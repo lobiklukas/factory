@@ -19,12 +19,12 @@ all gates green.
 | `packages/storage-postgres`  | Connection, migrations, health check. No `Storage` implementation yet.                                                                                           |
 | `packages/config-typescript` | Shared tsconfig presets (base, vite).                                                                                                                            |
 
-Proven working: Pi Durable 1.0.3 + `pi-ai` + `chord` install and run on bun; `Harness.open` over
+Proven working: Pi Durable 1.0.3 + `pi-ai` + `chord` install and run on bun; a live model turn with tool call; `Harness.open` over
 `MemoryStorage` with `NodeExecutionEnv` and `CodingTools`; and pi-durable's **23-case storage
 conformance suite passes against `MemoryStorage`** behind a ~40-line assertions adapter. That
 suite is the M1 oracle.
 
-Not proven: a live model turn (no `ANTHROPIC_API_KEY` was available), anything on a cluster, and
+Not proven: anything on a cluster, and
 any isolation claim whatsoever.
 
 ## What to do next
@@ -42,9 +42,10 @@ _Done when:_ pi-durable's `registerStorageConformance` runs as a vitest suite in
 `packages/storage-postgres` and every case passes against Postgres, with the same case count as
 `MemoryStorage` (23 at the time of writing).
 
-**3. Prove the model path.** Run `bun run m0` with `ANTHROPIC_API_KEY` set in `.env`. It submits one
-turn that calls the bash tool and prints the transcript and usage.
-_Done when:_ the spike prints a transcript containing the tool call and a usage object.
+**3. ~~Prove the model path.~~** Done (2026-10-06): `bun run m0` ran a live `claude-sonnet-5-5` turn that
+called `bash` (`echo m0-ok`), got the tool result back into the transcript, and printed `usage`
+(~2.7k tokens, cost per model). The spike now fails if the transcript lacks the tool call. Note
+`usage.tools` comes back empty, so per-tool rollups (R4) need checking before relying on them.
 
 **4. Session entity and endpoints.** Sessions, messages, interrupt, and a live stream, following
 `docs/design.md` D8 (live attach when the sandbox runs, historical fold when it does not) and D12

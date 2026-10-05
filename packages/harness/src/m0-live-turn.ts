@@ -54,6 +54,22 @@ const collectText = (value: unknown, found: string[] = []): string[] => {
   return found;
 };
 
+/** Count nested objects whose `key` equals `value`, without asserting a shape. */
+const collectField = (node: unknown, key: string, value: string): number => {
+  if (Array.isArray(node)) {
+    return node.reduce<number>(
+      (total, item) => total + collectField(item, key, value),
+      0,
+    );
+  }
+  if (node === null || typeof node !== "object") return 0;
+  const record = node as Record<string, unknown>;
+  return Object.values(record).reduce<number>(
+    (total, item) => total + collectField(item, key, value),
+    record[key] === value ? 1 : 0,
+  );
+};
+
 const program = Effect.gen(function* () {
   const apiKey = yield* Config.option(Config.String("ANTHROPIC_API_KEY"));
   if (Option.isNone(apiKey)) {
@@ -99,10 +115,21 @@ const program = Effect.gen(function* () {
 
   yield* Effect.log(`transcript entries: ${entries.length}`);
   for (const entry of entries) {
+    yield* Effect.log(`entry kind=${String(entry.kind)}`);
     const text = collectText(entry).join(" ").trim();
     if (text.length > 0) {
       yield* Effect.log(text.length > 300 ? `${text.slice(0, 300)}…` : text);
     }
+  }
+
+  // The turn only proves the model path if the model actually called the tool and the
+  // tool's output came back into the transcript.
+  const toolCalls = collectField(entries, "type", "toolCall");
+  const toolResults = collectField(entries, "toolName", "bash");
+  if (toolCalls === 0 || toolResults === 0) {
+    return yield* new M0Error({
+      reason: "transcript has no bash tool call and tool result",
+    });
   }
 
   const usage = yield* attempt(() => harness.usage(context));

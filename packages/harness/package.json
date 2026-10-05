@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "m0": "bun run src/m0-live-turn.ts",
+    "m0": "bun --env-file=../../.env run src/m0-live-turn.ts",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
