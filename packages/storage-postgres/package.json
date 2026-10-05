@@ -11,10 +11,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "effect": "4.0.0",
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-durable": "1.0.3",
     "@effect/platform-bun": "4.0.0",
     "@effect/sql-pg": "4.0.0",
-    "@repo/domain": "workspace:*"
+    "@repo/domain": "workspace:*",
+    "effect": "4.0.0"
   },
   "devDependencies": {
     "@repo/config-typescript": "workspace:*",

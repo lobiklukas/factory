@@ -102,7 +102,10 @@ Cloudflare impl we never run (drifts and lies).
 
 ### D7 — Storage: append-only log is truth, projections are derived
 
-Postgres holds `commits(seq bigserial, writes jsonb)`. The `Storage` interface is inherently a
+Postgres holds `commits(log_id, seq, writes json)` — one `log_id` per Pi Durable `Storage` (one
+session), `seq` minted by the owning process (`PRIMARY KEY (log_id, seq)` fences a second owner),
+`json` rather than `jsonb` because Pi Durable requires strings to round-trip unchanged and
+`jsonb` rejects lone surrogates and U+0000, and a trigger makes rows immutable. The `Storage` interface is inherently a
 commit log — `commit(writes) → Seq`, with cursor-based `scan*` reads — so one fold of the log
 serves three consumers: the harness's in-memory state, the control-plane read model, and the
 dashboards. Derived relational tables exist only for what we actually query (session status,

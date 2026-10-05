@@ -35,12 +35,15 @@ In order. Each task states its completion criterion.
 dropping the tail). `drive.mjs` requires the stream to reach `end`; see
 `.pi/skills/verify-web/features/rpc-stream.md`.
 
-**2. Build the Postgres `Storage` backend (design D7, M1).** Append-only `commits(seq bigserial,
-writes jsonb)` plus the single fold of the log into state, with a read-only non-owning mode so the
-control plane can read without opening a `Harness`.
-_Done when:_ pi-durable's `registerStorageConformance` runs as a vitest suite in
-`packages/storage-postgres` and every case passes against Postgres, with the same case count as
-`MemoryStorage` (23 at the time of writing).
+**2. ~~Build the Postgres `Storage` backend (design D7, M1).~~** Done (2026-10-06).
+`PostgresStorage` in `packages/storage-postgres` wraps Pi Durable's `MemoryStorage` as the fold
+(the same shape as its JSONL backend, so validation can't drift) over an append-only `commits`
+table. Owner mode folds on open and appends; reader mode catches up before every read and
+rejects writes. The conformance suite passes: 23/23 against Postgres, 23/23 against the
+`MemoryStorage` control, plus tests for reopen, U+0000/lone surrogates, log isolation, reader
+mode, second-owner fencing, rejected commits not poisoning, and append-only enforcement.
+Deviations from D7 as first written are recorded there (`log_id`, minted `seq`, `json`).
+Not yet built: the control plane's use of reader mode, and `LISTEN`/`NOTIFY` (task 4).
 
 **3. ~~Prove the model path.~~** Done (2026-10-06): `bun run m0` ran a live `claude-sonnet-5-5` turn that
 called `bash` (`echo m0-ok`), got the tool result back into the transcript, and printed `usage`

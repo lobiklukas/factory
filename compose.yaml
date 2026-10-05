@@ -1,0 +1,25 @@
+# Local infrastructure. Docker only — nothing here touches a cloud account.
+#
+#   docker compose up -d --wait postgres
+#
+# Host port 5442 (not 5432) because 5432 is routinely taken by an ssh tunnel or
+# another project's database on developer machines.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: factory
+      POSTGRES_DB: factory
+    ports:
+      - "5442:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:

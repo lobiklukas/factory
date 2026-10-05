@@ -5,9 +5,7 @@ import { Config, Layer, Redacted, String } from "effect";
 export const DatabaseConfig = Config.all({
   url: Config.Redacted("DATABASE_URL").pipe(
     Config.withDefault(
-      Redacted.make(
-        "postgres://stack_effect:stack_effect@localhost:5432/stack_effect",
-      ),
+      Redacted.make("postgres://factory:factory@localhost:5442/factory"),
     ),
   ),
   maxConnections: Config.Int("DATABASE_MAX_CONNECTIONS").pipe(

@@ -110,6 +110,8 @@
       "name": "@repo/storage-postgres",
       "version": "0.0.0",
       "dependencies": {
+        "@earendil-works/chord": "1.0.3",
+        "@earendil-works/pi-durable": "1.0.3",
         "@effect/platform-bun": "4.0.0",
         "@effect/sql-pg": "4.0.0",
         "@repo/domain": "workspace:*",

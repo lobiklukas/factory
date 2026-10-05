@@ -27,6 +27,9 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
 
 - **Local first.** Docker, kind, and local processes only. Nothing is provisioned in Google Cloud
   until a task says so explicitly.
+- **Local Postgres is part of the gate.** `docker compose up -d --wait postgres` (host port 5442) before `bun run test`; the storage suite fails loudly rather than skipping when it is
+  down. On this machine the active docker context may be a stopped Docker Desktop while Colima
+  is running — use `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
 - **Gate every change** with `bun run format:check`, `build`, `lint`, `test`, `type-check`. The
   Effect diagnostics run with `denyWarnings: true`, so a warning fails the build.
 - **`.pi/` is shared tooling for every agent and belongs in git**, committed alongside the work
