@@ -1,0 +1,28 @@
+{
+  "name": "@repo/domain",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "clean": "git clean -xdf .cache .turbo dist node_modules tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@repo/config-typescript": "workspace:*",
+    "vitest": "^4.1.4"
+  },
+  "exports": {
+    "./Api": "./src/Api.ts",
+    "./Chat": "./src/Chat.ts",
+    "./ChatRpc": "./src/ChatRpc.ts",
+    "./ChatManagedRpc": "./src/ChatManagedRpc.ts",
+    "./Rpc": "./src/Rpc.ts",
+    "./Todo": "./src/Todo.ts",
+    "./TodoApi": "./src/TodoApi.ts",
+    "./TodoRpc": "./src/TodoRpc.ts",
+    "./WebSocket": "./src/WebSocket.ts"
+  }
+}

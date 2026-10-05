@@ -1,0 +1,15 @@
+{
+  "name": "@repo/harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "m0": "bun run src/m0-live-turn.ts",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-durable": "1.0.3"
+  }
+}

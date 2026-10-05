@@ -19,13 +19,14 @@
     "prepare": "effect-tsgo patch --oxlint"
   },
   "devDependencies": {
-    "turbo": "^2.9.6",
+    "@effect/tsgo": "0.38.0",
     "oxfmt": "^0.65.0",
     "oxlint": "1.80.0",
     "oxlint-tsgolint": "7.0.2001",
-    "vitest": "^4.1.11",
-    "@effect/tsgo": "0.38.0",
-    "typescript": "7.0.2"
+    "stack-effect": "0.17.0",
+    "turbo": "^2.9.6",
+    "typescript": "7.0.2",
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=24"
