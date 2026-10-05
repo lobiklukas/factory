@@ -1,0 +1,12 @@
+# Project-scoped OMP settings for every agent working in this checkout.
+#
+# Read by OMP's settings layer as the "project" layer, under the global
+# ~/.omp/agent/config.yml. Only settings that are worth the same answer for
+# every agent in this repository belong here.
+#
+# Subagent isolation is off by default; turning it on lets a `task` item run in
+# its own copy-on-write worktree and hand back a patch instead of editing the
+# parent checkout. See docs/parallel-work.md for the workflow it enables.
+task:
+  isolation:
+    enabled: true
