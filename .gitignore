@@ -27,6 +27,9 @@ coverage
 playwright-report
 test-results
 
+# verification evidence produced by .pi/skills/verify-*
+.verify/
+
 # nix
 result
 result-*

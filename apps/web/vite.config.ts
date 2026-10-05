@@ -13,7 +13,11 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // VITE_PORT lets a verification run use an isolated port instead of competing
+    // for 3000 with whatever else is already running locally. See
+    // .pi/skills/verify-web/SKILL.md.
+    // oxlint-disable-next-line effecttsgo/process-env -- Vite's dev server reads its config in Node, before Effect exists.
+    port: Number(process.env["VITE_PORT"] ?? 3000),
     strictPort: true,
     host: "127.0.0.1",
   },
