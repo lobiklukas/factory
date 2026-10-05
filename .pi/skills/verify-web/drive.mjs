@@ -75,9 +75,8 @@ assert(
   `GET ${API_URL}/ -> ${health.status} ${JSON.stringify(health.body)}`,
 );
 
-// Feature: streaming RPC card. KNOWN FAILING as of this writing — over HTTP the
-// browser makes no request at all when the button is clicked. Do not gate the run
-// on it, but record exactly what was observed so the feature map stays honest.
+// Feature: streaming RPC card. Required: it is the only end-to-end check of the
+// streaming transport that session events depend on (docs/design.md D8/D9).
 // See features/rpc-stream.md.
 await page.getByRole("button", { name: /call rpc api/i }).click();
 let rpcWorked = false;
@@ -101,12 +100,12 @@ const cardText = (
     .catch(() => "")
 ).trim();
 observed.rpcStream = { worked: rpcWorked, cardText };
-console.log(
-  `${rpcWorked ? "PASS" : "KNOWN-FAILURE"}  streaming RPC card  ${
-    rpcWorked
-      ? "stream reached its end event"
-      : "no stream observed (see features/rpc-stream.md)"
-  }`,
+assert(
+  "streaming RPC card",
+  rpcWorked,
+  rpcWorked
+    ? `stream reached its end event: ${JSON.stringify(cardText)}`
+    : `no end event within 40s; panel: ${JSON.stringify(cardText)}`,
 );
 
 await page.screenshot({

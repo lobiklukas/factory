@@ -12,7 +12,7 @@ all gates green.
 | Workspace                    | State                                                                                                                                                            |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/api`                   | Control-plane skeleton. One HTTP API group (`GET /` → `"Hello Effect!"`) and the streaming RPC transport mounted at `POST /rpc`. Boots on `PORT` (default 9000). |
-| `apps/web`                   | Dashboard shell in React. Renders; its one card is broken (see below).                                                                                           |
+| `apps/web`                   | Dashboard shell in React. Its one card streams RPC events end to end (verified).                                                                                 |
 | `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`.                                                                                         |
 | `packages/domain`            | `Api.ts` (HttpApi) and `Rpc.ts` (the streaming RPC group). Everything else demo-shaped was pruned.                                                               |
 | `packages/harness`           | Pi Durable wiring. Contains one disposable M0 spike: `bun run m0`.                                                                                               |
@@ -27,26 +27,13 @@ suite is the M1 oracle.
 Not proven: a live model turn (no `ANTHROPIC_API_KEY` was available), anything on a cluster, and
 any isolation claim whatsoever.
 
-## Known failure, reproduced with evidence
-
-**The streaming RPC card on the dashboard does nothing when clicked.** The click is delivered,
-`VITE_SERVER_URL` is inlined correctly, and the browser reaches the API across origins — yet no
-request to `/rpc` is ever issued and no error surfaces. The failure is therefore in the
-client-side atom wiring (`runtime.fn` + `useAtom`), not the server, the URL, or CORS. Full
-diagnostic table in `.pi/skills/verify-web/features/rpc-stream.md`.
-
-This matters beyond the card: it is the only end-to-end check of the streaming transport that
-session event streams depend on (design D8/D9).
-
 ## What to do next
 
 In order. Each task states its completion criterion.
 
-**1. Resolve the streaming card.** Either repair the atom wiring, or delete the card when the real
-session event stream replaces it. Do not leave it as-is: an end-to-end check that silently proves
-nothing is worse than no check.
-_Done when:_ `.pi/skills/verify-web/drive.mjs` reports PASS for the streaming path (or the card is
-gone and the feature map is updated to match).
+**1. ~~Resolve the streaming card.~~** Done: two bugs (scoped layer inside the atom stream; `Queue.shutdown`
+dropping the tail). `drive.mjs` requires the stream to reach `end`; see
+`.pi/skills/verify-web/features/rpc-stream.md`.
 
 **2. Build the Postgres `Storage` backend (design D7, M1).** Append-only `commits(seq bigserial,
 writes jsonb)` plus the single fold of the log into state, with a read-only non-owning mode so the

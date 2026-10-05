@@ -10,9 +10,7 @@ export const tickAtom = runtime.fn(
         yield* Effect.logDebug("Starting Tick Atom Stream");
         const rpc = yield* RpcClient;
         return rpc.client.tick({ ticks: 10 });
-      }).pipe(Effect.provide(RpcClient.layer), (self) =>
-        abort ? Effect.interrupt : self,
-      ),
+      }).pipe((self) => (abort ? Effect.interrupt : self)),
     ).pipe(
       Stream.catchTags({
         RpcClientError: (e) => Stream.die(e),

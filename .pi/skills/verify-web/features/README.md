@@ -3,13 +3,13 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-05, `chrome`, headless, ports 9100/3100).
+Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 9100/3100).
 
-| Feature                 | Status            | File                                       |
-| ----------------------- | ----------------- | ------------------------------------------ |
-| Dashboard shell renders | passing           | [dashboard-shell.md](dashboard-shell.md)   |
-| Browser reaches the API | passing           | [api-connectivity.md](api-connectivity.md) |
-| Streaming RPC card      | **known failure** | [rpc-stream.md](rpc-stream.md)             |
+| Feature                 | Status  | File                                       |
+| ----------------------- | ------- | ------------------------------------------ |
+| Dashboard shell renders | passing | [dashboard-shell.md](dashboard-shell.md)   |
+| Browser reaches the API | passing | [api-connectivity.md](api-connectivity.md) |
+| Streaming RPC card      | passing | [rpc-stream.md](rpc-stream.md)             |
 
 ## Known gaps
 
