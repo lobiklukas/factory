@@ -257,7 +257,7 @@ review automation in CI (a different product surface, and it belongs after we tr
 | `packages/sandbox-kubernetes` | `SandboxRuntime` over the `agent-sandbox` CRD                              | efficient implementation of the above                              |
 | `packages/harness`            | Extension, tools, hooks, policy, and system prompt assembly for Pi Durable | `Extension` registrations                                          |
 | `packages/bus`                | Fan-out between control-plane replicas                                     | `SessionBus`                                                       |
-| `packages/api`                | HTTP + WebSocket surface for CLI and web                                   | `HttpApi` / `Rpc`                                                  |
+| `apps/api`                    | HTTP + RPC surface for CLI and web                                         | `HttpApi` / `RpcServer`                                            |
 | `apps/cli`                    | Interactive and headless operator client                                   | —                                                                  |
 | `apps/web`                    | Dashboard: sessions, live transcript, steering, approvals                  | —                                                                  |
 | `infra`                       | `alchemy.run.ts` composition root                                          | Alchemy `Stack`                                                    |

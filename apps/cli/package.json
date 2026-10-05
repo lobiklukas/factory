@@ -1,10 +1,10 @@
 {
-  "name": "cli-cli",
+  "name": "@repo/cli",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "bin": {
-    "cli-cli": "dist/index.js"
+    "factory": "dist/index.js"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir=dist --target=bun --minify",

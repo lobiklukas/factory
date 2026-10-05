@@ -17,7 +17,9 @@ export const ServerConfig = Config.all({
 });
 
 // HTTP API Router
-const ApiRouter = HttpApiBuilder.layer(Api).pipe(Layer.provide(HealthGroupLive));
+const ApiRouter = HttpApiBuilder.layer(Api).pipe(
+  Layer.provide(HealthGroupLive),
+);
 
 // NOTE: Modules append additional service layers here through Layer.mergeAll.
 const RouterDependencies = Layer.empty;

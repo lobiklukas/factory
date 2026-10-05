@@ -15,11 +15,26 @@
         "vitest": "^4.1.11",
       },
     },
-    "apps/cli-cli": {
-      "name": "cli-cli",
+    "apps/api": {
+      "name": "@repo/api",
+      "version": "0.0.0",
+      "dependencies": {
+        "@effect/platform-bun": "4.0.0",
+        "@repo/domain": "workspace:*",
+        "@repo/storage-postgres": "workspace:*",
+        "effect": "4.0.0",
+      },
+      "devDependencies": {
+        "@repo/config-typescript": "workspace:*",
+        "@types/bun": "^1.2.17",
+        "vitest": "^4.1.4",
+      },
+    },
+    "apps/cli": {
+      "name": "@repo/cli",
       "version": "0.0.0",
       "bin": {
-        "cli-cli": "dist/index.js",
+        "factory": "dist/index.js",
       },
       "dependencies": {
         "@effect/platform-bun": "4.0.0",
@@ -33,8 +48,8 @@
         "vitest": "^4.1.4",
       },
     },
-    "apps/client-react-web": {
-      "name": "client-react-web",
+    "apps/web": {
+      "name": "@repo/web",
       "version": "0.0.0",
       "dependencies": {
         "@base-ui/react": "^1.3.0",
@@ -65,40 +80,9 @@
         "vitest": "^4.1.4",
       },
     },
-    "apps/server-api": {
-      "name": "server-api",
-      "version": "0.0.0",
-      "dependencies": {
-        "@effect/platform-bun": "4.0.0",
-        "@repo/db": "workspace:*",
-        "@repo/domain": "workspace:*",
-        "effect": "4.0.0",
-      },
-      "devDependencies": {
-        "@repo/config-typescript": "workspace:*",
-        "@types/bun": "^1.2.17",
-        "vitest": "^4.1.4",
-      },
-    },
     "packages/config-typescript": {
       "name": "@repo/config-typescript",
       "version": "0.0.0",
-    },
-    "packages/db": {
-      "name": "@repo/db",
-      "version": "0.0.0",
-      "dependencies": {
-        "@effect/platform-bun": "4.0.0",
-        "@effect/sql-pg": "4.0.0",
-        "@repo/domain": "workspace:*",
-        "effect": "4.0.0",
-      },
-      "devDependencies": {
-        "@effect/sql-pg": "4.0.0",
-        "@effect/sql-sqlite-node": "4.0.0",
-        "@repo/config-typescript": "workspace:*",
-        "vitest": "^4.1.4",
-      },
     },
     "packages/domain": {
       "name": "@repo/domain",
@@ -119,6 +103,22 @@
         "@earendil-works/pi-ai": "1.0.3",
         "@earendil-works/pi-durable": "1.0.3",
         "effect": "4.0.0",
+      },
+    },
+    "packages/storage-postgres": {
+      "name": "@repo/storage-postgres",
+      "version": "0.0.0",
+      "dependencies": {
+        "@effect/platform-bun": "4.0.0",
+        "@effect/sql-pg": "4.0.0",
+        "@repo/domain": "workspace:*",
+        "effect": "4.0.0",
+      },
+      "devDependencies": {
+        "@effect/sql-pg": "4.0.0",
+        "@effect/sql-sqlite-node": "4.0.0",
+        "@repo/config-typescript": "workspace:*",
+        "vitest": "^4.1.4",
       },
     },
   },
@@ -464,13 +464,19 @@
 
     "@protobufjs/utf8": ["@protobufjs/utf8@1.1.2", "", {}, "sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug=="],
 
-    "@repo/config-typescript": ["@repo/config-typescript@workspace:packages/config-typescript"],
+    "@repo/api": ["@repo/api@workspace:apps/api"],
 
-    "@repo/db": ["@repo/db@workspace:packages/db"],
+    "@repo/cli": ["@repo/cli@workspace:apps/cli"],
+
+    "@repo/config-typescript": ["@repo/config-typescript@workspace:packages/config-typescript"],
 
     "@repo/domain": ["@repo/domain@workspace:packages/domain"],
 
     "@repo/harness": ["@repo/harness@workspace:packages/harness"],
+
+    "@repo/storage-postgres": ["@repo/storage-postgres@workspace:packages/storage-postgres"],
+
+    "@repo/web": ["@repo/web@workspace:apps/web"],
 
     "@rolldown/binding-android-arm-eabi": ["@rolldown/binding-android-arm-eabi@1.2.12", "", { "os": "android", "cpu": "arm" }, "sha512-dB/a1214qKfHMXCpgqR4OZT+jS4kTyEXbQGJPqzobt5EwH5rX080pxE37alt3RzvR1bf1Yz/yGqRfrYAxuPw0A=="],
 
@@ -712,13 +718,9 @@
 
     "class-variance-authority": ["class-variance-authority@0.7.1", "", { "dependencies": { "clsx": "^2.1.1" } }, "sha512-Ka+9Trutv7G8M6WT6SeiRWz792K5qEqIGEGzXKhAE6xOWAY6pPH8U+9IY3oCMv6kqTmLsv7Xh/2w2RigkePMsg=="],
 
-    "cli-cli": ["cli-cli@workspace:apps/cli-cli"],
-
     "cli-cursor": ["cli-cursor@5.0.0", "", { "dependencies": { "restore-cursor": "^5.0.0" } }, "sha512-aCj4O5wKyszjMmDT4tZj93kxyydN/K5zPWSCe6/0AV/AA1pqe5ZBIw0a2ZfPQV7lL5/yb5HsUreJ6UFAF1tEQw=="],
 
     "cli-spinners": ["cli-spinners@2.9.2", "", {}, "sha512-ywqV+5MmyL4E7ybXgKys4DugZbX0FC6LnwrhjuykIjnK9k8OQacQ7axGKnjDXWNhns0xot3bZI5h55H8yo9cJg=="],
-
-    "client-react-web": ["client-react-web@workspace:apps/client-react-web"],
 
     "clsx": ["clsx@2.1.1", "", {}, "sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA=="],
 
@@ -1165,8 +1167,6 @@
     "send": ["send@1.2.1", "", { "dependencies": { "debug": "^4.4.3", "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "etag": "^1.8.1", "fresh": "^2.0.0", "http-errors": "^2.0.1", "mime-types": "^3.0.2", "ms": "^2.1.3", "on-finished": "^2.4.1", "range-parser": "^1.2.1", "statuses": "^2.0.2" } }, "sha512-1gnZf7DFcoIcajTjTwjwuDjzuz4PPcY2StKPlsGAQ1+YH20IRVrBaXSWmdjowTJ6u8Rc01PoYOGHXfP1mYcZNQ=="],
 
     "serve-static": ["serve-static@2.2.1", "", { "dependencies": { "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "parseurl": "^1.3.3", "send": "^1.2.0" } }, "sha512-xRXBn0pPqQTVQiC8wyQrKs2MOlX24zQ0POGaj0kultvoOCstBQM5yvOhAVSUwOMjQtTvsPWoNCHfPGwaaQJhTw=="],
-
-    "server-api": ["server-api@workspace:apps/server-api"],
 
     "setprototypeof": ["setprototypeof@1.2.0", "", {}, "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="],
 

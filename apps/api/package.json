@@ -1,5 +1,5 @@
 {
-  "name": "server-api",
+  "name": "@repo/api",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -16,7 +16,7 @@
     "@effect/platform-bun": "4.0.0",
     "effect": "4.0.0",
     "@repo/domain": "workspace:*",
-    "@repo/db": "workspace:*"
+    "@repo/storage-postgres": "workspace:*"
   },
   "devDependencies": {
     "@repo/config-typescript": "workspace:*",

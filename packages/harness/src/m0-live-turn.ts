@@ -16,7 +16,11 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
+import {
+  createRegistry,
+  Harness,
+  MemoryStorage,
+} from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Config, Data, Effect, Option, Result } from "effect";
@@ -54,7 +58,8 @@ const program = Effect.gen(function* () {
   const apiKey = yield* Config.option(Config.String("ANTHROPIC_API_KEY"));
   if (Option.isNone(apiKey)) {
     return yield* new M0Error({
-      reason: "ANTHROPIC_API_KEY is not set.\n\n  cp .env.example .env\n  bun run m0",
+      reason:
+        "ANTHROPIC_API_KEY is not set.\n\n  cp .env.example .env\n  bun run m0",
     });
   }
 
