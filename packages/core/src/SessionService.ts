@@ -28,6 +28,7 @@ import {
   Option,
   Path,
   Ref,
+  Schema,
   Semaphore,
   Stream,
 } from "effect";
@@ -528,6 +529,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             baseRef: binding.baseRef ?? null,
             createdAt: "",
           };
+          // The index row is written before the log because it carries the request-id dedupe key.
+          // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
+          // re-derives the truth from the log rather than trusting the row.
           const owner = yield* acquireOwner(id, row);
           if (title.length > 0) {
             // The log keeps the title too, so rebuilding the index does not lose it.
@@ -758,15 +762,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const parseCursor = (
         raw: string,
       ): Effect.Effect<
-        { readonly at: string; readonly id: string },
+        { readonly at: string; readonly id: SessionId },
         SessionError
       > =>
         Effect.gen(function* () {
           const separator = raw.indexOf("|");
           const at = separator === -1 ? "" : raw.slice(0, separator);
           const id = separator === -1 ? "" : raw.slice(separator + 1);
-          const idPattern = /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/;
-          if (at === "" || !idPattern.test(id)) {
+          if (at === "" || !Schema.is(SessionIdSchema)(id)) {
             return yield* new SessionErrorClass({
               code: "invalid_input",
               message: `"${raw}" is not a list cursor`,

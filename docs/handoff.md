@@ -11,20 +11,20 @@ all gates green (with Postgres up — see "Local environment").
 
 ## Where things stand
 
-Last verified 2026-10-06 (after the dashboard rebuild): `format:check`, `build`, `lint`, `test`,
-`type-check` all green; `.pi/skills/verify-web/drive.mjs` passes all ten checks;
-`.pi/skills/verify-api/drive.ts` passes all sixteen.
+Last verified 2026-10-05 (after the repo binding and the session list): `format:check`, `build`,
+`lint`, `test`, `type-check` all green; `.pi/skills/verify-web/drive.mjs` passes all ten checks;
+`.pi/skills/verify-api/drive.ts` passes all twenty-five; `packages/core`'s suite passes ten.
 
-| Workspace                    | State                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/api`                   | Control plane. `GET /` (health) and the session RPC surface at `POST /rpc`. Boots on `PORT` (9000), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes").                                                                                                                  |
-| `apps/web`                   | Dashboard shell in React on TanStack Router (`/`, `/sessions/$sessionId`, `/sandboxes`, `/approvals`). Icon rail plus a browser-local session list beside a pane that creates a session, streams its transcript, and labels the read path (verified in a browser). `/sandboxes` and `/approvals` are named gaps, not empty tables. |
-| `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`.                                                                                                                                                                                                                                                           |
-| `packages/domain`            | `Api.ts` (HttpApi), `Session.ts` (session contracts, incl. `SessionError`), `Rpc.ts` (the session RPC group). Knows nothing about Pi Durable.                                                                                                                                                                                      |
-| `packages/core`              | **New.** `SessionService`: create/get/send/interrupt/watch, the owner registry, id minting, idle eviction, and the live-vs-fold read split (D8).                                                                                                                                                                                   |
-| `packages/harness`           | Pi Durable wiring, and the only place that touches it: `openSession`, the projection into domain shapes, the faux/anthropic model backends, the M0 spike (`bun run m0`).                                                                                                                                                           |
-| `packages/storage-postgres`  | `PostgresStorage` (owner + reader modes), the `commits` and `sessions` migrations, health check. Passes the 23-case conformance suite.                                                                                                                                                                                             |
-| `packages/config-typescript` | Shared tsconfig presets (base, vite).                                                                                                                                                                                                                                                                                              |
+| Workspace                    | State                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/api`                   | Control plane. `GET /` (health) and the session surface at `POST /rpc` — create, get, send, interrupt, list, registerRepo, watch. Boots on `PORT` (9000), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes").                                                                                                                                                     |
+| `apps/web`                   | Dashboard shell in React on TanStack Router (`/`, `/sessions/$sessionId`, `/sandboxes`, `/approvals`). Icon rail plus a browser-local session list beside a pane that creates a session, streams its transcript, and labels the read path (verified in a browser). `listSessions` exists now, so M5 can replace that browser-local list with a server read. `/sandboxes` and `/approvals` are named gaps, not empty tables. |
+| `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`. LOB-7 was paused mid-flight: the partial `run`/`watch`/`ls` work is preserved (not applied) at `.verify/scratch/paused-agents/`.                                                                                                                                                                                                                   |
+| `packages/domain`            | `Api.ts` (HttpApi), `Session.ts` (session, repo, workspace and list contracts, incl. `SessionError`), `Rpc.ts` (the session RPC group). Knows nothing about Pi Durable.                                                                                                                                                                                                                                                     |
+| `packages/core`              | **New.** `SessionService`: create/get/send/interrupt/list/registerRepo/watch, the owner registry, id minting, idle eviction, repo binding and workspace resolution, the derived `session_activity` index, and the live-vs-fold read split (D8). `rebuild.ts` folds every log back into the index tables.                                                                                                                    |
+| `packages/harness`           | Pi Durable wiring, and the only place that touches it: `openSession`, the projection into domain shapes, the faux/anthropic model backends, the M0 spike (`bun run m0`).                                                                                                                                                                                                                                                    |
+| `packages/storage-postgres`  | `PostgresStorage` (owner + reader modes), six migrations (`commits`, `sessions`, `repos`, `session_activity`, `sessions.repo`/`base_ref`), health check. Passes the 23-case conformance suite.                                                                                                                                                                                                                              |
+| `packages/config-typescript` | Shared tsconfig presets (base, vite).                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ### Proven
 
@@ -45,9 +45,20 @@ Last verified 2026-10-06 (after the dashboard rebuild): `format:check`, `build`,
   and `.pi/skills/verify-api`): create, send, live stream (`snapshot` → entries → `busy` → `idle`),
   read, release, fold, resume. The folded entries equal the live ones they replaced, and a
   historical stream is exactly one `snapshot` and then ends.
-- **The session surface through the real Effect RPC client** — 16/16 checks in
-  `.pi/skills/verify-api/drive.ts`, including typed errors (`SessionError{code: "not_found"}`)
-  surviving the wire.
+- **The session surface through the real Effect RPC client** — 25/25 checks in
+  `.pi/skills/verify-api/drive.ts`, including typed errors (`SessionError{code: "not_found"}`,
+  `invalid_input` for a message over the cap) surviving the wire.
+- **A session bound to a repo** (LOB-5, `packages/core`'s suite and `verify-api`):
+  `createSession({ repo, baseRef })` returns a summary carrying both, the snapshot's `workspace`
+  names the session's own directory plus the commands read from the repo's `.factory/config`, and a
+  repo with no config opens with `commandsSource: "none"`. The binding is a `factory.session`
+  document in the log, so `sessions.repo`/`base_ref` and the `repos` row are derivable from it.
+- **The session list without a fold** (LOB-6): `listSessions` answers from the derived
+  `session_activity` index in **one SQL statement whatever the row count** — asserted by counting
+  statements through `Statement.CurrentTransformer` over 3 rows and 30 — pages by keyset cursor
+  without repeating a row, and orders by newest activity. `rebuildIndexes` empties-and-rebuilds the
+  claim: `DELETE FROM sessions`, rebuild, and every list field (title, repo, base ref, spend,
+  creation time) comes back from the logs alone.
 - **The same session in a browser** — 10/10 checks in `.pi/skills/verify-web/drive.mjs`, off
   `MODEL_BACKEND=faux`, with a real tool call and a real log: the root redirect, the sidebar's honest
   empty state, the route moving to the created session, the header labelling the read path, the
@@ -67,7 +78,16 @@ Last verified 2026-10-06 (after the dashboard rebuild): `format:check`, `build`,
   renders either way, so the check is that string the day someone drives a fold through the UI.
 - `whenBusy` queueing and steering at the RPC surface: Pi Durable's queueing is exercised at the
   service level, and `busy` is a mapped error code, but no drive run forces a session to be busy
-  deterministically (the faux turn is too fast) — see task 6.
+  deterministically (the faux turn is too fast) — see task 6. `FAUX_COMMAND` is now configurable
+  (`FAUX_COMMAND="sleep 5 && echo faux-ok"`), so a verification run can hold that window open; the
+  activity index's `status` is asserted at rest and on release, not during a run.
+- **`rebuildIndexes` has no caller at runtime.** It is the D7 recovery path and its test drives it,
+  but no app or CLI invokes it, so the operator story for a lost index table is "read `packages/core/src/rebuild.ts`".
+- **The list's cost under load.** One statement per page is asserted in a unit test; nothing
+  measures `listSessions` against a large `session_activity` table or a slow database.
+- **Sessions that predate migration `0005`.** Their activity row is backfilled from the `sessions`
+  index (status `idle`, `last_activity_at` = the row's `created_at`), not from their logs, until a
+  rebuild runs.
 
 ## Local environment
 
@@ -105,7 +125,7 @@ column, `seq` minted by the owner rather than `bigserial`, `json` not `jsonb`, i
 **3. ~~Prove the model path.~~** Open finding: `usage.tools` comes back `{}` even though a tool ran,
 so per-tool rollups (R4) are unverified. Per-model usage and cost work.
 
-**4. ~~Session entity and endpoints.~~** Met: 16/16 checks in `.pi/skills/verify-api/drive.ts`, plus
+**4. ~~Session entity and endpoints.~~** Met: 25/25 checks in `.pi/skills/verify-api/drive.ts`, plus
 `packages/core`'s suite for the policy underneath. The three questions it raised were settled with
 the user first (server-minted id = `log_id` plus a mutable title; the API hosts the harness
 in-process behind a seam; a "message" is a thin Pi Durable submission and the wire carries our own
@@ -116,19 +136,34 @@ session-event schema). Two deviations from the plan, both recorded in the design
   `packages/storage-projection` and `packages/bus`. The fold already lives in `PostgresStorage`
   (`MemoryStorage`), so a projection package would have wrapped it for no gain.
 
+**4b. Repo binding and the session list (LOB-5, LOB-6 — 2026-10-05).** A session names its repo, at a
+base ref; the log records the binding (`factory.session`) and the index carries it, so the summary
+never folds. `listSessions` answers from the derived `session_activity` index. Both are in "Proven"
+with the checks that establish them, and `rebuildIndexes` is the recovery path for the index tables.
+This is what `createSession({ repo, baseRef })` needed to be worth anything downstream: a trigger
+(LOB-14) binds an issue to a repo, a sandbox (LOB-13) mounts it, and M6 cuts a worktree from it.
+
 ### 5. `apps/cli` subcommands — this finishes M2
+
+**Paused mid-flight (2026-10-05).** A subagent wrote `factory run` / `watch` / `ls` against
+`SessionRpc` and wired them into the root command, then was stopped by the user before it built
+`.pi/skills/verify-cli/` or ran anything. Its work is preserved but **not applied** at
+`.verify/scratch/paused-agents/` (patch + new files + a README saying what is there and what is
+missing); read it as a reviewer rather than trusting it.
 
 D9 puts the CLI first because dogfooding forces the session contract to be correct before a UI hides
 a bug; the dashboard already found one race, and a terminal will find more. The contract is proven
 already — the CLI is the same RPC client the dashboard builds (`apps/web/src/lib/rpc-client.ts`),
 minus the browser.
 
-Shape: `factory run "<task>"` (create, send, stream the transcript to the terminal until idle, print
-the session id), `factory watch <session-id>` (attach to any session, live or historical — the mode
-label is the interesting part), and `factory ls` (needs task 8).
+Shape: `factory run "<task>" --repo <owner/name>` (create, send, stream the transcript to the
+terminal until idle, print the session id), `factory watch <session-id>` (attach to any session, live
+or historical — the mode label is the interesting part), and `factory ls` (reads `listSessions`,
+which now exists).
 
 _Done when:_ `.pi/skills/verify-cli/` drives it in a tmux session — create, stream, and show the
-answer — pinned to `MODEL_BACKEND=faux` like the other skills, with evidence that survives cleanup.
+answer, plus `ls` showing a session the server knows about — pinned to `MODEL_BACKEND=faux` like the
+other skills, with evidence that survives cleanup.
 
 ### 6. Close task 4's two verification holes
 
@@ -163,15 +198,36 @@ promises today (`.pi/skills/verify-api/features/fold.md` needs updating with it)
 _Done when:_ two `SessionService` instances over one database — one owning, one not — stream the same
 session live, and a drive run proves it.
 
-### 8. Session list, and what the fold costs (R6)
+### 8. ~~Session list, and what the fold costs (R6)~~
 
-M5's dashboard needs "which sessions exist", and nothing answers it today: the `sessions` table has
-no status or activity, and a historical read folds a whole log (fine for one session, wrong for a
-list — every partial the agent committed is a row). Decide deliberately: bound the fold by
-compaction, or keep a derived projection table (D7 allows exactly this, and it must stay droppable).
+**Done (LOB-6, 2026-10-05).** Decided the derived-projection way, deliberately: `session_activity`
+holds `status`, `cost_total`, and `last_activity_at`, written as this process observes a session's
+committed changes, joined to `sessions` for identity. `listSessions` is therefore one statement
+whatever the row count (asserted by counting statements), pages by keyset cursor, and `rebuildIndexes`
+re-derives all three index tables by folding the logs. `factory ls` (LOB-7) is now the only consumer
+missing. What is still open from this item: compaction for long logs (LOB-27) and the list's cost
+under load — both named in "Not proven".
 
-_Done when:_ a list endpoint exists whose cost does not grow with the number of sessions, and
-`factory ls` reads it.
+### 8b. LOB-21 — readiness, shutdown and request limits (paused mid-flight)
+
+The deployment floor: `/livez` and `/readyz`, a SIGTERM handler that calls `SessionService.close`, a
+request-body cap, and a typed `invalid_input` error code. The error code and the message-length cap
+landed with 4b (`SessionService.send` refuses over `MAX_MESSAGE_CHARS` = 100,000; `verify-api` proves
+the typed error over the wire). The rest was paused: a subagent wrote `apps/api/src/Api/Probes.ts`
+(`/livez` as a constant 200; `/readyz` as live checks over Postgres, the six migration ids, and the
+control-plane tables) and restructured `apps/api/src/index.ts` to bind the server without
+`Layer.orDie` on migrations, plus a `maxRequestBodySize` config — but the SIGTERM finalizer and every
+piece of evidence were still missing when it was stopped. That work is preserved, not applied, at
+`.verify/scratch/paused-agents/`.
+
+Two design points to carry into it: a liveness probe must not depend on the database (Kubernetes
+would restart a healthy pod and turn an outage into a crash loop), and readiness that cannot answer
+while Postgres is down is not readiness — boot the server, report 503, and let requests fail with the
+typed `SessionError` codes.
+
+_Done when:_ a SIGTERM mid-run leaves a resumable session, an oversized request is refused rather
+than crashing, `/readyz` reports 503 while `/livez` stays 200, and the existing `verify-api` checks
+still pass. `FAUX_COMMAND` (configurable since 4b) is what holds a run open for the SIGTERM case.
 
 ### 9. M3 — local dependencies
 
@@ -225,15 +281,41 @@ How a session works now, so the next agent does not have to re-derive it:
   open; the sweep closes owners that nobody has touched for `SESSION_IDLE_TIMEOUT_MS` (15 min by
   default, and only when idle — a run in flight is durable either way, but closing it would throw
   away the fold a live client is streaming from). Sweeps run at least twice per timeout window.
-- **Titles live in the log and in an index.** The `sessions` row (id, title, request id, created_at)
-  is a droppable index; `factory.title` entries in the log are what make it rebuildable. The first
-  message names a session that has no title yet.
+- **Titles live in the log and in an index.** The `sessions` row (id, title, repo, base ref,
+  request id, created_at) is a droppable index; `factory.title` entries and the `factory.session`
+  document in the log are what make it rebuildable. The first message names a session that has no
+  title yet.
+- **A session's repo binding is a document, not an entry** (`factory.session`, written once at
+  create; empty strings mean "no repo"). It is state, not transcript, so the agent never sees it —
+  and `rebuildIndexes` reads it back to rebuild `sessions.repo`/`base_ref` and the `repos` row. A
+  repo the session names is registered on first use with no clone URL; `registerRepo` is what fills
+  in the URL and a local checkout.
+- **The workspace is resolved per read, and the session's own directory wins.** `SessionWorkspace`
+  is `{ path, repo?, baseRef?, commands, commandsSource }`: `path` is `SESSION_ROOT/<owner>/<name>/
+<session-id>` when bound (`SESSION_ROOT/<session-id>` otherwise), and `commands` comes from a
+  `.factory/config` first in that directory and then in the registry's `local_path`. A missing or
+  undecodable config is `commandsSource: "none"` with a warning, never an error — a repo that says
+  nothing about itself must still open.
+- **The list index is written from observation, not from reads.** While a process owns a session, a
+  fiber projects that session's committed changes into `session_activity` (status on `status`
+  events, spend on `usage`, `last_activity_at` on anything), and releasing an owner writes `idle` —
+  nobody owns it, so nothing is running (D8). `listSessions` never folds: it is one statement over
+  that table joined to `sessions`. The projection is best-effort (`Effect.ignore`): a failed upsert
+  must never fail a session.
+- **`rebuildIndexes` (`packages/core/src/rebuild.ts`) is the D7 recovery path.** It enumerates
+  `SELECT DISTINCT log_id FROM commits`, skips ids that are not session ids (the `commits` table is
+  shared with the harness suite's fixtures), folds each log with a reader storage, and rewrites
+  `sessions`, `session_activity`, and any repo slug it finds. Operator input survives: `repos.url`
+  and `repos.local_path` are kept, and a slug the log names is inserted with no URL.
 - **The model backend is configuration.** `MODEL_BACKEND=anthropic|faux`, defaulting by whether
   `ANTHROPIC_API_KEY` is set. `faux` is pi-ai's scripted provider: it runs a _real_ `bash` tool call
   and answers with that output, so the tool path, the log, and the stream are real while the model
-  is not. Every verification run uses it.
-- **Session working directories** are `SESSION_ROOT/<session-id>` (`.factory/sessions` locally,
-  gitignored). M6 replaces this with a per-session git worktree.
+  is not. Every verification run uses it, and `FAUX_COMMAND` overrides the command it runs — which
+  is how a verification run holds a turn open long enough to be busy.
+- **Session working directories** are `SESSION_ROOT/<session-id>` for a scratch session and
+  `SESSION_ROOT/<owner>/<name>/<session-id>` for a repo-bound one (`.factory/sessions` locally,
+  gitignored), one directory per session so two sessions never share files. The snapshot's
+  `workspace.path` is the resolved answer, and M6 replaces this with a per-session git worktree.
 
 ## Storage notes
 
@@ -257,8 +339,21 @@ How `PostgresStorage` works, so the next agent does not have to re-derive it:
   lone surrogates and U+0000. Nothing queries inside it.
 - **`seq` is read back as `Number`.** Safe far beyond any realistic log; noted so nobody is
   surprised by a `bigint` column.
-- The adapter takes an `SqlClient` and is Promise-shaped because Pi Durable's `Storage` is. Effect
+- **The adapter takes an `SqlClient` and is Promise-shaped because Pi Durable's `Storage` is. Effect
   runs only inside it (`Effect.runPromise` around SQL).
+- **Three tables are derived, and every column in them is a fold of `commits`** (`docs/handoff.md`
+  §Where things stand, D7). `sessions` (id, title, request id, repo, base ref, created at) and
+  `session_activity` (status, cost, last activity) are the control plane's index; `repos` (slug, url,
+  default base ref, local path, registered at) is the registry. None is a source of truth: drop any
+  of them and `packages/core/src/rebuild.ts` folds the logs back into all three. `repos.url` and
+  `repos.local_path` are the only columns the log cannot reconstruct.
+- **`session_activity` hangs off `sessions`** with `ON DELETE CASCADE`, and migration `0005`
+  backfills it from `sessions` so a pre-existing database does not silently lose sessions from the
+  list. Its `last_activity_at` is a `TIMESTAMPTZ` on purpose: the keyset cursor carries the exact
+  value Postgres ordered by, so pagination cannot skip or repeat a row.
+- **`sessions.repo` is nullable and `base_ref` is only allowed next to a repo** (a CHECK constraint),
+  so "no repo" is one state rather than two. Migration `0006` leaves existing rows `NULL` rather than
+  guessing a binding from the id.
 
 ## Deliberately not built
 
