@@ -17,11 +17,14 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Feature                      | Check in the driver                               | Why it matters                                  |
 | ---------------------------- | ------------------------------------------------- | ----------------------------------------------- |
 | Create a session (D7)        | `createSession`, and a retried `requestId`        | one log per session; retries must not leak logs |
+| Repo binding (A1)            | `registerRepo`, then `repo`/`baseRef`/`workspace` | a session names the repo it works on            |
+| Session list (A2)            | `listSessions` sees the new session, paged        | the list is a server read, not a client guess   |
 | Send a message               | `sendMessage` → `placement: run`, title set       | a message admits durably and names the session  |
 | Watch a live session (D8)    | snapshot first, then entries, then run state      | the UI's live path, including `busy → idle`     |
 | Read the transcript          | `getSession` → the `bash` tool result             | the run really happened, usage is attributed    |
 | Fold a released session (D8) | the same session reads `historical`, same entries | a paused session is served by folding the log   |
 | A fold's stream ends         | exactly one `snapshot` event                      | complete is distinguishable from dropped        |
+| Request limits (LOB-21)      | an oversized message → `invalid_input`            | a refusal is typed, not a truncation or a crash |
 | Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`    | callers can branch on `code`, not on text       |
 | Interrupt wakes, then stops  | `interruptSession` → idle                         | steering wakes a session before acting on it    |
 
