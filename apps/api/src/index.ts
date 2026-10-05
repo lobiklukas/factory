@@ -9,6 +9,7 @@ import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
+import { MotelLive } from "./observability/Motel";
 
 export const ServerConfig = Config.all({
   port: Config.Number("PORT").pipe(Config.withDefault(9000)),
@@ -51,6 +52,7 @@ const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive);
 const ServerLayers = Layer.mergeAll(
   BunHttpServer.layerConfig(ServerConfig),
   DevToolsLive,
+  MotelLive,
 );
 
 const HttpLive = Effect.gen(function* () {

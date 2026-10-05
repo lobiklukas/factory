@@ -40,3 +40,10 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
   `.verify/`. Add one before claiming a surface works.
 - **Pi Durable is consumed as an interface, not modified.** When implementing one of its
   interfaces, its conformance suites are the oracle: `Storage` (23 cases) and `ExecutionEnv`.
+- **Runtime evidence is in motel, not in a log tail.** `apps/api` and `apps/cli` export OTLP
+  logs and traces to a local [motel](https://github.com/kitlangton/motel) when `MOTEL_URL` is
+  set; `bun run motel` reads it and `bun run motel:start` runs it headless for agents. When a
+  bug needs facts about what actually ran, query motel — see `.pi/skills/motel-debug`. The
+  exporters are `effect/observability` on effect 4 stable, never `@effect/opentelemetry`, and
+  they live in `apps/*/src/observability/Motel.ts` beside `DevTools.ts`. `tools/motel/` holds
+  an isolated install because motel pins an effect beta; see its README before touching it.

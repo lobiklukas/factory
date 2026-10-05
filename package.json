@@ -17,7 +17,11 @@
     "lint:fix": "oxlint --fix",
     "test": "turbo run test",
     "m0": "bun packages/harness/src/m0-live-turn.ts",
-    "prepare": "effect-tsgo patch --oxlint"
+    "motel": "bun run --cwd tools/motel motel",
+    "motel:start": "bun run --cwd tools/motel start",
+    "motel:status": "bun run --cwd tools/motel status",
+    "motel:stop": "bun run --cwd tools/motel stop",
+    "prepare": "effect-tsgo patch --oxlint && bun install --cwd tools/motel --frozen-lockfile"
   },
   "devDependencies": {
     "@effect/tsgo": "0.38.0",

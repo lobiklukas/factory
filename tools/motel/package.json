@@ -1,0 +1,17 @@
+{
+  "name": "@repo/motel-tool",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Isolated install of @kitlangton/motel. Not a workspace member: its effect 4.0.0-beta.90 graph must not reach the app workspaces.",
+  "scripts": {
+    "motel": "motel",
+    "start": "motel start",
+    "status": "motel status",
+    "stop": "motel stop"
+  },
+  "dependencies": {
+    "@effect/platform-node-shared": "4.0.0-beta.90",
+    "@kitlangton/motel": "0.2.8"
+  }
+}
