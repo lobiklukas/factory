@@ -30,6 +30,9 @@ test-results
 # verification evidence produced by .pi/skills/verify-*
 .verify/
 
+# NOTE: .pi/ itself is shared agent tooling (skills, prompts) and IS committed.
+# See AGENTS.md. Only its generated output belongs here.
+
 # nix
 result
 result-*

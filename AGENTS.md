@@ -8,3 +8,32 @@ Read `docs/README.md` inside that installed package first, then read the relevan
 
 This block is written and re-added by `turbo` before repository-scoped commands when an AI agent is detected. In the Turborepo source repository, its template is defined in `crates/turborepo-cli/src/cli/agent_guidance.rs`. Removing the managed block while updates are enabled means a later qualifying invocation will add it again. Set `"agentGuidance": false` in the root `turbo.json` or `turbo.jsonc` to opt out; this does not remove an existing block. Keep the block committed with your work to avoid an uncommitted change on the next agent invocation.
 <!-- END:turborepo-agent-rules -->
+
+# factory
+
+An internal, agent-native software development platform: delegate a task, get back a reviewable
+pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
+
+## Read first
+
+- `docs/design.md` — the settled decisions (D1–D16) with their rationale, the component
+  inventory, the local-first build order (M0–M7), and the open risks (R1–R6). Read it before
+  proposing an architecture change.
+- `docs/handoff.md` — what is done, what is next, and the completion criterion for each step.
+- `.pi/skills/verify-web/features/README.md` — the feature map: what works, what fails, and how
+  each feature is proven.
+
+## Conventions
+
+- **Local first.** Docker, kind, and local processes only. Nothing is provisioned in Google Cloud
+  until a task says so explicitly.
+- **Gate every change** with `bun run format:check`, `build`, `lint`, `test`, `type-check`. The
+  Effect diagnostics run with `denyWarnings: true`, so a warning fails the build.
+- **`.pi/` is shared tooling for every agent and belongs in git**, committed alongside the work
+  that needs it. Skills, prompts, and agents that help any agent working in this repo go there.
+  It holds no credentials and no machine-local state.
+- **Verification is a skill, not an afterthought.** `.pi/skills/verify-<surface>/` launches the
+  surface on isolated ports, drives it through its real user path, and writes evidence to
+  `.verify/`. Add one before claiming a surface works.
+- **Pi Durable is consumed as an interface, not modified.** When implementing one of its
+  interfaces, its conformance suites are the oracle: `Storage` (23 cases) and `ExecutionEnv`.
