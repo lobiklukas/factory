@@ -30,6 +30,7 @@ import type {
 /** The conversation documents this projection reads, and the entry kind this package writes. */
 export const LIVE_DOC = "pi.live";
 export const USAGE_DOC = "pi.usage";
+export const SESSION_DOC_KIND = "factory.session";
 export const TITLE_ENTRY_KIND = "factory.title";
 
 type ContentBlock = TextContent | ThinkingContent | ToolCall | ImageContent;

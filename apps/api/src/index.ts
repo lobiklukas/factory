@@ -1,7 +1,11 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import { SessionServiceLive } from "@repo/core";
 import { Api } from "@repo/domain/Api";
-import { createModelAccess, type ModelBackend } from "@repo/harness";
+import {
+  createModelAccess,
+  FAUX_COMMAND,
+  type ModelBackend,
+} from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Config, Effect, Layer, Option } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
@@ -30,6 +34,10 @@ export const ServerConfig = Config.all({
 const ModelConfig = Config.all({
   backend: Config.option(
     Config.Literals(["anthropic", "faux"], "MODEL_BACKEND"),
+  ),
+  /** What the faux script runs. A verification run scripts a command that sleeps. */
+  fauxCommand: Config.String("FAUX_COMMAND").pipe(
+    Config.withDefault(FAUX_COMMAND),
   ),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
@@ -74,7 +82,7 @@ const HttpLive = Effect.gen(function* () {
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them.
   const RouterDependencies = SessionServiceLive({
-    model: createModelAccess(backend),
+    model: createModelAccess(backend, { fauxCommand: model.fauxCommand }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
   }).pipe(Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)));

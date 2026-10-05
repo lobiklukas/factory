@@ -78,6 +78,103 @@ const program = Effect.gen(function* () {
     `retry id=${retried.id}`,
   );
 
+  // Feature: repo binding (LOB-5). A session names a repo at a base ref, and its snapshot exposes
+  // the workspace the server resolved — including the commands the repo declares about itself in
+  // `.factory/config`. The registered local path is this skill's fixture.
+  const repoSlug = "lobiklukas/verify-api-fixture";
+  const repoUrl = "https://github.com/lobiklukas/factory.git";
+  const fixture = path.resolve(
+    new URL(".", import.meta.url).pathname,
+    "fixtures",
+    "repo",
+  );
+  const registered = yield* client.registerRepo({
+    repo: repoSlug,
+    url: repoUrl,
+    defaultBaseRef: "main",
+    localPath: fixture,
+  });
+  assert(
+    "registerRepo",
+    registered.repo === repoSlug &&
+      registered.url === repoUrl &&
+      registered.defaultBaseRef === "main",
+    `repo=${registered.repo} url=${registered.url} base=${registered.defaultBaseRef}`,
+  );
+
+  const bound = yield* client.createSession({
+    repo: repoSlug,
+    baseRef: "main",
+    title: "repo binding probe",
+  });
+  assert(
+    "a session summary carries its repo and base ref",
+    bound.repo === repoSlug && bound.baseRef === "main",
+    `repo=${bound.repo} baseRef=${bound.baseRef}`,
+  );
+
+  const boundSnapshot = yield* client.getSession({ sessionId: bound.id });
+  assert(
+    "the snapshot exposes the resolved workspace",
+    boundSnapshot.workspace.repo === repoSlug &&
+      boundSnapshot.workspace.baseRef === "main" &&
+      boundSnapshot.workspace.path.includes(
+        path.join("lobiklukas", "verify-api-fixture"),
+      ),
+    `workspace=${JSON.stringify(boundSnapshot.workspace)}`,
+  );
+  assert(
+    "the workspace carries the repo's own commands",
+    boundSnapshot.workspace.commandsSource === "repo" &&
+      boundSnapshot.workspace.commands.test === "bun run test" &&
+      boundSnapshot.workspace.commands.verify ===
+        "bun .pi/skills/verify-api/drive.ts",
+    `source=${boundSnapshot.workspace.commandsSource} commands=${JSON.stringify(boundSnapshot.workspace.commands)}`,
+  );
+
+  // Feature: the session list (LOB-6). A session created a moment ago is in the list without any
+  // read of its own, the list is ordered by newest activity, and it pages by cursor.
+  const listed = yield* client.listSessions({ limit: 25 });
+  assert(
+    "listSessions shows a new session without a poll",
+    listed.sessions.some((entry) => entry.id === bound.id) &&
+      listed.sessions.some((entry) => entry.id === created.id),
+    `${listed.sessions.length} entries, first=${listed.sessions[0]?.id}`,
+  );
+  const listedEntry = listed.sessions.find((entry) => entry.id === bound.id);
+  assert(
+    "a list entry carries status, repo, activity, and spend",
+    listedEntry !== undefined &&
+      listedEntry.repo === repoSlug &&
+      listedEntry.status === "idle" &&
+      listedEntry.lastActivityAt.length > 0 &&
+      listedEntry.costTotal >= 0,
+    JSON.stringify(listedEntry ?? null),
+  );
+  const listKeys = listed.sessions.map(
+    (entry) => `${entry.lastActivityAt}|${entry.id}`,
+  );
+  assert(
+    "the list is newest activity first",
+    JSON.stringify(listKeys) === JSON.stringify([...listKeys].sort().reverse()),
+    `${listKeys.length} keys, first=${listKeys[0]}`,
+  );
+
+  const firstPage = yield* client.listSessions({ limit: 2 });
+  const secondPage = yield* client.listSessions({
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  });
+  assert(
+    "listSessions pages by cursor without repeating a row",
+    firstPage.sessions.length === 2 &&
+      firstPage.nextCursor !== undefined &&
+      secondPage.sessions.every(
+        (entry) => !firstPage.sessions.some((first) => first.id === entry.id),
+      ),
+    `page1=${firstPage.sessions.map((entry) => entry.id).join(",")} page2=${secondPage.sessions.map((entry) => entry.id).join(",")}`,
+  );
+
   // Feature: watch a live session. Attach *before* sending, so the first event is the
   // state before the message and everything after it is a real delta.
   const collected = yield* Ref.make([]);
@@ -228,6 +325,24 @@ const program = Effect.gen(function* () {
     "a historical stream ends after its snapshot",
     historicalEvents.length === 1 && historicalEvents[0]?._tag === "snapshot",
     `${historicalEvents.length} event(s): ${historicalEvents.map((event) => event._tag).join(", ")}`,
+  );
+
+  // Feature: request limits. An oversized message is refused with a typed error rather than
+  // crashing the server or being silently truncated.
+  const oversized = yield* Effect.exit(
+    client.sendMessage({
+      sessionId: bound.id,
+      content: "x".repeat(100_001),
+    }),
+  );
+  const oversizedFailure = Exit.findErrorOption(oversized);
+  assert(
+    "an oversized message is refused with a typed error",
+    Exit.isFailure(oversized) &&
+      oversizedFailure._tag === "Some" &&
+      oversizedFailure.value._tag === "SessionError" &&
+      oversizedFailure.value.code === "invalid_input",
+    JSON.stringify(oversizedFailure),
   );
 
   // Feature: typed errors cross the wire.

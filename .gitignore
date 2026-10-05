@@ -39,6 +39,9 @@ test-results
 # local session working directories (SESSION_ROOT default)
 .factory/
 
+# ...except a verify skill's fixture, which is a repo's own config, not local state.
+!.pi/skills/verify-api/fixtures/repo/.factory/
+
 # NOTE: .pi/ itself is shared agent tooling (skills, prompts) and IS committed.
 # See AGENTS.md. Only its generated output belongs here.
 

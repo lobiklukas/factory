@@ -19,7 +19,7 @@ export type ModelBackend = "anthropic" | "faux";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
 
-/** The command the faux script runs, and the only thing it needs from the environment. */
+/** The command the faux script runs unless a caller scripts another one. */
 export const FAUX_COMMAND = "echo faux-ok";
 
 export type ModelAccess = {
@@ -69,26 +69,38 @@ const lastUserText = (messages: readonly Message[]): string => {
  * The answer a faux session gives, derived from its own transcript rather than from a queue: the
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
  * steps, repeatable for the life of a session, and it exercises the tool path a real turn uses.
+ *
+ * `command` is scriptable so a verification run can hold a turn open deliberately — a command
+ * that sleeps is the only way to observe a session that is genuinely busy (`FAUX_COMMAND`).
  */
-export const fauxAnswer = (messages: readonly Message[]): AssistantMessage => {
+export const fauxAnswer = (
+  messages: readonly Message[],
+  command: string = FAUX_COMMAND,
+): AssistantMessage => {
   const output = toolResultText(messages, "bash");
   if (output === undefined) {
     // `toolUse` is what a real provider reports for a tool-calling answer; without it the
     // generation treats the call as a final answer and never runs the tool.
-    return fauxAssistantMessage(
-      fauxToolCall("bash", { command: FAUX_COMMAND }),
-      {
-        stopReason: "toolUse",
-      },
-    );
+    return fauxAssistantMessage(fauxToolCall("bash", { command }), {
+      stopReason: "toolUse",
+    });
   }
   return fauxAssistantMessage(
     `${output.trim()} (re: ${lastUserText(messages).trim()})`,
   );
 };
 
-export const createModelAccess = (backend: ModelBackend): ModelAccess => {
+export type ModelAccessOptions = {
+  /** The command the faux script runs, for a run that needs a turn to take a known time. */
+  readonly fauxCommand?: string | undefined;
+};
+
+export const createModelAccess = (
+  backend: ModelBackend,
+  options: ModelAccessOptions = {},
+): ModelAccess => {
   const models = createModels();
+  const fauxCommand = options.fauxCommand ?? FAUX_COMMAND;
 
   if (backend === "faux") {
     const faux = fauxProvider();
@@ -96,7 +108,7 @@ export const createModelAccess = (backend: ModelBackend): ModelAccess => {
     // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
     const repeat: FauxResponseFactory = (context) => {
       faux.appendResponses([repeat]);
-      return fauxAnswer(context.messages);
+      return fauxAnswer(context.messages, fauxCommand);
     };
     faux.setResponses([repeat]);
     return {

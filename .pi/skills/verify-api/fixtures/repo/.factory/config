@@ -1,0 +1,6 @@
+{
+  "install": "bun install",
+  "build": "bun run build",
+  "test": "bun run test",
+  "verify": "bun .pi/skills/verify-api/drive.ts"
+}

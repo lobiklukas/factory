@@ -8,6 +8,7 @@
  * leaves this module is an Effect, like the rest of the repo.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord";
 import type {
   Conversation,
   ConversationView,
@@ -20,6 +21,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import {
   ConversationBusy,
+  defineDoc,
   defineEntry,
   Harness as HarnessRuntime,
   LiveDoc,
@@ -35,7 +37,10 @@ import type {
   SessionEvent,
   SessionId,
   SessionSnapshot,
+  SessionUsage,
+  SessionWorkspace,
   Timestamp,
+  TranscriptEntry,
 } from "@repo/domain/Session";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { ModelAccess } from "./models";
@@ -44,6 +49,7 @@ import {
   projectEntry,
   projectUsageDoc,
   projectView,
+  SESSION_DOC_KIND,
   TITLE_ENTRY_KIND,
   USAGE_DOC,
   type JsonRecord,
@@ -56,6 +62,29 @@ import {
 export const TitleEntry = defineEntry<{ readonly title: string }>(
   TITLE_ENTRY_KIND,
 );
+
+/**
+ * A session's repo binding, committed to the log so the index and the workspace are derivable
+ * from it (D7, docs/features.md §3 A1). Empty strings mean "no repo", which is the scratch
+ * session tests use, so the document is written once at create and never needs a tombstone.
+ *
+ * It is a document rather than an entry on purpose: it is session state, not transcript, and the
+ * agent should not see it (Group D's `defineDoc`).
+ */
+export const SessionDoc = defineDoc({
+  kind: SESSION_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ repo: "", baseRef: "" }),
+});
+
+/** The repo a session is bound to, as the log records it. */
+export type RepoBinding = {
+  readonly repo: string;
+  readonly baseRef: string;
+};
 
 /** Storage is remote here, so partial answers commit less often than the 100 ms default. */
 export const SESSION_PROGRESS = {
@@ -159,6 +188,26 @@ export const writeTitle = (
         BACKGROUND_CONTEXT,
       )
       .then((entry) => entry.id),
+  );
+
+/**
+ * Commit the repo binding. The log, not the `sessions` row, is what makes the binding survive a
+ * dropped index; the caller updates the row as well so summaries need no fold (docs/features.md §3
+ * A1).
+ */
+export const writeRepoBinding = (
+  conversation: Conversation,
+  binding: RepoBinding,
+): Effect.Effect<void, SessionError> =>
+  attempt("write repo binding", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(SessionDoc, conversation.id).then((doc) => {
+          doc.repo = binding.repo;
+          doc.baseRef = binding.baseRef;
+        }),
+      BACKGROUND_CONTEXT,
+    ),
   );
 
 /** The message a caller sends a session, in the control plane's terms. */
@@ -295,9 +344,20 @@ const readActiveEntries = (
   });
 
 export type SessionLog = {
-  readonly entries: ReturnType<typeof projectEntry>[];
-  readonly usage: ReturnType<typeof projectUsageDoc>;
+  readonly entries: readonly TranscriptEntry[];
+  readonly usage: SessionUsage;
+  /** The repo binding the log records, empty when the session is a scratch one. */
+  readonly binding: RepoBinding;
 };
+
+/** Read a string field from a document defensively: an unknown shape yields "". */
+const bindingString = (value: JsonValue | undefined, key: string): string =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (() => {
+        const field = (value as JsonRecord)[key];
+        return typeof field === "string" ? field : "";
+      })()
+    : "";
 
 /**
  * Read a session nobody owns by folding its log through a reader-mode `Storage`. No `Harness` is
@@ -310,9 +370,14 @@ export const readSessionLog = (
   Effect.gen(function* () {
     const records = yield* readActiveEntries(storage);
     const usage = yield* readDocument(storage, USAGE_DOC);
+    const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     return {
       entries: records.map(projectEntry),
       usage: projectUsageDoc(usage),
+      binding: {
+        repo: bindingString(binding, "repo"),
+        baseRef: bindingString(binding, "baseRef"),
+      },
     };
   });
 
@@ -323,6 +388,8 @@ export type SessionRef = {
   readonly id: SessionId;
   readonly title: string;
   readonly createdAt: Timestamp;
+  /** Where the session works, already resolved by the control plane (`@repo/domain/Session`). */
+  readonly workspace: SessionWorkspace;
 };
 
 const snapshotOf = (
@@ -337,7 +404,12 @@ const snapshotOf = (
       createdAt: ref.createdAt,
       mode: "live",
       status: projection.status,
+      ...(ref.workspace.repo === undefined ? {} : { repo: ref.workspace.repo }),
+      ...(ref.workspace.baseRef === undefined
+        ? {}
+        : { baseRef: ref.workspace.baseRef }),
     },
+    workspace: ref.workspace,
     entries: projection.entries,
     live: projection.live,
     usage: projection.usage,
@@ -424,7 +496,14 @@ export const readHistoricalSnapshot = (
         mode: "historical",
         // Nothing is running here by definition; the sandbox that ran it is paused or gone (D8).
         status: "idle",
+        ...(ref.workspace.repo === undefined
+          ? {}
+          : { repo: ref.workspace.repo }),
+        ...(ref.workspace.baseRef === undefined
+          ? {}
+          : { baseRef: ref.workspace.baseRef }),
       },
+      workspace: ref.workspace,
       entries: log.entries,
       live: { busy: false, tools: [] },
       usage: log.usage,

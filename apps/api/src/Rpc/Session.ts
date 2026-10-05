@@ -18,6 +18,8 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       getSession: (input) => sessions.get(input.sessionId),
       sendMessage: (input) => sessions.send(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
+      listSessions: (input) => sessions.list(input),
+      registerRepo: (input) => sessions.registerRepo(input),
       watchSession: (input) => sessions.events(input.sessionId),
     });
   }),
