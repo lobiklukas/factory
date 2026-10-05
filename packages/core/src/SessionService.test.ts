@@ -377,23 +377,31 @@ describe("repo binding", () => {
   });
 });
 
+/** The page size this loop drives the list with, and the page size the old bound assumed. */
+const PAGE_SIZE = 25;
+/**
+ * Filler rows this test writes itself. More than the old fixed budget of ten pages (`10 × 25`),
+ * so the test fails on a database of *any* size unless the loop is bounded by the data it reads
+ * rather than by a constant. The shared database may hold anything on top of these.
+ */
+const FILLERS = 280;
+
 describe("session list", () => {
   it("shows a new session without a poll, pages by cursor, one statement per page", async () => {
-    const filler = (index: number) => `ses_f${String(index).padStart(25, "0")}`;
     const result = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
-        // Hermetic across runs: the fillers are this test's, and the database is shared.
+        // Hermetic across runs: the filler rows are this test's, and the database is shared.
         yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_f%'`;
 
         const first = yield* sessions.create({ title: "older" });
         const second = yield* sessions.create({ title: "newer" });
         const third = yield* sessions.create({ title: "newest" });
         // A session created a moment ago is in the list already: no read, no fold, no poll.
-        const immediately = (yield* sessions.list({ limit: 25 })).sessions.map(
-          (entry) => entry.id,
-        );
+        const immediately = (yield* sessions.list({
+          limit: PAGE_SIZE,
+        })).sessions.map((entry) => entry.id);
 
         // Deterministic activity order: the index is what the list reads, so set it directly.
         const at = (id: SessionId, secondsAgo: number) =>
@@ -402,30 +410,60 @@ describe("session list", () => {
         yield* at(second.id, 20);
         yield* at(third.id, 10);
 
-        // Enough rows that the list cannot be one page, all older than the three above.
-        for (let index = 0; index < 27; index += 1) {
-          const id = filler(index);
-          yield* sql`INSERT INTO sessions (id, title) VALUES (${id}, ${`filler ${index}`})`;
-          yield* sql`
-            INSERT INTO session_activity (session_id, last_activity_at)
-            VALUES (${id}, now() - ${`${300 + index} seconds`}::interval)
-          `;
-        }
+        // Older than the three above, and more of them than the old page budget could see on
+        // their own, whatever the shared database already holds.
+        yield* sql`
+          INSERT INTO sessions (id, title)
+          SELECT 'ses_f' || lpad(n::text, 25, '0'), 'filler ' || n
+          FROM generate_series(0, ${FILLERS - 1}) AS g(n)
+        `;
+        yield* sql`
+          INSERT INTO session_activity (session_id, last_activity_at)
+          SELECT 'ses_f' || lpad(n::text, 25, '0'), now() - make_interval(secs => 300 + n)
+          FROM generate_series(0, ${FILLERS - 1}) AS g(n)
+        `;
 
-        // Page through everything, one statement per page.
+        // The page budget is a function of the rows, not a constant: every page the data can
+        // need, plus slack for a session a concurrent suite commits while we page. A budget that
+        // is too small shows up as `exhausted: false` below rather than as a wrong page count.
+        const [rowCount] = yield* sql<{ rows: number }>`
+          SELECT count(*)::int AS rows FROM session_activity
+        `;
+        if (rowCount === undefined) throw new Error("unreachable");
+        const visible = rowCount.rows;
+        const budget = Math.ceil(visible / PAGE_SIZE) + 2;
+
+        // Page through everything, one statement per page, until the cursor runs out.
         const pages = [];
         let cursor: string | undefined = undefined;
-        for (let page = 0; page < 10; page += 1) {
+        let exhausted = false;
+        for (let page = 0; page < budget; page += 1) {
           const payload: ListSessionsInput =
-            cursor === undefined ? { limit: 25 } : { limit: 25, cursor };
+            cursor === undefined
+              ? { limit: PAGE_SIZE }
+              : { limit: PAGE_SIZE, cursor };
           const counted = yield* countStatements(sessions.list(payload));
           pages.push(counted);
           cursor = counted.value.nextCursor;
-          if (cursor === undefined) break;
+          if (cursor === undefined) {
+            exhausted = true;
+            break;
+          }
         }
-        yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_f%'`;
-        return { first, second, third, immediately, pages };
-      }),
+        return { first, second, third, immediately, pages, exhausted, visible };
+      }).pipe(
+        // The fillers go whether this test passes, fails or dies: 280 rows left behind on a red run
+        // would grow the shared table for every later run as well.
+        Effect.ensuring(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_f%'`;
+          }).pipe(
+            // A cleanup that cannot run is a defect, not a silent 280-row leak.
+            Effect.orDie,
+          ),
+        ),
+      ),
     );
 
     expect(result.immediately).toContain(result.third.id);
@@ -435,8 +473,20 @@ describe("session list", () => {
     // Ordering contract, page after page: newest activity first, id descending to break ties.
     expect(keys).toEqual([...keys].sort().reverse());
     expect(new Set(keys).size).toBe(keys.length);
+    // The loop ended because the cursor ran out, not because it hit its budget: the list pages to
+    // the end of a database of any size. This is the assertion the old constant bound broke.
+    expect(result.exhausted).toBe(true);
     expect(result.pages.at(-1)?.value.nextCursor).toBeUndefined();
     expect(result.pages.length).toBeGreaterThan(1);
+    // Every row the list can see comes back. `session_activity.session_id` is the primary key, so
+    // its count is exactly the set the list pages over, and a shortfall means rows were dropped —
+    // in the shared rows behind the fillers as much as in the fillers themselves.
+    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every filler row this test wrote comes back exactly once, so a list that stops early inside
+    // them cannot pass by landing on the three sessions below.
+    expect(entries.filter((entry) => entry.id.startsWith("ses_f")).length).toBe(
+      FILLERS,
+    );
     // Cost is one statement per page whatever the row count: never a fold per session (R6).
     for (const page of result.pages) expect(page.statements).toBe(1);
 
