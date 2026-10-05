@@ -26,6 +26,9 @@
     "ralph:setup": "bash .pi/ralph/loop.sh setup",
     "ralph:plan": "bash .pi/ralph/loop.sh plan",
     "ralph:run": "bash .pi/ralph/loop.sh run",
+    "ralph:start": "bash .pi/ralph/loop.sh start",
+    "ralph:kill": "bash .pi/ralph/loop.sh kill",
+    "ralph:merge": "bash .pi/ralph/loop.sh merge",
     "ralph:audit": "bash .pi/ralph/loop.sh audit",
     "ralph:status": "bash .pi/ralph/loop.sh status",
     "ralph:stop": "bash .pi/ralph/loop.sh stop"

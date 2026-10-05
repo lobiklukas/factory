@@ -2,7 +2,8 @@
 
 You are one iteration of an autonomous loop on the `factory` repo. You have a fresh context and one
 job: take **one** issue from the plan to a reviewed draft PR, then stop. Everything durable lives
-outside your context: Linear, `.ralph/plan.md`, `.ralph/progress.md`, git. Your working directory is a
+outside your context: Linear, `.ralph/plan.md`, `.ralph/progress.md`, git. After you finish, the loop driver re-runs the whole gate and squash-merges a PR whose review record
+is clean - so your record must be true. Your working directory is a
 dedicated git worktree; it is never the human's checkout.
 
 Read `AGENTS.md` first. `docs/design.md` decisions (D1-D16) are settled - an issue that needs one
@@ -138,6 +139,14 @@ verifier reports which it checked. Stop after **three** full gate-fix cycles tha
   verify evidence paths, the pre-existing issues filed (ids), and the tests/fakes/skills added, third-party mocking entries added or reused (with
   licenses), review findings and how each was resolved, and open questions. Never merge,
   never push to `main`, never force-push.
+- **Post the review record** as a PR comment - the driver merges only on this. Exactly one line of
+  JSON in an HTML comment, plus a human-readable summary of the findings above it:
+  `gh pr comment <n> --body-file <file>` where the file ends with
+  `<!-- ralph-review: {"head":"<git rev-parse HEAD>","spec":"OK","standards":"OK","tests":"OK","design":"OK|n/a","p0p1_open":0,"gate":"green"} -->`
+  Use `OK`, `OK with notes`, or `BLOCK` per angle (`design` is `n/a` when no `apps/web` change).
+  `p0p1_open` counts findings you did not fix. Anything but all-OK, 0 and `green` stops the merge, so be
+  honest: the driver re-runs the gate itself, and a later push invalidates the record (`head`).
+  If a P0/P1 remains, do not open the PR - go to **Blocked**.
 - `save_comment` on the issue with the PR link, a 5-line summary, and the review verdicts;
   `save_issue` status `In Review`.
 - Plan row -> `in-review`, with the PR url in notes. Append to `.ralph/progress.md`:
@@ -166,7 +175,7 @@ credential - **do not push half-done work to a PR**. Instead:
 ## Guardrails
 
 - One issue per iteration. Never start a second.
-- Never merge a PR, never push `main`, never rewrite published history, never `git reset --hard`
+- Never merge a PR (the driver does that after re-running the gate), never push `main`, never rewrite published history, never `git reset --hard`
   anything you did not create this iteration.
 - Local-first: nothing is provisioned in any cloud. Do not touch other people's branches.
 - Do not read or print `.env` or any credential. Do not put secrets in comments or PR bodies.

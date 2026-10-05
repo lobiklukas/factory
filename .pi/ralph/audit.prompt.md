@@ -29,7 +29,7 @@ Launch `ralph-verifier` and `ralph-researcher` with `async: true`. Linear is rea
 7. **Gate** (`format:check`, `build`, `lint`, `test`, `type-check`), then one `ralph-reviewer` (`tests`
    angle) over the diff. Fix P0/P1.
 8. **Deliver:** when `RALPH_PUSH=1`, push and open a **draft** PR titled `chore(verify): audit <date>`
-   with the table from step 2, the before/after counts, issues filed (ids). Never merge. Append a short
+   with the table from step 2, the before/after counts, issues filed (ids). Never merge it yourself. Post the review record the worker prompt describes (`<!-- ralph-review: {...} -->`, with `design` `n/a`) once the reviewer is clean, so the driver can merge it. Append a short
    entry to `.ralph/progress.md`. Finally `git switch --detach origin/main`.
 
 Hard rules: never weaken or delete a check to make it pass; status `passing` only for what ran

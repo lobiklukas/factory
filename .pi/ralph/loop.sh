@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ralph loop driver: a fresh `pi -p` session per iteration, one Linear issue per iteration.
-# See .pi/ralph/README.md. Subcommands: setup | plan | run | audit | status | stop
+# See .pi/ralph/README.md. Subcommands: setup | plan | run | start | kill | merge | audit | status | stop
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +68,9 @@ cmd_setup() {
   (cd "$WT" && bun install --frozen-lockfile)
   ensure_db
   (cd "$WT" && pi mcp list >/dev/null 2>&1) || log "warning: 'pi mcp list' failed in the worktree - check Linear auth (pi mcp login linear)"
+  for l in "hold:Never auto-merge:B60205" "ralph-fix:Needs a fix before the ralph loop can merge it:D93F0B" "needs-human-merge:Touches protected paths; a human merges:FBCA04"; do
+    (cd "$WT" && gh label create "${l%%:*}" --description "$(echo "$l" | cut -d: -f2)" --color "${l##*:}" >/dev/null 2>&1) || true
+  done
   log "setup done. Next: loop.sh plan, then loop.sh run"
 }
 
@@ -158,6 +161,166 @@ lock() {
   trap 'rm -rf "$STATE/lock"' EXIT
 }
 
+# --- merge: the driver, not the model, merges ---------------------------------------------------
+# A PR merges only when ALL hold: it is a ralph/* PR targeting main; no `hold`/`needs-human-merge`
+# label and no CHANGES_REQUESTED review; it touches no protected path; the worker's review record
+# (a PR comment) names the current head with clean verdicts; the driver re-ran the full gate on the
+# branch merged with main and it passed; and the GitHub `gate` check, if reported, passed.
+RALPH_MERGE="${RALPH_MERGE:-1}"
+RALPH_CI_TIMEOUT="${RALPH_CI_TIMEOUT:-1800}"
+PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$|turbo\.json$)'
+
+pr_flag() { # <pr> <label> <message>
+  gh pr edit "$1" --add-label "$2" >/dev/null 2>&1 || true
+  gh pr comment "$1" --body "ralph: $3" >/dev/null 2>&1 || true
+  log "PR #$1 -> $2: $(printf '%s' "$3" | head -n 1)"
+}
+
+# review_ok <pr> <head-sha>: 0 = clean record for this head; 2 = record is for another head; 1 = missing/unclean
+review_ok() {
+  local body json out rc=0
+  body="$(gh pr view "$1" --json comments --jq '[.comments[].body | select(contains("ralph-review:"))] | last // ""' 2>/dev/null || true)"
+  [ -n "$body" ] || { echo "no review record"; return 1; }
+  json="$(printf '%s\n' "$body" | sed -n 's/.*<!-- *ralph-review: *\(.*}\) *-->.*/\1/p' | tail -n 1)"
+  out="$(printf '%s' "$json" | python3 -c '
+import json, sys
+head = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("review record is not valid JSON"); sys.exit(1)
+if d.get("head") != head:
+    print("review record is for %s, PR head is %s" % (str(d.get("head"))[:7], head[:7])); sys.exit(2)
+ok = lambda k: str(d.get(k, "")).strip().upper().startswith("OK")
+design_ok = ok("design") or str(d.get("design", "")).strip().lower() in ("n/a", "na")
+if not (ok("spec") and ok("standards") and ok("tests") and design_ok) or d.get("p0p1_open", 1) != 0 or d.get("gate") != "green":
+    print("review record is not clean: " + json.dumps(d)); sys.exit(1)
+' "$2")" || rc=$?
+  [ -z "$out" ] || echo "$out"
+  return "$rc"
+}
+
+# ci_report <pr>: when any check on the PR has failed, label it ralph-fix with the failing jobs and the
+# tail of their logs, so the next iteration fixes it. 0 = a failure was found and flagged.
+ci_report() {
+  local n="$1" failed link runid log
+  failed="$(gh pr checks "$n" --json name,bucket,link --jq '.[] | select(.bucket=="fail") | "- \(.name): \(.link)"' 2>/dev/null || true)"
+  [ -n "$failed" ] || return 1
+  link="$(printf '%s\n' "$failed" | head -n 1 | sed 's/.*: //')"
+  runid="$(printf '%s' "$link" | sed -n 's|.*/runs/\([0-9][0-9]*\).*|\1|p')"
+  log=""; [ -z "$runid" ] || log="$(gh run view "$runid" --log-failed 2>/dev/null | tail -n 60 || true)"
+  pr_flag "$n" ralph-fix "CI is red on this PR. Failing checks:
+$failed
+
+\`\`\`
+$log
+\`\`\`
+Reproduce locally with the same command as the failing job (\`bun run <format:check|lint|type-check|build|test>\`), fix the cause, push (no force), re-run the reviewers, post a fresh review record. If the same job also fails on main it is pre-existing: file it per .pi/ralph/ticket.md."
+  return 0
+}
+
+ci_ok() { # <pr>: 0 when the gate check passed or none exists on main; 1 on failure/timeout (already flagged)
+  git -C "$WT" cat-file -e "origin/main:.github/workflows/gate.yml" 2>/dev/null || return 0
+  local tries=0 out rc
+  while [ "$tries" -lt 4 ]; do
+    rc=0; out="$(with_timeout "$RALPH_CI_TIMEOUT" gh pr checks "$1" --watch --interval 20 2>&1)" || rc=$?
+    case "$out" in *"no checks reported"*) tries=$((tries + 1)); sleep 20; continue ;; esac
+    [ "$rc" -eq 0 ] && return 0
+    ci_report "$1" || pr_flag "$1" ralph-fix "the GitHub checks did not pass or did not finish within ${RALPH_CI_TIMEOUT}s: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+    return 1
+  done
+  return 0  # nothing reported after ~80s: the local gate is the authority
+}
+
+merge_one() { # <pr> <branch>  -> 0 merged, 1 not merged
+  local n="$1" branch="$2" issue head url title files rc
+  issue="${branch#ralph/}"
+  git fetch origin --quiet
+  head="$(gh pr view "$n" --json headRefOid --jq .headRefOid)"
+
+  # A red check is a defect to fix, whatever else is true of the PR.
+  if ci_report "$n"; then return 1; fi
+
+  files="$(gh pr diff "$n" --name-only)"
+  if printf '%s\n' "$files" | grep -Eq "$PROTECTED_RE"; then
+    pr_flag "$n" needs-human-merge "touches a protected path (CI, the loop itself, lint/format/test config), so a human merges this: $(printf '%s\n' "$files" | grep -E "$PROTECTED_RE" | head -n 5 | tr '\n' ' ')"
+    return 1
+  fi
+
+  local why; why="$(review_ok "$n" "$head")" && rc=0 || rc=$?
+  if [ "$rc" -eq 2 ]; then pr_flag "$n" ralph-fix "the head moved after review ($why). Re-run the reviewers on the current diff and post a fresh review record."; return 1; fi
+  if [ "$rc" -ne 0 ]; then log "PR #$n skipped: $why"; return 1; fi
+
+  # Branch + current main, in the worktree, exactly as it would land.
+  git switch --detach "origin/$branch" --quiet
+  if ! git merge --no-edit origin/main >/dev/null 2>&1; then
+    local conflicts; conflicts="$(git diff --name-only --diff-filter=U | head -n 10 | tr '\n' ' ')"
+    git merge --abort 2>/dev/null || true
+    pr_flag "$n" ralph-fix "conflicts with main in: $conflicts. Merge origin/main into the branch, resolve, re-run the gate and reviewers, push (no force), post a fresh review record."
+    return 1
+  fi
+  local merged_sha; merged_sha="$(git rev-parse HEAD)"
+
+  local glog="$STATE/logs/merge-pr$n-$(date +%Y%m%d-%H%M%S).log"
+  log "PR #$n ($issue): re-running the gate -> $glog"
+  if ! ( cd "$WT" && export DATABASE_URL API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" \
+         && bun install --frozen-lockfile \
+         && bun run format:check && bun run build && bun run lint && bun run test && bun run type-check ) >"$glog" 2>&1; then
+    pr_flag "$n" ralph-fix "the merge gate failed on this branch merged with main. Last lines of $(basename "$glog"):
+\`\`\`
+$(tail -n 40 "$glog")
+\`\`\`
+Fix the cause. If it also fails on a clean origin/main it is pre-existing: file it per .pi/ralph/ticket.md and say so here."
+    return 1
+  fi
+
+  if [ "$merged_sha" != "$head" ]; then
+    [ "$RALPH_PUSH" = 1 ] || { log "PR #$n needs a push of the merge with main, but RALPH_PUSH=0"; return 1; }
+    git push origin "HEAD:refs/heads/$branch" --quiet
+    head="$merged_sha"
+  fi
+  if ! ci_ok "$n"; then return 1; fi
+
+  title="$(gh pr view "$n" --json title --jq .title)"; url="$(gh pr view "$n" --json url --jq .url)"
+  gh pr ready "$n" >/dev/null 2>&1 || true
+  if gh pr merge "$n" --squash --match-head-commit "$head" --subject "$title (#$n)" --body "Merged by the ralph loop after: reviewer verdicts clean, merge gate green ($(basename "$glog")). Linear: $issue" >/dev/null; then
+    git push origin --delete "$branch" --quiet 2>/dev/null || true
+    echo "$issue $url" >>"$STATE/merged.txt"
+    log "merged PR #$n ($issue)"
+    return 0
+  fi
+  log "gh could not merge PR #$n"; return 1
+}
+
+merge_ready() {
+  [ "$RALPH_MERGE" = 1 ] || return 0
+  [ "$RALPH_PUSH" = 1 ] || return 0
+  command -v python3 >/dev/null || { log "python3 missing: merge step skipped"; return 0; }
+  local pass=0 progress
+  while [ "$pass" -lt 3 ]; do   # a merged parent retargets its child to main: take another pass
+    pass=$((pass + 1)); progress=0
+    reset_worktree
+    local rows; rows="$(cd "$WT" && gh pr list --state open --limit 50 --json number,headRefName,baseRefName,labels,reviewDecision \
+      --jq '.[] | select(.headRefName|startswith("ralph/")) | select(.baseRefName=="main") | select(.reviewDecision!="CHANGES_REQUESTED") | select([.labels[].name]|index("hold")|not) | select([.labels[].name]|index("ralph-fix")|not) | select([.labels[].name]|index("needs-human-merge")|not) | "\(.number) \(.headRefName)"' | sort -n)"
+    [ -n "$rows" ] || break
+    while read -r n branch; do
+      [ -n "$n" ] || continue
+      if merge_one "$n" "$branch"; then progress=1; else reset_worktree; fi
+    done <<<"$rows"
+    [ "$progress" -eq 1 ] || break
+  done
+  reset_worktree
+  if [ -s "$STATE/merged.txt" ]; then
+    log "syncing Linear for merged PRs"
+    [ "$(session 0 close)" = COMPLETE ] && : >"$STATE/merged.txt" || log "close-out incomplete; merged.txt kept for the next pass"
+  fi
+}
+
+cmd_merge() {
+  [ -d "$WT" ] || die "no worktree - run: $0 setup"
+  lock; ensure_db; merge_ready
+}
+
 cmd_plan() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
   lock; ensure_db; reset_worktree
@@ -181,6 +344,7 @@ cmd_run() {
   while [ "$i" -lt "$RALPH_MAX_ITER" ]; do
     i=$((i + 1))
     [ ! -f "$STATE/STOP" ] || { log "STOP file found"; break; }
+    merge_ready
     reset_worktree
     local tag; tag="$(session "$i" work)"
     case "$tag" in
@@ -192,6 +356,7 @@ cmd_run() {
     esac
     sleep "$RALPH_SLEEP"
   done
+  merge_ready
   log "done after $i iteration(s)"
   reset_worktree
 }
@@ -207,6 +372,7 @@ cmd_audit() {
 
 cmd_status() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
+  [ -f "$STATE/loop.pid" ] && kill -0 "$(cat "$STATE/loop.pid")" 2>/dev/null && echo "detached loop: ralph-loop pgid $(cat "$STATE/loop.pid")"
   echo "worktree: $WT  model: $RALPH_MODEL  push: $RALPH_PUSH"
   [ -d "$STATE/lock" ] && echo "loop: running (pid $(cat "$STATE/lock/pid" 2>/dev/null))" || echo "loop: idle"
   [ -f "$STATE/STOP" ] && echo "STOP requested"
@@ -217,6 +383,37 @@ cmd_status() {
   return 0
 }
 
+# start: run the loop detached, as a process group whose leader is named `ralph-loop`.
+# Kill it with `kill`: ralph:kill signals the whole group (loop, pi sessions, subagents).
+cmd_start() {
+  [ -d "$WT" ] || die "no worktree - run: $0 setup"
+  command -v perl >/dev/null || die "perl is needed to detach into its own process group"
+  mkdir -p "$STATE"
+  if [ -f "$STATE/loop.pid" ] && kill -0 "$(cat "$STATE/loop.pid")" 2>/dev/null; then
+    die "already running (pgid $(cat "$STATE/loop.pid")); use: $0 kill"
+  fi
+  local self="$HERE/loop.sh"
+  RALPH_WORKTREE="$WT" nohup perl -MPOSIX -e 'POSIX::setsid(); exec { "bash" } "ralph-loop", @ARGV' \
+    "$self" run "$@" >>"$STATE/loop.log" 2>&1 </dev/null &
+  echo $! >"$STATE/loop.pid"
+  sleep 1
+  log "started: process name 'ralph-loop', pgid $(cat "$STATE/loop.pid"), log $STATE/loop.log"
+  log "watch: tail -f $STATE/loop.log   graceful stop: $0 stop   kill now: $0 kill   (or: pkill -f ralph-loop)"
+}
+
+# kill: terminate the detached loop and everything it spawned.
+cmd_kill() {
+  local pg; pg="$(cat "$STATE/loop.pid" 2>/dev/null || true)"
+  if [ -n "$pg" ] && kill -0 "$pg" 2>/dev/null; then
+    kill -TERM -- "-$pg" 2>/dev/null || kill -TERM "$pg" 2>/dev/null || true
+    sleep 3; kill -KILL -- "-$pg" 2>/dev/null || true
+    log "killed process group $pg"
+  else
+    pkill -f "ralph-loop" 2>/dev/null && log "killed by name" || log "nothing running"
+  fi
+  rm -f "$STATE/loop.pid"; rm -rf "$STATE/lock"
+}
+
 cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the current iteration"; }
 
 case "${1:-}" in
@@ -224,7 +421,10 @@ case "${1:-}" in
   plan)   cmd_plan ;;
   run)    shift; [ "${1:-}" = "--max" ] && RALPH_MAX_ITER="${2:?--max N}"; cmd_run ;;
   audit)  cmd_audit ;;
+  merge)  cmd_merge ;;
+  start)  shift; cmd_start "$@" ;;
+  kill)   cmd_kill ;;
   status) cmd_status ;;
   stop)   cmd_stop ;;
-  *) echo "usage: $0 {setup|plan|run [--max N]|audit|status|stop}  (env: RALPH_MODEL RALPH_THINKING RALPH_PUSH RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
+  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|audit|status|stop}  (env: RALPH_MODEL RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
 esac
