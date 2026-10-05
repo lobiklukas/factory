@@ -122,9 +122,11 @@ CTX
 with_timeout() {
   local secs="$1"; shift
   "$@" & local pid=$!
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null ) & local watcher=$!
+  # The watcher must not hold our stdout: its orphaned sleep would keep a surrounding $(...) open until it expires.
+  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & local watcher=$!
   local rc=0
   wait "$pid" || rc=$?
+  pkill -P "$watcher" 2>/dev/null || true
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
   return "$rc"
