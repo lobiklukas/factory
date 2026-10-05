@@ -4,15 +4,8 @@ import { Config, Effect, Layer } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
-import { HelloGroupLive } from "./Api/Hello";
-import { ChatRpcLive } from "./Rpc/Chat";
-import { ChatSessionsLive } from "./runtime/ChatSessions";
-import { ChatManagedRpcLive } from "./Rpc/ChatManaged";
-import { DevToolsLive } from "./observability/DevTools";
-import { TodoApiLive } from "./Api/Todo";
-import { DatabaseLive, TodoRepositoryLive } from "@repo/db";
 import { EventRpcLive } from "./Rpc/Event";
-import { PresenceRpcLive } from "./Rpc/Presence";
+import { DevToolsLive } from "./observability/DevTools";
 
 export const ServerConfig = Config.all({
   port: Config.Number("PORT").pipe(Config.withDefault(9000)),
@@ -24,29 +17,15 @@ export const ServerConfig = Config.all({
 });
 
 // HTTP API Router
-const ApiRouter = HttpApiBuilder.layer(Api).pipe(
-  Layer.provide([HealthGroupLive, HelloGroupLive]),
-);
+const ApiRouter = HttpApiBuilder.layer(Api).pipe(Layer.provide(HealthGroupLive));
 
-// NOTE: Modules append additional routers through Layer.mergeAll.
-const RouterDependencies = Layer.mergeAll(
-  Layer.empty,
-  ChatSessionsLive,
-  TodoRepositoryLive.pipe(
-    Layer.provide(DatabaseLive),
-    Layer.satisfiesServicesType<never>(),
-  ),
-);
-const AllRouters = Layer.mergeAll(
-  ApiRouter,
-  ChatRpcLive,
-  ChatManagedRpcLive,
-  TodoApiLive,
-  EventRpcLive,
-  PresenceRpcLive,
-);
+// NOTE: Modules append additional service layers here through Layer.mergeAll.
+const RouterDependencies = Layer.empty;
 
-// NOTE: Modules append additional server layers through Layer.mergeAll.
+// NOTE: Modules append additional routers here through Layer.mergeAll.
+const AllRouters = Layer.mergeAll(ApiRouter, EventRpcLive);
+
+// NOTE: Modules append additional server layers here through Layer.mergeAll.
 const ServerLayers = Layer.mergeAll(
   BunHttpServer.layerConfig(ServerConfig),
   DevToolsLive,
@@ -59,6 +38,7 @@ const HttpLive = Effect.gen(function* () {
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   yield* Effect.logInfo("Starting server with:");
   yield* Effect.logInfo("  - HTTP API at /");
+  yield* Effect.logInfo("  - RPC at /rpc");
 
   const CorsRouters = AllRouters.pipe(
     Layer.provide(

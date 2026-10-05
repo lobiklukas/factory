@@ -15,10 +15,8 @@
   "dependencies": {
     "@effect/platform-bun": "4.0.0",
     "effect": "4.0.0",
-    "@repo/ai": "workspace:*",
     "@repo/domain": "workspace:*",
-    "@repo/db": "workspace:*",
-    "@repo/presence": "workspace:*"
+    "@repo/db": "workspace:*"
   },
   "devDependencies": {
     "@repo/config-typescript": "workspace:*",

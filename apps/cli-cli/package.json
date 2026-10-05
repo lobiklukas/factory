@@ -17,7 +17,6 @@
   "dependencies": {
     "@effect/platform-bun": "4.0.0",
     "effect": "4.0.0",
-    "@repo/ai": "workspace:*",
     "@repo/domain": "workspace:*",
     "effect-boxes": "^0.17.3"
   },

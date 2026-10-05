@@ -1,8 +1,13 @@
 import { EventRpc, RpcApi, type TickEvent } from "@repo/domain/Rpc";
 import { Effect, Layer, Queue } from "effect";
 import { RpcSerialization, RpcServer } from "effect/rpc";
-import { TodoRpcHandlers } from "./Todo";
 
+/**
+ * Scaffold handler for the streaming RPC transport.
+ *
+ * Replaced by the session event stream (docs/design.md D8): the queue becomes the
+ * SessionBus subscription and the emissions become transcript commits.
+ */
 const EventRpcHandlers = EventRpc.toLayer(
   Effect.gen(function* () {
     yield* Effect.logInfo("Starting Event RPC Live Implementation");
@@ -28,7 +33,8 @@ const EventRpcHandlers = EventRpc.toLayer(
   }),
 );
 
-const RpcHandlers = Layer.mergeAll(EventRpcHandlers, TodoRpcHandlers);
+// NOTE: Additional RPC handlers merge in here.
+const RpcHandlers = EventRpcHandlers;
 
 export const EventRpcLive = RpcServer.layerHttp({
   group: RpcApi,

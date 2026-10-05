@@ -16,6 +16,7 @@
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "test": "turbo run test",
+    "m0": "bun packages/harness/src/m0-live-turn.ts",
     "prepare": "effect-tsgo patch --oxlint"
   },
   "devDependencies": {
