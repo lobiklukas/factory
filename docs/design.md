@@ -118,6 +118,13 @@ SQLite semantics as SQL, makes record-shape changes into DDL against an experime
 dependency, and loses "delete the cache and replay" as a universal repair); SQLite on the
 sandbox PVC (couples session history to a running sandbox).
 
+_As built (M2)._ A `sessions` table (`id`, `title`, `request_id`, `created_at`) is the first such
+derived table: it is an index, not a projection. `id` is the `log_id`, so the join back to the log
+needs no lookup; `request_id` makes a retried create idempotent; and the title is _also_ committed
+as a `factory.title` entry, so dropping the table loses nothing but the index. A session id is
+`ses_` + ten Crockford base32 characters of millisecond timestamp + sixteen of randomness: one
+identifier that is a `log_id`, a URL segment, and a git branch (D10).
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.
@@ -126,6 +133,15 @@ must label which mode it is in so a historical read is never mistaken for a live
 wakes the sandbox first.
 _Rejected:_ always read the projection (two read paths with different staleness); always wake
 (discards the cost argument in D4).
+
+_As built (M2)._ Ownership decides the path, and it is a registry in the control plane process: a
+session this process holds open streams from the live view; one it does not is a reader-mode fold.
+The two paths project the _same_ active transcript (newest head marker onward), and both are
+asserted to agree entry for entry. `mode` is on every snapshot, and a historical stream sends its
+snapshot and then **ends**, so a completed fold is distinguishable from a dropped connection. The
+projection diffs whole views rather than forwarding operations, so a subscriber that falls behind
+still converges. `notify`-driven catch-up — the third branch, for a session owned elsewhere — waits
+on D12.
 
 ### D9 — Surfaces: CLI first, web dashboard second
 
@@ -169,6 +185,15 @@ behind a `SessionBus` service, with an in-process implementation as a legitimate
 Layer and Redis as a later replacement if `NOTIFY` becomes the bottleneck.
 _Rejected:_ single replica with in-process subscriptions (the ceiling is fine, but "which
 replica holds my session's stream" is the last bug you want to debug on a multi-hour session).
+
+_As built (M2)._ There is one replica, and it is also the local sandbox (D3), so it owns the harness
+in-process and streams from it. `SessionBus` is deliberately **not built yet**: a session owned by
+another process is served by folding, which is the honest answer while nothing can say who owns
+what. Two things unblock it, in order: **presence** (which process or sandbox owns a session, with a
+lease and a heartbeat), then the bus itself — an `AFTER INSERT` trigger on `commits` calling
+`pg_notify`, carrying a _cursor_ (`log_id`, `seq`) rather than an event, because `NOTIFY` payloads
+cap at 8000 bytes and D7 makes the log truth. A subscriber reads the log from the cursor, so the
+notification is a hint and the log stays authoritative.
 
 ### D13 — Sandbox image: generic base, then templates where they pay
 

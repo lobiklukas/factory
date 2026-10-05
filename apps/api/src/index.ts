@@ -1,10 +1,13 @@
-import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
+import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
+import { SessionServiceLive } from "@repo/core";
 import { Api } from "@repo/domain/Api";
-import { Config, Effect, Layer } from "effect";
+import { createModelAccess, type ModelBackend } from "@repo/harness";
+import { DatabaseLive } from "@repo/storage-postgres";
+import { Config, Effect, Layer, Option } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
-import { EventRpcLive } from "./Rpc/Event";
+import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
 
 export const ServerConfig = Config.all({
@@ -16,16 +19,33 @@ export const ServerConfig = Config.all({
   ),
 });
 
+/**
+ * Which model a session runs against.
+ *
+ * `MODEL_BACKEND` wins when set. Otherwise a key decides: a real provider when one is configured,
+ * pi-ai's deterministic faux provider when none is, so a checkout with no key still boots and a
+ * session still runs end to end — it just reports that it is not talking to a model.
+ */
+const ModelConfig = Config.all({
+  backend: Config.option(
+    Config.Literals(["anthropic", "faux"], "MODEL_BACKEND"),
+  ),
+  apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
+  sessionRoot: Config.String("SESSION_ROOT").pipe(
+    Config.withDefault(".factory/sessions"),
+  ),
+  idleTimeoutMs: Config.Int("SESSION_IDLE_TIMEOUT_MS").pipe(
+    Config.withDefault(15 * 60_000),
+  ),
+});
+
 // HTTP API Router
 const ApiRouter = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(HealthGroupLive),
 );
 
-// NOTE: Modules append additional service layers here through Layer.mergeAll.
-const RouterDependencies = Layer.empty;
-
 // NOTE: Modules append additional routers here through Layer.mergeAll.
-const AllRouters = Layer.mergeAll(ApiRouter, EventRpcLive);
+const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive);
 
 // NOTE: Modules append additional server layers here through Layer.mergeAll.
 const ServerLayers = Layer.mergeAll(
@@ -35,12 +55,35 @@ const ServerLayers = Layer.mergeAll(
 
 const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
+  const model = yield* ModelConfig;
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
+
+  const backend: ModelBackend = Option.getOrElse(model.backend, () =>
+    Option.isSome(model.apiKey) ? "anthropic" : "faux",
+  );
+  yield* Effect.logInfo(
+    `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
+  );
+  if (backend === "faux") {
+    yield* Effect.logWarning(
+      "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers",
+    );
+  }
+
+  // Sessions own one log, one working directory, and (locally) the harness that drives them.
+  const RouterDependencies = SessionServiceLive({
+    model: createModelAccess(backend),
+    sessionRoot: model.sessionRoot,
+    idleTimeoutMs: model.idleTimeoutMs,
+  }).pipe(Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)));
 
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   yield* Effect.logInfo("Starting server with:");
   yield* Effect.logInfo("  - HTTP API at /");
   yield* Effect.logInfo("  - RPC at /rpc");
+  yield* Effect.logInfo(
+    `  - session working directories under ${model.sessionRoot}`,
+  );
 
   const CorsRouters = AllRouters.pipe(
     Layer.provide(

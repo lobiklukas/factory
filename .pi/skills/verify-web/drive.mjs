@@ -75,22 +75,31 @@ assert(
   `GET ${API_URL}/ -> ${health.status} ${JSON.stringify(health.body)}`,
 );
 
-// Feature: streaming RPC card. Required: it is the only end-to-end check of the
-// streaming transport that session events depend on (docs/design.md D8/D9).
-// See features/rpc-stream.md.
-await page.getByRole("button", { name: /call rpc api/i }).click();
-let rpcWorked = false;
+// Feature: session stream. Required: it is the dashboard's only end-to-end check of
+// creating a session, driving it, and watching the events arrive. See
+// features/session-stream.md.
+await page.getByRole("button", { name: /start a session/i }).click();
+let sessionWorked = false;
 try {
+  // Require the end of the story, not the beginning: the answer is rendered only
+  // after the tool call, the transcript commit, and the stream all worked, and it is
+  // text the faux model derives from the bash tool's own output. Waiting for the
+  // earlier `toolResult` line reads the panel while the run is still finishing —
+  // which is exactly the race this check caught on 2026-10-06.
   await page.waitForFunction(
-    () => document.body.innerText.includes("Event: end"),
+    () => document.body.innerText.includes("assistant: faux-ok (re:"),
     null,
-    {
-      timeout: 40_000,
-    },
+    { timeout: 40_000 },
   );
-  rpcWorked = true;
+  // And the run must settle: a live read that never leaves `busy` is a stuck session.
+  await page.waitForFunction(
+    () => document.body.innerText.includes("live · idle"),
+    null,
+    { timeout: 20_000 },
+  );
+  sessionWorked = true;
 } catch {
-  rpcWorked = false;
+  sessionWorked = false;
 }
 const cardText = (
   await page
@@ -99,13 +108,31 @@ const cardText = (
     .innerText()
     .catch(() => "")
 ).trim();
-observed.rpcStream = { worked: rpcWorked, cardText };
+const modeLine = (
+  await page
+    .locator("p")
+    .filter({ hasText: /live|historical/ })
+    .first()
+    .innerText()
+    .catch(() => "")
+).trim();
+observed.session = { worked: sessionWorked, modeLine, cardText };
 assert(
-  "streaming RPC card",
-  rpcWorked,
-  rpcWorked
-    ? `stream reached its end event: ${JSON.stringify(cardText)}`
-    : `no end event within 40s; panel: ${JSON.stringify(cardText)}`,
+  "session stream",
+  sessionWorked,
+  sessionWorked
+    ? `transcript rendered: ${JSON.stringify(cardText.slice(0, 200))}`
+    : `no tool result within 40s; panel: ${JSON.stringify(cardText.slice(0, 200))}`,
+);
+assert(
+  "the dashboard labels a live read",
+  modeLine.startsWith("live"),
+  `mode line = ${JSON.stringify(modeLine)}`,
+);
+assert(
+  "the dashboard renders the answer",
+  cardText.includes("assistant: faux-ok (re:"),
+  `panel: ${JSON.stringify(cardText.slice(0, 200))}`,
 );
 
 await page.screenshot({

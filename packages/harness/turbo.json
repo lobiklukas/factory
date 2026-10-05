@@ -1,0 +1,10 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      // Drives a real Postgres log, so a cached pass proves nothing.
+      "cache": false
+    }
+  }
+}

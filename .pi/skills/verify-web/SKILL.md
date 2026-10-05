@@ -6,9 +6,8 @@ description: Drive and prove the factory web dashboard (React SPA at apps/web) i
 # Verify the web dashboard
 
 Proves behavior by driving the real dashboard in a real browser and capturing evidence.
-Unit tests and type checks do not replace this: the scaffold's streaming card type-checks and
-renders while the stream silently does nothing or drops its final event (see
-`features/rpc-stream.md`).
+Unit tests and type checks do not replace this: the streaming card once type-checked and rendered
+while the stream silently did nothing (see `features/session-stream.md`).
 
 Two surfaces exist in this repo. This skill covers the **web dashboard** plus the API it calls.
 The **CLI** (`apps/cli`) is a stub with no subcommands yet; when it grows, drive it in its own
@@ -52,16 +51,21 @@ Uses the locally installed Chrome (`channel: "chrome"`), so no Playwright browse
 needed. Environment: `WEB_URL`, `API_URL`, `EVIDENCE_DIR`.
 
 It asserts the shell renders, asserts the browser can reach the API from the page's own origin,
-and clicks the streaming RPC card, requiring the stream to reach its `end` event. Exit code is
-non-zero when a required check fails.
+and clicks **Start a session**, requiring the transcript to reach the answer the agent's `bash`
+tool produced and the card to label its read path. Exit code is non-zero when a required check
+fails.
+
+The dashboard drives the API, and the API needs Postgres: `docker compose up -d --wait postgres`
+before `./up.sh`. The session's model is scripted (`MODEL_BACKEND=faux`) so the run is offline and
+deterministic; its tool calls, transcript, and storage are real.
 
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
 
 - `dashboard.png` — full-page screenshot after the drive
-- `observed.json` — heading, per-check pass/fail with details, the API body, the RPC card's
-  observed text, console errors, and HTTP responses ≥ 400
+- `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
+  transcript and mode label, console errors, and HTTP responses ≥ 400
 
 Proof standards for this app:
 
@@ -70,11 +74,13 @@ Proof standards for this app:
   proves CORS and reachability through the client's origin, which a curl from the shell would not.
 - Capture the action and the resulting state: the screenshot plus the extracted text, not one or
   the other.
-- A green unit test is not evidence for a browser path. The RPC card was the proof: it compiled,
-  rendered, and did nothing.
+- A green unit test is not evidence for a browser path. The streaming card was the proof: it
+  compiled, rendered, and did nothing.
 - Chrome logs a 404 for a resource that never appears in Playwright's response events (it is a
   favicon-class request). It is not a failure of the drive and `failedResponses` will be empty
   for it. Do not chase it.
+- Require the end of the story, not the beginning. The session card check waits for the _answer_,
+  which exists only once the tool call, the transcript commit, and the stream all worked.
 
 ## Cleanup
 

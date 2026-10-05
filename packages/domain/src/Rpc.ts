@@ -1,30 +1,52 @@
-import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
-
-export const TickEvent = Schema.Union([
-  Schema.TaggedStruct("starting", {}),
-  Schema.TaggedStruct("tick", {}),
-  Schema.TaggedStruct("end", {}),
-]);
+import {
+  CreateSessionInput,
+  SendMessageInput,
+  SendMessageResult,
+  SessionError,
+  SessionEvent,
+  SessionIdInput,
+  SessionSnapshot,
+  SessionSummary,
+} from "./Session";
 
 /**
- * Streaming RPC over HTTP, kept as the transport scaffold for session events.
+ * The session RPC surface (docs/design.md D8/D9): create, read, drive, interrupt, watch.
  *
- * The shape is deliberate: a client opens a stream, the server pushes events as
- * they happen, and the stream ends. That is exactly what a Pi Durable
- * conversation needs for `watch()` — commit operations small enough to send over
- * a socket — so this group is replaced by the session event stream rather than
- * being rebuilt from scratch. See docs/design.md D8/D9.
+ * `watchSession` is the streaming one, and it is the only place the live/historical distinction
+ * shows: attaching to a session this process owns streams events as they commit, while attaching
+ * to one nobody owns folds the log once, sends a single `snapshot` whose `mode` is `historical`,
+ * and ends the stream. The stream's own error channel carries `SessionError`, so a session that
+ * vanishes mid-stream fails the stream rather than the connection.
  */
-export class EventRpc extends RpcGroup.make(
-  Rpc.make("tick", {
-    payload: {
-      ticks: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    },
-    success: TickEvent,
+export class SessionRpc extends RpcGroup.make(
+  Rpc.make("createSession", {
+    payload: CreateSessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  Rpc.make("getSession", {
+    payload: SessionIdInput,
+    success: SessionSnapshot,
+    error: SessionError,
+  }),
+  Rpc.make("sendMessage", {
+    payload: SendMessageInput,
+    success: SendMessageResult,
+    error: SessionError,
+  }),
+  Rpc.make("interruptSession", {
+    payload: SessionIdInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  Rpc.make("watchSession", {
+    payload: SessionIdInput,
+    success: SessionEvent,
+    error: SessionError,
     stream: true,
   }),
 ) {}
 
-// NOTE: Session lifecycle, sandbox lifecycle, and approvals merge in here.
-export const RpcApi = EventRpc;
+// NOTE: Sandbox, approval, and sandbox-status groups merge in here.
+export const RpcApi = SessionRpc;

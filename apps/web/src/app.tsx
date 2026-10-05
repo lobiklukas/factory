@@ -1,5 +1,5 @@
 import { ThemeToggle } from "./components/theme-toggle";
-import { RpcCard } from "./components/rpc-card";
+import { SessionCard } from "./components/session-card";
 
 /**
  * Control plane for agents: sessions, sandboxes, and approvals.
@@ -19,8 +19,8 @@ function App() {
 
       <section className="grid w-full grid-cols-1 gap-6 auto-rows-[22rem] lg:grid-cols-2">
         {/* @slot:components */}
-        {/* Streaming RPC over HTTP — the transport session events will use (D8/D9). */}
-        <RpcCard />
+        {/* A session, created, driven, and watched over the RPC surface (D8/D9). */}
+        <SessionCard />
       </section>
     </div>
   );

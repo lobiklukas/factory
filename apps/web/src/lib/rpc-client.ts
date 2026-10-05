@@ -1,4 +1,4 @@
-import { EventRpc } from "@repo/domain/Rpc";
+import { SessionRpc } from "@repo/domain/Rpc";
 import { Context, Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
@@ -15,7 +15,7 @@ const ProtocolLive = EffectRpcClient.layerProtocolHttp({
 export class RpcClient extends Context.Service<RpcClient>()("RpcClient", {
   make: Effect.gen(function* () {
     return {
-      client: yield* EffectRpcClient.make(EventRpc),
+      client: yield* EffectRpcClient.make(SessionRpc),
     } as const;
   }),
 }) {

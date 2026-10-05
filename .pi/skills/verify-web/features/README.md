@@ -9,18 +9,18 @@ Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 910
 | ----------------------- | ------- | ------------------------------------------ |
 | Dashboard shell renders | passing | [dashboard-shell.md](dashboard-shell.md)   |
 | Browser reaches the API | passing | [api-connectivity.md](api-connectivity.md) |
-| Streaming RPC card      | passing | [rpc-stream.md](rpc-stream.md)             |
+| Session stream card     | passing | [session-stream.md](session-stream.md)     |
 
 ## Known gaps
 
-- `apps/api` is covered only through the dashboard. Its HTTP API group has one endpoint
-  (`GET /`) and `/rpc` responds 500 to a malformed body, which is a mounting check rather than
-  a proof. When session endpoints land, add feature files for them and drive the RPC stream
-  through the real Effect client rather than the demo card.
+- The session API is covered here only through the dashboard. Its contract is proven by
+  `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
+  other, and a change to `packages/domain` or `packages/core` deserves both.
 - `apps/cli` has no subcommands, so there is nothing to drive yet.
-- Nothing browser-verifies the Postgres package or the harness. `packages/storage-postgres` is
-  proven by its vitest suite (conformance + log semantics) and needs
-  `docker compose up -d --wait postgres`; `packages/harness` has a disposable M0 spike
-  (`bun run m0`) that needs `ANTHROPIC_API_KEY` and runs over `MemoryStorage`, not Postgres.
+- The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
+  in `up.sh` so the card stays live; the fold path is proven by verify-api instead. M5 owns the
+  session list, which is where a historical read becomes a normal thing to see.
+- The browser path needs Postgres (`docker compose up -d --wait postgres`); sessions are logs, and
+  the log is Postgres.
 - Isolation is not verifiable locally at all. See `docs/design.md` R2 — kind cannot run gVisor,
   so never cite a local run as evidence that sandboxing works.

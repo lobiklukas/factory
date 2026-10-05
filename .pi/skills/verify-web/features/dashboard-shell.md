@@ -30,4 +30,4 @@ layout and cards rendered, not just a string match.
   machine, so the dev server fails outright instead of moving. Always launch through `up.sh`,
   which sets `VITE_PORT`.
 - The shell renders even when every card is broken. A passing shell check says nothing about
-  the cards — see `rpc-stream.md`.
+  the cards — see `session-stream.md`.

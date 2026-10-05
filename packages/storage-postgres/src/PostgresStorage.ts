@@ -1,4 +1,5 @@
 import type { Context } from "@earendil-works/chord";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import type {
   ConversationId,
@@ -96,6 +97,34 @@ export class PostgresStorage implements Storage {
       options.mode ?? "owner",
     );
     return storage.catchUp().then(() => storage);
+  }
+
+  /**
+   * The single writer for one log, for Effect callers.
+   *
+   * The Chord context is deliberately the never-cancelling one: a session's log outlives the
+   * request that opens it, so cancelling that request must not cancel the storage.
+   */
+  static owner(sql: SqlClient, logId: string): Promise<PostgresStorage> {
+    return PostgresStorage.open(
+      sql,
+      { logId, mode: "owner" },
+      BACKGROUND_CONTEXT,
+    );
+  }
+
+  /** Read-only, non-owning mode for one log, for Effect callers. */
+  static reader(sql: SqlClient, logId: string): Promise<PostgresStorage> {
+    return PostgresStorage.open(
+      sql,
+      { logId, mode: "reader" },
+      BACKGROUND_CONTEXT,
+    );
+  }
+
+  /** `close()` with the never-cancelling context, for Effect callers. */
+  dispose(): Promise<void> {
+    return this.close(BACKGROUND_CONTEXT);
   }
 
   private serialize<A>(operation: () => Promise<A>): Promise<A> {

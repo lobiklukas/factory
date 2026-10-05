@@ -18,12 +18,20 @@ if [ -f "$RUN_DIR/api.pid" ] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null;
 fi
 
 # API. ALLOWED_ORIGINS must name the web port or the browser's RPC call is blocked
-# by CORS.
+# by CORS. MODEL_BACKEND=faux keeps the dashboard drive offline, deterministic, and
+# free: the session card still runs a real bash tool call, but the model is scripted.
+# The idle timeout is long so the card stays on the live read path for the whole drive.
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
+    MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
+    SESSION_ROOT="$RUN_DIR/sessions" \
+    SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-600000}" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
+
+# Sessions from a previous drive run would be re-read as historical folds; start clean.
+rm -rf "$RUN_DIR/sessions"
 
 # Web dashboard.
 ( cd "$ROOT/apps/web" && exec env \

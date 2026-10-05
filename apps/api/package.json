@@ -16,7 +16,9 @@
     "@effect/platform-bun": "4.0.0",
     "effect": "4.0.0",
     "@repo/domain": "workspace:*",
-    "@repo/storage-postgres": "workspace:*"
+    "@repo/storage-postgres": "workspace:*",
+    "@repo/core": "workspace:*",
+    "@repo/harness": "workspace:*"
   },
   "devDependencies": {
     "@repo/config-typescript": "workspace:*",

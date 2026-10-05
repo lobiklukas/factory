@@ -5,12 +5,24 @@
   "type": "module",
   "scripts": {
     "m0": "bun --env-file=../../.env run src/m0-live-turn.ts",
+    "test": "vitest run --passWithNoTests",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@earendil-works/chord": "1.0.3",
     "@earendil-works/pi-ai": "1.0.3",
     "@earendil-works/pi-durable": "1.0.3",
+    "@repo/domain": "workspace:*",
     "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-pg": "4.0.0",
+    "@repo/config-typescript": "workspace:*",
+    "@repo/storage-postgres": "workspace:*",
+    "vitest": "^4.1.4"
+  },
+  "exports": {
+    ".": "./src/index.ts"
   }
 }
