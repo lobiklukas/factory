@@ -12,6 +12,7 @@ MAIN_ROOT="$(dirname "$COMMON")"
 RALPH_WORKTREE="${RALPH_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
 RALPH_MODEL="${RALPH_MODEL:-opencode-go/deepseek-v4.1-flash}"
 RALPH_THINKING="${RALPH_THINKING:-high}"
+RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/space-bunny-free,opencode-go/longcat-2.5-preview-free}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-3600}"          # seconds per iteration
@@ -104,6 +105,7 @@ run_context() {
 - database for tests and verify scripts: DATABASE_URL=$DATABASE_URL (never use the default \`factory\` database)
 - ports for verify-* scripts: API_PORT=$RALPH_API_PORT WEB_PORT=$RALPH_WEB_PORT
 - DOCKER_HOST=${DOCKER_HOST:-<unset>}
+- subagent fallback models: ${RALPH_FALLBACK_MODELS:-<none>}. If a subagent launch fails with a provider error (429, overloaded, quota, unavailable), relaunch that same task once per listed model with the per-run override \`model: "<id>"\`. Do not edit agent files for this.
 - date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 CTX
 }
@@ -121,34 +123,52 @@ with_timeout() {
 }
 
 # session <iteration> <plan|work>; echoes the control tag (NEXT|COMPLETE|BLOCKED|NONE)
+# A provider failure (rate limit, overload, quota, outage) is retried on the next model in the chain.
+# A timeout, or a clean run that simply forgot the control line, is not: another model will not fix those.
+provider_failed() { # <out> <err>
+  tail -c 6000 "$1" "$2" 2>/dev/null | grep -qiE '429|rate.?limit|overloaded|quota|insufficient|unavailable|503|502|capacity|too many requests|ECONNRESET|ETIMEDOUT|No (API key|provider)|credit|billing'
+}
+
 session() {
   local n="$1" mode="$2" prompt="${SESS_CWD:-$WT}/.pi/ralph/$2.prompt.md" stamp out err
   stamp="$(date +%Y%m%d-%H%M%S)-$mode-$n"
-  out="$STATE/logs/$stamp.out"; err="$STATE/logs/$stamp.err"
   [ -f "$prompt" ] || die "missing $prompt"
-  log "$mode iteration $n -> $out"
-  local rc=0
-  (
-    cd "${SESS_CWD:-$WT}"
-    export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
-    export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
-    [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
-    with_timeout "$RALPH_TIMEOUT" pi -p --approve \
-      --model "$RALPH_MODEL" --thinking "$RALPH_THINKING" \
-      --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
-      "$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")" \
-      </dev/null >"$out" 2>"$err"
-  ) || rc=$?
-  local last tag="NONE"
-  last="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 1 | tr -d '`' | tr -d '[:space:]' || true)"
-  case "$last" in
-    "<promise>NEXT</promise>") tag=NEXT ;;
-    "<promise>COMPLETE</promise>") tag=COMPLETE ;;
-    "<promise>BLOCKED</promise>") tag=BLOCKED ;;
-  esac
-  printf '{"at":"%s","mode":"%s","iteration":%s,"exit":%s,"tag":"%s","log":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$n" "$rc" "$tag" "$out" >>"$STATE/runs.jsonl"
-  [ "$rc" -eq 0 ] || log "pi exited $rc (see $err)"
+  local models=("$RALPH_MODEL") m
+  local IFS_OLD="$IFS"; IFS=','; for m in $RALPH_FALLBACK_MODELS; do [ -n "$m" ] && models+=("$m"); done; IFS="$IFS_OLD"
+  local attempt=0 rc tag used
+  for m in "${models[@]}"; do
+    attempt=$((attempt + 1)); rc=0; used="$m"
+    out="$STATE/logs/$stamp.out"; err="$STATE/logs/$stamp.err"
+    [ "$attempt" -eq 1 ] || { out="$STATE/logs/$stamp.try$attempt.out"; err="$STATE/logs/$stamp.try$attempt.err"; }
+    log "$mode iteration $n [$m] -> $out"
+    (
+      cd "${SESS_CWD:-$WT}"
+      export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
+      export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
+      [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
+      with_timeout "$RALPH_TIMEOUT" pi -p --approve \
+        --model "$m" --thinking "$RALPH_THINKING" \
+        --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
+        "$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")" \
+        </dev/null >"$out" 2>"$err"
+    ) || rc=$?
+    local last; tag="NONE"
+    last="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 1 | tr -d '`' | tr -d '[:space:]' || true)"
+    case "$last" in
+      "<promise>NEXT</promise>") tag=NEXT ;;
+      "<promise>COMPLETE</promise>") tag=COMPLETE ;;
+      "<promise>BLOCKED</promise>") tag=BLOCKED ;;
+    esac
+    [ "$rc" -eq 0 ] || log "pi exited $rc (see $err)"
+    [ "$tag" = NONE ] || break                                  # a valid control line ends it
+    case "$rc" in 124|137|143) break ;; esac                    # timed out / killed: do not retry
+    if provider_failed "$out" "$err" && [ "$attempt" -lt "${#models[@]}" ]; then
+      log "provider error on $m; falling back to ${models[$attempt]}"; continue
+    fi
+    break
+  done
+  printf '{"at":"%s","mode":"%s","iteration":%s,"exit":%s,"tag":"%s","model":"%s","attempts":%s,"log":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$n" "$rc" "$tag" "$used" "$attempt" "$out" >>"$STATE/runs.jsonl"
   echo "$tag"
 }
 
@@ -465,5 +485,5 @@ case "${1:-}" in
   kill)   cmd_kill ;;
   status) cmd_status ;;
   stop)   cmd_stop ;;
-  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
+  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_FALLBACK_MODELS RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
 esac

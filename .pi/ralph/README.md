@@ -61,6 +61,10 @@ RALPH_API_PORT RALPH_WEB_PORT`.
 - PRs touching `.github/`, `.pi/ralph/`, `.pi/agents/ralph-*` or lint/format/test config are never auto-merged.
 - `bun run ralph:split` breaks `too-big` issues into S/M children in a separate worktree, beside a live loop.
 
+## Model fallback
+
+`RALPH_MODEL` (default `opencode-go/deepseek-v4.1-flash`) is tried first. On a provider error (429, overload, quota, outage) the driver retries the same iteration on each model in `RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free,opencode-go/longcat-2.5-preview-free`; empty disables). A timeout, or a run that merely forgot the control line, is not retried. `pi-subagents` never falls back by itself, so the worker is told to relaunch a failed subagent once per fallback model with a per-run `model` override. `runs.jsonl` records the model that finished each run and the attempts.
+
 ## Known traps
 
 - `ralph-researcher` and `ralph-verifier` need `async: true` (foreground children do not load web
