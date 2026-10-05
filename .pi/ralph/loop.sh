@@ -173,10 +173,25 @@ RALPH_MERGE="${RALPH_MERGE:-1}"
 RALPH_CI_TIMEOUT="${RALPH_CI_TIMEOUT:-1800}"
 PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$|turbo\.json$)'
 
+RALPH_FIX_MAX="${RALPH_FIX_MAX:-3}"   # automatic fix attempts per PR before a human is asked
+
 pr_flag() { # <pr> <label> <message>
-  gh pr edit "$1" --add-label "$2" >/dev/null 2>&1 || true
-  gh pr comment "$1" --body "ralph: $3" >/dev/null 2>&1 || true
-  log "PR #$1 -> $2: $(printf '%s' "$3" | head -n 1)"
+  local n="$1" label="$2" msg="$3"
+  if [ "$label" = ralph-fix ]; then
+    local tries; tries="$(gh pr view "$n" --json comments --jq '[.comments[].body | select(contains("<!-- ralph-fix -->"))] | length' 2>/dev/null || echo 0)"
+    if [ "${tries:-0}" -ge "$RALPH_FIX_MAX" ]; then
+      gh pr edit "$n" --add-label needs-human-merge --remove-label ralph-fix >/dev/null 2>&1 || true
+      gh pr comment "$n" --body "ralph: giving up after $tries automatic fix attempts. A human needs to look at this PR. Latest problem: $(printf '%s' "$msg" | head -n 3)" >/dev/null 2>&1 || true
+      echo "PR #$n stuck after $tries attempts: $(date -u +%FT%TZ)" >>"$STATE/stuck.txt"
+      log "PR #$n -> needs-human-merge (fix attempts exhausted)"
+      return 0
+    fi
+    msg="$msg
+<!-- ralph-fix -->"
+  fi
+  gh pr edit "$n" --add-label "$label" >/dev/null 2>&1 || true
+  gh pr comment "$n" --body "ralph: $msg" >/dev/null 2>&1 || true
+  log "PR #$n -> $label: $(printf '%s' "$msg" | head -n 1)"
 }
 
 # review_ok <pr> <head-sha>: 0 = clean record for this head; 2 = record is for another head; 1 = missing/unclean
@@ -398,6 +413,7 @@ cmd_status() {
   echo "worktree: $WT  model: $RALPH_MODEL  push: $RALPH_PUSH"
   [ -d "$STATE/lock" ] && echo "loop: running (pid $(cat "$STATE/lock/pid" 2>/dev/null))" || echo "loop: idle"
   [ -f "$STATE/STOP" ] && echo "STOP requested"
+  [ -s "$STATE/stuck.txt" ] && { echo "needs a human:"; sed 's/^/  /' "$STATE/stuck.txt"; }
   if [ -f "$STATE/plan.md" ]; then
     echo; echo "queue:"; grep -E '^\| *[0-9]+ ' "$STATE/plan.md" | awk -F'|' '{printf "  %-4s %-8s %-12s %s\n", $2, $3, $5, $4}'
   fi

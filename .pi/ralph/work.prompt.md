@@ -36,6 +36,27 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 
 ### 2. Pick
 
+- **Fix first.** `gh pr list --state open --label ralph-fix --json number,headRefName,title`. The driver
+  puts that label on a PR it could not merge (conflict with main, red CI or merge gate, head moved after
+  review); it gives up after 3 attempts and asks a human, so make this one count. If there is one,
+  handle the lowest-numbered **instead of** a new issue: `git switch -C <branch> origin/<branch>`, read
+  the latest `ralph:` comment and any human review comments, and fix the cause. Never rebase or
+  force-push.
+  - _Conflict:_ `git fetch origin && git merge origin/main`. If it conflicts, launch `ralph-merger`
+    (`async: true`, then `bg_wait`) with the PR's issue text; it resolves by intent and stages the
+    files. If its report has anything `unresolved`, do not push: comment on the PR what a human must
+    decide, label `needs-human-merge`, remove `ralph-fix`, end `NEXT`. Otherwise commit the merge.
+  - _Red gate or CI:_ reproduce with the failing command and fix the root cause. A failure that also
+    reproduces on clean `origin/main` is pre-existing: file it per `ticket.md` and say so on the PR. To
+    see why CI is red: `gh pr checks <n>`, then `gh run view <run-id> --log-failed`; the `ralph:`
+    comment on the PR already carries the failing jobs and a log tail.
+    Then run the gate, re-run the three reviewers on the new diff, `git push`, post a fresh review record
+    (step 10), `gh pr edit <n> --remove-label ralph-fix`, update the plan and progress as usual, and end
+    `NEXT`.
+- **Red main.** `gh run list --branch main --workflow gate.yml --limit 1 --json conclusion,databaseId,url`.
+  If the latest run failed and no open issue already covers it (search first), file one per
+  `ticket.md` - priority 2, front of the queue, evidence = `gh run view <id> --log-failed | tail -60`.
+  A red main is fixed before any new feature.
 - **Sync first.** `list_issues` for open `ralph`-labelled issues in Factory MVP that have no row in the
   plan (issues you, an audit, or a human filed since the last planning pass). Append each as `ready`
   if it has checkable acceptance criteria, else `needs-spec`; priority 1-2 bug tickets go to the front.
