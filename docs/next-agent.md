@@ -3,8 +3,8 @@
 A self-contained starting brief for the next agent session. Paste it into a fresh session, or point
 the agent at this file.
 
-**Written:** 2026-10-05, against `main` at `cebb996`. **Scope:** finish milestone M2 — issues **LOB-7**
-and **LOB-21** — and nothing else.
+**Written:** 2026-10-05, against `main` at `50c3c9d`. **Scope:** finish milestone M2 — issues **LOB-7**
+and **LOB-21** — then start milestone **B**, the board.
 
 **It goes stale fast.** It is a brief for one stretch of work, not a document of record. When the
 stretch changes — the issues close, or priorities move — rewrite it from `docs/roadmap.md`, whose
@@ -54,8 +54,9 @@ Two remain, and both were **paused mid-flight** by the user:
 2. `docs/handoff.md` — the state of the work and the gotchas that have already cost hours. The
    gotchas section is the cheapest thing you will read today.
 3. `docs/roadmap.md` — priority tiers, the milestone map, the tracks, and what "done" means for M2.
-   (Another session expanded it with LOB-42+ — a workflow-as-data and lifecycle thread. It changes
-   this stretch not at all.)
+   Milestone **B** (the board) is the stretch after this one, and `docs/board.md` is its design:
+   tasks as the unit of work, columns binding roles and skills, runs, gates, and what is explicitly
+   wave 2. Read `docs/board.md` before touching anything that models work.
 4. `docs/features.md` §3 (Group A) and §6 (unused Pi Durable primitives) — the evidence behind the
    work, with file:line, so you do not re-derive it.
 5. `.pi/skills/verify-api/SKILL.md` and its `features/` directory — how this repo proves things. The
@@ -128,8 +129,17 @@ explicitly rather than quietly narrowing scope.
 
 ## After this stretch
 
-M2 closes with LOB-7 and LOB-21. Then the roadmap's P0 list continues with **M3** — LOB-8 (policy
-hooks) → LOB-9 (approvals) → LOB-10 (credentials), which is the first milestone where the agent is
-policed, and its driver is `.pi/skills/verify-policy` proving the refusals rather than the happy path.
-All three feed milestone **L**, the local end-to-end run (LOB-40) that gates everything in Google
-Cloud.
+M2 closes with LOB-7 and LOB-21. Two things then run in parallel, both tracked in Linear and both
+described in `docs/board.md`:
+
+- **Milestone B — the board**, because it is the surface everything after is driven from: LOB-42
+  (board domain: tasks, columns, transitions, gates) → LOB-48 (skills kernel) → LOB-46 (the specifying
+  stage) → LOB-22 (board UI), with LOB-49 as the gate. Nothing in B is autonomous: a person starts
+  every run, which is what keeps it small. LOB-49 needs the PR path (LOB-11, LOB-12) before the
+  `review` gate can be exercised at all.
+- **The M3 block** — LOB-8 (policy hooks) → LOB-9 (approvals) → LOB-10 (credentials), the first
+  milestone where the agent is policed, with `.pi/skills/verify-policy` proving the refusals rather
+  than the happy path.
+
+All of it feeds milestone **L**, the local end-to-end run (LOB-40) that gates everything in Google
+Cloud — driven from the CLI first (D9) and from the board once B lands.

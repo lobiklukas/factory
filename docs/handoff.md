@@ -110,8 +110,9 @@ gates, and the traps. This section is the longer view behind it.
 
 **Where we are in the build order (design §4).** M2 is half done. The control plane exists and is
 proven end to end — sessions, messages, interrupt, and both read paths — but M2 also names the CLI,
-and `apps/cli` is still a bare root command. So: finish M2, close the two verification holes task 4
-left open, then M3.
+and `apps/cli` is still a bare root command. So: finish M2 (LOB-7,
+LOB-21), close the two verification holes task 4 left open, then M3 — with milestone **B** (the board,
+`docs/board.md`) running alongside it as the operator surface everything after is driven from.
 
 ### Done so far
 

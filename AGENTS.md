@@ -24,6 +24,8 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
   decision in `docs/design.md`.
 - `docs/roadmap.md` — the plan: priority by distance to MVP, the milestone map, and the Linear
   project that tracks it. Read it before starting work that is not already an issue.
+- `docs/board.md` — the board: a task as the unit of work, columns binding roles and skills, runs,
+  gates, and the MVP/wave-2 cut. Read it before touching anything that models work.
 - `docs/parallel-work.md` — how to run several streams of work at once here: subagent isolation,
   worktrees, the shared-Postgres and port hazards, and where local agent work should stop and a
   factory session should start instead.

@@ -10,8 +10,9 @@ Status: design agreed through 2026-10-05. All decisions settled; no open items.
 ## 1. Scope
 
 **What it is.** A control plane that runs coding agents against our repositories and hands
-back reviewable PRs. An operator delegates work from a CLI or a web dashboard, watches and
-steers the agent while it runs, and reviews the result in GitHub.
+back reviewable PRs. Work is a **task on a board** (D17, `docs/board.md`): an operator brings a task
+in from a tracker or creates it, moves it through columns that bind a role and its skills, watches and
+steers each run while it happens, and reviews the result in GitHub.
 
 **Non-goals (v1).** No code review UI — GitHub owns review. No billing, SSO, audit log, or
 plugin marketplace. No multi-tenant isolation; it is an internal tool for one team. No
@@ -247,6 +248,19 @@ _Rejected:_ an agent-authored review command (cheap to add later as another conv
 cheaper model and read-only tools, better once we know what our diffs look like); PR-level
 review automation in CI (a different product surface, and it belongs after we trust our output).
 
+### D17 — The unit of work is a task on a board, not a session
+
+Sessions remain the execution primitive, but the product's spine is a board: tasks with columns, runs
+attached to tasks, and moves that are gated. `docs/board.md` holds the settled board decisions
+(B1–B12), the default pipeline and the MVP/wave-2 cut; milestone **B** builds it with no autonomy — a
+person starts every run — and the dispatcher that makes it self-driving is wave 2.
+_Rejected:_ Linear as the only board (the tracker cannot express per-column automation, run lineage,
+admission, or "waiting on a blocked issue", and mirroring micro-states into it turns two systems into a
+reconciliation job); a board-scope log under `commits` (possible — `log_id` is free-form and
+`rebuild.ts` deliberately skips non-`ses_` ids — but a log is a single-writer resource, and a card is
+_input_: a person typed it, and there is no log to replay it from); modeling cards as Pi Durable
+`Task`s (tasks are created through a `Session` commit, and a card must exist before any session does).
+
 ---
 
 ## 3. Architecture
@@ -279,6 +293,7 @@ review automation in CI (a different product surface, and it belongs after we tr
 | ----------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `packages/domain`             | Schemas for product entities and API contracts, shared by every layer      | `Schema` definitions only                                          |
 | `packages/core`               | Session, sandbox, credential, and policy services as Effect `Layer`s       | `SessionService`, `SandboxService`, `Policy`, `CredentialProvider` |
+| `packages/board`              | Board domain: definitions, tasks, runs, transitions, evidence gates        | `BoardService`, column rules                                       |
 | `packages/storage-postgres`   | `Storage` implementation: append-only log + read-only non-owning mode      | Pi Durable's `Storage`                                             |
 | `packages/storage-projection` | The single fold of the log into state, plus derived query tables           | `Projection`, `ReadModel`                                          |
 | `packages/sandbox`            | `SandboxRuntime` interface and capability descriptor                       | `SandboxRuntime`                                                   |
@@ -314,6 +329,14 @@ non-owning mode.
 
 **M2 — Control plane and CLI.** Session lifecycle, messages, interrupt, streaming; `SessionBus`
 with an in-process implementation; `packages/domain` schemas. First dogfoodable milestone.
+
+**B — board (local, human-driven).** The unit of work becomes a task on a board (D17): `packages/board`
+over `tasks`/`task_events`, a versioned board definition, columns binding roles and skills, moves that
+carry an actor and a revision, evidence gates, the board UI as the cockpit, and a skill registry
+injected at `openSession`. Nothing auto-starts — a person begins every run — which is what keeps this
+milestone small. The dispatcher, leases, caps, durable questions, dependency links and the failure
+policy are wave 2 (`docs/board.md`). B is the surface milestone **L** is driven from; L's own
+acceptance stays the scripted CLI loop (D9).
 
 **M3 — Local dependencies.** Docker provider for Postgres and the sandbox image;
 `CredentialProvider` with a static-token implementation; policy service with hook enforcement
