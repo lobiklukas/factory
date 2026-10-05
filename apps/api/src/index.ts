@@ -1,19 +1,32 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
-import { SessionServiceLive } from "@repo/core";
+import { SessionService, SessionServiceLive } from "@repo/core";
 import { Api } from "@repo/domain/Api";
 import {
   createModelAccess,
   FAUX_COMMAND,
   type ModelBackend,
 } from "@repo/harness";
-import { DatabaseLive } from "@repo/storage-postgres";
-import { Config, Effect, Layer, Option } from "effect";
+import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
+import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
+import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
+
+/**
+ * Cap on an HTTP request body, in bytes (LOB-21). The largest legitimate request here is an RPC
+ * `sendMessage`: the service refuses a message over `MAX_MESSAGE_CHARS` (100,000 characters), which
+ * is at most ~400 KB of UTF-8 plus JSON framing, so 1 MiB carries every legal request with
+ * headroom. Bun's own default is 128 MiB — 128× larger, and enough for one unauthenticated upload
+ * to exhaust the process.
+ */
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
+
+/** How long to wait before retrying a failed migration sweep (LOB-21). */
+const MIGRATION_RETRY_MS = 3_000;
 
 export const ServerConfig = Config.all({
   port: Config.Number("PORT").pipe(Config.withDefault(9000)),
@@ -21,6 +34,10 @@ export const ServerConfig = Config.all({
   idleTimeout: Config.Number("IDLE_TIMEOUT").pipe(Config.withDefault(120)),
   allowedOrigins: Config.String("ALLOWED_ORIGINS").pipe(
     Config.withDefault("http://localhost:3000"),
+  ),
+  /** Bounds one request; Bun's own default is 128 MiB (LOB-21). */
+  maxRequestBodySize: Config.Number("MAX_REQUEST_BODY_BYTES").pipe(
+    Config.withDefault(DEFAULT_MAX_REQUEST_BODY_BYTES),
   ),
 });
 
@@ -48,13 +65,71 @@ const ModelConfig = Config.all({
   ),
 });
 
+/** The first line of a cause, short enough for one log line. */
+const firstLine = (cause: Cause.Cause<unknown>): string =>
+  Cause.pretty(cause).split("\n")[0]?.trim() ?? "unknown failure";
+
+/**
+ * Release every session owner this process holds when it is asked to stop (LOB-21).
+ *
+ * `BunRuntime.runMain` interrupts the main fiber on SIGINT/SIGTERM, which tears down this layer's
+ * scope; the finalizer then runs `SessionService.close`. Releasing the owners — rather than letting
+ * the process exit with them open — is what makes an interrupted run *resumable* rather than merely
+ * durable: `closeHarness` settles the run and the storage is disposed, so the log is a clean
+ * transcript a later read folds and a later message continues. The log lines are the evidence.
+ */
+const SessionShutdown = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        yield* Effect.logInfo(
+          "shutdown: releasing every session owner held by this process",
+        );
+        yield* sessions.close;
+        yield* Effect.logInfo("shutdown: session owners released");
+      }),
+    );
+  }),
+);
+
+/**
+ * Apply migrations out of the boot path (LOB-21).
+ *
+ * `PgMigrator.layer` runs its migrations during layer *acquisition* and dies when Postgres is
+ * unreachable, so building it as a dependency of the HTTP server would turn a database outage into
+ * a crash loop instead of a pod that is up but *not ready*. Here it is a scoped build inside a
+ * forked fiber: the server binds first, `/readyz` names what is missing, and a database that comes
+ * back later turns readiness green without a restart. A successful build means the migrations are
+ * applied — `PgMigrator.layer` is `Layer.effectDiscard(run(...))`, not a daemon.
+ */
+const applyMigrations = Effect.gen(function* () {
+  for (;;) {
+    const exit = yield* Effect.scoped(Layer.build(MigrationsLive)).pipe(
+      Effect.exit,
+    );
+    if (Exit.isSuccess(exit)) {
+      yield* Effect.logInfo("migrations: applied");
+      return;
+    }
+    yield* Effect.logError(
+      `migrations failed; retrying in ${MIGRATION_RETRY_MS}ms: ${firstLine(exit.cause)}`,
+    );
+    yield* Effect.sleep(MIGRATION_RETRY_MS);
+  }
+});
+
+const MigrationsDaemon = Layer.effectDiscard(
+  Effect.forkScoped(applyMigrations),
+);
+
 // HTTP API Router
 const ApiRouter = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(HealthGroupLive),
 );
 
 // NOTE: Modules append additional routers here through Layer.mergeAll.
-const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive);
+const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive, ProbesLive);
 
 // NOTE: Modules append additional server layers here through Layer.mergeAll.
 const ServerLayers = Layer.mergeAll(
@@ -81,18 +156,35 @@ const HttpLive = Effect.gen(function* () {
   }
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them.
-  const RouterDependencies = SessionServiceLive({
+  const SessionDeps = SessionServiceLive({
     model: createModelAccess(backend, { fauxCommand: model.fauxCommand }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
-  }).pipe(Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)));
+  });
+
+  // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
+  // — and the server binds — even when Postgres is unreachable. Migrations run in the background so
+  // a failing migrator cannot kill the process; `/readyz` reports the truth and requests that need
+  // the log fail with a typed `SessionError`.
+  //
+  // `provideMerge` (not `provide`): `/readyz` needs `SqlClient` itself, so the database services
+  // have to stay in the layer's output rather than being kept private to the session layer. The
+  // shutdown finalizer registers after the pool, so it runs before the pool closes.
+  const RouterDependencies = Layer.mergeAll(
+    SessionShutdown.pipe(Layer.provideMerge(SessionDeps)),
+    MigrationsDaemon,
+  ).pipe(Layer.provideMerge(Layer.mergeAll(PostgresLive, BunServices.layer)));
 
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   yield* Effect.logInfo("Starting server with:");
   yield* Effect.logInfo("  - HTTP API at /");
   yield* Effect.logInfo("  - RPC at /rpc");
+  yield* Effect.logInfo("  - probes at /livez and /readyz");
   yield* Effect.logInfo(
     `  - session working directories under ${model.sessionRoot}`,
+  );
+  yield* Effect.logInfo(
+    `  - request body cap ${config.maxRequestBodySize} bytes`,
   );
 
   const CorsRouters = AllRouters.pipe(

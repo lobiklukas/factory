@@ -14,19 +14,23 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 
 ## What it proves
 
-| Feature                      | Check in the driver                               | Why it matters                                  |
-| ---------------------------- | ------------------------------------------------- | ----------------------------------------------- |
-| Create a session (D7)        | `createSession`, and a retried `requestId`        | one log per session; retries must not leak logs |
-| Repo binding (A1)            | `registerRepo`, then `repo`/`baseRef`/`workspace` | a session names the repo it works on            |
-| Session list (A2)            | `listSessions` sees the new session, paged        | the list is a server read, not a client guess   |
-| Send a message               | `sendMessage` → `placement: run`, title set       | a message admits durably and names the session  |
-| Watch a live session (D8)    | snapshot first, then entries, then run state      | the UI's live path, including `busy → idle`     |
-| Read the transcript          | `getSession` → the `bash` tool result             | the run really happened, usage is attributed    |
-| Fold a released session (D8) | the same session reads `historical`, same entries | a paused session is served by folding the log   |
-| A fold's stream ends         | exactly one `snapshot` event                      | complete is distinguishable from dropped        |
-| Request limits (LOB-21)      | an oversized message → `invalid_input`            | a refusal is typed, not a truncation or a crash |
-| Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`    | callers can branch on `code`, not on text       |
-| Interrupt wakes, then stops  | `interruptSession` → idle                         | steering wakes a session before acting on it    |
+| Feature                      | Check in the driver                                                                      | Why it matters                                  |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Create a session (D7)        | `createSession`, and a retried `requestId`                                               | one log per session; retries must not leak logs |
+| Repo binding (A1)            | `registerRepo`, then `repo`/`baseRef`/`workspace`                                        | a session names the repo it works on            |
+| Session list (A2)            | `listSessions` sees the new session, paged                                               | the list is a server read, not a client guess   |
+| Send a message               | `sendMessage` → `placement: run`, title set                                              | a message admits durably and names the session  |
+| Watch a live session (D8)    | snapshot first, then entries, then run state                                             | the UI's live path, including `busy → idle`     |
+| Read the transcript          | `getSession` → the `bash` tool result                                                    | the run really happened, usage is attributed    |
+| Fold a released session (D8) | the same session reads `historical`, same entries                                        | a paused session is served by folding the log   |
+| A fold's stream ends         | exactly one `snapshot` event                                                             | complete is distinguishable from dropped        |
+| Request limits (LOB-21)      | an oversized message → `invalid_input`                                                   | a refusal is typed, not a truncation or a crash |
+| Transport cap (LOB-21)       | a 2 MiB body → 413, and `/livez` still answers                                           | the configured cap, not Bun's 128 MiB default   |
+| Probes (LOB-21)              | `/livez` 200; `/readyz` 200 naming every check                                           | liveness is cheap; readiness is a live answer   |
+| Degraded readiness (LOB-21)  | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid | an outage is not a crash loop                   |
+| SIGTERM mid-run (LOB-21)     | the owners are released, and the interrupted session folds and continues                 | a killed run is resumable, not lost             |
+| Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`                                           | callers can branch on `code`, not on text       |
+| Interrupt wakes, then stops  | `interruptSession` → idle                                                                | steering wakes a session before acting on it    |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -41,16 +45,34 @@ the run is offline, deterministic, and free.
 ```
 
 `up.sh` needs Postgres (`docker compose up -d --wait postgres`); the session log _is_ Postgres, so
-without it there is nothing worth driving. It waits for `GET /` and fails loudly with the log path
-(`.verify/run/api.log`).
+without it there is nothing worth driving. It waits for **`/readyz`**, not `GET /`: the server binds
+before its migrations are applied (LOB-21), so `/` answers a moment before a session can be created.
+It fails loudly with the log path (`.verify/run/api.log`).
 
-Two settings in `up.sh` exist for the sake of proof, not for production:
+Three settings in `up.sh` exist for the sake of proof, not for production:
 
 - `MODEL_BACKEND=faux` — pi-ai's scripted provider. The session runs a real `bash` tool call and the
   answer is derived from that tool's output, so the tool path is real; the _model_ is not. A drive
   run must never depend on a key, a network, or a model's mood.
 - `SESSION_IDLE_TIMEOUT_MS=2000` — so a drive run can reach the historical-fold read path. At the
   deployment default (15 minutes) you would wait 15 minutes to prove D8's other half.
+- `MAX_REQUEST_BODY_BYTES=1048576` — the transport cap `drive.ts` proves by sending 2 MiB. The
+  default is the same 1 MiB; setting it here ties the check to a value this script owns.
+
+### Lifecycle and degradation — their own scripts
+
+Two LOB-21 claims cannot be driven against the instance `up.sh` owns, because each one kills it or
+takes the database away. Each script owns its own API instance on its own port, leaves nothing
+running, and writes its own evidence:
+
+```sh
+./sigterm.sh     # api on :9400 — a busy session, then SIGTERM, then a fresh process resumes it
+./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
+```
+
+`degraded.sh` stops the local Postgres container and **always** starts it again (a trap, so a failure
+half way through cannot leave the database down). Run it when nothing else in the repo needs the
+database.
 
 ## Doctor
 
@@ -81,8 +103,16 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
 order you want the evidence to end in.
 
 - `observed.json` — every check with its detail, the stream's event log, the transcript, the session
-  id, and the API URL
+  id, the API URL, and the probe bodies
 - `session.txt` — the transcript as text, for reading
+- `sigterm-arm.json` / `sigterm-verify.json` — from `./sigterm.sh`: the arm phase (a run genuinely in
+  flight) and the verify phase (the same session folded and continued), each with its transcript as
+  text (`sigterm-arm-transcript.txt`, `sigterm-verify-transcript.txt`)
+- `sigterm-process.json`, `sigterm-api.log` — what the process did: the exit, the shutdown log lines,
+  and the pid that served the phase
+- `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
+  `./degraded.sh`: the probes with Postgres stopped and back, and the process facts (one pid served
+  both phases)
 
 Proof standards for this app:
 
@@ -124,7 +154,9 @@ just mints new ids.
 - **Two owners of one log is a footgun, not a race.** Pi Durable allows one owner per log, and a
   second owner's append collides and poisons that instance. The controller is `SessionService`'s
   acquisition gate; do not open a `PostgresStorage` in owner mode yourself while the API is running.
-- `apps/cli` has no subcommands yet, so nothing there is driven here.
+- **The CLI is proven elsewhere.** `apps/cli`'s `run`/`watch`/`ls` are driven in a real terminal by
+  `.pi/skills/verify-cli`; this skill covers the contract they speak. A bug in one is often a bug in
+  the other, so run both when the session surface changes.
 
 ## Feature map
 

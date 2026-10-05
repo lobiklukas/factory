@@ -13,9 +13,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
-import { Effect, Exit, Fiber, Layer, Ref, Stream } from "effect";
-import { FetchHttpClient } from "effect/http";
-import { RpcClient, RpcSerialization } from "effect/rpc";
+import { Effect, Exit, Fiber, Ref, Stream } from "effect";
+import { RpcClient } from "effect/rpc";
+import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9200";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
@@ -26,33 +26,80 @@ const EXPECTED_ANSWER = `faux-ok (re: ${PROMPT})`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
-const observed = { apiUrl: API_URL, checks: {}, events: [], transcript: [] };
-const assert = (name, condition, detail) => {
-  observed.checks[name] = { passed: Boolean(condition), detail };
-  console.log(`${condition ? "PASS" : "FAIL"}  ${name}  ${detail}`);
-  return Boolean(condition);
+const observed = {
+  apiUrl: API_URL,
+  probes: {},
+  checks: {},
+  events: [],
+  transcript: [],
+};
+const assert = makeChecker(observed);
+
+const ProtocolLive = protocolFor(API_URL);
+
+/**
+ * Feature: the probes (LOB-21). `/livez` must answer without touching the database, and `/readyz`
+ * must answer from a live check of Postgres, the migration ledger, and the tables a session request
+ * reads. Both are plain HTTP — the RPC client cannot reach them.
+ */
+const probe = async (route) => {
+  const response = await fetch(`${API_URL}${route}`);
+  return {
+    status: response.status,
+    body: await response.json().catch(() => null),
+  };
 };
 
-const ProtocolLive = RpcClient.layerProtocolHttp({
-  url: `${API_URL}/rpc`,
-}).pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(RpcSerialization.layerNdjson),
+const livez = await probe("/livez");
+assert(
+  "GET /livez answers 200",
+  livez.status === 200 && livez.body?.status === "ok",
+  `status=${livez.status} body=${JSON.stringify(livez.body)}`,
+);
+
+const readyz = await probe("/readyz");
+const readyzChecks = readyz.body?.checks ?? [];
+assert(
+  "GET /readyz answers 200 with every check ok",
+  readyz.status === 200 &&
+    readyz.body?.status === "ok" &&
+    readyzChecks.length > 0 &&
+    readyzChecks.every((check) => check.ok),
+  `status=${readyz.status} checks=${JSON.stringify(readyzChecks)}`,
 );
 
 /**
- * Poll until `check` yields anything but `false`/`undefined`, so the drive never depends on a
- * fixed delay, and return what it yielded.
+ * Feature: the transport request cap (LOB-21). `up.sh` runs the instance with
+ * `MAX_REQUEST_BODY_BYTES=1 MiB`, so a 2 MiB body must be refused at the transport — before any RPC
+ * parsing — and the process must still be serving afterwards. Bun's own default is 128 MiB, so this
+ * check fails if the configured cap is lost.
  */
-const waitUntil = (check, label) =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      const value = yield* check;
-      if (value !== false && value !== undefined) return value;
-      yield* Effect.sleep(100);
-    }
-    return yield* Effect.die(new Error(`timed out waiting for ${label}`));
-  });
+const oversizedBody = "x".repeat(2 * 1024 * 1024);
+const capped = await fetch(`${API_URL}/rpc`, {
+  method: "POST",
+  headers: { "content-type": "application/x-ndjson" },
+  body: oversizedBody,
+})
+  .then((response) => response.status)
+  .catch(() => 0);
+assert(
+  "an oversized request body is refused",
+  capped === 413,
+  `status=${capped} (body=${oversizedBody.length} bytes)`,
+);
+
+const afterCap = await probe("/livez");
+assert(
+  "the server survives an oversized body",
+  afterCap.status === 200,
+  `livez=${afterCap.status}`,
+);
+
+observed.probes = {
+  livez: livez.body,
+  readyz: readyz.body,
+  oversizedBodyStatus: capped,
+};
 
 const textOf = (entry) => entry.text;
 const lastAssistant = (entries) =>

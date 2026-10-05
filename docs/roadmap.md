@@ -121,11 +121,11 @@ products ship it.
 Work is split into three tracks, each independently verifiable — a change in one is provable without
 the other two being finished.
 
-| Track       | Scope                                                                         | Linear label | Verified by                                                                         |
-| ----------- | ----------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------- |
-| **Backend** | `apps/api`, `packages/*` — control plane, harness, sandbox, storage, triggers | `backend`    | `.pi/skills/verify-api/` (16 checks today) plus the package suites with Postgres up |
-| **CLI**     | `apps/cli` — `factory run` / `watch` / `ls`                                   | `cli`        | `.pi/skills/verify-cli/`, driven in tmux (does not exist yet — LOB-7 creates it)    |
-| **UI**      | `apps/web` — the operator cockpit                                             | `ui`         | `.pi/skills/verify-web/`, driven in a real browser against the routed cockpit       |
+| Track       | Scope                                                                         | Linear label | Verified by                                                                                                              |
+| ----------- | ----------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| **Backend** | `apps/api`, `packages/*` — control plane, harness, sandbox, storage, triggers | `backend`    | `.pi/skills/verify-api/` (29 checks today, plus `sigterm.sh` and `degraded.sh`) plus the package suites with Postgres up |
+| **CLI**     | `apps/cli` — `factory run` / `watch` / `ls`                                   | `cli`        | `.pi/skills/verify-cli/`, driven in tmux (14 checks — LOB-7)                                                             |
+| **UI**      | `apps/web` — the operator cockpit                                             | `ui`         | `.pi/skills/verify-web/`, driven in a real browser against the routed cockpit                                            |
 
 Rules that keep the split honest:
 
@@ -153,7 +153,7 @@ Rules that keep the split honest:
 
 | Milestone                                   | Done when                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **M2 — session surface complete**           | A session names its repo, `factory ls` reads the server, and the CLI drives create → stream → answer. Closes M2 from `docs/design.md`.                                                                                                                                                                                                                                                                                               |
+| **M2 — session surface complete**           | **Done 2026-10-05.** A session names its repo (`cebb996`), `factory ls` reads the server, and the CLI drives create → stream → answer in tmux (LOB-7); the deployment floor is real (`/livez`+`/readyz`, SIGTERM release, 1 MiB body cap — LOB-21).                                                                                                                                                                                  |
 | **B — board (MVP)**                         | A task is created, moved through the columns by a person, a run started from it, a question parked on the task and answered, the plan approved by a human move, and the card lands in review with the PR link — driven from the board, with the transitions and refusals proven. No autonomy: every run is started by a person. (LOB-42, LOB-46, LOB-48, LOB-22, LOB-49)                                                             |
 | **M3 — policy, credentials, sandbox image** | A tool call is refused by configuration with a clear error, an approval survives a restart, and a static-token push works locally. `verify-policy` proves the refusals.                                                                                                                                                                                                                                                              |
 | **M4 — sandbox runtime (local kind)**       | create → pause → resume → destroy on kind with PVC persistence, and the env passes Pi Durable's conformance suite. **Isolation is still not proven** (R2).                                                                                                                                                                                                                                                                           |
@@ -167,17 +167,23 @@ Rules that keep the split honest:
 
 ## Next three
 
-The target is milestone **L** — the whole workflow, running locally. In order:
+The target is milestone **L** — the whole workflow, running locally. M2 is closed; what is next is
+the board and the M3 block, in parallel:
 
-1. ~~**LOB-5** — session↔repo binding.~~ **Done 2026-10-05** (`cebb996`). `createSession({ repo,
-baseRef })`, the `repos` registry, the resolved workspace in the snapshot, and the binding in the
-   log so the index is rebuildable.
-2. ~~**LOB-6** — the list endpoint.~~ **Done 2026-10-05** (`cebb996`): `listSessions` over the
-   derived `session_activity` index, one statement per page, cursor-paged, with `rebuildIndexes` as
-   the recovery path.
-3. **LOB-7 + LOB-21** — the CLI and the deployment floor; together they finish M2. Both were paused
-   mid-flight on 2026-10-05, with the partial work preserved (not applied) at
-   `.verify/scratch/paused-agents/` and the remaining acceptance criteria in `docs/next-agent.md`.
+1. **LOB-42** — board domain: tasks, columns, transitions, gates. The next contract change, and the
+   one everything in milestone **B** hangs off (`docs/board.md`); it is what turns "a session" into
+   "a task" as the unit of work.
+2. **LOB-8 → LOB-9 → LOB-10** — the M3 block: policy hooks, the approval surface, and
+   `CredentialProvider`. The first milestone where the agent is policed; `.pi/skills/verify-policy`
+   proves the refusals rather than the happy path.
+3. **LOB-48 → LOB-46 → LOB-22** — skills kernel, the specifying stage, then the board UI, with
+   LOB-49 as the gate. LOB-49 needs the PR path (LOB-11, LOB-12) before the `review` gate can be
+   exercised at all.
+
+Closed on 2026-10-05: **LOB-5** (repo binding, `cebb996`), **LOB-6** (`listSessions` over
+`session_activity`), **LOB-7** (`factory run`/`watch`/`ls`, driven in tmux by `.pi/skills/verify-cli`)
+and **LOB-21** (`/livez`+`/readyz`, SIGTERM owner release, the 1 MiB body cap — proven by
+`verify-api`'s `sigterm.sh` and `degraded.sh`).
 
 The board (milestone **B**) runs alongside M3 and M6 rather than after them, because it is a second
 contract on the same session API: LOB-42 (domain) → LOB-48 (skills kernel) → LOB-46 (specifying

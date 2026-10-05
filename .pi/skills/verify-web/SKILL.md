@@ -10,8 +10,9 @@ Unit tests and type checks do not replace this: the streaming card once type-che
 while the stream silently did nothing (see `features/session-stream.md`).
 
 Two surfaces exist in this repo. This skill covers the **web dashboard** plus the API it calls.
-The **CLI** (`apps/cli`) is a stub with no subcommands yet; when it grows, drive it in its own
-tmux session rather than here.
+The **CLI** (`apps/cli`) is a separate surface with its own skill — `.pi/skills/verify-cli`, which
+drives `factory run`/`watch`/`ls` in a real tmux terminal. Use that one for command-line changes;
+this one for anything a person clicks.
 
 ## Launch
 

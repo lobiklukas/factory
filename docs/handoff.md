@@ -11,15 +11,17 @@ all gates green (with Postgres up — see "Local environment").
 
 ## Where things stand
 
-Last verified 2026-10-05 (after the repo binding and the session list): `format:check`, `build`,
-`lint`, `test`, `type-check` all green; `.pi/skills/verify-web/drive.mjs` passes all ten checks;
-`.pi/skills/verify-api/drive.ts` passes all twenty-five; `packages/core`'s suite passes ten.
+Last verified 2026-10-05 (after the CLI and the deployment floor): `format:check`, `build`,
+`lint`, `test`, `type-check` all green; `.pi/skills/verify-cli/drive.sh` passes all fourteen checks
+(in tmux); `.pi/skills/verify-api/drive.ts` passes all twenty-nine, `sigterm.sh` ten, and
+`degraded.sh` eleven; `.pi/skills/verify-web/drive.mjs` passes all ten; `packages/core`'s suite
+passes ten.
 
 | Workspace                    | State                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/api`                   | Control plane. `GET /` (health) and the session surface at `POST /rpc` — create, get, send, interrupt, list, registerRepo, watch. Boots on `PORT` (9000), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes").                                                                                                                                                     |
+| `apps/api`                   | Control plane. `GET /` (health), `/livez` + `/readyz` (probes), and the session surface at `POST /rpc` — create, get, send, interrupt, list, registerRepo, watch. Boots on `PORT` (9000) without waiting for migrations (they retry in the background, LOB-21), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes").                                               |
 | `apps/web`                   | Dashboard shell in React on TanStack Router (`/`, `/sessions/$sessionId`, `/sandboxes`, `/approvals`). Icon rail plus a browser-local session list beside a pane that creates a session, streams its transcript, and labels the read path (verified in a browser). `listSessions` exists now, so M5 can replace that browser-local list with a server read. `/sandboxes` and `/approvals` are named gaps, not empty tables. |
-| `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`. LOB-7 was paused mid-flight: the partial `run`/`watch`/`ls` work is preserved (not applied) at `.verify/scratch/paused-agents/`.                                                                                                                                                                                                                   |
+| `apps/cli`                   | `factory run "<task>"` (create, send, stream, print the answer), `factory watch <session-id>` (attach to any session; prints the read-path mode), `factory ls` (the server's list). Installed bin is `factory`; verified in tmux by `.pi/skills/verify-cli`.                                                                                                                                                                |
 | `packages/domain`            | `Api.ts` (HttpApi), `Session.ts` (session, repo, workspace and list contracts, incl. `SessionError`), `Rpc.ts` (the session RPC group). Knows nothing about Pi Durable.                                                                                                                                                                                                                                                     |
 | `packages/core`              | **New.** `SessionService`: create/get/send/interrupt/list/registerRepo/watch, the owner registry, id minting, idle eviction, repo binding and workspace resolution, the derived `session_activity` index, and the live-vs-fold read split (D8). `rebuild.ts` folds every log back into the index tables.                                                                                                                    |
 | `packages/harness`           | Pi Durable wiring, and the only place that touches it: `openSession`, the projection into domain shapes, the faux/anthropic model backends, the M0 spike (`bun run m0`).                                                                                                                                                                                                                                                    |
@@ -45,9 +47,10 @@ Last verified 2026-10-05 (after the repo binding and the session list): `format:
   and `.pi/skills/verify-api`): create, send, live stream (`snapshot` → entries → `busy` → `idle`),
   read, release, fold, resume. The folded entries equal the live ones they replaced, and a
   historical stream is exactly one `snapshot` and then ends.
-- **The session surface through the real Effect RPC client** — 25/25 checks in
+- **The session surface through the real Effect RPC client** — 29/29 checks in
   `.pi/skills/verify-api/drive.ts`, including typed errors (`SessionError{code: "not_found"}`,
-  `invalid_input` for a message over the cap) surviving the wire.
+  `invalid_input` for a message over the cap, and the probes and transport cap LOB-21 added)
+  surviving the wire.
 - **A session bound to a repo** (LOB-5, `packages/core`'s suite and `verify-api`):
   `createSession({ repo, baseRef })` returns a summary carrying both, the snapshot's `workspace`
   names the session's own directory plus the commands read from the repo's `.factory/config`, and a
@@ -59,6 +62,21 @@ Last verified 2026-10-05 (after the repo binding and the session list): `format:
   without repeating a row, and orders by newest activity. `rebuildIndexes` empties-and-rebuilds the
   claim: `DELETE FROM sessions`, rebuild, and every list field (title, repo, base ref, spend,
   creation time) comes back from the logs alone.
+- **The CLI, in a real terminal** (LOB-7) — 14/14 checks in `.pi/skills/verify-cli`, driving
+  `factory` in a tmux pane against the API: `factory run` mints a session, prints the workspace the
+  server resolved, streams the `bash` tool call and the answer, and exits 0; `factory ls` prints the
+  session the run created, with the title the index holds; `factory watch` labels that session
+  `mode: live` while this process owns it and `mode: historical` after the idle sweep released it,
+  with the same answer both times; an unknown id prints `error: not_found` and exits non-zero.
+- **The deployment floor** (LOB-21). `/livez` answers 200 and `/readyz` answers 200 with every check
+  `ok` (Postgres, the six migration ids, the four tables a session request reads). A 2 MiB request
+  body is refused with 413 — the configured 1 MiB cap, not Bun's 128 MiB default — and `/livez`
+  still answers afterwards. `verify-api/sigterm.sh` (10/10): a busy session, `SIGTERM`, both
+  shutdown log lines, and a _fresh_ process folds the interrupted session (`mode: historical`,
+  `status: idle`, the task still in the transcript) and continues it — 6 entries before, 8 after.
+  `verify-api/degraded.sh` (11/11): with Postgres stopped the server still binds, `/livez` stays 200
+  while `/readyz` reports 503 naming all three failing checks, a session request fails with typed
+  `SessionError{code: "storage"}`, and when Postgres returns readiness goes green **on the same pid**.
 - **The same session in a browser** — 10/10 checks in `.pi/skills/verify-web/drive.mjs`, off
   `MODEL_BACKEND=faux`, with a real tool call and a real log: the root redirect, the sidebar's honest
   empty state, the route moving to the created session, the header labelling the read path, the
@@ -88,6 +106,15 @@ Last verified 2026-10-05 (after the repo binding and the session list): `format:
 - **Sessions that predate migration `0005`.** Their activity row is backfilled from the `sessions`
   index (status `idle`, `last_activity_at` = the row's `created_at`), not from their logs, until a
   rebuild runs.
+- **A kill that runs no finalizer.** SIGTERM is proven to release the owners and leave a resumable
+  session; `SIGKILL` or a lost machine runs nothing, and what the log then holds is LOB-25's
+  (`Harness.resume()`) problem. The interrupted _tool call_ is not resumed either — the resumed turn
+  is a new turn.
+- **The readiness probe's middle branch.** `/readyz` names a missing migration in principle; only
+  the database-down branch is driven (`degraded.sh`), because dropping a migration row would corrupt
+  the ledger the other suites share.
+- **A real cluster.** No probe, no `livenessProbe`/`readinessProbe`, and no pod is configured
+  anywhere yet — M7 owns the manifests.
 
 ## Local environment
 
@@ -102,17 +129,22 @@ Last verified 2026-10-05 (after the repo binding and the session list): `format:
 - **Browser verification:** `.pi/skills/verify-web/up.sh`, then `node drive.mjs`, then `down.sh`.
 - **API verification:** `.pi/skills/verify-api/up.sh`, then `bun drive.ts`, then `down.sh`. Both
   skills need Postgres and both pin `MODEL_BACKEND=faux`, so neither needs a key or the network.
+- **CLI verification:** `.pi/skills/verify-cli/up.sh` (API on `:9300`), then `./drive.sh` (drives
+  `factory` in a private tmux server), then `down.sh`. Needs `tmux`.
+- **Lifecycle verification:** `.pi/skills/verify-api/sigterm.sh` (its own API on `:9400`) and
+  `degraded.sh` (its own API on `:9500`). `degraded.sh` stops the local Postgres container and always
+  starts it again; run it when nothing else needs the database.
 
 ## What to do next
 
 **The brief for a fresh session is `docs/next-agent.md`** — it names the issues for this stretch, the
 gates, and the traps. This section is the longer view behind it.
 
-**Where we are in the build order (design §4).** M2 is half done. The control plane exists and is
-proven end to end — sessions, messages, interrupt, and both read paths — but M2 also names the CLI,
-and `apps/cli` is still a bare root command. So: finish M2 (LOB-7,
-LOB-21), close the two verification holes task 4 left open, then M3 — with milestone **B** (the board,
-`docs/board.md`) running alongside it as the operator surface everything after is driven from.
+**Where we are in the build order (design §4).** M2 is done: the control plane is proven end to end,
+the CLI drives it from a terminal, and the deployment floor is real. What is left from that stretch is
+the pair of verification holes task 4 opened (steering at the RPC surface, `usage.tools`) — item 6
+below. Then M3 (policy, approvals, credentials), with milestone **B** (the board, `docs/board.md`)
+running alongside it as the operator surface everything after is driven from.
 
 ### Done so far
 
@@ -144,27 +176,25 @@ with the checks that establish them, and `rebuildIndexes` is the recovery path f
 This is what `createSession({ repo, baseRef })` needed to be worth anything downstream: a trigger
 (LOB-14) binds an issue to a repo, a sandbox (LOB-13) mounts it, and M6 cuts a worktree from it.
 
-### 5. `apps/cli` subcommands — this finishes M2
+### 5. ~~`apps/cli` subcommands~~ — done, and it finished M2
 
-**Paused mid-flight (2026-10-05).** A subagent wrote `factory run` / `watch` / `ls` against
-`SessionRpc` and wired them into the root command, then was stopped by the user before it built
-`.pi/skills/verify-cli/` or ran anything. Its work is preserved but **not applied** at
-`.verify/scratch/paused-agents/` (patch + new files + a README saying what is there and what is
-missing); read it as a reviewer rather than trusting it.
+**Done (LOB-7, 2026-10-05).** `factory run "<task>" [--repo owner/name] [--base-ref ref]` creates a
+session, prints the workspace the server resolved, sends the task, streams the transcript until the
+run settles, and prints the answer; `factory watch <session-id>` attaches to any session and prints
+the read-path mode first; `factory ls` reads `listSessions` and prints the page plus a cursor. The
+CLI is the same RPC client the dashboard builds (`apps/cli/src/rpc.ts` mirrors
+`apps/web/src/lib/rpc-client.ts`), minus the browser, and `apps/cli/src/errors.ts` turns a
+`SessionError` into `error: <code>: <message>` plus a non-zero exit.
 
-D9 puts the CLI first because dogfooding forces the session contract to be correct before a UI hides
-a bug; the dashboard already found one race, and a terminal will find more. The contract is proven
-already — the CLI is the same RPC client the dashboard builds (`apps/web/src/lib/rpc-client.ts`),
-minus the browser.
+D9 put the CLI first because dogfooding forces the session contract to be correct before a UI hides a
+bug, and it did: the drive found that `watch` labels a session `live` while the API owns it and
+`historical` once the idle sweep releases it, on the same session id, which is the only way to see
+D8's two paths side by side.
 
-Shape: `factory run "<task>" --repo <owner/name>` (create, send, stream the transcript to the
-terminal until idle, print the session id), `factory watch <session-id>` (attach to any session, live
-or historical — the mode label is the interesting part), and `factory ls` (reads `listSessions`,
-which now exists).
-
-_Done when:_ `.pi/skills/verify-cli/` drives it in a tmux session — create, stream, and show the
-answer, plus `ls` showing a session the server knows about — pinned to `MODEL_BACKEND=faux` like the
-other skills, with evidence that survives cleanup.
+`.pi/skills/verify-cli/` drives it in a private tmux server: `up.sh` (API on `:9300`, faux backend,
+a 5 s idle timeout), `doctor.sh`, `drive.sh` (14 checks), `down.sh`, and `features/`. One gotcha
+worth keeping: zsh's `url-quote-magic` escapes a `;` typed right after a URL, so the driver sends its
+exit-code sentinel as a second line rather than as a `;` continuation.
 
 ### 6. Close task 4's two verification holes
 
@@ -209,26 +239,34 @@ re-derives all three index tables by folding the logs. `factory ls` (LOB-7) is n
 missing. What is still open from this item: compaction for long logs (LOB-27) and the list's cost
 under load — both named in "Not proven".
 
-### 8b. LOB-21 — readiness, shutdown and request limits (paused mid-flight)
+### 8b. ~~LOB-21 — readiness, shutdown and request limits~~ — done
 
-The deployment floor: `/livez` and `/readyz`, a SIGTERM handler that calls `SessionService.close`, a
-request-body cap, and a typed `invalid_input` error code. The error code and the message-length cap
-landed with 4b (`SessionService.send` refuses over `MAX_MESSAGE_CHARS` = 100,000; `verify-api` proves
-the typed error over the wire). The rest was paused: a subagent wrote `apps/api/src/Api/Probes.ts`
-(`/livez` as a constant 200; `/readyz` as live checks over Postgres, the six migration ids, and the
-control-plane tables) and restructured `apps/api/src/index.ts` to bind the server without
-`Layer.orDie` on migrations, plus a `maxRequestBodySize` config — but the SIGTERM finalizer and every
-piece of evidence were still missing when it was stopped. That work is preserved, not applied, at
-`.verify/scratch/paused-agents/`.
+**Done (2026-10-05).** The deployment floor is real and proven:
 
-Two design points to carry into it: a liveness probe must not depend on the database (Kubernetes
-would restart a healthy pod and turn an outage into a crash loop), and readiness that cannot answer
-while Postgres is down is not readiness — boot the server, report 503, and let requests fail with the
-typed `SessionError` codes.
+- **`/livez` and `/readyz`** (`apps/api/src/Api/Probes.ts`). Liveness is a constant 200 and touches
+  nothing; readiness is a _live_ check per request — Postgres round-trip, the six migration ids in
+  `effect_sql_migrations`, and the real columns of `sessions`, `session_activity`, `repos`, and
+  `commits` — answering 503 with a body naming each check and what failed.
+- **Migrations out of the boot path.** `apps/api/src/index.ts` builds `PostgresLive` and a
+  `MigrationsDaemon` instead of `DatabaseLive`, so the server binds while the database is down and
+  retries the migrator every 3 s. `PgMigrator.layer` runs its migrations during _acquisition_, so a
+  successful scoped build means applied — that is why the daemon is a loop and not a fork.
+- **SIGTERM releases the owners.** `SessionShutdown` registers an `Effect.addFinalizer` beside the
+  session service; `BunRuntime.runMain` interrupts the main fiber on SIGINT/SIGTERM, the scope
+  closes, and `SessionService.close` runs before the connection pool does (the finalizer registers
+  after the pool, so it runs first). Two log lines are the evidence.
+- **A 1 MiB request-body cap** (`MAX_REQUEST_BODY_BYTES`, Bun's default is 128 MiB), refused at the
+  transport with 413.
 
-_Done when:_ a SIGTERM mid-run leaves a resumable session, an oversized request is refused rather
-than crashing, `/readyz` reports 503 while `/livez` stays 200, and the existing `verify-api` checks
-still pass. `FAUX_COMMAND` (configurable since 4b) is what holds a run open for the SIGTERM case.
+Evidence, all in `.pi/skills/verify-api`: `drive.ts` (29/29) covers the probes and the cap;
+`sigterm.sh` (10/10) arms a busy session with `FAUX_COMMAND="sleep 8 && echo faux-ok"`, sends
+`SIGTERM`, and has a _fresh_ process fold and continue the interrupted session; `degraded.sh` (11/11)
+stops Postgres and proves `/livez` 200 + `/readyz` 503 + a typed `storage` error, then proves
+readiness recovers on the same pid. `up.sh` now waits on `/readyz` rather than `GET /`.
+
+The two design points held: a liveness probe that depends on the database turns an outage into a
+crash loop, and readiness that cannot answer while Postgres is down is not readiness — the server
+binds, reports 503, and requests fail with typed `SessionError` codes.
 
 ### 9. M3 — local dependencies
 
@@ -313,6 +351,16 @@ How a session works now, so the next agent does not have to re-derive it:
   and answers with that output, so the tool path, the log, and the stream are real while the model
   is not. Every verification run uses it, and `FAUX_COMMAND` overrides the command it runs — which
   is how a verification run holds a turn open long enough to be busy.
+- **Boot, probes, and shutdown (LOB-21).** The API binds _before_ its migrations are applied:
+  `apps/api/src/index.ts` builds `PostgresLive` (a lazy pool) plus a `MigrationsDaemon` fiber that
+  retries `PgMigrator` every 3 s, instead of `DatabaseLive` in the boot path. `/livez` is a constant
+  200 that touches nothing; `/readyz` is a live query per request (Postgres, the six migration ids,
+  and the real columns a session request reads) and answers 503 with a body naming each failing
+  check. On SIGTERM the runtime interrupts the main fiber, the layer scope closes, and the finalizer
+  registered beside the session service calls `SessionService.close` — releasing owners (which
+  settles their runs) _before_ the connection pool is disposed, because it registers after the pool.
+  That is what makes an interrupted session resumable rather than merely durable, and it is why the
+  request body cap (1 MiB) is safe to enforce at the transport.
 - **Session working directories** are `SESSION_ROOT/<session-id>` for a scratch session and
   `SESSION_ROOT/<owner>/<name>/<session-id>` for a repo-bound one (`.factory/sessions` locally,
   gitignored), one directory per session so two sessions never share files. The snapshot's

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Launch an isolated API instance to drive the session RPC surface against.
+# Launch an isolated API for the CLI drive.
 #
-# Isolation: its own port, its own session working directories under .verify/run,
-# and pids recorded in .verify/run/api.pid so ./down.sh can stop exactly this one.
+# `factory` is a client of the control plane, so the skill starts its own API: its own port, its own
+# session working directories under .verify/run, and a pid recorded in .verify/run/api.pid so
+# ./down.sh stops exactly this one.
 #
-# MODEL_BACKEND=faux keeps verification offline and deterministic (pi-ai's scripted
-# provider): no API key, no cost, same transcript every run. SESSION_IDLE_TIMEOUT_MS is
-# short on purpose so a drive run can reach the historical-fold read path without
-# waiting the 15 minutes a real deployment uses — see features/session-fold.md.
+# MODEL_BACKEND=faux keeps the drive offline and deterministic — the session still runs a real bash
+# tool call, but the model is scripted. SESSION_IDLE_TIMEOUT_MS is short on purpose: the drive
+# proves both read-path labels (docs/design.md D8) by watching a session while this process owns it,
+# then again after the idle sweep has released it. The value is recorded in
+# .verify/run/cli-idle-ms so drive.sh waits the window that was actually configured.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-API_PORT="${API_PORT:-9200}"
+API_PORT="${API_PORT:-9300}"
+IDLE_MS="${SESSION_IDLE_TIMEOUT_MS:-5000}"
 RUN_DIR="$ROOT/.verify/run"
 
 mkdir -p "$RUN_DIR"
@@ -34,15 +37,13 @@ fi
     ALLOWED_ORIGINS="http://localhost:$API_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
     SESSION_ROOT="$RUN_DIR/sessions" \
-    SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-2000}" \
-    MAX_REQUEST_BODY_BYTES="${MAX_REQUEST_BODY_BYTES:-1048576}" \
+    SESSION_IDLE_TIMEOUT_MS="$IDLE_MS" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
+echo "$IDLE_MS" > "$RUN_DIR/cli-idle-ms"
 
 # Ready means `/readyz` says so, not merely that the port answers: the server binds before its
-# migrations are applied (LOB-21), so `GET /` is true a moment before a session can be created. The
-# body cap is explicit (the default is the same 1 MiB) so drive.ts's 413 check is tied to a value
-# this script sets rather than to a default that could drift.
+# migrations are applied (LOB-21), so `GET /` is true a moment before a session can be created.
 ready=0
 for _ in $(seq 1 60); do
   if curl -sf -m 1 "http://localhost:$API_PORT/readyz" >/dev/null 2>&1; then
@@ -58,4 +59,4 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "api  http://localhost:$API_PORT  (pid $(cat "$RUN_DIR/api.pid"))"
-echo "model backend: ${MODEL_BACKEND:-faux}"
+echo "model backend: ${MODEL_BACKEND:-faux}; session idle timeout: ${IDLE_MS}ms"

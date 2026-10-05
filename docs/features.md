@@ -68,8 +68,9 @@ than the products rather than a worse copy of them — see §5.
 | --------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | M0 harness spike      | done          | `packages/harness/src/m0-live-turn.ts`, `session.test.ts:87-138`                                                                                                           |
 | M1 Postgres `Storage` | done          | `PostgresStorage.ts:71-382`; 23-case conformance, `PostgresStorage.test.ts:62,75`                                                                                          |
-| M2 control plane      | done          | `packages/core/src/SessionService.ts`; 16/16 in `.pi/skills/verify-api/drive.ts`                                                                                           |
-| M2 CLI                | **paused**    | `apps/cli/src/index.ts:7-19` — bare root command; LOB-7's partial work preserved at `.verify/scratch/paused-agents/`                                                       |
+| M2 control plane      | done          | `packages/core/src/SessionService.ts`; 25/25 in `.pi/skills/verify-api/drive.ts`                                                                                           |
+| M2 CLI                | done          | `apps/cli/src/index.ts` + `commands/{run,watch,ls}.ts`; 14/14 in `.pi/skills/verify-cli`, driven in tmux                                                                   |
+| M2 deployment floor   | done          | `/livez` + `/readyz` (`apps/api/src/Api/Probes.ts`), SIGTERM owner release, 1 MiB body cap; `verify-api` `sigterm.sh` 10/10 and `degraded.sh` 11/11                        |
 | M2 `SessionBus`       | **not built** | `packages/bus` absent; handoff task 7                                                                                                                                      |
 | M3 local deps         | **partial**   | `compose.yaml` only; no sandbox image, no `CredentialProvider`, no policy service                                                                                          |
 | M4 k8s tier           | not started   | `packages/sandbox*`, `infra` absent                                                                                                                                        |
@@ -77,14 +78,15 @@ than the products rather than a worse copy of them — see §5.
 | M6 git/PR path        | not started   | no worktree, branch, credential, or PR code anywhere                                                                                                                       |
 | M7 GKE                | not started   | gated on explicit approval                                                                                                                                                 |
 
-Production-readiness gaps that matter before any cluster (all verified in the audit):
-`GET /` returns the constant `"Hello Effect!"` (`apps/api/src/Api/Health.ts:5-6`) and the DB health
-check is only reachable from a script; no rate limiting; no body/text length caps; no HTTP status
-mapping for `SessionError`; migrations are forward-only and run at boot
-(`apps/api/src/index.ts:76-80` provides `DatabaseLive`, which is `PostgresLive + MigratedLive`,
-`packages/storage-postgres/src/Migrations.ts:27-29`); `SessionService.close` is never called by any
-app (`SessionService.test.ts:173` is the only caller), so a SIGTERM mid-run discards in-flight state
-that the log would otherwise have made recoverable; no Dockerfile, no CI.
+Production-readiness gaps that matter before any cluster (all verified in the audit): `GET /`
+returns the constant `"Hello Effect!"` (`apps/api/src/Api/Health.ts:5-6`) — the probes are the health
+surface now; no rate limiting or admission control; no HTTP status mapping for `SessionError` (the
+RPC path carries typed errors, the plain routes answer 200 or 503); migrations are forward-only
+(`packages/storage-postgres/src/Migrations.ts`), and since LOB-21 they run in a background retry
+loop instead of the boot path, so a pod binds while its database is down; no Dockerfile, no CI.
+
+Closed since the audit: the probes, the body cap, and `SessionService.close` on SIGTERM (LOB-21 —
+`apps/api/src/Api/Probes.ts`, `apps/api/src/index.ts`).
 
 Drift and dead weight found: `packages/storage-postgres/docker-compose.yml` still points at port
 5432 with `stack_effect` credentials, contradicting `AGENTS.md` and `docs/handoff.md` (5442,
@@ -119,8 +121,9 @@ research adds is the contract detail the design leaves out and the evidence that
 > `.factory/config` (evidence: `packages/domain/src/Session.ts`, `.factory/session` doc in the log);
 > `template?`, `model?`, and `autonomy?` were deliberately _not_ added as inert input fields —
 > `autonomy` is A3/D11 and `template` is A5/D13, and a field nothing reads is worse than an absent
-> one. A2 landed as `session_activity` + `listSessions` + `rebuildIndexes`; `factory ls` (and the
-> rest of A2's UI) is LOB-7 and LOB-22, still open.
+> one. A2 landed as `session_activity` + `listSessions` + `rebuildIndexes`; `factory ls` shipped with
+> LOB-7 and is driven by `.pi/skills/verify-cli` (14/14 in tmux), so what remains of A2 is its UI half:
+> LOB-22 replaces the sidebar's browser-local registry with the server list.
 
 ---
 
@@ -207,21 +210,25 @@ roadmap is the priority tiers, the Linear issues, and what "done" means for each
 The design's M0–M7 order is still right; this research only reorders the _inside_ of M2/M3 and adds
 what the design leaves out. Concretely:
 
-**Status, 2026-10-05.** A1 and A2 shipped at `cebb996`, so items 1–2 below are done; what remains of
-M2 is the CLI (LOB-7, paused mid-flight) and the deployment floor (LOB-21). The board (milestone **B**,
-`docs/board.md`) now sits alongside M2/M3 rather than after them: it is the operator surface, and
-LOB-42 is the next contract change of the same rank as A1 was.
+**Status, 2026-10-05.** A1, A2, and M2's remaining two issues shipped — the CLI (LOB-7, 14/14 in
+`.pi/skills/verify-cli`) and the deployment floor (LOB-21: `/livez`+`/readyz`, SIGTERM owner release,
+the body cap). M2 is closed; the board (milestone **B**, `docs/board.md`) now sits alongside M3/M6
+rather than after them: it is the operator surface, and LOB-42 is the next contract change of the
+same rank as A1 was.
 
-**Now (finish M2, and it is mostly small):**
+**Now (M3, with the board alongside):**
 
-1. **A2 session list + activity table**, then the CLI (`factory run`, `factory watch`, `factory ls`)
-   with a `verify-cli` skill driven in tmux — M2's own definition of done. It is also the unblock for
-   the in-flight dashboard sidebar, which is currently guessing client-side.
-2. **A1 session↔repo binding + repo config.** The highest-leverage contract change in the repo; it is
-   the precondition for A4, A5, C3, and any Automation. Do it before the first worktree exists, or
-   the worktree has nothing to attach to.
-3. **B5 readiness/shutdown + B7 hygiene** while passing through: a real health probe, a SIGTERM
-   handler, body caps, the stale compose file, the two dead exports.
+1. ~~**A2 session list + activity table**, then the CLI (`factory run`, `factory watch`, `factory ls`)
+   with a `verify-cli` skill driven in tmux — M2's own definition of done.~~ **Done 2026-10-05**
+   (LOB-6, LOB-7): the list is one statement over `session_activity`, and the CLI is driven in a real
+   tmux terminal.
+2. ~~**A1 session↔repo binding + repo config.**~~ **Done 2026-10-05** (`cebb996`): `repo`/`baseRef` +
+   the `repos` registry + `.factory/config`, and the binding is a document in the log so the index
+   rebuilds from it. It is the precondition for A4, A5, C3, and any Automation.
+3. ~~**B5 readiness/shutdown + B7 hygiene** while passing through: a real health probe, a SIGTERM
+   handler, body caps, the stale compose file, the two dead exports.~~ **Readiness, shutdown and body
+   caps done 2026-10-05** (LOB-21, `verify-api`'s `sigterm.sh` and `degraded.sh`). The hygiene half —
+   the stale compose file and the two dead exports — is LOB-31 and still open.
 
 **Then the design's M3, with the two additions this research justifies:**
 

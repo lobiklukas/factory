@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Read-only check: is this instance worth driving?
 #
-# Verifies the pid we started is alive, that our port is owned by it, and that the
-# API answers. Changes nothing.
+# Verifies the pid we started is alive, that our port is owned by it, that the probes agree the
+# control plane can serve a session, and that tmux exists (the drive needs a real terminal).
+# Changes nothing.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-API_PORT="${API_PORT:-9200}"
+API_PORT="${API_PORT:-9300}"
 RUN_DIR="$ROOT/.verify/run"
 
 fail=0
@@ -34,14 +35,18 @@ else
   fail=1
 fi
 
-health="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$API_PORT/" || echo 000)"
-if [ "$health" = "200" ]; then note "api GET /:" "200"; else note "api GET /:" "$health"; fail=1; fi
-
 livez="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$API_PORT/livez" || echo 000)"
 if [ "$livez" = "200" ]; then note "GET /livez:" "200"; else note "GET /livez:" "$livez"; fail=1; fi
 
 readyz="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$API_PORT/readyz" || echo 000)"
 if [ "$readyz" = "200" ]; then note "GET /readyz:" "200"; else note "GET /readyz:" "$readyz"; fail=1; fi
+
+if command -v tmux >/dev/null 2>&1; then
+  note "tmux:" "$(tmux -V)"
+else
+  note "tmux:" "MISSING — the drive needs a real terminal"
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   echo "doctor: OK"

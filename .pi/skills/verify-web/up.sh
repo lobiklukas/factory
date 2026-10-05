@@ -42,7 +42,7 @@ echo $! > "$RUN_DIR/web.pid"
 
 ready=0
 for _ in $(seq 1 60); do
-  if curl -sf -m 1 "http://localhost:$API_PORT/" >/dev/null 2>&1 &&
+  if curl -sf -m 1 "http://localhost:$API_PORT/readyz" >/dev/null 2>&1 &&
      curl -sf -m 1 "http://localhost:$WEB_PORT/" >/dev/null 2>&1; then
     ready=1
     break
