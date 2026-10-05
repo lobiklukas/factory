@@ -54,7 +54,7 @@ passes all sixteen.
 - Anything on a cluster, and any isolation claim whatsoever (design R2).
 - **Cross-process fan-out (D12).** Live streaming is in-process: the replica that owns a session
   streams it. A session owned by another process reads as `historical`, which is the honest answer
-  while nothing can say who owns it (see task 5).
+  while nothing can say who owns it (see task 7).
 - Reader mode under a concurrent writer's load, and replay cost on a long log (see "Storage
   notes" below). Every historical read folds the whole log, once per read.
 - `whenBusy` queueing and steering at the RPC surface: Pi Durable's queueing is exercised at the
@@ -77,70 +77,118 @@ passes all sixteen.
 
 ## What to do next
 
-In order. Each task states its completion criterion.
+**Where we are in the build order (design §4).** M2 is half done. The control plane exists and is
+proven end to end — sessions, messages, interrupt, and both read paths — but M2 also names the CLI,
+and `apps/cli` is still a bare root command. So: finish M2, close the two verification holes task 4
+left open, then M3.
 
-**1. ~~Resolve the streaming card.~~** Done. Two bugs hid behind one symptom: a scoped layer
-provided inside the atom's stream (closed the client before it sent a request), and
-`Queue.shutdown` on the server (discarded the tail, including `end`). The demo stream is gone,
-replaced by the session stream. Rules: `.pi/skills/verify-web/features/session-stream.md`.
+### Done so far
 
-**2. ~~Build the Postgres `Storage` backend (D7, M1).~~** Done. Design deviations are recorded in
-D7: `log_id` column, `seq` minted by the owner rather than `bigserial`, `json` not `jsonb`,
-immutable rows.
+**1. ~~Resolve the streaming card.~~** The demo stream is gone, replaced by the session stream. Two
+bugs hid behind one symptom (a scoped layer provided inside an atom's stream; `Queue.shutdown`
+discarding the tail). Rules: `.pi/skills/verify-web/features/session-stream.md`.
 
-**3. ~~Prove the model path.~~** Done. Open finding: `usage.tools` came back `{}` even though a
-tool ran, so per-tool rollups (R4) are unverified. Per-model usage and cost work.
+**2. ~~Build the Postgres `Storage` backend (D7, M1).~~** Deviations recorded in D7: `log_id`
+column, `seq` minted by the owner rather than `bigserial`, `json` not `jsonb`, immutable rows.
 
-**4. ~~Session entity and endpoints.~~** Done, with two deviations from the plan below, and the
-three questions settled with the user first (server-minted id = `log_id` plus a mutable title; the
-API hosts the harness in-process behind a seam; a "message" is a thin Pi Durable submission and the
-wire carries our own session-event schema). Deviations:
+**3. ~~Prove the model path.~~** Open finding: `usage.tools` comes back `{}` even though a tool ran,
+so per-tool rollups (R4) are unverified. Per-model usage and cost work.
 
-- **`SessionBus` was not built.** It has no consumer yet: live streaming is in-process because this
-  process owns the session, and a session nobody owns here is served by folding. A bus would carry
-  cursors, not events (`NOTIFY` payloads cap at 8000 bytes, and D7 makes the log truth), which means
-  a subscriber must read the log — useful only when the owner is _elsewhere_. See task 5.
+**4. ~~Session entity and endpoints.~~** Met: 16/16 checks in `.pi/skills/verify-api/drive.ts`, plus
+`packages/core`'s suite for the policy underneath. The three questions it raised were settled with
+the user first (server-minted id = `log_id` plus a mutable title; the API hosts the harness
+in-process behind a seam; a "message" is a thin Pi Durable submission and the wire carries our own
+session-event schema). Two deviations from the plan, both recorded in the design:
+
+- **`SessionBus` was not built** — it has no consumer while ownership is in-process (task 7).
 - **`packages/core` and `packages/harness` took the work** the plan spread across
   `packages/storage-projection` and `packages/bus`. The fold already lives in `PostgresStorage`
-  (`MemoryStorage`), so a projection package would have wrapped it for no gain; the projection into
-  domain shapes is 200 lines in `packages/harness/src/projection.ts`.
+  (`MemoryStorage`), so a projection package would have wrapped it for no gain.
 
-_Done when:_ a session can be created, driven, and replayed through the API, and `verify-api`
-proves it by driving the real Effect RPC client rather than curl. **Met** — 16/16 checks in
-`.pi/skills/verify-api/drive.ts`, plus `packages/core`'s suite for the policy underneath.
+### 5. `apps/cli` subcommands — this finishes M2
 
-**5. Make D12 true: `SessionBus` and presence.** _Next._ A second replica cannot stream a session
-another replica owns, because nothing can say who owns what. Two pieces, in this order:
+D9 puts the CLI first because dogfooding forces the session contract to be correct before a UI hides
+a bug; the dashboard already found one race, and a terminal will find more. The contract is proven
+already — the CLI is the same RPC client the dashboard builds (`apps/web/src/lib/rpc-client.ts`),
+minus the browser.
 
-1. **Presence.** Which process (later: which sandbox) owns a session, with a lease and a heartbeat.
-   Today ownership _is_ "the registry in this process has it", which is only true on one replica.
-2. **`SessionBus`** (`packages/bus`), with an in-process Layer and a Postgres `LISTEN`/`NOTIFY`
-   Layer: a trigger on `commits` (`AFTER INSERT … pg_notify('factory_commits', log_id || ':' ||
-seq)`, which fires at commit time and covers every writer, including a sandbox we do not
-   control), and a subscriber that reads the log from the cursor. The cache is a hint; the log stays
-   truth.
+Shape: `factory run "<task>"` (create, send, stream the transcript to the terminal until idle, print
+the session id), `factory watch <session-id>` (attach to any session, live or historical — the mode
+label is the interesting part), and `factory ls` (needs task 8).
 
-Then `SessionService.events` gains its third branch: not owned here, but owned somewhere → stream
-from notices instead of folding once and ending (which is what the `mode: "historical"` contract
-promises today — see `.pi/skills/verify-api/features/fold.md`, which must be updated with it).
-_Done when:_ two `SessionService` instances over one database — one owning, one not — can both
-stream the same session live, and a drive run proves it.
+_Done when:_ `.pi/skills/verify-cli/` drives it in a tmux session — create, stream, and show the
+answer — pinned to `MODEL_BACKEND=faux` like the other skills, with evidence that survives cleanup.
 
-**6. Close the verification gaps.** `.pi/skills/verify-policy/` (the negative tests from D15 —
-assert a push to `main` is refused), `.pi/skills/verify-sandbox/` for M4, and a storage skill if the
-vitest suite stops being enough. Two specific holes worth a check now:
+### 6. Close task 4's two verification holes
 
-- Steering: force a session to be busy deterministically (a faux script that blocks, e.g. a `bash`
-  command that sleeps) and assert `sendMessage` reports `placement: "followUp"`, and that
-  `whenBusy: "reject"` fails with `code: "busy"`.
-- `usage.tools` (finding from task 3): per-tool usage is `{}` with both providers, so R4's tool
-  rollups are still unproven.
+Cheap, and they are the only claims in this repo that nothing currently checks.
 
-**7. `apps/cli` subcommands.** Bare root command today. It needs `factory run`, `factory watch`,
-`factory ls` before it is worth a skill; it is the same RPC client the dashboard uses, so the
-contract is already proven.
+- **Steering.** The faux turn is too fast to be reliably busy, so `placement` and the `busy` error
+  code are unproven at the RPC surface. Force the window: a faux script whose command sleeps, then
+  assert `sendMessage` reports `placement: "followUp"` and `whenBusy: "reject"` fails with
+  `code: "busy"`.
+- **`usage.tools`** (finding from task 3) is `{}` with both providers. Either find what carries it
+  or drop per-tool rollups from R4's claims — an unverified cost claim is worse than an absent one.
 
-**8. Stop and ask before M7.** Nothing is provisioned in Google Cloud without explicit approval.
+_Done when:_ both are asserted in a suite or a drive run, or explicitly withdrawn in the design.
+
+### 7. Presence and `SessionBus` — makes D12 true
+
+A second replica cannot stream a session another replica owns, because nothing can say who owns
+what. Two pieces, in this order, and the first is the one that matters:
+
+1. **Presence.** Which process owns a session, with a lease and a heartbeat. Today ownership _is_
+   "the registry in this process has it", which is only true on one replica. A Postgres lease table
+   is enough to make it real locally and is what a sandbox will renew in M4.
+2. **`SessionBus`** (`packages/bus`): an in-process Layer and a Postgres `LISTEN`/`NOTIFY` Layer —
+   an `AFTER INSERT` trigger on `commits` calling `pg_notify` with a **cursor** (`log_id`, `seq`),
+   not an event (`NOTIFY` payloads cap at 8000 bytes, and D7 makes the log truth). The subscriber
+   reads the log from the cursor, so the notification is a hint.
+
+Then `SessionService.events` gains its third branch: not owned here, but owned _somewhere_ → stream
+from notices instead of folding once and ending, which is what the `mode: "historical"` contract
+promises today (`.pi/skills/verify-api/features/fold.md` needs updating with it).
+
+_Done when:_ two `SessionService` instances over one database — one owning, one not — stream the same
+session live, and a drive run proves it.
+
+### 8. Session list, and what the fold costs (R6)
+
+M5's dashboard needs "which sessions exist", and nothing answers it today: the `sessions` table has
+no status or activity, and a historical read folds a whole log (fine for one session, wrong for a
+list — every partial the agent committed is a row). Decide deliberately: bound the fold by
+compaction, or keep a derived projection table (D7 allows exactly this, and it must stay droppable).
+
+_Done when:_ a list endpoint exists whose cost does not grow with the number of sessions, and
+`factory ls` reads it.
+
+### 9. M3 — local dependencies
+
+Docker provider for Postgres and the sandbox image; `CredentialProvider` with a static-token
+implementation; the policy service with hook enforcement and the D11 boundary (D15). Policy is the
+interesting one: it is data, not logic, and its negative cases are exactly what
+`.pi/skills/verify-policy/` should assert — a push to `main` is refused, force-push and ref deletion
+are refused, writes outside the worktree are refused.
+
+_Done when:_ a session's tool calls are policed by configuration, and `verify-policy` proves the
+refusals rather than the happy path.
+
+### 10. M4 — Kubernetes tier, and the skill it needs
+
+`Kubernetes.LocalCluster` (kind), the released `agent-sandbox` manifest, and
+`packages/sandbox-kubernetes`. Validates `Sandbox` lifecycle, pause/resume, PVC persistence, and
+warm-pool behavior — and _nothing else_: kind cannot run gVisor, so a green local suite still says
+nothing about isolation (R2). This is also where presence gets a real owner — a sandbox renewing a
+lease rather than a replica — and where the sandbox's PVC becomes the working directory that M6 turns
+into a git worktree.
+
+_Done when:_ `.pi/skills/verify-sandbox/` drives create → pause → resume → destroy against kind, and
+the handoff stops calling isolation unverified.
+
+### 11. Stop and ask before M7
+
+Nothing is provisioned in Google Cloud without explicit approval. M7 is where isolation is finally
+tested, and it needs a dedicated cluster, a gVisor node pool, and the GitHub rulesets from D15.
 
 ## Session notes
 
@@ -208,6 +256,16 @@ Missions (v2 — but note Pi Durable already supplies the primitives: `defineTas
 owned conversations), automations, AutoWiki, Agent Readiness scoring, Slack/Linear/Jira
 delegation, any diff or review UI (review is GitHub's, per D16), and the Cloudflare executor
 (interface only, per D6).
+
+Of the design's component inventory (§3), these do not exist yet, and none of them is an oversight:
+
+| Package                       | Status                                                       |
+| ----------------------------- | ------------------------------------------------------------ |
+| `packages/bus`                | Not built; needs presence first — task 7.                    |
+| `packages/storage-projection` | Not built; the fold lives in `PostgresStorage` — task 8.     |
+| `packages/sandbox`            | M4.                                                          |
+| `packages/sandbox-kubernetes` | M4.                                                          |
+| `infra`                       | M3 (Docker) and M7 (GKE); nothing is provisioned until then. |
 
 ## Gotchas that cost time already
 
