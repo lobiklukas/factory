@@ -73,7 +73,9 @@ proven on one session id.
 
 ## Evidence
 
-Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
+Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored. Note that
+`.pi/skills/verify-web` writes to the same directory: the last drive run wins, so run them in the
+order you want the evidence to end in.
 
 - `observed.json` — every check with its detail, the stream's event log, the transcript, the session
   id, and the API URL
