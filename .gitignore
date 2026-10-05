@@ -31,6 +31,12 @@ test-results
 .verify/
 
 # local session working directories (SESSION_ROOT default)
+
+# TanStack Router generator cache. src/routeTree.gen.ts IS committed: it is the
+# route tree the type checker reads, so a fresh clone type-checks without a build.
+.tanstack/
+
+# local session working directories (SESSION_ROOT default)
 .factory/
 
 # NOTE: .pi/ itself is shared agent tooling (skills, prompts) and IS committed.

@@ -9,17 +9,24 @@ Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 910
 | ----------------------- | ------- | ------------------------------------------ |
 | Dashboard shell renders | passing | [dashboard-shell.md](dashboard-shell.md)   |
 | Browser reaches the API | passing | [api-connectivity.md](api-connectivity.md) |
-| Session stream card     | passing | [session-stream.md](session-stream.md)     |
+| Session stream          | passing | [session-stream.md](session-stream.md)     |
 
 ## Known gaps
 
+- **The session list is browser-local.** `sessionStorage` through `KeyValueStore`, because the
+  control plane has no list endpoint (docs/handoff.md task 8). A reload keeps the list; a different
+  browser does not have it. The sidebar's empty state says so rather than claiming the account has no
+  sessions.
+- **`/sandboxes` and `/approvals` are honest gaps, not features.** No RPC group backs either, so both
+  name the milestone (M4, M3) that will. `drive.mjs` asserts the copy, so a table appearing without a
+  source behind it fails the run.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
   other, and a change to `packages/domain` or `packages/core` deserves both.
-- `apps/cli` has no subcommands, so there is nothing to drive yet.
 - The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
-  in `up.sh` so the card stays live; the fold path is proven by verify-api instead. M5 owns the
-  session list, which is where a historical read becomes a normal thing to see.
+  in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
+  either way, so the day a fold is driven the check is the header string.
+- `apps/cli` has no subcommands, so there is nothing to drive yet.
 - The browser path needs Postgres (`docker compose up -d --wait postgres`); sessions are logs, and
   the log is Postgres.
 - Isolation is not verifiable locally at all. See `docs/design.md` R2 — kind cannot run gVisor,

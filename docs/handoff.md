@@ -2,27 +2,29 @@
 
 State of the work and what to do next. Read `docs/design.md` before changing an architectural
 decision — the decisions (D1–D16), the build order (M0–M7), and the open risks (R1–R6) are all
-settled there and this document does not restate them.
+settled there and this document does not restate them. `docs/features.md` sits beside them: it
+ranks _what to build next and why_ from the code audit, the Pi Durable API surface, and a survey of
+13 comparable products, and it changes no decision.
 
 Repo: `github.com/lobiklukas/factory` (private, `lobiklukas`), branch `main`, working tree clean,
 all gates green (with Postgres up — see "Local environment").
 
 ## Where things stand
 
-Last verified 2026-10-06 (after task 4): `format:check`, `build`, `lint`, `test`, `type-check` all
-green; `.pi/skills/verify-web/drive.mjs` passes all five checks; `.pi/skills/verify-api/drive.ts`
-passes all sixteen.
+Last verified 2026-10-06 (after the dashboard rebuild): `format:check`, `build`, `lint`, `test`,
+`type-check` all green; `.pi/skills/verify-web/drive.mjs` passes all ten checks;
+`.pi/skills/verify-api/drive.ts` passes all sixteen.
 
-| Workspace                    | State                                                                                                                                                                                                             |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/api`                   | Control plane. `GET /` (health) and the session RPC surface at `POST /rpc`. Boots on `PORT` (9000), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes"). |
-| `apps/web`                   | Dashboard shell in React. Its card creates a session, sends a message, and streams the transcript (verified in a browser).                                                                                        |
-| `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`.                                                                                                                                          |
-| `packages/domain`            | `Api.ts` (HttpApi), `Session.ts` (session contracts, incl. `SessionError`), `Rpc.ts` (the session RPC group). Knows nothing about Pi Durable.                                                                     |
-| `packages/core`              | **New.** `SessionService`: create/get/send/interrupt/watch, the owner registry, id minting, idle eviction, and the live-vs-fold read split (D8).                                                                  |
-| `packages/harness`           | Pi Durable wiring, and the only place that touches it: `openSession`, the projection into domain shapes, the faux/anthropic model backends, the M0 spike (`bun run m0`).                                          |
-| `packages/storage-postgres`  | `PostgresStorage` (owner + reader modes), the `commits` and `sessions` migrations, health check. Passes the 23-case conformance suite.                                                                            |
-| `packages/config-typescript` | Shared tsconfig presets (base, vite).                                                                                                                                                                             |
+| Workspace                    | State                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/api`                   | Control plane. `GET /` (health) and the session RPC surface at `POST /rpc`. Boots on `PORT` (9000), drives sessions over `PostgresStorage`, and hosts the harness in-process for local dev (see "Session notes").                                                                                                                  |
+| `apps/web`                   | Dashboard shell in React on TanStack Router (`/`, `/sessions/$sessionId`, `/sandboxes`, `/approvals`). Icon rail plus a browser-local session list beside a pane that creates a session, streams its transcript, and labels the read path (verified in a browser). `/sandboxes` and `/approvals` are named gaps, not empty tables. |
+| `apps/cli`                   | Bare `factory` root command, no subcommands. Installed bin is `factory`.                                                                                                                                                                                                                                                           |
+| `packages/domain`            | `Api.ts` (HttpApi), `Session.ts` (session contracts, incl. `SessionError`), `Rpc.ts` (the session RPC group). Knows nothing about Pi Durable.                                                                                                                                                                                      |
+| `packages/core`              | **New.** `SessionService`: create/get/send/interrupt/watch, the owner registry, id minting, idle eviction, and the live-vs-fold read split (D8).                                                                                                                                                                                   |
+| `packages/harness`           | Pi Durable wiring, and the only place that touches it: `openSession`, the projection into domain shapes, the faux/anthropic model backends, the M0 spike (`bun run m0`).                                                                                                                                                           |
+| `packages/storage-postgres`  | `PostgresStorage` (owner + reader modes), the `commits` and `sessions` migrations, health check. Passes the 23-case conformance suite.                                                                                                                                                                                             |
+| `packages/config-typescript` | Shared tsconfig presets (base, vite).                                                                                                                                                                                                                                                                                              |
 
 ### Proven
 
@@ -46,8 +48,11 @@ passes all sixteen.
 - **The session surface through the real Effect RPC client** — 16/16 checks in
   `.pi/skills/verify-api/drive.ts`, including typed errors (`SessionError{code: "not_found"}`)
   surviving the wire.
-- **The same session in a browser** — 5/5 checks in `.pi/skills/verify-web/drive.mjs`, off
-  `MODEL_BACKEND=faux`, with a real tool call and a real log.
+- **The same session in a browser** — 10/10 checks in `.pi/skills/verify-web/drive.mjs`, off
+  `MODEL_BACKEND=faux`, with a real tool call and a real log: the root redirect, the sidebar's honest
+  empty state, the route moving to the created session, the header labelling the read path, the
+  session landing in the sidebar, a bad id refused locally, and both milestone routes naming what is
+  missing.
 
 ### Not proven
 
@@ -57,6 +62,9 @@ passes all sixteen.
   while nothing can say who owns it (see task 7).
 - Reader mode under a concurrent writer's load, and replay cost on a long log (see "Storage
   notes" below). Every historical read folds the whole log, once per read.
+- **A historical read through the dashboard.** `verify-web/up.sh` keeps `SESSION_IDLE_TIMEOUT_MS`
+  long so the pane stays live, and `.pi/skills/verify-api` owns the fold path. The header label
+  renders either way, so the check is that string the day someone drives a fold through the UI.
 - `whenBusy` queueing and steering at the RPC surface: Pi Durable's queueing is exercised at the
   service level, and `busy` is a mapped error code, but no drive run forces a session to be busy
   deterministically (the faux turn is too fast) — see task 6.
