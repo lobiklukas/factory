@@ -63,6 +63,7 @@ import type {
   ModelAccess,
   SessionRef,
 } from "@repo/harness";
+import { Policy, PolicyLive, type AutonomyConfig } from "@repo/harness";
 import {
   closeHarness,
   interrupt as interruptConversation,
@@ -137,6 +138,11 @@ export type SessionServiceOptions = {
    */
   readonly idleTimeoutMs?: number;
   readonly sweepIntervalMs?: number;
+  /**
+   * What a session may do unattended (D11, `@repo/harness`'s `Policy`). Absent: D11's defaults, so
+   * an unpoliced session is not reachable by omitting an argument.
+   */
+  readonly autonomy?: AutonomyConfig;
 };
 
 type SessionRow = {
@@ -212,6 +218,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const sql = yield* SqlClient;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      const policy = yield* Policy;
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -449,6 +456,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               storage,
               model: options.model,
               cwd: workspace.path,
+              // D11's boundary, resolved for this session's worktree: the one place the policy
+              // needs a fact the service does not hold as data.
+              policy: policy.forWorktree(workspace.path),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -951,4 +961,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         close: closeAll,
       });
     }),
+  ).pipe(
+    // D11's policy is a service so it can be replaced without touching a session's code; today the
+    // only implementation is the autonomy rules, and `options.autonomy` is how a deployment
+    // narrows or widens them.
+    Layer.provide(PolicyLive(options.autonomy)),
   );

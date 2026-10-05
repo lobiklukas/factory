@@ -124,6 +124,19 @@ research adds is the contract detail the design leaves out and the evidence that
 > one. A2 landed as `session_activity` + `listSessions` + `rebuildIndexes`; `factory ls` shipped with
 > LOB-7 and is driven by `.pi/skills/verify-cli` (14/14 in tmux), so what remains of A2 is its UI half:
 > LOB-22 replaces the sidebar's browser-local registry with the server list.
+>
+> **A3's policy half shipped** (LOB-8): `packages/harness/src/policy.ts` is D11's boundary as data —
+> `AutonomyConfig` / `AutonomyRules` / a pure `decideToolCall` — installed as a `ToolTask` hook beside
+> `CodingTools` and read from `SessionServiceOptions.autonomy` through the `Policy` service. The
+> refusals are driven through the real session API by `.pi/skills/verify-policy` (8/8 cases, and the
+> refused write is asserted absent from the filesystem). The classification is textual, so it is
+> neither complete nor free of false positives: `packages/harness/src/policy.attack.test.ts` holds a
+> row for each hole and each over-refusal it found (a write reached through `cd`, a force-push with
+> combined short flags, a push to a URL remote, `curl -o out.json` read as egress), and
+> `.pi/skills/verify-policy/features/refusals.md` states them in prose. What remains of A3 is the
+> approval half — LOB-50 (contract and pending list), LOB-52 (durability via `api.memo`, riding this
+> hook) and LOB-53 (CLI and dashboard consumers) — and D15's enforcement outside the agent, which is
+> LOB-51/LOB-54 (credentials) and LOB-30 (rulesets).
 
 ---
 
