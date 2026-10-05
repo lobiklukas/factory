@@ -1,0 +1,21 @@
+# Testing third parties
+
+Rule: **no test, and nothing in the default gate, calls a real third-party service.** Each external
+system the code touches has one entry here saying how it is faked, so nobody re-researches it. The
+ralph loop (`.pi/ralph/`) owns this file: a worker that touches a system with no entry runs
+`ralph-researcher`, then adds the row. Keep rows true; an entry that no longer matches the code is a
+bug to file.
+
+| System                     | Strategy                                                             | Tool / version / license                      | Where                                                   | Cannot prove                                                                                             | Sources            |
+| -------------------------- | -------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------ |
+| Model provider (Anthropic) | In-process deterministic provider, selected by `MODEL_BACKEND=faux`. | `@earendil-works/pi-ai` `faux` provider (dep) | `packages/harness/src/models.ts`                        | Real model behaviour, tool-call quality, cost. `bun run m0` is the opt-in live check, never in the gate. | models.ts header   |
+| Postgres                   | **Not mocked.** Real Postgres 17 in Docker on host port 5442.        | `compose.yaml`                                | `packages/storage-postgres` tests                       | -                                                                                                        | `AGENTS.md`        |
+| Pi Durable `Storage`       | In-memory control implementation beside the Postgres one.            | `MemoryStorage` (Pi Durable)                  | `packages/storage-postgres/src/PostgresStorage.test.ts` | Postgres-specific behaviour (covered by the real DB suite).                                              | conformance suites |
+
+## Adding a row
+
+Strategy preference, in order: (1) in-process fake behind an existing Effect service seam; (2) HTTP
+interception at the client boundary; (3) a local emulator or mock server in a container; (4) record
+and replay. Prefer a small typed hand-written fake over a heavy tool when the surface is a few
+calls. Record license, last release date, and the pinned version. State what the fake cannot prove
+and whether a contract test or an opt-in live smoke backs it.

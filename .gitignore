@@ -49,3 +49,6 @@ test-results
 result
 result-*
 .direnv/
+
+# ralph loop local state (plan, progress, logs) lives in the ralph worktree, never in git
+.ralph/

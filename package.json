@@ -21,7 +21,14 @@
     "motel:start": "bun run --cwd tools/motel start",
     "motel:status": "bun run --cwd tools/motel status",
     "motel:stop": "bun run --cwd tools/motel stop",
-    "prepare": "effect-tsgo patch --oxlint && bun install --cwd tools/motel --frozen-lockfile"
+    "prepare": "effect-tsgo patch --oxlint && bun install --cwd tools/motel --frozen-lockfile",
+    "ralph": "bash .pi/ralph/loop.sh",
+    "ralph:setup": "bash .pi/ralph/loop.sh setup",
+    "ralph:plan": "bash .pi/ralph/loop.sh plan",
+    "ralph:run": "bash .pi/ralph/loop.sh run",
+    "ralph:audit": "bash .pi/ralph/loop.sh audit",
+    "ralph:status": "bash .pi/ralph/loop.sh status",
+    "ralph:stop": "bash .pi/ralph/loop.sh stop"
   },
   "devDependencies": {
     "@effect/tsgo": "0.38.0",
