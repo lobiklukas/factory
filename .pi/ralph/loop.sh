@@ -56,6 +56,11 @@ cmd_setup() {
     git -C "$MAIN_ROOT" worktree add --detach "$WT" "$RALPH_BASE_REF"
     log "worktree at $WT ($RALPH_BASE_REF)"
   fi
+  # An existing worktree may predate the last push: move it to the current base (stash leftovers first).
+  if [ -n "$(git -C "$WT" status --porcelain --untracked-files=no)" ]; then
+    git -C "$WT" stash push -m "ralph-setup-$(date +%Y%m%d-%H%M%S)" >/dev/null
+  fi
+  git -C "$WT" switch --detach "$RALPH_BASE_REF" --quiet
   [ -f "$WT/.pi/ralph/work.prompt.md" ] || die "$RALPH_BASE_REF has no .pi/ralph/ - commit and push the ralph tooling (.pi/ralph, .pi/agents/ralph-*) to $RALPH_BASE_REF first"
   mkdir -p "$STATE/logs" "$STATE/sessions" "$STATE/research"
   # Credentials are local state: copy, never commit (gitignored).
