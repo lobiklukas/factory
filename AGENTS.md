@@ -28,6 +28,8 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
   worktrees, the shared-Postgres and port hazards, and where local agent work should stop and a
   factory session should start instead.
 - `docs/handoff.md` — what is done, what is next, and the completion criterion for each step.
+- `docs/next-agent.md` — the brief for the current stretch of work: points at the issues, the gates,
+  and the traps. Stale by design; rewrite it when the stretch changes, from `docs/roadmap.md`.
 - `.pi/skills/verify-web/features/README.md` — the feature map: what works, what fails, and how
   each feature is proven.
 

@@ -85,6 +85,9 @@ Last verified 2026-10-06 (after the dashboard rebuild): `format:check`, `build`,
 
 ## What to do next
 
+**The brief for a fresh session is `docs/next-agent.md`** — it names the issues for this stretch, the
+gates, and the traps. This section is the longer view behind it.
+
 **Where we are in the build order (design §4).** M2 is half done. The control plane exists and is
 proven end to end — sessions, messages, interrupt, and both read paths — but M2 also names the CLI,
 and `apps/cli` is still a bare root command. So: finish M2, close the two verification holes task 4
