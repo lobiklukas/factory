@@ -84,8 +84,16 @@ reset_worktree() {
   grep -qx '.ralph/' "$excl" 2>/dev/null || { mkdir -p "$(dirname "$excl")"; echo '.ralph/' >>"$excl"; }
   mkdir -p "$STATE/logs" "$STATE/sessions" "$STATE/research"
   if [ -n "$(git status --porcelain)" ]; then
-    local tag="ralph-leftover-$(date +%Y%m%d-%H%M%S)"
-    git stash push -u -m "$tag" >/dev/null && log "stashed leftover work: $tag"
+    local br; br="$(git branch --show-current)"
+    case "$br" in
+      ralph/*)  # an interrupted iteration: keep its work on its branch so the next one resumes it
+        git add -A && git -c user.name="${GIT_AUTHOR_NAME:-ralph}" -c user.email="${GIT_AUTHOR_EMAIL:-ralph@localhost}" \
+          commit -q --no-verify -m "wip($br): unfinished work preserved after an interrupted iteration" \
+          && log "committed leftover work to $br as WIP" \
+          && { [ "$RALPH_PUSH" != 1 ] || git push -q origin "$br" 2>/dev/null || log "could not push $br (kept locally)"; } ;;
+      *) local tag="ralph-leftover-$(date +%Y%m%d-%H%M%S)"
+         git stash push -u -m "$tag" >/dev/null && log "stashed leftover work: $tag" ;;
+    esac
   fi
   git fetch origin --quiet
   git switch --detach "$RALPH_BASE_REF" --quiet

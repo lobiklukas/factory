@@ -73,7 +73,7 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 - `save_issue` status `In Progress`; `save_comment`: "ralph: picked up on branch `ralph/LOB-n`".
 - Plan row -> `in-progress`.
 - `git fetch origin`, then `git switch -c ralph/LOB-n <base>` where base is `origin/main`, or the
-  blocker's `origin/ralph/LOB-m` when stacking. If the branch already exists locally, switch to it.
+  blocker's `origin/ralph/LOB-m` when stacking. If the branch already exists locally or on `origin` (an interrupted earlier iteration, whose unfinished work the driver committed as `wip(...)`), switch to it, read the WIP commit and the issue, and continue from there instead of starting over.
 
 ### 4. Understand
 
