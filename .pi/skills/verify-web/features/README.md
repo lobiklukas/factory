@@ -18,8 +18,9 @@ Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 910
   a proof. When session endpoints land, add feature files for them and drive the RPC stream
   through the real Effect client rather than the demo card.
 - `apps/cli` has no subcommands, so there is nothing to drive yet.
-- Nothing verifies the Postgres package or the harness. `packages/storage-postgres` has
-  migrations and a health check but nothing drives them; `packages/harness` has a disposable
-  M0 spike (`bun run m0`) that needs `ANTHROPIC_API_KEY` and a live model.
+- Nothing browser-verifies the Postgres package or the harness. `packages/storage-postgres` is
+  proven by its vitest suite (conformance + log semantics) and needs
+  `docker compose up -d --wait postgres`; `packages/harness` has a disposable M0 spike
+  (`bun run m0`) that needs `ANTHROPIC_API_KEY` and runs over `MemoryStorage`, not Postgres.
 - Isolation is not verifiable locally at all. See `docs/design.md` R2 — kind cannot run gVisor,
   so never cite a local run as evidence that sandboxing works.
