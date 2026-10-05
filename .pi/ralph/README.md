@@ -58,7 +58,7 @@ RALPH_API_PORT RALPH_WEB_PORT`.
 ## Failure paths
 
 - Conflict, red CI or red merge gate on a ralph PR: the driver labels it `ralph-fix` with the evidence; the next iteration fixes it first (conflicts via `ralph-merger`). After 3 automatic attempts (`RALPH_FIX_MAX`) it becomes `needs-human-merge` and is listed by `ralph:status`.
-- PRs touching `.github/`, `.pi/ralph/`, `.pi/agents/ralph-*` or lint/format/test config are never auto-merged.
+- PRs touching `.github/`, `.pi/ralph/`, `.pi/agents/ralph-*` or lint/format/vitest config are never auto-merged.
 - `bun run ralph:split` breaks `too-big` issues into S/M children in a separate worktree, beside a live loop.
 
 ## Model fallback

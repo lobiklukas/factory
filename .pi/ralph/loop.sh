@@ -199,7 +199,7 @@ lock() { # [name]: the main loop holds `lock`; the splitter holds `lock-split`, 
 # branch merged with main and it passed; and the GitHub `gate` check, if reported, passed.
 RALPH_MERGE="${RALPH_MERGE:-1}"
 RALPH_CI_TIMEOUT="${RALPH_CI_TIMEOUT:-1800}"
-PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$|turbo\.json$)'
+PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$)'
 
 RALPH_FIX_MAX="${RALPH_FIX_MAX:-3}"   # automatic fix attempts per PR before a human is asked
 
