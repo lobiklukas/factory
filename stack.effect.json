@@ -1,0 +1,12 @@
+{
+  "$schema": "https://stack-effect.lloydrichards.dev/schemas/v1/stack.effect.schema.json",
+  "name": "factory",
+  "runtime": {
+    "_tag": "bun"
+  },
+  "typescript": "7",
+  "lint": "oxlint",
+  "format": "oxfmt",
+  "test": "vitest",
+  "monorepo": "turbo"
+}
