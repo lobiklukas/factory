@@ -39,7 +39,7 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 - **Sync first.** `list_issues` for open `ralph`-labelled issues in Factory MVP that have no row in the
   plan (issues you, an audit, or a human filed since the last planning pass). Append each as `ready`
   if it has checkable acceptance criteria, else `needs-spec`; priority 1-2 bug tickets go to the front.
-- Take the first `ready` row of the Queue. `get_issue` with `includeRelations: true` and check
+- Rows in state `split` are containers: never pick them. Take the first `ready` row of the Queue. `get_issue` with `includeRelations: true` and check
   against **Linear, which wins over the plan**: status is Backlog/Todo (or In Progress with a
   `ralph/LOB-n` branch to resume), every blocker is Done - or exactly one blocker is In Review
   with its branch pushed, in which case you stack on that branch.

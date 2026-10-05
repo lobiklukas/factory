@@ -42,9 +42,10 @@ holds settled decisions; a plan that contradicts one is wrong.
      questions, prefixed `ralph:`; skip it if an identical `ralph:` comment is already there.
    - `needs-human` - requires credentials, cloud provisioning, a product/architecture decision,
      or anything destructive. The repo is local-first: nothing in Google Cloud.
-   - `too-big` - size L. Either propose the split in the plan notes, or create 2-4 sub-issues
-     (`parentId` set, labels `ralph`, each independently verifiable with its own acceptance criteria,
-     blockedBy wired in order) and mark the parent `skipped`. Split at most 2 issues per pass.
+   - `too-big` - size L. Do **not** create sub-issues: record the proposed cut (children, each S/M and
+     independently verifiable) in `## Notes` under "Splits proposed but not created". The `split` pass
+     (`bun run ralph:split`) creates the children. A parent that already has children is `split`: not
+     pickable, and Done when every child is Done.
    - `in-progress`, `in-review`, from Linear status.
 6. **Order.** Topological over `blockedBy`, then milestone order, then Linear priority (Urgent first),
    then `mvp`-labelled before others. Wave-2 items (see `docs/board.md`) go last.
@@ -83,7 +84,7 @@ surfaced in your summary - never silently dropped.
 ## Rules
 
 - Never change an issue's status, priority, assignee or title. Never delete or archive anything.
-- Never create more than the capped sub-issues. Never touch issues outside Factory MVP.
+- Never create sub-issues here (the split pass does). Never touch issues outside Factory MVP.
 - If Linear is unreachable or unauthenticated, stop and finish with `<promise>BLOCKED</promise>`
   after one line saying why.
 

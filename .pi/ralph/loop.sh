@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ralph loop driver: a fresh `pi -p` session per iteration, one Linear issue per iteration.
-# See .pi/ralph/README.md. Subcommands: setup | plan | run | start | kill | merge | audit | status | stop
+# See .pi/ralph/README.md. Subcommands: setup | plan | run | start | kill | merge | split | audit | status | stop
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +15,7 @@ RALPH_THINKING="${RALPH_THINKING:-high}"
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-3600}"          # seconds per iteration
+RALPH_SPLIT_MAX="${RALPH_SPLIT_MAX:-10}"        # parents split per `split` run
 RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-3}"         # consecutive iterations with no valid control line
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
@@ -97,7 +98,7 @@ run_context() {
 ## Run context (authoritative for this iteration)
 
 - iteration: $1 of $RALPH_MAX_ITER, mode: $2
-- worktree (your cwd): $WT
+- worktree (your cwd): ${SESS_CWD:-$WT}
 - base ref: $RALPH_BASE_REF
 - RALPH_PUSH=$RALPH_PUSH  (1: push the branch and open a draft PR; 0: commit locally only, no push, no PR)
 - database for tests and verify scripts: DATABASE_URL=$DATABASE_URL (never use the default \`factory\` database)
@@ -121,20 +122,21 @@ with_timeout() {
 
 # session <iteration> <plan|work>; echoes the control tag (NEXT|COMPLETE|BLOCKED|NONE)
 session() {
-  local n="$1" mode="$2" prompt="$WT/.pi/ralph/$2.prompt.md" stamp out err
+  local n="$1" mode="$2" prompt="${SESS_CWD:-$WT}/.pi/ralph/$2.prompt.md" stamp out err
   stamp="$(date +%Y%m%d-%H%M%S)-$mode-$n"
   out="$STATE/logs/$stamp.out"; err="$STATE/logs/$stamp.err"
   [ -f "$prompt" ] || die "missing $prompt"
   log "$mode iteration $n -> $out"
   local rc=0
   (
-    cd "$WT"
+    cd "${SESS_CWD:-$WT}"
+    export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
     export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
     [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
     with_timeout "$RALPH_TIMEOUT" pi -p --approve \
       --model "$RALPH_MODEL" --thinking "$RALPH_THINKING" \
       --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
-      "$(cat "$prompt"; run_context "$n" "$mode")" \
+      "$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")" \
       </dev/null >"$out" 2>"$err"
   ) || rc=$?
   local last tag="NONE"
@@ -150,15 +152,16 @@ session() {
   echo "$tag"
 }
 
-lock() {
+lock() { # [name]: the main loop holds `lock`; the splitter holds `lock-split`, so both can run
+  local name="${1:-lock}"
   mkdir -p "$STATE"
-  if ! mkdir "$STATE/lock" 2>/dev/null; then
-    local pid; pid="$(cat "$STATE/lock/pid" 2>/dev/null || echo '?')"
-    kill -0 "$pid" 2>/dev/null && die "another loop is running (pid $pid)"
-    log "removing stale lock (pid $pid)"; rm -rf "$STATE/lock"; mkdir "$STATE/lock"
+  if ! mkdir "$STATE/$name" 2>/dev/null; then
+    local pid; pid="$(cat "$STATE/$name/pid" 2>/dev/null || echo '?')"
+    kill -0 "$pid" 2>/dev/null && die "$name is held by pid $pid"
+    log "removing stale $name (pid $pid)"; rm -rf "$STATE/$name"; mkdir "$STATE/$name"
   fi
-  echo $$ >"$STATE/lock/pid"
-  trap 'rm -rf "$STATE/lock"' EXIT
+  echo $$ >"$STATE/$name/pid"
+  trap "rm -rf '$STATE/$name'" EXIT
 }
 
 # --- merge: the driver, not the model, merges ---------------------------------------------------
@@ -361,6 +364,25 @@ cmd_run() {
   reset_worktree
 }
 
+# split: break `too-big` issues into S/M children. Runs beside a live loop, so it uses its OWN throwaway
+# worktree (never the loop's) and shares only the .ralph state directory.
+cmd_split() {
+  [ -d "$WT" ] || die "no worktree - run: $0 setup"
+  [ -f "$STATE/plan.md" ] || die "no plan - run: $0 plan"
+  lock lock-split
+  local SW="${WT}-split"
+  git -C "$MAIN_ROOT" fetch origin --quiet
+  if [ ! -d "$SW" ]; then git -C "$MAIN_ROOT" worktree add --detach "$SW" "$RALPH_BASE_REF" >/dev/null; fi
+  git -C "$SW" switch --detach "$RALPH_BASE_REF" --quiet
+  local excl; excl="$(git -C "$SW" rev-parse --path-format=absolute --git-path info/exclude)"
+  grep -qx '.ralph' "$excl" 2>/dev/null || echo '.ralph' >>"$excl"
+  [ -L "$SW/.ralph" ] || { rm -rf "$SW/.ralph"; ln -s "$STATE" "$SW/.ralph"; }
+  [ -f "$SW/.pi/ralph/split.prompt.md" ] || die "$RALPH_BASE_REF has no split.prompt.md - push the ralph tooling first"
+  local tag; tag="$(SESS_CWD="$SW" session 0 split)"
+  log "split finished: $tag (see $STATE/logs)"
+  [ "$tag" = COMPLETE ] || exit 3
+}
+
 cmd_audit() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
   lock; ensure_db; reset_worktree
@@ -421,10 +443,11 @@ case "${1:-}" in
   plan)   cmd_plan ;;
   run)    shift; [ "${1:-}" = "--max" ] && RALPH_MAX_ITER="${2:?--max N}"; cmd_run ;;
   audit)  cmd_audit ;;
+  split)  cmd_split ;;
   merge)  cmd_merge ;;
   start)  shift; cmd_start "$@" ;;
   kill)   cmd_kill ;;
   status) cmd_status ;;
   stop)   cmd_stop ;;
-  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|audit|status|stop}  (env: RALPH_MODEL RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
+  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
 esac

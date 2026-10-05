@@ -12,7 +12,11 @@ Read `.ralph/merged.txt`: one line per merged PR, `<ISSUE-ID> <PR url>`. Linear 
 4. In `.ralph/plan.md`, set the row for that issue to `done` (keep the PR url in notes).
 5. Append one line to `.ralph/progress.md`: `<date> <ISSUE-ID> merged <PR url>`.
 
-Do not edit any issue other than the ones listed. Do not touch merged.txt (the driver clears it).
+6. **Split parents.** For each merged issue with a `parentId`, `list_issues` with that `parentId`; if every
+   child is now `Done`, set the parent (label `split-parent`) to `Done` with a comment listing the
+   children, and its plan row to `done`.
+
+Do not edit any issue other than the ones listed and those parents. Do not touch merged.txt (the driver clears it).
 If Linear is unreachable, finish with `<promise>BLOCKED</promise>`.
 
 Your reply's **last non-empty line** must be `<promise>COMPLETE</promise>` or `<promise>BLOCKED</promise>`.
