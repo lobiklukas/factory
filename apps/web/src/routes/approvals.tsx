@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { CheckSquareIcon } from "lucide-react";
 import { EmptyPane } from "@/components/empty-pane";
 
 export const Route = createFileRoute("/approvals")({
@@ -17,8 +18,9 @@ export const Route = createFileRoute("/approvals")({
 function ApprovalsRoute() {
   return (
     <EmptyPane
+      icon={<CheckSquareIcon strokeWidth={1.75} />}
       title="No approvals pending"
-      detail="Policy enforcement and durable approval memos are M3 (docs/handoff.md). Tool calls are not gated yet, so there is nothing to approve or deny."
+      detail="Policy enforcement is M3. Tool calls are not gated yet, so there is nothing to approve or deny."
       visible
     />
   );

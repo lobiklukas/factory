@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { BoxesIcon, CheckSquareIcon, TerminalIcon } from "lucide-react";
 import { cn } from "cn";
+import { FactoryMark } from "@/components/factory-mark";
 import {
   Tooltip,
   TooltipContent,
@@ -32,9 +33,10 @@ export const NavRail = () => {
     >
       <Link
         to="/sessions"
-        className="mb-3 grid size-7 place-items-center bg-foreground text-[11px] font-semibold tracking-tight text-background"
+        aria-label="factory"
+        className="mb-3 grid size-7 shrink-0 place-items-center bg-foreground text-background"
       >
-        f
+        <FactoryMark className="size-7" />
       </Link>
 
       {SECTIONS.map(({ to, label, icon: Icon }) => {

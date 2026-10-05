@@ -3,7 +3,6 @@
 @import "@fontsource-variable/geist-mono";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/jetbrains-mono";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -30,11 +29,6 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -52,8 +46,20 @@
 }
 
 :root {
-  /* Vercel's hairline scale. Radius is locked to 0 (see the note below), so the
-   radius ladder exists only for shadcn components that ask for it. */
+  /* Factory's hairline scale.
+   *
+   * SHAPE: radius is locked to 0 everywhere, avatars included. A square mark in a
+   * square frame is the whole look; a single rounded element reads as a mistake
+   * rather than as emphasis.
+   *
+   * COLOUR: `--ring` is the page's ONLY accent, and it is named for what it does
+   * rather than for what it looks like: it is the focus ring and the live/running
+   * signal, the way a machine's indicator lamp is both. Hi-vis amber because a
+   * shop floor's signal is amber, not blue. `--destructive` is the only red, it
+   * means blocked or refused, and it never appears without a word next to it.
+   * Everything else is neutral. Measured contrast for every pair is in
+   * `.pi/skills/verify-web/features/dashboard-shell.md`.
+   */
   --radius: 0rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -72,12 +78,7 @@
   --destructive: oklch(0.55 0.21 27);
   --border: oklch(0.912 0 0);
   --input: oklch(0.885 0 0);
-  --ring: oklch(0.55 0.19 258);
-  --chart-1: oklch(0.55 0.19 258);
-  --chart-2: oklch(0.62 0.17 155);
-  --chart-3: oklch(0.72 0.16 75);
-  --chart-4: oklch(0.58 0.19 300);
-  --chart-5: oklch(0.6 0.2 20);
+  --ring: oklch(0.55 0.16 60);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.145 0 0);
@@ -85,7 +86,7 @@
   --sidebar-accent: oklch(0.96 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.912 0 0);
-  --sidebar-ring: oklch(0.55 0.19 258);
+  --sidebar-ring: oklch(0.55 0.16 60);
 }
 
 /* Dark is the default (docs: the dashboard is a cockpit), so the dark tokens live
@@ -108,12 +109,7 @@
   --destructive: oklch(0.68 0.19 24);
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.68 0.14 256);
-  --chart-1: oklch(0.68 0.14 256);
-  --chart-2: oklch(0.72 0.15 158);
-  --chart-3: oklch(0.78 0.14 78);
-  --chart-4: oklch(0.68 0.16 302);
-  --chart-5: oklch(0.68 0.18 22);
+  --ring: oklch(0.8 0.15 70);
   --sidebar: oklch(0.165 0 0);
   --sidebar-foreground: oklch(0.97 0 0);
   --sidebar-primary: oklch(0.97 0 0);
@@ -121,7 +117,7 @@
   --sidebar-accent: oklch(0.245 0 0);
   --sidebar-accent-foreground: oklch(0.97 0 0);
   --sidebar-border: oklch(1 0 0 / 9%);
-  --sidebar-ring: oklch(0.68 0.14 256);
+  --sidebar-ring: oklch(0.8 0.15 70);
 }
 
 @layer base {
@@ -140,5 +136,18 @@
   }
   :root:not(.dark) {
     color-scheme: light;
+  }
+  /* A running tool pulses and a card crossing a lane animates; neither is
+     information a reduced-motion reader should lose. The pulse becomes static
+     here, and the transitions that carry motion use `motion-safe:` at the call
+     site so a fade still says "this changed". */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }

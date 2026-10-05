@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { BoxesIcon } from "lucide-react";
 import { EmptyPane } from "@/components/empty-pane";
 
 export const Route = createFileRoute("/sandboxes")({
@@ -17,8 +18,9 @@ export const Route = createFileRoute("/sandboxes")({
 function SandboxesRoute() {
   return (
     <EmptyPane
+      icon={<BoxesIcon strokeWidth={1.75} />}
       title="No sandboxes yet"
-      detail="Sandbox lifecycle is M4 (docs/handoff.md). Until then the API process hosts the harness in-process, so a session's environment is the control plane itself and there is nothing separate to list."
+      detail="Sandbox lifecycle is M4. Until it lands a session's environment is the control plane itself, so there is nothing separate to list."
       visible
     />
   );

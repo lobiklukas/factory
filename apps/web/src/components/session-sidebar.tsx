@@ -1,6 +1,7 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { PlusIcon } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "cn";
 import { sessionRegistry } from "@/lib/atoms/session-registry";
 import { startSessionAtom } from "@/lib/atoms/session-atom";
@@ -31,14 +32,21 @@ export const SessionSidebar = () => {
           onClick={() => {
             // Navigating on the created id rather than waiting for the registry
             // to update: the pane attaches on the route, so the route is what has
-            // to move. A failure leaves the user on the list with the error in
-            // the console, which is the honest outcome for a create that did not
-            // happen — there is no session id to navigate to.
-            void start({ content: PROMPT }).then((session) =>
-              navigate({
-                to: "/sessions/$sessionId",
-                params: { sessionId: session.id },
-              }),
+            // to move. A refusal says so out loud instead of leaving the user on
+            // the list with an error they cannot see: there is no session id to
+            // navigate to, and silence is indistinguishable from a dead button.
+            void start({ content: PROMPT }).then(
+              (session) =>
+                navigate({
+                  to: "/sessions/$sessionId",
+                  params: { sessionId: session.id },
+                }),
+              (cause: unknown) => {
+                toast.error("No session was created", {
+                  description:
+                    cause instanceof Error ? cause.message : String(cause),
+                });
+              },
             );
           }}
         >
