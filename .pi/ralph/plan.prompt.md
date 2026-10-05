@@ -25,7 +25,9 @@ holds settled decisions; a plan that contradicts one is wrong.
 2. **Label.** Make sure a workspace/team label named `ralph` exists (create it with
    `save_issue_label` if missing: color `#5E6AD2`, description "Eligible for the ralph loop"). Add it to
    **every** open issue in the project with `addLabels: ["ralph"]` (append-only).
-3. **Scout.** Run `ralph-scout` in parallel over the issues. Use the results, not the issue text, to
+3. **Scout.** First check `.ralph/scout-cache/*.md`: reports left by an interrupted pass in the same
+   output format (`### LOB-n` blocks). Use every issue they cover and scout only the rest. Otherwise run
+   `ralph-scout` in parallel over the issues. Use the results, not the issue text, to
    decide footprint, UI-ness, size, and hidden dependencies.
 4. **Dependencies.** Keep the relations that already exist. Add `blockedBy` only for a dependency a
    scout proved (a missing symbol, table, or contract another issue creates). Never add a relation on
