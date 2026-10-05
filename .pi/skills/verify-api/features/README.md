@@ -3,8 +3,12 @@
 One file per user-facing feature of the session surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified run: 2026-10-05, API on `:9200`, `MODEL_BACKEND=faux` —
-`bun drive.ts` 29/29, `./sigterm.sh` 10/10, `./degraded.sh` 11/11.
+Status reflects the last verified run. `bun drive.ts` **29/29** on 2026-10-05, API on `:9400` (not
+the usual `:9200`), `MODEL_BACKEND=faux` — LOB-93 verification of the session list from the
+`ralph/LOB-93` worktree against the run-context database; `./up.sh` started cleanly, `./down.sh`
+stopped it afterwards, and `drive-summary.txt` with `drive-observed.json` records the run
+(`.verify/evidence/lob-93/`). `./sigterm.sh` 10/10 and `./degraded.sh` 11/11 are from an earlier run
+of those scripts — each starts and owns its own API instance — and were **not** re-run for LOB-93.
 
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
