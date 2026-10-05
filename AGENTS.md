@@ -19,6 +19,14 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
 - `docs/design.md` — the settled decisions (D1–D16) with their rationale, the component
   inventory, the local-first build order (M0–M7), and the open risks (R1–R6). Read it before
   proposing an architecture change.
+- `docs/features.md` — what to build next and why: a ranked backlog from a code audit, the
+  installed Pi Durable API surface, and a survey of 13 comparable products. It changes no
+  decision in `docs/design.md`.
+- `docs/roadmap.md` — the plan: priority by distance to MVP, the milestone map, and the Linear
+  project that tracks it. Read it before starting work that is not already an issue.
+- `docs/parallel-work.md` — how to run several streams of work at once here: subagent isolation,
+  worktrees, the shared-Postgres and port hazards, and where local agent work should stop and a
+  factory session should start instead.
 - `docs/handoff.md` — what is done, what is next, and the completion criterion for each step.
 - `.pi/skills/verify-web/features/README.md` — the feature map: what works, what fails, and how
   each feature is proven.
@@ -32,6 +40,11 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
   is running — use `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
 - **Gate every change** with `bun run format:check`, `build`, `lint`, `test`, `type-check`. The
   Effect diagnostics run with `denyWarnings: true`, so a warning fails the build.
+- **Work is tracked in Linear, not in the repo.** Project `Factory MVP` in
+  [lobiklukas](https://linear.app/lobiklukas) holds the roadmap: milestones, priorities, and the
+  acceptance criteria per issue. `.mcp.json` at the repo root wires Linear's MCP server for any
+  agent (first use authorizes in a browser; the token is cached in `~/.mcp-auth` and shared across
+  clients). No Linear key is stored in the repo. `docs/roadmap.md` is the Markdown mirror.
 - **`.pi/` is shared tooling for every agent and belongs in git**, committed alongside the work
   that needs it. Skills, prompts, and agents that help any agent working in this repo go there.
   It holds no credentials and no machine-local state.
