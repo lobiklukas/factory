@@ -9,9 +9,10 @@
  * Deterministic and offline (faux model), but it needs Postgres:
  * `docker compose up -d --wait postgres`.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import type {
   ListSessionsInput,
@@ -513,6 +514,14 @@ describe("session list", () => {
     expect(failure.value.code).toBe("invalid_input");
   });
 
+  // The fold is global by design (D7): `rebuildIndexes` replays every commit the database holds,
+  // log by log, so this case's cost is the whole shared log's, not the one session it asserts on.
+  // Measured 2026-10-06 at ~670 session logs / 11 754 commits: 5.8-6.0 s, i.e. 6-7.5 ms per session
+  // log and almost nothing per commit row. Vitest's 5 s default was under that, so the gate went
+  // red for every iteration — and the abort is destructive, because the case's own
+  // `DELETE FROM sessions` has already run when the timeout fires. 30 000 is ~5x today's fold and
+  // the budget expires at ~4 050 session logs (the guard at the end of this file pins it); a
+  // database of its own per run is the durable fix (LOB-96).
   it("rebuilds the index from the log after the index tables are emptied", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -582,7 +591,7 @@ describe("session list", () => {
       "https://github.com/lobiklukas/factory.git",
     );
     expect(result.repos[0]?.defaultBaseRef).toBe("main");
-  });
+  }, 30_000);
 });
 
 describe("request limits", () => {
@@ -604,5 +613,92 @@ describe("request limits", () => {
     const failure = Exit.findErrorOption(outcome);
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
+  });
+});
+
+/**
+ * The rebuild case's budget, guarded so it cannot silently go back to vitest's default (LOB-113).
+ *
+ * The case above empties the shared `sessions` index and refolds *every* session log the database
+ * holds, so its cost is the database's, not the case's — the case comment has the measurement.
+ * Deleting the case's third argument is silent while the database is small (the LOB-107 iteration
+ * saw the case pass in 2.06 s against a database created empty for the run) and reddens only once
+ * the shared database has grown past the default, so the deletion is invisible exactly when it is
+ * made. Reading this file back is the shape `postgres-up.test.ts` already uses for its own header.
+ *
+ * What this cannot prove: that the declared budget is *enough*. No static check can — only the
+ * fold's cost on the database in front of it, which is why the case itself is what fails when the
+ * deadline passes. Two other ways out of the problem satisfy the issue but not this reader, so the
+ * guard has to be updated with them: a repo-wide `testTimeout` in `vitest.config.ts`, and
+ * `it(name, { timeout }, fn)`. A skipped or excluded `describe("session list")` passes it as well,
+ * because every byte it reads is still in the file.
+ *
+ * If LOB-96 lands and `@repo/core` gets a database of its own per run, delete this describe
+ * together with the case's third argument and the case comment that explains it, with the fold's
+ * new cost in the commit message.
+ *
+ * Mutation checked: deleting the case's `, 30_000` back to `  });` — the budget case below goes red
+ * in 2-3 ms, with no database involved. `reads a budget only where one is declared` is the control
+ * that keeps it from passing on a reader that answers unconditionally.
+ */
+const REBUILD_CASE =
+  "rebuilds the index from the log after the index tables are emptied";
+
+/**
+ * The budget a case declares, or `undefined` when it would take vitest's default.
+ *
+ * The case's closing line is the first two-space-indented `}` after its `it(` — every nested
+ * callback in the body closes deeper — and the budget is the optional third argument on it.
+ */
+const declaredBudget = (
+  source: string,
+  caseName: string,
+): number | undefined => {
+  const start = source.indexOf(`it("${caseName}"`);
+  if (start < 0) return undefined;
+  const closing = /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(source.slice(start));
+  const digits = closing?.[1];
+  return digits === undefined ? undefined : Number(digits.replaceAll("_", ""));
+};
+
+describe("the rebuild case's budget", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+
+  it("declares a timeout big enough for a shared database's whole-log fold", () => {
+    // The case has to be in the file at all, or the reader below would be reading nothing.
+    expect(source).toContain(REBUILD_CASE);
+    const budget = declaredBudget(source, REBUILD_CASE);
+    expect(
+      budget,
+      `no third-argument timeout on "${REBUILD_CASE}", so it would take vitest's 5 s default, which is under the shared database's whole-log fold: declare \`, 30_000)\` on the case, or update this guard as its header says.`,
+    ).toBeDefined();
+    if (budget === undefined) throw new Error("unreachable");
+    // 30 000 is what LOB-113 chose: ~5x the 5.9 s the fold costs at ~670 session logs. A smaller
+    // budget is a decision to re-measure the fold against the run-context database, not an edit.
+    expect(budget).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("reads a budget only where one is declared", () => {
+    // Negative control for the reader, on a source shaped like this file: a case whose body closes
+    // a nested callback first and then declares nothing. If this read as a budget, the case above
+    // would pass on a file that declares none.
+    const without = [
+      'describe("x", () => {',
+      `  it("${REBUILD_CASE}", async () => {`,
+      "    const nested = (() => {",
+      "      return 1;",
+      "    });",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+    expect(declaredBudget(without, REBUILD_CASE)).toBeUndefined();
+    // The same source with the third argument back reads as that number, underscore and all.
+    expect(
+      declaredBudget(
+        without.replace(/^ {2}\}\);$/m, "  }, 120_000);"),
+        REBUILD_CASE,
+      ),
+    ).toBe(120_000);
   });
 });
