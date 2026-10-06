@@ -519,86 +519,46 @@ describe("session list", () => {
     "returns every row of a same-millisecond group exactly once",
     { timeout: 60_000 },
     async () => {
+      const GROUP = 12;
+      const LIMIT = 4;
+      // The seeding and paging helpers are declared *after* this case. They are `const`s in the same
+      // `describe` callback, which vitest runs to completion before any case body, so by the time
+      // this body reads them they are initialised — no hoisting is involved, only ordering.
       const result = await program(
-        Effect.gen(function* () {
-          const sessions = yield* SessionService;
-          const sql = yield* SqlClient;
-          // Hermetic across runs: these rows are this test's, and the database is shared.
-          yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_ms%'`;
-
-          // One timestamp for the whole group, with non-zero microseconds. Both halves matter: a
-          // timestamp whose millisecond rendering is already lossless would not trigger the bug,
-          // and the group has to be newer than whatever the shared database holds so that the page
-          // boundary falls inside it rather than below it.
-          const [groupAt] = yield* sql<{ at: string }>`
-          SELECT to_char(
-            '2027-01-01T00:00:00.123456Z'::timestamptz AT TIME ZONE 'UTC',
-            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
-          ) AS at
-        `;
-          if (groupAt === undefined) throw new Error("unreachable");
-
-          const GROUP = 12;
-          // Zero-padded, so the id tiebreak orders them contiguously and a four-row page boundary
-          // lands inside the group.
-          yield* sql`
-          INSERT INTO sessions (id, title)
-          SELECT 'ses_ms' || lpad(n::text, 24, '0'), 'same millisecond ' || n
-          FROM generate_series(0, ${GROUP - 1}) AS g(n)
-        `;
-          yield* sql`
-          INSERT INTO session_activity (session_id, last_activity_at)
-          SELECT 'ses_ms' || lpad(n::text, 24, '0'), ${groupAt.at}::timestamptz
-          FROM generate_series(0, ${GROUP - 1}) AS g(n)
-        `;
-
-          const expected = Array.from(
-            { length: GROUP },
-            (_, n) => `ses_ms${String(n).padStart(24, "0")}`,
-          );
-          const LIMIT = 4;
-          const budget = Math.ceil(GROUP / LIMIT) + 2;
-          const seen: string[] = [];
-          const statements: number[] = [];
-          let cursor: string | undefined = undefined;
-          let exhausted = false;
-          for (let page = 0; page < budget; page += 1) {
-            const input: ListSessionsInput =
-              cursor === undefined
-                ? { limit: LIMIT }
-                : { limit: LIMIT, cursor };
-            const counted = yield* countStatements(sessions.list(input));
-            statements.push(counted.statements);
-            for (const entry of counted.value.sessions) {
-              if (entry.id.startsWith("ses_ms")) seen.push(entry.id);
-            }
-            cursor = counted.value.nextCursor;
-            if (new Set(seen).size === GROUP) break;
-            if (cursor === undefined) {
-              exhausted = true;
-              break;
-            }
-          }
-          return { expected, seen, exhausted, statements };
-        }).pipe(
-          Effect.ensuring(
-            Effect.gen(function* () {
-              const sql = yield* SqlClient;
-              yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_ms%'`;
-            }).pipe(Effect.orDie),
-          ),
+        withGroup(
+          Effect.gen(function* () {
+            // One instant for the whole group, with non-zero microseconds, and newer than anything
+            // the shared table holds. Both halves matter: a timestamp whose millisecond rendering
+            // is already lossless would not trigger the defect, and a group older than the table
+            // would be walked past instead of paged through.
+            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            const visible = yield* listableRows;
+            // A four-row page against a twelve-row group: three of the four boundaries fall inside
+            // the group, so a truncated cursor loses rows on every one of them.
+            const { pages, exhausted } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+            );
+            return { GROUP, pages, exhausted };
+          }),
         ),
       );
 
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
       // Every row of the group came back, exactly once, in the keyset's own order (id descending
       // inside the tie). A cursor truncated to the millisecond stopped the page at the boundary
       // and dropped the rest of the group.
-      expect(result.seen).toEqual([...result.expected].sort().reverse());
-      expect(new Set(result.seen).size).toBe(result.seen.length);
-      // The loop ended because the group was complete, not because the cursor ran out first.
-      expect(result.exhausted).toBe(false);
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      // The walk ended because the cursor ran out, not because it hit its budget.
+      expect(result.exhausted).toBe(true);
       // Cost is one statement per page whatever the row count: never a fold per session (R6).
-      for (const count of result.statements) expect(count).toBe(1);
+      for (const page of result.pages) expect(page.statements).toBe(1);
     },
   );
 
@@ -1252,30 +1212,6 @@ describe("session list", () => {
     },
   );
 
-  /**
-   * Refuse a same-millisecond case that declares no budget.
-   *
-   * The budgets above are load-bearing rather than decorative: with the shared table at ~2 000
-   * rows, vitest's 5 s default timed out three of these cases and took the whole gate red. This
-   * reads the file back and fails when a case in this group loses its `timeout:`.
-   */
-  it("gives every same-millisecond case a budget", () => {
-    const source = readFileSync(new URL(import.meta.url), "utf8");
-    // Anchor on the declaration, not the bare name: this case's own body quotes both names, and
-    // a bare `indexOf` would find that instead and read a 105-character slice of itself.
-    const first =
-      'it("returns every row of a same-millisecond group exactly once", {';
-    const start = source.indexOf(first);
-    const end = source.indexOf('it("refuses a cursor it did not mint"', start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    const group = source.slice(start, end);
-    const cases = [...group.matchAll(/\bit\("[^"]+", \{ timeout:/g)];
-    const bare = [...group.matchAll(/\bit\("[^"]+", async/g)];
-    expect(bare).toEqual([]);
-    expect(cases.length).toBe(9);
-  });
-
   it("refuses a cursor it did not mint", async () => {
     const outcome = await program(
       Effect.gen(function* () {
@@ -1404,10 +1340,10 @@ describe("request limits", () => {
  *
  * What this cannot prove: that the declared budget is *enough*. No static check can — only the
  * fold's cost on the database in front of it, which is why the case itself is what fails when the
- * deadline passes. Two other ways out of the problem satisfy the issue but not this reader, so the
- * guard has to be updated with them: a repo-wide `testTimeout` in `vitest.config.ts`, and
- * `it(name, { timeout }, fn)`. A skipped or excluded `describe("session list")` passes it as well,
- * because every byte it reads is still in the file.
+ * deadline passes. One other way out of the problem satisfies the issue but not this reader, so
+ * the guard has to be updated with it: a repo-wide `testTimeout` in `vitest.config.ts`. A skipped
+ * or excluded `describe("session list")` passes it as well, because every byte it reads is still
+ * in the file.
  *
  * If LOB-96 lands and `@repo/core` gets a database of its own per run, delete this describe
  * together with the case's third argument and the case comment that explains it, with the fold's
@@ -1423,17 +1359,34 @@ const REBUILD_CASE =
 /**
  * The budget a case declares, or `undefined` when it would take vitest's default.
  *
- * The case's closing line is the first two-space-indented `}` after its `it(` — every nested
- * callback in the body closes deeper — and the budget is the optional third argument on it.
+ * Vitest takes the budget in either of two shapes, and this reads both so a case may use either:
+ * the options object `it(name, { timeout }, fn)` — the form LOB-128 standardised across the repo,
+ * which the same-millisecond cases use — and the third argument `it(name, fn, ms)`, which the
+ * rebuild case carries. The declaration is found by pattern rather than by `it("name"`: oxfmt
+ * breaks the arguments of a long-named case one per line, so `it(` and the name are not adjacent
+ * in the source. The options object is read only from the start of the declaration up to its
+ * `=>`, so a `timeout:` inside a body cannot be mistaken for the declaration; the third argument
+ * sits on the case's closing line, which is the first two-space-indented `}` after its `it(` —
+ * every nested callback in the body closes deeper.
+ *
+ * Neither shape survives oxfmt unchanged when the name is long: it breaks the arguments one per
+ * line, so the budget is `}, 60_000,` rather than `}, 60_000);`. That is why the options form is
+ * read rather than the closing line for it.
  */
 const declaredBudget = (
   source: string,
   caseName: string,
 ): number | undefined => {
-  const start = source.indexOf(`it("${caseName}"`);
-  if (start < 0) return undefined;
-  const closing = /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(source.slice(start));
-  const digits = closing?.[1];
+  const at = new RegExp(
+    `it\\(\\s*"${caseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`,
+  ).exec(source);
+  if (at === null) return undefined;
+  const declaration = source.slice(at.index);
+  const options = /\{[ \t]*timeout: (\d[\d_]*)/.exec(
+    declaration.slice(0, declaration.indexOf("=>")),
+  );
+  const digits =
+    options?.[1] ?? /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(declaration)?.[1];
   return digits === undefined ? undefined : Number(digits.replaceAll("_", ""));
 };
 
@@ -1476,5 +1429,110 @@ describe("the rebuild case's budget", () => {
         REBUILD_CASE,
       ),
     ).toBe(120_000);
+  });
+});
+
+/**
+ * The same-millisecond group's budgets, guarded the same way (LOB-95).
+ *
+ * These nine cases page over the *whole* shared table — that is how each one proves its group was
+ * not dropped in passing — so their cost is the table's, not the case's. The table grew from 1 628
+ * to 2 011 rows while they were written, and vitest's 5 s default turned that into
+ * `Test timed out in 5000ms` on three of them. Declaring the budget is load-bearing rather than
+ * decorative, and dropping it is silent until the table is large enough, which is exactly when it
+ * matters. The durable fix is LOB-96: a database per run, at which point this describe goes the
+ * way the rebuild one says it goes.
+ *
+ * Mutation checked: replacing one case's `{ timeout: 60_000 }` with nothing — the guard below goes
+ * red in a few ms, with no database involved. The control that keeps it from passing on a reader
+ * that answers unconditionally is `reads an options-object budget only where one is declared`.
+ */
+const SAME_MILLISECOND_CASES = [
+  "returns every row of a same-millisecond group exactly once",
+  "mints the cursor from the exact instant when the group is exactly one page",
+  "returns a same-millisecond group one row at a time",
+  "returns a same-millisecond group that sits inside a larger page",
+  "returns a same-millisecond group at the end of the ordering",
+  "accepts a millisecond-truncated cursor and loses the rest of that millisecond",
+  "returns a two-row same-millisecond group split by the page boundary",
+  "returns a group whose millisecond rendering is already lossless",
+  "returns a same-millisecond group straddling the page-size cap",
+] as const;
+
+describe("the same-millisecond cases' budgets", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  // The group is bounded by two doc comments rather than by case names, because a name is what
+  // the guard reads: anchoring on one would let the reader find its own list entry first. The
+  // opening comment is the defect's description, the closing one this describe's neighbour's.
+  const start = source.indexOf(
+    " * A page boundary inside a group of rows that share a millisecond",
+  );
+  const end = source.indexOf('it("refuses a cursor it did not mint"', start);
+
+  it("gives every same-millisecond case a budget", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    // A case added to the group and not to the list above is unbudgeted by definition, so the two
+    // have to be the same size. The count is read off the group's own declarations rather than off
+    // the list, so a case nobody listed still reddens here.
+    const declared = [...source.slice(start, end).matchAll(/^ {2}it\($/gm)]
+      .length;
+    expect(declared).toBe(SAME_MILLISECOND_CASES.length);
+    for (const caseName of SAME_MILLISECOND_CASES) {
+      const budget = declaredBudget(source, caseName);
+      expect(
+        budget,
+        `no timeout on "${caseName}", so it would take vitest's 5 s default while it pages the whole shared table: declare \`{ timeout: 60_000 }\` on the case, or update this guard as its header says.`,
+      ).toBeDefined();
+      // 60 000 is a ceiling, not a target: the cases cost milliseconds while the table is small,
+      // and the fold cost of a table twice this size is still an order of magnitude below it.
+      if (budget === undefined) throw new Error("unreachable");
+      expect(budget).toBeGreaterThanOrEqual(60_000);
+    }
+  });
+
+  it("reads an options-object budget only where one is declared", () => {
+    // Negative control for the reader's first shape, on a source shaped like this file: a case with
+    // no options object, whose body closes a nested callback and then declares nothing. The three
+    // same-millisecond shapes are the ones that matter — no options, a nested object, and the
+    // options — and a reader that answered any of them with a number would pass the guard above on
+    // a file whose cases declare nothing.
+    const name = "a same-millisecond group straddling the page-size cap";
+    const without = [
+      'describe("x", () => {',
+      `  it("${name}", async () => {`,
+      "    const nested = (() => {",
+      "      return 1;",
+      "    });",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+    expect(declaredBudget(without, name)).toBeUndefined();
+    // A name that is not in the source at all reads as no budget either: a reader that answered
+    // there would pass the guard above on a group whose cases had all been renamed out from under
+    // it. The count tripwire is what catches a deleted case; this is what catches a renamed one.
+    expect(declaredBudget(without, "no such case")).toBeUndefined();
+    // The same source with the options object back reads as that number, underscore and all, in
+    // both shapes oxfmt gives it: the declaration on one line, and broken one argument per line.
+    expect(
+      declaredBudget(
+        without.replace(
+          `  it("${name}", async`,
+          `  it(\n    "${name}",\n    { timeout: 90_000 },`,
+        ),
+        name,
+      ),
+    ).toBe(90_000);
+    // A `timeout:` in the body is not the declaration: the reader stops at the case's `=>`.
+    expect(
+      declaredBudget(
+        without.replace(
+          "    const nested = (() => {",
+          "    const budget = { timeout: 90_000 };\n    const nested = (() => {",
+        ),
+        name,
+      ),
+    ).toBeUndefined();
   });
 });
