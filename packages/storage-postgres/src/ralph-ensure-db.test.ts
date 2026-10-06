@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -9,7 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type Server } from "node:net";
+import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,11 @@ import { afterAll, describe, expect, it } from "vitest";
  *
  * Each case names the mutation it was checked against. A case whose mutation nobody can state is not
  * testing anything.
+ *
+ * What these cases do **not** cover: `ensure_postgres` itself. `ensure_db` sources the helper from
+ * `MAIN_ROOT` — the human's checkout, which is what the issue prescribed — so mutating this
+ * worktree's `.pi/skills/lib/postgres.sh` changes nothing in this file. The helper's own cases and
+ * their mutation notes live in `postgres-up.test.ts`.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -49,6 +55,8 @@ interface Scratch {
   readonly home: string;
   readonly bin: string;
   readonly calls: string;
+  /** Where a fake `compose up` that really binds a port records the listener's pid. */
+  readonly listenerPid: string;
 }
 
 const created: string[] = [];
@@ -64,7 +72,91 @@ const mkScratch = (): Scratch => {
   created.push(root, home);
   const bin = path.join(root, "bin");
   mkdirSync(bin, { recursive: true });
-  return { root, home, bin, calls: path.join(root, "docker-calls.txt") };
+  return {
+    root,
+    home,
+    bin,
+    calls: path.join(root, "docker-calls.txt"),
+    listenerPid: path.join(root, "listener.pid"),
+  };
+};
+
+/**
+ * A listener that holds a port open until it is killed, run under `process.execPath` so the child
+ * depends on no `PATH` guess. A plain `node` would be found through the fake `bin` of some other
+ * case and could be the machine's, which is the same class of mistake as a fake `docker` that is
+ * not on `PATH` at all.
+ */
+const LISTENER_SOURCE = [
+  'const { createServer } = require("node:net");',
+  "const server = createServer();",
+  'server.listen(Number(process.argv[2]), "127.0.0.1");',
+  "",
+].join("\n");
+
+/** Whether a pid is still there: `kill -0`, in-process. */
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Wait until `check` holds, so no case depends on a fixed delay. It throws instead of returning:
+ * every caller here is asserting. The shape is `postgres-up.test.ts`'s, minus the Effect harness.
+ */
+const waitFor = async (
+  check: () => Promise<boolean>,
+  label: string,
+): Promise<void> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+};
+
+/** Whether something completes a TCP handshake on `port`. Bash's `/dev/tcp` asks the same thing. */
+const doesAnswer = async (port: number): Promise<boolean> => {
+  const socket = createConnection({ port, host: "127.0.0.1" });
+  try {
+    // `once` rejects on the socket's `error`, which is what a refused connect is.
+    await once(socket, "connect");
+    socket.destroy();
+    return true;
+  } catch {
+    socket.destroy();
+    return false;
+  }
+};
+
+/** The pid a fake `compose up` recorded, if it opened a listener. */
+const recordedListener = (scratch: Scratch): number | undefined => {
+  if (!existsSync(scratch.listenerPid)) return undefined;
+  const pid = Number(readFileSync(scratch.listenerPid, "utf8"));
+  return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+};
+
+/** Kill the listener a fake `compose up` opened, and wait for the port to refuse again. */
+const stopOpenedListener = async (
+  scratch: Scratch,
+  port: number,
+): Promise<void> => {
+  const pid = recordedListener(scratch);
+  if (pid === undefined) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone: the case's compose never started one, or the listener died with its port.
+  }
+  await waitFor(
+    async () => !(await doesAnswer(port)),
+    `port ${String(port)} to refuse again`,
+  );
+  await waitFor(async () => !isAlive(pid), `pid ${String(pid)} to be gone`);
 };
 
 /**
@@ -87,8 +179,33 @@ const mkScratch = (): Scratch => {
  * answer — which reads as "the database is not there" and sends the drive down the `createdb` path
  * for a reason that has nothing to do with the case.
  */
-const writeFakeDocker = (scratch: Scratch): void => {
+const writeFakeDocker = (
+  scratch: Scratch,
+  options: {
+    /**
+     * The port a `compose up` should really bind before it exits. Left out, the same fake models a
+     * compose that reports success and leaves nothing answering, which is AC1's case.
+     */
+    readonly opensPort?: number;
+  } = {},
+): void => {
   const file = path.join(scratch.bin, "docker");
+  const port = options.opensPort;
+  if (port !== undefined) {
+    writeFileSync(path.join(scratch.root, "listener.cjs"), LISTENER_SOURCE);
+  }
+  // A compose that reports success has to leave something answering: the `--wait` it models would
+  // not have returned otherwise. So bind a real listener, wait for the bind, and only then exit.
+  const upBranch =
+    port === undefined
+      ? ['  compose*) exit "${FAKE_COMPOSE_EXIT:-0}" ;;']
+      : [
+          "  compose*)",
+          `    ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(scratch.root, "listener.cjs"))} ${String(port)} >/dev/null 2>&1 &`,
+          `    printf '%s' "$!" > ${JSON.stringify(scratch.listenerPid)}`,
+          `    for _ in $(seq 1 250); do (exec 3<>\"/dev/tcp/127.0.0.1/${String(port)}\") 2>/dev/null && break; sleep 0.02; done`,
+          '    exit "${FAKE_COMPOSE_EXIT:-0}" ;;',
+        ];
   writeFileSync(
     file,
     [
@@ -98,7 +215,7 @@ const writeFakeDocker = (scratch: Scratch): void => {
       "  info) exit 0 ;;",
       "  ps*) printf '%s\\n' \"${FAKE_OWNER-}\" ;;",
       "  *psql*) printf '%s\\n' \"${FAKE_PSQL_OUT-}\" ;;",
-      '  compose*) exit "${FAKE_COMPOSE_EXIT:-0}" ;;',
+      ...upBranch,
       "  *) exit 0 ;;",
       "esac",
       "",
@@ -180,28 +297,35 @@ const ensureDb = (
 };
 
 /**
- * A port nothing is listening on, so `pg_port_open` refuses the connect. The bind is asynchronous,
- * so the port is read off the `listening` event rather than off `address()` — which is still `null`
- * synchronously after `listen()` and used to read as "no port could be reserved".
+ * A port nothing answers on, so `pg_port_open` refuses the connect. An ephemeral port is taken and
+ * released, then confirmed to refuse — and retried, because the release is asynchronous: without
+ * the `close` event the handle can still hold the port, and `databaseIsUp` would then fail with
+ * `EADDRINUSE`, or a stranger would take the port in the window and AC1's case would read as
+ * "something is answering" (status 0) for a reason that has nothing to do with the driver. Same
+ * helper, same reasoning, as `postgres-up.test.ts`'s `closedPort`.
  */
-const freePort = async (): Promise<number> => {
-  const probe = createServer();
-  probe.listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const address = probe.address();
-  probe.close();
-  if (address === null || typeof address === "string") {
-    throw new Error("could not read the ephemeral port off the probe");
+const closedPort = async (): Promise<number> => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1");
+    await once(probe, "listening");
+    const address = probe.address();
+    probe.close();
+    await once(probe, "close");
+    if (address === null || typeof address === "string") continue;
+    if (!(await doesAnswer(address.port))) return address.port;
   }
-  return address.port;
+  throw new Error("no closed port was available to drive ensure_db");
 };
 
 /** A real listener on `port`: "a database is answering", without a container and without 5442. */
 const databaseIsUp = async (port: number): Promise<Server> => {
   const listener = createServer();
   listener.listen(port, "127.0.0.1");
-  await once(listener, "listening");
+  // Registered before the await, so a listener that bound but never reported `listening` is still
+  // closed by `afterAll` instead of holding the port for the rest of the worker's life.
   listeners.push(listener);
+  await once(listener, "listening");
   return listener;
 };
 
@@ -290,7 +414,7 @@ describe("the ralph driver's ensure_db", () => {
       // `ensure_postgres ||` with `(cd "$MAIN_ROOT" && docker compose up -d --wait postgres) >&2 ||`
       // — the pre-LOB-108 body. The status goes 0 and the stderr loses the port.
       const scratch = mkScratch();
-      const port = await freePort();
+      const port = await closedPort();
       writeFakeDocker(scratch);
 
       const run = ensureDb(scratch, { PG_PORT: String(port) });
@@ -325,7 +449,7 @@ describe("the ralph driver's ensure_db", () => {
       // the record, and on a host where the port is held by a native server that compose cannot
       // start, the case goes red on the status too.
       const scratch = mkScratch();
-      const port = await freePort();
+      const port = await closedPort();
       await databaseIsUp(port);
       writeFakeDocker(scratch);
 
@@ -352,10 +476,13 @@ describe("the ralph driver's ensure_db", () => {
     async () => {
       // The other half of AC2's mechanism: a database can answer on the port without a container
       // owning it (a native server, a tunnel), and `compose exec` can only reach the project of the
-      // directory it runs from. Mutation: delete the `if [ -n "$owner" ]` branch — the `ps` call
-      // disappears from the record and the exec goes to a container name that was never read.
+      // directory it runs from. Mutation: flip the branch test to `[ -z "$owner" ]` — `pg_port_owner`
+      // still runs, so the `ps` call stays in the record and the red is the exec that follows it:
+      // `compose exec -T postgres psql …` where the case demands the container that publishes the
+      // port. (Deleting the `if` outright reddens the case too, on the status: `pgin` is then never
+      // defined and the subshell dies 127 on `command not found`.)
       const scratch = mkScratch();
-      const port = await freePort();
+      const port = await closedPort();
       await databaseIsUp(port);
       writeFakeDocker(scratch);
 
@@ -385,7 +512,7 @@ describe("the ralph driver's ensure_db", () => {
       // the database is not there yet. Mutation: drop the `if [ "$exists" != "1" ]` guard — the
       // `createdb` call disappears from the record.
       const scratch = mkScratch();
-      const port = await freePort();
+      const port = await closedPort();
       await databaseIsUp(port);
       writeFakeDocker(scratch);
 
@@ -411,10 +538,15 @@ describe("the ralph driver's ensure_db", () => {
     async () => {
       // The driver and the helper it now sources must agree on which daemon is authoritative (LOB-105
       // is the same promise one file over). `ensure_db` calls `docker_env` first, so a value rewritten
-      // there is what every later call records. Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from
-      // `docker_env`'s guard — the recorded `docker_host` becomes colima's socket.
+      // there is what every later call records. Mutation: make the colima fallback in `docker_env`
+      // unconditional — drop the guard, the probe and the socket test, so the `if` body always runs —
+      // and every recorded `docker_host` becomes colima's socket. The case is about an explicit value
+      // surviving every call, not about the guard's own arithmetic: in this case's environment
+      // (`$HOME` is a bare scratch dir with no colima socket, and the fake's `info` exits 0) the
+      // guard's clauses are unreachable, and `ralph-docker-env.test.ts` owns the mutations that redden
+      // each of them.
       const scratch = mkScratch();
-      const port = await freePort();
+      const port = await closedPort();
       await databaseIsUp(port);
       writeFakeDocker(scratch);
       const explicit = "unix:///var/run/docker.sock";
@@ -432,6 +564,69 @@ describe("the ralph driver's ensure_db", () => {
       for (const call of calls) {
         expect(call.dockerHost, call.argv).toBe(explicit);
       }
+    },
+  );
+
+  it(
+    "asks the container compose just started, when nothing answered before",
+    { timeout: 30_000 },
+    async () => {
+      // The path a fresh machine takes: `loop.sh setup` on a host where 5442 answers nothing yet.
+      // `ensure_postgres` starts the database with compose and the port answers afterwards, so the
+      // existence question — and the `createdb` — have to go to the container that now publishes
+      // the port, not to the project this directory would name. The fake's `compose up` really binds
+      // the port (through `process.execPath`, so the child depends on no `PATH` guess) before it
+      // exits 0; `postgres-up.test.ts` owns the start half and the cases above own the ask half, so
+      // this is the composition between them. Mutation: flip the branch test to `[ -z "$owner" ]` —
+      // both the `psql` and the `createdb` go to `compose exec -T postgres` instead of the owner.
+      const scratch = mkScratch();
+      const port = await closedPort();
+      writeFakeDocker(scratch, { opensPort: port });
+      try {
+        const run = ensureDb(scratch, {
+          PG_PORT: String(port),
+          FAKE_OWNER: "factory-postgres-1",
+          FAKE_PSQL_OUT: "",
+          RALPH_DB: "ralph_lob108_probe",
+        });
+
+        expect(run.status, run.stderr).toBe(0);
+        expect(driverCalls(scratch).map((call) => call.argv)).toEqual([
+          "compose up -d --wait postgres",
+          `ps --filter publish=${String(port)} --format {{.Names}}`,
+          "exec factory-postgres-1 psql -U factory -d factory -tAc select 1 from pg_database where datname='ralph_lob108_probe'",
+          "exec factory-postgres-1 createdb -U factory ralph_lob108_probe",
+        ]);
+        // And the start happened from the checkout that owns the database's project.
+        for (const call of composeCalls(scratch)) {
+          expect(call.cwd, call.argv).toBe(mainRoot());
+        }
+      } finally {
+        await stopOpenedListener(scratch, port);
+      }
+    },
+  );
+
+  it(
+    "proves the fake is what PATH resolves before any case relies on it",
+    { timeout: 30_000 },
+    () => {
+      // Every case's premise: `ensure_db` reaches the fake and not the machine's CLI. `childEnv`
+      // asserts the fake file exists; this asserts the resolution, the way `postgres-up.test.ts` and
+      // `ralph-docker-env.test.ts` do. Without it the "no compose was called" assertions are false
+      // greens: a `PATH` that missed the fake would record nothing, and an empty record reads as
+      // exactly the thing the case is asserting. Mutation: drop the fake `bin` from `childEnv`'s
+      // `PATH` — this case is red on the machine's own path to docker.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch);
+
+      const run = spawnSync("bash", ["-c", "command -v docker"], {
+        cwd: scratch.root,
+        encoding: "utf8",
+        env: childEnv(scratch, {}),
+      });
+
+      expect(run.stdout.trim()).toBe(path.join(scratch.bin, "docker"));
     },
   );
 
