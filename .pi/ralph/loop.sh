@@ -3,6 +3,34 @@
 # See .pi/ralph/README.md. Subcommands: setup | plan | run | start | kill | merge | split | audit | status | stop
 set -euo pipefail
 
+log() { printf '[ralph %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+# The usage text lives in one place: the dispatch's `*` case and the stdin refusal below both print
+# it. `$1` overrides the invocation name, because there is no path to print when bash read this file
+# from stdin (`$0` is the shell) and the file's own name is the useful thing to show there.
+usage() {
+  echo "usage: ${1:-$0} {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_FALLBACK_MODELS RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2
+}
+
+# `bash < .pi/ralph/loop.sh` reads this file from stdin: `BASH_SOURCE[0]` is unset and `$0` is the
+# shell, so the file cannot locate itself — and everything below is derived from that location
+# (`HERE`, `CHECKOUT`, `MAIN_ROOT`, and through them `WT`, `STATE` and every prompt path). Falling
+# back to `${BASH_SOURCE[0]:-$0}` is worse than refusing, not a fix: `HERE` would point at the
+# caller's cwd and the driver would act on whatever checkout that happens to be. Refuse in one line,
+# with the status the no-subcommand case uses, instead of dying on `set -u` at the `HERE=` below with
+# `BASH_SOURCE[0]: unbound variable` and a `cd: null directory` (LOB-110).
+#
+# The test is exactly that — `BASH_SOURCE[0]` empty. A shape that hands it a path which is not this
+# file's directory (`bash <(cat loop.sh)`, `bash -c 'source /dev/stdin' < loop.sh`) still derives
+# `HERE` from that path and dies at the `git -C` below with status 128: loud, and never the caller's
+# cwd, so it is filed as LOB-130 rather than guessed at here.
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
+  log "refusing to run from stdin: bash cannot tell this file where it is"
+  usage "bash .pi/ralph/loop.sh"
+  exit 64
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKOUT="$(git -C "$HERE" rev-parse --show-toplevel)"
 COMMON="$(git -C "$CHECKOUT" rev-parse --path-format=absolute --git-common-dir)"
@@ -28,9 +56,6 @@ RALPH_WEB_PORT="${RALPH_WEB_PORT:-3400}"
 WT="$RALPH_WORKTREE"
 STATE="$WT/.ralph"
 DATABASE_URL="postgres://factory:factory@localhost:5442/$RALPH_DB"
-
-log() { printf '[ralph %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
-die() { log "error: $*"; exit 1; }
 
 # `docker`, with a colima fallback, for the driver's own calls. AGENTS.md: the active context may be
 # a stopped Docker Desktop while Colima runs.
@@ -552,6 +577,8 @@ cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the cu
 # each against a fake `docker`. Executed — `bun run ralph <subcommand>`, `cmd_start`'s
 # re-exec of `"$self"` — `$0` is this file and the dispatch runs as before. `$0` is the script's path
 # even when the process was re-exec'd under another argv[0] ("ralph-loop"), so the comparison holds.
+# Read from stdin this line is never reached — the refusal at the top exits 64 first — which is why
+# neither `BASH_SOURCE[0]` use in this file needs a fallback.
 # Sourcing is not free: it also applies `set -euo pipefail` and this file's own `WT`, `STATE` and
 # `DATABASE_URL` (the ralph worktree and its database) to the sourcing shell — the opposite of
 # `.pi/skills/lib/postgres.sh`'s contract, which the caller owns. Only those two test files may
@@ -569,5 +596,5 @@ case "${1:-}" in
   kill)   cmd_kill ;;
   status) cmd_status ;;
   stop)   cmd_stop ;;
-  *) echo "usage: $0 {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_FALLBACK_MODELS RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2; exit 64 ;;
+  *) usage; exit 64 ;;
 esac
