@@ -171,7 +171,9 @@ just mints new ids.
   — and the directory name otherwise) and fights whatever already holds 5442: it fails with "port is
   already allocated" and leaves a `Created` container behind, while the database you need is up and
   healthy. Ask the port instead (that is
-  what `ensure_postgres` does). The regression is covered by
+  what `ensure_postgres` does). It asks again after a compose that reported success, so a start that
+  leaves nothing answering is a loud failure here rather than a 30-second `/readyz` loop in
+  `up.sh` (LOB-104). The regression is covered by
   `packages/storage-postgres/src/postgres-up.test.ts`, which drives every caller with a fake `docker`
   and a real listener, and by a `PG_PORT` pointing at nothing, which reproduces the failure path
   without touching 5442.

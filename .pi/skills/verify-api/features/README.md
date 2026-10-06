@@ -11,7 +11,11 @@ while 5442 was taken, and so did the two scripts that own their own API instance
 `PG_PORT=5499` against a throwaway container of its own rather than stopping the human's database;
 the owner-selection path it exercises is the same code. Evidence: `.verify/evidence/lob-57/`
 (`32-api-drive-final.log` with `32-api-drive-final-observed.json`, `19-sigterm.log`,
-`22-degraded.log`). The earlier session-list run for LOB-93 is in `.verify/evidence/lob-93/`.
+`22-degraded.log`). The earlier session-list run for LOB-93 is in `.verify/evidence/lob-93/`. The `bun drive.ts` half was re-run from the `ralph/LOB-104` worktree on 2026-10-06 (`:9400`, faux, Postgres on 5442): **29/29**, evidence `.verify/evidence/lob-104/verify-api/`.
+`./sigterm.sh` and `./degraded.sh` were not re-run there, so the two statuses below rest on the
+LOB-57 run. The Postgres precondition they and `./up.sh` share changed in LOB-104 (it asks the port
+again after a compose that reported success), and that change is covered by
+`packages/storage-postgres/src/postgres-up.test.ts` rather than by a drive.
 
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
