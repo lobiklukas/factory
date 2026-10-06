@@ -251,6 +251,32 @@ const dockerCalls = (
   dockerRecords(scratch).map(({ argv, dockerHost }) => ({ argv, dockerHost }));
 
 /**
+ * A port nothing is listening on, so `pg_port_open` refuses the connect. The bind is asynchronous,
+ * so the port is read off the `listening` event rather than off `address()` — which is still `null`
+ * synchronously after `listen()` and used to read as "no port could be reserved".
+ */
+const freePort = async (): Promise<number> => {
+  const probe = createServer();
+  probe.listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const address = probe.address();
+  probe.close();
+  if (address === null || typeof address === "string") {
+    throw new Error("could not read the ephemeral port off the probe");
+  }
+  return address.port;
+};
+
+/** A real listener on `port`: "a database is answering", without a container and without 5442. */
+const databaseIsUp = async (port: number): Promise<Server> => {
+  const listener = createServer();
+  listener.listen(port, "127.0.0.1");
+  await once(listener, "listening");
+  listeners.push(listener);
+  return listener;
+};
+
+/**
  * The checkout `ensure_db` exports into: `MAIN_ROOT`, the parent of the repository's common git
  * directory. Derived the way `loop.sh` derives it, because in a ralph worktree it is the main
  * checkout and not the directory this suite runs from.
@@ -277,319 +303,392 @@ const colimaSocket = (scratch: Scratch): string =>
   `unix://${path.join(scratch.home, COLIMA_SOCKET)}`;
 
 describe("the ralph driver's docker_env", () => {
-  it("leaves an explicit DOCKER_HOST alone, and never probes either way", async () => {
-    // The acceptance criterion: with the caller's socket set and `docker info` failing, the value is
-    // unchanged — this driver used to replace it with colima's here, and the skills an agent then
-    // ran disagreed with the caller about which daemon was authoritative. The guard's first clause
-    // short-circuits, so with the fix the probe does not run at all and the fake's answer cannot be
-    // what saved the value: which is why both exit codes are driven and why the no-call assertion,
-    // not the value, is what makes the short-circuit observable. Mutation: delete
-    // `[ -z "${DOCKER_HOST:-}" ] &&` — an `info` call appears, and the `infoExit: 1` half also gets
-    // colima's socket back.
-    //
-    // A child that did not resolve the fake is invisible *here*: with an explicit socket no docker
-    // runs at all, so the value and the empty record agree that nothing happened. That premise is
-    // asserted where it can be seen — `childEnv` refuses to build an environment without the fake,
-    // and the last case in this file proves `command -v docker` resolves it in this very
-    // environment.
-    for (const infoExit of [1, 0]) {
+  it(
+    "leaves an explicit DOCKER_HOST alone, and never probes either way",
+    { timeout: 30_000 },
+    async () => {
+      // The acceptance criterion: with the caller's socket set and `docker info` failing, the value is
+      // unchanged — this driver used to replace it with colima's here, and the skills an agent then
+      // ran disagreed with the caller about which daemon was authoritative. The guard's first clause
+      // short-circuits, so with the fix the probe does not run at all and the fake's answer cannot be
+      // what saved the value: which is why both exit codes are driven and why the no-call assertion,
+      // not the value, is what makes the short-circuit observable. Mutation: delete
+      // `[ -z "${DOCKER_HOST:-}" ] &&` — an `info` call appears, and the `infoExit: 1` half also gets
+      // colima's socket back.
+      //
+      // A child that did not resolve the fake is invisible *here*: with an explicit socket no docker
+      // runs at all, so the value and the empty record agree that nothing happened. That premise is
+      // asserted where it can be seen — `childEnv` refuses to build an environment without the fake,
+      // and the last case in this file proves `command -v docker` resolves it in this very
+      // environment.
+      for (const infoExit of [1, 0]) {
+        const scratch = mkScratch();
+        await colimaIsRunning(scratch);
+        writeFakeDocker(scratch, infoExit);
+        const label = `docker info exits ${String(infoExit)}`;
+
+        expect(afterDockerEnv(scratch, { DOCKER_HOST: EXPLICIT }), label).toBe(
+          EXPLICIT,
+        );
+        expect(dockerCalls(scratch), label).toEqual([]);
+      }
+    },
+  );
+
+  it(
+    "falls back to colima's socket when nothing else answers",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: `[ -z "${DOCKER_HOST:-}" ]` → `[ -n "${DOCKER_HOST:-}" ]`, and an unset host no
+      // longer falls back at all. Deleting the `:-` instead leaves `${DOCKER_HOST}` unbound under the
+      // `set -u` the sourced file sets, which fails the same case.
       const scratch = mkScratch();
       await colimaIsRunning(scratch);
-      writeFakeDocker(scratch, infoExit);
-      const label = `docker info exits ${String(infoExit)}`;
+      writeFakeDocker(scratch, 1);
 
-      expect(afterDockerEnv(scratch, { DOCKER_HOST: EXPLICIT }), label).toBe(
-        EXPLICIT,
+      expect(afterDockerEnv(scratch)).toBe(colimaSocket(scratch));
+      // And it probed with no `DOCKER_HOST` at all: the child's environment really is the unset one
+      // this case claims, not a value inherited from the shell running the suite.
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: UNSET },
+      ]);
+    },
+  );
+
+  it(
+    "treats an empty DOCKER_HOST as unset, the way the skills' helper reads it",
+    { timeout: 30_000 },
+    async () => {
+      // `pg_docker` and `docker_env` both spell the guard `${DOCKER_HOST:-}`, so an empty value falls
+      // back (`postgres-up.test.ts` passes `DOCKER_HOST: ""` to reach its colima case for exactly this
+      // reason). Mutations: `-z` → `-n` — an empty host would then stop falling back and the driver
+      // would export an empty string instead; or a guard spelled as an arity test
+      // (`[ "${DOCKER_HOST+x}" ]`, i.e. "the variable exists"), which stops falling back for an empty
+      // value a caller exported and the two helpers disagreed about.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 1);
+
+      expect(afterDockerEnv(scratch, { DOCKER_HOST: "" })).toBe(
+        colimaSocket(scratch),
       );
-      expect(dockerCalls(scratch), label).toEqual([]);
-    }
-  });
+      // An empty string is set, so the fake records it as empty rather than as `<unset>`.
+      expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: "" }]);
+    },
+  );
 
-  it("falls back to colima's socket when nothing else answers", async () => {
-    // Mutation: `[ -z "${DOCKER_HOST:-}" ]` → `[ -n "${DOCKER_HOST:-}" ]`, and an unset host no
-    // longer falls back at all. Deleting the `:-` instead leaves `${DOCKER_HOST}` unbound under the
-    // `set -u` the sourced file sets, which fails the same case.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
+  it(
+    "exports nothing when the active context answers",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: delete `! docker info >/dev/null 2>&1 &&`, so a reachable docker still triggers the
+      // fallback.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 0);
 
-    expect(afterDockerEnv(scratch)).toBe(colimaSocket(scratch));
-    // And it probed with no `DOCKER_HOST` at all: the child's environment really is the unset one
-    // this case claims, not a value inherited from the shell running the suite.
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: UNSET }]);
-  });
+      expect(afterDockerEnv(scratch)).toBe(UNSET);
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: UNSET },
+      ]);
+    },
+  );
 
-  it("treats an empty DOCKER_HOST as unset, the way the skills' helper reads it", async () => {
-    // `pg_docker` and `docker_env` both spell the guard `${DOCKER_HOST:-}`, so an empty value falls
-    // back (`postgres-up.test.ts` passes `DOCKER_HOST: ""` to reach its colima case for exactly this
-    // reason). Mutations: `-z` → `-n` — an empty host would then stop falling back and the driver
-    // would export an empty string instead; or a guard spelled as an arity test
-    // (`[ "${DOCKER_HOST+x}" ]`, i.e. "the variable exists"), which stops falling back for an empty
-    // value a caller exported and the two helpers disagreed about.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
+  it(
+    "exports nothing when there is no colima socket to fall back to",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: delete `&& [ -S "$HOME/.colima/default/docker.sock" ]`, and the fallback points at a
+      // socket that does not exist — which is worse than the unset value it replaced.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
 
-    expect(afterDockerEnv(scratch, { DOCKER_HOST: "" })).toBe(
-      colimaSocket(scratch),
-    );
-    // An empty string is set, so the fake records it as empty rather than as `<unset>`.
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: "" }]);
-  });
+      expect(afterDockerEnv(scratch)).toBe(UNSET);
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: UNSET },
+      ]);
+    },
+  );
 
-  it("exports nothing when the active context answers", async () => {
-    // Mutation: delete `! docker info >/dev/null 2>&1 &&`, so a reachable docker still triggers the
-    // fallback.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 0);
+  it(
+    "does not mistake a plain file for colima's socket",
+    { timeout: 30_000 },
+    async () => {
+      // A stale `docker.sock` left behind by a colima that was uninstalled is a regular file. `-S`
+      // asks whether a socket accepts there; `-e` asks whether a name exists. Mutation: `-S` → `-e`,
+      // and the driver points every session at a dead socket — the failure the type test exists to
+      // prevent, and a worse one than the unset value it replaced.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const socketPath = path.join(scratch.home, COLIMA_SOCKET);
+      mkdirSync(path.dirname(socketPath), { recursive: true });
+      writeFileSync(socketPath, "");
 
-    expect(afterDockerEnv(scratch)).toBe(UNSET);
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: UNSET }]);
-  });
+      expect(afterDockerEnv(scratch)).toBe(UNSET);
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: UNSET },
+      ]);
+    },
+  );
 
-  it("exports nothing when there is no colima socket to fall back to", async () => {
-    // Mutation: delete `&& [ -S "$HOME/.colima/default/docker.sock" ]`, and the fallback points at a
-    // socket that does not exist — which is worse than the unset value it replaced.
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
+  it(
+    "probes once across two calls, and writes nothing outside the environment",
+    { timeout: 30_000 },
+    async () => {
+      // `ensure_db` calls `docker_env` on every `cmd_run`/`cmd_merge`/`cmd_plan`, and a stale export
+      // from an earlier call must not cost a second probe — the same "resolved once, then kept"
+      // `pg_docker` case in `postgres-up.test.ts` asserts. Mutations: (a) delete
+      // `[ -z "${DOCKER_HOST:-}" ] &&` — the second call probes again (two records) and rewrites a
+      // value it no longer owns; (b) a `docker_env` that leaves something behind rather than only
+      // exporting — a state file in the caller's directory, or any new entry in `$HOME` beside the
+      // colima directory this case made.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 1);
 
-    expect(afterDockerEnv(scratch)).toBe(UNSET);
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: UNSET }]);
-  });
+      const out = bash(
+        scratch,
+        [
+          'source "$LOOP"',
+          "docker_env",
+          'first="${DOCKER_HOST-<unset>}"',
+          "docker_env",
+          'printf "first=%s\\nsecond=%s\\n" "$first" "${DOCKER_HOST-<unset>}"',
+        ].join("\n"),
+      );
 
-  it("does not mistake a plain file for colima's socket", async () => {
-    // A stale `docker.sock` left behind by a colima that was uninstalled is a regular file. `-S`
-    // asks whether a socket accepts there; `-e` asks whether a name exists. Mutation: `-S` → `-e`,
-    // and the driver points every session at a dead socket — the failure the type test exists to
-    // prevent, and a worse one than the unset value it replaced.
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const socketPath = path.join(scratch.home, COLIMA_SOCKET);
-    mkdirSync(path.dirname(socketPath), { recursive: true });
-    writeFileSync(socketPath, "");
+      expect(out).toBe(
+        `first=${colimaSocket(scratch)}\nsecond=${colimaSocket(scratch)}\n`,
+      );
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: UNSET },
+      ]);
+      // Nothing was written for it: the only things in the scratch root are this case's own, and the
+      // `$HOME` the driver looked in holds the colima directory this case made and nothing else.
+      expect(readdirSync(scratch.root).sort()).toEqual([
+        "bin",
+        "docker-calls.txt",
+      ]);
+      expect(readdirSync(scratch.home)).toEqual([".colima"]);
+    },
+  );
 
-    expect(afterDockerEnv(scratch)).toBe(UNSET);
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: UNSET }]);
-  });
+  it(
+    "agrees with the skills' helper about an explicit socket",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the driver's guard: the loop half of this
+      // case then reports colima while `pg_docker` keeps the explicit value — the disagreement the
+      // issue exists to remove, and the one an agent's own drive would act on.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 1);
 
-  it("probes once across two calls, and writes nothing outside the environment", async () => {
-    // `ensure_db` calls `docker_env` on every `cmd_run`/`cmd_merge`/`cmd_plan`, and a stale export
-    // from an earlier call must not cost a second probe — the same "resolved once, then kept"
-    // `pg_docker` case in `postgres-up.test.ts` asserts. Mutations: (a) delete
-    // `[ -z "${DOCKER_HOST:-}" ] &&` — the second call probes again (two records) and rewrites a
-    // value it no longer owns; (b) a `docker_env` that leaves something behind rather than only
-    // exporting — a state file in the caller's directory, or any new entry in `$HOME` beside the
-    // colima directory this case made.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
+      const out = bash(
+        scratch,
+        [
+          'source "$LOOP"; source "$LIB"',
+          "docker_env",
+          'printf "loop=%s\\n" "${DOCKER_HOST-<unset>}"',
+          // The fake's `info` branch exits 1 — a stopped context is the case — and the sourced file
+          // sets `-e`, so the failure is tolerated here and asserted on the value instead.
+          "pg_docker info || true",
+          'printf "skills=%s\\n" "${DOCKER_HOST-<unset>}"',
+        ].join("\n"),
+        { DOCKER_HOST: EXPLICIT },
+      );
 
-    const out = bash(
-      scratch,
-      [
-        'source "$LOOP"',
-        "docker_env",
-        'first="${DOCKER_HOST-<unset>}"',
-        "docker_env",
-        'printf "first=%s\\nsecond=%s\\n" "$first" "${DOCKER_HOST-<unset>}"',
-      ].join("\n"),
-    );
+      expect(out).toBe(`loop=${EXPLICIT}\nskills=${EXPLICIT}\n`);
+      // Two helpers, one socket, and neither of them probed: the only `docker info` the fake saw is
+      // `pg_docker`'s own explicit call, made under the caller's socket.
+      expect(dockerCalls(scratch)).toEqual([
+        { argv: "info", dockerHost: EXPLICIT },
+      ]);
+    },
+  );
 
-    expect(out).toBe(
-      `first=${colimaSocket(scratch)}\nsecond=${colimaSocket(scratch)}\n`,
-    );
-    expect(dockerCalls(scratch)).toEqual([{ argv: "info", dockerHost: UNSET }]);
-    // Nothing was written for it: the only things in the scratch root are this case's own, and the
-    // `$HOME` the driver looked in holds the colima directory this case made and nothing else.
-    expect(readdirSync(scratch.root).sort()).toEqual([
-      "bin",
-      "docker-calls.txt",
-    ]);
-    expect(readdirSync(scratch.home)).toEqual([".colima"]);
-  });
+  it(
+    "hands the explicit socket to every call ensure_db makes, from the checkout that owns them",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the guard: the fallback rewrites the value
+      // before `ensure_db` makes a single docker call, and every call after it records colima.
+      //
+      // The drive uses a port of its own with a real listener rather than 5442: since LOB-108
+      // `ensure_db` probes the port before it asks compose anything, so on 5442 this case would stand
+      // or fall with the shared database instead of with the code under test. The fake's `ps` prints
+      // nothing, which is the no-container-publishes-the-port path and the reason `ensure_db` reaches
+      // for `compose exec` at all.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 1);
+      const port = await freePort();
+      await databaseIsUp(port);
 
-  it("agrees with the skills' helper about an explicit socket", async () => {
-    // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the driver's guard: the loop half of this
-    // case then reports colima while `pg_docker` keeps the explicit value — the disagreement the
-    // issue exists to remove, and the one an agent's own drive would act on.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
-
-    const out = bash(
-      scratch,
-      [
-        'source "$LOOP"; source "$LIB"',
-        "docker_env",
-        'printf "loop=%s\\n" "${DOCKER_HOST-<unset>}"',
-        // The fake's `info` branch exits 1 — a stopped context is the case — and the sourced file
-        // sets `-e`, so the failure is tolerated here and asserted on the value instead.
-        "pg_docker info || true",
-        'printf "skills=%s\\n" "${DOCKER_HOST-<unset>}"',
-      ].join("\n"),
-      { DOCKER_HOST: EXPLICIT },
-    );
-
-    expect(out).toBe(`loop=${EXPLICIT}\nskills=${EXPLICIT}\n`);
-    // Two helpers, one socket, and neither of them probed: the only `docker info` the fake saw is
-    // `pg_docker`'s own explicit call, made under the caller's socket.
-    expect(dockerCalls(scratch)).toEqual([
-      { argv: "info", dockerHost: EXPLICIT },
-    ]);
-  });
-
-  it("hands the explicit socket to every call ensure_db makes, from the checkout that owns them", async () => {
-    // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the guard: the fallback rewrites the value
-    // before `ensure_db` shell's first compose call, and every call after it records colima.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
-
-    bash(scratch, 'source "$LOOP"; ensure_db', {
-      DOCKER_HOST: EXPLICIT,
-      RALPH_DB: "ralph_docker_env_test",
-    });
-
-    const calls = dockerRecords(scratch);
-    // An explicit socket means the driver does not probe at all, so the fake sees three calls: the
-    // start, the existence question and the `createdb` the empty answer leads to. The drive is
-    // worthless if the fake never ran, so the argv is asserted as well as the socket.
-    expect(calls.map((call) => call.argv)).toEqual([
-      "compose up -d --wait postgres",
-      "compose exec -T postgres psql -U factory -d factory -tAc select 1 from pg_database where datname='ralph_docker_env_test'",
-      "compose exec -T postgres createdb -U factory ralph_docker_env_test",
-    ]);
-    expect(calls.map((call) => call.dockerHost)).toEqual([
-      EXPLICIT,
-      EXPLICIT,
-      EXPLICIT,
-    ]);
-    // Every call runs from the checkout `MAIN_ROOT` names, which is what keeps the loop on the main
-    // checkout's compose project instead of one named after wherever the loop was started (LOB-57's
-    // port-2 hazard, at the driver). `compose.yaml` sets no `name:`, so the directory decides.
-    // Mutation: drop the `cd "$MAIN_ROOT" &&` from `ensure_db`'s three calls — the recorded cwd
-    // becomes the caller's.
-    for (const call of calls) {
-      expect(call.cwd, call.argv).toBe(mainRoot());
-    }
-  });
-
-  it("hands the explicit socket to the pi session, in the environment and in the run context", async () => {
-    // The claim the issue is about, one step past `docker_env`: `run_context` writes the socket into
-    // the prompt of every iteration and `session` exports it into the `pi -p` it starts, so a value
-    // rewritten here is what the agent's own verify-* drives act on. Mutation: delete
-    // `[ -z "${DOCKER_HOST:-}" ] &&` — both assertions then read colima's socket, which is exactly
-    // the "the loop and the skills disagree" the issue describes, at the point it is felt.
-    const scratch = mkScratch();
-    await colimaIsRunning(scratch);
-    writeFakeDocker(scratch, 1);
-    const worktree = path.join(scratch.root, "worktree");
-    mkdirSync(path.join(worktree, ".pi/ralph"), { recursive: true });
-    writeFileSync(path.join(worktree, ".pi/ralph/work.prompt.md"), "PROMPT\n");
-    mkdirSync(path.join(worktree, ".ralph/logs"), { recursive: true });
-    mkdirSync(path.join(worktree, ".ralph/sessions"), { recursive: true });
-    // A `pi` that records what it was handed: the proof is the agent's own view of the socket, and
-    // no iteration is started.
-    const piLog = path.join(scratch.root, "pi-calls.txt");
-    writeFileSync(
-      path.join(scratch.bin, "pi"),
-      [
-        "#!/usr/bin/env bash",
-        `printf 'docker_host=%s\\n' "\${DOCKER_HOST-${UNSET}}" >> ${JSON.stringify(piLog)}`,
-        `printf 'argv=%s\\n' "$*" >> ${JSON.stringify(piLog)}`,
-        "exit 0",
-        "",
-      ].join("\n"),
-    );
-    chmodSync(path.join(scratch.bin, "pi"), 0o755);
-    // The premise the case rests on, asserted the way `childEnv` asserts the `docker` shim: this
-    // machine has a real `pi` on `PATH`, so a case whose shim went missing would launch the agent
-    // CLI, its model provider and its MCP servers, and only then fail here.
-    expect(readdirSync(scratch.bin)).toContain("pi");
-
-    const out = bash(scratch, 'source "$LOOP"; docker_env; session 1 work', {
-      DOCKER_HOST: EXPLICIT,
-      RALPH_WORKTREE: worktree,
-      RALPH_FALLBACK_MODELS: "",
-      RALPH_TIMEOUT: "5",
-    });
-
-    // No control line, one model, clean exit: the tag `cmd_run` would count as a failed iteration.
-    expect(out.trim()).toBe("NONE");
-    const record = readFileSync(piLog, "utf8");
-    expect(record).toContain(`docker_host=${EXPLICIT}\n`);
-    expect(record).toContain(`- DOCKER_HOST=${EXPLICIT}\n`);
-    expect(record).not.toContain("colima");
-    // The file's own rule, applied here too: an explicit socket means `docker_env` does not probe,
-    // so the fake saw nothing. Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` — a probe appears,
-    // carrying the very socket the case claims the driver never looked away from.
-    expect(dockerCalls(scratch)).toEqual([]);
-  });
-
-  it("still dispatches when it is executed, in the shape each caller uses", async () => {
-    // The guard has to be exact: `return 0` when the file is sourced, and the dispatch when it is
-    // run. Executed, `$0` and `BASH_SOURCE[0]` are the same string — as given, absolute or relative
-    // — including under the argv[0] `cmd_start` re-execs it with (`exec { "bash" } "ralph-loop",
-    // @ARGV`, modelled here with bash's own `exec -a`, which execs the same argv shape without
-    // needing perl to be on `PATH` in the gate).
-    // Mutation: invert the guard (`!=`) — every execution below then exits 0 without printing the
-    // usage, and `bun run ralph` becomes a silent no-op.
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const shapes: ReadonlyArray<readonly [string, readonly string[]]> = [
-      // `package.json`'s `"ralph": "bash .pi/ralph/loop.sh"`, from the root.
-      [
-        "relative, as the package script runs it",
-        [path.relative(REPO_ROOT, LOOP)],
-      ],
-      ["absolute", [LOOP]],
-      [
-        "under a substituted argv[0], as cmd_start re-execs it",
-        ["-c", 'exec -a ralph-loop bash "$LOOP"'],
-      ],
-    ];
-
-    for (const [label, args] of shapes) {
-      const run = spawnSync("bash", [...args], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        env: childEnv(scratch, {}),
-        timeout: 30_000,
+      bash(scratch, 'source "$LOOP"; ensure_db', {
+        DOCKER_HOST: EXPLICIT,
+        RALPH_DB: "ralph_docker_env_test",
+        PG_PORT: String(port),
       });
-      expect(run.status, `${label}: ${run.stderr}`).toBe(64);
-      expect(run.stderr, label).toContain("usage:");
-    }
-    // Dispatched, the driver never reached a docker call of its own: the usage line is the last
-    // thing the file does.
-    expect(dockerCalls(scratch)).toEqual([]);
-  });
 
-  it("defines its functions and runs no subcommand when it is sourced", async () => {
-    // Mutation: delete the `[ "${BASH_SOURCE[0]}" = "$0" ] || return 0` line (the sourced half then
-    // dispatches `cmd_status`, which dies on the missing worktree and takes the sourcing shell with
-    // it, so `rc=0` never prints).
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
+      const calls = dockerRecords(scratch);
+      // An explicit socket means `docker_env` short-circuits and never probes (LOB-105), so the fake
+      // sees three calls: the port-owner lookup, the existence question and the `createdb` the empty
+      // answer leads to. No `compose up` — the port already answers, which is LOB-108's whole claim.
+      // The drive is worthless if the fake never ran, so the argv is asserted as well as the socket.
+      expect(calls.map((call) => call.argv)).toEqual([
+        `ps --filter publish=${String(port)} --format {{.Names}}`,
+        "compose exec -T postgres psql -U factory -d factory -tAc select 1 from pg_database where datname='ralph_docker_env_test'",
+        "compose exec -T postgres createdb -U factory ralph_docker_env_test",
+      ]);
+      expect(calls.map((call) => call.dockerHost)).toEqual([
+        EXPLICIT,
+        EXPLICIT,
+        EXPLICIT,
+      ]);
+      // The compose calls run from the checkout `MAIN_ROOT` names, which is what keeps the loop on the
+      // main checkout's compose project instead of one named after wherever the loop was started
+      // (LOB-57's port-2 hazard, at the driver). `compose.yaml` sets no `name:`, so the directory
+      // decides. Mutation: drop the `cd "$PG_ROOT" &&` inside `pg_compose` — the recorded cwd becomes
+      // the caller's.
+      for (const call of calls.filter((entry) =>
+        entry.argv.startsWith("compose"),
+      )) {
+        expect(call.cwd, call.argv).toBe(mainRoot());
+      }
+    },
+  );
 
-    const run = bashResult(
-      scratch,
-      [
-        'source "$LOOP" status',
-        'printf "rc=%s\\n" "$?"',
-        "declare -F docker_env cmd_status cmd_run",
-      ].join("\n"),
-    );
+  it(
+    "hands the explicit socket to the pi session, in the environment and in the run context",
+    { timeout: 30_000 },
+    async () => {
+      // The claim the issue is about, one step past `docker_env`: `run_context` writes the socket into
+      // the prompt of every iteration and `session` exports it into the `pi -p` it starts, so a value
+      // rewritten here is what the agent's own verify-* drives act on. Mutation: delete
+      // `[ -z "${DOCKER_HOST:-}" ] &&` — both assertions then read colima's socket, which is exactly
+      // the "the loop and the skills disagree" the issue describes, at the point it is felt.
+      const scratch = mkScratch();
+      await colimaIsRunning(scratch);
+      writeFakeDocker(scratch, 1);
+      const worktree = path.join(scratch.root, "worktree");
+      mkdirSync(path.join(worktree, ".pi/ralph"), { recursive: true });
+      writeFileSync(
+        path.join(worktree, ".pi/ralph/work.prompt.md"),
+        "PROMPT\n",
+      );
+      mkdirSync(path.join(worktree, ".ralph/logs"), { recursive: true });
+      mkdirSync(path.join(worktree, ".ralph/sessions"), { recursive: true });
+      // A `pi` that records what it was handed: the proof is the agent's own view of the socket, and
+      // no iteration is started.
+      const piLog = path.join(scratch.root, "pi-calls.txt");
+      writeFileSync(
+        path.join(scratch.bin, "pi"),
+        [
+          "#!/usr/bin/env bash",
+          `printf 'docker_host=%s\\n' "\${DOCKER_HOST-${UNSET}}" >> ${JSON.stringify(piLog)}`,
+          `printf 'argv=%s\\n' "$*" >> ${JSON.stringify(piLog)}`,
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(path.join(scratch.bin, "pi"), 0o755);
+      // The premise the case rests on, asserted the way `childEnv` asserts the `docker` shim: this
+      // machine has a real `pi` on `PATH`, so a case whose shim went missing would launch the agent
+      // CLI, its model provider and its MCP servers, and only then fail here.
+      expect(readdirSync(scratch.bin)).toContain("pi");
 
-    expect(run.stderr, run.stdout).toBe("");
-    const lines = run.stdout.trimEnd().split("\n");
-    expect(lines[0]).toBe("rc=0");
-    expect(lines.slice(1).sort()).toEqual([
-      "cmd_run",
-      "cmd_status",
-      "docker_env",
-    ]);
-  });
+      const out = bash(scratch, 'source "$LOOP"; docker_env; session 1 work', {
+        DOCKER_HOST: EXPLICIT,
+        RALPH_WORKTREE: worktree,
+        RALPH_FALLBACK_MODELS: "",
+        RALPH_TIMEOUT: "5",
+      });
+
+      // No control line, one model, clean exit: the tag `cmd_run` would count as a failed iteration.
+      expect(out.trim()).toBe("NONE");
+      const record = readFileSync(piLog, "utf8");
+      expect(record).toContain(`docker_host=${EXPLICIT}\n`);
+      expect(record).toContain(`- DOCKER_HOST=${EXPLICIT}\n`);
+      expect(record).not.toContain("colima");
+      // The file's own rule, applied here too: an explicit socket means `docker_env` does not probe,
+      // so the fake saw nothing. Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` — a probe appears,
+      // carrying the very socket the case claims the driver never looked away from.
+      expect(dockerCalls(scratch)).toEqual([]);
+    },
+  );
+
+  it(
+    "still dispatches when it is executed, in the shape each caller uses",
+    { timeout: 30_000 },
+    async () => {
+      // The guard has to be exact: `return 0` when the file is sourced, and the dispatch when it is
+      // run. Executed, `$0` and `BASH_SOURCE[0]` are the same string — as given, absolute or relative
+      // — including under the argv[0] `cmd_start` re-execs it with (`exec { "bash" } "ralph-loop",
+      // @ARGV`, modelled here with bash's own `exec -a`, which execs the same argv shape without
+      // needing perl to be on `PATH` in the gate).
+      // Mutation: invert the guard (`!=`) — every execution below then exits 0 without printing the
+      // usage, and `bun run ralph` becomes a silent no-op.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const shapes: ReadonlyArray<readonly [string, readonly string[]]> = [
+        // `package.json`'s `"ralph": "bash .pi/ralph/loop.sh"`, from the root.
+        [
+          "relative, as the package script runs it",
+          [path.relative(REPO_ROOT, LOOP)],
+        ],
+        ["absolute", [LOOP]],
+        [
+          "under a substituted argv[0], as cmd_start re-execs it",
+          ["-c", 'exec -a ralph-loop bash "$LOOP"'],
+        ],
+      ];
+
+      for (const [label, args] of shapes) {
+        const run = spawnSync("bash", [...args], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: childEnv(scratch, {}),
+          timeout: 30_000,
+        });
+        expect(run.status, `${label}: ${run.stderr}`).toBe(64);
+        expect(run.stderr, label).toContain("usage:");
+      }
+      // Dispatched, the driver never reached a docker call of its own: the usage line is the last
+      // thing the file does.
+      expect(dockerCalls(scratch)).toEqual([]);
+    },
+  );
+
+  it(
+    "defines its functions and runs no subcommand when it is sourced",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation: delete the `[ "${BASH_SOURCE[0]}" = "$0" ] || return 0` line (the sourced half then
+      // dispatches `cmd_status`, which dies on the missing worktree and takes the sourcing shell with
+      // it, so `rc=0` never prints).
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+
+      const run = bashResult(
+        scratch,
+        [
+          'source "$LOOP" status',
+          'printf "rc=%s\\n" "$?"',
+          "declare -F docker_env cmd_status cmd_run",
+        ].join("\n"),
+      );
+
+      expect(run.stderr, run.stdout).toBe("");
+      const lines = run.stdout.trimEnd().split("\n");
+      expect(lines[0]).toBe("rc=0");
+      expect(lines.slice(1).sort()).toEqual([
+        "cmd_run",
+        "cmd_status",
+        "docker_env",
+      ]);
+    },
+  );
 
   it("never names the CLI by a path, and resolves it to the fake in every case's environment", () => {
     // The false green `docs/testing-third-parties.md` names: a call by absolute path bypasses the
