@@ -165,29 +165,23 @@ function rowPins(row: string): string[] {
  * Every version named in a cell that mentions the package, range-qualified examples excluded.
  *
  * The row states the pin in two shapes: `mcp-remote@0.14.3` in the strategy cell, and, in the sources
- * cell, a link whose *URL* is the package name — `[\`mcp-remote\` registry](https://registry.
-npmjs.org/mcp-remote) (0.14.3, MIT, 2026-09-21)` — where the version follows the closing paren. The
- * first is what `rowPins` reads; this reader is the one that also reads the second, and the one the
- * bump procedure's "two places" names. The system cell deliberately names no version: it says the
- * server is reached as a pinned `npx -y mcp-remote`, so it cannot go stale on a bump.
+ * cell, a version in parentheses after a link whose URL is the package name — the shipped row writes
+ * `(0.14.3, MIT, 2026-09-21)` after the `mcp-remote` registry link. The first is what `rowPins`
+ * reads; this reader is the one that also reads the second, and the one the bump procedure's "two
+ * places" names. The system cell deliberately names no version, so it cannot go stale on a bump.
  *
- * Cell-scoped rather than window-scoped is the whole point. A distance rule has to guess how close a
- * version has to sit to belong to a mention, and the guess has two failure modes that a verifier
- * measured on 2026-10-06 (`.verify/evidence/lob-126-verifier/summary.md` §2 hole 3): bump the pin
- * everywhere the bump procedure names and leave a stale number 80+ characters further along the
- * sources cell, and the row names two versions while every distance-scoped reader sees one; move a
- * citation *before* its link and the distance is zero, so it drifts with no window to catch it. A
- * cell is the unit markdown already gives the row, it needs no constant, and a cell that talks about
- * the package may name exactly one version: the pin.
+ * Cell-scoped rather than window-scoped is the point: a distance rule has to guess how close a
+ * version must sit to belong to a mention, and both guesses are wrong. A stale number further along
+ * the sources cell than the guess is missed, and a citation moved *before* its link sits at distance
+ * zero, so it drifts with no window to catch it. A cell is the unit markdown already gives the row,
+ * and a cell that talks about the package may name exactly one version: the pin.
  *
- * The cost of the wider rule is a false red a distance rule would miss: a cell that names both this
+ * The cost of the wider rule is a false red a distance rule would miss: a cell naming both this
  * package and another package's version reads both. The shipped row does not (the tool cell names
- * `@modelcontextprotocol/server` 2.3.1 and no `mcp-remote`), and a row that did would be telling a
- * reader the two versions are related anyway. `VERSION` is bounded to three components of at most
- * three digits each for the same reason: the sources cell carries a date, and a dotted one
- * (`2026.09.21`) would otherwise read as a version. A version with a four-digit component would not
- * be read; this package's `0.x` line has none, and `EXACT_VERSION` is the reader that owns the
- * specifier's shape.
+ * `@modelcontextprotocol/server` 2.3.1 and no `mcp-remote`). `VERSION` is bounded to three components
+ * of at most three digits each so the sources cell's date cannot read as a version — a dotted
+ * `2026.09.21` would otherwise count, and a version with a four-digit component would not be read;
+ * this package's `0.x` line has none.
  */
 function cellVersions(row: string): string[] {
   const out: string[] = [];
@@ -214,7 +208,7 @@ const CONFIGURED = specifier(config(read(MCP_CONFIG)), SERVER);
  * That pin as a plain string, or `""` when the config pins nothing.
  *
  * Deliberately not a throw: a config with no pin is a *result to assert on*, so the case that owns
- * that failure can name it and the five other cases still run and report their own verdicts. A
+ * that failure can name it and the other cases still run and report their own verdicts. A
  * module-level throw would abort the file and tell a reader only that something, somewhere, is
  * wrong.
  */
@@ -229,7 +223,9 @@ describe("the mcp-remote pin", () => {
       CONFIGURED.kind,
       `${MCP_CONFIG}'s ${SERVER} server must ask npx for an exact ${PACKAGE} version`,
     ).toBe("pinned");
-    expect(PIN).toMatch(EXACT_VERSION);
+    // No second assertion on `PIN`'s shape: `specifier` only answers `pinned` after `EXACT_VERSION`
+    // has matched, so one here would be dominated by the line above. The boundary itself is the
+    // refusal case below, which every float in this file's list reddens.
   });
 
   // Mutation checked: `args` reordered to `["-y", "https://mcp.linear.app/mcp", "mcp-remote@0.14.3"]`,
@@ -278,8 +274,9 @@ describe("the mcp-remote pin", () => {
     const link = path.join(REPO_ROOT, PI_MCP_CONFIG);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe(PI_MCP_TARGET);
-    // And the link is live: the text pi reads at the project path is the text this file just pinned.
-    expect(read(PI_MCP_CONFIG)).toBe(read(MCP_CONFIG));
+    // Those two lines also settle that the link is live: reading the project path resolves through
+    // the target asserted above, so the text pi reads is the text this file just pinned. Asserting
+    // the read as well would be dominated by them and could never be the line that fails.
   });
 
   // Mutation checked: making `specifier` accept any `mcp-remote@`-prefixed argument, which would
@@ -350,8 +347,9 @@ describe("the mcp-remote pin", () => {
 
   // Mutation checked: widening `rowPins` to any `@version` in the row — the row also names
   // `@modelcontextprotocol/server` 2.3.1, so a rule that does not tie the version to the package
-  // reads the wrong one — or narrowing its trailing-delimiter class so a pin written outside
-  // backticks at the end of a sentence reads as `0.14.3.`.
+  // reads the wrong one — or dropping the `TRAILING_PUNCTUATION` strip, so a pin written outside
+  // backticks at the end of a sentence reads as `0.14.3.`. (`ROW_PIN`'s own delimiter class is not
+  // exercised here: every input below is stopped by a backtick or a space first.)
   it("reads the pinned specifier out of the row, and no other package's version", () => {
     expect(rowPins("| x | pins `mcp-remote@0.14.3` (MIT) |")).toEqual([
       "0.14.3",
@@ -377,8 +375,7 @@ describe("the mcp-remote pin", () => {
   // Mutation checked: bumping `.mcp.json` and both places the bump procedure names to `0.15.0`
   // while a stale `0.14.3` stays in the sources cell's prose, further along that cell than any
   // distance rule would look — measured green against a window-scoped reader, which is why this one
-  // is cell-scoped (`.verify/evidence/lob-126-verifier/summary.md` §2 hole 3) — or moving the
-  // citation *before* its link, where the distance is zero.
+  // is cell-scoped — or moving the citation *before* its link, where the distance is zero.
   it("names no other version in a cell that talks about the package", () => {
     const row = linearRow(read(THIRD_PARTIES));
     expect(
