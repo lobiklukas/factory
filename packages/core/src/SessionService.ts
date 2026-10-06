@@ -89,10 +89,11 @@ export const MAX_MESSAGE_CHARS = 100_000;
 /** How often idle owners are swept, when sweeping is at all. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
-/** Page size for `listSessions` when the caller does not choose one, and the largest we serve. */
+/** Page size for `listSessions` when the caller does not choose one. */
 const DEFAULT_PAGE_SIZE = 25;
-/** Exported for the list tests: the cap is part of the service's contract, so a case that
- * straddles it has to read the real value rather than a copy. */
+/** Largest page `listSessions` will serve, however large a limit the caller asks for. Exported for
+ * the list tests: the cap is part of the service's contract, so a case that straddles it has to
+ * read the real value rather than a copy. */
 export const MAX_PAGE_SIZE = 100;
 
 export type SessionServiceShape = {

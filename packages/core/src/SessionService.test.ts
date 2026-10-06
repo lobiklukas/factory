@@ -494,6 +494,19 @@ describe("session list", () => {
     // Cost is one statement per page whatever the row count: never a fold per session (R6).
     for (const page of result.pages) expect(page.statements).toBe(1);
 
+    // The wire shape of `lastActivityAt` is the one thing this issue promised not to change, and
+    // nothing else here would notice if it did: the ordering key above and the cursor the
+    // same-millisecond cases compare are both derived from it, so a switch to `US` precision would
+    // leave every assertion in this file green while the dashboard's timestamps grew six digits.
+    // `packages/domain/src/Session.ts` types it as a general `Timestamp`, so the millisecond
+    // rendering is this file's contract to hold.
+    for (const entry of entries) {
+      expect(
+        entry.lastActivityAt,
+        `rendered as ${entry.lastActivityAt}: the wire shape is millisecond-precise and the cursor carries the exact instant separately`,
+      ).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+
     // The three sessions this test made are all there, in activity order.
     const mine = entries
       .map((entry) => entry.id)
@@ -511,10 +524,9 @@ describe("session list", () => {
    * group failed `(last_activity_at, id) < (cursor.at, cursor.id)` and the page ended early.
    */
   // Every case below pages over the *whole* shared table to prove the group is not dropped in
-  // passing, so each one carries a budget: the shared table is large enough that a full walk costs
-  // more than vitest's 5 s default, and three of these cases timed out at the default while they
-  // were being written. The budget is a ceiling, not a target — a walk costs a few milliseconds
-  // when the table is small. The durable fix is LOB-96 (a database per run).
+  // passing, so each one carries a budget, and their cost is the table's rather than the group's.
+  // The durable fix is LOB-96 (a database per run); the budget describe at the end of this file
+  // carries the measurement and guards the declaration.
   it(
     "returns every row of a same-millisecond group exactly once",
     { timeout: 60_000 },
@@ -527,11 +539,9 @@ describe("session list", () => {
       const result = await program(
         withGroup(
           Effect.gen(function* () {
-            // One instant for the whole group, with non-zero microseconds, and newer than anything
-            // the shared table holds. Both halves matter: a timestamp whose millisecond rendering
-            // is already lossless would not trigger the defect, and a group older than the table
-            // would be walked past instead of paged through.
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            // One instant for the whole group, newer than anything the shared table holds and
+            // with non-zero microseconds — `newestInstant` says why both halves are load-bearing.
+            yield* seedGroup(GROUP, yield* newestInstant);
             const visible = yield* listableRows;
             // A four-row page against a twelve-row group: the page boundaries fall after the
             // group's 4th, 8th and 12th row, and the first two are inside it. A millisecond-
@@ -610,12 +620,52 @@ describe("session list", () => {
    * only the database can place: `min(last_activity_at) - 1 hour` is however old the shared table
    * already is, and a fixed year would stop being the end the day something older is written.
    */
+  /**
+   * An instant newer than anything the shared table holds, with a non-zero sub-millisecond part.
+   *
+   * Derived from `max(last_activity_at)` rather than fixed, for two reasons that are both
+   * load-bearing. A group has to be at the *head* of the ordering for the cases that assert it is,
+   * and a hard-coded year stops being newer on the first day it passes — a red the fix did not
+   * cause and cannot explain. And the sub-millisecond part must not be inherited from `max`, which
+   * in a shared table this old is usually millisecond-aligned: an aligned instant renders losslessly
+   * at `MS`, so the truncated cursor would drop nothing and the case would pass against the code it
+   * exists to catch. Truncating to the second and adding a fixed `.123456` makes the loss
+   * deterministic whatever the table holds.
+   */
+  const newestInstant = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const [row] = yield* sql<{ at: string }>`
+      SELECT to_char(
+        (
+          date_trunc(
+            'seconds',
+            COALESCE(max(last_activity_at), now())
+          ) + interval '1 hour 0.123456 seconds'
+        ) AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+      ) AS at
+      FROM session_activity
+    `;
+    if (row === undefined) throw new Error("unreachable");
+    return row.at;
+  });
+
+  /**
+   * The same instant with its sub-millisecond part zeroed: newer than the shared table, and
+   * rendered losslessly at `MS`. The one case that needs this is the control for the other eight —
+   * see its doc comment.
+   */
+  const alignedInstant = Effect.map(newestInstant, (at) =>
+    at.replace(/(\.\d{3})\d+(Z)$/, "$1$2"),
+  );
+
   const seedGroup = (n: number, at: string) =>
     Effect.gen(function* () {
       yield* deleteSeeded;
       const sql = yield* SqlClient;
-      // The prefix is cast, not quoted: as a bare parameter Postgres cannot infer a type for
-      // `$1 || lpad(…)` and rejects the statement with 42P18 before it runs.
+      // The prefix is cast because a bare parameter makes the concatenation's type come from the
+      // parameter rather than from `lpad`, and the driver sends an untyped one. The cast states it
+      // instead of leaving it to inference; nothing here depends on inference failing.
       yield* sql`
         INSERT INTO sessions (id, title)
         SELECT ${GROUP_PREFIX}::text || lpad(n::text, 24, '0'), 'same millisecond ' || n
@@ -704,12 +754,18 @@ describe("session list", () => {
    *
    * This is a control, not a boundary case, and it passes against the unfixed code: the whole
    * group fits in the first page, so a millisecond-truncated cursor skips *past* the group instead
-   * of splitting it. What it pins is the ordinary path — the group is the head of page 1, and
-   * every row below it still comes back — so a fix that special-cased same-millisecond groups and
-   * broke the walk fails here rather than in the two cases below.
+   * of splitting it. What it pins is the ordinary path and the last page — the group is the head of
+   * page 1, every row below it still comes back, and the walk ends because the cursor ran out
+   * rather than because a boundary truncated it. A fix that special-cased same-millisecond groups
+   * and broke the walk, or that minted a cursor past the end of the table, fails here rather than
+   * in the two cases below.
+   *
+   * The name says what it pins rather than what the fix does: it deliberately does *not* pin cursor
+   * precision, because a group inside one page cannot expose it. The cases that do are the ones
+   * that page a group in two.
    */
   it(
-    "mints the cursor from the exact instant when the group is exactly one page",
+    "returns a same-millisecond group that is exactly one page, and mints no cursor past the end",
     { timeout: 60_000 },
     async () => {
       const result = await program(
@@ -720,7 +776,7 @@ describe("session list", () => {
             const LIMIT = 4;
             // Newer than anything the shared table holds, with non-zero microseconds: a timestamp
             // whose millisecond rendering is already lossless would not trigger the bug.
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            yield* seedGroup(GROUP, yield* newestInstant);
             // Older than the group, and enough of them that the table does not end with the group —
             // otherwise `rows.length > limit` is false and there is no cursor to mint at all.
             yield* sql`
@@ -752,6 +808,12 @@ describe("session list", () => {
       // The whole group, exactly once, in the keyset's own order.
       expect(group.map((entry) => entry.id)).toEqual(
         groupIdsDescending(result.GROUP),
+      );
+      // Exactly once across the whole walk, not only for the group: `toBeGreaterThanOrEqual` below
+      // tolerates a duplicate, so a keyset that re-served a row on a boundary could pass every
+      // other assertion here while the list handed the dashboard the same session twice.
+      expect(new Set(entries.map((entry) => entry.id)).size).toBe(
+        entries.length,
       );
       // The group is the newest thing in the table, so it is the head of the first page: it cannot
       // be dropped by a boundary below it.
@@ -785,7 +847,7 @@ describe("session list", () => {
             const sessions = yield* SessionService;
             const sql = yield* SqlClient;
             const GROUP = 5;
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            yield* seedGroup(GROUP, yield* newestInstant);
             yield* sql`
             INSERT INTO sessions (id, title)
             SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
@@ -853,7 +915,7 @@ describe("session list", () => {
           Effect.gen(function* () {
             const sql = yield* SqlClient;
             const GROUP = 3;
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            yield* seedGroup(GROUP, yield* newestInstant);
             yield* sql`
             INSERT INTO sessions (id, title)
             SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
@@ -999,7 +1061,7 @@ describe("session list", () => {
             const sessions = yield* SessionService;
             const GROUP = 6;
             const LIMIT = 4;
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            yield* seedGroup(GROUP, yield* newestInstant);
 
             const first = yield* sessions.list({ limit: LIMIT });
             const boundary = first.sessions.at(-1);
@@ -1076,7 +1138,7 @@ describe("session list", () => {
           Effect.gen(function* () {
             const GROUP = 2;
             const LIMIT = 1;
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            yield* seedGroup(GROUP, yield* newestInstant);
             const visible = yield* listableRows;
             const { pages, exhausted } = yield* pageAll(
               LIMIT,
@@ -1124,9 +1186,11 @@ describe("session list", () => {
           Effect.gen(function* () {
             const GROUP = 6;
             const LIMIT = 4;
-            // `.123000`: the millisecond rendering *is* the value, so the truncated cursor an
-            // older build minted was already exact and the bug had nothing to bite on.
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123000Z");
+            // The one case that needs an aligned instant, so it cannot use `newestInstant`: the
+            // millisecond rendering is *the* value, the truncated cursor an older build minted was
+            // already exact, and the bug had nothing to bite on. `newestInstant` pins `.123456`
+            // precisely so the other eight cases cannot inherit that alignment.
+            yield* seedGroup(GROUP, yield* alignedInstant);
             const visible = yield* listableRows;
             const { pages, exhausted } = yield* pageAll(
               LIMIT,
@@ -1182,13 +1246,11 @@ describe("session list", () => {
         withGroup(
           Effect.gen(function* () {
             const sessions = yield* SessionService;
-            // A literal, not `MAX_PAGE_SIZE + 3`: the seed's `generate_series(0, n - 1)`
-            // gives Postgres nothing to infer a type for at `$1`, so it resolves as `integer` from
-            // the `0` literal and a double-precision parameter has no `generate_series` overload to
-            // land on (42883). `LIMIT ${limit + 1}` below is interpolated from a `number` too and
-            // is fine, because `LIMIT` is a typed position.
-            const GROUP = 103;
-            yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+            // Read off the cap rather than written as a literal, so the group stays larger than it
+            // when the cap moves: a group that fit inside `MAX_PAGE_SIZE` would make the boundary
+            // fall after the group and stop straddling it.
+            const GROUP = MAX_PAGE_SIZE + 3;
+            yield* seedGroup(GROUP, yield* newestInstant);
             const visible = yield* listableRows;
             const { pages, exhausted } = yield* pageAll(
               MAX_PAGE_SIZE,
@@ -1444,12 +1506,17 @@ describe("the rebuild case's budget", () => {
  * The same-millisecond group's budgets, guarded the same way (LOB-95).
  *
  * These nine cases page over the *whole* shared table — that is how each one proves its group was
- * not dropped in passing — so their cost is the table's, not the case's. The shared table is large
- * enough that a full walk costs more than vitest's 5 s default, and three of these cases timed out
- * at that default while they were being written. Declaring the budget is load-bearing rather than
- * decorative, and dropping it is silent until the table is large enough, which is exactly when it
- * matters. The durable fix is LOB-96: a database per run, at which point this describe goes the
- * way the rebuild one says it goes.
+ * not dropped in passing — so their cost is the table's, not the case's. Declaring the budget is
+ * load-bearing rather than decorative, and dropping it is silent until the table is large enough,
+ * which is exactly when it matters.
+ *
+ * The budget is sized against a table that only grows. Measured on the run-context database at
+ * 2 609 `session_activity` rows: the file total 50.9 s, the two `limit: 1` cases 8.4 s and 8.3 s,
+ * so a page statement costs ~3.2 ms and the 60 s ceiling holds to roughly 18 000 rows. That growth
+ * is not this diff's — every gate run leaves ~15 real sessions behind (the create and rebuild cases
+ * dispose the runtime without deleting their rows), so each run widens the cost of all nine. The
+ * durable fix is LOB-96: a database per run, at which point this describe goes the way the rebuild
+ * one says it goes.
  *
  * Mutation checked: replacing one case's `{ timeout: 60_000 }` with nothing — the guard below goes
  * red in a few ms, with no database involved. The control that keeps it from passing on a reader
@@ -1457,7 +1524,7 @@ describe("the rebuild case's budget", () => {
  */
 const SAME_MILLISECOND_CASES = [
   "returns every row of a same-millisecond group exactly once",
-  "mints the cursor from the exact instant when the group is exactly one page",
+  "returns a same-millisecond group that is exactly one page, and mints no cursor past the end",
   "returns a same-millisecond group one row at a time",
   "returns a same-millisecond group that sits inside a larger page",
   "returns a same-millisecond group at the end of the ordering",

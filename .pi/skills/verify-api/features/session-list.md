@@ -39,9 +39,12 @@ caller yet (it is the recovery path, driven by its test). Sessions created befor
 rebuild runs. **A page boundary whose row shares its millisecond with a row that sorts after it no
 longer drops that row:** as of LOB-95 (2026-10-06) the cursor is minted from a second, exact column
 (`to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`), so the keyset
-comparison runs at the precision the value is stored with, and the nine cases in
-`packages/core/src/SessionService.test.ts` that seed same-millisecond groups all come back whole —
-including one paged a row at a time, so every boundary inside a group is covered. Before that fix
+comparison runs at the precision the value is stored with. Eight of the nine cases in
+`packages/core/src/SessionService.test.ts` that seed same-millisecond groups page with the
+service's own cursor and bring the whole group back — including one paged a row at a time, so every
+boundary inside a group is covered. The ninth is the exception and asserts the opposite: it pins
+what a cursor an _older_ build minted still costs, so that a future hardening of `parseCursor`
+reddens it rather than quietly changing what the list returns. Before that fix
 the cursor carried the millisecond-rendered `lastActivityAt` while the column was `TIMESTAMPTZ`, so
 the tie on the boundary was skipped by the next page; a probe reproduced the skip on 2026-10-05 (two
 sessions at the same `…00.123456Z`: the lower id never came back), and the recipe and output are in
@@ -49,9 +52,10 @@ sessions at the same `…00.123456Z`: the lower id never came back), and the rec
 
 What is still millisecond-precise is the _displayed_ `lastActivityAt` (unchanged, and unchanged on
 purpose: it is the wire shape the schema promises), so the same truncation has a second
-manifestation the suite does not survive: the ordering assertion compares the _rendered_
+manifestation the suite can still hit: the ordering assertion compares the _rendered_
 `lastActivityAt`, so two rows that share a millisecond while differing in microseconds order the list
-differently than the assertion expects. That one reproduces deterministically (two seeded rows at
+differently than the assertion expects — it goes red when the two orders disagree, which a shared
+row landing in a filler's millisecond can arrange. That one reproduces deterministically (two seeded rows at
 `…00.100456Z` and `…00.100Z`) and the pre-LOB-93 test file fails it identically
 (`recheck-2c-ms-ordering-pair-control.log`); it was also seen live on `factory_ralph`, where a filler
 row and a pre-existing row rendered to the same millisecond (`recheck-1-mutation-6-tail-truncation.log`,
