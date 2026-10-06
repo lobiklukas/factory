@@ -43,9 +43,9 @@ children exist but the plan lacks their rows, only add the rows.
      strategy (`docs/testing-third-parties.md`). Add "Part N of M of LOB-p" as the first line.
      Do not create the children if an identical title already exists under the parent.
 4. On the parent: add label `split-parent` (create the label once: color `#BDBDBD`, description
-   "Container for split children; Done when all children are Done"); `save_comment` listing the children
-   and the order; **leave its status unchanged** (it stays open as the container, and other issues stay
-   `blockedBy` it until it is Done).
+   "Container for split children; Done when all children are Done"); `save_comment({ issueId, body })`
+   listing the children and the order; **leave its status unchanged** (it stays open as the container,
+   and other issues stay `blockedBy` it until it is Done).
 5. `.ralph/plan.md`: set the parent's row state to `split` and its notes to "children: LOB-a, LOB-b, ...".
    Insert a row for each child immediately after the parent: state `ready` (or `needs-spec` if you could
    not write checkable acceptance), `blocked-by` as set above (the parent's row blockers expressed as
