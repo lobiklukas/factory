@@ -1,6 +1,6 @@
 # Ralph loop
 
-An autonomous backlog loop for this repo: a **fresh `pi -p` session per iteration**, **one Linear
+An autonomous backlog loop for this repo: a **fresh `pi -p` session per iteration** (or `opencode run`, see below), **one Linear
 issue per iteration**, state kept outside the model (Linear, `.ralph/`, git). Every agent runs on
 `opencode-go/longcat-2.5-preview-free` (override with `RALPH_MODEL`). Nothing merges; the output is a
 reviewed **draft PR** per issue and the issue moved to _In Review_.
@@ -64,6 +64,33 @@ RALPH_API_PORT RALPH_WEB_PORT`.
 ## Model fallback
 
 `RALPH_MODEL` (default `opencode-go/longcat-2.5-preview-free`) is tried first. On a provider error (429, overload, quota, outage) the driver retries the same iteration on each model in `RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free`; empty disables). A timeout, or a run that merely forgot the control line, is not retried. `pi-subagents` never falls back by itself, so the worker is told to relaunch a failed subagent once per fallback model with a per-run `model` override. `runs.jsonl` records the model that finished each run and the attempts.
+
+## Running on opencode
+
+`RALPH_AGENT=opencode` runs every session (`plan`, `work`, `split`, `audit`) through `opencode run` instead of
+`pi -p`; the driver, the worktree, the prompts and the merge gate are the same. Use it when the models you can
+reach are only available through OpenCode (its free Zen tier answers only to the OpenCode client).
+
+```sh
+(cd ../factory-ralph && opencode mcp auth linear)   # once: browser OAuth for the Linear MCP server
+RALPH_AGENT=opencode bun run ralph:run --max 3
+```
+
+- **Models.** `RALPH_MODEL` defaults to `opencode/space-bunny-free`, `RALPH_FALLBACK_MODELS` to
+  `opencode/nemotron-3-ultra-free,opencode/mimo-v2.6-flash-free`. `opencode models` lists the ids.
+- **Config.** Each attempt writes `.opencode/opencode.jsonc` into the worktree (git-excluded) with
+  `opencode-config.py`: the `ralph-*` subagents are generated from `.pi/agents/ralph-*.md`, pinned to the model of
+  the attempt (so the fallback also moves the subagents); the Linear MCP server is registered with direct
+  `linear_*` tools; every MCP server in your global opencode config is disabled for the run.
+- **Prompts.** They are written for pi's tools. The Run context appended to each prompt maps them: `linear_*`
+  for `codemode`, the `subagent` tool for pi's, no `async`/`bg_wait`/`timeoutMs`.
+- **Control line.** The last line of the final `text` event of the `--format json` log. The log is JSON lines,
+  not a readable transcript.
+- **Stall watchdog.** pi's sessions are files; opencode's are a database. `oc_activity` reads the newest message
+  time of any session (subagent children included) started from the worktree, so a parent waiting on a long
+  subagent is not mistaken for a hung one.
+- **Fallback.** A top-level `error` event (a refused or failed model call) counts as a provider failure and moves to
+  the next model, as pi's 429/overload patterns do.
 
 ## Known traps
 
