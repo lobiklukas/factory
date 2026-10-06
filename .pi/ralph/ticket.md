@@ -15,9 +15,10 @@ for your own issue, in which case file it as below, then follow "Blocked by it".
 ## 1. Search first (no duplicates)
 
 `list_issues` in project Factory MVP with `query` set to 2-3 distinctive keywords (file name, error
-text, symbol), states Backlog/Todo/In Progress/In Review. If one matches, add a `save_comment`
-("ralph: seen again in LOB-n on <date>: <new evidence>") and use that issue as the one to reference.
-If it exists but is `Done`, it regressed: file a new one and `relatedTo` the old.
+text, symbol), states Backlog/Todo/In Progress/In Review. If one matches, add a
+`save_comment({ issueId, body })` ("ralph: seen again in LOB-n on <date>: <new evidence>") and use
+that issue as the one to reference. If it exists but is `Done`, it regressed: file a new one and
+`relatedTo` the old.
 
 ## 2. Create it
 
