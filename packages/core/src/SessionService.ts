@@ -163,6 +163,14 @@ type ListRow = {
   readonly status: string;
   readonly createdAt: string;
   readonly lastActivityAt: string;
+  /**
+   * The same instant as `lastActivityAt` at full microsecond precision. The keyset cursor is built
+   * from this, not from `lastActivityAt`: the display value is truncated to milliseconds, and a
+   * cursor cast back from it is then strictly *less* than the stored `timestamptz`, so every
+   * remaining row in a same-millisecond group fails `(last_activity_at, id) < (cursor.at, cursor.id)`
+   * and the page ends early.
+   */
+  readonly lastActivityExact: string;
   readonly costTotal: number;
 };
 
@@ -719,6 +727,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 a.status,
                 a.cost_total,
                 to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_activity_at,
+                to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_activity_exact,
                 to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
               FROM session_activity a
               JOIN sessions s ON s.id = a.session_id
@@ -732,9 +741,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
           const page = rows.slice(0, limit);
           const last = page.at(-1);
+          // The cursor carries the exact instant, not the millisecond display value: the keyset
+          // comparison is against the stored `timestamptz`, so the cursor has to be too. A cursor
+          // minted by an older build is millisecond-truncated and stays lossy for that one page
+          // boundary; nothing can repair a value that has already been rounded.
           const nextCursor =
             rows.length > limit && last !== undefined
-              ? `${last.lastActivityAt}|${last.id}`
+              ? `${last.lastActivityExact}|${last.id}`
               : undefined;
           const sessions: SessionListEntry[] = [];
           for (const row of page) {

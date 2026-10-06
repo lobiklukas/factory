@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import type {
   ListSessionsInput,
+  ListSessionsOutput,
+  SessionError,
   SessionEvent,
   SessionId,
   SessionListEntry,
@@ -498,6 +500,515 @@ describe("session list", () => {
         [result.first.id, result.second.id, result.third.id].includes(id),
       );
     expect(mine).toEqual([result.third.id, result.second.id, result.first.id]);
+  });
+
+  /**
+   * A page boundary inside a group of rows that share a millisecond must not drop the rest of the
+   * group. The cursor used to be built from `lastActivityAt`, which the list renders at millisecond
+   * precision while `session_activity.last_activity_at` is a `TIMESTAMPTZ`: casting the truncated
+   * cursor back gave a value strictly *less* than the stored one, so every remaining row in the
+   * group failed `(last_activity_at, id) < (cursor.at, cursor.id)` and the page ended early.
+   */
+  it("returns every row of a same-millisecond group exactly once", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        // Hermetic across runs: these rows are this test's, and the database is shared.
+        yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_ms%'`;
+
+        // One timestamp for the whole group, with non-zero microseconds. Both halves matter: a
+        // timestamp whose millisecond rendering is already lossless would not trigger the bug,
+        // and the group has to be newer than whatever the shared database holds so that the page
+        // boundary falls inside it rather than below it.
+        const [groupAt] = yield* sql<{ at: string }>`
+          SELECT to_char(
+            '2027-01-01T00:00:00.123456Z'::timestamptz AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS at
+        `;
+        if (groupAt === undefined) throw new Error("unreachable");
+
+        const GROUP = 12;
+        // Zero-padded, so the id tiebreak orders them contiguously and a four-row page boundary
+        // lands inside the group.
+        yield* sql`
+          INSERT INTO sessions (id, title)
+          SELECT 'ses_ms' || lpad(n::text, 24, '0'), 'same millisecond ' || n
+          FROM generate_series(0, ${GROUP - 1}) AS g(n)
+        `;
+        yield* sql`
+          INSERT INTO session_activity (session_id, last_activity_at)
+          SELECT 'ses_ms' || lpad(n::text, 24, '0'), ${groupAt.at}::timestamptz
+          FROM generate_series(0, ${GROUP - 1}) AS g(n)
+        `;
+
+        const expected = Array.from(
+          { length: GROUP },
+          (_, n) => `ses_ms${String(n).padStart(24, "0")}`,
+        );
+        const LIMIT = 4;
+        const budget = Math.ceil(GROUP / LIMIT) + 2;
+        const seen: string[] = [];
+        const statements: number[] = [];
+        let cursor: string | undefined = undefined;
+        let exhausted = false;
+        for (let page = 0; page < budget; page += 1) {
+          const input: ListSessionsInput =
+            cursor === undefined ? { limit: LIMIT } : { limit: LIMIT, cursor };
+          const counted = yield* countStatements(sessions.list(input));
+          statements.push(counted.statements);
+          for (const entry of counted.value.sessions) {
+            if (entry.id.startsWith("ses_ms")) seen.push(entry.id);
+          }
+          cursor = counted.value.nextCursor;
+          if (new Set(seen).size === GROUP) break;
+          if (cursor === undefined) {
+            exhausted = true;
+            break;
+          }
+        }
+        return { expected, seen, exhausted, statements };
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_ms%'`;
+          }).pipe(Effect.orDie),
+        ),
+      ),
+    );
+
+    // Every row of the group came back, exactly once, in the keyset's own order (id descending
+    // inside the tie). A cursor truncated to the millisecond stopped the page at the boundary
+    // and dropped the rest of the group.
+    expect(result.seen).toEqual([...result.expected].sort().reverse());
+    expect(new Set(result.seen).size).toBe(result.seen.length);
+    // The loop ended because the group was complete, not because the cursor ran out first.
+    expect(result.exhausted).toBe(false);
+    // Cost is one statement per page whatever the row count: never a fold per session (R6).
+    for (const count of result.statements) expect(count).toBe(1);
+  });
+
+  /**
+   * The prefix every case below seeds with, and the ids it seeds.
+   *
+   * Zero-padded to the full id length, so the ids sort contiguously and a page boundary falls
+   * inside the group wherever the limit puts it. `ses_mv` is in the id alphabet (which excludes
+   * `i`, `l`, `o` and `u`).
+   */
+  const GROUP_PREFIX = "ses_mv";
+  const groupId = (n: number) =>
+    `${GROUP_PREFIX}${String(n).padStart(24, "0")}`;
+  const groupIds = (n: number) =>
+    Array.from({ length: n }, (_, k) => groupId(k));
+  /** A group's ids in the order the list returns them: id descending inside the tie. */
+  const groupIdsDescending = (n: number) => [...groupIds(n)].sort().reverse();
+  /** `GROUP_PREFIX` as a `LIKE` pattern — `_` is a wildcard in `LIKE`, so it is escaped. */
+  const GROUP_PATTERN = `${GROUP_PREFIX.replace(/_/g, "\\_")}%`;
+
+  /**
+   * Seed `n` sessions whose `last_activity_at` is one literal instant.
+   *
+   * The instant is a parameter because one case needs a group at the *end* of the ordering, which
+   * only the database can place: `min(last_activity_at) - 1 hour` is however old the shared table
+   * already is, and a fixed year would stop being the end the day something older is written.
+   */
+  const seedGroup = (n: number, at: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      // Hermetic across runs: these rows are these cases', and the database is shared.
+      yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN}`;
+      yield* sql`
+        INSERT INTO sessions (id, title)
+        SELECT '${GROUP_PREFIX}' || lpad(n::text, 24, '0'), 'same millisecond ' || n
+        FROM generate_series(0, ${n - 1}) AS g(n)
+      `;
+      yield* sql`
+        INSERT INTO session_activity (session_id, last_activity_at)
+        SELECT '${GROUP_PREFIX}' || lpad(n::text, 24, '0'), ${at}::timestamptz
+        FROM generate_series(0, ${n - 1}) AS g(n)
+      `;
+    });
+
+  /** Run `body` with these cases' rows gone afterwards, whether it passes, fails or dies. */
+  const withGroup = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+    body.pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN}`;
+        }).pipe(
+          // A cleanup that cannot run is a defect, not a silent row leak.
+          Effect.orDie,
+        ),
+      ),
+    );
+
+  /**
+   * Page the list until the cursor runs out, returning every page with the number of statements
+   * it cost.
+   *
+   * The budget is the caller's, and is a function of the rows the list can see rather than a
+   * constant: a budget that is too small shows up as `exhausted: false` rather than as a wrong
+   * page count. `start` is the cursor to page on from, for a walk that begins mid-table.
+   */
+  const pageAll = (
+    limit: number,
+    budget: number,
+    start?: string,
+  ): Effect.Effect<
+    {
+      readonly pages: readonly {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[];
+      readonly exhausted: boolean;
+    },
+    SessionError,
+    SessionService
+  > =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const pages: {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[] = [];
+      let cursor: string | undefined = start;
+      let exhausted = false;
+      for (let page = 0; page < budget; page += 1) {
+        const input: ListSessionsInput =
+          cursor === undefined ? { limit } : { limit, cursor };
+        const counted = yield* countStatements(sessions.list(input));
+        pages.push({ output: counted.value, statements: counted.statements });
+        cursor = counted.value.nextCursor;
+        if (cursor === undefined) {
+          exhausted = true;
+          break;
+        }
+      }
+      return { pages, exhausted };
+    });
+
+  /** The rows the list can see, which is the set it has to page over exactly once. */
+  const listableRows = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const [rowCount] = yield* sql<{ rows: number }>`
+      SELECT count(*)::int AS rows FROM session_activity
+    `;
+    if (rowCount === undefined) throw new Error("unreachable");
+    return rowCount.rows;
+  });
+
+  /**
+   * A group that is exactly one page big, so the cursor is minted only because the query fetches
+   * `limit + 1` rows.
+   *
+   * `rows.length > limit` is the whole decision about whether another page exists. With the group
+   * the newest thing in the table and the same size as the page, the page is full of group rows and
+   * the one extra row the query fetched is what says there is more: the cursor has to be minted
+   * from the group's last row at full precision, or the rest of the table is unreachable.
+   */
+  it("mints the cursor from the exact instant when the group is exactly one page", async () => {
+    const result = await program(
+      withGroup(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sql = yield* SqlClient;
+          const GROUP = 4;
+          const LIMIT = 4;
+          // Newer than anything the shared table holds, with non-zero microseconds: a timestamp
+          // whose millisecond rendering is already lossless would not trigger the bug.
+          yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+          // Older than the group, and enough of them that the table does not end with the group —
+          // otherwise `rows.length > limit` is false and there is no cursor to mint at all.
+          yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 6) AS g(n)
+          `;
+          yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 6) AS g(n)
+          `;
+
+          const visible = yield* listableRows;
+          const { pages, exhausted } = yield* pageAll(
+            LIMIT,
+            Math.ceil(visible / LIMIT) + 2,
+          );
+          return { GROUP, LIMIT, pages, exhausted, visible };
+        }),
+      ),
+    );
+
+    const entries = result.pages.flatMap((page) => page.output.sessions);
+    const group = entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+    // The whole group, exactly once, in the keyset's own order.
+    expect(group.map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP),
+    );
+    // The group is the newest thing in the table, so it is the head of the first page: it cannot
+    // be dropped by a boundary below it.
+    expect(entries.slice(0, result.GROUP).map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP),
+    );
+    // The loop ended because the cursor ran out, not because it hit its budget.
+    expect(result.exhausted).toBe(true);
+    expect(result.pages.at(-1)?.output.nextCursor).toBeUndefined();
+    // Every row the list can see came back, so the group's exactness is not being paid for with
+    // the older rows behind it.
+    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Cost is one statement per page whatever the row count: never a fold per session (R6).
+    for (const page of result.pages) expect(page.statements).toBe(1);
+  });
+
+  /**
+   * A group paged one row at a time, so every single page boundary falls inside the group.
+   *
+   * This is the sharpest form of the defect: the cursor is minted from a group row on every page,
+   * and a millisecond-truncated one drops the rest of the group every time, not once.
+   */
+  it("returns a same-millisecond group one row at a time", async () => {
+    const result = await program(
+      withGroup(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sql = yield* SqlClient;
+          const GROUP = 5;
+          yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+          yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 4) AS g(n)
+          `;
+          yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 4) AS g(n)
+          `;
+
+          const visible = yield* listableRows;
+          const { pages, exhausted } = yield* pageAll(
+            1,
+            Math.ceil(visible / 1) + 2,
+          );
+          // `limit: 0` is clamped to 1 by the service rather than refused: one row, and a cursor,
+          // so the clamp does not silently mean "no pages".
+          const clamped = yield* sessions.list({ limit: 0 });
+          return { GROUP, pages, exhausted, clamped };
+        }),
+      ),
+    );
+
+    const entries = result.pages.flatMap((page) => page.output.sessions);
+    const group = entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+    expect(group.map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP),
+    );
+    expect(new Set(group).size).toBe(group.length);
+    // Every page the group spans mints a cursor from a group row, so the group spans exactly one
+    // page per row — a cursor that dropped the rest of the millisecond would show up here as a
+    // short count, not as a wrong order.
+    const groupPages = result.pages.filter((page) =>
+      page.output.sessions.some((entry) => entry.id.startsWith(GROUP_PREFIX)),
+    );
+    expect(groupPages.length).toBe(result.GROUP);
+    expect(result.exhausted).toBe(true);
+    for (const page of result.pages) expect(page.statements).toBe(1);
+
+    expect(result.clamped.sessions.length).toBe(1);
+    expect(result.clamped.nextCursor).toBeDefined();
+  });
+
+  /**
+   * A group that sits whole inside a page larger than it, so the cursor that carries the paging
+   * past the group comes from a row *after* it.
+   *
+   * This is the control for the two cases above: the group's own exactness is not what is under
+   * test here, so it fails if the fix broke the ordinary path rather than if it failed to fix the
+   * boundary.
+   */
+  it("returns a same-millisecond group that sits inside a larger page", async () => {
+    const result = await program(
+      withGroup(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const GROUP = 3;
+          yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+          yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 11) AS g(n)
+          `;
+          yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 11) AS g(n)
+          `;
+
+          const visible = yield* listableRows;
+          const { pages, exhausted } = yield* pageAll(
+            10,
+            Math.ceil(visible / 10) + 2,
+          );
+          return { GROUP, pages, exhausted, visible };
+        }),
+      ),
+    );
+
+    const entries = result.pages.flatMap((page) => page.output.sessions);
+    const group = entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+    expect(group.map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP),
+    );
+    expect(new Set(group).size).toBe(group.length);
+    expect(result.exhausted).toBe(true);
+    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    for (const page of result.pages) expect(page.statements).toBe(1);
+  });
+
+  /**
+   * A group at the very end of the ordering — the oldest rows, not the newest.
+   *
+   * The cursor that reaches this group is minted from a row *above* it, so a different instant,
+   * and the group is found by comparison rather than by being the head of the first page. The
+   * page that starts inside the group then mints a cursor from a group row, and the next page has
+   * to come back for the rest of the group instead of skipping past it.
+   */
+  it("returns a same-millisecond group at the end of the ordering", async () => {
+    const result = await program(
+      withGroup(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const GROUP = 5;
+          // However old the shared table already is: the group has to be the end of the ordering,
+          // whatever else is in it.
+          const [oldest] = yield* sql<{ at: string }>`
+            SELECT to_char(
+              COALESCE(min(last_activity_at), now()) - interval '1 hour'
+                AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            ) AS at
+            FROM session_activity
+          `;
+          if (oldest === undefined) throw new Error("unreachable");
+          yield* seedGroup(GROUP, oldest.at);
+          // Newer than the group, at second spacing so none of them ties with it.
+          yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'newer ' || n
+            FROM generate_series(0, 6) AS g(n)
+          `;
+          yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => n)
+            FROM generate_series(0, 6) AS g(n)
+          `;
+
+          const visible = yield* listableRows;
+          const { pages, exhausted } = yield* pageAll(
+            2,
+            Math.ceil(visible / 2) + 2,
+          );
+          return { GROUP, pages, exhausted, visible };
+        }),
+      ),
+    );
+
+    const entries = result.pages.flatMap((page) => page.output.sessions);
+    const group = entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+    expect(group.map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP),
+    );
+    expect(new Set(group).size).toBe(group.length);
+    // The group is the tail of the ordering, so it is the tail of the whole walk: nothing after it.
+    expect(
+      entries.slice(entries.length - result.GROUP).map((entry) => entry.id),
+    ).toEqual(groupIdsDescending(result.GROUP));
+    expect(result.exhausted).toBe(true);
+    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    for (const page of result.pages) expect(page.statements).toBe(1);
+  });
+
+  /**
+   * A cursor in the old millisecond-only format, fed back in.
+   *
+   * This pins the boundary of the fix rather than a behaviour anyone wanted. `parseCursor` checks
+   * only that the cursor has a `|` and a well-formed id, so a truncated `at` is *accepted* — and
+   * then loses every remaining row of that millisecond, because the stored `timestamptz` is
+   * strictly greater than the truncated cursor. The code says so itself: nothing can repair a value
+   * that has already been rounded. The contrast with the exact cursor on the same page is what
+   * makes that visible in one test.
+   */
+  it("accepts a millisecond-truncated cursor and loses the rest of that millisecond", async () => {
+    const result = await program(
+      withGroup(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const GROUP = 6;
+          const LIMIT = 4;
+          yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
+
+          const first = yield* sessions.list({ limit: LIMIT });
+          const boundary = first.sessions.at(-1);
+          if (boundary === undefined) throw new Error("unreachable");
+          // Exactly what an older build minted from this same page: the rendered millisecond.
+          const truncated = `${boundary.lastActivityAt}|${boundary.id}`;
+          const exact = first.nextCursor;
+          if (exact === undefined) throw new Error("unreachable");
+
+          // The truncated cursor is well-formed, so it is not refused — it is answered, and the
+          // answer skips the rest of the group.
+          const oldFormat = yield* sessions.list({
+            limit: LIMIT,
+            cursor: truncated,
+          });
+          const exactNext = yield* sessions.list({
+            limit: LIMIT,
+            cursor: exact,
+          });
+
+          // Paging on *from the truncated cursor*, the group never comes back.
+          const visible = yield* listableRows;
+          const { pages } = yield* pageAll(
+            LIMIT,
+            Math.ceil(visible / LIMIT) + 2,
+            truncated,
+          );
+          return { GROUP, first, truncated, oldFormat, exactNext, pages };
+        }),
+      ),
+    );
+
+    const groupOf = (
+      entries: readonly SessionListEntry[],
+    ): readonly SessionListEntry[] =>
+      entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+    // The first page is four of the six, and the cursor an older build would have minted is the
+    // rendered millisecond of the row it ended on.
+    expect(groupOf(result.first.sessions)).toHaveLength(4);
+    expect(result.truncated).toBe(
+      `${result.first.sessions.at(-1)?.lastActivityAt}|${result.first.sessions.at(-1)?.id}`,
+    );
+    expect(result.truncated).not.toBe(result.first.nextCursor);
+    // The exact cursor comes back for the remaining two rows of the group.
+    expect(groupOf(result.exactNext.sessions).map((entry) => entry.id)).toEqual(
+      groupIdsDescending(result.GROUP).slice(4),
+    );
+    // The truncated cursor is accepted, and its page holds no row of the group at all: the two rows
+    // above are skipped by the keyset comparison.
+    expect(groupOf(result.oldFormat.sessions)).toEqual([]);
+    // Paging on from it, the group is still absent — the loss is permanent for that cursor, not
+    // deferred to the next page.
+    expect(
+      groupOf(result.pages.flatMap((page) => page.output.sessions)),
+    ).toEqual([]);
   });
 
   it("refuses a cursor it did not mint", async () => {
