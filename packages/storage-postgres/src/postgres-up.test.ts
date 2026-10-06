@@ -13,6 +13,7 @@ import {
 import { createConnection, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -31,6 +32,12 @@ import { afterAll, describe, expect, it } from "vitest";
  * boundary, per `docs/testing-third-parties.md` — and a real TCP listener standing in for a
  * database that answers. No case here starts, stops or contacts a container, and no case touches
  * 5442: the probe port is passed as `PG_PORT`, so the gate's own Postgres is never in the way.
+ *
+ * Compose's exit code is not the claim either (LOB-104): `--wait` reports on its healthcheck, so a
+ * start whose container comes up and leaves can exit 0 with nothing answering, and a caller would
+ * then launch against a database that is not there and leave its own process behind. The fake
+ * `docker` can therefore be asked to *really* open a listener when it reports success, and the
+ * cases below cover both halves: a compose that says so and answers, and one that says so and not.
  *
  * The file lives in `@repo/storage-postgres` for the same reason `turbo-env.test.ts` does: it is a
  * repo-level Postgres claim that belongs to no package, and it needs no database to run.
@@ -60,6 +67,8 @@ interface Scratch {
   readonly dockerCalls: string;
   readonly dockerDetail: string;
   readonly bunRan: string;
+  /** Where a fake `docker` records the listener it started, when a case asked it to open the port. */
+  readonly listenerPid: string;
 }
 
 const created: string[] = [];
@@ -80,7 +89,83 @@ const mkScratch = (): Scratch => {
     dockerCalls: path.join(root, "docker-calls.txt"),
     dockerDetail: path.join(root, "docker-detail.txt"),
     bunRan: path.join(root, "bun-ran"),
+    listenerPid: path.join(root, "listener.pid"),
   };
+};
+
+/**
+ * The listener a fake `docker` starts when a case wants a compose that really brings a database up.
+ * Started with `process.execPath` — the runtime running this suite — so the child depends on no
+ * `PATH` guess, and written to a file rather than passed as an inline `-e` string so the same text
+ * runs under `bun` and under `node`. It holds the port open until `stopOpenedListener` kills it.
+ */
+const LISTENER_SOURCE = [
+  'const { createServer } = require("node:net");',
+  "const server = createServer();",
+  'server.listen(Number(process.argv[2]), "127.0.0.1");',
+  "",
+].join("\n");
+
+/** Whether a pid is still there: `kill -0`, in-process. */
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Wait until `check` holds, so a case never depends on a fixed delay — the primitive `harness.ts`
+ * uses without Effect. It throws instead of returning: every caller here is asserting.
+ */
+const waitFor = async (
+  check: () => Promise<boolean>,
+  label: string,
+): Promise<void> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await check()) return;
+    await delay(25);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+};
+
+/** The pid a fake `docker` recorded for the listener it started, if it recorded a usable one. */
+const recordedListener = (scratch: Scratch): number | undefined => {
+  if (!existsSync(scratch.listenerPid)) return undefined;
+  const pid = Number(readFileSync(scratch.listenerPid, "utf8"));
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+};
+
+/**
+ * The pid of the listener a fake `docker` started, stopped so a case cannot leak a bound port.
+ *
+ * The port is the hazard, not the pid: a listener that outlived its case is an open port every later
+ * case has to guess around, and a child nobody accounts for. So this waits until the port refuses
+ * again and the pid is gone, and fails the case that leaked rather than the one that trips over it.
+ *
+ * `pg_compose`'s successful branch is the only thing that opens a port, so a case whose compose
+ * never reported success has nothing to stop — and `pid <= 0` is load-bearing, because a malformed
+ * record holding 0 or -1 must never reach `process.kill`, which would signal this process's whole
+ * group (or every process the user owns).
+ */
+const stopOpenedListener = async (
+  scratch: Scratch,
+  port: number,
+): Promise<void> => {
+  const pid = recordedListener(scratch);
+  if (pid === undefined) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone: the case's compose never started one, or the listener died with its port.
+  }
+  await waitFor(
+    async () => !(await doesAnswer(port)),
+    `port ${String(port)} to refuse again`,
+  );
+  await waitFor(async () => !isAlive(pid), `pid ${String(pid)} to be gone`);
 };
 
 /**
@@ -94,11 +179,33 @@ const mkScratch = (): Scratch => {
 const writeFakeDocker = (
   scratch: Scratch,
   upExit: number,
-  options: { readonly infoExit?: number } = {},
+  options: {
+    readonly infoExit?: number;
+    /**
+     * The port a successful `compose up` should really open a listener on. Left out, the fake
+     * models a compose that reports success and leaves nothing answering — LOB-104's case.
+     */
+    readonly opensPort?: number;
+  } = {},
 ): void => {
   const file = path.join(scratch.bin, "docker");
   const calls = JSON.stringify(scratch.dockerCalls);
   const detail = JSON.stringify(scratch.dockerDetail);
+  const port = options.opensPort;
+  if (port !== undefined) {
+    writeFileSync(path.join(scratch.root, "listener.cjs"), LISTENER_SOURCE);
+  }
+  // A compose that reports success has to leave something answering: the `--wait` it models would
+  // not have returned otherwise. So bind a real listener, wait for the bind, and only then exit.
+  const upBranch =
+    port === undefined
+      ? [`    exit ${String(upExit)} ;;`]
+      : [
+          `    ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(scratch.root, "listener.cjs"))} ${String(port)} >/dev/null 2>&1 &`,
+          `    printf '%s' "$!" > ${JSON.stringify(scratch.listenerPid)}`,
+          `    for _ in $(seq 1 250); do (exec 3<>"/dev/tcp/127.0.0.1/${String(port)}") 2>/dev/null && break; sleep 0.02; done`,
+          `    exit ${String(upExit)} ;;`,
+        ];
   writeFileSync(
     file,
     [
@@ -107,7 +214,8 @@ const writeFakeDocker = (
       `printf 'argv=%s\\tcwd=%s\\tdocker_host=%s\\n' "$*" "$PWD" "\${DOCKER_HOST:-<unset>}" >> ${detail}`,
       'case "$*" in',
       `  info) exit ${String(options.infoExit ?? 0)} ;;`,
-      `  *"compose up"*) exit ${String(upExit)} ;;`,
+      '  *"compose up"*)',
+      ...upBranch,
       // What a failed start left in `Created`, as `docker compose ps -q --status created` reports it.
       '  *"compose ps"*) [ -n "${FAKE_DOCKER_CREATED:-}" ] && printf \'%s\\n\' "$FAKE_DOCKER_CREATED"; exit 0 ;;',
       // What `docker ps --filter publish=<port>` would list, one name per line.
@@ -138,12 +246,26 @@ const writeFakeBunAndCurl = (scratch: Scratch): void => {
  * A `bun` that leaves a mark, so a case can prove no process was launched, and a `curl` that says
  * every URL is ready, so a caller that wrongly gets past the precondition exits at once instead of
  * spending its 30-second readiness loop.
+ *
+ * `markerDelayMs` makes the mark land late on purpose. `up.sh` backgrounds its launch and its own
+ * `curl` stub answers on the first turn, so the script is done before the forked `bun` has run — the
+ * mark legitimately arrives after `spawnSync` returns, and a case that asserts the launch happened
+ * has to wait for it. Setting the delay turns that race into a certainty, so the wait is load-bearing
+ * rather than a cure for a flake.
  */
-const writeMarkingBunAndReadyCurl = (scratch: Scratch): void => {
+const writeMarkingBunAndReadyCurl = (
+  scratch: Scratch,
+  options: { readonly markerDelayMs?: number } = {},
+): void => {
   const bun = path.join(scratch.bin, "bun");
+  // `markerDelay`, not `delay`: the module-level `delay` belongs to `waitFor`.
+  const markerDelay =
+    options.markerDelayMs === undefined
+      ? ""
+      : `sleep ${String(options.markerDelayMs / 1000)}\n`;
   writeFileSync(
     bun,
-    `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(scratch.bunRan)}\nexit 0\n`,
+    `#!/usr/bin/env bash\n${markerDelay}printf '%s\\n' "$*" >> ${JSON.stringify(scratch.bunRan)}\nexit 0\n`,
   );
   chmodSync(bun, 0o755);
   const curl = path.join(scratch.bin, "curl");
@@ -394,17 +516,83 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it("starts Postgres with compose when nothing answers on the port", async () => {
     const scratch = mkScratch();
+    const port = await closedPort();
+    // A compose that behaves: it exits 0 *and* the port answers afterwards, which is what `--wait`
+    // promises. Leaving this fake without `opensPort` is the next case.
+    writeFakeDocker(scratch, 0, { opensPort: port });
+    try {
+      const result = ensurePostgres(scratch, port);
+      expect(result.status, result.stderr).toBe(0);
+      expect(composeCalls(scratch)).toEqual(["compose up -d --wait postgres"]);
+      // Compose names its project after the directory it runs in, so the call has to happen from
+      // the root the helper belongs to: from anywhere else it addresses a project nobody else can
+      // see. Mutation checked: dropping the `cd "$PG_ROOT"` from `pg_compose` (cwd becomes the
+      // caller's).
+      expect(recordOf(scratch, "compose up -d --wait postgres").cwd).toBe(
+        path.resolve(REPO_ROOT),
+      );
+    } finally {
+      await stopOpenedListener(scratch, port);
+    }
+  }, 30_000);
+
+  it("fails loudly when compose reports success but nothing answers on the port", async () => {
+    const scratch = mkScratch();
+    // The LOB-104 case: `--wait` reports on its healthcheck, so a start whose container comes up
+    // and leaves exits 0 with nothing listening. Trusting that exit code hands the caller a
+    // database that is not there — `up.sh` would spend its 30-second readiness loop and leave its
+    // process and pid file behind. Mutation checked: dropping `|| ! pg_port_open` from
+    // `ensure_postgres` (the status becomes 0 and the assertion below is red).
     writeFakeDocker(scratch, 0);
-    const result = ensurePostgres(scratch, await closedPort());
-    expect(result.status, result.stderr).toBe(0);
-    expect(composeCalls(scratch)).toEqual(["compose up -d --wait postgres"]);
-    // Compose names its project after the directory it runs in, so the call has to happen from the
-    // root the helper belongs to: from anywhere else it addresses a project nobody else can see.
-    // Mutation checked: dropping the `cd "$PG_ROOT"` from `pg_compose` (cwd becomes the caller's).
-    expect(recordOf(scratch, "compose up -d --wait postgres").cwd).toBe(
-      path.resolve(REPO_ROOT),
+    const port = await closedPort();
+    const result = ensurePostgres(scratch, port, {
+      FAKE_DOCKER_CREATED: "faux-created",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `postgres is not up on port ${String(port)}`,
     );
-  });
+    expect(result.stderr).toContain("docker compose up -d --wait postgres");
+    expect(result.stdout).toBe("");
+    // Compose said it started something, so the `Created` container it left is this call's to
+    // remove — the same cleanup the failed-exit path does, in the same order.
+    expect(subcommands(scratch)).toEqual([
+      "compose up -d --wait postgres",
+      "compose ps -aq --status created postgres",
+      "rm -f faux-created",
+    ]);
+  }, 30_000);
+
+  it("fails loudly and removes nothing when a compose that reported success left no container", async () => {
+    const scratch = mkScratch();
+    // Acceptance criterion 1 in full: compose exits 0 with nothing answering *and* left no
+    // `Created` container, so the cleanup must ask, find nothing, and remove nothing. Mutation
+    // checked: dropping `|| ! pg_port_open` (the status is 0 and every assertion here is red).
+    writeFakeDocker(scratch, 0);
+    const port = await closedPort();
+    const result = ensurePostgres(scratch, port);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `postgres is not up on port ${String(port)}`,
+    );
+    expect(result.stderr).toContain("docker compose up -d --wait postgres");
+    expect(result.stdout).toBe("");
+    // The whole argv, in order, and no `rm` at all: the re-probe's failure is reported from the
+    // same branch as a failed exit, and a container compose never created is not this call's to
+    // delete. Mutation checked: replacing `ps -aq --status created` with a bare `ps -aq` (a running
+    // container would then be removed by every failed start).
+    expect(subcommands(scratch)).toEqual([
+      "compose up -d --wait postgres",
+      "compose ps -aq --status created postgres",
+    ]);
+    expect(
+      subcommands(scratch).filter((call) => call.startsWith("rm ")),
+    ).toEqual([]);
+    // Both calls address this directory's project — compose names it after the cwd.
+    for (const call of composeCalls(scratch)) {
+      expect(recordOf(scratch, call).cwd, call).toBe(path.resolve(REPO_ROOT));
+    }
+  }, 30_000);
 
   it("fails loudly on the command to run, and removes the container a failed start created", async () => {
     const scratch = mkScratch();
@@ -475,6 +663,78 @@ describe("the verify-* skills' Postgres precondition", () => {
     },
     30_000,
   );
+
+  it.each(UP_SCRIPTS)(
+    "lets %s/up.sh start after compose really brings Postgres up",
+    async (skill) => {
+      const scratch = mkScratch();
+      const port = await closedPort();
+      // Acceptance criterion 2 at the caller, from the ralph worktree's real position: nothing
+      // answers on the port, compose starts the database, and the script goes on to launch its API
+      // instead of exiting 1 or waiting out its readiness loop. Mutation checked: making the
+      // re-probe stricter than a TCP connect (`pg_isready`, or any check that waits for Postgres to
+      // greet) — a listener that only accepts answers the port and nothing else.
+      writeFakeDocker(scratch, 0, { opensPort: port });
+      // The mark is deliberately late: the wait below is the assertion, not a race against a fork.
+      writeMarkingBunAndReadyCurl(scratch, { markerDelayMs: 300 });
+      const staged = stageCaller(scratch, `.pi/skills/${skill}/up.sh`);
+      try {
+        const result = spawnSync("bash", [staged], {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: childEnv(scratch, port),
+          timeout: 30_000,
+        });
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+        expect(composeCalls(scratch)).toEqual([
+          "compose up -d --wait postgres",
+        ]);
+        // "Starts normally" means the API launch really happened — not merely that the script got
+        // past the precondition and its stub `curl` called every URL ready. The launch is forked, so
+        // the mark arrives after the script is gone: this waits for it. Mutation checked: asserting
+        // `existsSync(scratch.bunRan)` here instead — the mark is 300ms late, so that is red.
+        await waitFor(
+          async () => existsSync(scratch.bunRan),
+          "the API launch to be recorded",
+        );
+      } finally {
+        await stopOpenedListener(scratch, port);
+      }
+    },
+    30_000,
+  );
+
+  it("answers on the port the compose it started opened, and on no other, then releases it", async () => {
+    const scratch = mkScratch();
+    const port = await closedPort();
+    writeFakeDocker(scratch, 0, { opensPort: port });
+    // The port refuses *before* the call, so this case is about the re-probe and not about a port
+    // that happened to be open: a leftover listener would make the case below vacuous.
+    expect(await doesAnswer(port)).toBe(false);
+    try {
+      const result = ensurePostgres(scratch, port);
+      expect(result.status, result.stderr).toBe(0);
+      // A start that worked: compose alone, no `ps`, no `rm`.
+      expect(subcommands(scratch)).toEqual(["compose up -d --wait postgres"]);
+      // The listener that fake `docker` started is the thing that answers — the re-probe's 0 is
+      // attributable to it and to nothing else, because killing that pid takes the port with it.
+      // It is never this process: a cleanup that killed the runner would take the suite with it.
+      const pid = recordedListener(scratch);
+      expect(pid).toBeDefined();
+      expect(pid).not.toBe(process.pid);
+      expect(pid).not.toBe(process.ppid);
+      expect(isAlive(pid ?? 0)).toBe(true);
+      expect(await doesAnswer(port)).toBe(true);
+      // Mutation checked: dropping `opensPort` from this case (nothing answers, the status is 1),
+      // and `stopOpenedListener` not killing (the port stays open and the wait below times out).
+      await stopOpenedListener(scratch, port);
+      expect(await doesAnswer(port)).toBe(false);
+      expect(isAlive(pid ?? 0)).toBe(false);
+    } finally {
+      // Idempotent, and a no-op once the port refuses: the case cannot leak one either way.
+      await stopOpenedListener(scratch, port);
+    }
+  }, 30_000);
 
   it("defaults the port to the one compose.yaml publishes, under a caller's strict shell", async () => {
     const scratch = mkScratch();
@@ -608,6 +868,81 @@ describe("the verify-* skills' Postgres precondition", () => {
     30_000,
   );
 
+  it.each(UP_SCRIPTS)(
+    "lets %s/up.sh refuse when its compose reported success and nothing answers",
+    async (skill) => {
+      const scratch = mkScratch();
+      // LOB-104's failure at the caller, verbatim: compose reports success and nothing answers. The
+      // pre-fix script went on to launch an API against a database that is not there, spent its
+      // 30-second `/readyz` loop, exited 1 with `api.pid` written and the process still up — so the
+      // next `up.sh` refused with "already running". With the re-probe it stops before any of that.
+      // Mutation checked: dropping `|| ! pg_port_open` — the launcher runs (`bunRan`), the pid file
+      // appears, and the status is 0 instead of 1, so three assertions here go red.
+      writeFakeDocker(scratch, 0);
+      writeMarkingBunAndReadyCurl(scratch);
+      const staged = stageCaller(scratch, `.pi/skills/${skill}/up.sh`);
+      const port = await closedPort();
+      const result = spawnSync("bash", [staged], {
+        cwd: scratch.root,
+        encoding: "utf8",
+        env: childEnv(scratch, port, { FAKE_DOCKER_CREATED: "faux-created" }),
+        timeout: 30_000,
+      });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+      expect(result.stderr).toContain(
+        `postgres is not up on port ${String(port)}`,
+      );
+      expect(result.stderr).toContain("docker compose up -d --wait postgres");
+      // No process was launched, and no pid file was left for the next run to refuse on. The run
+      // directory exists — `up.sh` makes it before the precondition — so the absence is the pid
+      // file and not a directory that was never created.
+      expect(existsSync(scratch.bunRan)).toBe(false);
+      const runDir = path.join(scratch.root, ".verify/run");
+      expect(existsSync(runDir)).toBe(true);
+      expect(existsSync(path.join(runDir, "api.pid"))).toBe(false);
+      // And the `Created` container left by this start is still removed, as on a failed exit.
+      expect(subcommands(scratch)).toEqual([
+        "compose up -d --wait postgres",
+        "compose ps -aq --status created postgres",
+        "rm -f faux-created",
+      ]);
+    },
+    30_000,
+  );
+
+  it("fails loudly when its own compose failed, even though the port answers by then", async () => {
+    const scratch = mkScratch();
+    const port = await closedPort();
+    // The race a worktree can lose: the port looked free, someone else's `compose up` bound it
+    // first, and this call's compose failed with "port is already allocated" — while a database now
+    // answers on the very port every caller needs.
+    writeFakeDocker(scratch, 1, { opensPort: port });
+    try {
+      const result = ensurePostgres(scratch, port);
+      expect(await doesAnswer(port)).toBe(true);
+      // JUDGEMENT CALL, pinned so it is a decision and not an accident: today the compose failure
+      // wins and the call fails even though a database answers — the one claim the helper
+      // documents ("0 when Postgres is reachable — already up, or started by this call"). `||`
+      // short-circuits, so `! compose || ! port_open` cannot see the port once compose has failed.
+      // The other reading is one line: `pg_compose up ... >/dev/null 2>&1 || true`, then
+      // `if ! pg_port_open`. Whichever way it goes, the caller's behaviour is fail-safe: it refuses
+      // and names the command. Not covered by LOB-104's acceptance criteria either way, so there is
+      // no mutation to name: the case pins a decision (LOB-106 owns changing it), and the red would
+      // come from that decision flipping, not from a one-line break.
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `postgres is not up on port ${String(port)}`,
+      );
+      // Still the honest branch: nothing this project did not create is touched.
+      expect(subcommands(scratch)).toEqual([
+        "compose up -d --wait postgres",
+        "compose ps -aq --status created postgres",
+      ]);
+    } finally {
+      await stopOpenedListener(scratch, port);
+    }
+  }, 30_000);
+
   it("lets degraded.sh refuse loudly when the port answers but no container publishes it", async () => {
     const scratch = mkScratch();
     // No `FAKE_DOCKER_PS`: the port is served by something docker does not know about — a native
@@ -683,10 +1018,12 @@ describe("the verify-* skills' Postgres precondition", () => {
   it("falls back to colima's socket when the active context cannot answer", async () => {
     const scratch = mkScratch();
     const home = await colimaHome();
-    // `docker info` fails the way a stopped Docker Desktop does; colima's socket is there.
-    writeFakeDocker(scratch, 0, { infoExit: 1 });
+    const port = await closedPort();
+    // `docker info` fails the way a stopped Docker Desktop does; colima's socket is there, and the
+    // compose that runs on it really brings the database up — the re-probe would refuse otherwise.
+    writeFakeDocker(scratch, 0, { infoExit: 1, opensPort: port });
     try {
-      const result = ensurePostgres(scratch, await closedPort(), {
+      const result = ensurePostgres(scratch, port, {
         HOME: home.home,
         DOCKER_HOST: "",
       });
@@ -701,15 +1038,17 @@ describe("the verify-* skills' Postgres precondition", () => {
       ).toHaveLength(1);
     } finally {
       await home.close();
+      await stopOpenedListener(scratch, port);
     }
-  });
+  }, 30_000);
 
   it("leaves DOCKER_HOST alone when the active context answers", async () => {
     const scratch = mkScratch();
     const home = await colimaHome();
-    writeFakeDocker(scratch, 0, { infoExit: 0 });
+    const port = await closedPort();
+    writeFakeDocker(scratch, 0, { infoExit: 0, opensPort: port });
     try {
-      const result = ensurePostgres(scratch, await closedPort(), {
+      const result = ensurePostgres(scratch, port, {
         HOME: home.home,
         DOCKER_HOST: "",
       });
@@ -721,15 +1060,17 @@ describe("the verify-* skills' Postgres precondition", () => {
       ).toBe("<unset>");
     } finally {
       await home.close();
+      await stopOpenedListener(scratch, port);
     }
-  });
+  }, 30_000);
 
   it("never second-guesses an explicit DOCKER_HOST", async () => {
     const scratch = mkScratch();
     const home = await colimaHome();
-    writeFakeDocker(scratch, 0, { infoExit: 1 });
+    const port = await closedPort();
+    writeFakeDocker(scratch, 0, { infoExit: 1, opensPort: port });
     try {
-      const result = ensurePostgres(scratch, await closedPort(), {
+      const result = ensurePostgres(scratch, port, {
         HOME: home.home,
         DOCKER_HOST: "unix:///var/run/docker.sock",
       });
@@ -741,8 +1082,115 @@ describe("the verify-* skills' Postgres precondition", () => {
       expect(dockerCalls(scratch)).not.toContain("info");
     } finally {
       await home.close();
+      await stopOpenedListener(scratch, port);
     }
+  }, 30_000);
+
+  it("drives docker only through the shim on PATH, and starts nothing but its own runtime", async () => {
+    const scratch = mkScratch();
+    const port = await closedPort();
+    writeFakeDocker(scratch, 0, { opensPort: port });
+
+    // 1. The shim is what every child of this file resolves `docker` to. A call through an absolute
+    //    path or a login shell would bypass it and read as "docker was never called" — a false green
+    //    for every case above, and a real daemon behind the ones that assert it was never reached.
+    const resolved = spawnSync("bash", ["-c", "command -v docker || true"], {
+      cwd: scratch.root,
+      encoding: "utf8",
+      env: childEnv(scratch, port),
+      timeout: 30_000,
+    });
+    expect(resolved.stdout.trim()).toBe(path.join(scratch.bin, "docker"));
+    expect(
+      childEnv(scratch, port)["PATH"]?.startsWith(
+        `${scratch.bin}${path.delimiter}`,
+      ),
+    ).toBe(true);
+
+    // 2. A text guard on the shape of the fake, not a behavioural one: it can only fail if these
+    //    constants are edited, and it is here to keep them edited together. What it is worth is that
+    //    the shim starts the runtime running this suite on one file rather than a `node` looked up
+    //    on `PATH` or a shell one-liner. The *clients* in this file are pinned to loopback by the
+    //    cases that connect; the listener's own bind address is guarded here, because a listener on
+    //    `0.0.0.0` would answer those same connections just as well.
+    const shim = readFileSync(path.join(scratch.bin, "docker"), "utf8");
+    expect(shim).toContain(process.execPath);
+    const listener = readFileSync(
+      path.join(scratch.root, "listener.cjs"),
+      "utf8",
+    );
+    expect(listener).toContain('require("node:net")');
+    expect(listener).toContain(
+      'server.listen(Number(process.argv[2]), "127.0.0.1")',
+    );
+    expect(listener).not.toContain("0.0.0.0");
+
+    // 3. The helper itself names the CLI in exactly two places, both inside `pg_docker` — the
+    //    function that owns the colima fallback. Anywhere else in the file is a call the cases could
+    //    not drive, and a call that skipped the fallback. Mutation checked: adding a `docker ps ...`
+    //    beside `pg_port_open`.
+    const helper = readFileSync(LIB, "utf8");
+    const code = helper
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n")
+      .replace(/'[^']*'/g, "''")
+      .replace(/"[^"]*"/g, '""');
+    const pgDocker = code.slice(
+      code.indexOf("pg_docker() {"),
+      code.indexOf("}", code.indexOf("pg_docker() {")),
+    );
+    expect(code.match(/\bdocker\b/g)).toHaveLength(2);
+    expect(pgDocker.match(/\bdocker\b/g)).toHaveLength(2);
+    // The probe is loopback on the overridable port: never a host name, never every interface.
+    // `${PG_PORT}` counts as well as `$PG_PORT` — the property is the address, not the spelling.
+    const noComments = helper
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(noComments).toMatch(/\/dev\/tcp\/127\.0\.0\.1\/\$\{?PG_PORT\}?/);
+    expect(noComments).not.toMatch(/localhost|0\.0\.0\.0/);
+
+    // 4. And this file's own connections go to ports it started or proved closed: no `host:port`
+    //    literal to inherit a real service by accident, and no URL at all. The literal 5442 in the
+    //    `pg_port_owner` case feeds `docker ps --filter`, which opens no socket.
+    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    expect(self).not.toMatch(/https?:\/\//);
+    expect(self).not.toMatch(/port:\s*\d/);
   });
+
+  it("leaves the listener alone when there is none, and never signals a malformed pid", async () => {
+    const scratch = mkScratch();
+    // The `finally` in the cases above runs on paths whose compose never reported success, so there
+    // is no listener to stop and nothing to wait for.
+    writeFakeDocker(scratch, 1);
+    const port = await closedPort();
+    await stopOpenedListener(scratch, port);
+    expect(existsSync(scratch.listenerPid)).toBe(false);
+
+    // A truncated or corrupted record must not reach `process.kill`: 0 signals this process's whole
+    // group (this suite included) and -1 every process the user owns, so only a positive integer is
+    // treated as a listener. This case survives those records; a `<= 0` guard that loosened would
+    // not be an assertion failure here but a dead runner, which is why the values are exercised.
+    // Mutation checked: dropping the `pid > 0` guard from `recordedListener` — `kill -1` takes the
+    // suite and the shell that started it with it.
+    for (const malformed of ["", "0", "-1", "12 34\n", "not-a-pid\n"]) {
+      writeFileSync(scratch.listenerPid, malformed);
+      await stopOpenedListener(scratch, port);
+    }
+    expect(isAlive(process.pid)).toBe(true);
+
+    // A listener that is already gone — the case where the compose it belonged to exited long
+    // after the port was opened by someone else. `process.kill` throws, and the wait still passes
+    // instead of failing the case that cleaned up correctly.
+    const exited = spawnSync("true", { encoding: "utf8" });
+    const deadPid = exited.pid ?? 0;
+    expect(deadPid).toBeGreaterThan(0);
+    if (!isAlive(deadPid)) {
+      writeFileSync(scratch.listenerPid, String(deadPid));
+      await stopOpenedListener(scratch, port);
+    }
+  }, 30_000);
 
   it("keeps the compose call inside the one helper the callers share", () => {
     // The bug existed in five copies of the same stanza. This is the drift guard: a new `up.sh`
