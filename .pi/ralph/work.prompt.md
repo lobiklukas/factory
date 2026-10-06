@@ -24,6 +24,11 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
   `critique`), `ralph-verifier` (writes tests, e2e drives, fakes and `verify-*` skills) and
   `ralph-researcher` (web research: how to fake a third party). Launch parallel reviewers in **one** `subagent` call, not one by one. Subagents have
   no Linear access: you post their findings yourself.
+- **Subagent time is the loop's biggest cost** (about half of an iteration). Pass `timeoutMs` on every
+  launch: **900000** (15 min) for a reviewer, **1200000** (20 min) for a verifier. If one times out or
+  fails with a provider error (`Model is unavailable`, `Endpoint is unavailable`), relaunch **only that
+  one**, once, with the same task; do not relaunch the ones that finished. A second failure of the same
+  subagent is **Blocked**, not a third try.
 - **Launch `ralph-researcher` and `ralph-verifier` with `async: true`** - they need extension tools
   (web search) or long runs; a foreground launch fails. Await them with `bg_wait`. If `web_search`
   reports no provider under `auto`, the researcher retries with provider `anysearch` or `keenable`.
@@ -115,7 +120,9 @@ Linear, GitHub, model providers, emulators). Tests must never call a real one. F
   absent. A new dev dependency for a fake is allowed when the research recommends it; name it and its
   license in the PR. If no maintained option exists, write a small typed in-process fake and say so.
 
-**b. Tests and e2e.** Launch `ralph-verifier` with the issue text, acceptance criteria, changed
+**b. Tests and e2e.** Skip the verifier when the diff is prompt, docs or tooling text only, or when it
+is a single-file change of about 40 lines or fewer whose tests you already wrote and ran in step 6;
+say so in the PR body. Otherwise launch `ralph-verifier` with the issue text, acceptance criteria, changed
 paths, the Run-context env, and the research brief paths. It writes unit/integration tests, fakes,
 the e2e drive checks, and creates or updates the `.pi/skills/verify-<surface>/` skill and its feature
 docs. A **new surface** (new RPC group, CLI command, route, service boundary) gets a **new
@@ -143,16 +150,30 @@ verifier reports which it checked. Stop after **three** full gate-fix cycles tha
 
 ### 9. Review
 
-- Launch **in one parallel call**: `ralph-reviewer` x3 (angles `spec`, `standards`, `tests`), each
-  given the issue text and acceptance criteria, plus `ralph-designer` mode **critique** when the diff
-  touches `apps/web` (give it the Run-context ports). The `tests` reviewer also checks that
-  nothing can reach a real third party and that skills/feature docs match what actually ran. Review the **uncommitted** diff - do not commit
-  first.
-- Fix every P0 and P1 that is evidenced **and caused by your diff**. A finding you reject needs a
-  one-line reason in the PR body. Anything a reviewer, designer or verifier reports as
-  `pre-existing`, and every P2 that is a real defect rather than a taste note, is **filed per
-  `.pi/ralph/ticket.md`** - not fixed here, not dropped. Re-run the gate. At most **two** review rounds; a second round re-launches only the angles
-  that had P0/P1 findings. A remaining P0 means **Blocked**.
+Review is the slowest step, so size it to the diff. Measure first: `git diff HEAD --shortstat` plus
+`git status --short` for untracked files.
+
+- **Small diff** - about 150 changed lines or fewer, one package, no new surface (no new RPC group, CLI
+  command, route or service boundary): launch **one** `ralph-reviewer` with angle `combined` (spec,
+  standards and tests in one pass).
+- **Otherwise** launch **in one parallel call** `ralph-reviewer` x3 (angles `spec`, `standards`,
+  `tests`), plus `ralph-designer` mode **critique** when the diff touches `apps/web` (give it the
+  Run-context ports).
+- Give each the issue text and acceptance criteria. The `tests` angle also checks that nothing can
+  reach a real third party and that skills/feature docs match what actually ran. Review the
+  **uncommitted** diff - do not commit first. Pass `timeoutMs: 900000`.
+- Fix every P0 and P1 that is evidenced **and caused by your diff**, and every P2 _in your diff_ that
+  is a one-line wording or comment fix. A finding you reject needs a one-line reason in the PR body.
+- **One re-review round at most**, and only when a fix changed behaviour: a P0, or a P1 whose fix is
+  more than about 20 lines of logic. Re-launch only the angle that found it. A fix to a comment,
+  wording, formatting or a test name needs no re-review: read the diff yourself and say so in the review
+  record. A remaining P0 means **Blocked**.
+- Anything a reviewer, designer or verifier reports as `pre-existing` is handled per
+  `.pi/ralph/ticket.md`: a priority 2 or 3 defect is filed; priority 4 polish goes to
+  `.ralph/polish.md`, one line each. File **at most 3** tickets per iteration.
+- After fixes, run `format:check` and `type-check` and the tests of the packages you touched. The full
+  gate in step 8 is not repeated unless a fix touched non-test code in another package; the driver
+  re-runs the whole gate before it merges.
 
 ### 10. Deliver
 
