@@ -914,10 +914,11 @@ describe("session list", () => {
             // statement (42883) rather than shifting the instant.
             //
             // The sub-millisecond part is pinned rather than inherited. `min(last_activity_at)` in
-            // this shared database is `…28.945000`, so a group placed at `min - 1 hour` renders
-            // losslessly at millisecond precision and the truncated cursor drops nothing — the
-            // case would pass against the unfixed code. Truncating to the second and adding a
-            // fixed `.123456` makes the loss deterministic whatever the table holds.
+            // a shared database this old tends to be millisecond-aligned, so a group placed at
+            // `min - 1 hour` inherits an alignment that renders losslessly at millisecond precision
+            // — the truncated cursor would drop nothing and the case would pass against the
+            // unfixed code. Truncating to the second and adding a fixed `.123456` makes the loss
+            // deterministic whatever the table holds.
             const [oldest] = yield* sql<{ at: string }>`
             SELECT to_char(
               (
@@ -1181,9 +1182,11 @@ describe("session list", () => {
         withGroup(
           Effect.gen(function* () {
             const sessions = yield* SessionService;
-            // A literal, not `MAX_PAGE_SIZE + 3`: the seed's `generate_series(0, n - 1)` needs a
-            // type it can infer, and an expression typed `number` goes over the wire as double
-            // precision, which Postgres rejects (42883).
+            // A literal, not `MAX_PAGE_SIZE + 3`: the seed's `generate_series(0, n - 1)`
+            // gives Postgres nothing to infer a type for at `$1`, so it resolves as `integer` from
+            // the `0` literal and a double-precision parameter has no `generate_series` overload to
+            // land on (42883). `LIMIT ${limit + 1}` below is interpolated from a `number` too and
+            // is fine, because `LIMIT` is a typed position.
             const GROUP = 103;
             yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
             const visible = yield* listableRows;
