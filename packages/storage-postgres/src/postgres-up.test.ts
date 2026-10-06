@@ -39,6 +39,10 @@ import { afterAll, describe, expect, it } from "vitest";
  * `docker` can therefore be asked to *really* open a listener when it reports success, and the
  * cases below cover both halves: a compose that says so and answers, and one that says so and not.
  *
+ * Compose's exit code is not the claim in the other direction either (LOB-106): it may have failed
+ * only because another agent's `compose up` won the port between the probe and this call, so the
+ * port is asked after a failed attempt too, and the failure is discarded.
+ *
  * The file lives in `@repo/storage-postgres` for the same reason `turbo-env.test.ts` does: it is a
  * repo-level Postgres claim that belongs to no package, and it needs no database to run.
  *
@@ -910,38 +914,113 @@ describe("the verify-* skills' Postgres precondition", () => {
     30_000,
   );
 
-  it("fails loudly when its own compose failed, even though the port answers by then", async () => {
+  it("defers to the port when its own compose failed but the port answers by then", async () => {
     const scratch = mkScratch();
     const port = await closedPort();
     // The race a worktree can lose: the port looked free, someone else's `compose up` bound it
     // first, and this call's compose failed with "port is already allocated" — while a database now
-    // answers on the very port every caller needs.
+    // answers on the very port every caller needs. LOB-106: a failed compose is not this call's to
+    // report, because the one claim a caller depends on — "is there a database on 5442" — is true,
+    // and refusing would print a command that now fails too. The port decides, in both directions.
+    // Mutation checked: putting the failure back in charge, i.e. the shipped line reverting to
+    // `if ! pg_compose up -d --wait postgres >/dev/null 2>&1 || ! pg_port_open` — the status becomes
+    // 1, the refusal appears on stderr, and the `Created` cleanup runs.
     writeFakeDocker(scratch, 1, { opensPort: port });
     try {
       const result = ensurePostgres(scratch, port);
       expect(await doesAnswer(port)).toBe(true);
-      // JUDGEMENT CALL, pinned so it is a decision and not an accident: today the compose failure
-      // wins and the call fails even though a database answers — the one claim the helper
-      // documents ("0 when Postgres is reachable — already up, or started by this call"). `||`
-      // short-circuits, so `! compose || ! port_open` cannot see the port once compose has failed.
-      // The other reading is one line: `pg_compose up ... >/dev/null 2>&1 || true`, then
-      // `if ! pg_port_open`. Whichever way it goes, the caller's behaviour is fail-safe: it refuses
-      // and names the command. Not covered by LOB-104's acceptance criteria either way, so there is
-      // no mutation to name: the case pins a decision (LOB-106 owns changing it), and the red would
-      // come from that decision flipping, not from a one-line break.
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        `postgres is not up on port ${String(port)}`,
-      );
-      // Still the honest branch: nothing this project did not create is touched.
-      expect(subcommands(scratch)).toEqual([
-        "compose up -d --wait postgres",
-        "compose ps -aq --status created postgres",
-      ]);
+      expect(result.status, result.stderr).toBe(0);
+      // Silent, like every other success: a caller's own output is the only thing on the terminal.
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("");
+      // Nothing this project did not create is touched, and the healthy database is left exactly as
+      // it was found: no `ps`, no `rm`, and no second compose attempt.
+      expect(subcommands(scratch)).toEqual(["compose up -d --wait postgres"]);
     } finally {
       await stopOpenedListener(scratch, port);
     }
   }, 30_000);
+
+  it("survives its own failed compose in a caller that runs `set -euo pipefail` without guarding the call", async () => {
+    const scratch = mkScratch();
+    const port = await closedPort();
+    // The other half of the LOB-106 line, and the reason compose's exit code is *discarded* rather
+    // than ignored: the library sets no shell options and states that "the caller owns `set -euo
+    // pipefail`" (`.pi/skills/lib/postgres.sh`, header). Every caller today writes
+    // `ensure_postgres || exit 1`, and bash ignores `-e` inside a function called in an `||` list or
+    // in an `if` condition — so for those five callers the `|| true` is defence, not a live fix. For
+    // a caller that calls it bare, it is the whole fix: without it the failing compose aborts the
+    // shell at the compose line, before the port is ever asked, and LOB-106's refusal comes back one
+    // layer down with the exit status of a `docker compose up`.
+    // Mutation checked: dropping `|| true` from the compose line. This is the only case that
+    // mutation reddens (dropping it alone left 38 of 39 green) — no other case in this file pins it.
+    // The marker avoids `port:` followed by a digit on purpose: the case further down that guards
+    // this file's own connections reads them out of its own source, and that pattern is one of its
+    // assertions.
+    writeFakeDocker(scratch, 1, { opensPort: port });
+    try {
+      const strict = spawnSync(
+        "bash",
+        [
+          "-c",
+          'set -euo pipefail; source "$PG_LIB"; ensure_postgres; echo "the port was asked, status $?"',
+        ],
+        {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: { ...childEnv(scratch, port), PG_LIB: LIB },
+          timeout: 30_000,
+        },
+      );
+      // The line after the call ran, so the shell was not aborted by the compose failure — and the
+      // status it read is 0, because the port answers.
+      expect(strict.status, strict.stderr).toBe(0);
+      expect(strict.stdout).toBe("the port was asked, status 0\n");
+      expect(await doesAnswer(port)).toBe(true);
+      // Reached by asking the port, and the database the failed compose did not start is untouched.
+      expect(subcommands(scratch)).toEqual(["compose up -d --wait postgres"]);
+    } finally {
+      await stopOpenedListener(scratch, port);
+    }
+  }, 30_000);
+
+  it.each(UP_SCRIPTS)(
+    "lets %s/up.sh start after a compose that failed while another agent took the port",
+    async (skill) => {
+      const scratch = mkScratch();
+      const port = await closedPort();
+      // LOB-106 at the caller, from the ralph worktree's real position: the port was free when the
+      // precondition probed it, another agent's `compose up` bound 5442 in the window, and this
+      // call's compose exited 1 with "port is already allocated". The database every caller needs is
+      // up, so `up.sh` must go on to launch its API rather than refuse and leave `api.pid` unwritten.
+      // Mutation checked: the same one-line revert as the library case above — status 1, no launch
+      // mark, and the refusal naming a command that would fail.
+      writeFakeDocker(scratch, 1, { opensPort: port });
+      // The mark is deliberately late, so the wait below is the assertion rather than a race.
+      writeMarkingBunAndReadyCurl(scratch, { markerDelayMs: 300 });
+      const staged = stageCaller(scratch, `.pi/skills/${skill}/up.sh`);
+      try {
+        const result = spawnSync("bash", [staged], {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: childEnv(scratch, port),
+          timeout: 30_000,
+        });
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+        // One attempt, and no cleanup of a container that is not this call's: the port answers.
+        expect(composeCalls(scratch)).toEqual([
+          "compose up -d --wait postgres",
+        ]);
+        await waitFor(
+          async () => existsSync(scratch.bunRan),
+          "the API launch to be recorded",
+        );
+      } finally {
+        await stopOpenedListener(scratch, port);
+      }
+    },
+    30_000,
+  );
 
   it("lets degraded.sh refuse loudly when the port answers but no container publishes it", async () => {
     const scratch = mkScratch();
