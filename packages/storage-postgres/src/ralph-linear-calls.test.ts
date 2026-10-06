@@ -14,18 +14,20 @@ import { describe, expect, it } from "vitest";
  * argument a create takes — `.pi/ralph/work.prompt.md`'s tool list named `get_issue({ id, … })` and
  * then `save_comment` bare — so an iteration that guessed `id` lost its `ralph: picked up` or
  * PR-link comment silently: the 400 arrives as tool content with `isError: true`, not as a thrown
- * error, so no gate, no log line and no failed tool call noticed it. (`docs/next-agent.md` did name
+ * error, so no gate, no log line and no reader of the payload noticed it. (`docs/next-agent.md` did name
  * `issueId`, but it is the handoff brief, not what a worker reads.) The call sites now spell the
  * argument out; this file is what keeps them.
  *
  * A "call site" is a line that names the tool and carries a `{`, in either of the two shapes below:
  * the ordinary one, where the argument object opens on the same line, and a call a line wrapper broke
  * in two. Prose that names the tool without a brace is exempt, which is deliberate — the explanation
- * beside the fix has to be able to name the wrong argument in order to warn about it. Two false reds
- * are accepted rather than papered over: documenting the *update* form (`save_comment` with an `id`
- * edits an existing comment) reddens, and so does prose that names the tool and shows its result
- * shape on one line. Narrowing the rule to the tool immediately followed by `(` would drop
- * `docs/next-agent.md`'s JSON shape, which is a real instruction, so the rule stays broad.
+ * beside the fix has to be able to name the wrong argument in order to warn about it. The rule is
+ * therefore broader than the bug: a brace-bearing line that documents the *update* form
+ * (`save_comment({ id })` edits an existing comment) and a line that names the tool beside its result
+ * shape would both redden, and neither is in the corpus today — the update form is documented without
+ * a brace, and the result shape sits on a line of its own. Both are accepted rather than papered
+ * over, because narrowing the rule to the tool immediately followed by `(` would drop
+ * `docs/next-agent.md`'s JSON shape, which is a real instruction.
  *
  * What this can prove: that our instructions hand the agent the argument the server needs, and that
  * they still do after the next edit to a prompt. What it cannot prove: that the hosted server accepts
@@ -35,15 +37,18 @@ import { describe, expect, it } from "vitest";
  * The file lives in `@repo/storage-postgres` for the same reason `turbo-env.test.ts`,
  * `postgres-up.test.ts` and `ralph-docker-env.test.ts` do: it is a repo-level claim that belongs to no
  * package, and it needs no database and no container to run. It reads every Markdown file under
- * `.pi/` and `docs/`, plus the root `AGENTS.md` — every tree that instructs an agent.
+ * `.pi/` and `docs/`, plus the root `AGENTS.md` — the trees that instruct an agent. The root
+ * `README.md` is the one instruction file outside them, and it names no `save_comment` call.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 /**
- * The trees that instruct an agent, walked in full. `.ralph/` is deliberately *not* here: it is the
- * loop's run state, and `.ralph/plan.md`'s LOB-118 row quotes the failing call as part of the bug
- * report — a historical record, not an instruction, and one this guard would false-red on.
+ * The trees that instruct an agent, walked in full. `.ralph/` is deliberately *not* here: it is
+ * gitignored run state (`.gitignore`), not an instruction — `.ralph/plan.md`'s LOB-118 row quotes the
+ * failing call as part of the bug report. That row would not false-red either: it names `issueId`
+ * elsewhere on the same line (in `list_comments({ issueId })`), so the line-based rule below reads it
+ * as a call site and then accepts it. Which is a limit of the rule, not a reason for the exclusion.
  */
 const CORPUS_DIRS = [".pi", "docs"];
 
@@ -147,9 +152,10 @@ function corpus(): Source[] {
  * up` comment — the one this issue is about — is lost again.
  *
  * Files that merely *mention* the tool are not listed and not pinned: `docs/testing-third-parties.md`
- * carries a `{` on its Linear MCP row because the row quotes the 400 payload, and whether that row is
- * a call site at all is an accident of its wording. Case 1 still scans it; this map only pins the
- * files that call the tool on purpose.
+ * carries `save_comment` on its Linear MCP row and no `{` at all, so it is not a call site — and
+ * whether a future reword makes it one is an accident of that row's wording, which is not something a
+ * tripwire should encode. Case 1 still scans it; this map only pins the files that call the tool on
+ * purpose.
  */
 const CALLING_FILES: Record<string, number> = {
   ".pi/ralph/close.prompt.md": 1,

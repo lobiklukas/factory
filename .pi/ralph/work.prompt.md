@@ -15,9 +15,10 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 - **Linear** via `codemode`: `await tools.mcp__linear__get_issue({ id, includeRelations: true })`,
   `save_issue`, `save_comment({ issueId, body })`, `list_issues`. Results are
   `{ content: [{ type: "text", text: "<json>" }] }` - `JSON.parse(res.content[0].text)`.
-  `get_issue` and `save_issue` address the issue as `id`; on `save_comment` an `id` means _update that
-  existing comment_ instead: one that names no comment comes back `400 Could not find referenced
-Comment` and posts nothing, and one that names a comment overwrites it. Always name `issueId`.
+  `get_issue` and `save_issue` address the issue as `id`. On `save_comment`, `id` means _update that
+  existing comment_ instead and the create form takes `issueId`. An `id` that names no comment comes
+  back `400 Could not find referenced Comment` and posts nothing; one that names a comment overwrites
+  it. Always name `issueId`.
 - **Subagents.** Delegation is authorized for this task. Roles, all fresh-context and read-mostly:
   `ralph-reviewer` (angles `spec`, `standards`, `tests`), `ralph-designer` (modes `spec`,
   `critique`), `ralph-verifier` (writes tests, e2e drives, fakes and `verify-*` skills) and
