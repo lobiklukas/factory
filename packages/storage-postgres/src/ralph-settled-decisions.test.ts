@@ -26,13 +26,14 @@ import { describe, expect, it } from "vitest";
  * *wording* at each site is the range-free wording — only that no stale range survives. A site
  * could still say "the older decisions" and stay green; that is a prose judgement no scan makes.
  *
- * The corpus is the trees that instruct an agent, walked in full, plus the root `README.md` — the
- * one instruction file outside them. `.ralph/` and `.verify/` are deliberately absent: both are
- * gitignored run state (`.gitignore`), not instructions, and both quote the stale range as part of
- * a bug report (`.ralph/plan.md`'s LOB-127 row, `.ralph/sessions/subagent-artifacts/*`). The
- * acceptance's literal `grep -rn … .` over the working tree therefore cannot be the check: it
- * matches evidence and plan state that never ships. Scanning the repository's own trees is the
- * honest reading of "returns nothing outside `.git/` and `node_modules/`" — nothing *in the repo*.
+ * The corpus is the trees that instruct an agent (`.pi/`, `docs/`), walked in full, plus every
+ * root-level `*.md` (`AGENTS.md`, `README.md`). `.ralph/`, the root `.verify/` and any `.verify/`
+ * under `.pi/` (where the verify skills drop evidence) are deliberately absent: gitignored run
+ * state (`.gitignore`), not instructions, and the first two quote the stale range in plan rows,
+ * review records and PR bodies. The acceptance's literal `grep -rn … .` over the working tree
+ * therefore cannot be the check: it matches run state that never ships. Scanning the repository's
+ * own trees is the honest reading of "returns nothing outside `.git/` and `node_modules/`" —
+ * nothing *in the repo*.
  *
  * The file lives in `@repo/storage-postgres` for the same reason `ralph-linear-calls.test.ts`,
  * `turbo-env.test.ts` and `postgres-up.test.ts` do: it is a repo-level claim that belongs to no
@@ -95,7 +96,8 @@ function findings(sources: readonly Source[], highest: number): string[] {
 }
 
 /**
- * The corpus, read from disk: every Markdown file under `CORPUS_DIRS`, plus the root `README.md`.
+ * The corpus, read from disk: every Markdown file under `CORPUS_DIRS` (skipping `.verify/`
+ * run-state directories), plus every root-level `*.md`.
  *
  * Walked rather than enumerated from `git ls-files` so that an instruction file someone forgot to
  * stage is still scanned — the walk sees the working tree, which is what a reader reads.
@@ -109,7 +111,7 @@ function corpus(): Source[] {
     readdirSync(path.join(REPO_ROOT, dir), { withFileTypes: true }).flatMap(
       (entry) => {
         const relative = path.join(dir, entry.name);
-        if (entry.isDirectory()) return walk(relative);
+        if (entry.isDirectory()) return entry.name === ".verify" ? [] : walk(relative);
         return entry.name.endsWith(".md") ? [relative] : [];
       },
     );
@@ -133,6 +135,10 @@ describe("the instructions' settled-decisions range", () => {
     const highest = highestDecision(design);
     expect(highest).toBeGreaterThan(0);
     expect(findings(corpus(), highest)).toEqual([]);
+    // The tripwire needs a live range to trip: `README.md:114` and `docs/README.md:3,11` say
+    // `D1-D17`, so the next appended decision reddens this case. If a future pass makes them
+    // range-free too, this assertion is what says the AC2 proof needs a new fixture.
+    expect(findings(corpus(), highest + 1).length).toBeGreaterThan(0);
   });
 
   // Mutation checked: raising the highest decision the corpus is compared against — exactly what
@@ -168,17 +174,6 @@ describe("the instructions' settled-decisions range", () => {
     }
   });
 
-  // Mutation checked: making `staleRanges` skip the `top >= highest` comparison, so a range that
-  // already reaches the top is exempt — `README.md:114` and `docs/README.md:3,11` say `D1-D17`
-  // and are correct today. Without this case the rule could pass by flagging them.
-  it("accepts a range that already reaches the highest decision", () => {
-    const source: Source = {
-      path: "synthetic.md",
-      text: "`design.md` holds the settled decisions (D1-D17) and their rationale.\n",
-    };
-    expect(findings([source], 17)).toEqual([]);
-  });
-
   // Mutation checked: dropping the `D${highest}` exemption, which is what lets a line carry a
   // range *and* the acknowledgement that the set runs further. `docs/board.md:5` was written that
   // way — "(D1–D16, plus D17 which introduces it)" — and it was a true sentence.
@@ -190,12 +185,12 @@ describe("the instructions' settled-decisions range", () => {
     expect(findings([source], 17)).toEqual([]);
   });
 
-  // Mutation checked: dropping the `top >= highest` guard. It looks redundant next to the case
-  // above — every range that reaches the top also names it — and it is not: a range that
-  // *overshoots* (`D1-D18` while the top is 17) names no top decision, so without the guard it
-  // would red. It is exempt on purpose. LOB-127 is about instructions that understate the settled
-  // set; an overshooting range is a different error, and a guard that flags it would red on a
-  // line that is merely wrong in the other direction.
+  // Mutation checked: dropping the `top >= highest` guard. It looks redundant — every range that
+  // reaches the top also names the top decision in its own text, so the exemption below would
+  // catch it — and it is not: a range that *overshoots* (`D1-D18` while the top is 17) names no
+  // top decision, so without the guard it would red. It is exempt on purpose. LOB-127 is about
+  // instructions that understate the settled set; an overshooting range is a different error, and
+  // a guard that flags it would red on a line that is merely wrong in the other direction.
   it("does not read a range above the highest as an understatement", () => {
     const source: Source = {
       path: "synthetic.md",
@@ -214,8 +209,10 @@ describe("the instructions' settled-decisions range", () => {
     expect(findings([source], 17)).toEqual(["synthetic.md:1: D1-D16"]);
   });
 
-  // Mutation checked: reading the decision number from the wrong capture group, or matching a
-  // single decision reference instead of a range. `D17` alone is not a range and must not red.
+  // Mutation checked: matching a single decision reference instead of a range — `D17` alone is
+  // not a range and must not red. (Reading the number from the wrong capture group reddens the
+  // overshoot case above, not this one: read as top `1`, a `D1-D17` range is still exempt because
+  // its line names the top decision.)
   it("ignores a single decision reference and a range above the highest", () => {
     const sources: Source[] = [
       { path: "synthetic.md", text: "D17 introduces the board.\n" },
