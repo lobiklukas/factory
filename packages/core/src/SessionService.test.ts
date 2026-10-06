@@ -604,8 +604,31 @@ describe("session list", () => {
     Array.from({ length: n }, (_, k) => groupId(k));
   /** A group's ids in the order the list returns them: id descending inside the tie. */
   const groupIdsDescending = (n: number) => [...groupIds(n)].sort().reverse();
-  /** `GROUP_PREFIX` as a `LIKE` pattern — `_` is a wildcard in `LIKE`, so it is escaped. */
-  const GROUP_PATTERN = `${GROUP_PREFIX.replace(/_/g, "\\_")}%`;
+  /**
+   * The rows these cases seed *below* the group, so the group is not the head of the table and a
+   * page boundary can fall inside it from either side.
+   */
+  // `ses_mn`, not `ses_mo`: the id alphabet excludes `i`, `l`, `o` and `u`, and the service
+  // refuses a row it cannot parse.
+  const OLDER_PREFIX = "ses_mn";
+  /** A prefix as a `LIKE` pattern — `_` is a wildcard in `LIKE`, so it is escaped. */
+  const asPattern = (prefix: string) => `${prefix.replace(/_/g, "\\_")}%`;
+  const GROUP_PATTERN = asPattern(GROUP_PREFIX);
+  const OLDER_PATTERN = asPattern(OLDER_PREFIX);
+  /** The rows one case seeds *above* its group, so the group is the tail of the ordering. */
+  const NEWER_PREFIX = "ses_my";
+  const NEWER_PATTERN = asPattern(NEWER_PREFIX);
+
+  /**
+   * Delete every row these cases mint, in one statement.
+   *
+   * The database is shared, so a run that leaves its rows behind collides with the next run's
+   * `sessions_pkey` — and, worse, silently changes the row count every other case pages over.
+   */
+  const deleteSeeded = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN} OR id LIKE ${OLDER_PATTERN} OR id LIKE ${NEWER_PATTERN}`;
+  });
 
   /**
    * Seed `n` sessions whose `last_activity_at` is one literal instant.
@@ -616,17 +639,18 @@ describe("session list", () => {
    */
   const seedGroup = (n: number, at: string) =>
     Effect.gen(function* () {
+      yield* deleteSeeded;
       const sql = yield* SqlClient;
-      // Hermetic across runs: these rows are these cases', and the database is shared.
-      yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN}`;
+      // The prefix is cast, not quoted: as a bare parameter Postgres cannot infer a type for
+      // `$1 || lpad(…)` and rejects the statement with 42P18 before it runs.
       yield* sql`
         INSERT INTO sessions (id, title)
-        SELECT '${GROUP_PREFIX}' || lpad(n::text, 24, '0'), 'same millisecond ' || n
+        SELECT ${GROUP_PREFIX}::text || lpad(n::text, 24, '0'), 'same millisecond ' || n
         FROM generate_series(0, ${n - 1}) AS g(n)
       `;
       yield* sql`
         INSERT INTO session_activity (session_id, last_activity_at)
-        SELECT '${GROUP_PREFIX}' || lpad(n::text, 24, '0'), ${at}::timestamptz
+        SELECT ${GROUP_PREFIX}::text || lpad(n::text, 24, '0'), ${at}::timestamptz
         FROM generate_series(0, ${n - 1}) AS g(n)
       `;
     });
@@ -635,10 +659,7 @@ describe("session list", () => {
   const withGroup = <A, E, R>(body: Effect.Effect<A, E, R>) =>
     body.pipe(
       Effect.ensuring(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient;
-          yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN}`;
-        }).pipe(
+        deleteSeeded.pipe(
           // A cleanup that cannot run is a defect, not a silent row leak.
           Effect.orDie,
         ),
@@ -706,14 +727,18 @@ describe("session list", () => {
    *
    * `rows.length > limit` is the whole decision about whether another page exists. With the group
    * the newest thing in the table and the same size as the page, the page is full of group rows and
-   * the one extra row the query fetched is what says there is more: the cursor has to be minted
-   * from the group's last row at full precision, or the rest of the table is unreachable.
+   * the one extra row the query fetched is what says there is more.
+   *
+   * This is a control, not a boundary case, and it passes against the unfixed code: the whole
+   * group fits in the first page, so a millisecond-truncated cursor skips *past* the group instead
+   * of splitting it. What it pins is the ordinary path — the group is the head of page 1, and
+   * every row below it still comes back — so a fix that special-cased same-millisecond groups and
+   * broke the walk fails here rather than in the two cases below.
    */
   it("mints the cursor from the exact instant when the group is exactly one page", async () => {
     const result = await program(
       withGroup(
         Effect.gen(function* () {
-          const sessions = yield* SessionService;
           const sql = yield* SqlClient;
           const GROUP = 4;
           const LIMIT = 4;
@@ -724,12 +749,12 @@ describe("session list", () => {
           // otherwise `rows.length > limit` is false and there is no cursor to mint at all.
           yield* sql`
             INSERT INTO sessions (id, title)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
             FROM generate_series(0, 6) AS g(n)
           `;
           yield* sql`
             INSERT INTO session_activity (session_id, last_activity_at)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
                    now() - make_interval(secs => 60 + n)
             FROM generate_series(0, 6) AS g(n)
           `;
@@ -781,12 +806,12 @@ describe("session list", () => {
           yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
           yield* sql`
             INSERT INTO sessions (id, title)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
             FROM generate_series(0, 4) AS g(n)
           `;
           yield* sql`
             INSERT INTO session_activity (session_id, last_activity_at)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
                    now() - make_interval(secs => 60 + n)
             FROM generate_series(0, 4) AS g(n)
           `;
@@ -828,9 +853,11 @@ describe("session list", () => {
    * A group that sits whole inside a page larger than it, so the cursor that carries the paging
    * past the group comes from a row *after* it.
    *
-   * This is the control for the two cases above: the group's own exactness is not what is under
-   * test here, so it fails if the fix broke the ordinary path rather than if it failed to fix the
-   * boundary.
+   * The second control, and it also passes against the unfixed code: the group is wholly inside
+   * the first page, so no cursor is ever minted from a group row and no cursor can split it. What
+   * it pins is the walk itself — the rows *below* the group have to keep coming back, exactly once,
+   * on the pages after it (`entries.length >= visible`). A fix that special-cased same-millisecond
+   * groups and broke the ordinary path fails here.
    */
   it("returns a same-millisecond group that sits inside a larger page", async () => {
     const result = await program(
@@ -841,12 +868,12 @@ describe("session list", () => {
           yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
           yield* sql`
             INSERT INTO sessions (id, title)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'older ' || n
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
             FROM generate_series(0, 11) AS g(n)
           `;
           yield* sql`
             INSERT INTO session_activity (session_id, last_activity_at)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
                    now() - make_interval(secs => 60 + n)
             FROM generate_series(0, 11) AS g(n)
           `;
@@ -888,10 +915,23 @@ describe("session list", () => {
           const GROUP = 5;
           // However old the shared table already is: the group has to be the end of the ordering,
           // whatever else is in it.
+          // The subtraction is parenthesised: `AT TIME ZONE` binds to the interval on its left,
+          // so without them Postgres reads `interval '1 hour' AT TIME ZONE 'UTC'` and rejects the
+          // statement (42883) rather than shifting the instant.
+          //
+          // The sub-millisecond part is pinned rather than inherited. `min(last_activity_at)` in
+          // this shared database is `…28.945000`, so a group placed at `min - 1 hour` renders
+          // losslessly at millisecond precision and the truncated cursor drops nothing — the
+          // case would pass against the unfixed code. Truncating to the second and adding a
+          // fixed `.123456` makes the loss deterministic whatever the table holds.
           const [oldest] = yield* sql<{ at: string }>`
             SELECT to_char(
-              COALESCE(min(last_activity_at), now()) - interval '1 hour'
-                AT TIME ZONE 'UTC',
+              (
+                date_trunc(
+                  'seconds',
+                  COALESCE(min(last_activity_at), now()) - interval '1 hour'
+                ) + interval '0.123456 seconds'
+              ) AT TIME ZONE 'UTC',
               'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
             ) AS at
             FROM session_activity
@@ -901,12 +941,12 @@ describe("session list", () => {
           // Newer than the group, at second spacing so none of them ties with it.
           yield* sql`
             INSERT INTO sessions (id, title)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'), 'newer ' || n
+            SELECT 'ses_my' || lpad(n::text, 24, '0'), 'newer ' || n
             FROM generate_series(0, 6) AS g(n)
           `;
           yield* sql`
             INSERT INTO session_activity (session_id, last_activity_at)
-            SELECT 'ses_mo' || lpad(n::text, 24, '0'),
+            SELECT 'ses_my' || lpad(n::text, 24, '0'),
                    now() - make_interval(secs => n)
             FROM generate_series(0, 6) AS g(n)
           `;
@@ -923,6 +963,7 @@ describe("session list", () => {
 
     const entries = result.pages.flatMap((page) => page.output.sessions);
     const group = entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+
     expect(group.map((entry) => entry.id)).toEqual(
       groupIdsDescending(result.GROUP),
     );
