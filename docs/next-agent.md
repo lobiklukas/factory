@@ -94,6 +94,18 @@ over HTTP with the cached `mcp-remote` OAuth token: `~/.mcp-auth/mcp-remote-v1/*
 Move each issue to In Progress when you start, and to In Review with a comment carrying your evidence
 when it is done. Never invent an issue number.
 
+**Where the MCP servers are configured.** The root `.mcp.json` is authoritative: `.pi/mcp.json` is a
+symlink to `../.mcp.json`, so pi's project-level read and every other client see one file and there is
+no second copy to drift out of step. The `linear` server is reached as
+`npx -y mcp-remote@<exact version>`, never as a bare `mcp-remote` — with no specifier `npx` installs
+whatever the registry calls `latest` on the day an agent starts, which is a different program from the
+one this repo was tested against. To bump it, change the version in `.mcp.json`'s `linear.args` **and**
+the two places in this repo's Linear MCP row that the guard reads — the strategy cell's
+`mcp-remote@<version>` and the sources cell's `(<version>, MIT, …)` — in one commit:
+`packages/storage-postgres/src/mcp-pin.test.ts` fails when any of the three disagrees. Then confirm
+the tools still mount with `pi mcp list`, which prints the server, its tool count and the pinned
+command line it resolved.
+
 ### Constraints that will bite
 
 - **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). On this

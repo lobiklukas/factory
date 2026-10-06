@@ -202,8 +202,11 @@ once B lands.
   `observability`, `infra`, `self-hosting`, `board` refine the area within a track.
 - **Milestones:** the eleven above — M2 … M7, **B (the board MVP, before T)**, T, **L (the local-run
   gate)**, S, V2.
-- **MCP:** `.mcp.json` at the repo root runs `npx mcp-remote https://mcp.linear.app/mcp`, which every
-  stdio MCP client (OMP, Claude Code) picks up. First use authorizes in a browser; the token is
+- **MCP:** `.mcp.json` at the repo root runs `npx -y mcp-remote@0.14.3` against
+  `https://mcp.linear.app/mcp`, which every stdio MCP client (OMP, Claude Code) picks up. The version
+  is pinned rather than floating: `docs/next-agent.md` says how to bump it, and
+  `packages/storage-postgres/src/mcp-pin.test.ts` fails when the pin and the version
+  `docs/testing-third-parties.md` records disagree. First use authorizes in a browser; the token is
   cached in `~/.mcp-auth` and shared by all of them. No API key is stored in the repo.
 
 ## Not on this roadmap
