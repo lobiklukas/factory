@@ -10,17 +10,17 @@ Pattern sources: Huntley's bash loop; fresh context per iteration (Galarza's Lin
 
 ## Roles
 
-| Role                | Where                           | Job                                                                                                                                                               |
-| ------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| planner             | `plan.prompt.md` (main session) | Labels every open Factory MVP issue `ralph`, scouts them, wires `blockedBy`, classifies (`ready` / `needs-spec` / `needs-human` / split), writes `.ralph/plan.md` |
-| worker              | `work.prompt.md` (main session) | Picks one `ready` issue (stacking on an in-review blocker), implements, verifies, reviews, opens a draft PR                                                       |
-| `ralph-scout`       | `.pi/agents/`                   | Read-only recon: evidence, footprint, dependencies, third parties, size                                                                                           |
-| `ralph-designer`    | `.pi/agents/`                   | UI spec before an `apps/web` change; critique of the rendered result after                                                                                        |
-| `ralph-verifier`    | `.pi/agents/`                   | Fresh-context writer of tests, fakes, e2e drive checks and `.pi/skills/verify-*`                                                                                  |
-| `ralph-researcher`  | `.pi/agents/`                   | Finds maintained OSS to fake a third party; feeds `docs/testing-third-parties.md`                                                                                 |
-| `ralph-merger`      | `.pi/agents/`                   | Resolves `git merge origin/main` conflicts by intent; knows the migration, lockfile, generated-file and registry traps                                            |
-| `ralph-reviewer` x3 | `.pi/agents/`                   | Parallel `spec` / `standards` / `tests` review of the uncommitted diff                                                                                            |
-| audit               | `audit.prompt.md`               | Re-runs every verify skill, fixes drift, files what it cannot fix                                                                                                 |
+| Role               | Where                           | Job                                                                                                                                                               |
+| ------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| planner            | `plan.prompt.md` (main session) | Labels every open Factory MVP issue `ralph`, scouts them, wires `blockedBy`, classifies (`ready` / `needs-spec` / `needs-human` / split), writes `.ralph/plan.md` |
+| worker             | `work.prompt.md` (main session) | Picks one `ready` issue (stacking on an in-review blocker), implements, verifies, reviews, opens a draft PR                                                       |
+| `ralph-scout`      | `.pi/agents/`                   | Read-only recon: evidence, footprint, dependencies, third parties, size                                                                                           |
+| `ralph-designer`   | `.pi/agents/`                   | UI spec before an `apps/web` change; critique of the rendered result after                                                                                        |
+| `ralph-verifier`   | `.pi/agents/`                   | Fresh-context writer of tests, fakes, e2e drive checks and `.pi/skills/verify-*`                                                                                  |
+| `ralph-researcher` | `.pi/agents/`                   | Finds maintained OSS to fake a third party; feeds `docs/testing-third-parties.md`                                                                                 |
+| `ralph-merger`     | `.pi/agents/`                   | Resolves `git merge origin/main` conflicts by intent; knows the migration, lockfile, generated-file and registry traps                                            |
+| `ralph-reviewer`   | `.pi/agents/`                   | One `combined` review for a small diff, else parallel `spec` / `standards` / `tests`                                                                              |
+| audit              | `audit.prompt.md`               | Re-runs every verify skill, fixes drift, files what it cannot fix                                                                                                 |
 
 ## Rules that matter
 

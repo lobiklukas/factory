@@ -9,6 +9,14 @@ feature docs, lint/type warnings, bugs in code you read, tests that can reach a 
 missing verification for an existing surface, and unevidenced claims in docs. It also covers real
 defects that a reviewer, designer or verifier reported outside your diff, and deferred review findings.
 
+**Severity decides the form.** The rule above is for defects that matter: priority 2 (turns a gate
+red, loses data, breaks a contract or a security boundary) and priority 3 (broken tests, drifted
+verification, real bugs). **Priority 4 polish** - wording or comment accuracy, a README line, a
+naming nit, a mutation-note over-claim - is not a ticket: each costs a whole iteration of reviews and
+CI. Append one line to `.ralph/polish.md` (`<date> LOB-n <path:line> <what>`), which a human or the
+audit pass batches. Never file more than 3 tickets in one iteration; put the rest in `polish.md` with
+their evidence. A polish defect **in your own diff** is just fixed.
+
 Do **not** fix it inline - that is scope creep and hides it from review - **unless** it blocks the gate
 for your own issue, in which case file it as below, then follow "Blocked by it".
 
