@@ -36,25 +36,24 @@ droppable, per D7.
 **What it does not prove.** Nothing measures the list under load, and `rebuildIndexes` has no runtime
 caller yet (it is the recovery path, driven by its test). Sessions created before the
 `session_activity` migration get their row backfilled from `sessions`, not from their logs, until a
-rebuild runs. **A page boundary whose row shares its millisecond with a row that sorts after it is
-red rather than green:** the cursor carries `lastActivityAt` at millisecond resolution (`to_char(…
-'MS')`) while the column is `TIMESTAMPTZ`, so the tie that falls on the boundary is skipped by the
-next page's keyset comparison — and the completeness assertion above catches the missing row (before
-LOB-93 the suite could not see it at all). A tie _inside_ one page comes back whole and green, which
-is why the probe forced the boundary (`limit: 1`); the boundary is reachable in this suite because
-the shared table decides where the page edges land. A probe reproduced the skip on 2026-10-05 (two
-sessions at the same `…00.123456Z`: the lower id never comes back), and the same truncation makes the
-rendered-`lastActivityAt` ordering assertion above red when a shared row lands in a filler's
-millisecond; the recipe and output are in
+rebuild runs. **A page boundary whose row shares its millisecond with a row that sorts after it no
+longer drops that row:** as of LOB-95 (2026-10-06) the cursor is minted from a second, exact column
+(`to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`), so the keyset
+comparison runs at the precision the value is stored with, and the nine cases in
+`packages/core/src/SessionService.test.ts` that seed same-millisecond groups all come back whole —
+including one paged a row at a time, so every boundary inside a group is covered. Before that fix
+the cursor carried the millisecond-rendered `lastActivityAt` while the column was `TIMESTAMPTZ`, so
+the tie on the boundary was skipped by the next page; a probe reproduced the skip on 2026-10-05 (two
+sessions at the same `…00.123456Z`: the lower id never came back), and the recipe and output are in
 `.verify/evidence/lob-93/preexisting-cursor-precision-row-loss.log`.
-The filler rows are distinct at second granularity, which rules out ties among themselves but not
-ties with rows the shared table already holds, and the same truncation has a second manifestation
-the suite does not survive either: the ordering assertion compares the _rendered_ `lastActivityAt`,
-so two rows that share a millisecond while differing in microseconds order the list differently than
-the assertion expects. That one reproduces deterministically (two seeded rows at `…00.100456Z` and
-`…00.100Z`) and the pre-LOB-93 test file fails it identically (`recheck-2c-ms-ordering-pair-control.log`);
-it was also seen live on `factory_ralph`, where a filler row and a pre-existing row rendered to the
-same millisecond (`recheck-1-mutation-6-tail-truncation.log`, first run). Both belong to the same
-API-side gap — the list's `lastActivityAt` and its cursor are only millisecond-precise — and a
-test-side change can only tolerate that, not remove it. Fixing the cursor belongs to
-`SessionService.ts`, not to this test. Reported as a separate defect.
+
+What is still millisecond-precise is the _displayed_ `lastActivityAt` (unchanged, and unchanged on
+purpose: it is the wire shape the schema promises), so the same truncation has a second
+manifestation the suite does not survive: the ordering assertion compares the _rendered_
+`lastActivityAt`, so two rows that share a millisecond while differing in microseconds order the list
+differently than the assertion expects. That one reproduces deterministically (two seeded rows at
+`…00.100456Z` and `…00.100Z`) and the pre-LOB-93 test file fails it identically
+(`recheck-2c-ms-ordering-pair-control.log`); it was also seen live on `factory_ralph`, where a filler
+row and a pre-existing row rendered to the same millisecond (`recheck-1-mutation-6-tail-truncation.log`,
+first run). The filler rows are distinct at second granularity, which rules out ties among themselves
+but not ties with rows the shared table already holds. LOB-100 owns that half.

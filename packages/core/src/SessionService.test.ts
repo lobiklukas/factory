@@ -511,10 +511,10 @@ describe("session list", () => {
    * group failed `(last_activity_at, id) < (cursor.at, cursor.id)` and the page ended early.
    */
   // Every case below pages over the *whole* shared table to prove the group is not dropped in
-  // passing, so each one carries a budget: the table grew from 1 628 to 2 011 rows during this
-  // iteration, and vitest's 5 s default turned that into `Test timed out in 5000ms` on three of
-  // them. The budget is a ceiling, not a target — the cases run in milliseconds when the table
-  // is small. The durable fix is LOB-96 (a database per run).
+  // passing, so each one carries a budget: the shared table is large enough that a full walk costs
+  // more than vitest's 5 s default, and three of these cases timed out at the default while they
+  // were being written. The budget is a ceiling, not a target — a walk costs a few milliseconds
+  // when the table is small. The durable fix is LOB-96 (a database per run).
   it(
     "returns every row of a same-millisecond group exactly once",
     { timeout: 60_000 },
@@ -533,8 +533,9 @@ describe("session list", () => {
             // would be walked past instead of paged through.
             yield* seedGroup(GROUP, "2027-01-01T00:00:00.123456Z");
             const visible = yield* listableRows;
-            // A four-row page against a twelve-row group: three of the four boundaries fall inside
-            // the group, so a truncated cursor loses rows on every one of them.
+            // A four-row page against a twelve-row group: the page boundaries fall after the
+            // group's 4th, 8th and 12th row, and the first two are inside it. A millisecond-
+            // truncated cursor loses the rest of the group at each of those two boundaries.
             const { pages, exhausted } = yield* pageAll(
               LIMIT,
               Math.ceil(visible / LIMIT) + 2,
@@ -982,6 +983,10 @@ describe("session list", () => {
    * strictly greater than the truncated cursor. The code says so itself: nothing can repair a value
    * that has already been rounded. The contrast with the exact cursor on the same page is what
    * makes that visible in one test.
+   *
+   * A maintainer who hardens `parseCursor` — refusing a cursor it did not mint, as the case after
+   * this one does for a malformed one — should expect this case to go red and delete it: refusing is
+   * the better answer than answering lossily, and this case exists to show what the choice costs.
    */
   it(
     "accepts a millisecond-truncated cursor and loses the rest of that millisecond",
@@ -1360,14 +1365,14 @@ const REBUILD_CASE =
  * The budget a case declares, or `undefined` when it would take vitest's default.
  *
  * Vitest takes the budget in either of two shapes, and this reads both so a case may use either:
- * the options object `it(name, { timeout }, fn)` — the form LOB-128 standardised across the repo,
- * which the same-millisecond cases use — and the third argument `it(name, fn, ms)`, which the
- * rebuild case carries. The declaration is found by pattern rather than by `it("name"`: oxfmt
- * breaks the arguments of a long-named case one per line, so `it(` and the name are not adjacent
- * in the source. The options object is read only from the start of the declaration up to its
- * `=>`, so a `timeout:` inside a body cannot be mistaken for the declaration; the third argument
- * sits on the case's closing line, which is the first two-space-indented `}` after its `it(` —
- * every nested callback in the body closes deeper.
+ * the options object `it(name, { timeout }, fn)` — the form the ralph-driver suite in
+ * `packages/storage-postgres` uses (LOB-128), which the same-millisecond cases here use — and the
+ * third argument `it(name, fn, ms)`, which the rebuild case carries. The declaration is found by
+ * pattern rather than by `it("name"`: oxfmt breaks the arguments of a long-named case one per line,
+ * so `it(` and the name are not adjacent in the source. The options object is read only from the
+ * start of the declaration up to its `=>`, so a `timeout:` inside a body cannot be mistaken for the
+ * declaration; the third argument sits on the case's closing line, which is the first
+ * two-space-indented `}` after its `it(` — every nested callback in the body closes deeper.
  *
  * Neither shape survives oxfmt unchanged when the name is long: it breaks the arguments one per
  * line, so the budget is `}, 60_000,` rather than `}, 60_000);`. That is why the options form is
@@ -1436,9 +1441,9 @@ describe("the rebuild case's budget", () => {
  * The same-millisecond group's budgets, guarded the same way (LOB-95).
  *
  * These nine cases page over the *whole* shared table — that is how each one proves its group was
- * not dropped in passing — so their cost is the table's, not the case's. The table grew from 1 628
- * to 2 011 rows while they were written, and vitest's 5 s default turned that into
- * `Test timed out in 5000ms` on three of them. Declaring the budget is load-bearing rather than
+ * not dropped in passing — so their cost is the table's, not the case's. The shared table is large
+ * enough that a full walk costs more than vitest's 5 s default, and three of these cases timed out
+ * at that default while they were being written. Declaring the budget is load-bearing rather than
  * decorative, and dropping it is silent until the table is large enough, which is exactly when it
  * matters. The durable fix is LOB-96: a database per run, at which point this describe goes the
  * way the rebuild one says it goes.
@@ -1461,9 +1466,9 @@ const SAME_MILLISECOND_CASES = [
 
 describe("the same-millisecond cases' budgets", () => {
   const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
-  // The group is bounded by two doc comments rather than by case names, because a name is what
-  // the guard reads: anchoring on one would let the reader find its own list entry first. The
-  // opening comment is the defect's description, the closing one this describe's neighbour's.
+  // The group is bounded by its opening doc comment and by the next case's declaration: a case
+  // name is what the guard reads, so anchoring on one would let the reader find its own list entry
+  // first. The opening comment is the defect's description.
   const start = source.indexOf(
     " * A page boundary inside a group of rows that share a millisecond",
   );
