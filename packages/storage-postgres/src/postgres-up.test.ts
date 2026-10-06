@@ -47,7 +47,11 @@ import { afterAll, describe, expect, it } from "vitest";
  * repo-level Postgres claim that belongs to no package, and it needs no database to run.
  *
  * Each case below names the mutation it was checked against — the one-line change that makes it go
- * red. A case whose mutation nobody can state is not testing anything.
+ * red. A case whose mutation nobody can state is not testing anything. "Names" is meant
+ * mechanically: the note is a `//` comment line inside the case that carries the marker
+ * `Mutation checked:` on that one line, and the last case in this file reads the file back and
+ * fails when a case has none. That is not decoration — six cases had drifted away from the claim by
+ * the time it was measured (LOB-107), which is how a header stops being true.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -64,6 +68,17 @@ const CALLERS = [
 
 /** `up.sh` per skill: a script that must start its API while Postgres already answers. */
 const UP_SCRIPTS = ["verify-api", "verify-cli", "verify-web"] as const;
+
+/** The marker a case's mutation note carries, on one comment line. */
+const MUTATION_NOTE = "Mutation checked:";
+
+/**
+ * Whether a line is a case's mutation note. `//` lines only: a note is documentation, and a string
+ * literal that happens to carry the marker is not one — otherwise an assertion could satisfy the
+ * scan that the last case in this file runs.
+ */
+const isMutationNote = (line: string): boolean =>
+  /^\s*\/\//.test(line) && line.includes(MUTATION_NOTE);
 
 interface Scratch {
   readonly root: string;
@@ -510,6 +525,9 @@ describe("the verify-* skills' Postgres precondition", () => {
     try {
       const result = ensurePostgres(scratch, database.port);
       expect(result.status, result.stderr).toBe(0);
+      // Mutation checked: dropping the `pg_port_open && return 0` line at the top of
+      // `ensure_postgres` — the helper goes on to ask compose about a database that is already up,
+      // which is the LOB-57 bug from the caller's side.
       expect(dockerCalls(scratch)).toEqual([]);
       // The helper is silent on the path every skill takes on a developer machine.
       expect(result.stdout).toBe("");
@@ -545,8 +563,10 @@ describe("the verify-* skills' Postgres precondition", () => {
     // The LOB-104 case: `--wait` reports on its healthcheck, so a start whose container comes up
     // and leaves exits 0 with nothing listening. Trusting that exit code hands the caller a
     // database that is not there — `up.sh` would spend its 30-second readiness loop and leave its
-    // process and pid file behind. Mutation checked: dropping `|| ! pg_port_open` from
-    // `ensure_postgres` (the status becomes 0 and the assertion below is red).
+    // process and pid file behind. Mutation checked: dropping the port probe back out of the
+    // condition — `if ! pg_compose up -d --wait postgres >/dev/null 2>&1; then`, which is the
+    // `|| ! pg_port_open` this note named before LOB-106 rewrote the compose line (the status
+    // becomes 0 and the assertion below is red).
     writeFakeDocker(scratch, 0);
     const port = await closedPort();
     const result = ensurePostgres(scratch, port, {
@@ -570,8 +590,9 @@ describe("the verify-* skills' Postgres precondition", () => {
   it("fails loudly and removes nothing when a compose that reported success left no container", async () => {
     const scratch = mkScratch();
     // Acceptance criterion 1 in full: compose exits 0 with nothing answering *and* left no
-    // `Created` container, so the cleanup must ask, find nothing, and remove nothing. Mutation
-    // checked: dropping `|| ! pg_port_open` (the status is 0 and every assertion here is red).
+    // `Created` container, so the cleanup must ask, find nothing, and remove nothing.
+    // Mutation checked: the same dropped probe as the case above (`if ! pg_compose up -d --wait
+    // postgres >/dev/null 2>&1; then`) — the status is 0 and every assertion here is red.
     writeFakeDocker(scratch, 0);
     const port = await closedPort();
     const result = ensurePostgres(scratch, port);
@@ -630,7 +651,9 @@ describe("the verify-* skills' Postgres precondition", () => {
     const result = ensurePostgres(scratch, await closedPort());
     expect(result.status).toBe(1);
     // A running container is someone's database and an `exited` one is not this call's to delete:
-    // only `--status created` containers are removed, and there are none here.
+    // only `--status created` containers are removed, and there are none here. Mutation checked:
+    // collapsing the cleanup's `for container in $created` loop into one unquoted
+    // `pg_docker rm -f $created` — with nothing to delete, that is a stray `rm -f`.
     expect(composeCalls(scratch)).toEqual([
       "compose up -d --wait postgres",
       "compose ps -aq --status created postgres",
@@ -660,6 +683,10 @@ describe("the verify-* skills' Postgres precondition", () => {
           timeout: 30_000,
         });
         expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+        // Mutation checked: the same one-line revert as the first case — dropping
+        // `pg_port_open && return 0` from `ensure_postgres` — with `up.sh` in the position the bug
+        // was reported from: another container holds the port, compose fails, and the call that
+        // was supposed to be a no-op reaches docker anyway.
         expect(dockerCalls(scratch)).toEqual([]);
       } finally {
         await database.close();
@@ -880,8 +907,9 @@ describe("the verify-* skills' Postgres precondition", () => {
       // pre-fix script went on to launch an API against a database that is not there, spent its
       // 30-second `/readyz` loop, exited 1 with `api.pid` written and the process still up — so the
       // next `up.sh` refused with "already running". With the re-probe it stops before any of that.
-      // Mutation checked: dropping `|| ! pg_port_open` — the launcher runs (`bunRan`), the pid file
-      // appears, and the status is 0 instead of 1, so three assertions here go red.
+      // Mutation checked: the same dropped port probe (`if ! pg_compose up -d --wait postgres
+      // >/dev/null 2>&1; then`) — the launcher runs (`bunRan`), the pid file appears, and the status
+      // is 0 instead of 1, so three assertions here go red.
       writeFakeDocker(scratch, 0);
       writeMarkingBunAndReadyCurl(scratch);
       const staged = stageCaller(scratch, `.pi/skills/${skill}/up.sh`);
@@ -953,7 +981,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     // shell at the compose line, before the port is ever asked, and LOB-106's refusal comes back one
     // layer down with the exit status of a `docker compose up`.
     // Mutation checked: dropping `|| true` from the compose line. This is the only case that
-    // mutation reddens (dropping it alone left 38 of 39 green) — no other case in this file pins it.
+    // mutation reddens (dropping it alone left 39 of 40 green) — no other case in this file pins it.
     // The marker avoids `port:` followed by a digit on purpose: the case further down that guards
     // this file's own connections reads them out of its own source, and that pattern is one of its
     // assertions.
@@ -1079,9 +1107,11 @@ describe("the verify-* skills' Postgres precondition", () => {
       // `pg_docker stop "$PG_PORT"`.
       expect(calls).toContain("stop factory-postgres-1");
       expect(calls).toContain("start factory-postgres-1");
-      // The stop is the test; the start is the `EXIT` trap putting the database back. A trap that
-      // forgot the second half leaves someone's database down, so the order is the assertion.
-      // Mutation checked: dropping `postgres_up` from the trap.
+      // The stop is the test; the start is putting the database back, and `degraded.sh` does it
+      // twice — the `EXIT` trap and an explicit call after the API launch — so dropping either one
+      // alone is silent. The pair is the assertion: the database comes back, after the stop.
+      // Mutation checked: neutering `postgres_up` in `degraded.sh` (`pg_docker start "$PG_CONTAINER"`
+      // → `:`), so no start call is recorded at all and the `start` assertion above goes red.
       expect(calls.indexOf("stop factory-postgres-1")).toBeLessThan(
         calls.indexOf("start factory-postgres-1"),
       );
@@ -1107,6 +1137,9 @@ describe("the verify-* skills' Postgres precondition", () => {
         DOCKER_HOST: "",
       });
       expect(result.status, result.stderr).toBe(0);
+      // Mutation checked: neutering colima's `export DOCKER_HOST=…` line (`:` in its place) — the
+      // fallback stops switching sockets, and a machine whose active context is a stopped Docker
+      // Desktop keeps failing every call.
       expect(
         recordOf(scratch, "compose up -d --wait postgres").dockerHost,
       ).toBe(`unix://${home.socket}`);
@@ -1154,6 +1187,8 @@ describe("the verify-* skills' Postgres precondition", () => {
         DOCKER_HOST: "unix:///var/run/docker.sock",
       });
       expect(result.status, result.stderr).toBe(0);
+      // Mutation checked: dropping the `[ -z "${DOCKER_HOST:-}" ]` condition from `pg_docker`
+      // (LOB-105's guard) — the fallback overwrites the socket the caller chose.
       expect(
         recordOf(scratch, "compose up -d --wait postgres").dockerHost,
       ).toBe("unix:///var/run/docker.sock");
@@ -1274,7 +1309,8 @@ describe("the verify-* skills' Postgres precondition", () => {
   it("keeps the compose call inside the one helper the callers share", () => {
     // The bug existed in five copies of the same stanza. This is the drift guard: a new `up.sh`
     // that copy-pastes `docker compose up` re-introduces it, and the cases above would not see a
-    // script they are not told about.
+    // script they are not told about. Mutation checked: adding `docker compose up -d --wait
+    // postgres` to any caller below, under whatever name it is sourced as.
     for (const caller of CALLERS) {
       const source = readFileSync(path.join(REPO_ROOT, caller), "utf8");
       expect(source, caller).toContain(".pi/skills/lib/postgres.sh");
@@ -1298,5 +1334,37 @@ describe("the verify-* skills' Postgres precondition", () => {
       expect(code, caller).not.toMatch(/\bdocker\b/);
       expect(code, caller).not.toMatch(/(^|[^_\w])compose\b/);
     }
+  });
+
+  it("leaves no case unaccounted for in the mutation note every case carries", () => {
+    // The header's claim is a property of this file, so it is checked like one: a case declares
+    // itself on a line that starts with `it(` or `test(`, and its mutation note is a comment line
+    // inside it. The scan is structural — a note anywhere between two declarations belongs to the
+    // earlier one — because a hand-kept list of exceptions in the header is exactly what drifted
+    // (LOB-107, six cases). Mutation checked: deleting every `Mutation checked:` line a case
+    // carries, whose case then appears in `unaccounted` — this case included, since its own note is
+    // the only place the marker is written inside it.
+    const lines = readFileSync(fileURLToPath(import.meta.url), "utf8").split(
+      "\n",
+    );
+    // Vitest's modifiers included, in both spellings: `it.each(UP_SCRIPTS)(` and
+    // `it.skip("name", fn)` both declare a case that carries a note like any other, and neither is
+    // a case the scan may walk past. `it.todo` counts too — it has no assertion, so it has no
+    // mutation to name, and the honest answer is a red guard rather than a silent exemption.
+    const declarations = lines.flatMap((line, index) =>
+      /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line) ? [index] : [],
+    );
+    // A scan that stopped finding declarations would leave nothing to check and pass vacuously.
+    // The count is a tripwire, not an invariant: bump the 28 when a case is added, and give the new
+    // case its note.
+    expect(
+      declarations,
+      "declaration count changed — bump the 28 and keep every case's mutation note",
+    ).toHaveLength(28);
+    const unaccounted = declarations.filter((start, position) => {
+      const end = declarations[position + 1] ?? lines.length;
+      return !lines.slice(start, end).some(isMutationNote);
+    });
+    expect(unaccounted.map((index) => lines[index]?.trim())).toEqual([]);
   });
 });
