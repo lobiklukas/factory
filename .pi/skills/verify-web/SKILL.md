@@ -56,9 +56,12 @@ and clicks **Start a session**, requiring the transcript to reach the answer the
 tool produced and the card to label its read path. Exit code is non-zero when a required check
 fails.
 
-The dashboard drives the API, and the API needs Postgres: `docker compose up -d --wait postgres`
-before `./up.sh`. The session's model is scripted (`MODEL_BACKEND=faux`) so the run is offline and
-deterministic; its tool calls, transcript, and storage are real.
+The dashboard drives the API, and the API needs Postgres on host port 5442: `./up.sh` asks the port
+first and runs `docker compose up -d --wait postgres` only when nothing answers, so it starts from a
+ralph worktree while another project's container holds 5442 (LOB-57); with no database and no way to
+start one it exits non-zero, printing the command to run. The session's model is scripted
+(`MODEL_BACKEND=faux`) so the run is offline and deterministic; its tool calls, transcript, and
+storage are real.
 
 ## Evidence
 

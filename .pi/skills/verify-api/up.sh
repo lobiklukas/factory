@@ -21,12 +21,11 @@ if [ -f "$RUN_DIR/api.pid" ] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null;
   exit 1
 fi
 
-# Postgres is the session log; without it nothing here is worth driving.
-if ! (cd "$ROOT" && DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}" \
-        docker compose up -d --wait postgres >/dev/null 2>&1); then
-  echo "postgres is not up: docker compose up -d --wait postgres" >&2
-  exit 1
-fi
+# Postgres is the session log; without it nothing here is worth driving. The shared check asks the
+# port before it asks compose, so this works from a ralph worktree where compose would derive its
+# own project name and fight the human's container for 5442 (LOB-57).
+source "$ROOT/.pi/skills/lib/postgres.sh"
+ensure_postgres || exit 1
 
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
