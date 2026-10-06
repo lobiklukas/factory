@@ -1,7 +1,7 @@
 # Roadmap
 
 What we build, in what order, and what "done" means. `docs/design.md` holds the settled decisions
-(D1–D16) and the milestone definitions; `docs/features.md` holds the research behind each item.
+and the milestone definitions; `docs/features.md` holds the research behind each item.
 This document is the plan: priority by MVP distance, and the Linear project that tracks it.
 
 Tracked in Linear: **[Factory MVP](https://linear.app/lobiklukas/project/factory-mvp-8d860fd4312a)**

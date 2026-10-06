@@ -16,7 +16,7 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
 
 ## Read first
 
-- `docs/design.md` — the settled decisions (D1–D16) with their rationale, the component
+- `docs/design.md` — the settled decisions with their rationale, the component
   inventory, the local-first build order (M0–M7), and the open risks (R1–R6). Read it before
   proposing an architecture change.
 - `docs/features.md` — what to build next and why: a ranked backlog from a code audit, the

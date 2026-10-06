@@ -2,7 +2,8 @@
 
 The factory's unit of work is a **task on a board**, not a session. This document holds the settled
 board decisions (B1–B12), the default pipeline, and the MVP/wave-2 cut. `docs/design.md` holds the
-decisions the board rests on (D1–D16, plus D17 which introduces it); `docs/features.md` §11 holds the
+decisions the board rests on;
+`docs/features.md` §11 holds the
 sixteen-system survey it was designed against; `docs/roadmap.md` holds milestone **B** and the issues.
 
 Status: design agreed through 2026-10-05, after a full interview round. Nothing here is built yet.
