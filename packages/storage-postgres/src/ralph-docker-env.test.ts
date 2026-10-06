@@ -679,8 +679,13 @@ describe("the ralph driver's shell contract", () => {
       // does. A subcommand on argv is not a licence to run — `bash -s -- status` is the shape a
       // wrapper would use to feed the driver its own argv, and it must not reach `cmd_status`.
       //
+      // The guard is wider than stdin on purpose, and the last block below pins that too:
+      // `bash -c "$(cat .pi/ralph/loop.sh)"` also leaves `BASH_SOURCE[0]` empty (the script arrives
+      // as the `-c` string, not as a path) and would misderive `HERE` the same way, so it refuses
+      // rather than falling back to `$0`.
+      //
       // Mutation: delete the `[ -z "${BASH_SOURCE[0]:-}" ]` guard — every shape below then dies at
-      // `HERE=` with `unbound variable` and status 1, so the status assertion goes red five times
+      // `HERE=` with `unbound variable` and status 1, so the status assertion goes red six times
       // over. Inverting the guard (`-n`) also reddens this case, because a stdin shape leaves
       // `BASH_SOURCE[0]` empty and falls through to `HERE=` (measured: 12 of the 14 cases fail
       // under `-n`; the dispatch case is *not* one of them — an execution gives `BASH_SOURCE[0]` a
@@ -744,6 +749,23 @@ describe("the ralph driver's shell contract", () => {
         // directly above the `log` line reddens this assertion and nothing else.
         expect(run.stdout, label).toBe("");
       }
+
+      // The same refusal when the script arrives as a `-c` string rather than on stdin. Kept out of
+      // `shapes` because that table feeds the script on stdin; here it *is* the argument. Without
+      // this the guard's width is accidental — it happens to catch `-c` too, and nothing says so.
+      const viaC = spawnSync("bash", ["-c", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: childEnv(scratch, {}),
+        timeout: 30_000,
+      });
+      expect(viaC.status, viaC.stderr).toBe(64);
+      expect(viaC.stderr, viaC.stdout).toContain("usage:");
+      expect(viaC.stderr, 'bash -c "$(cat .pi/ralph/loop.sh)"').toContain(
+        "stdin",
+      );
+      expect(viaC.stdout, 'bash -c "$(cat .pi/ralph/loop.sh)"').toBe("");
+
       // The file's rule that every case asserts what the fake recorded, applied here: nothing
       // before the guard may consult docker. It cannot redden under a mutation of the guard itself
       // (every one of those dies before the first call site), so the mutation it names is a

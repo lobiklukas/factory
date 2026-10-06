@@ -21,12 +21,15 @@ usage() {
 # with the status the no-subcommand case uses, instead of dying on `set -u` at the `HERE=` below with
 # `BASH_SOURCE[0]: unbound variable` and a `cd: null directory` (LOB-110).
 #
-# The test is exactly that — `BASH_SOURCE[0]` empty. A shape that hands it a path which is not this
-# file's directory (`bash <(cat loop.sh)`, `bash -c 'source /dev/stdin' < loop.sh`) still derives
-# `HERE` from that path and dies at the `git -C` below with status 128: loud, and never the caller's
-# cwd, so it is filed as LOB-130 rather than guessed at here.
+# The test is exactly that — `BASH_SOURCE[0]` empty — so the guard is a little wider than stdin, and
+# that is deliberate: `bash -c "$(cat .pi/ralph/loop.sh)"` also leaves it empty (the script arrives
+# as the `-c` string, not as a path) and would misderive `HERE` the same way, so it refuses too. Both
+# shapes are pinned by the case below. A shape that hands it a path which is not this file's
+# directory (`bash <(cat loop.sh)`, `bash -c 'source /dev/stdin' < loop.sh`) still derives `HERE`
+# from that path and dies at the `git -C` below with status 128: loud, and never the caller's cwd,
+# so it is filed as LOB-130 rather than guessed at here.
 if [ -z "${BASH_SOURCE[0]:-}" ]; then
-  log "refusing to run from stdin: bash cannot tell this file where it is"
+  log "refusing to run: bash cannot tell this file where it is (stdin or -c)"
   usage "bash .pi/ralph/loop.sh"
   exit 64
 fi
