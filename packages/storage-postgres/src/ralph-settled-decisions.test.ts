@@ -111,7 +111,8 @@ function corpus(): Source[] {
     readdirSync(path.join(REPO_ROOT, dir), { withFileTypes: true }).flatMap(
       (entry) => {
         const relative = path.join(dir, entry.name);
-        if (entry.isDirectory()) return entry.name === ".verify" ? [] : walk(relative);
+        if (entry.isDirectory())
+          return entry.name === ".verify" ? [] : walk(relative);
         return entry.name.endsWith(".md") ? [relative] : [];
       },
     );
@@ -199,8 +200,9 @@ describe("the instructions' settled-decisions range", () => {
     expect(findings([source], 17)).toEqual([]);
   });
 
-  // Mutation checked: making `staleRanges` return nothing, or `highestDecision` return a number
-  // below the real one. Both leave the first case green while the rule is inert.
+  // Mutation checked: making `staleRanges` return nothing, which leaves the first case green
+  // while the rule is inert. `highestDecision` is deliberately not named here — this case passes
+  // its `highest` in as a literal, so the case below is the only one that reaches that reader.
   it("reddens on the range that is stale today", () => {
     const source: Source = {
       path: "synthetic.md",
@@ -209,19 +211,16 @@ describe("the instructions' settled-decisions range", () => {
     expect(findings([source], 17)).toEqual(["synthetic.md:1: D1-D16"]);
   });
 
-  // Mutation checked: matching a single decision reference instead of a range — `D17` alone is
-  // not a range and must not red. (Reading the number from the wrong capture group reddens the
-  // overshoot case above, not this one: read as top `1`, a `D1-D17` range is still exempt because
-  // its line names the top decision.)
-  it("ignores a single decision reference and a range above the highest", () => {
-    const sources: Source[] = [
-      { path: "synthetic.md", text: "D17 introduces the board.\n" },
-      {
-        path: "synthetic.md",
-        text: "the decisions run D1-D17 and no further.\n",
-      },
-    ];
-    expect(findings(sources, 17)).toEqual([]);
+  // Mutation checked: widening `RANGE` to match a single decision reference — `D5` alone is not a
+  // range and must not red. A lone `D17` would stay green under that mutation too, because the
+  // same-line exemption happens to cover it, so `D5` is what makes this case catch the widening;
+  // the first case catches it as well, through the lone `Dn` references the real corpus carries.
+  it("ignores a single decision reference", () => {
+    const source: Source = {
+      path: "synthetic.md",
+      text: "D5 introduces the board.\n",
+    };
+    expect(findings([source], 17)).toEqual([]);
   });
 
   // Mutation checked: narrowing `RANGE` to the hyphen only, so the en-dash form `D1–D16` — the one
