@@ -123,14 +123,29 @@ function corpus(): Source[] {
 const CORPUS_DIRS = [".pi", "docs"];
 
 describe("the instructions' settled-decisions range", () => {
-  // Mutation checked: appending a `### D18 —` heading to `docs/design.md` (the case below does it
-  // to a copy) reddens this one, because every `D1-D17` range in the corpus then understates the
-  // set. This is the regression LOB-127 exists to catch.
+  // Mutation checked: appending a `### D18 —` heading to `docs/design.md` reddens this one —
+  // every `D1-D17` range in the corpus (`README.md:114`, `docs/README.md:3,11`) then understates
+  // the set. The case below is the same regression against a synthetic corpus, so the proof does
+  // not depend on those two files keeping their ranges. This is the regression LOB-127 exists to
+  // catch.
   it("names no range below the highest decision in docs/design.md", () => {
     const design = readFileSync(path.join(REPO_ROOT, DESIGN_DOC), "utf8");
     const highest = highestDecision(design);
     expect(highest).toBeGreaterThan(0);
     expect(findings(corpus(), highest)).toEqual([]);
+  });
+
+  // Mutation checked: raising the highest decision the corpus is compared against — exactly what
+  // appending `### D18 —` to `docs/design.md` does — reddens this one, because the `D1-D17`
+  // range then understates the set. LOB-127's second acceptance criterion, proven without touching
+  // the real `docs/design.md` or depending on which ranges the corpus happens to carry.
+  it("reddens when a decision is appended and the instructions are not updated", () => {
+    const source: Source = {
+      path: "synthetic.md",
+      text: "`docs/design.md` holds the settled decisions (D1-D17) and their rationale.\n",
+    };
+    expect(findings([source], 17)).toEqual([]);
+    expect(findings([source], 18)).toEqual(["synthetic.md:1: D1-D17"]);
   });
 
   // Mutation checked: pointing `CORPUS_DIRS` at one directory, or dropping `docs/` from it, which
