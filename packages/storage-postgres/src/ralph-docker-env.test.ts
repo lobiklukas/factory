@@ -27,8 +27,9 @@ import { afterAll, describe, expect, it } from "vitest";
  * hands to each `pi -p` iteration, and the skills an agent then runs talk to colima while the caller
  * chose another socket.
  *
- * These cases drive the driver's own `docker_env` — the file is sourced, which is why its dispatch
- * sits behind `[ "${BASH_SOURCE[0]}" = "$0" ]` — against a fake `docker` first on `PATH`, per
+ * These cases drive the driver's own `docker_env` and the dispatch around it — the file is sourced,
+ * which is why its dispatch sits behind `[ "${BASH_SOURCE[0]}" = "$0" ]`, and read from stdin it
+ * refuses before it gets there — against a fake `docker` first on `PATH`, per
  * `docs/testing-third-parties.md`. `$HOME` points at a scratch directory, and "colima is running"
  * is a real unix socket there, so the `-S` test is exercised rather than assumed. No case starts,
  * stops or contacts a container, and no case reads the machine's real `$HOME`: an unset
@@ -302,7 +303,7 @@ const mainRoot = (): string => {
 const colimaSocket = (scratch: Scratch): string =>
   `unix://${path.join(scratch.home, COLIMA_SOCKET)}`;
 
-describe("the ralph driver's docker_env", () => {
+describe("the ralph driver's shell contract", () => {
   it(
     "leaves an explicit DOCKER_HOST alone, and never probes either way",
     { timeout: 30_000 },
@@ -656,6 +657,119 @@ describe("the ralph driver's docker_env", () => {
       }
       // Dispatched, the driver never reached a docker call of its own: the usage line is the last
       // thing the file does.
+      expect(dockerCalls(scratch)).toEqual([]);
+    },
+  );
+
+  it(
+    "refuses in one line whenever bash reads it from stdin, and dispatches in none",
+    { timeout: 30_000 },
+    async () => {
+      // `bash < .pi/ralph/loop.sh` has no `BASH_SOURCE[0]` and no argv: under `set -u` the `HERE=`
+      // line used to die with `BASH_SOURCE[0]: unbound variable` and `cd: null directory`, exit 1,
+      // before any subcommand was even looked at (LOB-110). The driver refuses in one line instead,
+      // with the status the no-subcommand case uses, because the fallback `${BASH_SOURCE[0]:-$0}`
+      // would point `HERE` at the caller's cwd and everything below it — `WT`, `STATE`, the prompts —
+      // at a checkout the driver cannot vouch for.
+      //
+      // The guard keys on `BASH_SOURCE[0]` being empty, which is a property of how bash was started
+      // rather than of the directory it was started in or the argv it was handed: `cat file | bash`,
+      // `bash -s -- status` and `exec -a ralph-loop bash` all read the script from stdin and all
+      // leave `BASH_SOURCE[0]` unset, so every shape below must refuse exactly as `bash < file`
+      // does. A subcommand on argv is not a licence to run — `bash -s -- status` is the shape a
+      // wrapper would use to feed the driver its own argv, and it must not reach `cmd_status`.
+      //
+      // The guard is wider than stdin on purpose, and the last block below pins that too:
+      // `bash -c "$(cat .pi/ralph/loop.sh)"` also leaves `BASH_SOURCE[0]` empty (the script arrives
+      // as the `-c` string, not as a path) and would misderive `HERE` the same way, so it refuses
+      // rather than falling back to `$0`.
+      //
+      // Mutation: delete the `[ -z "${BASH_SOURCE[0]:-}" ]` guard — every shape below then dies at
+      // `HERE=` with `unbound variable` and status 1, so the status assertion goes red six times
+      // over. Inverting the guard (`-n`) also reddens this case, because a stdin shape leaves
+      // `BASH_SOURCE[0]` empty and falls through to `HERE=` (measured: 12 of the 14 cases fail
+      // under `-n`; the dispatch case is *not* one of them — an execution gives `BASH_SOURCE[0]` a
+      // value, and the refusal's `64` plus usage line is exactly what that case asserts). A guard
+      // that refuses only when argv is empty — the naive fix — is caught by the `-s -- status`
+      // shape alone, which is why it is in the list.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      // The premise of the non-git shape, asserted rather than assumed: the scratch root really is
+      // outside a work tree, so a green there is about the guard and not about the repository the
+      // suite itself runs in.
+      const outside = spawnSync(
+        "git",
+        ["-C", scratch.root, "rev-parse", "--show-toplevel"],
+        { encoding: "utf8" },
+      );
+      expect(outside.status, outside.stderr).not.toBe(0);
+
+      const script = readFileSync(LOOP, "utf8");
+      const shapes: ReadonlyArray<readonly [string, string[], string]> = [
+        // [label, argv, cwd]
+        [
+          "redirected from the repo root, the shape the issue names",
+          [],
+          REPO_ROOT,
+        ],
+        ["piped in through cat", ["-c", 'cat "$LOOP" | bash'], REPO_ROOT],
+        [
+          "redirected from a directory that is not a git repository",
+          [],
+          scratch.root,
+        ],
+        [
+          "handed its own argv with -s, as a wrapper feeding it argv would",
+          ["-s", "--", "status"],
+          REPO_ROOT,
+        ],
+        [
+          "re-exec'd under the argv[0] cmd_start uses, still reading stdin",
+          ["-c", "exec -a ralph-loop bash"],
+          REPO_ROOT,
+        ],
+      ];
+
+      for (const [label, argv, cwd] of shapes) {
+        const run = spawnSync("bash", argv, {
+          cwd,
+          encoding: "utf8",
+          input: script,
+          env: childEnv(scratch, {}),
+          timeout: 30_000,
+        });
+        expect(run.status, `${label}: ${run.stderr}`).toBe(64);
+        expect(run.stderr, `${label}: ${run.stdout}`).toContain("usage:");
+        // Each shape has to name the reason too, or a wrapper's reader cannot tell a refusal from
+        // the plain no-subcommand usage.
+        expect(run.stderr, label).toContain("stdin");
+        // "and dispatches in none" needs its own assertion: `cmd_status` writes `worktree: …
+        // model: …` to stdout, so a shape that dispatched and still exited 64 would satisfy
+        // everything above. Mutation: any write to stdout on the refusal path — `echo "$@"`
+        // directly above the `log` line reddens this assertion and nothing else.
+        expect(run.stdout, label).toBe("");
+      }
+
+      // The same refusal when the script arrives as a `-c` string rather than on stdin. Kept out of
+      // `shapes` because that table feeds the script on stdin; here it *is* the argument. Without
+      // this the guard's width is accidental — it happens to catch `-c` too, and nothing says so.
+      const viaC = spawnSync("bash", ["-c", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: childEnv(scratch, {}),
+        timeout: 30_000,
+      });
+      expect(viaC.status, viaC.stderr).toBe(64);
+      expect(viaC.stderr, viaC.stdout).toContain("usage:");
+      expect(viaC.stderr, 'bash -c "$(cat .pi/ralph/loop.sh)"').toContain(
+        "stdin",
+      );
+      expect(viaC.stdout, 'bash -c "$(cat .pi/ralph/loop.sh)"').toBe("");
+
+      // The file's rule that every case asserts what the fake recorded, applied here: nothing
+      // before the guard may consult docker. It cannot redden under a mutation of the guard itself
+      // (every one of those dies before the first call site), so the mutation it names is a
+      // `docker` call added *above* the guard — which is the regression it is here to catch.
       expect(dockerCalls(scratch)).toEqual([]);
     },
   );

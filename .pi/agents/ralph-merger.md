@@ -39,7 +39,7 @@ rules below say).
 - **Append-only registries** (RPC groups in `packages/domain`, `index.ts` export lists, skill/feature
   indexes such as `.pi/skills/*/features/README.md`, `docs/testing-third-parties.md` tables): keep both
   sides' entries, in a stable order, no duplicates.
-- **`docs/design.md` decisions (D1-D16)**: if the conflict is a decision, stop and report; do not choose.
+- **`docs/design.md` decisions**: if the conflict is a decision, stop and report; do not choose.
 - A conflict in `.github/`, `.pi/ralph/`, lint/format config: stop and report; a human merges those.
 
 ## Checks you may run
