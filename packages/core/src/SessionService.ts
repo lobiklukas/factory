@@ -91,7 +91,9 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
 /** Page size for `listSessions` when the caller does not choose one, and the largest we serve. */
 const DEFAULT_PAGE_SIZE = 25;
-const MAX_PAGE_SIZE = 100;
+/** Exported for the list tests: the cap is part of the service's contract, so a case that
+ * straddles it has to read the real value rather than a copy. */
+export const MAX_PAGE_SIZE = 100;
 
 export type SessionServiceShape = {
   readonly create: (
