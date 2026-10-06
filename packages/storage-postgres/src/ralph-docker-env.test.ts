@@ -690,36 +690,76 @@ describe("the ralph driver's docker_env", () => {
     },
   );
 
-  it("never names the CLI by a path, and resolves it to the fake in every case's environment", () => {
-    // The false green `docs/testing-third-parties.md` names: a call by absolute path bypasses the
-    // fake on `PATH` and reads as "docker was never called" — which is the claim half the cases
-    // above rest on. Mutation: a `docker` call in the driver spelled `/usr/local/bin/docker` (M11 in
-    // the sweep log) matches the pattern below; unanchored, it would run for real and no case here
-    // would notice. The static half is deliberately narrow — one pattern, and no claim about which
-    // functions may call docker — so a later issue that adds a docker call elsewhere in the driver
-    // does not have to touch this file.
-    const withoutComments = readFileSync(LOOP, "utf8")
-      .split("\n")
-      // Comments hold prose (this file's own header names docker); a message that mentions docker is
-      // not a call.
-      .filter((line) => !/^\s*#/.test(line))
-      .join("\n");
+  it(
+    "never names the CLI by a path, and resolves it to the fake in every case's environment",
+    { timeout: 30_000 },
+    () => {
+      // The false green `docs/testing-third-parties.md` names: a call by absolute path bypasses the
+      // fake on `PATH` and reads as "docker was never called" — which is the claim half the cases
+      // above rest on. Mutation: a `docker` call in the driver spelled `/usr/local/bin/docker` (M11 in
+      // the sweep log) matches the pattern below; unanchored, it would run for real and no case here
+      // would notice. The static half is deliberately narrow — one pattern, and no claim about which
+      // functions may call docker — so a later issue that adds a docker call elsewhere in the driver
+      // does not have to touch this file.
+      const withoutComments = readFileSync(LOOP, "utf8")
+        .split("\n")
+        // Comments hold prose (this file's own header names docker); a message that mentions docker is
+        // not a call.
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n");
 
-    // No call site names the CLI by a path: `/usr/bin/docker info` would run for real. The strings
-    // are kept here — an absolute path is exactly what a blanket string-strip would hide — and the
-    // only slash-docker in the file is colima's socket, which no prefix in this pattern reaches.
-    expect(withoutComments).not.toMatch(
-      /(^|[\s"'`=:;|&(])\/(?:usr|opt|bin|sbin|usr\/local)\S*\bdocker\b/,
-    );
+      // No call site names the CLI by a path: `/usr/bin/docker info` would run for real. The strings
+      // are kept here — an absolute path is exactly what a blanket string-strip would hide — and the
+      // only slash-docker in the file is colima's socket, which no prefix in this pattern reaches.
+      expect(withoutComments).not.toMatch(
+        /(^|[\s"'`=:;|&(])\/(?:usr|opt|bin|sbin|usr\/local)\S*\bdocker\b/,
+      );
 
-    // At run time, in the environment every case above builds: `PATH` resolves docker to the fake.
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    expect(bash(scratch, "command -v docker").trim()).toBe(
-      path.join(scratch.bin, "docker"),
-    );
-    expect(childEnv(scratch, {})["PATH"]).toContain(
-      `${scratch.bin}${path.delimiter}`,
-    );
-  });
+      // At run time, in the environment every case above builds: `PATH` resolves docker to the fake.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      expect(bash(scratch, "command -v docker").trim()).toBe(
+        path.join(scratch.bin, "docker"),
+      );
+      expect(childEnv(scratch, {})["PATH"]).toContain(
+        `${scratch.bin}${path.delimiter}`,
+      );
+    },
+  );
+
+  it(
+    "gives every case a budget, so none relies on vitest's 5 s default",
+    { timeout: 30_000 },
+    () => {
+      // Mutation: delete `{ timeout: 30_000 },` from any case above — the guard reads the file
+      // back and fails, naming the case that lost its budget. Without this case a future edit
+      // could silently drop a budget and the gate would go red intermittently under parallel
+      // load, which is the failure this issue exists to prevent.
+      //
+      // The guard enforces this file's convention — a per-case `{ timeout }` option — not the
+      // only possible way to budget a case. A future `test.timeout` in `vitest.config.ts` would
+      // be a legitimate fix that this guard does not recognise; that is a limitation to note,
+      // not a false green today (the config sets no timeout).
+      const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const lines = source.split("\n");
+      const missing: string[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        if (!/^\s*(?:it|test)\s*\(/.test(line)) continue;
+        let hasTimeout = false;
+        for (let j = i; j < Math.min(i + 6, lines.length); j++) {
+          const candidate = lines[j] ?? "";
+          if (/\btimeout\s*:/.test(candidate)) {
+            hasTimeout = true;
+            break;
+          }
+          if (/(?:=>|function\s*\()/.test(candidate)) break;
+        }
+        if (!hasTimeout) {
+          missing.push(`line ${String(i + 1)}: ${line.trim()}`);
+        }
+      }
+      expect(missing).toEqual([]);
+    },
+  );
 });
