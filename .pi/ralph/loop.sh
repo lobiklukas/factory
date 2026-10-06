@@ -31,8 +31,18 @@ DATABASE_URL="postgres://factory:factory@localhost:5442/$RALPH_DB"
 log() { printf '[ralph %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
+# `docker`, with a colima fallback, for the driver's own calls. AGENTS.md: the active context may be
+# a stopped Docker Desktop while Colima runs.
+#
+# An explicit `DOCKER_HOST` is authoritative and is never rewritten — the promise
+# `.pi/skills/lib/postgres.sh`'s `pg_docker` makes, and the one every verify-* skill's docker call
+# depends on. The rewrite here used to overrule it: `cmd_run` calls `ensure_db`, so the exported
+# value is the one `session` hands to every `pi -p` iteration, and an agent's drive then talked to
+# colima while the caller had chosen another socket (LOB-105). An empty value counts as unset, the
+# same way `pg_docker` reads it.
 docker_env() {
-  if ! docker info >/dev/null 2>&1 && [ -S "$HOME/.colima/default/docker.sock" ]; then
+  if [ -z "${DOCKER_HOST:-}" ] && ! docker info >/dev/null 2>&1 &&
+    [ -S "$HOME/.colima/default/docker.sock" ]; then
     export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
   fi
 }
@@ -483,6 +493,15 @@ cmd_kill() {
 }
 
 cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the current iteration"; }
+
+# Sourced, the file defines the functions and stops: `packages/storage-postgres/src/ralph-docker-env.test.ts`
+# drives `docker_env` against a fake `docker`. Executed — `bun run ralph <subcommand>`, `cmd_start`'s
+# re-exec of `"$self"` — `$0` is this file and the dispatch runs as before. `$0` is the script's path
+# even when the process was re-exec'd under another argv[0] ("ralph-loop"), so the comparison holds.
+# Sourcing is not free: it also applies `set -euo pipefail` and this file's own `WT`, `STATE` and
+# `DATABASE_URL` (the ralph worktree and its database) to the sourcing shell — the opposite of
+# `.pi/skills/lib/postgres.sh`'s contract, which the caller owns. Nothing else may source it.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
   setup)  cmd_setup ;;
