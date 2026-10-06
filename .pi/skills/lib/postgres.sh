@@ -58,19 +58,23 @@ pg_port_owner() {
 }
 
 # 0 when Postgres is reachable — already up, or started by this call. 1 with one line on stderr
-# naming the command to run when it is not. A compose this call ran and that failed is a failure even
-# when the port answers by then: `||` short-circuits, and LOB-106 owns that decision.
+# naming the command to run when it is not. The port is the only claim: a compose this call ran is
+# not consulted, in either direction.
 ensure_postgres() {
   local created container
   pg_port_open && return 0
-  # Compose's exit code is not the claim a caller depends on. It reports on the start it was asked
-  # for, not on the port a caller needs: a container that comes up and leaves can leave the port
-  # refused while the command exited 0. Then a caller launches an API against a database that is not
-  # there, spends its 30-second readiness loop, exits 1 and leaves its process and pid file behind,
-  # so the next run refuses with "already running". Ask the port again when compose reports success.
-  # (A compose that *failed* still decides the call on its own, even if the port answers by then —
-  # `||` short-circuits, and LOB-106 owns that.)
-  if ! pg_compose up -d --wait postgres >/dev/null 2>&1 || ! pg_port_open; then
+  # Compose's exit code is not the claim a caller depends on, so it is discarded and the port is
+  # asked instead. That took two tickets, one per direction: LOB-104 removed the success half (a
+  # start whose container comes up and leaves can exit 0 with the port refused), LOB-106 the failure
+  # half. Compose reports on the start it was asked for, not on the port a caller needs: after a
+  # success, a caller would launch an API against a database that is not there, spend its 30-second
+  # readiness loop, exit 1 and leave its process and pid file behind, so the next run refuses with
+  # "already running". After a failure, the compose may have lost the port to another agent's
+  # `compose up` in the window since the probe at the top of this function, with the database every
+  # caller needs up and healthy by the time it returned — the race this file exists to survive. A
+  # compose that failed and left nothing answering is caught by the same probe.
+  pg_compose up -d --wait postgres >/dev/null 2>&1 || true
+  if ! pg_port_open; then
     # A failed start leaves a `Created` container holding the port reservation, which is what makes
     # the next run fail even after 5442 is free. Remove exactly that, and nothing else: a running
     # container is someone's database, and an `exited` one is not this call's to delete.

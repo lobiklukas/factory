@@ -14,8 +14,12 @@ the owner-selection path it exercises is the same code. Evidence: `.verify/evide
 `22-degraded.log`). The earlier session-list run for LOB-93 is in `.verify/evidence/lob-93/`. The `bun drive.ts` half was re-run from the `ralph/LOB-104` worktree on 2026-10-06 (`:9400`, faux, Postgres on 5442): **29/29**, evidence `.verify/evidence/lob-104/verify-api/`.
 `./sigterm.sh` and `./degraded.sh` were not re-run there, so the two statuses below rest on the
 LOB-57 run. The Postgres precondition they and `./up.sh` share changed in LOB-104 (it asks the port
-again after a compose that reported success), and that change is covered by
-`packages/storage-postgres/src/postgres-up.test.ts` rather than by a drive.
+again after a compose that reported success) and LOB-106 (it asks the port after a failed one too,
+and the port alone decides), and those changes are covered by
+`packages/storage-postgres/src/postgres-up.test.ts` rather than by a drive: with 5442 answering, a
+drive returns at the precondition's first probe and never reaches the compose line. The `bun
+drive.ts` half was re-run from the `ralph/LOB-106` worktree on 2026-10-06 (`:9400`, faux, Postgres on
+5442): **29/29**, evidence `.verify/evidence/lob-106/verify-api/`.
 
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
