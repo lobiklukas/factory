@@ -13,6 +13,7 @@ import {
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -35,7 +36,10 @@ import { afterAll, describe, expect, it } from "vitest";
  * the exit status back.
  *
  * Each case names the mutation it was checked against. A case whose mutation nobody can state is not
- * testing anything.
+ * testing anything. The marker is `Mutation:` rather than `postgres-up.test.ts`'s `Mutation checked:`
+ * because this file follows its sibling `ralph-docker-env.test.ts` — the other test that drives
+ * `.pi/ralph/loop.sh` — and neither of those two carries that file's mechanical accounting case.
+ * Bringing both under it is filed as its own ticket; the notes here are read by people, not scanned.
  *
  * What these cases do **not** cover: `ensure_postgres` itself. `ensure_db` sources the helper from
  * `MAIN_ROOT` — the human's checkout, which is what the issue prescribed — so mutating this
@@ -114,7 +118,9 @@ const waitFor = async (
 ): Promise<void> => {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // `node:timers/promises`, not `new Promise`: this repo's lint denies manual promise construction
+    // and its bare `setTimeout`, the same way `postgres-up.test.ts`'s wait loop does it.
+    await delay(25);
   }
   throw new Error(`timed out waiting for ${label}`);
 };
@@ -203,7 +209,7 @@ const writeFakeDocker = (
           "  compose*)",
           `    ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(scratch.root, "listener.cjs"))} ${String(port)} >/dev/null 2>&1 &`,
           `    printf '%s' "$!" > ${JSON.stringify(scratch.listenerPid)}`,
-          `    for _ in $(seq 1 250); do (exec 3<>\"/dev/tcp/127.0.0.1/${String(port)}\") 2>/dev/null && break; sleep 0.02; done`,
+          `    for _ in $(seq 1 250); do (exec 3<>"/dev/tcp/127.0.0.1/${String(port)}") 2>/dev/null && break; sleep 0.02; done`,
           '    exit "${FAKE_COMPOSE_EXIT:-0}" ;;',
         ];
   writeFileSync(
