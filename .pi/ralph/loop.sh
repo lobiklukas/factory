@@ -50,12 +50,42 @@ docker_env() {
 
 ensure_db() {
   docker_env
-  (cd "$MAIN_ROOT" && docker compose up -d --wait postgres) >&2
-  local exists
-  exists="$(cd "$MAIN_ROOT" && docker compose exec -T postgres \
-    psql -U factory -d factory -tAc "select 1 from pg_database where datname='$RALPH_DB'")"
+  # "Is Postgres up?" is the one question every verify-* skill asks, and since LOB-104 and LOB-106
+  # the answer lives in `.pi/skills/lib/postgres.sh`: the port is the only claim, because compose's
+  # exit code is not evidence that a database is there, in either direction. This driver used to
+  # ask compose itself and trust the status, so a database that was up and healthy could still
+  # refuse to start the loop — the loop's own version of the bug those two tickets removed from the
+  # skills. `PG_ROOT` is pinned rather than derived: belt-and-braces. The `source` below already names
+  # the human's checkout, so the helper's own derivation would land on the same root; pinning keeps
+  # compose tied to the checkout that owns the database's project even if this file is ever sourced
+  # from somewhere else. It is a plain assignment, not an export, so no session inherits it. `PG_PORT`
+  # is deliberately left to the helper's default — 5442, the port `DATABASE_URL` above names — and a
+  # drive or a test may set it in the environment: `ensure_db` then probes that port while the
+  # sessions it starts still talk to 5442, which is what the storage-postgres cases rely on.
+  PG_ROOT="$MAIN_ROOT"
+  source "$MAIN_ROOT/.pi/skills/lib/postgres.sh"
+  ensure_postgres ||
+    die "postgres is not up on port ${PG_PORT}; the loop will not start agents against it"
+  # The database itself, asked of whichever postgres publishes the port rather than of the project
+  # this directory would name: the human's `factory-postgres-1` usually holds 5442, and `compose
+  # exec` can only reach the project of the directory it runs from. `docker exec` reaches either,
+  # which is what keeps a database that a container already publishes — the common case on a
+  # developer machine — free of any `compose` call at all. When nothing publishes the port (a native
+  # server, a tunnel) there is no container to exec into and the existence question falls back to
+  # `compose exec`, one compose call more than the container case and no worse than this function was
+  # before LOB-108. No `-T`: that is a `docker compose exec` flag, not a `docker exec` one —
+  # `docker exec` simply does not allocate a terminal when stdin is not one.
+  local owner exists
+  owner="$(pg_port_owner || true)"
+  if [ -n "$owner" ]; then
+    pgin() { pg_docker exec "$owner" "$@"; }
+  else
+    pgin() { pg_compose exec -T postgres "$@"; }
+  fi
+  exists="$(pgin psql -U factory -d factory -tAc \
+    "select 1 from pg_database where datname='$RALPH_DB'")"
   if [ "$exists" != "1" ]; then
-    (cd "$MAIN_ROOT" && docker compose exec -T postgres createdb -U factory "$RALPH_DB")
+    pgin createdb -U factory "$RALPH_DB"
     log "created database $RALPH_DB"
   fi
 }
@@ -518,12 +548,14 @@ cmd_kill() {
 cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the current iteration"; }
 
 # Sourced, the file defines the functions and stops: `packages/storage-postgres/src/ralph-docker-env.test.ts`
-# drives `docker_env` against a fake `docker`. Executed — `bun run ralph <subcommand>`, `cmd_start`'s
+# drives `docker_env` and `packages/storage-postgres/src/ralph-ensure-db.test.ts` drives `ensure_db`,
+# each against a fake `docker`. Executed — `bun run ralph <subcommand>`, `cmd_start`'s
 # re-exec of `"$self"` — `$0` is this file and the dispatch runs as before. `$0` is the script's path
 # even when the process was re-exec'd under another argv[0] ("ralph-loop"), so the comparison holds.
 # Sourcing is not free: it also applies `set -euo pipefail` and this file's own `WT`, `STATE` and
 # `DATABASE_URL` (the ralph worktree and its database) to the sourcing shell — the opposite of
-# `.pi/skills/lib/postgres.sh`'s contract, which the caller owns. Nothing else may source it.
+# `.pi/skills/lib/postgres.sh`'s contract, which the caller owns. Only those two test files may
+# source it.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
