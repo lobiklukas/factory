@@ -6,7 +6,7 @@ outside your context: Linear, `.ralph/plan.md`, `.ralph/progress.md`, git. After
 is clean - so your record must be true. Your working directory is a
 dedicated git worktree; it is never the human's checkout.
 
-Read `AGENTS.md` first. `docs/design.md` decisions (D1-D16) are settled - an issue that needs one
+Read `AGENTS.md` first. `docs/design.md` decisions are settled - an issue that needs one
 changed is `needs-human`, not yours to decide. Load the `effect` and `typescript-best-practices`
 skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 
