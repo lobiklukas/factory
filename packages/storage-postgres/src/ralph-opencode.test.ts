@@ -309,7 +309,10 @@ describe("RALPH_AGENT=opencode", () => {
   // "no activity since 1970" and kill the first iteration it checks.
   it("reports now, never a stall, when the database cannot be read", () => {
     const scratch = mkScratch();
-    const before = Math.floor(Date.now() / 1000);
+    // The wall clock, read the way the driver reads it (`date +%s`): `Date` is Effect's `Clock` in this repo.
+    const clock = () =>
+      Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim());
+    const before = clock();
     const result = run(
       scratch,
       `source "$LOOP"; oc_activity "${scratch.worktree}"`,
