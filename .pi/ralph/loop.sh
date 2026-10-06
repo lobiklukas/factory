@@ -49,12 +49,35 @@ docker_env() {
 
 ensure_db() {
   docker_env
-  (cd "$MAIN_ROOT" && docker compose up -d --wait postgres) >&2
-  local exists
-  exists="$(cd "$MAIN_ROOT" && docker compose exec -T postgres \
-    psql -U factory -d factory -tAc "select 1 from pg_database where datname='$RALPH_DB'")"
+  # "Is Postgres up?" is the one question every verify-* skill asks, and since LOB-104 and LOB-106
+  # the answer lives in `.pi/skills/lib/postgres.sh`: the port is the only claim, because compose's
+  # exit code is not evidence that a database is there, in either direction. This driver used to
+  # ask compose itself and trust the status, so a database that was up and healthy could still
+  # refuse to start the loop — the loop's own version of the bug those two tickets removed from the
+  # skills. `PG_ROOT` is pinned because the helper derives its root from its own path and this file
+  # is sourced from a worktree: the compose project that owns the database is the human's checkout,
+  # which is `MAIN_ROOT`. It is a plain assignment, not an export, so no session inherits it.
+  PG_ROOT="$MAIN_ROOT"
+  source "$MAIN_ROOT/.pi/skills/lib/postgres.sh"
+  ensure_postgres ||
+    die "postgres is not up on port ${PG_PORT}; the loop will not start agents against it"
+  # The database itself, asked of whichever postgres publishes the port rather than of the project
+  # this directory would name: the human's `factory-postgres-1` usually holds 5442, and `compose
+  # exec` can only reach the project of the directory it runs from. `docker exec` reaches either,
+  # which is also what lets a database that is already answering be used without a single
+  # `compose` call. No `-T`: that is a `docker compose exec` flag, not a `docker exec` one —
+  # `docker exec` simply does not allocate a terminal when stdin is not one.
+  local owner exists
+  owner="$(pg_port_owner || true)"
+  if [ -n "$owner" ]; then
+    pgin() { pg_docker exec "$owner" "$@"; }
+  else
+    pgin() { pg_compose exec -T postgres "$@"; }
+  fi
+  exists="$(pgin psql -U factory -d factory -tAc \
+    "select 1 from pg_database where datname='$RALPH_DB'")"
   if [ "$exists" != "1" ]; then
-    (cd "$MAIN_ROOT" && docker compose exec -T postgres createdb -U factory "$RALPH_DB")
+    pgin createdb -U factory "$RALPH_DB"
     log "created database $RALPH_DB"
   fi
 }
