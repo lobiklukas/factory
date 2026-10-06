@@ -44,10 +44,14 @@ the run is offline, deterministic, and free.
 ./down.sh        # stops only what up.sh started
 ```
 
-`up.sh` needs Postgres (`docker compose up -d --wait postgres`); the session log _is_ Postgres, so
-without it there is nothing worth driving. It waits for **`/readyz`**, not `GET /`: the server binds
-before its migrations are applied (LOB-21), so `/` answers a moment before a session can be created.
-It fails loudly with the log path (`.verify/run/api.log`).
+`up.sh` needs Postgres on host port 5442; the session log _is_ Postgres, so without it there is
+nothing worth driving. It does not start one blindly: the shared `.pi/skills/lib/postgres.sh` asks
+the port first and runs `docker compose up -d --wait postgres` only when nothing answers — compose
+names its project after the directory it runs in, so a ralph worktree asking for 5442 a second time
+while another project's container holds it is a hard failure (LOB-57). With no database and no way
+to start one, `up.sh` exits non-zero and prints the command to run. It waits for **`/readyz`**, not
+`GET /`: the server binds before its migrations are applied (LOB-21), so `/` answers a moment before
+a session can be created. It fails loudly with the log path (`.verify/run/api.log`).
 
 Three settings in `up.sh` exist for the sake of proof, not for production:
 
@@ -70,9 +74,13 @@ running, and writes its own evidence:
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ```
 
-`degraded.sh` stops the local Postgres container and **always** starts it again (a trap, so a failure
-half way through cannot leave the database down). Run it when nothing else in the repo needs the
-database.
+`degraded.sh` stops the container that publishes 5442 — by the name `docker ps --filter publish=5442`
+reports, because the compose project owning the port is not necessarily the one this directory would
+name (LOB-57) — and **always** starts it again (a trap, so a failure half way through cannot leave
+the database down). It refuses before it stops anything when the port answers but no container
+publishes it. Run it when nothing else in the repo needs the database; `PG_PORT` selects the port it
+looks at, and `DATABASE_URL` must name the same database — the API it starts reads `DATABASE_URL`,
+which is how it can be run against a database of its own.
 
 ## Doctor
 
@@ -157,6 +165,16 @@ just mints new ids.
 - **The CLI is proven elsewhere.** `apps/cli`'s `run`/`watch`/`ls` are driven in a real terminal by
   `.pi/skills/verify-cli`; this skill covers the contract they speak. A bug in one is often a bug in
   the other, so run both when the session surface changes.
+- **5442 is a shared port, and compose is not the way to ask about it.** `docker compose up -d
+--wait postgres` from a plain shell in a ralph worktree derives the project name `factory-ralph`
+  (compose uses `COMPOSE_PROJECT_NAME` when it is set — `.pi/ralph/loop.sh` sets it for its sessions
+  — and the directory name otherwise) and fights whatever already holds 5442: it fails with "port is
+  already allocated" and leaves a `Created` container behind, while the database you need is up and
+  healthy. Ask the port instead (that is
+  what `ensure_postgres` does). The regression is covered by
+  `packages/storage-postgres/src/postgres-up.test.ts`, which drives every caller with a fake `docker`
+  and a real listener, and by a `PG_PORT` pointing at nothing, which reproduces the failure path
+  without touching 5442.
 
 ## Feature map
 

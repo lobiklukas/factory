@@ -3,7 +3,9 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 9100/3100).
+Status reflects the last verified run (2026-10-06, `chrome`, headless, API `:9400` / web `:3400` —
+the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required checks passed, from the
+`ralph/LOB-57` worktree with the human's `factory-postgres-1` holding 5442).
 
 | Feature                 | Status  | File                                       |
 | ----------------------- | ------- | ------------------------------------------ |
@@ -33,7 +35,8 @@ Status reflects the last verified run (2026-10-06, `chrome`, headless, ports 910
   either way, so the day a fold is driven the check is the header string.
 - **The transcript's follow-the-stream behaviour is not driven.** The faux run finishes too fast to
   observe it; it is checked by hand (see `transcript.md`).
-- The browser path needs Postgres (`docker compose up -d --wait postgres`); sessions are logs, and
-  the log is Postgres.
+- The browser path needs Postgres on host port 5442; sessions are logs, and the log is Postgres.
+  `./up.sh` asks the port first and only starts one when nothing answers, so it runs from a ralph
+  worktree while another project's container holds 5442 (LOB-57).
 - Isolation is not verifiable locally at all. See `docs/design.md` R2 — kind cannot run gVisor,
   so never cite a local run as evidence that sandboxing works.

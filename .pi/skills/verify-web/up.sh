@@ -17,6 +17,12 @@ if [ -f "$RUN_DIR/api.pid" ] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null;
   exit 1
 fi
 
+# The dashboard reads the session log, which is Postgres: a dashboard on a database-less API has
+# nothing worth driving. Shared with the other skills; it asks the port before it asks compose, so
+# it works from a ralph worktree (LOB-57).
+source "$ROOT/.pi/skills/lib/postgres.sh"
+ensure_postgres || exit 1
+
 # API. ALLOWED_ORIGINS must name the web port or the browser's RPC call is blocked
 # by CORS. MODEL_BACKEND=faux keeps the dashboard drive offline, deterministic, and
 # free: the session card still runs a real bash tool call, but the model is scripted.

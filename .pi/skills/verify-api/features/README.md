@@ -3,12 +3,15 @@
 One file per user-facing feature of the session surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified run. `bun drive.ts` **29/29** on 2026-10-05, API on `:9400` (not
-the usual `:9200`), `MODEL_BACKEND=faux` — LOB-93 verification of the session list from the
-`ralph/LOB-93` worktree against the run-context database; `./up.sh` started cleanly, `./down.sh`
-stopped it afterwards, and `drive-summary.txt` with `drive-observed.json` records the run
-(`.verify/evidence/lob-93/`). `./sigterm.sh` 10/10 and `./degraded.sh` 11/11 are from an earlier run
-of those scripts — each starts and owns its own API instance — and were **not** re-run for LOB-93.
+Status reflects the last verified run: **2026-10-06**, from the `ralph/LOB-57` worktree with the
+human's `factory-postgres-1` holding 5442, API on `:9400` (not the usual `:9200`),
+`MODEL_BACKEND=faux`. `bun drive.ts` **29/29**, `./sigterm.sh` **10/10**, `./degraded.sh` **11/11**. `./up.sh` started
+while 5442 was taken, and so did the two scripts that own their own API instance (`sigterm.sh`,
+`degraded.sh`) on the same precondition — which is what LOB-57 is about. The degraded run used
+`PG_PORT=5499` against a throwaway container of its own rather than stopping the human's database;
+the owner-selection path it exercises is the same code. Evidence: `.verify/evidence/lob-57/`
+(`32-api-drive-final.log` with `32-api-drive-final-observed.json`, `19-sigterm.log`,
+`22-degraded.log`). The earlier session-list run for LOB-93 is in `.verify/evidence/lob-93/`.
 
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |

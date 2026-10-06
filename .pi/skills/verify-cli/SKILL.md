@@ -37,9 +37,13 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
 ```
 
-`up.sh` needs Postgres (`docker compose up -d --wait postgres`) — the session log _is_ Postgres. It
-waits for **`/readyz`**, not `GET /`: the API binds its server before its migrations are applied
-(LOB-21), so `/` answers a moment before a session can be created.
+`up.sh` needs Postgres on host port 5442 — the session log _is_ Postgres. It does not start one
+blindly: the shared `.pi/skills/lib/postgres.sh` asks the port first and runs `docker compose up -d
+--wait postgres` only when nothing answers, because compose names its project after the directory it
+runs in and a ralph worktree asking for 5442 a second time fails while another project's container
+holds it (LOB-57). With no database and no way to start one it exits non-zero, printing the command
+to run. It waits for **`/readyz`**, not `GET /`: the API binds its server before its migrations are
+applied (LOB-21), so `/` answers a moment before a session can be created.
 
 Two settings exist for the sake of proof, not production:
 
@@ -113,6 +117,15 @@ new ids.
   Do not open a `PostgresStorage` in owner mode against the same database while the API is running.
 - **`factory` in `dist/` is stale unless you built it.** Drive the source entry point; `bun run
 build` is part of the repo's gates, not of this drive.
+- **5442 is a shared port, and compose is not the way to ask about it.** `docker compose up -d
+--wait postgres` from a plain shell in a ralph worktree derives the project name `factory-ralph`
+  (compose uses `COMPOSE_PROJECT_NAME` when it is set — `.pi/ralph/loop.sh` sets it for its sessions
+  — and the directory name otherwise) and fights whatever already holds 5442: it fails with "port is
+  already allocated" and leaves a `Created` container behind, while the database you need is up and
+  healthy. `up.sh` asks the port instead
+  (LOB-57); the regression is covered by
+  `packages/storage-postgres/src/postgres-up.test.ts`, which drives this `up.sh` with a fake `docker`
+  and a real listener.
 
 ## Feature map
 
