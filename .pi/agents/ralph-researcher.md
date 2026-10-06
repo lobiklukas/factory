@@ -1,7 +1,7 @@
 ---
 name: ralph-researcher
 description: Web researcher for the ralph loop - finds how to fake or mock a third-party system in tests, using maintained open source projects, and returns a sourced recommendation
-model: opencode-go/deepseek-v4.1-flash
+model: opencode-go/longcat-2.5-preview-free
 thinking: medium
 tools: read, write, web_search, fetch_content, get_search_content, source_check
 systemPromptMode: replace

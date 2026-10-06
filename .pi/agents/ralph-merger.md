@@ -1,7 +1,7 @@
 ---
 name: ralph-merger
 description: Conflict resolver for the ralph loop - finishes an in-progress `git merge origin/main` on a PR branch, resolving each conflict by intent, and reports what it kept
-model: opencode-go/deepseek-v4.1-flash
+model: opencode-go/longcat-2.5-preview-free
 thinking: high
 tools: read, grep, find, ls, bash, edit, write
 skills: resolving-merge-conflicts

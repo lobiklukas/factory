@@ -10,9 +10,9 @@ MAIN_ROOT="$(dirname "$COMMON")"
 
 # --- configuration (all overridable from the environment) -------------------------------------
 RALPH_WORKTREE="${RALPH_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
-RALPH_MODEL="${RALPH_MODEL:-opencode-go/deepseek-v4.1-flash}"
+RALPH_MODEL="${RALPH_MODEL:-opencode-go/longcat-2.5-preview-free}"
 RALPH_THINKING="${RALPH_THINKING:-high}"
-RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/space-bunny-free,opencode-go/longcat-2.5-preview-free}"  # comma list; empty disables
+RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/space-bunny-free}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-7200}"          # seconds per iteration
