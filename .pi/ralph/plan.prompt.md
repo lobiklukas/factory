@@ -11,7 +11,10 @@ holds settled decisions; a plan that contradicts one is wrong.
 ## Tools
 
 - **Linear** is reached through `codemode`: `await tools.mcp__linear__list_issues({...})`,
-  `get_issue`, `save_issue`, `save_issue_label`, `save_comment`, `list_issue_labels`. Each result is
+  `get_issue`, `save_issue`, `save_issue_label`, `save_comment({ issueId, body })`, `list_issue_labels`.
+  (`save_comment`'s `id` updates an existing comment and the create form takes `issueId`: an `id` that
+  names no comment returns `400 Could not find referenced Comment`, and one that names a comment
+  overwrites it.) Each result is
   `{ content: [{ type: "text", text: "<json>" }] }` - `JSON.parse(res.content[0].text)`. Batch
   independent calls in one codemode script and return only the fields you need.
 - **Subagents.** Delegation is authorized for this task. Fan out `ralph-scout` (read-only) over the

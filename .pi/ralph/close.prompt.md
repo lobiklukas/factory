@@ -8,7 +8,7 @@ Read `.ralph/merged.txt`: one line per merged PR, `<ISSUE-ID> <PR url>`. Linear 
 
 1. `get_issue` the id. If its status is already `Done`, skip the status change.
 2. `save_issue` status `Done`.
-3. `save_comment`: "ralph: merged <PR url>. Reviewer verdicts were clean and the merge gate was green."
+3. `save_comment({ issueId, body })`: "ralph: merged <PR url>. Reviewer verdicts were clean and the merge gate was green."
 4. In `.ralph/plan.md`, set the row for that issue to `done` (keep the PR url in notes).
 5. Append one line to `.ralph/progress.md`: `<date> <ISSUE-ID> merged <PR url>`.
 

@@ -89,9 +89,10 @@ over HTTP with the cached `mcp-remote` OAuth token: `~/.mcp-auth/mcp-remote-v1/*
 <token>`, `Content-Type: application/json`, `Accept: application/json, text/event-stream`, and
 `MCP-Protocol-Version: 2025-06-18` speaks JSON-RPC (`initialize`, then `tools/call` with `get_issue` /
 `save_issue` / `save_comment`). The server is stateless: it answers without an `mcp-session-id` header.
-`save_issue` takes `{"id": "LOB-42", "state": "In Review"}`; `save_comment` takes
-`{"issueId": "LOB-42", "body": "…"}`. Move each issue to In Progress when you start, and to In Review
-with a comment carrying your evidence when it is done. Never invent an issue number.
+`save_issue` takes `{"id": "LOB-42", "state": "In Review"}`. A comment is created by
+`save_comment` with `{"issueId": "LOB-42", "body": "…"}`; its own `id` updates an existing comment.
+Move each issue to In Progress when you start, and to In Review with a comment carrying your evidence
+when it is done. Never invent an issue number.
 
 ### Constraints that will bite
 

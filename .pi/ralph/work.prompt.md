@@ -13,8 +13,11 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 ## Tools
 
 - **Linear** via `codemode`: `await tools.mcp__linear__get_issue({ id, includeRelations: true })`,
-  `save_issue`, `save_comment`, `list_issues`. Results are
+  `save_issue`, `save_comment({ issueId, body })`, `list_issues`. Results are
   `{ content: [{ type: "text", text: "<json>" }] }` - `JSON.parse(res.content[0].text)`.
+  `get_issue` and `save_issue` address the issue as `id`; on `save_comment` an `id` means _update that
+  existing comment_ instead: one that names no comment comes back `400 Could not find referenced
+Comment` and posts nothing, and one that names a comment overwrites it. Always name `issueId`.
 - **Subagents.** Delegation is authorized for this task. Roles, all fresh-context and read-mostly:
   `ralph-reviewer` (angles `spec`, `standards`, `tests`), `ralph-designer` (modes `spec`,
   `critique`), `ralph-verifier` (writes tests, e2e drives, fakes and `verify-*` skills) and
@@ -70,7 +73,8 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 
 ### 3. Claim
 
-- `save_issue` status `In Progress`; `save_comment`: "ralph: picked up on branch `ralph/LOB-n`".
+- `save_issue` status `In Progress`; `save_comment({ issueId, body })`: "ralph: picked up on branch
+  `ralph/LOB-n`".
 - Plan row -> `in-progress`.
 - `git fetch origin`, then `git switch -c ralph/LOB-n <base>` where base is `origin/main`, or the
   blocker's `origin/ralph/LOB-m` when stacking. If the branch already exists locally or on `origin` (an interrupted earlier iteration, whose unfinished work the driver committed as `wip(...)`), switch to it, read the WIP commit and the issue, and continue from there instead of starting over.
@@ -168,7 +172,8 @@ verifier reports which it checked. Stop after **three** full gate-fix cycles tha
   `p0p1_open` counts findings you did not fix. Anything but all-OK, 0 and `green` stops the merge, so be
   honest: the driver re-runs the gate itself, and a later push invalidates the record (`head`).
   If a P0/P1 remains, do not open the PR - go to **Blocked**.
-- `save_comment` on the issue with the PR link, a 5-line summary, and the review verdicts;
+- `save_comment({ issueId, body })` on the issue with the PR link, a 5-line summary, and the review
+  verdicts;
   `save_issue` status `In Review`.
 - Plan row -> `in-review`, with the PR url in notes. Append to `.ralph/progress.md`:
   `## <date> LOB-n - in review` plus 3-6 bullets: what changed, what you learned that the next
@@ -185,8 +190,9 @@ If you cannot finish safely - unfixable gate, wrong spec, a decision that is not
 credential - **do not push half-done work to a PR**. Instead:
 
 - Commit nothing unreviewed to a shared branch. You may push the branch if useful, labelled WIP.
-- `save_comment` on the issue starting `ralph: blocked` with what you tried, the exact error or
-  conflict, and the one decision or fix a human must make. Return the issue to its original status.
+- `save_comment({ issueId, body })` on the issue starting `ralph: blocked` with what you tried, the
+  exact error or conflict, and the one decision or fix a human must make. Return the issue to its
+  original status.
 - Plan row -> `needs-human` with the reason. Append a progress entry.
 - If the cause is **infrastructure** (Linear down, Postgres/Docker down, auth - things no ticket can
   fix from inside the loop), end with

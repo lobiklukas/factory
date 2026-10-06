@@ -277,33 +277,41 @@ const colimaSocket = (scratch: Scratch): string =>
   `unix://${path.join(scratch.home, COLIMA_SOCKET)}`;
 
 describe("the ralph driver's docker_env", () => {
-  it("leaves an explicit DOCKER_HOST alone, and never probes either way", async () => {
-    // The acceptance criterion: with the caller's socket set and `docker info` failing, the value is
-    // unchanged — this driver used to replace it with colima's here, and the skills an agent then
-    // ran disagreed with the caller about which daemon was authoritative. The guard's first clause
-    // short-circuits, so with the fix the probe does not run at all and the fake's answer cannot be
-    // what saved the value: which is why both exit codes are driven and why the no-call assertion,
-    // not the value, is what makes the short-circuit observable. Mutation: delete
-    // `[ -z "${DOCKER_HOST:-}" ] &&` — an `info` call appears, and the `infoExit: 1` half also gets
-    // colima's socket back.
-    //
-    // A child that did not resolve the fake is invisible *here*: with an explicit socket no docker
-    // runs at all, so the value and the empty record agree that nothing happened. That premise is
-    // asserted where it can be seen — `childEnv` refuses to build an environment without the fake,
-    // and the last case in this file proves `command -v docker` resolves it in this very
-    // environment.
-    for (const infoExit of [1, 0]) {
-      const scratch = mkScratch();
-      await colimaIsRunning(scratch);
-      writeFakeDocker(scratch, infoExit);
-      const label = `docker info exits ${String(infoExit)}`;
+  // `{ timeout: 30_000 }` because this case spawns bash and binds a unix socket twice — once per
+  // `infoExit` arm — and measured 6.5-7.4 s under the package suite's own parallel load against
+  // vitest's 5 s default, which reddened `bun run test` twice in a row (LOB-118; `ralph/LOB-108`
+  // gives every case in this file the same budget).
+  it(
+    "leaves an explicit DOCKER_HOST alone, and never probes either way",
+    { timeout: 30_000 },
+    async () => {
+      // The acceptance criterion: with the caller's socket set and `docker info` failing, the value is
+      // unchanged — this driver used to replace it with colima's here, and the skills an agent then
+      // ran disagreed with the caller about which daemon was authoritative. The guard's first clause
+      // short-circuits, so with the fix the probe does not run at all and the fake's answer cannot be
+      // what saved the value: which is why both exit codes are driven and why the no-call assertion,
+      // not the value, is what makes the short-circuit observable. Mutation: delete
+      // `[ -z "${DOCKER_HOST:-}" ] &&` — an `info` call appears, and the `infoExit: 1` half also gets
+      // colima's socket back.
+      //
+      // A child that did not resolve the fake is invisible *here*: with an explicit socket no docker
+      // runs at all, so the value and the empty record agree that nothing happened. That premise is
+      // asserted where it can be seen — `childEnv` refuses to build an environment without the fake,
+      // and the last case in this file proves `command -v docker` resolves it in this very
+      // environment.
+      for (const infoExit of [1, 0]) {
+        const scratch = mkScratch();
+        await colimaIsRunning(scratch);
+        writeFakeDocker(scratch, infoExit);
+        const label = `docker info exits ${String(infoExit)}`;
 
-      expect(afterDockerEnv(scratch, { DOCKER_HOST: EXPLICIT }), label).toBe(
-        EXPLICIT,
-      );
-      expect(dockerCalls(scratch), label).toEqual([]);
-    }
-  });
+        expect(afterDockerEnv(scratch, { DOCKER_HOST: EXPLICIT }), label).toBe(
+          EXPLICIT,
+        );
+        expect(dockerCalls(scratch), label).toEqual([]);
+      }
+    },
+  );
 
   it("falls back to colima's socket when nothing else answers", async () => {
     // Mutation: `[ -z "${DOCKER_HOST:-}" ]` → `[ -n "${DOCKER_HOST:-}" ]`, and an unset host no
