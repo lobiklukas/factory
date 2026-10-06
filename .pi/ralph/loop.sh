@@ -17,7 +17,8 @@ RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-7200}"          # seconds per iteration
 RALPH_SPLIT_MAX="${RALPH_SPLIT_MAX:-10}"        # parents split per `split` run
-RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-3}"         # consecutive iterations with no valid control line
+RALPH_STALL="${RALPH_STALL:-1500}"                # seconds with no session/subagent write before pi is killed
+RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-5}"         # consecutive iterations with no valid control line
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
 RALPH_DB="${RALPH_DB:-factory_ralph}"
@@ -129,16 +130,33 @@ CTX
 }
 
 # Run a command with a wall-clock limit (macOS has no `timeout`).
+# with_timeout <secs> <cmd...>: hard cap, plus a stall watchdog when RALPH_STALL_DIR is set: a model that
+# stops answering (a free model returning nothing) leaves pi idle for hours, so kill it once nothing under that
+# directory (session + subagent transcripts) has been written for RALPH_STALL seconds. Returns 125 on a stall.
+newest_mtime() { find "$1" -type f -exec stat -f %m {} + 2>/dev/null | sort -n | tail -n 1; }
 with_timeout() {
   local secs="$1"; shift
+  local mark; mark="$(mktemp -u "${TMPDIR:-/tmp}/ralph-stall.XXXXXX")"
   "$@" & local pid=$!
-  # The watcher must not hold our stdout: its orphaned sleep would keep a surrounding $(...) open until it expires.
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & local watcher=$!
+  # The watcher must not hold our stdout: an orphaned child would keep a surrounding $(...) open.
+  (
+    start="$(date +%s)"
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep 20; now="$(date +%s)"
+      if [ $((now - start)) -ge "$secs" ]; then why=timeout
+      elif [ -n "${RALPH_STALL_DIR:-}" ] && [ $((now - start)) -ge "$RALPH_STALL" ] \
+        && [ $((now - $(newest_mtime "$RALPH_STALL_DIR"))) -ge "$RALPH_STALL" ]; then why=stall; : >"$mark"
+      else continue; fi
+      echo "$why" >&2
+      kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null; break
+    done
+  ) >/dev/null 2>&1 & local watcher=$!
   local rc=0
   wait "$pid" || rc=$?
   pkill -P "$watcher" 2>/dev/null || true
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
+  if [ -e "$mark" ]; then rm -f "$mark"; return 125; fi
   return "$rc"
 }
 
@@ -166,7 +184,7 @@ session() {
       export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
       export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
       [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
-      with_timeout "$RALPH_TIMEOUT" pi -p --approve \
+      RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
         --model "$m" --thinking "$RALPH_THINKING" \
         --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
         "$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")" \
@@ -181,6 +199,11 @@ session() {
     esac
     [ "$rc" -eq 0 ] || log "pi exited $rc (see $err)"
     [ "$tag" = NONE ] || break                                  # a valid control line ends it
+    if [ "$rc" -eq 125 ]; then                                  # stalled: nothing written for RALPH_STALL seconds
+      log "pi stalled on $m (no activity for ${RALPH_STALL}s); killed"
+      [ "$attempt" -lt "${#models[@]}" ] && { log "falling back to ${models[$attempt]}"; continue; }
+      break
+    fi
     case "$rc" in 124|137|143) break ;; esac                    # timed out / killed: do not retry
     if provider_failed "$out" "$err" && [ "$attempt" -lt "${#models[@]}" ]; then
       log "provider error on $m; falling back to ${models[$attempt]}"; continue
