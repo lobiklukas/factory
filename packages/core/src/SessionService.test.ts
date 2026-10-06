@@ -6,14 +6,16 @@
  * and the fold have to agree, or the dashboard shows two different sessions depending on whether
  * a sandbox happens to be running.
  *
- * Deterministic and offline (faux model), but it needs Postgres:
- * `docker compose up -d --wait postgres`.
+ * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
+ * postgres`. It creates a database of its own for the run and drops it at the end, so it neither
+ * reads nor writes the rows of whatever `DATABASE_URL` points at — see the block below.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
 import { BunServices } from "@effect/platform-bun";
+import { PgClient } from "@effect/sql-pg";
 import type {
   ListSessionsInput,
   SessionEvent,
@@ -28,6 +30,7 @@ import {
   Fiber,
   Layer,
   ManagedRuntime,
+  Redacted,
   Ref,
   Stream,
 } from "effect";
@@ -61,6 +64,97 @@ const emptyRepoRoot = mkdtempSync(join(tmpdir(), "factory-repo-empty-"));
 
 const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
 
+/**
+ * The URL `DATABASE_URL` resolves to, and the one the suite actually runs against (LOB-96).
+ *
+ * Every statement this file issues goes through one pool, and one case of it empties the `sessions`
+ * index entirely, so the blast radius of a run is whatever database that pool opened. Sharing one
+ * with everything else on the machine made that radius every session anyone else had, and the fold
+ * that follows costs the whole shared log rather than the one session the case asserts on — which
+ * is why that case carried a budget that expired as the shared database grew (LOB-113).
+ *
+ * So this file creates a database of its own for the run and drops it at the end, and points the
+ * suite's `DATABASE_URL` at it before the runtime is built. Nothing else changes: the case still
+ * drops the whole index and refolds it, which is the claim worth making, and it is now a claim
+ * about this run's rows.
+ *
+ * The fallback is `DatabaseConfig`'s own default, kept in step by the comment there. Reading the
+ * environment directly is not a shortcut, it is the only order that works: the config provider
+ * snapshots the environment the first time *any* config is read, so the one read that matters has
+ * to happen after this assignment and before anything else asks. That is why the maintenance
+ * client below is built from this string rather than from `DatabaseLive` — a `DatabaseLive` here
+ * would read the config first and freeze `DATABASE_URL` where it was.
+ */
+const configuredUrl =
+  // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+  process.env["DATABASE_URL"] ??
+  "postgres://factory:factory@localhost:5442/factory";
+
+/**
+ * The database `DATABASE_URL` names, read from its URL path.
+ *
+ * `postgres` when the URL names none, so the derived name is still a legal identifier rather than a
+ * leading underscore.
+ */
+const configuredDatabase =
+  new URL(configuredUrl).pathname.replace(/^\//, "") || "postgres";
+
+/**
+ * A database name for this run: the configured one, a marker, and six random characters, so two
+ * runs of this suite against one server cannot collide. Postgres folds an unquoted identifier to
+ * lower case and truncates at 63 bytes, so the whole string is lower case and the random tail is
+ * never the part that gets truncated away.
+ */
+const runDatabaseName = (() => {
+  const tail = `_core_${randomBytes(3).toString("hex")}`;
+  const base = configuredDatabase
+    .replaceAll(/[^a-z0-9_]/g, "_")
+    .slice(0, 63 - tail.length);
+  return `${base}${tail}`;
+})();
+
+/** The same URL with a different database on it, and every other parameter left alone. */
+const runDatabaseUrl = (() => {
+  const url = new URL(configuredUrl);
+  url.pathname = `/${runDatabaseName}`;
+  return url.toString();
+})();
+
+/**
+ * The only connection to the configured database this file ever opens.
+ *
+ * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops the
+ * run's own database, and migrating somebody else's would be the very reach this change is about.
+ * It issues no `sessions` statement either, only `CREATE`/`DROP DATABASE` and the one count in
+ * `describe("this suite's database")` below.
+ */
+const maintenance = ManagedRuntime.make(
+  PgClient.layer({
+    url: Redacted.make(configuredUrl),
+    maxConnections: 2,
+  }).pipe(Layer.provide(BunServices.layer)),
+);
+
+/**
+ * Create the run's database, loudly.
+ *
+ * A failure here is the loop's Postgres precondition failing, which the gate must not paper over:
+ * there is no fallback to the configured database, because pointing at that is the defect.
+ */
+await maintenance.runPromise(
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    // Not a parameter: Postgres has no placeholder for an identifier. `sql(name)` is the
+    // compiler's escaped-identifier helper, so this cannot become an injection.
+    yield* sql`CREATE DATABASE ${sql(runDatabaseName)}`;
+  }).pipe(Effect.orDie),
+);
+
+// Before the runtime below and before any case can run it, and before this process has read any
+// config at all — see the note on `configuredUrl`.
+// oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+process.env["DATABASE_URL"] = runDatabaseUrl;
+
 const runtime = ManagedRuntime.make(
   // `provideMerge` keeps the database in the runtime's context, so a test can run SQL and the
   // rebuild against the same pool the service uses.
@@ -76,8 +170,44 @@ const program = <A, E>(
 /** The repo slug tests bind to. */
 const factoryRepo = RepoSlugSchema.make("lobiklukas/factory");
 
+/**
+ * `sessions` rows in whichever database this client is connected to, `0` for a database that has
+ * not been migrated: a fresh CI database has no such table, and the count of no table is no rows.
+ */
+const countSessions = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const table = yield* sql<{ present: string | null }>`
+    SELECT to_regclass('public.sessions')::text AS present
+  `;
+  if (table[0]?.present === null) return 0;
+  const counted = yield* sql<{ rows: number }>`
+    SELECT count(*)::int AS rows FROM sessions
+  `;
+  return counted[0]?.rows ?? 0;
+});
+
+/**
+ * How many sessions the *configured* database held before a single case ran.
+ *
+ * A witness for the isolation, not the isolation itself: the case below compares it against the
+ * count afterwards, and `sessions` is what the rebuild case empties. Read before anything runs, so
+ * it is a floor rather than a fixed value — another suite may add rows to a shared database while
+ * this file runs, and only a *deletion* here is the harm LOB-96 is about.
+ */
+const configuredSessionsAtStart = await maintenance.runPromise(
+  countSessions.pipe(Effect.orDie),
+);
+
 afterAll(async () => {
+  // The run's own pool holds connections to the database being dropped, so it goes first.
   await runtime.dispose();
+  await maintenance.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`DROP DATABASE ${sql(runDatabaseName)} WITH (FORCE)`;
+    }).pipe(Effect.orDie),
+  );
+  await maintenance.dispose();
 });
 
 /** Count the SQL statements an effect issues, without changing what it does. */
@@ -515,13 +645,13 @@ describe("session list", () => {
   });
 
   // The fold is global by design (D7): `rebuildIndexes` replays every commit the database holds,
-  // log by log, so this case's cost is the whole shared log's, not the one session it asserts on.
-  // Measured 2026-10-06 at ~670 session logs / 11 754 commits: 5.8-6.0 s, i.e. 6-7.5 ms per session
-  // log and almost nothing per commit row. Vitest's 5 s default was under that, so the gate went
-  // red for every iteration — and the abort is destructive, because the case's own
-  // `DELETE FROM sessions` has already run when the timeout fires. 30 000 is ~5x today's fold and
-  // the budget expires at ~4 050 session logs (the guard at the end of this file pins it); a
-  // database of its own per run is the durable fix (LOB-96).
+  // log by log, so this case's cost is the whole database's, not the one session it asserts on.
+  // That was the whole shared database when this case ran against whatever `DATABASE_URL` named:
+  // ~670 session logs / 11 754 commits measured 5.8-6.0 s on 2026-10-06, so the case needed a
+  // 30 000 budget that expired at ~4 050 logs (LOB-113), and its `DELETE FROM sessions` reached
+  // every session on the machine (LOB-96). Both costs go with the same fix: this file runs against
+  // a database of its own (the block above), so the delete below and the fold that follows are
+  // about this run's rows and the case takes vitest's default again.
   it("rebuilds the index from the log after the index tables are emptied", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -549,7 +679,9 @@ describe("session list", () => {
           entries.find((entry) => entry.id === created.id);
         const before = find((yield* sessions.list({ limit: 100 })).sessions);
 
-        // Drop the derived rows, as losing an index table would.
+        // Drop the derived rows, as losing an index table would. Every row, not just this case's:
+        // the claim under test is that the whole index comes back from the log, and the database
+        // this runs against is the run's own (LOB-96), so the whole means whole.
         yield* sql`DELETE FROM sessions`;
         const empty = (yield* sessions.list({ limit: 100 })).sessions.length;
 
@@ -591,7 +723,7 @@ describe("session list", () => {
       "https://github.com/lobiklukas/factory.git",
     );
     expect(result.repos[0]?.defaultBaseRef).toBe("main");
-  }, 30_000);
+  });
 });
 
 describe("request limits", () => {
@@ -616,89 +748,50 @@ describe("request limits", () => {
   });
 });
 
-/**
- * The rebuild case's budget, guarded so it cannot silently go back to vitest's default (LOB-113).
- *
- * The case above empties the shared `sessions` index and refolds *every* session log the database
- * holds, so its cost is the database's, not the case's — the case comment has the measurement.
- * Deleting the case's third argument is silent while the database is small (the LOB-107 iteration
- * saw the case pass in 2.06 s against a database created empty for the run) and reddens only once
- * the shared database has grown past the default, so the deletion is invisible exactly when it is
- * made. Reading this file back is the shape `postgres-up.test.ts` already uses for its own header.
- *
- * What this cannot prove: that the declared budget is *enough*. No static check can — only the
- * fold's cost on the database in front of it, which is why the case itself is what fails when the
- * deadline passes. Two other ways out of the problem satisfy the issue but not this reader, so the
- * guard has to be updated with them: a repo-wide `testTimeout` in `vitest.config.ts`, and
- * `it(name, { timeout }, fn)`. A skipped or excluded `describe("session list")` passes it as well,
- * because every byte it reads is still in the file.
- *
- * If LOB-96 lands and `@repo/core` gets a database of its own per run, delete this describe
- * together with the case's third argument and the case comment that explains it, with the fold's
- * new cost in the commit message.
- *
- * Mutation checked: deleting the case's `, 30_000` back to `  });` — the budget case below goes red
- * in 2-3 ms, with no database involved. `reads a budget only where one is declared` is the control
- * that keeps it from passing on a reader that answers unconditionally.
- */
-const REBUILD_CASE =
-  "rebuilds the index from the log after the index tables are emptied";
+/** The name of the database a client is connected to: what the two pools below are compared on. */
+const currentDatabase = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const rows = yield* sql<{ name: string }>`SELECT current_database() AS name`;
+  const name = rows[0]?.name;
+  if (name === undefined) throw new Error("unreachable");
+  return name;
+});
 
 /**
- * The budget a case declares, or `undefined` when it would take vitest's default.
+ * The run's own database, asserted rather than assumed (LOB-96).
  *
- * The case's closing line is the first two-space-indented `}` after its `it(` — every nested
- * callback in the body closes deeper — and the budget is the optional third argument on it.
+ * Everything above depends on it: the rebuild case empties `sessions` and the session-list case
+ * writes 280 filler rows, so a run pointed at the configured database takes that database's
+ * sessions with it and pays for its whole log. The block at the top of this file is what makes that
+ * untrue, and these two cases are what notice if it stops being true.
+ *
+ * They read the isolation at run time, not the source, because the isolation is a property of the
+ * connection and not of the text: pointing the suite's `DATABASE_URL` back at the configured
+ * database is a one-line deletion that every comment in this file would go along with.
+ *
+ * Mutation checked: deleting the `process.env["DATABASE_URL"] = runDatabaseUrl;` line above — the
+ * first case then reads the configured database's name from both pools and goes red, and the
+ * second goes red as well once the rebuild case above has emptied that index. Do not apply it
+ * against the run-context database: that is the harm, live. Use a scratch database instead.
  */
-const declaredBudget = (
-  source: string,
-  caseName: string,
-): number | undefined => {
-  const start = source.indexOf(`it("${caseName}"`);
-  if (start < 0) return undefined;
-  const closing = /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(source.slice(start));
-  const digits = closing?.[1];
-  return digits === undefined ? undefined : Number(digits.replaceAll("_", ""));
-};
-
-describe("the rebuild case's budget", () => {
-  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
-
-  it("declares a timeout big enough for a shared database's whole-log fold", () => {
-    // The case has to be in the file at all, or the reader below would be reading nothing.
-    expect(source).toContain(REBUILD_CASE);
-    const budget = declaredBudget(source, REBUILD_CASE);
-    expect(
-      budget,
-      `no third-argument timeout on "${REBUILD_CASE}", so it would take vitest's 5 s default, which is under the shared database's whole-log fold: declare \`, 30_000)\` on the case, or update this guard as its header says.`,
-    ).toBeDefined();
-    if (budget === undefined) throw new Error("unreachable");
-    // 30 000 is what LOB-113 chose: ~5x the 5.9 s the fold costs at ~670 session logs. A smaller
-    // budget is a decision to re-measure the fold against the run-context database, not an edit.
-    expect(budget).toBeGreaterThanOrEqual(30_000);
+describe("this suite's database", () => {
+  it("is one of its own, not the one DATABASE_URL names", async () => {
+    const [here, there] = await Promise.all([
+      program(currentDatabase),
+      maintenance.runPromise(currentDatabase.pipe(Effect.orDie)),
+    ]);
+    // Two real reads, so the inequality cannot come from a client that never connected: a run that
+    // could not reach the configured database does not get this far.
+    expect(there).toBe(configuredDatabase);
+    expect(here).toBe(runDatabaseName);
+    expect(here).not.toBe(there);
   });
 
-  it("reads a budget only where one is declared", () => {
-    // Negative control for the reader, on a source shaped like this file: a case whose body closes
-    // a nested callback first and then declares nothing. If this read as a budget, the case above
-    // would pass on a file that declares none.
-    const without = [
-      'describe("x", () => {',
-      `  it("${REBUILD_CASE}", async () => {`,
-      "    const nested = (() => {",
-      "      return 1;",
-      "    });",
-      "  });",
-      "});",
-      "",
-    ].join("\n");
-    expect(declaredBudget(without, REBUILD_CASE)).toBeUndefined();
-    // The same source with the third argument back reads as that number, underscore and all.
-    expect(
-      declaredBudget(
-        without.replace(/^ {2}\}\);$/m, "  }, 120_000);"),
-        REBUILD_CASE,
-      ),
-    ).toBe(120_000);
+  it("leaves the configured database's sessions alone", async () => {
+    // Reads the database the rebuild case above emptied, in the run's own. A suite that shared it
+    // shows fewer rows here; a concurrent suite adding sessions shows more, which is not this
+    // file's harm — hence the floor rather than an equality.
+    const now = await maintenance.runPromise(countSessions.pipe(Effect.orDie));
+    expect(now).toBeGreaterThanOrEqual(configuredSessionsAtStart);
   });
 });
