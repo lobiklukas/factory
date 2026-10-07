@@ -2121,7 +2121,13 @@ describe("the abandoned-run sweep", () => {
     // Built through the same tail the sweep decodes, so the only thing separating these two is age.
     const old = `${runDatabasePrefix}${runDatabaseTail(now - TWO_HOURS)}`;
     const fresh = `${runDatabasePrefix}${runDatabaseTail(now)}`;
-    const unstamped = `${runDatabasePrefix}abcdef`;
+    // The shape a database minted before this file encoded a stamp has: prefix, random characters,
+    // no `_`, so nothing decodes an age out of it. The random characters are load-bearing and not
+    // decoration: a *fixed* literal here collides with a concurrent run of this same file on the
+    // same server, which answers `42P04 database … already exists` and reds this case (measured,
+    // and it is the shape the `randombits` clause in the file header exists to prevent). The other
+    // four decoys get their uniqueness from `runDatabaseTail` for the same reason.
+    const unstamped = `${runDatabasePrefix}${randomBytes(3).toString("hex")}`;
     // Old, unclaimed and decodable like `old`, and *not* this file's: the prefix's first `_` is
     // spelled `X`, so the name differs by one character from anything this file can mint while still
     // matching the prefix under `LIKE`, where `_` is a single-character wildcard. It is here so the
@@ -2177,36 +2183,65 @@ describe("the abandoned-run sweep", () => {
    *
    * The connection is a real one, held by a second `PgClient` on the decoy's own URL, because the
    * condition under test is what `pg_stat_activity` reports — a faked count would test the faker.
+   *
+   * Staging it is a race this case has to win, and losing it is not a failure. The decoy must be old
+   * (that is half of what is under test) and it cannot be connected to until it exists, so between
+   * the `CREATE` and the first connect it is *old, unclaimed and decodable* — precisely the set the
+   * sweep collects. Under two concurrent runs of this file the other run's module-level sweep can
+   * land in that window (measured: `effect/sql/SqlError: PgConnection: Connection closed`, which is
+   * the holder discovering the database it was told to connect to had been collected). The sweep
+   * behaving as specified is not a red case, so the case restages instead of failing, bounded and
+   * with the last attempt rethrown, so a genuine inability to stage still surfaces.
    */
   it("keeps a database that still has a connection, however old it is", async () => {
-    const name = `${runDatabasePrefix}${runDatabaseTail((await nowMillis()) - TWO_HOURS)}`;
-    const url = new URL(configuredUrl);
-    url.pathname = `/${name}`;
-    const holder = ManagedRuntime.make(
-      PgClient.layer({
-        url: Redacted.make(url.toString()),
-        maxConnections: 1,
-      }).pipe(Layer.provide(BunServices.layer)),
-    );
+    const ATTEMPTS = 6;
+    /** Every name this case minted, so a stranded one is dropped rather than left for the sweep. */
+    const staged: string[] = [];
     try {
-      await createDecoy(name);
-      // Force the pool to open, so the backend exists and `pg_stat_activity` can count it.
-      await holder.runPromise(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient;
-          yield* sql`SELECT 1`;
-        }).pipe(Effect.orDie),
-      );
-      await maintenance.runPromise(
-        sweepAbandonedRunDatabases.pipe(Effect.orDie),
-      );
-      expect(
-        await databaseExists(name),
-        "an old database with a live connection is a long run, not an orphan",
-      ).toBe(true);
+      for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+        // A fresh name per attempt, because a run's module-level sweep happens exactly once at
+        // import: a decoy stranded after a lost race is collected by nobody afterwards, and a fixed
+        // name would answer `42P04 already exists` on every retry (measured — twice in five
+        // concurrent pairs, before this became per-attempt).
+        const name = `${runDatabasePrefix}${runDatabaseTail((await nowMillis()) - TWO_HOURS)}`;
+        staged.push(name);
+        // A fresh runtime per attempt: a pool whose first connect landed on a collected database is
+        // not a pool worth reusing, and rebuilding it costs a few milliseconds on a path that only
+        // runs when a concurrent run won the race.
+        const url = new URL(configuredUrl);
+        url.pathname = `/${name}`;
+        const holder = ManagedRuntime.make(
+          PgClient.layer({
+            url: Redacted.make(url.toString()),
+            maxConnections: 1,
+          }).pipe(Layer.provide(BunServices.layer)),
+        );
+        try {
+          await createDecoy(name);
+          // Force the pool to open, so the backend exists and `pg_stat_activity` can count it.
+          await holder.runPromise(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient;
+              yield* sql`SELECT 1`;
+            }).pipe(Effect.orDie),
+          );
+          await maintenance.runPromise(
+            sweepAbandonedRunDatabases.pipe(Effect.orDie),
+          );
+          expect(
+            await databaseExists(name),
+            "an old database with a live connection is a long run, not an orphan",
+          ).toBe(true);
+          return;
+        } catch (error) {
+          if (attempt === ATTEMPTS) throw error;
+        } finally {
+          await holder.dispose();
+          await dropDecoy(name);
+        }
+      }
     } finally {
-      await holder.dispose();
-      await dropDecoy(name);
+      for (const name of staged) await dropDecoy(name);
     }
   }, 30_000);
 
