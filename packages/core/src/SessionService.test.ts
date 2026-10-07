@@ -2230,9 +2230,22 @@ describe("the abandoned-run sweep", () => {
     /** Every name this case minted, so a stranded one is dropped rather than left for the sweep. */
     const staged: string[] = [];
     // Set by the staging loop and read after it: a fresh holder per attempt is disposable, the
-    // connected database it holds is not, so only the last one is kept for the assertion.
+    // connected database it holds is not, so only the last one is kept for the assertion. The type is
+    // `makeHolder`'s own inference rather than a written `ReturnType<typeof ManagedRuntime.make>`,
+    // because `make` is generic and naming it directly widens the scope to `unknown`, which does not
+    // assign back to the runtime it came from.
+    const makeHolder = (name: string) => {
+      const url = new URL(configuredUrl);
+      url.pathname = `/${name}`;
+      return ManagedRuntime.make(
+        PgClient.layer({
+          url: Redacted.make(url.toString()),
+          maxConnections: 1,
+        }).pipe(Layer.provide(BunServices.layer)),
+      );
+    };
     let held:
-      | { name: string; holder: ReturnType<typeof ManagedRuntime.make> }
+      | { name: string; holder: ReturnType<typeof makeHolder> }
       | undefined;
     let stagingError: unknown;
     try {
@@ -2246,14 +2259,7 @@ describe("the abandoned-run sweep", () => {
         // A fresh runtime per attempt: a pool whose first connect landed on a collected database is
         // not a pool worth reusing, and rebuilding it costs a few milliseconds on a path that only
         // runs when a concurrent run won the race.
-        const url = new URL(configuredUrl);
-        url.pathname = `/${name}`;
-        const holder = ManagedRuntime.make(
-          PgClient.layer({
-            url: Redacted.make(url.toString()),
-            maxConnections: 1,
-          }).pipe(Layer.provide(BunServices.layer)),
-        );
+        const holder = makeHolder(name);
         try {
           await createDecoy(name);
           // Force the pool to open, so the backend exists and `pg_stat_activity` can count it.
