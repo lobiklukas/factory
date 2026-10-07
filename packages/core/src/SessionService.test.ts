@@ -648,6 +648,32 @@ describe("SessionService", () => {
     );
 
     expect(folded.entries.at(-1)?.text).toBe("faux-ok (re: third)");
+
+    // This case ends with the session owned again — the third turn reopened it — and an owned
+    // session keeps a projector running that rewrites its own `session_activity.last_activity_at`
+    // to "now" on every live event (`recordActivity` → `touch` / `setActivityStatus`). Left open,
+    // that projector writes to `session_activity` while every case below pages over the whole
+    // table, and a row whose key moves mid-walk is one no walk can return: it has left the range
+    // below the cursor. The list cases account for that skip, so it would not turn the gate red —
+    // but the write is this case's, and the file has no business leaving a background writer
+    // running for the twenty cases after it. Closing releases the owner and ends the fiber too.
+    //
+    // Mutation checked: deleting this `sessions.close`, which leaves the projector running. The
+    // assertion below goes red on `expect(released.session.mode).toBe("historical")` — and nothing
+    // else in the file notices, because a skip the helper can explain is silent by design.
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+    const released = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.get(session.id);
+      }),
+    );
+    expect(released.session.mode).toBe("historical");
   }, 120_000);
 
   it("reports an unknown session as not_found", async () => {
@@ -835,7 +861,21 @@ describe("session list", () => {
             break;
           }
         }
-        return { first, second, third, immediately, pages, exhausted, visible };
+        // Its own page loop keeps `counted` whole (the statement count travels with it), so the
+        // accounting reads the output out of it rather than this case reshaping the array.
+        const leftOver = yield* unaccounted(
+          pages.map((page) => ({ output: page.value })),
+        );
+        return {
+          first,
+          second,
+          third,
+          immediately,
+          pages,
+          exhausted,
+          visible,
+          leftOver,
+        };
       }).pipe(
         // The fillers go whether this test passes, fails or dies: the cases below page over the
         // whole table, so 280 rows left behind are rows they read and this case does not own.
@@ -863,10 +903,13 @@ describe("session list", () => {
     expect(result.exhausted).toBe(true);
     expect(result.pages.at(-1)?.value.nextCursor).toBeUndefined();
     expect(result.pages.length).toBeGreaterThan(1);
-    // Every row the list can see comes back. `session_activity.session_id` is the primary key, so
-    // its count is exactly the set the list pages over, and a shortfall means rows were dropped —
-    // in the rows behind the fillers as much as in the fillers themselves.
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the list should have had comes back, and comes back once. Not
+    // `entries.length >= visible`: `visible` was counted before the walk, and `last_activity_at`
+    // — the ordering key — is rewritten to "now" by every live event, so a row can leave the range
+    // the walk is traversing mid-walk (LOB-135). That is one legitimate reason for a shortfall and
+    // `unaccounted` accounts for it; a row dropped behind the fillers for any other reason still
+    // reds here.
+    expect(result.leftOver).toEqual([]);
     // Every filler row this test wrote comes back exactly once, so a list that stops early inside
     // them cannot pass by landing on the three sessions below.
     expect(entries.filter((entry) => entry.id.startsWith("ses_f")).length).toBe(
@@ -932,7 +975,8 @@ describe("session list", () => {
             LIMIT,
             Math.ceil(visible / LIMIT) + 2,
           );
-          return { GROUP, pages, exhausted };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, leftOver };
         }),
       ),
     );
@@ -1084,6 +1128,98 @@ describe("session list", () => {
     );
 
   /**
+   * The rows the three cases that move the table under the walk seed (LOB-135).
+   *
+   * A plain ladder of distinct instants, ten seconds apart, so the walk's order is the insertion
+   * order reversed and every position is unambiguous. Nothing here is tied: those cases are about a
+   * key *moving*, and a tie would make them pass or fail for two reasons at once.
+   *
+   * Seeded *above* everything else, into the near future, and that is load-bearing rather than
+   * decorative. Two of the cases write to one row between two pages, and which row that write can
+   * reach depends on where the walk is: the rewind case needs the row it moves to have been returned
+   * already, so it must be the head of page 1, and the skip case needs the row it moves to be one
+   * the walk has *not* reached. Seeding the ladder above the rest of the table — which holds rows
+   * every earlier case created at `to_timestamp(Clock.currentTimeMillis / 1000)`, i.e. about now —
+   * makes page 1 a probe row whichever way the write goes. Measured: seeded at `now() - 10n` the
+   * rewind case passed in isolation and returned nothing extra in a full-file run, because the
+   * walk had not reached the row it rewound. The cases must not depend on what else the table
+   * holds.
+   */
+  const PROBE_PREFIX = "ses_pr";
+  const probeId = (n: number) =>
+    `${PROBE_PREFIX}${String(n).padStart(24, "0")}`;
+  const seedProbe = (n: number) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`DELETE FROM sessions WHERE id LIKE ${asPattern(PROBE_PREFIX)}`;
+      yield* sql`
+        INSERT INTO sessions (id, title)
+        SELECT ${PROBE_PREFIX}::text || lpad(n::text, 24, '0'), 'probe ' || n
+        FROM generate_series(1, ${n}) AS g(n)
+      `;
+      // `1` is the newest row, so the walk reaches it first and `n` is the last one it reaches.
+      // Into the future on purpose — see the doc comment above.
+      yield* sql`
+        INSERT INTO session_activity (session_id, last_activity_at)
+        SELECT ${PROBE_PREFIX}::text || lpad(n::text, 24, '0'),
+               now() + make_interval(secs => 10 * (${n} - n))
+        FROM generate_series(1, ${n}) AS g(n)
+      `;
+    });
+  const deleteProbe = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    yield* sql`DELETE FROM sessions WHERE id LIKE ${asPattern(PROBE_PREFIX)}`;
+  });
+  /** As `withGroup`, for the probe rows: they page over the whole table too. */
+  const withProbe = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+    body.pipe(Effect.ensuring(deleteProbe.pipe(Effect.orDie)));
+
+  /**
+   * Page the list by hand, running `afterPage` once the given page is in.
+   *
+   * `pageAll` has no seam between pages, and the whole point of these two cases is to write to the
+   * table in that gap — so the loop is spelled out here rather than bent into `pageAll`. What it
+   * returns is exactly what `pageAll` returns, so the two are interchangeable everywhere else.
+   */
+  const walkBetween = (
+    limit: number,
+    afterPage: number,
+    between: () => Effect.Effect<void, never, SqlClient>,
+  ): Effect.Effect<
+    {
+      readonly pages: readonly {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[];
+      readonly exhausted: boolean;
+    },
+    SessionError,
+    SessionService | SqlClient
+  > =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const pages: {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[] = [];
+      let cursor: string | undefined = undefined;
+      let exhausted = false;
+      for (let page = 0; ; page += 1) {
+        const input: ListSessionsInput =
+          cursor === undefined ? { limit } : { limit, cursor };
+        const counted = yield* countStatements(sessions.list(input));
+        pages.push({ output: counted.value, statements: counted.statements });
+        cursor = counted.value.nextCursor;
+        if (cursor === undefined) {
+          exhausted = true;
+          break;
+        }
+        if (page === afterPage - 1) yield* between();
+      }
+      return { pages, exhausted };
+    });
+
+  /**
    * Page the list until the cursor runs out, returning every page with the number of statements
    * it cost.
    *
@@ -1139,6 +1275,70 @@ describe("session list", () => {
   });
 
   /**
+   * What a walk did to the table, minus the one thing it is allowed to do to it (LOB-135).
+   *
+   * A walk reads a table nothing holds still: `last_activity_at` is the ordering key *and* a
+   * column every live event rewrites to "now" (`recordActivity` reaches it through `touch`,
+   * `setActivityStatus` and `setActivityCost`), so a row can move while the walk is in flight.
+   * Two things follow, and both are real:
+   *
+   * - **Skip.** A row below the cursor whose key moves *above* it has left the range the walk is
+   *   traversing. It is never returned, and `nextCursor` still says the walk is finished, so the
+   *   walk reads as complete while being short. The row is not lost: its activity advanced, so it
+   *   now belongs at the head and the next walk finds it there.
+   * - **Duplicate.** A row already returned whose key moves *back below* the cursor comes back
+   *   around. Only `rebuildIndexes` moves a key backwards — every incremental writer sets it to
+   *   "now" — so this one needs a whole-table rewrite to reach, and it is still a wrong answer.
+   *
+   * So the count the cases used to compare against is the wrong instrument twice over: it is read
+   * *before* the walk, and rows the walk legitimately never returns were counted in it. This asks
+   * the question that has a determinate answer instead — *is every row the walk should have had,
+   * did it have, and did it have each one once?* — and reports what is left over.
+   *
+   * The boundary is the first page's own cursor: the walk traversed everything strictly below it,
+   * so a row that is still below it and was not returned is unaccounted for, while a row at or
+   * above it left the range legitimately. A one-page walk minted no cursor, traversed everything,
+   * and can be short only by a duplicate — which is the other half of this list.
+   *
+   * Empty is the answer a correct walk gives, whatever else moved: the point is that it is
+   * *always* empty when nothing rewrites the table, and the cases below that rewrite it
+   * deliberately are the only ones that can ever see a skip.
+   */
+  const unaccounted = (
+    pages: readonly { readonly output: ListSessionsOutput }[],
+  ): Effect.Effect<readonly string[], never, SqlClient> =>
+    Effect.gen(function* () {
+      const returned = pages.flatMap((page) =>
+        page.output.sessions.map((entry) => entry.id),
+      );
+      const seen = new Set<string>();
+      const duplicated: string[] = [];
+      for (const id of returned) {
+        if (seen.has(id)) duplicated.push(id);
+        seen.add(id);
+      }
+      const firstCursor = pages[0]?.output.nextCursor;
+      if (firstCursor === undefined) return [...duplicated].sort();
+      // The instant half of `at|id`, which is the exact `timestamptz` page 1 ordered by.
+      const at = firstCursor.slice(0, firstCursor.indexOf("|"));
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ sessionId: string }>`
+        SELECT session_id AS "sessionId" FROM session_activity
+        WHERE last_activity_at < ${at}::timestamptz
+      `.pipe(Effect.orDie);
+      const belowCursor = rows
+        .map((row) => row.sessionId)
+        .filter((id) => !seen.has(id))
+        .sort();
+      return [
+        ...duplicated.map((id) => `returned more than once: ${id}`),
+        ...belowCursor.map(
+          (id) => `below the first cursor, never returned: ${id}`,
+        ),
+      ];
+    });
+
+  /**
    * A group that is exactly one page big, so the cursor is minted only because the query fetches
    * `limit + 1` rows.
    *
@@ -1187,7 +1387,8 @@ describe("session list", () => {
             LIMIT,
             Math.ceil(visible / LIMIT) + 2,
           );
-          return { GROUP, LIMIT, pages, exhausted, visible };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, LIMIT, pages, exhausted, visible, leftOver };
         }),
       ),
     );
@@ -1212,7 +1413,11 @@ describe("session list", () => {
     expect(result.pages.at(-1)?.output.nextCursor).toBeUndefined();
     // Every row the list can see came back, so the group's exactness is not being paid for with
     // the older rows behind it.
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     // Cost is one statement per page whatever the row count: never a fold per session (R6).
     for (const page of result.pages) expect(page.statements).toBe(1);
   });
@@ -1251,7 +1456,8 @@ describe("session list", () => {
           // `limit: 0` is clamped to 1 by the service rather than refused: one row, and a cursor,
           // so the clamp does not silently mean "no pages".
           const clamped = yield* sessions.list({ limit: 0 });
-          return { GROUP, pages, exhausted, clamped };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, clamped, leftOver };
         }),
       ),
     );
@@ -1310,7 +1516,8 @@ describe("session list", () => {
             10,
             Math.ceil(visible / 10) + 2,
           );
-          return { GROUP, pages, exhausted, visible };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, visible, leftOver };
         }),
       ),
     );
@@ -1322,7 +1529,11 @@ describe("session list", () => {
     );
     expect(new Set(group).size).toBe(group.length);
     expect(result.exhausted).toBe(true);
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     for (const page of result.pages) expect(page.statements).toBe(1);
   });
 
@@ -1384,7 +1595,8 @@ describe("session list", () => {
             2,
             Math.ceil(visible / 2) + 2,
           );
-          return { GROUP, pages, exhausted, visible };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, visible, leftOver };
         }),
       ),
     );
@@ -1401,7 +1613,11 @@ describe("session list", () => {
       entries.slice(entries.length - result.GROUP).map((entry) => entry.id),
     ).toEqual(groupIdsDescending(result.GROUP));
     expect(result.exhausted).toBe(true);
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     for (const page of result.pages) expect(page.statements).toBe(1);
   });
 
@@ -1505,7 +1721,8 @@ describe("session list", () => {
             LIMIT,
             Math.ceil(visible / LIMIT) + 2,
           );
-          return { GROUP, pages, exhausted, visible };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, visible, leftOver };
         }),
       ),
     );
@@ -1517,7 +1734,11 @@ describe("session list", () => {
     );
     expect(new Set(group).size).toBe(group.length);
     expect(result.exhausted).toBe(true);
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     for (const page of result.pages) expect(page.statements).toBe(1);
   });
 
@@ -1551,7 +1772,8 @@ describe("session list", () => {
             LIMIT,
             Math.ceil(visible / LIMIT) + 2,
           );
-          return { GROUP, pages, exhausted, visible };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, visible, leftOver };
         }),
       ),
     );
@@ -1563,7 +1785,11 @@ describe("session list", () => {
     );
     expect(new Set(group).size).toBe(group.length);
     expect(result.exhausted).toBe(true);
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     for (const page of result.pages) expect(page.statements).toBe(1);
 
     // The cursor minted from a lossless row has to denote the same instant the millisecond
@@ -1609,7 +1835,8 @@ describe("session list", () => {
           // still minted because the table is bigger than one capped page. A literal, for the
           // same reason `GROUP` is: `LIMIT ${limit + 1}` needs a type the driver can infer.
           const clamped = yield* sessions.list({ limit: 1100 });
-          return { GROUP, pages, exhausted, visible, clamped };
+          const leftOver = yield* unaccounted(pages);
+          return { GROUP, pages, exhausted, visible, clamped, leftOver };
         }),
       ),
     );
@@ -1621,11 +1848,184 @@ describe("session list", () => {
     );
     expect(new Set(group).size).toBe(group.length);
     expect(result.exhausted).toBe(true);
-    expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+    // Every row the walk should have had came back, once. Not `entries.length >= visible`:
+    // `visible` was counted before the walk, and the ordering key is rewritten to "now" by every
+    // live event, so a row can legitimately leave the range mid-walk (LOB-135). `leftOver` is empty
+    // for that and names anything else.
+    expect(result.leftOver).toEqual([]);
     for (const page of result.pages) expect(page.statements).toBe(1);
 
     expect(result.clamped.sessions.length).toBe(MAX_PAGE_SIZE);
     expect(result.clamped.nextCursor).toBeDefined();
+  });
+
+  /**
+   * A row whose activity advances above the cursor is skipped, and `unaccounted` accounts for it
+   * (LOB-135).
+   *
+   * This is the shape that turned a green gate red about once in thirty-five runs and was never
+   * reproduced by a rerun: `expected 9 to be greater than or equal to 10`, on a case whose cursor
+   * arithmetic is exact. It is not a race to reproduce — it is a race to *notice*, because it
+   * needs a row to move at the right instant. Here it moves at an instant this case chooses.
+   *
+   * `recordActivity` is what moves it in production: every live event for an owned session writes
+   * `last_activity_at = to_timestamp(Clock.currentTimeMillis / 1000)` through `touch`,
+   * `setActivityStatus` or `setActivityCost`, from the per-session projector. A walk that pages
+   * slowly enough overlaps one, and the row it moved is one the walk had not reached.
+   *
+   * The skip is not a defect in the keyset — `lastActivityExact` carries microseconds, so the
+   * comparison is exact and the row is skipped for being *newer*, not for being truncated. It is
+   * the walk's contract: it traverses what was below its first cursor, and this row is no longer
+   * below it. The next walk finds it at the head, which is where a session that just became active
+   * belongs. So the assertions are about the *accounting*, not about the count:
+   *
+   * - the walk finished (`exhausted`), because a cursor running out is not how the row went;
+   * - the row was not returned, and is now the newest thing in the table;
+   * - a fresh walk returns it, so it was skipped rather than lost;
+   * - `unaccounted` is empty — the skip has the reason the helper looks for, and nothing else is
+   *   missing.
+   *
+   * This case pins the *behaviour*, and it is the only one that can: it stages the state, so it is
+   * green or red on every run instead of once in thirty-five. It does not pin `unaccounted` — a
+   * helper that returned an empty list always would pass it, which is what the two cases below it
+   * are for.
+   *
+   * Mutation checked: `unaccounted`'s `belowCursor` filter to `filter(() => false)`, which hides
+   * every unexplained shortfall. This case stays green — its only skip is the one it stages, and
+   * that is the skip the helper exists to explain — and so does every other case in this file.
+   * That mutation was measured green, which is the reason the case after this one exists.
+   */
+  it("skips a row whose activity advances above the cursor, and accounts for it", async () => {
+    const result = await program(
+      withProbe(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          const PROBE = 5;
+          const LIMIT = 1;
+          yield* seedProbe(PROBE);
+          // Walk by hand rather than through `pageAll`, because the point is to write to the table
+          // *between* two pages, and `pageAll` has no seam for that.
+          const { pages, exhausted } = yield* walkBetween(LIMIT, 1, () =>
+            Effect.orDie(sql`
+                UPDATE session_activity
+                SET last_activity_at = now() + interval '1 hour'
+                WHERE session_id = ${probeId(PROBE)}
+              `),
+          );
+          // The row did not vanish: it is the newest thing in the table, and a walk that starts
+          // now returns it first.
+          const head = yield* sessions.list({ limit: 1 });
+          const leftOver = yield* unaccounted(pages);
+          return { PROBE, LIMIT, pages, exhausted, head, leftOver };
+        }),
+      ),
+    );
+
+    expect(result.exhausted).toBe(true);
+    const returned = result.pages.flatMap((page) =>
+      page.output.sessions.map((entry) => entry.id),
+    );
+    // Every probe row but the moved one came back, in order, once each. The table holds more than
+    // the probe, so the walk is over the whole thing and only the probe ids are claimed here.
+    expect(returned.filter((id) => id.startsWith(PROBE_PREFIX))).toEqual(
+      [1, 2, 3, 4].map((n) => probeId(n)),
+    );
+    // A fresh walk finds it at the head, so it was skipped and not lost.
+    expect(result.head.sessions.map((entry) => entry.id)).toEqual([
+      probeId(result.PROBE),
+    ]);
+    // Explained, and nothing else is missing.
+    expect(result.leftOver).toEqual([]);
+  });
+
+  /**
+   * A row whose activity is rewound below the cursor comes back around, and `unaccounted` names it
+   * (LOB-135).
+   *
+   * The mirror image of the case above, and the one that keeps the helper honest. A walk that only
+   * ever skipped rows could still be reporting the wrong thing, and a helper that returned an empty
+   * list always would pass every other case in this file. So this case stages the direction that is
+   * *not* legitimate — no incremental writer moves a key backwards, so the only thing that can is
+   * `rebuildIndexes` rewriting the whole table — and asserts the helper says so by name.
+   *
+   * Mutation checked: `unaccounted`'s `duplicated` accumulator to never push, which is what a
+   * helper that only looked for missing rows would look like. This case goes red on
+   * `expect(result.leftOver).toEqual([...])`, naming the row.
+   */
+  it("names a row the walk returns twice after its activity is rewound", async () => {
+    const result = await program(
+      withProbe(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const PROBE = 5;
+          const LIMIT = 1;
+          yield* seedProbe(PROBE);
+          const { pages, exhausted } = yield* walkBetween(LIMIT, 1, () =>
+            Effect.orDie(sql`
+                UPDATE session_activity
+                SET last_activity_at = now() - interval '1 hour'
+                WHERE session_id = ${probeId(1)}
+              `),
+          );
+          const leftOver = yield* unaccounted(pages);
+          return { PROBE, LIMIT, pages, exhausted, leftOver };
+        }),
+      ),
+    );
+
+    expect(result.exhausted).toBe(true);
+    expect(result.leftOver).toEqual([`returned more than once: ${probeId(1)}`]);
+  });
+
+  /**
+   * A row the walk left below its first cursor is named, not counted (LOB-135).
+   *
+   * The half of `unaccounted` that names *missing* rows has no walk to catch it, because on
+   * unmutated code a row below the first cursor always comes back — that is the whole of what the
+   * exact cursor buys (LOB-95) — and reverting it reddens six cases in this file on their group
+   * assertions, not on this helper. So this case does not stage a walk. It stages the **output** of
+   * a broken one.
+   *
+   * One real page against the seeded ladder, taken from the real list and carrying the real
+   * cursor, and then the walk stops. Rows 2 to 5 are below that cursor and were never returned —
+   * which is what LOB-135 saw, except there the walk also claimed to be finished. So the rule is
+   * pinned against a helper that quietly stopped looking: mutating `belowCursor`'s filter to
+   * `filter(() => false)` — a helper that finds missing rows by not looking for them — leaves
+   * every other case in this file green and this one red. Measured: that mutation was green
+   * before this case existed, which is why it is here.
+   *
+   * Mutation checked: `.filter((id) => !seen.has(id))` → `.filter(() => false)`. This case goes red
+   * on the assertion below, which names all four probe rows.
+   */
+  it("names a row the walk left below its first cursor", async () => {
+    const result = await program(
+      withProbe(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const PROBE = 5;
+          yield* seedProbe(PROBE);
+          const counted = yield* countStatements(sessions.list({ limit: 1 }));
+          // A one-page walk that stops with a cursor still in hand: the shape of a list that
+          // drops the rest of the table, and of a caller that pages once and gives up.
+          const firstCursor = counted.value.nextCursor;
+          if (firstCursor === undefined) throw new Error("unreachable");
+          const leftOver = yield* unaccounted([{ output: counted.value }]);
+          return { PROBE, firstCursor, leftOver };
+        }),
+      ),
+    );
+
+    // Only the probe rows are claimed: the table also holds every row the cases before this one
+    // created, and those are below the cursor too, so the helper names them as well — which is
+    // the helper working, not noise. Row 1 is absent from the list because the page returned it.
+    expect(
+      result.leftOver.filter((entry) => entry.includes(PROBE_PREFIX)),
+    ).toEqual(
+      [2, 3, 4, 5].map(
+        (n) => `below the first cursor, never returned: ${probeId(n)}`,
+      ),
+    );
   });
 
   it("refuses a cursor it did not mint", async () => {

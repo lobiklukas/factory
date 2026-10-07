@@ -705,6 +705,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         }).pipe(Effect.ignore);
 
+      /**
+       * One page of the session list, newest activity first.
+       *
+       * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
+       * keyset comparison is against the `timestamptz` Postgres ordered by and a page boundary
+       * inside a group of rows sharing a millisecond loses none of it (LOB-95).
+       *
+       * A *walk* — this call repeated from `nextCursor` until it is gone — is not a snapshot, and
+       * cannot be one from here: the ordering key is `session_activity.last_activity_at`, which
+       * every live event for an owned session rewrites to "now" (`recordActivity` reaches it
+       * through `touch`, `setActivityStatus` and `setActivityCost`). So a row can move between two
+       * pages of the same walk, and both directions are observable:
+       *
+       * - A row below the cursor whose key advances *above* it leaves the range the walk is
+       *   traversing. It is not returned by that walk, and `nextCursor` still reports the walk
+       *   finished. It is not lost: a session that just became active now belongs at the head, and
+       *   the next walk finds it there.
+       * - A row already returned whose key moves *back below* the cursor is returned again. Only
+       *   `rebuildIndexes` moves a key backwards — every incremental writer sets it to "now" — so
+       *   reaching this needs a whole-table rewrite in flight, and it is still a wrong answer.
+       *
+       * Callers that page the whole table should therefore treat a walk as a best-effort snapshot
+       * rather than a count, and should re-walk from the top to pick up what moved. Making a walk
+       * a true snapshot needs either one transaction spanning every page — impossible from here, a
+       * walk is a client's loop across calls — or a materialised snapshot id carried in the cursor;
+       * both are a decision about this contract rather than a fix, so neither is taken.
+       */
       const list = (
         input: ListSessionsInput,
       ): Effect.Effect<ListSessionsOutput, SessionError> =>
