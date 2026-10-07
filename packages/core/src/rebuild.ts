@@ -61,6 +61,13 @@ const storageError = (what: string, cause: unknown): SessionError =>
     message: `${what}: ${String(cause)}`,
   });
 
+/**
+ * Folded index rows per `INSERT … SELECT FROM unnest(…)`, so the write side costs a bounded number
+ * of round trips instead of one per row. It bounds a statement's payload, not what the fold means:
+ * every row still lands, and the conflict clauses are the ones that were there before.
+ */
+const WRITE_BATCH_ROWS = 1_000;
+
 export const rebuildIndexes: Effect.Effect<
   RebuildReport,
   SessionError,
@@ -78,17 +85,22 @@ export const rebuildIndexes: Effect.Effect<
     ORDER BY log_id
   `;
 
+  // One batched read per group of session logs, not one reader per log: the per-log path costs
+  // several sequential round trips for every log, which is what made the fold grow with the log
+  // table rather than with the number of commits in it. The fold below is unchanged — the stores
+  // `readers` returns are Pi Durable's own `MemoryStorage`, so a session reads here exactly as it
+  // read through `PostgresStorage.reader`.
+  const sessionLogs = logs.filter((log) => Schema.is(SessionId)(log.logId));
+  const folds = yield* Effect.tryPromise({
+    try: () => PostgresStorage.readers(sql, sessionLogs.map((log) => log.logId)),
+    catch: (cause) => storageError("read the session logs", cause),
+  });
+
   const folded: FoldedRow[] = [];
-  for (const log of logs) {
-    if (!Schema.is(SessionId)(log.logId)) continue;
-    const storage = yield* Effect.tryPromise({
-      try: () => PostgresStorage.reader(sql, log.logId),
-      catch: (cause) => storageError(`open log ${log.logId}`, cause),
-    });
-    const sessionLog = yield* readSessionLog(storage).pipe(
-      Effect.tapError(() => Effect.promise(() => storage.dispose())),
-    );
-    yield* Effect.promise(() => storage.dispose());
+  for (const log of sessionLogs) {
+    const storage = folds.get(log.logId);
+    if (storage === undefined) continue;
+    const sessionLog = yield* readSessionLog(storage);
 
     const title = sessionLog.entries
       .filter((entry) => entry.kind === "title")
@@ -116,10 +128,20 @@ export const rebuildIndexes: Effect.Effect<
     repoDefaults.set(row.repo, row.baseRef ?? "main");
   }
 
-  for (const row of folded) {
+  // Two statements per batch of index rows rather than two per row: the fold's cost has to be in
+  // the number of rows, not in the number of round trips it takes to write them.
+  for (let at = 0; at < folded.length; at += WRITE_BATCH_ROWS) {
+    const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
+    const ids = batch.map((row) => row.id);
     yield* sql`
       INSERT INTO sessions (id, title, repo, base_ref, created_at)
-      VALUES (${row.id}, ${row.title}, ${row.repo}, ${row.baseRef}, ${row.createdAt}::timestamptz)
+      SELECT * FROM unnest(
+        ${ids}::text[],
+        ${batch.map((row) => row.title)}::text[],
+        ${batch.map((row) => row.repo)}::text[],
+        ${batch.map((row) => row.baseRef)}::text[],
+        ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
+      )
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
@@ -128,7 +150,12 @@ export const rebuildIndexes: Effect.Effect<
     `;
     yield* sql`
       INSERT INTO session_activity (session_id, status, cost_total, last_activity_at)
-      VALUES (${row.id}, 'idle', ${row.costTotal}, ${row.lastActivityAt}::timestamptz)
+      SELECT * FROM unnest(
+        ${ids}::text[],
+        ${batch.map(() => "idle")}::text[],
+        ${batch.map((row) => row.costTotal)}::double precision[],
+        ${batch.map((row) => row.lastActivityAt)}::text[]::timestamptz[]
+      )
       ON CONFLICT (session_id) DO UPDATE SET
         status = 'idle',
         cost_total = EXCLUDED.cost_total,
