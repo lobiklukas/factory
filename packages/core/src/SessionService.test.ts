@@ -186,12 +186,16 @@ const RUN_NAME_RESERVED =
 const runDatabasePrefixFor = (database: string) => {
   // The name may be empty, which leaves a leading underscore — a legal identifier, and one this
   // file quotes anyway. There is nothing to pad it with.
-  const base = database.replaceAll(/[^a-z0-9_]/g, "_").slice(0, 63 - RUN_NAME_RESERVED);
+  const base = database
+    .replaceAll(/[^a-z0-9_]/g, "_")
+    .slice(0, 63 - RUN_NAME_RESERVED);
   return `${base}_core_`;
 };
 
 /** This run's own prefix: the one over `configuredDatabase`. */
-const runDatabasePrefix = runDatabasePrefixFor(configuredDatabase);/** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
+const runDatabasePrefix = runDatabasePrefixFor(configuredDatabase);
+
+/** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
 const runDatabaseTail = (at: number) =>
   `${randomBytes(3).toString("hex")}_${Math.trunc(at).toString(36)}`;
 
@@ -2261,12 +2265,14 @@ describe("the abandoned-run sweep", () => {
     // The limit applies to a quoted identifier too, and a truncated tail would collide two runs.
     // Asked with a base long enough to hit the limit, not the run-context database's short one, and
     // with the widest stamp base 36 can hold — nine digits — rather than today's eight.
+    //
+    // The reservation is asked of `runDatabasePrefixFor` rather than re-derived here, which is the
+    // whole reason it is a function: a local `63 - reserved` would be a second copy of the
+    // arithmetic, and narrowing the real one by a character would leave this case green over a name
+    // Postgres truncates silently.
     const widestStamp = "zzzzzzzzz";
-    const widest = `${"a".repeat(63)}_core_${randomBytes(3).toString("hex")}_${widestStamp}`;
-    expect(widest.length).toBeGreaterThan(63);
-    const reserved =
-      `_core_`.length + RUN_RANDOM_CHARS + 1 + widestStamp.length;
-    const base = widest.replaceAll(/[^a-z0-9_]/g, "_").slice(0, 63 - reserved);
+    const overlong = `${"a".repeat(63)}_core_${randomBytes(3).toString("hex")}_${widestStamp}`;
+    expect(overlong.length).toBeGreaterThan(63);
     // `runDatabaseTail` is asked for an instant that renders as nine base-36 digits, so the name
     // measured here is the longest this file can ever mint, not merely the longest minted today.
     const widestInstant = Number.parseInt(widestStamp, 36);
@@ -2274,7 +2280,8 @@ describe("the abandoned-run sweep", () => {
       RUN_RANDOM_CHARS + 1 + 9,
     );
     expect(
-      `${base}_core_${runDatabaseTail(widestInstant)}`.length,
+      `${runDatabasePrefixFor(overlong)}${runDatabaseTail(widestInstant)}`
+        .length,
     ).toBeLessThanOrEqual(63);
   });
 });
