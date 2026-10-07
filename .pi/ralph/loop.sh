@@ -56,7 +56,7 @@ case "$RALPH_AGENT" in
   *) echo "[ralph] error: RALPH_AGENT must be pi or opencode, not '$RALPH_AGENT'" >&2; exit 64 ;;
 esac
 RALPH_THINKING="${RALPH_THINKING:-high}"
-if [ "$RALPH_AGENT" = opencode ]; then _fallback_default="opencode/nemotron-3-ultra-free"   # mimo-v2.6-flash-free finished 0 of 3 fallback runs
+if [ "$RALPH_AGENT" = opencode ]; then _fallback_default="opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/ling-3.1-flash-free"   # mimo-v2.6-flash-free finished 0 of 3 fallback runs
 else _fallback_default="opencode-go/space-bunny-free"; fi
 RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-$_fallback_default}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
@@ -65,6 +65,8 @@ RALPH_TIMEOUT="${RALPH_TIMEOUT:-7200}"          # seconds per iteration
 RALPH_SPLIT_MAX="${RALPH_SPLIT_MAX:-10}"        # parents split per `split` run
 RALPH_STALL="${RALPH_STALL:-1500}"                # seconds with no session/subagent write before the agent is killed
 RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-5}"         # consecutive iterations with no valid control line
+RALPH_PROVIDER_BACKOFF="${RALPH_PROVIDER_BACKOFF:-600}"    # seconds to wait when every model in the chain is refusing
+RALPH_PROVIDER_BACKOFFS="${RALPH_PROVIDER_BACKOFFS:-36}"   # waits in a row before the loop gives up (6 h at the default)
 RALPH_OC_RESUMES="${RALPH_OC_RESUMES:-3}"       # opencode: resumes of a session whose model returned nothing mid-turn
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
@@ -360,6 +362,13 @@ provider_failed() { # <out> <err>
   tail -c 6000 "$1" "$2" 2>/dev/null | grep -qiE '429|rate.?limit|overloaded|quota|insufficient|unavailable|503|502|capacity|too many requests|ECONNRESET|ETIMEDOUT|No (API key|provider)|credit|billing'
 }
 
+# provider_down <out> <err>: the run ended on a provider failure, not on anything the agent did. opencode says so in a
+# top-level `error` event; for pi the error text is all there is.
+provider_down() {
+  if [ "$RALPH_AGENT" = opencode ]; then grep -q '^{"type":"error"' "$1" 2>/dev/null
+  else provider_failed "$1" "$2"; fi
+}
+
 session() {
   local n="$1" mode="$2" prompt="${SESS_CWD:-$WT}/.pi/ralph/$2.prompt.md" stamp out err
   stamp="$(date +%Y%m%d-%H%M%S)-$mode-$n"
@@ -430,6 +439,9 @@ session() {
     fi
     break
   done
+  # Every model in the chain refused (a rate limit, a quota, an outage): not the iteration's fault. Say so, so the
+  # driver waits instead of counting a failed iteration; five of those in a row used to end the loop in a minute.
+  if [ "$tag" = NONE ] && provider_down "$out" "$err"; then tag=PROVIDER; fi
   printf '{"at":"%s","mode":"%s","iteration":%s,"exit":%s,"tag":"%s","model":"%s","attempts":%s,"log":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$n" "$rc" "$tag" "$used" "$attempt" "$out" >>"$STATE/runs.jsonl"
   echo "$tag"
@@ -654,6 +666,14 @@ cmd_plan() {
   grep -E '^\| *[0-9]+ ' "$STATE/plan.md" | head -n 15
 }
 
+# nap <seconds>: sleep, but wake within 30 s of a STOP file so `stop` is never held up by a backoff.
+nap() {
+  local left="$1"
+  while [ "$left" -gt 0 ] && [ ! -f "$STATE/STOP" ]; do
+    sleep $(( left < 30 ? left : 30 )); left=$((left - 30))
+  done
+}
+
 cmd_run() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
   lock; ensure_db
@@ -665,7 +685,7 @@ cmd_run() {
     reset_worktree
     [ "$(session 0 plan)" = COMPLETE ] && [ -f "$STATE/plan.md" ] || die "planning failed"
   fi
-  local i=0 fails=0
+  local i=0 fails=0 waits=0
   while [ "$i" -lt "$RALPH_MAX_ITER" ]; do
     i=$((i + 1))
     [ ! -f "$STATE/STOP" ] || { log "STOP file found"; break; }
@@ -674,8 +694,12 @@ cmd_run() {
     local tag; tag="$(session "$i" work)"
     release_idle_claims
     case "$tag" in
-      NEXT)     fails=0 ;;
+      NEXT)     fails=0; waits=0 ;;
       COMPLETE) log "queue exhausted"; break ;;
+      PROVIDER) waits=$((waits + 1)); i=$((i - 1))
+                [ "$waits" -lt "$RALPH_PROVIDER_BACKOFFS" ] || { log "every model has been refusing for $waits waits - giving up"; exit 3; }
+                log "every model in the chain is refusing (rate limit, quota or outage): waiting ${RALPH_PROVIDER_BACKOFF}s ($waits/$RALPH_PROVIDER_BACKOFFS), not counted as a failed iteration"
+                nap "$RALPH_PROVIDER_BACKOFF"; continue ;;
       BLOCKED)  log "worker reported BLOCKED - a human must look (see $STATE/logs)"; exit 2 ;;
       *)        fails=$((fails + 1)); log "no valid control line ($fails/$RALPH_MAX_FAILS)"
                 [ "$fails" -lt "$RALPH_MAX_FAILS" ] || { log "too many failed iterations"; exit 3; } ;;

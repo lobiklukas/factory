@@ -296,6 +296,39 @@ describe("RALPH_AGENT=opencode", () => {
     },
   );
 
+  // Mutation: delete the `provider_down` line in `session` — a rate-limited chain then ends NONE and
+  // counts as a failed iteration, and five of those in a row end the loop within a minute (what a
+  // free-tier quota did to both workers).
+  it("tags a run that every model refused as PROVIDER, and a plain miss as NONE", () => {
+    const scratch = mkScratch();
+    const refused = run(scratch, 'source "$LOOP"; session 1 work', {
+      RALPH_MODEL: "opencode/free-refused",
+      RALPH_FALLBACK_MODELS: "opencode/other-refused",
+    });
+    expect(refused.stdout.trim()).toBe("PROVIDER");
+    const prose = run(scratch, 'source "$LOOP"; session 2 work', {
+      RALPH_MODEL: "opencode/free-prose",
+    });
+    expect(prose.stdout.trim()).toBe("NONE");
+    expect(readRuns(scratch).map((r) => r["tag"])).toEqual([
+      "PROVIDER",
+      "NONE",
+    ]);
+  });
+
+  // Mutation: sleep the whole backoff in one `sleep` — `stop` would wait out a ten-minute backoff.
+  it("wakes from a backoff as soon as a STOP file appears", () => {
+    const scratch = mkScratch();
+    const started = spawnSync("date", ["+%s"], { encoding: "utf8" });
+    const result = run(
+      scratch,
+      'source "$LOOP"; mkdir -p "$STATE"; touch "$STATE/STOP"; nap 600',
+    );
+    const ended = spawnSync("date", ["+%s"], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(Number(ended.stdout) - Number(started.stdout)).toBeLessThan(10);
+  });
+
   // Mutation: pin the subagents to the model in the pi frontmatter instead of `--model` (a fallback
   // model would then leave its subagents on the one that just failed), re-enable the global `github`
   // server, drop `codemode: false`, or let a subagent keep the shell after `tools:` dropped it.
