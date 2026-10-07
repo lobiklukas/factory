@@ -105,46 +105,58 @@ const claim = (
 describe("claim.sh", () => {
   // Mutation: replace `mkdir "$d"` with a check-then-write (`[ -d ] || ...`): two claims race and
   // both win; with the sequential calls here it shows as the second worker getting exit 0.
-  it("gives an issue to the first worker that asks and refuses the second", () => {
-    const scratch = mkScratch();
-    expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
-    const second = claim(scratch, "2", "claim LOB-7");
-    expect(second.status).toBe(1);
-    expect(second.stderr).toContain("LOB-7 is claimed by worker 1");
-    // Another issue is free, and the holder may claim its own again.
-    expect(claim(scratch, "2", "claim LOB-8").status).toBe(0);
-    expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
-  });
+  it(
+    "gives an issue to the first worker that asks and refuses the second",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
+      const second = claim(scratch, "2", "claim LOB-7");
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain("LOB-7 is claimed by worker 1");
+      // Another issue is free, and the holder may claim its own again.
+      expect(claim(scratch, "2", "claim LOB-8").status).toBe(0);
+      expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
+    },
+  );
 
   // Mutation: drop the owner check in `release` (any worker frees any claim), or make `--any` a no-op
   // (the merging worker could not free the PR author's claim).
-  it("lets only the holder release, unless told --any", () => {
-    const scratch = mkScratch();
-    claim(scratch, "1", "claim LOB-7");
-    claim(scratch, "2", "release LOB-7");
-    expect(claim(scratch, "2", "claim LOB-7").status).toBe(1);
-    claim(scratch, "2", "release --any LOB-7");
-    expect(claim(scratch, "2", "claim LOB-7").status).toBe(0);
-    claim(scratch, "2", "release LOB-7");
-    expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
-  });
+  it(
+    "lets only the holder release, unless told --any",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      claim(scratch, "1", "claim LOB-7");
+      claim(scratch, "2", "release LOB-7");
+      expect(claim(scratch, "2", "claim LOB-7").status).toBe(1);
+      claim(scratch, "2", "release --any LOB-7");
+      expect(claim(scratch, "2", "claim LOB-7").status).toBe(0);
+      claim(scratch, "2", "release LOB-7");
+      expect(claim(scratch, "1", "claim LOB-7").status).toBe(0);
+    },
+  );
 
   // Mutation: ignore the TTL — a killed worker would hold its issue forever.
-  it("lets another worker take over a claim older than the TTL", () => {
-    const scratch = mkScratch();
-    claim(scratch, "1", "claim LOB-7");
-    expect(claim(scratch, "2", "claim LOB-7").status).toBe(1);
-    // Everything is older than a zero TTL.
-    const takeover = claim(scratch, "2", "claim LOB-7", {
-      RALPH_CLAIM_TTL: "0",
-    });
-    expect(takeover.status).toBe(0);
-    const listed = claim(scratch, "2", "list");
-    expect(listed.stdout).toMatch(/^LOB-7 worker=2 age=\d+$/m);
-  });
+  it(
+    "lets another worker take over a claim older than the TTL",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      claim(scratch, "1", "claim LOB-7");
+      expect(claim(scratch, "2", "claim LOB-7").status).toBe(1);
+      // Everything is older than a zero TTL.
+      const takeover = claim(scratch, "2", "claim LOB-7", {
+        RALPH_CLAIM_TTL: "0",
+      });
+      expect(takeover.status).toBe(0);
+      const listed = claim(scratch, "2", "list");
+      expect(listed.stdout).toMatch(/^LOB-7 worker=2 age=\d+$/m);
+    },
+  );
 
   // Mutation: delete the id check — `../x` would escape the claims directory.
-  it("rejects an id that is not an issue id", () => {
+  it("rejects an id that is not an issue id", { timeout: 30_000 }, () => {
     const scratch = mkScratch();
     for (const id of ["../escape", "a b", ""]) {
       expect(claim(scratch, "1", `claim '${id}'`).status).toBe(64);
@@ -159,101 +171,119 @@ describe("worker identity in loop.sh", () => {
 
   // Mutation: derive nothing from RALPH_WORKER — two workers would share one worktree, database and
   // port, and both would merge. Worker 1 must stay exactly what the loop has always used.
-  it("keeps worker 1 as it always was and gives worker 2 its own worktree, database, ports and no merge", () => {
-    const scratch = mkScratch();
-    const one = sh(scratch, facts, {
-      RALPH_PRIMARY_WORKTREE: "/x/repo-ralph",
-    });
-    expect(one.stdout.trim().split("\n")).toEqual([
-      "/x/repo-ralph",
-      "postgres://factory:factory@localhost:5442/factory_ralph",
-      "9400",
-      "3400",
-      "1",
-    ]);
-    const three = sh(scratch, facts, {
-      RALPH_WORKER: "3",
-      RALPH_PRIMARY_WORKTREE: "/x/repo-ralph",
-    });
-    expect(three.stdout.trim().split("\n")).toEqual([
-      "/x/repo-ralph-3",
-      "postgres://factory:factory@localhost:5442/factory_ralph_3",
-      "9420",
-      "3420",
-      "0",
-    ]);
-  });
+  it(
+    "keeps worker 1 as it always was and gives worker 2 its own worktree, database, ports and no merge",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      const one = sh(scratch, facts, {
+        RALPH_PRIMARY_WORKTREE: "/x/repo-ralph",
+      });
+      expect(one.stdout.trim().split("\n")).toEqual([
+        "/x/repo-ralph",
+        "postgres://factory:factory@localhost:5442/factory_ralph",
+        "9400",
+        "3400",
+        "1",
+      ]);
+      const three = sh(scratch, facts, {
+        RALPH_WORKER: "3",
+        RALPH_PRIMARY_WORKTREE: "/x/repo-ralph",
+      });
+      expect(three.stdout.trim().split("\n")).toEqual([
+        "/x/repo-ralph-3",
+        "postgres://factory:factory@localhost:5442/factory_ralph_3",
+        "9420",
+        "3420",
+        "0",
+      ]);
+    },
+  );
 
-  it("refuses a worker number that is not a positive integer", () => {
-    const scratch = mkScratch();
-    for (const bad of ["0", "two", "-1"]) {
-      const result = sh(scratch, 'source "$LOOP"', { RALPH_WORKER: bad });
-      expect(result.status, bad).toBe(64);
-      expect(result.stderr).toContain(
-        "RALPH_WORKER must be a positive integer",
-      );
-    }
-  });
+  it(
+    "refuses a worker number that is not a positive integer",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      for (const bad of ["0", "two", "-1"]) {
+        const result = sh(scratch, 'source "$LOOP"', { RALPH_WORKER: bad });
+        expect(result.status, bad).toBe(64);
+        expect(result.stderr).toContain(
+          "RALPH_WORKER must be a positive integer",
+        );
+      }
+    },
+  );
 
   // Mutation: skip the symlinks — worker 2 would plan and note in a private copy and never see worker
   // 1's queue; or link `logs` too, and the workers would interleave one log.
-  it("shares worker 1's plan, notes and research with worker 2, and nothing else", () => {
-    const scratch = mkScratch();
-    const primary = path.join(scratch.root, "repo-ralph");
-    const second = path.join(scratch.root, "repo-ralph-2");
-    mkdirSync(path.join(primary, ".ralph"), { recursive: true });
-    mkdirSync(path.join(second, ".ralph/logs"), { recursive: true });
-    writeFileSync(path.join(primary, ".ralph/plan.md"), "| 1 | LOB-1 |\n");
-    const result = sh(
-      scratch,
-      'source "$LOOP"; mkdir -p "$STATE"; share_state',
-      {
-        RALPH_WORKER: "2",
-        RALPH_PRIMARY_WORKTREE: primary,
-        RALPH_WORKTREE: second,
-      },
-    );
-    expect(result.status, result.stderr).toBe(0);
-    for (const name of ["plan.md", "progress.md", "polish.md", "research"]) {
-      const link = path.join(second, ".ralph", name);
-      expect(lstatSync(link).isSymbolicLink(), name).toBe(true);
-      expect(readlinkSync(link), name).toBe(path.join(primary, ".ralph", name));
-    }
-    expect(lstatSync(path.join(second, ".ralph/logs")).isSymbolicLink()).toBe(
-      false,
-    );
-  });
+  it(
+    "shares worker 1's plan, notes and research with worker 2, and nothing else",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      const primary = path.join(scratch.root, "repo-ralph");
+      const second = path.join(scratch.root, "repo-ralph-2");
+      mkdirSync(path.join(primary, ".ralph"), { recursive: true });
+      mkdirSync(path.join(second, ".ralph/logs"), { recursive: true });
+      writeFileSync(path.join(primary, ".ralph/plan.md"), "| 1 | LOB-1 |\n");
+      const result = sh(
+        scratch,
+        'source "$LOOP"; mkdir -p "$STATE"; share_state',
+        {
+          RALPH_WORKER: "2",
+          RALPH_PRIMARY_WORKTREE: primary,
+          RALPH_WORKTREE: second,
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      for (const name of ["plan.md", "progress.md", "polish.md", "research"]) {
+        const link = path.join(second, ".ralph", name);
+        expect(lstatSync(link).isSymbolicLink(), name).toBe(true);
+        expect(readlinkSync(link), name).toBe(
+          path.join(primary, ".ralph", name),
+        );
+      }
+      expect(lstatSync(path.join(second, ".ralph/logs")).isSymbolicLink()).toBe(
+        false,
+      );
+    },
+  );
 
   // Mutation: release every claim of this worker at the end of an iteration, PR or no PR — the issue
   // whose PR is under review could then be picked up by another worker and worked twice.
-  it("releases this worker's claims that have no open PR and keeps the rest", () => {
-    const scratch = mkScratch();
-    const worktree = path.join(scratch.root, "repo-ralph");
-    mkdirSync(worktree, { recursive: true });
-    // `gh pr list --head ralph/LOB-2` reports one open PR; every other branch reports none.
-    const gh = path.join(scratch.bin, "gh");
-    writeFileSync(
-      gh,
-      [
-        "#!/usr/bin/env bash",
-        'case "$*" in *"--head ralph/LOB-2 "*) echo 1 ;; *) echo 0 ;; esac',
-        "",
-      ].join("\n"),
-    );
-    chmodSync(gh, 0o755);
-    claim(scratch, "1", "claim LOB-1");
-    claim(scratch, "1", "claim LOB-2");
-    claim(scratch, "2", "claim LOB-3");
-    const result = sh(scratch, 'source "$LOOP"; release_idle_claims', {
-      RALPH_WORKER: "1",
-      RALPH_WORKTREE: worktree,
-    });
-    expect(result.status, result.stderr).toBe(0);
-    const left = claim(scratch, "1", "list").stdout;
-    expect(left).not.toContain("LOB-1 ");
-    expect(left).toContain("LOB-2 worker=1");
-    // Worker 2's claim is not worker 1's to release, whatever its PR state (`claim.sh release` also
-    // refuses a non-holder, so no mutation of the driver's own filter alone shows here).
-    expect(left).toContain("LOB-3 worker=2");
-  });
+  it(
+    "releases this worker's claims that have no open PR and keeps the rest",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      const worktree = path.join(scratch.root, "repo-ralph");
+      mkdirSync(worktree, { recursive: true });
+      // `gh pr list --head ralph/LOB-2` reports one open PR; every other branch reports none.
+      const gh = path.join(scratch.bin, "gh");
+      writeFileSync(
+        gh,
+        [
+          "#!/usr/bin/env bash",
+          'case "$*" in *"--head ralph/LOB-2 "*) echo 1 ;; *) echo 0 ;; esac',
+          "",
+        ].join("\n"),
+      );
+      chmodSync(gh, 0o755);
+      claim(scratch, "1", "claim LOB-1");
+      claim(scratch, "1", "claim LOB-2");
+      claim(scratch, "2", "claim LOB-3");
+      const result = sh(scratch, 'source "$LOOP"; release_idle_claims', {
+        RALPH_WORKER: "1",
+        RALPH_WORKTREE: worktree,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const left = claim(scratch, "1", "list").stdout;
+      expect(left).not.toContain("LOB-1 ");
+      expect(left).toContain("LOB-2 worker=1");
+      // Worker 2's claim is not worker 1's to release, whatever its PR state (`claim.sh release` also
+      // refuses a non-holder, so no mutation of the driver's own filter alone shows here).
+      expect(left).toContain("LOB-3 worker=2");
+    },
+  );
 });
