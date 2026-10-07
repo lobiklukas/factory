@@ -103,7 +103,7 @@ RALPH_AGENT=opencode bun run ralph:run --max 3
 ```
 
 - **Models.** `RALPH_MODEL` defaults to `opencode/space-bunny-free`, `RALPH_FALLBACK_MODELS` to
-  `opencode/nemotron-3-ultra-free` (`mimo-v2.6-flash-free` finished none of its 3 fallback runs). `opencode models` lists the ids.
+  `opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/ling-3.1-flash-free` (`mimo-v2.6-flash-free` finished none of its 3 fallback runs). `opencode models` lists the ids.
 - **Config.** Each attempt writes `.opencode/opencode.jsonc` into the worktree (git-excluded) with
   `opencode-config.py`: the `ralph-*` subagents are generated from `.pi/agents/ralph-*.md`, pinned to the model of
   the attempt (so the fallback also moves the subagents); the Linear MCP server is registered with direct
@@ -118,6 +118,10 @@ RALPH_AGENT=opencode bun run ralph:run --max 3
 - **Resume.** A free model sometimes returns nothing mid-turn: opencode exits 0 on a log that ends on a `step_start`.
   The driver resumes that session (`-s <id>`, up to `RALPH_OC_RESUMES`, default 3) instead of redoing the iteration.
   A run that ends on text without a control line is not resumed.
+- **Provider backoff.** When every model in the chain refuses (a free tier's `FreeUsageLimitError`, a quota,
+  an outage) the iteration is tagged `PROVIDER`: the loop waits `RALPH_PROVIDER_BACKOFF` (10 min) and tries
+  again without counting a failed iteration, up to `RALPH_PROVIDER_BACKOFFS` (36) waits in a row. A free tier's
+  limit is per model and can last hours; before this, five instant refusals ended the loop in a minute.
 - **Fallback.** A top-level `error` event (a refused or failed model call) counts as a provider failure and moves to
   the next model, as pi's 429/overload patterns do.
 
