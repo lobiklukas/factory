@@ -12,10 +12,24 @@ import {
   createStorageConformance,
   registerStorageConformance,
 } from "@earendil-works/pi-durable/testing";
-import { Clock, Effect, ManagedRuntime, Random, Schema } from "effect";
+import { randomBytes } from "node:crypto";
+import { BunServices } from "@effect/platform-bun";
+import { PgClient } from "@effect/sql-pg";
+import {
+  Clock,
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Random,
+  Redacted,
+  Schema,
+  // Aliased: this file's `beforeAll` calls the global `String` on a caught cause, and
+  // `effect`'s own `String` module would shadow it.
+  String as EffectString,
+} from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DatabaseLive } from "./index";
+import { DatabaseConfig, DatabaseLive } from "./index";
 import { PostgresStorage, READER_PAGE_ROWS } from "./PostgresStorage";
 import { BoardDefinition } from "@repo/domain/Task";
 
@@ -684,6 +698,204 @@ describe("the board's tables and seed", () => {
       );
       // 23503 is foreign_key_violation.
       expect(sqlstate(refused)).toBe("23503");
+    },
+  );
+
+  /**
+   * B4's table, every field of every column, as the literal a reader of `docs/board.md` would copy
+   * out of it: the name, the kind, the role (`undefined` where B4 prints an em dash) and the exit
+   * requirements with their descriptions, not only their keys.
+   *
+   * `intake`'s empty `requires` is the one entry B4 does not spell as a requirement. Its exit cell
+   * reads "a person moves it on (nothing auto-starts; the card may be nearly empty)", which is a
+   * statement about the column rather than a gate: B5 names exactly two human gates (the plan
+   * approval and the merge) and describes the move out of `intake` as "the recorded move that
+   * starts the first run", so nothing is checked on the way out and there is no requirement key a
+   * refusal could name. The two columns B5 does call gates carry theirs.
+   */
+  const B4_COLUMNS = [
+    {
+      name: "intake",
+      kind: "resting",
+      role: undefined,
+      skills: [],
+      requires: [],
+    },
+    {
+      name: "specifying",
+      kind: "working",
+      role: "specifier",
+      skills: [],
+      requires: [
+        {
+          key: "spec_doc",
+          description:
+            "a spec doc, gaps declared (explicitly [] when there are none)",
+        },
+      ],
+    },
+    {
+      name: "planning",
+      kind: "working",
+      role: "planner",
+      skills: [],
+      requires: [
+        { key: "plan_doc", description: "a plan doc" },
+        {
+          key: "human_move",
+          description: "a human move (B5's plan approval gate)",
+        },
+      ],
+    },
+    {
+      name: "building",
+      kind: "working",
+      role: "builder",
+      skills: [],
+      requires: [
+        { key: "run_completed", description: "a run that completed" },
+        { key: "non_empty_diff", description: "a non-empty diff" },
+        { key: "pr_link", description: "a PR link" },
+      ],
+    },
+    {
+      name: "review",
+      kind: "working",
+      role: "reviewer",
+      skills: [],
+      requires: [
+        { key: "review_verdict", description: "a review verdict" },
+        { key: "human_merge", description: "a human merge (B5's merge gate)" },
+      ],
+    },
+    {
+      name: "done",
+      kind: "terminal",
+      role: undefined,
+      skills: [],
+      requires: [],
+    },
+    {
+      name: "canceled",
+      kind: "terminal",
+      role: undefined,
+      skills: [],
+      requires: [],
+    },
+  ];
+
+  /**
+   * What the migration *writes*, read on a database it has never run against.
+   *
+   * The seed case above reads `board_definitions` in the run's database, which is a weaker claim
+   * than it looks: `PgMigrator` records 0007 as applied and the seed is `ON CONFLICT … DO NOTHING`,
+   * so a database seeded by an *earlier* run keeps the row that run wrote, and every one of the
+   * seed's fields can be edited without a single case above going red (measured: shortening
+   * `spec_doc`'s description to "a spec doc", or `planning`'s kind to `resting`, leaves those cases
+   * green — only this case reddens). A criterion about what the seed *resolves to* is a claim about
+   * a database the migration has just created the tables in, so that is where it is read.
+   *
+   * The database is this case's own, minted here and dropped in the `finally`; the configured
+   * database only ever sees the `CREATE DATABASE` and the `DROP DATABASE` below. A run killed
+   * between the two leaks its database — empty, seconds old, and swept by nothing here;
+   * `packages/core/src/SessionService.test.ts` carries the sweep and the argument for one.
+   *
+   * The client mirrors `DatabaseLive`: `DatabaseConfig`'s own URL with the database swapped, and the
+   * same name transforms, so the migration runs against the client shape `db:migrate` gives it.
+   */
+  it(
+    "writes B4's columns, field by field, into a database it has never run against",
+    { timeout: 120_000 },
+    async () => {
+      const configured = new URL(
+        Redacted.value((await runtime.runPromise(DatabaseConfig)).url),
+      );
+      const scratchName = `factory_lob58_seed_${randomBytes(4).toString("hex")}`;
+      const scratchUrl = new URL(configured.toString());
+      scratchUrl.pathname = `/${scratchName}`;
+
+      await Effect.runPromise(sql`CREATE DATABASE ${sql(scratchName)}`);
+
+      const scratch = ManagedRuntime.make(
+        PgClient.layer({
+          url: Redacted.make(scratchUrl.toString()),
+          maxConnections: 2,
+          transformQueryNames: EffectString.camelToSnake,
+          transformResultNames: EffectString.snakeToCamel,
+        }).pipe(Layer.provide(BunServices.layer)),
+      );
+
+      try {
+        const scratchSql = await scratch.runPromise(SqlClient);
+        const migration = (await import("./migrations/0007_create_tasks"))
+          .default;
+        const migrate = migration.pipe(
+          Effect.provideService(SqlClient, scratchSql),
+        );
+
+        /** How many relations of this name the database holds. */
+        const present = async (name: string) => {
+          const rows = await Effect.runPromise(
+            scratchSql<{ present: number }>`
+              SELECT count(*)::int AS present FROM information_schema.tables
+              WHERE table_schema = 'public' AND table_name = ${name}
+            `,
+          );
+          return rows[0]?.present ?? 0;
+        };
+
+        /** Every definition row the database holds, undecoded. */
+        const definitions = () =>
+          Effect.runPromise(
+            scratchSql<{
+              id: string;
+              version: number;
+              name: string;
+              columns: unknown;
+            }>`SELECT id, version, name, columns FROM board_definitions`,
+          );
+
+        const tables = [
+          "tasks",
+          "task_events",
+          "task_runs",
+          "board_definitions",
+          "board_instances",
+        ];
+
+        // A database nothing has migrated has none of them, so the `1`s below are this run's
+        // `CREATE TABLE`s rather than `IF NOT EXISTS` finding another run's tables.
+        for (const name of tables) expect(await present(name)).toBe(0);
+
+        await Effect.runPromise(migrate);
+
+        for (const name of tables) expect(await present(name)).toBe(1);
+
+        const afterFirst = await definitions();
+        expect(afterFirst).toHaveLength(1);
+        const seeded = Schema.decodeUnknownSync(BoardDefinition)(afterFirst[0]);
+        expect(seeded.id).toBe("default");
+        expect(seeded.version).toBe(1);
+        expect(seeded.name).toBe("Default pipeline");
+        expect(
+          seeded.columns.map((column) => ({
+            name: column.name,
+            kind: column.kind,
+            role: column.role,
+            skills: column.skills,
+            requires: column.requires,
+          })),
+        ).toEqual(B4_COLUMNS);
+
+        // The second run is the acceptance criterion's own: one definition row, and the same one.
+        await Effect.runPromise(migrate);
+        expect(await definitions()).toEqual(afterFirst);
+      } finally {
+        await scratch.dispose();
+        await Effect.runPromise(
+          sql`DROP DATABASE IF EXISTS ${sql(scratchName)} WITH (FORCE)`,
+        );
+      }
     },
   );
 });

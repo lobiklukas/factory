@@ -17,7 +17,11 @@
  * that writes them is a later issue.
  */
 import { Schema } from "effect";
-import { RepoSlug, SessionId, Timestamp } from "./Session";
+// The package's own subpath, not `./Session`: `PgMigrator.fromFileSystem` loads a migration
+// with a *native* dynamic import, and in that context an extensionless relative specifier
+// inside this package is left for Node's ESM loader, which does not add `.ts`. Every other
+// consumer in the repo (`packages/core`, `packages/harness`) already imports the subpath.
+import { RepoSlug, SessionId, Timestamp } from "@repo/domain/Session";
 
 /**
  * Task ids use `SessionId`'s alphabet and shape (`tsk_`, ten of millisecond timestamp then sixteen
