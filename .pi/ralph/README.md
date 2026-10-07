@@ -77,7 +77,7 @@ RALPH_AGENT=opencode bun run ralph:run --max 3
 ```
 
 - **Models.** `RALPH_MODEL` defaults to `opencode/space-bunny-free`, `RALPH_FALLBACK_MODELS` to
-  `opencode/nemotron-3-ultra-free,opencode/mimo-v2.6-flash-free`. `opencode models` lists the ids.
+  `opencode/nemotron-3-ultra-free` (`mimo-v2.6-flash-free` finished none of its 3 fallback runs). `opencode models` lists the ids.
 - **Config.** Each attempt writes `.opencode/opencode.jsonc` into the worktree (git-excluded) with
   `opencode-config.py`: the `ralph-*` subagents are generated from `.pi/agents/ralph-*.md`, pinned to the model of
   the attempt (so the fallback also moves the subagents); the Linear MCP server is registered with direct

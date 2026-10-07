@@ -121,8 +121,9 @@ Linear, GitHub, model providers, emulators). Tests must never call a real one. F
   license in the PR. If no maintained option exists, write a small typed in-process fake and say so.
 
 **b. Tests and e2e.** Skip the verifier when the diff is prompt, docs or tooling text only, or when it
-is a single-file change of about 40 lines or fewer whose tests you already wrote and ran in step 6;
-say so in the PR body. Otherwise launch `ralph-verifier` with the issue text, acceptance criteria, changed
+is a change of about 150 changed lines or fewer in one package with no new surface (no new RPC group,
+CLI command, route or service boundary) whose tests you already wrote and ran in step 6; say so in
+the PR body. The verifier is the single most expensive step after the gate (a launch costs 15-30 minutes). Otherwise launch `ralph-verifier` with the issue text, acceptance criteria, changed
 paths, the Run-context env, and the research brief paths. It writes unit/integration tests, fakes,
 the e2e drive checks, and creates or updates the `.pi/skills/verify-<surface>/` skill and its feature
 docs. A **new surface** (new RPC group, CLI command, route, service boundary) gets a **new
@@ -145,8 +146,20 @@ skill on the Run-context ports and keep the evidence path.
 it on a clean checkout (`git stash` is not enough - use `git worktree add --detach ../ralph-clean
 origin/main` and remove it after), then file it per `.pi/ralph/ticket.md` (priority 2, front of the
 queue) and follow "Blocked by it".
-Mutation sanity: for each acceptance criterion, a test must fail when the behaviour is broken - the
-verifier reports which it checked. Stop after **three** full gate-fix cycles that make no progress: go to **Blocked**.
+Run the full gate **once**, after your last change to non-test code. After a fix to a comment, wording,
+formatting or a test name, run only `format:check` and the tests of the touched package; the driver
+re-runs the whole gate before it merges and CI runs it again, so a fourth full run proves nothing.
+Mutation sanity: for each acceptance criterion, a test must fail when the behaviour is broken - **one
+mutation per criterion, each run once** (the verifier reports which it checked). A mutation that
+survives is fixed or explained in the PR body; do not re-run the whole sweep after a wording, comment
+or formatting fix. Keep one evidence file per criterion under `.verify/`; do not write `resume`,
+`final` or `recheck` copies of a sweep. Stop after **three** full gate-fix cycles that make no
+progress: go to **Blocked**.
+
+**Stop polishing.** Once the gate is green, the reviewers have no open P0/P1 and the PR body is true,
+deliver (step 10). A P2 that is not a one-line wording fix goes in the PR body as a note, not into
+another commit and another round of checks. Iterations that run past about two hours are almost
+always polishing, not delivery.
 
 ### 9. Review
 
