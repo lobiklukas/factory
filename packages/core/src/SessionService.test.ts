@@ -7,8 +7,9 @@
  * a sandbox happens to be running.
  *
  * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
- * postgres`. It creates a database of its own for the run and drops it at the end, so it neither
- * reads nor writes the rows of whatever `DATABASE_URL` points at — see the block below.
+ * postgres`. It creates a database of its own for the run and drops it at the end, so it never
+ * *writes* to whatever `DATABASE_URL` points at; it reads that database twice more, to prove it did
+ * not — see the block below and `describe("this suite's database")` at the end of this file.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,12 +82,14 @@ const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
  * drops the whole index and refolds it, which is the claim worth making, and it is now a claim
  * about this run's rows.
  *
- * The fallback is `DatabaseConfig`'s own default, kept in step by the comment there. Reading the
- * environment directly is not a shortcut, it is the only order that works: the config provider
- * snapshots the environment the first time *any* config is read, so the one read that matters has
- * to happen after this assignment and before anything else asks. That is why the maintenance
- * client below is built from this string rather than from `DatabaseLive` — a `DatabaseLive` here
- * would read the config first and freeze `DATABASE_URL` where it was.
+ * The fallback below is `DatabaseConfig`'s own default, duplicated rather than imported because
+ * reading the config is the thing being ordered around. `Database.ts` says so at the literal.
+ *
+ * Reading the environment directly is not a shortcut, it is the only order that works: Effect's
+ * config provider copies `process.env` when it is built, so the copy has to happen after the
+ * assignment below and before anything asks for a config. That is why the maintenance client is
+ * built from this string rather than from `DatabaseLive` — a `DatabaseLive` here would build the
+ * provider first and freeze `DATABASE_URL` where it was.
  */
 const configuredUrl =
   // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
@@ -128,8 +131,9 @@ const runDatabaseUrl = (() => {
  *
  * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops the
  * run's own database, and migrating somebody else's would be the very reach this change is about.
- * It issues no `sessions` statement either, only `CREATE`/`DROP DATABASE` and the one count in
- * `describe("this suite's database")` below.
+ * It never writes a `sessions` row either. The only statements it issues against the configured
+ * database are `CREATE`/`DROP DATABASE` for the run's own, `current_database()` and the two id
+ * reads `describe("this suite's database")` witnesses the isolation with.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -156,7 +160,7 @@ await maintenance.runPromise(
 // Before the runtime below and before any case can run it, and before this process has read any
 // config at all — see the note on `configuredUrl`.
 // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
-process.env["DATABASE_URL"] = runDatabaseUrl;
+// MUTATION M1: the env assignment is gone.
 
 const runtime = ManagedRuntime.make(
   // `provideMerge` keeps the database in the runtime's context, so a test can run SQL and the
