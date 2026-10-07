@@ -7,7 +7,9 @@
  * a sandbox happens to be running.
  *
  * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
- * postgres`. It creates a database of its own for the run and drops it at the end, so it never
+ * postgres`. It also needs the role to hold `CREATEDB`, because the block below creates the
+ * database it runs against; `compose.yaml` satisfies that by making the bootstrap user the
+ * superuser, and a role without it fails the whole file at import rather than one case. It creates a database of its own for the run and drops it at the end, so it never
  * writes a row of any table in whatever `DATABASE_URL` points at. It does write two things there
  * that are not rows: it adds and removes its own database in the shared `pg_database` catalogue,
  * and it reads that database five times over the run. Every statement it issues against the
@@ -76,11 +78,11 @@ const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
 /**
  * The URL `DATABASE_URL` resolves to, and the one the suite actually runs against (LOB-96).
  *
- * Every statement this file issues goes through one pool, and one case of it empties the `sessions`
- * index entirely, so the blast radius of a run is whatever database that pool opened. Sharing one
- * with everything else on the machine made that radius every session anyone else had, and the fold
- * that follows costs the whole shared log rather than the one session the case asserts on — which
- * is why that case carried a budget that expired as the shared database grew (LOB-113).
+ * Every statement this file used to issue went through one pool, and one case of it emptied the
+ * `sessions` index entirely, so the blast radius of a run was whatever database that pool opened.
+ * Sharing one with everything else on the machine made that radius every session anyone else had,
+ * and the fold that follows costs the whole shared log rather than the one session the case asserts
+ * on — which is why that case carried a budget that expired as the shared database grew (LOB-113).
  *
  * So this file creates a database of its own for the run and drops it at the end, and points the
  * suite's `DATABASE_URL` at it before the runtime is built. Nothing else changes: the case still
@@ -107,14 +109,16 @@ const configuredUrl =
   "postgres://factory:factory@localhost:5442/factory";
 
 /**
- * The database `DATABASE_URL` names, read from its URL path.
+ * The database `DATABASE_URL` names, read from its URL path — or `""` when the URL names none.
  *
- * `postgres` when the URL names none — not for legality (an empty path would not do) but because
- * `describe("this suite's database")` compares the configured database's own name against
- * `current_database()`, and an empty string there is a silent no-op rather than a failing one.
+ * Empty is the honest answer and the code below is written to cope with it, because there is no
+ * other one derivable here: a URL with an empty path resolves to the *role's* own database, and
+ * which database that is belongs to the server, not to the string (measured: substituting a
+ * plausible guess like `postgres` fails the witness below with
+ * `expected 'factory' to be 'postgres'`). So the witness compares the configured database's own
+ * name only when the URL gave one, and relies on the two pools disagreeing otherwise.
  */
-const configuredDatabase =
-  new URL(configuredUrl).pathname.replace(/^\//, "") || "postgres";
+const configuredDatabase = new URL(configuredUrl).pathname.replace(/^\//, "");
 
 /**
  * A database name for this run: the configured one, a marker, and six random characters, so two
@@ -130,6 +134,8 @@ const configuredDatabase =
  */
 const runDatabaseName = (() => {
   const tail = `_core_${randomBytes(3).toString("hex")}`;
+  // `configuredDatabase` may be empty, which leaves the name with a leading underscore — a legal
+  // identifier, and this one is quoted anyway. There is nothing to pad it with.
   const base = configuredDatabase
     .replaceAll(/[^a-z0-9_]/g, "_")
     .slice(0, 63 - tail.length);
@@ -148,11 +154,11 @@ const runDatabaseUrl = (() => {
  *
  * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops the
  * run's own database, and migrating somebody else's would be the very reach this change is about.
- * It never writes a `sessions` row either. Five statements reach the configured database and no
- * more: `CREATE DATABASE` and `DROP DATABASE` for the run's own, `current_database()`, a
- * `to_regclass('public.sessions')` probe and a `SELECT id FROM sessions` — the last two in one
- * helper that the witness below runs once before any case and once after them. Every one of the
- * five is named in `describe("this suite's database")` at the end of this file.
+ * It never writes a `sessions` row either. Five *shapes* of statement reach the configured
+ * database and no sixth — seven executions of them over a run: `CREATE DATABASE` and
+ * `DROP DATABASE` for the run's own, `current_database()`, and a `to_regclass('public.sessions')`
+ * probe paired with a `SELECT id FROM sessions` in one helper that the witness at the end of this
+ * file runs once before any case and once after them. The witness's header names all five.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -213,6 +219,15 @@ const sessionIds = Effect.gen(function* () {
   return rows.map((row) => row.id);
 });
 
+/** The name of the database a client is connected to: what the two pools below are compared on. */
+const currentDatabase = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const rows = yield* sql<{ name: string }>`SELECT current_database() AS name`;
+  const name = rows[0]?.name;
+  if (name === undefined) throw new Error("unreachable");
+  return name;
+});
+
 /**
  * The ids the *configured* database held before a single case ran.
  *
@@ -228,6 +243,12 @@ const configuredSessionIdsAtStart = await maintenance.runPromise(
 afterAll(async () => {
   // The run's own pool holds connections to the database being dropped, so it goes first.
   await runtime.dispose();
+  // Undo the reassignment rather than leave it: harmless while this package holds one test file,
+  // and a trap for the second one, which would inherit a `DATABASE_URL` naming a database that no
+  // longer exists. The literal is `configuredUrl` again, not `undefined` — deleting the key would
+  // make `DatabaseConfig` fall back to a *different* database than the one this file ran against.
+  // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+  process.env["DATABASE_URL"] = configuredUrl;
   await maintenance.runPromise(
     Effect.gen(function* () {
       const sql = yield* SqlClient;
@@ -1426,9 +1447,10 @@ describe("session list", () => {
   // 20 s against the run-context database's 2 883 sessions.
   //
   // Mutation checked: `rebuild.ts`'s `if (!Schema.is(SessionId)(log.logId)) continue;` to
-  // `if (true) continue;`, which makes the fold restore nothing — this case goes red on
-  // `result.after` being undefined, and `describe("this suite's database")` stays green, because the
-  // fold's job and the isolation's are separate claims and each is worth its own case.
+  // `if (true) continue;`, which makes the fold restore nothing — this case goes red 1 of 22 on
+  // `expect(result.report.sessions).toBeGreaterThan(0)`, which is the first assertion the emptied
+  // index reaches, and `describe("this suite's database")` stays green because the fold's job and
+  // the isolation's are separate claims and each is worth its own case.
   it("rebuilds the index from the log after the index tables are emptied", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -1524,22 +1546,13 @@ describe("request limits", () => {
     expect(failure.value.code).toBe("invalid_input");
   });
 });
-/** The name of the database a client is connected to: what the two pools below are compared on. */
-const currentDatabase = Effect.gen(function* () {
-  const sql = yield* SqlClient;
-  const rows = yield* sql<{ name: string }>`SELECT current_database() AS name`;
-  const name = rows[0]?.name;
-  if (name === undefined) throw new Error("unreachable");
-  return name;
-});
-
 /**
  * The run's own database, asserted rather than assumed (LOB-96).
  *
  * Everything above depends on it: the rebuild case empties `sessions` and the session-list case
  * writes 280 filler rows, so a run pointed at the configured database takes that database's
  * sessions with it and pays for its whole log. The block at the top of this file is what makes that
- * untrue, and these two cases are what notice if it stops being true.
+ * untrue, and the first two cases here are what notice if it stops being true.
  *
  * They read the isolation at run time, not the source, because the isolation is a property of the
  * connection and not of the text: pointing the suite's `DATABASE_URL` back at the configured
@@ -1554,15 +1567,17 @@ const currentDatabase = Effect.gen(function* () {
  * DATABASE` leaves the suite green (measured). A run killed between `CREATE DATABASE` and
  * `afterAll` — a signal, a crash — therefore leaves one database behind, and nothing collects it.
  * That is a leak of *empty databases* in the shared catalogue, not of session rows, which is what
- * the two cases below are about; LOB-135 owns the sweep that would collect them.
+ * the first two cases below are about; LOB-135 owns the sweep that would collect them.
  *
  * Mutation checked: deleting the `process.env["DATABASE_URL"] = runDatabaseUrl;` line above. The
  * first case then reads the configured database's name from both pools and goes red on it. The
  * second goes red on the unrelated ids the rebuild case above deleted and no fold could put back —
  * a session with no commits is exactly that, so the ids have to be the witness and a count cannot
- * be (a refold raises the count again and hides the loss; measured, `.verify/evidence/lob-96/`).
+ * be (a refold raises the count again and hides the loss).
  * Do not apply it against the run-context database: that is the harm, live. Seed a scratch
- * database with a session that has no commits and point `DATABASE_URL` at that.
+ * database that already holds a session with no commits —
+ * `INSERT INTO sessions (id, title) VALUES ('ses_seed_aaa', 'seeded')` — and point `DATABASE_URL`
+ * at it.
  */
 describe("this suite's database", () => {
   it("is one of its own, not the one DATABASE_URL names", async () => {
@@ -1572,7 +1587,12 @@ describe("this suite's database", () => {
     ]);
     // Two real reads, so the inequality cannot come from a client that never connected: a run that
     // could not reach the configured database does not get this far.
-    expect(there).toBe(configuredDatabase);
+    //
+    // The first comparison is conditional because `configuredDatabase` is `""` when the URL names
+    // no database, and the server resolves that to the role's own — a name the URL cannot supply
+    // and no substitute would match (measured: `expected 'factory' to be 'postgres'`). The
+    // inequality below still holds, and it is the part that carries the claim.
+    if (configuredDatabase !== "") expect(there).toBe(configuredDatabase);
     expect(here).toBe(runDatabaseName);
     expect(here).not.toBe(there);
   });
@@ -1582,6 +1602,13 @@ describe("this suite's database", () => {
     // `sessions`. A suite pointed at the configured database has by now deleted the ones it cannot
     // rebuild; an unrelated suite *adding* sessions is not this file's harm, so the assertion is
     // about these ids and not about a total.
+    //
+    // This case can only fail if there was something to lose: on a configured database holding no
+    // sessions — which is every first CI run, since `gate.yml` sets no `DATABASE_URL` — it reads
+    // nothing twice and asserts nothing. That is a property of the data, not a hole that can be
+    // bolted shut from here, because closing it would mean this file writing a row into the
+    // database it exists not to write to. So it is stated rather than hidden: the count is in the
+    // message below, and the case above is the one that holds unconditionally.
     const now = await maintenance.runPromise(sessionIds.pipe(Effect.orDie));
     const missing = configuredSessionIdsAtStart.filter(
       (id) => !now.includes(id),
