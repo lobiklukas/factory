@@ -8,13 +8,17 @@
  *
  * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
  * postgres`. It creates a database of its own for the run and drops it at the end, so it never
- * *writes* to whatever `DATABASE_URL` points at; it reads that database twice more, to prove it did
- * not — see the block below and `describe("this suite's database")` at the end of this file.
+ * writes a row of any table in whatever `DATABASE_URL` points at. It does write two things there
+ * that are not rows: it adds and removes its own database in the shared `pg_database` catalogue,
+ * and it reads that database five times over the run. Every statement it issues against the
+ * configured database is one of five, and `describe("this suite's database")` at the end of this
+ * file names all of them.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import type {
@@ -26,8 +30,9 @@ import type {
   SessionListEntry,
 } from "@repo/domain/Session";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import { DatabaseLive } from "@repo/storage-postgres";
+import { DatabaseConfig, DatabaseLive } from "@repo/storage-postgres";
 import {
+  ConfigProvider,
   Effect,
   Exit,
   Fiber,
@@ -83,13 +88,18 @@ const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
  * about this run's rows.
  *
  * The fallback below is `DatabaseConfig`'s own default, duplicated rather than imported because
- * reading the config is the thing being ordered around. `Database.ts` says so at the literal.
+ * reading the config is the thing being ordered around. `Database.ts` says so at the literal, and
+ * `describe("this suite's database")` reads both back so the duplication cannot drift silently.
  *
- * Reading the environment directly is not a shortcut, it is the only order that works: Effect's
- * config provider copies `process.env` when it is built, so the copy has to happen after the
- * assignment below and before anything asks for a config. That is why the maintenance client is
- * built from this string rather than from `DatabaseLive` — a `DatabaseLive` here would build the
- * provider first and freeze `DATABASE_URL` where it was.
+ * Reading the environment directly is not a shortcut, it is the only order that works. In effect
+ * 4.0.0 `ConfigProvider.fromEnv()` is a *copy* of `process.env`, not a per-read view, and
+ * `ConfigProvider` is a `Context.Reference` whose default is memoised — so the snapshot is taken
+ * when that reference's default is first materialised, which is the first config read anywhere in
+ * the process, not when this line runs. `ManagedRuntime.make` is lazy, so the assignment below may
+ * come after the runtime is constructed and still land first; what it may not do is come after
+ * anything has *resolved* a config. That is why the maintenance client below is built from this
+ * string rather than from `DatabaseLive` — a `DatabaseLive` here would resolve a config before the
+ * assignment and freeze `DATABASE_URL` where it was.
  */
 const configuredUrl =
   // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
@@ -99,17 +109,24 @@ const configuredUrl =
 /**
  * The database `DATABASE_URL` names, read from its URL path.
  *
- * `postgres` when the URL names none, so the derived name is still a legal identifier rather than a
- * leading underscore.
+ * `postgres` when the URL names none — not for legality (an empty path would not do) but because
+ * `describe("this suite's database")` compares the configured database's own name against
+ * `current_database()`, and an empty string there is a silent no-op rather than a failing one.
  */
 const configuredDatabase =
   new URL(configuredUrl).pathname.replace(/^\//, "") || "postgres";
 
 /**
  * A database name for this run: the configured one, a marker, and six random characters, so two
- * runs of this suite against one server cannot collide. Postgres folds an unquoted identifier to
- * lower case and truncates at 63 bytes, so the whole string is lower case and the random tail is
- * never the part that gets truncated away.
+ * runs of this suite against one server cannot collide (measured: two concurrent runs of this file,
+ * and two concurrent gates, both clean).
+ *
+ * Every identifier this file issues is quoted — `sql(name)` escapes it — so Postgres does not fold
+ * the name to lower case and does not need it folded. What *is* real is the 63-byte limit, which
+ * applies to a quoted identifier too: it truncates silently, and a truncated tail would collide.
+ * So the base is cut to `63 - tail.length` characters and the replacement below keeps characters
+ * and bytes the same length, which is what makes that cut exact for a name that was not plain ASCII
+ * to begin with.
  */
 const runDatabaseName = (() => {
   const tail = `_core_${randomBytes(3).toString("hex")}`;
@@ -131,9 +148,11 @@ const runDatabaseUrl = (() => {
  *
  * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops the
  * run's own database, and migrating somebody else's would be the very reach this change is about.
- * It never writes a `sessions` row either. The only statements it issues against the configured
- * database are `CREATE`/`DROP DATABASE` for the run's own, `current_database()` and the two id
- * reads `describe("this suite's database")` witnesses the isolation with.
+ * It never writes a `sessions` row either. Five statements reach the configured database and no
+ * more: `CREATE DATABASE` and `DROP DATABASE` for the run's own, `current_database()`, a
+ * `to_regclass('public.sessions')` probe and a `SELECT id FROM sessions` — the last two in one
+ * helper that the witness below runs once before any case and once after them. Every one of the
+ * five is named in `describe("this suite's database")` at the end of this file.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -1526,6 +1545,17 @@ const currentDatabase = Effect.gen(function* () {
  * connection and not of the text: pointing the suite's `DATABASE_URL` back at the configured
  * database is a one-line deletion that every comment in this file would go along with.
  *
+ * The third case is not about isolation but about the duplication that makes it expressible: this
+ * file spells `DatabaseConfig`'s default URL out again, and a comment asking the two to stay in
+ * step is not enforcement.
+ *
+ * What this block cannot witness is the drop itself. `afterAll` runs after every case in the file,
+ * so no case here can observe whether the run's database went away, and a neutralised `DROP
+ * DATABASE` leaves the suite green (measured). A run killed between `CREATE DATABASE` and
+ * `afterAll` — a signal, a crash — therefore leaves one database behind, and nothing collects it.
+ * That is a leak of *empty databases* in the shared catalogue, not of session rows, which is what
+ * the two cases below are about; LOB-135 owns the sweep that would collect them.
+ *
  * Mutation checked: deleting the `process.env["DATABASE_URL"] = runDatabaseUrl;` line above. The
  * first case then reads the configured database's name from both pools and goes red on it. The
  * second goes red on the unrelated ids the rebuild case above deleted and no fold could put back —
@@ -1560,5 +1590,33 @@ describe("this suite's database", () => {
       missing,
       `the configured database no longer holds ${missing.length} of the ${configuredSessionIdsAtStart.length} session(s) it held before this file ran, so this suite deleted rows that were never its own`,
     ).toEqual([]);
+  });
+
+  /**
+   * `DatabaseConfig`'s own default URL, resolved with an *empty* environment.
+   *
+   * `fromEnvRecord({})` rather than the provider this file runs under: the claim is about the
+   * default, so an inherited `DATABASE_URL` must not be able to answer for it — otherwise the case
+   * below compares the literal with itself on every configured run and passes for the wrong reason.
+   */
+  it("keeps the fallback literal in step with DatabaseConfig's own default", async () => {
+    const expected = await Effect.runPromise(
+      DatabaseConfig.pipe(
+        Effect.map((config) => Redacted.value(config.url)),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord({}),
+        ),
+      ),
+    );
+    // Read out of this file rather than reusing `configuredUrl`, which *is* `DATABASE_URL` whenever
+    // the environment has one — so comparing the two would be vacuous on every configured run.
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const fallback =
+      /process\.env\["DATABASE_URL"\] \?\?\s*\n\s*"([^"]+)"/.exec(source);
+    expect(
+      fallback?.[1],
+      `the fallback literal this file reads DATABASE_URL against, which \`packages/storage-postgres/src/Database.ts\` also spells out`,
+    ).toBe(expected);
   });
 });
