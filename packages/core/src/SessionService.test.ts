@@ -1567,7 +1567,7 @@ describe("request limits", () => {
  * DATABASE` leaves the suite green (measured). A run killed between `CREATE DATABASE` and
  * `afterAll` — a signal, a crash — therefore leaves one database behind, and nothing collects it.
  * That is a leak of *empty databases* in the shared catalogue, not of session rows, which is what
- * the first two cases below are about; LOB-135 owns the sweep that would collect them.
+ * the first two cases below are about; LOB-134 owns the sweep that would collect them.
  *
  * Mutation checked: deleting the `process.env["DATABASE_URL"] = runDatabaseUrl;` line above. The
  * first case then reads the configured database's name from both pools and goes red on it. The
