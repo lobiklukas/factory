@@ -65,6 +65,32 @@ RALPH_API_PORT RALPH_WEB_PORT`.
 
 `RALPH_MODEL` (default `opencode-go/longcat-2.5-preview-free`) is tried first. On a provider error (429, overload, quota, outage) the driver retries the same iteration on each model in `RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free`; empty disables). A timeout, or a run that merely forgot the control line, is not retried. `pi-subagents` never falls back by itself, so the worker is told to relaunch a failed subagent once per fallback model with a per-run `model` override. `runs.jsonl` records the model that finished each run and the attempts.
 
+## Parallel workers
+
+One loop delivers about one PR an hour on a free model. `parallel` runs several side by side:
+
+```sh
+bun run ralph parallel start 2 --max 40   # workers 1 and 2, started 60 s apart (RALPH_STAGGER)
+bun run ralph parallel status             # each worker, then the claims
+bun run ralph parallel stop               # graceful, every worker
+```
+
+`RALPH_WORKER=N` is what makes a worker: worker 1 is the loop as it was; worker N gets its own worktree
+(`<repo>-ralph-N`), database (`factory_ralph_N`) and ports (`9400`/`3400` plus 10 per worker), and
+symlinks worker 1's `plan.md`, `progress.md`, `polish.md` and `research/` so there is one queue.
+
+- **Claims.** The worker's prompt runs `.pi/ralph/claim.sh claim LOB-n` before it takes an issue or a
+  `ralph-fix` PR. A claim is a `mkdir` under `$RALPH_SHARED/claims` (atomic), stale after
+  `RALPH_CLAIM_TTL` (3 h). The driver releases a worker's claims for issues with no open PR after each
+  iteration, and releases a claim when its PR merges or is flagged `ralph-fix`/`needs-human-merge`.
+- **Only worker 1 merges.** It re-runs the gate, merges and syncs Linear; `RALPH_MERGE` defaults to 0 for the
+  others so two workers never merge one PR.
+- **Costs.** Each worker has its own gate run (CPU: the suites' budgets were tuned for parallel load, so
+  watch for timeouts), its own model requests (the free tiers rate-limit) and its own database. Two is a
+  sensible start.
+- **Not shared on purpose:** logs, sessions, `runs.jsonl`, the lock and the STOP file. `stop` and `kill`
+  per worker still work with `RALPH_WORKER=N`.
+
 ## Running on opencode
 
 `RALPH_AGENT=opencode` runs every session (`plan`, `work`, `split`, `audit`) through `opencode run` instead of
@@ -77,7 +103,7 @@ RALPH_AGENT=opencode bun run ralph:run --max 3
 ```
 
 - **Models.** `RALPH_MODEL` defaults to `opencode/space-bunny-free`, `RALPH_FALLBACK_MODELS` to
-  `opencode/nemotron-3-ultra-free,opencode/mimo-v2.6-flash-free`. `opencode models` lists the ids.
+  `opencode/nemotron-3-ultra-free` (`mimo-v2.6-flash-free` finished none of its 3 fallback runs). `opencode models` lists the ids.
 - **Config.** Each attempt writes `.opencode/opencode.jsonc` into the worktree (git-excluded) with
   `opencode-config.py`: the `ralph-*` subagents are generated from `.pi/agents/ralph-*.md`, pinned to the model of
   the attempt (so the fallback also moves the subagents); the Linear MCP server is registered with direct
