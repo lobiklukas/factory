@@ -2055,6 +2055,50 @@ describe("the abandoned-run sweep", () => {
     expect(runStartedAt("33d7d8_0")).toBeUndefined();
   });
 
+  /**
+   * The sweep has to be *called*, and before the `CREATE`.
+   *
+   * The behaviour is proved by the drive in the PR body — seeding an orphan and watching a run
+   * collect it cannot be staged from inside the file, because the sweep runs at import and no case
+   * exists yet. What a case *can* do is refuse the wiring that behaviour depends on: a sweep that
+   * stops being called, or moves below the `CREATE`, leaves the file green and the leak back.
+   */
+  it("runs before this file creates its own database", () => {
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const sweep = source.indexOf("runPromise(sweepAbandonedRunDatabases");
+    const create = source.indexOf("sql`CREATE DATABASE");
+    expect(
+      sweep,
+      `no module-level call to the sweep in this file, so a run killed between CREATE and afterAll leaks forever again: add \`await maintenance.runPromise(sweepAbandonedRunDatabases.pipe(Effect.orDie));\` above the CREATE.`,
+    ).toBeGreaterThan(-1);
+    expect(create).toBeGreaterThan(-1);
+    expect(
+      sweep,
+      "the sweep must run before the CREATE, or this run's own seconds-old database is a candidate for its own sweep",
+    ).toBeLessThan(create);
+  });
+
+  /**
+   * The header's residual-leak claim, kept honest by being required.
+   *
+   * A sweep that only *reduces* a leak is the kind of thing a future reader upgrades to "collects
+   * them" in their own summary. Two phrases the header must keep saying, so deleting either one —
+   * which is what an over-claiming edit looks like — is a red test rather than a silent drift.
+   */
+  it("states in the header that the sweep is best-effort and leaks two ways", () => {
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const header = source.slice(0, source.indexOf("import {"));
+    for (const claim of [
+      "Best-effort collection, not a guarantee",
+      "no age to read",
+    ]) {
+      expect(
+        header,
+        `the header no longer says "${claim}", which is a claim about the sweep's limits rather than about what it does: put it back, or re-measure and rewrite the header.`,
+      ).toContain(claim);
+    }
+  });
+
   it("keeps every name it can mint inside Postgres' 63-byte identifier limit", () => {
     // The limit applies to a quoted identifier too, and a truncated tail would collide two runs.
     // Asked with a base long enough to hit the limit, not the run-context database's short one, and
