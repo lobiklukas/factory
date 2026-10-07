@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import type {
   ListSessionsInput,
+  ListSessionsOutput,
+  SessionError,
   SessionEvent,
   SessionId,
   SessionListEntry,
@@ -38,6 +40,7 @@ import { createModelAccess } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import {
   MAX_MESSAGE_CHARS,
+  MAX_PAGE_SIZE,
   SessionService,
   SessionServiceLive,
 } from "./SessionService";
@@ -491,6 +494,19 @@ describe("session list", () => {
     // Cost is one statement per page whatever the row count: never a fold per session (R6).
     for (const page of result.pages) expect(page.statements).toBe(1);
 
+    // The wire shape of `lastActivityAt` is the one thing this issue promised not to change, and
+    // nothing else here would notice if it did: the ordering key above and the cursor the
+    // same-millisecond cases compare are both derived from it, so a switch to `US` precision would
+    // leave every assertion in this file green while the dashboard's timestamps grew six digits.
+    // `packages/domain/src/Session.ts` types it as a general `Timestamp`, so the millisecond
+    // rendering is this file's contract to hold.
+    for (const entry of entries) {
+      expect(
+        entry.lastActivityAt,
+        `rendered as ${entry.lastActivityAt}: the wire shape is millisecond-precise and the cursor carries the exact instant separately`,
+      ).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+
     // The three sessions this test made are all there, in activity order.
     const mine = entries
       .map((entry) => entry.id)
@@ -499,6 +515,786 @@ describe("session list", () => {
       );
     expect(mine).toEqual([result.third.id, result.second.id, result.first.id]);
   });
+
+  /**
+   * A page boundary inside a group of rows that share a millisecond must not drop the rest of the
+   * group. The cursor used to be built from `lastActivityAt`, which the list renders at millisecond
+   * precision while `session_activity.last_activity_at` is a `TIMESTAMPTZ`: casting the truncated
+   * cursor back gave a value strictly *less* than the stored one, so every remaining row in the
+   * group failed `(last_activity_at, id) < (cursor.at, cursor.id)` and the page ended early.
+   */
+  // Every case below pages over the *whole* shared table to prove the group is not dropped in
+  // passing, so each one carries a budget, and their cost is the table's rather than the group's.
+  // The durable fix is LOB-96 (a database per run); the budget describe at the end of this file
+  // carries the measurement and guards the declaration.
+  it(
+    "returns every row of a same-millisecond group exactly once",
+    { timeout: 60_000 },
+    async () => {
+      const GROUP = 12;
+      const LIMIT = 4;
+      // The seeding and paging helpers are declared *after* this case. They are `const`s in the same
+      // `describe` callback, which vitest runs to completion before any case body, so by the time
+      // this body reads them they are initialised — no hoisting is involved, only ordering.
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            // One instant for the whole group, newer than anything the shared table holds and
+            // with non-zero microseconds — `newestInstant` says why both halves are load-bearing.
+            yield* seedGroup(GROUP, yield* newestInstant);
+            const visible = yield* listableRows;
+            // A four-row page against a twelve-row group: the page boundaries fall after the
+            // group's 4th, 8th and 12th row, and the first two are inside it. A millisecond-
+            // truncated cursor loses the rest of the group at each of those two boundaries.
+            const { pages, exhausted } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+            );
+            return { GROUP, pages, exhausted };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      // Every row of the group came back, exactly once, in the keyset's own order (id descending
+      // inside the tie). A cursor truncated to the millisecond stopped the page at the boundary
+      // and dropped the rest of the group.
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      // The walk ended because the cursor ran out, not because it hit its budget.
+      expect(result.exhausted).toBe(true);
+      // Cost is one statement per page whatever the row count: never a fold per session (R6).
+      for (const page of result.pages) expect(page.statements).toBe(1);
+    },
+  );
+
+  /**
+   * The prefix every case below seeds with, and the ids it seeds.
+   *
+   * Zero-padded to the full id length, so the ids sort contiguously and a page boundary falls
+   * inside the group wherever the limit puts it. `ses_mv` is in the id alphabet (which excludes
+   * `i`, `l`, `o` and `u`).
+   */
+  const GROUP_PREFIX = "ses_mv";
+  const groupId = (n: number) =>
+    `${GROUP_PREFIX}${String(n).padStart(24, "0")}`;
+  const groupIds = (n: number) =>
+    Array.from({ length: n }, (_, k) => groupId(k));
+  /** A group's ids in the order the list returns them: id descending inside the tie. */
+  const groupIdsDescending = (n: number) => [...groupIds(n)].sort().reverse();
+  /**
+   * The rows these cases seed *below* the group, so the group is not the head of the table and a
+   * page boundary can fall inside it from either side.
+   */
+  // `ses_mn`, not `ses_mo`: the id alphabet excludes `i`, `l`, `o` and `u`, and the service
+  // refuses a row it cannot parse.
+  const OLDER_PREFIX = "ses_mn";
+  /** A prefix as a `LIKE` pattern — `_` is a wildcard in `LIKE`, so it is escaped. */
+  const asPattern = (prefix: string) => `${prefix.replace(/_/g, "\\_")}%`;
+  const GROUP_PATTERN = asPattern(GROUP_PREFIX);
+  const OLDER_PATTERN = asPattern(OLDER_PREFIX);
+  /** The rows one case seeds *above* its group, so the group is the tail of the ordering. */
+  const NEWER_PREFIX = "ses_my";
+  const NEWER_PATTERN = asPattern(NEWER_PREFIX);
+
+  /**
+   * Delete every row these cases mint, in one statement.
+   *
+   * The database is shared, so a run that leaves its rows behind collides with the next run's
+   * `sessions_pkey` — and, worse, silently changes the row count every other case pages over.
+   */
+  const deleteSeeded = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    yield* sql`DELETE FROM sessions WHERE id LIKE ${GROUP_PATTERN} OR id LIKE ${OLDER_PATTERN} OR id LIKE ${NEWER_PATTERN}`;
+  });
+
+  /**
+   * Seed `n` sessions whose `last_activity_at` is one literal instant.
+   *
+   * The instant is a parameter because one case needs a group at the *end* of the ordering, which
+   * only the database can place: `min(last_activity_at) - 1 hour` is however old the shared table
+   * already is, and a fixed year would stop being the end the day something older is written.
+   */
+  /**
+   * An instant newer than anything the shared table holds, with a non-zero sub-millisecond part.
+   *
+   * Derived from `max(last_activity_at)` rather than fixed, for two reasons that are both
+   * load-bearing. A group has to be at the *head* of the ordering for the cases that assert it is,
+   * and a hard-coded year stops being newer on the first day it passes — a red the fix did not
+   * cause and cannot explain. And the sub-millisecond part must not be inherited from `max`, which
+   * in a shared table this old is usually millisecond-aligned: an aligned instant renders losslessly
+   * at `MS`, so the truncated cursor would drop nothing and the case would pass against the code it
+   * exists to catch. Truncating to the second and adding a fixed `.123456` makes the loss
+   * deterministic whatever the table holds — and it is load-bearing for more than one case:
+   * zeroing the pinned part instead (`+ interval '1 hour 0.000000 seconds'`, a *valid* mutation,
+   * unlike dropping the part and getting a SQL parse error) reddens the truncated-cursor case and
+   * the end-of-ordering case. The cases whose group sits inside a single page cannot notice either
+   * way, which is the control discussed at `alignedInstant`.
+   */
+  const newestInstant = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const [row] = yield* sql<{ at: string }>`
+      SELECT to_char(
+        (
+          date_trunc(
+            'seconds',
+            COALESCE(max(last_activity_at), now())
+          ) + interval '1 hour 0.123456 seconds'
+        ) AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+      ) AS at
+      FROM session_activity
+    `;
+    if (row === undefined) throw new Error("unreachable");
+    return row.at;
+  });
+
+  /**
+   * The same instant with its sub-millisecond part zeroed: newer than the shared table, and
+   * rendered losslessly at `MS`. The one case that needs this is the control for the other eight —
+   * see its doc comment.
+   */
+  const alignedInstant = Effect.gen(function* () {
+    const at = yield* newestInstant;
+    // Sliced, not `replace`d: a regex that quietly stopped matching would leave this a ninth copy
+    // of the lossless case — green, and testing nothing. Asserting the six-digit shape first makes
+    // a change to `newestInstant`'s format string die here instead.
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(at)) {
+      throw new Error(
+        `alignedInstant expected newestInstant's six-digit rendering, got ${at}`,
+      );
+    }
+    // `2027-01-01T00:00:00.123456Z` → `2027-01-01T00:00:00.123Z`, the same instant at `MS`.
+    return at.slice(0, -4) + "Z";
+  });
+
+  const seedGroup = (n: number, at: string) =>
+    Effect.gen(function* () {
+      yield* deleteSeeded;
+      const sql = yield* SqlClient;
+      // The prefix is cast because a bare parameter makes the concatenation's type come from the
+      // parameter rather than from `lpad`, and the driver sends an untyped one. The cast states it
+      // instead of leaving it to inference; nothing here depends on inference failing.
+      yield* sql`
+        INSERT INTO sessions (id, title)
+        SELECT ${GROUP_PREFIX}::text || lpad(n::text, 24, '0'), 'same millisecond ' || n
+        FROM generate_series(0, ${n - 1}) AS g(n)
+      `;
+      yield* sql`
+        INSERT INTO session_activity (session_id, last_activity_at)
+        SELECT ${GROUP_PREFIX}::text || lpad(n::text, 24, '0'), ${at}::timestamptz
+        FROM generate_series(0, ${n - 1}) AS g(n)
+      `;
+    });
+
+  /** Run `body` with these cases' rows gone afterwards, whether it passes, fails or dies. */
+  const withGroup = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+    body.pipe(
+      Effect.ensuring(
+        deleteSeeded.pipe(
+          // A cleanup that cannot run is a defect, not a silent row leak.
+          Effect.orDie,
+        ),
+      ),
+    );
+
+  /**
+   * Page the list until the cursor runs out, returning every page with the number of statements
+   * it cost.
+   *
+   * The budget is the caller's, and is a function of the rows the list can see rather than a
+   * constant: a budget that is too small shows up as `exhausted: false` rather than as a wrong
+   * page count. `start` is the cursor to page on from, for a walk that begins mid-table.
+   */
+  const pageAll = (
+    limit: number,
+    budget: number,
+    start?: string,
+  ): Effect.Effect<
+    {
+      readonly pages: readonly {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[];
+      readonly exhausted: boolean;
+    },
+    SessionError,
+    SessionService
+  > =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const pages: {
+        readonly output: ListSessionsOutput;
+        readonly statements: number;
+      }[] = [];
+      let cursor: string | undefined = start;
+      let exhausted = false;
+      for (let page = 0; page < budget; page += 1) {
+        const input: ListSessionsInput =
+          cursor === undefined ? { limit } : { limit, cursor };
+        const counted = yield* countStatements(sessions.list(input));
+        pages.push({ output: counted.value, statements: counted.statements });
+        cursor = counted.value.nextCursor;
+        if (cursor === undefined) {
+          exhausted = true;
+          break;
+        }
+      }
+      return { pages, exhausted };
+    });
+
+  /** The rows the list can see, which is the set it has to page over exactly once. */
+  const listableRows = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const [rowCount] = yield* sql<{ rows: number }>`
+      SELECT count(*)::int AS rows FROM session_activity
+    `;
+    if (rowCount === undefined) throw new Error("unreachable");
+    return rowCount.rows;
+  });
+
+  /**
+   * A group that is exactly one page big, so the cursor is minted only because the query fetches
+   * `limit + 1` rows.
+   *
+   * `rows.length > limit` is the whole decision about whether another page exists. With the group
+   * the newest thing in the table and the same size as the page, the page is full of group rows and
+   * the one extra row the query fetched is what says there is more.
+   *
+   * This is a control, not a boundary case, and it passes against the unfixed code: the whole
+   * group fits in the first page, so a millisecond-truncated cursor skips *past* the group instead
+   * of splitting it. What it pins is the ordinary path and the last page — the group is the head of
+   * page 1, every row below it still comes back, and the walk ends because the cursor ran out
+   * rather than because a boundary truncated it. A fix that special-cased same-millisecond groups
+   * and broke the walk, or that minted a cursor past the end of the table, fails here rather than
+   * in the two cases below.
+   *
+   * The name says what it pins rather than what the fix does: it deliberately does *not* pin cursor
+   * precision, because a group inside one page cannot expose it. The cases that do are the ones
+   * that page a group in two.
+   */
+  it(
+    "returns a same-millisecond group that is exactly one page, and mints no cursor past the end",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            const GROUP = 4;
+            const LIMIT = 4;
+            // Newer than anything the shared table holds, with non-zero microseconds: a timestamp
+            // whose millisecond rendering is already lossless would not trigger the bug.
+            yield* seedGroup(GROUP, yield* newestInstant);
+            // Older than the group, and enough of them that the table does not end with the group —
+            // otherwise `rows.length > limit` is false and there is no cursor to mint at all.
+            yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 6) AS g(n)
+          `;
+            yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 6) AS g(n)
+          `;
+
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+            );
+            return { GROUP, LIMIT, pages, exhausted, visible };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      // The whole group, exactly once, in the keyset's own order.
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      // Exactly once across the whole walk, not only for the group: `toBeGreaterThanOrEqual` below
+      // tolerates a duplicate, so a keyset that re-served a row on a boundary could pass every
+      // other assertion here while the list handed the dashboard the same session twice.
+      expect(new Set(entries.map((entry) => entry.id)).size).toBe(
+        entries.length,
+      );
+      // The group is the newest thing in the table, so it is the head of the first page: it cannot
+      // be dropped by a boundary below it.
+      expect(entries.slice(0, result.GROUP).map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      // The loop ended because the cursor ran out, not because it hit its budget.
+      expect(result.exhausted).toBe(true);
+      expect(result.pages.at(-1)?.output.nextCursor).toBeUndefined();
+      // Every row the list can see came back, so the group's exactness is not being paid for with
+      // the older rows behind it.
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      // Cost is one statement per page whatever the row count: never a fold per session (R6).
+      for (const page of result.pages) expect(page.statements).toBe(1);
+    },
+  );
+
+  /**
+   * A group paged one row at a time, so every single page boundary falls inside the group.
+   *
+   * This is the sharpest form of the defect: the cursor is minted from a group row on every page,
+   * and a millisecond-truncated one drops the rest of the group every time, not once.
+   */
+  it(
+    "returns a same-millisecond group one row at a time",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const sql = yield* SqlClient;
+            const GROUP = 5;
+            yield* seedGroup(GROUP, yield* newestInstant);
+            yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 4) AS g(n)
+          `;
+            yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 4) AS g(n)
+          `;
+
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              1,
+              Math.ceil(visible / 1) + 2,
+            );
+            // `limit: 0` is clamped to 1 by the service rather than refused: one row, and a cursor,
+            // so the clamp does not silently mean "no pages".
+            const clamped = yield* sessions.list({ limit: 0 });
+            return { GROUP, pages, exhausted, clamped };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      // Every page the group spans mints a cursor from a group row, so the group spans exactly one
+      // page per row — a cursor that dropped the rest of the millisecond would show up here as a
+      // short count, not as a wrong order.
+      const groupPages = result.pages.filter((page) =>
+        page.output.sessions.some((entry) => entry.id.startsWith(GROUP_PREFIX)),
+      );
+      expect(groupPages.length).toBe(result.GROUP);
+      expect(result.exhausted).toBe(true);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+
+      expect(result.clamped.sessions.length).toBe(1);
+      expect(result.clamped.nextCursor).toBeDefined();
+    },
+  );
+
+  /**
+   * A group that sits whole inside a page larger than it, so the cursor that carries the paging
+   * past the group comes from a row *after* it.
+   *
+   * The second control, and it also passes against the unfixed code: the group is wholly inside
+   * the first page, so no cursor is ever minted from a group row and no cursor can split it. What
+   * it pins is the walk itself — the rows *below* the group have to keep coming back, exactly once,
+   * on the pages after it (`entries.length >= visible`). A fix that special-cased same-millisecond
+   * groups and broke the ordinary path fails here.
+   */
+  it(
+    "returns a same-millisecond group that sits inside a larger page",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            const GROUP = 3;
+            yield* seedGroup(GROUP, yield* newestInstant);
+            yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'), 'older ' || n
+            FROM generate_series(0, 11) AS g(n)
+          `;
+            yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_mn' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => 60 + n)
+            FROM generate_series(0, 11) AS g(n)
+          `;
+
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              10,
+              Math.ceil(visible / 10) + 2,
+            );
+            return { GROUP, pages, exhausted, visible };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      expect(result.exhausted).toBe(true);
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+    },
+  );
+
+  /**
+   * A group at the very end of the ordering — the oldest rows, not the newest.
+   *
+   * The cursor that reaches this group is minted from a row *above* it, so a different instant,
+   * and the group is found by comparison rather than by being the head of the first page. The
+   * page that starts inside the group then mints a cursor from a group row, and the next page has
+   * to come back for the rest of the group instead of skipping past it.
+   */
+  it(
+    "returns a same-millisecond group at the end of the ordering",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            const GROUP = 5;
+            // However old the shared table already is: the group has to be the end of the ordering,
+            // whatever else is in it.
+            // The subtraction is parenthesised: `AT TIME ZONE` binds to the interval on its left,
+            // so without them Postgres reads `interval '1 hour' AT TIME ZONE 'UTC'` and rejects the
+            // statement (42883) rather than shifting the instant.
+            //
+            // The sub-millisecond part is pinned rather than inherited. `min(last_activity_at)` in
+            // a shared database this old tends to be millisecond-aligned, so a group placed at
+            // `min - 1 hour` inherits an alignment that renders losslessly at millisecond precision
+            // — the truncated cursor would drop nothing and the case would pass against the
+            // unfixed code. Truncating to the second and adding a fixed `.123456` makes the loss
+            // deterministic whatever the table holds.
+            const [oldest] = yield* sql<{ at: string }>`
+            SELECT to_char(
+              (
+                date_trunc(
+                  'seconds',
+                  COALESCE(min(last_activity_at), now()) - interval '1 hour'
+                ) + interval '0.123456 seconds'
+              ) AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            ) AS at
+            FROM session_activity
+          `;
+            if (oldest === undefined) throw new Error("unreachable");
+            yield* seedGroup(GROUP, oldest.at);
+            // Newer than the group, at second spacing so none of them ties with it.
+            yield* sql`
+            INSERT INTO sessions (id, title)
+            SELECT 'ses_my' || lpad(n::text, 24, '0'), 'newer ' || n
+            FROM generate_series(0, 6) AS g(n)
+          `;
+            yield* sql`
+            INSERT INTO session_activity (session_id, last_activity_at)
+            SELECT 'ses_my' || lpad(n::text, 24, '0'),
+                   now() - make_interval(secs => n)
+            FROM generate_series(0, 6) AS g(n)
+          `;
+
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              2,
+              Math.ceil(visible / 2) + 2,
+            );
+            return { GROUP, pages, exhausted, visible };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      // The group is the tail of the ordering, so it is the tail of the whole walk: nothing after it.
+      expect(
+        entries.slice(entries.length - result.GROUP).map((entry) => entry.id),
+      ).toEqual(groupIdsDescending(result.GROUP));
+      expect(result.exhausted).toBe(true);
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+    },
+  );
+
+  /**
+   * A cursor in the old millisecond-only format, fed back in.
+   *
+   * This pins the boundary of the fix rather than a behaviour anyone wanted. `parseCursor` checks
+   * only that the cursor has a `|` and a well-formed id, so a truncated `at` is *accepted* — and
+   * then loses every remaining row of that millisecond, because the stored `timestamptz` is
+   * strictly greater than the truncated cursor. The code says so itself: nothing can repair a value
+   * that has already been rounded. The contrast with the exact cursor on the same page is what
+   * makes that visible in one test.
+   *
+   * A maintainer who hardens `parseCursor` — refusing a cursor it did not mint, as the case after
+   * this one does for a malformed one — should expect this case to go red and delete it: refusing is
+   * the better answer than answering lossily, and this case exists to show what the choice costs.
+   */
+  it(
+    "accepts a millisecond-truncated cursor and loses the rest of that millisecond",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const GROUP = 6;
+            const LIMIT = 4;
+            yield* seedGroup(GROUP, yield* newestInstant);
+
+            const first = yield* sessions.list({ limit: LIMIT });
+            const boundary = first.sessions.at(-1);
+            if (boundary === undefined) throw new Error("unreachable");
+            // Exactly what an older build minted from this same page: the rendered millisecond.
+            const truncated = `${boundary.lastActivityAt}|${boundary.id}`;
+            const exact = first.nextCursor;
+            if (exact === undefined) throw new Error("unreachable");
+
+            // The truncated cursor is well-formed, so it is not refused — it is answered, and the
+            // answer skips the rest of the group.
+            const oldFormat = yield* sessions.list({
+              limit: LIMIT,
+              cursor: truncated,
+            });
+            const exactNext = yield* sessions.list({
+              limit: LIMIT,
+              cursor: exact,
+            });
+
+            // Paging on *from the truncated cursor*, the group never comes back.
+            const visible = yield* listableRows;
+            const { pages } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+              truncated,
+            );
+            return { GROUP, first, truncated, oldFormat, exactNext, pages };
+          }),
+        ),
+      );
+
+      const groupOf = (
+        entries: readonly SessionListEntry[],
+      ): readonly SessionListEntry[] =>
+        entries.filter((entry) => entry.id.startsWith(GROUP_PREFIX));
+      // The first page is four of the six, and the cursor an older build would have minted is the
+      // rendered millisecond of the row it ended on.
+      expect(groupOf(result.first.sessions)).toHaveLength(4);
+      expect(result.truncated).toBe(
+        `${result.first.sessions.at(-1)?.lastActivityAt}|${result.first.sessions.at(-1)?.id}`,
+      );
+      expect(result.truncated).not.toBe(result.first.nextCursor);
+      // The exact cursor comes back for the remaining two rows of the group.
+      expect(
+        groupOf(result.exactNext.sessions).map((entry) => entry.id),
+      ).toEqual(groupIdsDescending(result.GROUP).slice(4));
+      // The truncated cursor is accepted, and its page holds no row of the group at all: the two rows
+      // above are skipped by the keyset comparison.
+      expect(groupOf(result.oldFormat.sessions)).toEqual([]);
+      // Paging on from it, the group is still absent — the loss is permanent for that cursor, not
+      // deferred to the next page.
+      expect(
+        groupOf(result.pages.flatMap((page) => page.output.sessions)),
+      ).toEqual([]);
+    },
+  );
+
+  /**
+   * The smallest group the defect needs: two rows sharing a millisecond, with the page boundary
+   * between them.
+   *
+   * Every other case here seeds at least three rows, so a boundary that splits a *pair* — one row
+   * on each side of it — is the sharpest form of the repro, and the one the issue measured. A fix
+   * that only held for a group larger than the page would pass all of them and still drop the
+   * second row here.
+   */
+  it(
+    "returns a two-row same-millisecond group split by the page boundary",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const GROUP = 2;
+            const LIMIT = 1;
+            yield* seedGroup(GROUP, yield* newestInstant);
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+            );
+            return { GROUP, pages, exhausted, visible };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      expect(result.exhausted).toBe(true);
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+    },
+  );
+
+  /**
+   * A group whose millisecond rendering is already lossless — the shape every live writer
+   * actually produces.
+   *
+   * `touchActivity`, `setActivityStatus` and `setActivityCost` all write
+   * `to_timestamp(Clock.currentTimeMillis / 1000)`, which is millisecond-aligned by construction,
+   * and `rebuildIndexes` renders the column through `to_char(… 'MS')` before storing it. So a
+   * real same-millisecond group is lossy in its microseconds only when something else wrote it.
+   *
+   * This pins the fix's other direction: an exact cursor must not *gain* rows a millisecond
+   * cursor would have dropped, nor *lose* rows a millisecond cursor would have kept. The cursor
+   * minted here has to denote the very instant the millisecond rendering shows, and the walk
+   * still has to return the whole group exactly once.
+   */
+  it(
+    "returns a group whose millisecond rendering is already lossless",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const GROUP = 6;
+            const LIMIT = 4;
+            // The one case that needs an aligned instant, so it cannot use `newestInstant`: the
+            // millisecond rendering is *the* value, the truncated cursor an older build minted was
+            // already exact, and the bug had nothing to bite on. `newestInstant` pins `.123456`
+            // precisely so the other eight cases cannot inherit that alignment.
+            yield* seedGroup(GROUP, yield* alignedInstant);
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              LIMIT,
+              Math.ceil(visible / LIMIT) + 2,
+            );
+            return { GROUP, pages, exhausted, visible };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      expect(result.exhausted).toBe(true);
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+
+      // The cursor minted from a lossless row has to denote the same instant the millisecond
+      // rendering shows — the extra digits are trailing zeros, not extra reach.
+      const first = result.pages[0];
+      if (first === undefined) throw new Error("unreachable");
+      const boundary = first.output.sessions.at(-1);
+      if (boundary === undefined) throw new Error("unreachable");
+      const firstCursor: string | undefined = first.output.nextCursor;
+      if (firstCursor === undefined) throw new Error("unreachable");
+      const [firstAt, firstId] = firstCursor.split("|");
+      if (firstAt === undefined || firstId === undefined)
+        throw new Error("unreachable");
+      expect(firstId).toBe(boundary.id);
+      expect(Date.parse(firstAt)).toBe(Date.parse(boundary.lastActivityAt));
+    },
+  );
+
+  /**
+   * A group straddling the page-size cap, and a limit larger than the table.
+   *
+   * `MAX_PAGE_SIZE` is where `Math.min` stops, so the query fetches `MAX_PAGE_SIZE + 1` rows and
+   * `rows.length > limit` is decided a hundred rows into the group rather than four. The group
+   * is deliberately bigger than the cap, so the boundary falls inside it at the largest limit the
+   * service will honour. The second half pins the clamp itself: a limit above the cap is answered
+   * with a capped page, not with the whole table.
+   */
+  it(
+    "returns a same-millisecond group straddling the page-size cap",
+    { timeout: 60_000 },
+    async () => {
+      const result = await program(
+        withGroup(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            // Read off the cap rather than written as a literal, so the group stays larger than it
+            // when the cap moves: a group that fit inside `MAX_PAGE_SIZE` would make the boundary
+            // fall after the group and stop straddling it.
+            const GROUP = MAX_PAGE_SIZE + 3;
+            yield* seedGroup(GROUP, yield* newestInstant);
+            const visible = yield* listableRows;
+            const { pages, exhausted } = yield* pageAll(
+              MAX_PAGE_SIZE,
+              Math.ceil(visible / MAX_PAGE_SIZE) + 2,
+            );
+            // A limit above the cap is clamped to the cap: the page is capped, and a cursor is
+            // still minted because the table is bigger than one capped page. A literal, for the
+            // same reason `GROUP` is: `LIMIT ${limit + 1}` needs a type the driver can infer.
+            const clamped = yield* sessions.list({ limit: 1100 });
+            return { GROUP, pages, exhausted, visible, clamped };
+          }),
+        ),
+      );
+
+      const entries = result.pages.flatMap((page) => page.output.sessions);
+      const group = entries.filter((entry) =>
+        entry.id.startsWith(GROUP_PREFIX),
+      );
+      expect(group.map((entry) => entry.id)).toEqual(
+        groupIdsDescending(result.GROUP),
+      );
+      expect(new Set(group).size).toBe(group.length);
+      expect(result.exhausted).toBe(true);
+      expect(entries.length).toBeGreaterThanOrEqual(result.visible);
+      for (const page of result.pages) expect(page.statements).toBe(1);
+
+      expect(result.clamped.sessions.length).toBe(MAX_PAGE_SIZE);
+      expect(result.clamped.nextCursor).toBeDefined();
+    },
+  );
 
   it("refuses a cursor it did not mint", async () => {
     const outcome = await program(
@@ -628,10 +1424,10 @@ describe("request limits", () => {
  *
  * What this cannot prove: that the declared budget is *enough*. No static check can — only the
  * fold's cost on the database in front of it, which is why the case itself is what fails when the
- * deadline passes. Two other ways out of the problem satisfy the issue but not this reader, so the
- * guard has to be updated with them: a repo-wide `testTimeout` in `vitest.config.ts`, and
- * `it(name, { timeout }, fn)`. A skipped or excluded `describe("session list")` passes it as well,
- * because every byte it reads is still in the file.
+ * deadline passes. One other way out of the problem satisfies the issue but not this reader, so
+ * the guard has to be updated with it: a repo-wide `testTimeout` in `vitest.config.ts`. A skipped
+ * or excluded `describe("session list")` passes it as well, because every byte it reads is still
+ * in the file.
  *
  * If LOB-96 lands and `@repo/core` gets a database of its own per run, delete this describe
  * together with the case's third argument and the case comment that explains it, with the fold's
@@ -647,17 +1443,34 @@ const REBUILD_CASE =
 /**
  * The budget a case declares, or `undefined` when it would take vitest's default.
  *
- * The case's closing line is the first two-space-indented `}` after its `it(` — every nested
- * callback in the body closes deeper — and the budget is the optional third argument on it.
+ * Vitest takes the budget in either of two shapes, and this reads both so a case may use either:
+ * the options object `it(name, { timeout }, fn)` — the form the ralph-driver suite in
+ * `packages/storage-postgres` uses (LOB-128), which the same-millisecond cases here use — and the
+ * third argument `it(name, fn, ms)`, which the rebuild case carries. The declaration is found by
+ * pattern rather than by `it("name"`: oxfmt breaks the arguments of a long-named case one per line,
+ * so `it(` and the name are not adjacent in the source. The options object is read only from the
+ * start of the declaration up to its `=>`, so a `timeout:` inside a body cannot be mistaken for the
+ * declaration; the third argument sits on the case's closing line, which is the first
+ * two-space-indented `}` after its `it(` — every nested callback in the body closes deeper.
+ *
+ * Neither shape survives oxfmt unchanged when the name is long: it breaks the arguments one per
+ * line, so the budget is `}, 60_000,` rather than `}, 60_000);`. That is why the options form is
+ * read rather than the closing line for it.
  */
 const declaredBudget = (
   source: string,
   caseName: string,
 ): number | undefined => {
-  const start = source.indexOf(`it("${caseName}"`);
-  if (start < 0) return undefined;
-  const closing = /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(source.slice(start));
-  const digits = closing?.[1];
+  const at = new RegExp(
+    `it\\(\\s*"${caseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`,
+  ).exec(source);
+  if (at === null) return undefined;
+  const declaration = source.slice(at.index);
+  const options = /\{[ \t]*timeout: (\d[\d_]*)/.exec(
+    declaration.slice(0, declaration.indexOf("=>")),
+  );
+  const digits =
+    options?.[1] ?? /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(declaration)?.[1];
   return digits === undefined ? undefined : Number(digits.replaceAll("_", ""));
 };
 
@@ -700,5 +1513,116 @@ describe("the rebuild case's budget", () => {
         REBUILD_CASE,
       ),
     ).toBe(120_000);
+  });
+});
+
+/**
+ * The same-millisecond group's budgets, guarded the same way (LOB-95).
+ *
+ * These nine cases page over the *whole* shared table — that is how each one proves its group was
+ * not dropped in passing — so their cost is the table's, not the case's. Declaring the budget is
+ * load-bearing rather than decorative, and dropping it is silent until the table is large enough,
+ * which is exactly when it matters.
+ *
+ * The budget is sized against a table that only grows, and it is a *per-case* ceiling, so what
+ * matters is the slowest single case rather than the file. Measured on the run-context database at
+ * 2 609 `session_activity` rows: the two `limit: 1` cases 8.4 s and 8.3 s, and at 2 743 rows they
+ * measured 9.3 s and 9.1 s — a page statement costs ~3.2 ms, so a `limit: 1` case reaches 60 s at
+ * roughly 18 000 rows and that is the binding number. The growth is not this diff's: every gate run
+ * leaves ~15 real sessions behind (the create and rebuild cases dispose the runtime without
+ * deleting their rows), so each run widens the cost of all nine. The durable fix is LOB-96, a
+ * database per run, at which point this describe goes the way the rebuild one says it goes.
+ *
+ * Mutation checked: replacing one case's `{ timeout: 60_000 }` with nothing — the guard below goes
+ * red in a few ms, with no database involved. The control that keeps it from passing on a reader
+ * that answers unconditionally is `reads an options-object budget only where one is declared`.
+ */
+const SAME_MILLISECOND_CASES = [
+  "returns every row of a same-millisecond group exactly once",
+  "returns a same-millisecond group that is exactly one page, and mints no cursor past the end",
+  "returns a same-millisecond group one row at a time",
+  "returns a same-millisecond group that sits inside a larger page",
+  "returns a same-millisecond group at the end of the ordering",
+  "accepts a millisecond-truncated cursor and loses the rest of that millisecond",
+  "returns a two-row same-millisecond group split by the page boundary",
+  "returns a group whose millisecond rendering is already lossless",
+  "returns a same-millisecond group straddling the page-size cap",
+] as const;
+
+describe("the same-millisecond cases' budgets", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  // The group is bounded by its opening doc comment and by the next case's declaration: a case
+  // name is what the guard reads, so anchoring on one would let the reader find its own list entry
+  // first. The opening comment is the defect's description.
+  const start = source.indexOf(
+    " * A page boundary inside a group of rows that share a millisecond",
+  );
+  const end = source.indexOf('it("refuses a cursor it did not mint"', start);
+
+  it("gives every same-millisecond case a budget", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    // A case added to the group and not to the list above is unbudgeted by definition, so the two
+    // have to be the same size. The count is read off the group's own declarations rather than off
+    // the list, so a case nobody listed still reddens here.
+    const declared = [...source.slice(start, end).matchAll(/^ {2}it\($/gm)]
+      .length;
+    expect(declared).toBe(SAME_MILLISECOND_CASES.length);
+    for (const caseName of SAME_MILLISECOND_CASES) {
+      const budget = declaredBudget(source, caseName);
+      expect(
+        budget,
+        `no timeout on "${caseName}", so it would take vitest's 5 s default while it pages the whole shared table: declare \`{ timeout: 60_000 }\` on the case, or update this guard as its header says.`,
+      ).toBeDefined();
+      // 60 000 is a ceiling, not a target: the cases cost milliseconds while the table is small,
+      // and the fold cost of a table twice this size is still an order of magnitude below it.
+      if (budget === undefined) throw new Error("unreachable");
+      expect(budget).toBeGreaterThanOrEqual(60_000);
+    }
+  });
+
+  it("reads an options-object budget only where one is declared", () => {
+    // Negative control for the reader's first shape, on a source shaped like this file: a case with
+    // no options object, whose body closes a nested callback and then declares nothing. The three
+    // same-millisecond shapes are the ones that matter — no options, a nested object, and the
+    // options — and a reader that answered any of them with a number would pass the guard above on
+    // a file whose cases declare nothing.
+    const name = "a same-millisecond group straddling the page-size cap";
+    const without = [
+      'describe("x", () => {',
+      `  it("${name}", async () => {`,
+      "    const nested = (() => {",
+      "      return 1;",
+      "    });",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+    expect(declaredBudget(without, name)).toBeUndefined();
+    // A name that is not in the source at all reads as no budget either: a reader that answered
+    // there would pass the guard above on a group whose cases had all been renamed out from under
+    // it. The count tripwire is what catches a deleted case; this is what catches a renamed one.
+    expect(declaredBudget(without, "no such case")).toBeUndefined();
+    // The same source with the options object back reads as that number, underscore and all, in
+    // both shapes oxfmt gives it: the declaration on one line, and broken one argument per line.
+    expect(
+      declaredBudget(
+        without.replace(
+          `  it("${name}", async`,
+          `  it(\n    "${name}",\n    { timeout: 90_000 },`,
+        ),
+        name,
+      ),
+    ).toBe(90_000);
+    // A `timeout:` in the body is not the declaration: the reader stops at the case's `=>`.
+    expect(
+      declaredBudget(
+        without.replace(
+          "    const nested = (() => {",
+          "    const budget = { timeout: 90_000 };\n    const nested = (() => {",
+        ),
+        name,
+      ),
+    ).toBeUndefined();
   });
 });
