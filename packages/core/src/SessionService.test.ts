@@ -630,7 +630,11 @@ describe("session list", () => {
    * in a shared table this old is usually millisecond-aligned: an aligned instant renders losslessly
    * at `MS`, so the truncated cursor would drop nothing and the case would pass against the code it
    * exists to catch. Truncating to the second and adding a fixed `.123456` makes the loss
-   * deterministic whatever the table holds.
+   * deterministic whatever the table holds — and it is load-bearing for more than one case:
+   * zeroing the pinned part instead (`+ interval '1 hour 0.000000 seconds'`, a *valid* mutation,
+   * unlike dropping the part and getting a SQL parse error) reddens the truncated-cursor case and
+   * the end-of-ordering case. The cases whose group sits inside a single page cannot notice either
+   * way, which is the control discussed at `alignedInstant`.
    */
   const newestInstant = Effect.gen(function* () {
     const sql = yield* SqlClient;
@@ -655,9 +659,18 @@ describe("session list", () => {
    * rendered losslessly at `MS`. The one case that needs this is the control for the other eight —
    * see its doc comment.
    */
-  const alignedInstant = Effect.map(newestInstant, (at) =>
-    at.replace(/(\.\d{3})\d+(Z)$/, "$1$2"),
-  );
+  const alignedInstant = Effect.gen(function* () {
+    const at = yield* newestInstant;
+    // Sliced, not `replace`d: a regex would quietly become a no-op if `newestInstant` ever stopped
+    // emitting microseconds, leaving this a ninth copy of the lossless case — green, and testing
+    // nothing. The length check dies instead.
+    if (at.length !== 27 || !at.endsWith("000Z")) {
+      throw new Error(
+        `alignedInstant expected a microsecond rendering to zero out, got ${at}`,
+      );
+    }
+    return at.slice(0, -4) + "Z";
+  });
 
   const seedGroup = (n: number, at: string) =>
     Effect.gen(function* () {
@@ -1510,13 +1523,14 @@ describe("the rebuild case's budget", () => {
  * load-bearing rather than decorative, and dropping it is silent until the table is large enough,
  * which is exactly when it matters.
  *
- * The budget is sized against a table that only grows. Measured on the run-context database at
- * 2 609 `session_activity` rows: the file total 50.9 s, the two `limit: 1` cases 8.4 s and 8.3 s,
- * so a page statement costs ~3.2 ms and the 60 s ceiling holds to roughly 18 000 rows. That growth
- * is not this diff's — every gate run leaves ~15 real sessions behind (the create and rebuild cases
- * dispose the runtime without deleting their rows), so each run widens the cost of all nine. The
- * durable fix is LOB-96: a database per run, at which point this describe goes the way the rebuild
- * one says it goes.
+ * The budget is sized against a table that only grows, and it is a *per-case* ceiling, so what
+ * matters is the slowest single case rather than the file. Measured on the run-context database at
+ * 2 609 `session_activity` rows: the two `limit: 1` cases 8.4 s and 8.3 s, and at 2 743 rows they
+ * measured 9.3 s and 9.1 s — a page statement costs ~3.2 ms, so a `limit: 1` case reaches 60 s at
+ * roughly 18 000 rows and that is the binding number. The growth is not this diff's: every gate run
+ * leaves ~15 real sessions behind (the create and rebuild cases dispose the runtime without
+ * deleting their rows), so each run widens the cost of all nine. The durable fix is LOB-96, a
+ * database per run, at which point this describe goes the way the rebuild one says it goes.
  *
  * Mutation checked: replacing one case's `{ timeout: 60_000 }` with nothing — the guard below goes
  * red in a few ms, with no database involved. The control that keeps it from passing on a reader
