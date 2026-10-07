@@ -49,7 +49,7 @@ case "$RALPH_AGENT" in
   *) echo "[ralph] error: RALPH_AGENT must be pi or opencode, not '$RALPH_AGENT'" >&2; exit 64 ;;
 esac
 RALPH_THINKING="${RALPH_THINKING:-high}"
-if [ "$RALPH_AGENT" = opencode ]; then _fallback_default="opencode/nemotron-3-ultra-free,opencode/mimo-v2.6-flash-free"
+if [ "$RALPH_AGENT" = opencode ]; then _fallback_default="opencode/nemotron-3-ultra-free"   # mimo-v2.6-flash-free finished 0 of 3 fallback runs
 else _fallback_default="opencode-go/space-bunny-free"; fi
 RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-$_fallback_default}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
