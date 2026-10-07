@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Ralph loop driver: a fresh `pi -p` session per iteration, one Linear issue per iteration.
+# Ralph loop driver: a fresh agent session per iteration (`pi -p`, or `opencode run` with RALPH_AGENT=opencode),
+# one Linear issue per iteration.
 # See .pi/ralph/README.md. Subcommands: setup | plan | run | start | kill | merge | split | audit | status | stop
 set -euo pipefail
 
@@ -41,14 +42,21 @@ MAIN_ROOT="$(dirname "$COMMON")"
 
 # --- configuration (all overridable from the environment) -------------------------------------
 RALPH_WORKTREE="${RALPH_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
-RALPH_MODEL="${RALPH_MODEL:-opencode-go/longcat-2.5-preview-free}"
+RALPH_AGENT="${RALPH_AGENT:-pi}"                # pi | opencode: the CLI that runs each session
+case "$RALPH_AGENT" in
+  pi)       RALPH_MODEL="${RALPH_MODEL:-opencode-go/longcat-2.5-preview-free}" ;;
+  opencode) RALPH_MODEL="${RALPH_MODEL:-opencode/space-bunny-free}" ;;
+  *) echo "[ralph] error: RALPH_AGENT must be pi or opencode, not '$RALPH_AGENT'" >&2; exit 64 ;;
+esac
 RALPH_THINKING="${RALPH_THINKING:-high}"
-RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/space-bunny-free}"  # comma list; empty disables
+if [ "$RALPH_AGENT" = opencode ]; then _fallback_default="opencode/nemotron-3-ultra-free,opencode/mimo-v2.6-flash-free"
+else _fallback_default="opencode-go/space-bunny-free"; fi
+RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-$_fallback_default}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-7200}"          # seconds per iteration
 RALPH_SPLIT_MAX="${RALPH_SPLIT_MAX:-10}"        # parents split per `split` run
-RALPH_STALL="${RALPH_STALL:-1500}"                # seconds with no session/subagent write before pi is killed
+RALPH_STALL="${RALPH_STALL:-1500}"                # seconds with no session/subagent write before the agent is killed
 RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-5}"         # consecutive iterations with no valid control line
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
@@ -120,7 +128,7 @@ ensure_db() {
 
 # --- setup: worktree, dependencies, database ---------------------------------------------------
 cmd_setup() {
-  command -v pi >/dev/null || die "pi not on PATH"
+  command -v "$RALPH_AGENT" >/dev/null || die "$RALPH_AGENT not on PATH"
   command -v gh >/dev/null || die "gh not on PATH"
   git -C "$MAIN_ROOT" fetch origin --quiet
   if [ ! -d "$WT" ]; then
@@ -138,7 +146,13 @@ cmd_setup() {
   [ -f "$MAIN_ROOT/.env" ] && [ ! -f "$WT/.env" ] && cp "$MAIN_ROOT/.env" "$WT/.env"
   (cd "$WT" && bun install --frozen-lockfile)
   ensure_db
-  (cd "$WT" && pi mcp list >/dev/null 2>&1) || log "warning: 'pi mcp list' failed in the worktree - check Linear auth (pi mcp login linear)"
+  if [ "$RALPH_AGENT" = opencode ]; then
+    oc_prepare "$WT" "$RALPH_MODEL"
+    (cd "$WT" && opencode mcp list 2>&1 | grep -E '^. linear +connected') >/dev/null 2>&1 \
+      || log "warning: opencode's linear MCP server is not connected - run: (cd $WT && opencode mcp auth linear)"
+  else
+    (cd "$WT" && pi mcp list >/dev/null 2>&1) || log "warning: 'pi mcp list' failed in the worktree - check Linear auth (pi mcp login linear)"
+  fi
   for l in "hold:Never auto-merge:B60205" "ralph-fix:Needs a fix before the ralph loop can merge it:D93F0B" "needs-human-merge:Touches protected paths; a human merges:FBCA04"; do
     (cd "$WT" && gh label create "${l%%:*}" --description "$(echo "$l" | cut -d: -f2)" --color "${l##*:}" >/dev/null 2>&1) || true
   done
@@ -151,6 +165,7 @@ reset_worktree() {
   # Keep local state out of git (and out of `stash -u`) whatever the checked-out branch's .gitignore says.
   local excl; excl="$(git rev-parse --path-format=absolute --git-path info/exclude)"
   grep -qx '.ralph/' "$excl" 2>/dev/null || { mkdir -p "$(dirname "$excl")"; echo '.ralph/' >>"$excl"; }
+  grep -qx '.opencode/' "$excl" 2>/dev/null || echo '.opencode/' >>"$excl"   # the generated opencode config (oc_prepare)
   mkdir -p "$STATE/logs" "$STATE/sessions" "$STATE/research"
   if [ -n "$(git status --porcelain)" ]; then
     local br; br="$(git branch --show-current)"
@@ -168,6 +183,32 @@ reset_worktree() {
   git switch --detach "$RALPH_BASE_REF" --quiet
 }
 
+# agent_context: the Run-context bullet that depends on which CLI runs the session. The prompts were written for
+# pi's tools; under opencode they are mapped here instead of forking every prompt.
+agent_context() {
+  if [ "$RALPH_AGENT" = opencode ]; then
+    cat <<'OC'
+- agent CLI: opencode (not pi). The pi-only tools and options named above do not exist here. Map them like this:
+  - **Linear**: the `linear` MCP server's tools are called directly - `linear_get_issue`, `linear_save_issue`,
+    `linear_save_comment`, `linear_list_issues` - with the same arguments the `tools.mcp__linear__*` calls above
+    take. There is no `codemode`, and a result is the tool's own output, not wrapped in `content[0].text`.
+  - **Subagents**: the `subagent` tool, `{ agent: "ralph-reviewer", description, prompt, background: false }`,
+    runs that role in a fresh context and returns its report. **Always pass `background: false`.** This session
+    ends the moment you stop calling tools and reply, and a background subagent dies with it, so one launched
+    with `background: true` is lost and the iteration ends with no control line. `async: true` (also for
+    `ralph-researcher`, `ralph-verifier` and `ralph-merger`), `bg_wait`, `timeoutMs` and a per-launch `model` do
+    not exist: ignore those instructions. To run reviewers in parallel, make several foreground `subagent` calls
+    in **one** message. Subagents still have no Linear access. A subagent that fails or returns nothing is
+    relaunched once; a second failure is **Blocked**, as above.
+  - Never end your reply before the control line: "I will wait for it" is not an outcome, nothing wakes you.
+  - **Skills**: the `skill` tool lists them; if one is missing, read `.pi/skills/<name>/SKILL.md` directly.
+OC
+    printf -- '- the model fallback chain (%s) is handled by the driver per iteration, not by you.\n' "${RALPH_FALLBACK_MODELS:-<none>}"
+  else
+    printf -- '- subagent fallback models: %s. If a subagent launch fails with a provider error (429, overloaded, quota, unavailable), relaunch that same task once per listed model with the per-run override `model: "<id>"`. Do not edit agent files for this.\n' "${RALPH_FALLBACK_MODELS:-<none>}"
+  fi
+}
+
 run_context() {
   cat <<CTX
 
@@ -182,7 +223,7 @@ run_context() {
 - database for tests and verify scripts: DATABASE_URL=$DATABASE_URL (never use the default \`factory\` database)
 - ports for verify-* scripts: API_PORT=$RALPH_API_PORT WEB_PORT=$RALPH_WEB_PORT
 - DOCKER_HOST=${DOCKER_HOST:-<unset>}
-- subagent fallback models: ${RALPH_FALLBACK_MODELS:-<none>}. If a subagent launch fails with a provider error (429, overloaded, quota, unavailable), relaunch that same task once per listed model with the per-run override \`model: "<id>"\`. Do not edit agent files for this.
+$(agent_context)
 - date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 CTX
 }
@@ -191,7 +232,10 @@ CTX
 # with_timeout <secs> <cmd...>: hard cap, plus a stall watchdog when RALPH_STALL_DIR is set: a model that
 # stops answering (a free model returning nothing) leaves pi idle for hours, so kill it once nothing under that
 # directory (session + subagent transcripts) has been written for RALPH_STALL seconds. Returns 125 on a stall.
+# RALPH_STALL_CMD, when set, replaces the directory probe: a command that prints the newest activity as epoch
+# seconds (opencode keeps its sessions in a database, not files; see oc_activity).
 newest_mtime() { find "$1" -type f -exec stat -f %m {} + 2>/dev/null | sort -n | tail -n 1; }
+last_activity() { if [ -n "${RALPH_STALL_CMD:-}" ]; then eval "$RALPH_STALL_CMD"; else newest_mtime "$RALPH_STALL_DIR"; fi; }
 with_timeout() {
   local secs="$1"; shift
   local mark; mark="$(mktemp -u "${TMPDIR:-/tmp}/ralph-stall.XXXXXX")"
@@ -202,8 +246,8 @@ with_timeout() {
     while kill -0 "$pid" 2>/dev/null; do
       sleep 20; now="$(date +%s)"
       if [ $((now - start)) -ge "$secs" ]; then why=timeout
-      elif [ -n "${RALPH_STALL_DIR:-}" ] && [ $((now - start)) -ge "$RALPH_STALL" ] \
-        && [ $((now - $(newest_mtime "$RALPH_STALL_DIR"))) -ge "$RALPH_STALL" ]; then why=stall; : >"$mark"
+      elif [ -n "${RALPH_STALL_DIR:-}${RALPH_STALL_CMD:-}" ] && [ $((now - start)) -ge "$RALPH_STALL" ] \
+        && [ $((now - $(last_activity))) -ge "$RALPH_STALL" ]; then why=stall; : >"$mark"
       else continue; fi
       echo "$why" >&2
       kill -TERM "$pid" 2>/dev/null; sleep 10; kill -KILL "$pid" 2>/dev/null; break
@@ -218,10 +262,51 @@ with_timeout() {
   return "$rc"
 }
 
+# --- opencode (RALPH_AGENT=opencode) -------------------------------------------------------------
+# oc_prepare <cwd> <model>: write the project config `opencode run` reads from <cwd>/.opencode/. It is generated
+# per attempt because the subagent roles (from .pi/agents/ralph-*.md) are pinned to the model the attempt runs on.
+oc_prepare() {
+  python3 "$HERE/opencode-config.py" --agents-dir "$1/.pi/agents" --model "$2" \
+    --out "$1/.opencode/opencode.jsonc" --skills "$1/.pi/skills" --skills "$HOME/.pi/agent/skills" \
+    || die "could not write the opencode config for $2"
+}
+
+# oc_activity <cwd>: newest activity, in epoch seconds, of any opencode session started from <cwd>, subagent child
+# sessions included. A parent that waits on a long subagent writes nothing to stdout, so stdout alone cannot tell
+# "working" from "hung"; the session database can. Falls back to now when it cannot be read: never a false stall.
+oc_activity() {
+  local db dir t
+  db="$(opencode debug paths db 2>/dev/null)" || { date +%s; return; }
+  dir="$(cd "$1" && pwd -P)"
+  t="$(sqlite3 -readonly "$db" "select coalesce(max(m.time_updated), 0) from session_message m join session_v2 s on s.id = m.session_id where s.directory = '${dir//\'/\'\'}'" 2>/dev/null || true)"
+  case "$t" in ''|*[!0-9]*|0) date +%s ;; *) echo $((t / 1000)) ;; esac
+}
+
+# oc_last_line <out>: the last non-empty line of the final assistant text in an `opencode run --format json` log,
+# stripped the way the control-line check strips pi's output.
+oc_last_line() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+text = ""
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if event.get("type") == "text":
+        text = (event.get("part") or {}).get("text") or text
+lines = [l for l in text.splitlines() if l.strip()]
+print("".join(lines[-1].replace("`", "").split()) if lines else "")
+PY
+}
+
 # session <iteration> <plan|work>; echoes the control tag (NEXT|COMPLETE|BLOCKED|NONE)
 # A provider failure (rate limit, overload, quota, outage) is retried on the next model in the chain.
 # A timeout, or a clean run that simply forgot the control line, is not: another model will not fix those.
 provider_failed() { # <out> <err>
+  # opencode reports a refused or failed model call as a top-level `error` event (a failed tool call is a
+  # `tool_use` event, so this is never a tool's own failure): "not available in your country" matches no pattern below.
+  [ "$RALPH_AGENT" != opencode ] || ! grep -q '^{"type":"error"' "$1" 2>/dev/null || return 0
   tail -c 6000 "$1" "$2" 2>/dev/null | grep -qiE '429|rate.?limit|overloaded|quota|insufficient|unavailable|503|502|capacity|too many requests|ECONNRESET|ETIMEDOUT|No (API key|provider)|credit|billing'
 }
 
@@ -242,23 +327,34 @@ session() {
       export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
       export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
       [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
-      RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
-        --model "$m" --thinking "$RALPH_THINKING" \
-        --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
-        "$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")" \
-        </dev/null >"$out" 2>"$err"
+      local text; text="$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")"
+      if [ "$RALPH_AGENT" = opencode ]; then
+        # --standalone: a private server, so the config above is read for this directory and the run dies with
+        # the loop's process group instead of leaving a shared background service holding a stale one.
+        # --format json: one event per line, so the log both proves liveness and holds the final text.
+        oc_prepare "$PWD" "$m"
+        RALPH_STALL_CMD="oc_activity '$PWD'" with_timeout "$RALPH_TIMEOUT" \
+          opencode run --standalone --auto --format json -m "$m" \
+          --title "ralph-$mode-$n" "$text" </dev/null >"$out" 2>"$err"
+      else
+        RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
+          --model "$m" --thinking "$RALPH_THINKING" \
+          --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
+          "$text" </dev/null >"$out" 2>"$err"
+      fi
     ) || rc=$?
     local last; tag="NONE"
-    last="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 1 | tr -d '`' | tr -d '[:space:]' || true)"
+    if [ "$RALPH_AGENT" = opencode ]; then last="$(oc_last_line "$out")"
+    else last="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 1 | tr -d '`' | tr -d '[:space:]' || true)"; fi
     case "$last" in
       "<promise>NEXT</promise>") tag=NEXT ;;
       "<promise>COMPLETE</promise>") tag=COMPLETE ;;
       "<promise>BLOCKED</promise>") tag=BLOCKED ;;
     esac
-    [ "$rc" -eq 0 ] || log "pi exited $rc (see $err)"
+    [ "$rc" -eq 0 ] || log "$RALPH_AGENT exited $rc (see $err)"
     [ "$tag" = NONE ] || break                                  # a valid control line ends it
     if [ "$rc" -eq 125 ]; then                                  # stalled: nothing written for RALPH_STALL seconds
-      log "pi stalled on $m (no activity for ${RALPH_STALL}s); killed"
+      log "$RALPH_AGENT stalled on $m (no activity for ${RALPH_STALL}s); killed"
       [ "$attempt" -lt "${#models[@]}" ] && { log "falling back to ${models[$attempt]}"; continue; }
       break
     fi
@@ -512,6 +608,7 @@ cmd_split() {
   git -C "$SW" switch --detach "$RALPH_BASE_REF" --quiet
   local excl; excl="$(git -C "$SW" rev-parse --path-format=absolute --git-path info/exclude)"
   grep -qx '.ralph' "$excl" 2>/dev/null || echo '.ralph' >>"$excl"
+  grep -qx '.opencode/' "$excl" 2>/dev/null || echo '.opencode/' >>"$excl"
   [ -L "$SW/.ralph" ] || { rm -rf "$SW/.ralph"; ln -s "$STATE" "$SW/.ralph"; }
   [ -f "$SW/.pi/ralph/split.prompt.md" ] || die "$RALPH_BASE_REF has no split.prompt.md - push the ralph tooling first"
   local tag; tag="$(SESS_CWD="$SW" session 0 split)"
