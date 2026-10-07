@@ -20,11 +20,10 @@ measured: `packages/core`'s suite counts SQL statements through `Statement.Curre
 gets **1 page = 1 statement** for every page it takes — including over the hundreds of rows the test
 writes — while a per-session fold would grow with the table. The loop that pages is bounded by
 `count(*)` over `session_activity`, not by a constant, and asserts the positive: every page it took
-was one statement, the cursor ran out (rather than the loop hitting its budget), every row the count
-says the list can see came back — that count
-is the exact listable set, because `session_activity.session_id` is the primary key — and each of
-the 280 filler rows the test wrote came back exactly once. A list that stops early, drops a row, or
-folds a log per session therefore fails the suite. Verified 2026-10-05 (LOB-93): green on the shared
+was one statement, the cursor ran out (rather than the loop hitting its budget), each of
+the 280 filler rows the test wrote came back exactly once, and nothing the walk should have had was
+left over. A list that stops early, drops a row, or folds a log per session therefore fails the
+suite. Verified 2026-10-05 (LOB-93): green on the shared
 `factory_ralph` table (292 rows) and on a scratch table seeded with 340 unrelated rows (404–458 rows
 during the runs); reverting the bound to the old constant fails it on a table of six rows.
 Re-checked the same day after the completeness assertion was added: 4/4 on `factory_ralph` at
@@ -41,6 +40,29 @@ LOB-134 (2026-10-07) that suite also **sweeps** abandoned `<db>_core_*` database
 in its name and reads zero connections. That is the one way it reaches beyond its own database, and
 it is best-effort — the file header states the two leaks it leaves and the one live run it can
 misjudge.
+
+**What a walk is, since LOB-135 (2026-10-07).** Completeness used to be asserted as
+`entries.length >= count(*)`, which was the wrong instrument and turned the gate red about once in
+thirty-five runs with `expected 9 to be greater than or equal to 10` — never reproduced by a rerun.
+The cause is not the cursor. It is that `last_activity_at` is the ordering key _and_ a column every
+live event rewrites to "now" (`recordActivity` reaches it through `touch`, `setActivityStatus` and
+`setActivityCost`). A row below the cursor whose key advances above it leaves the range the walk is
+traversing, and `nextCursor` still says the walk finished. Reproduced deterministically on
+unmutated code: five rows, one row per page, one `UPDATE` between two pages, and the walk returned
+four with all five still in the table. The mirror image is real too — a row whose key moves _back_
+below the cursor comes back around, and only `rebuildIndexes` moves a key backwards. Both halves,
+with the raw probe output, are in `.verify/evidence/lob-135/01-diagnosis.md`.
+
+The suite therefore asserts `unaccounted(pages) === []`: nothing returned twice, and every row still
+below the first page's cursor returned. That is a question with a determinate answer, unlike a count
+read before the walk. Two cases stage the two failure modes directly — one moving a key up, one
+moving it back down — and a third stages a walk that stops early, because the missing-row half
+cannot be staged by any walk on unmutated code. The `count(*)` still bounds the page budget; it no
+longer claims to be the walk's answer. **Undecided** is whether a walk should be a snapshot at all:
+that needs either a transaction spanning every page (impossible — a walk is a client's loop across
+RPCs) or a materialised snapshot id carried in the cursor, and both are a contract decision rather
+than a fix. The service's `list` doc comment states the contract as it stands; a follow-up issue
+owns the decision.
 
 **What it does not prove.** Nothing measures the list under load, and `rebuildIndexes` has no runtime
 caller yet (it is the recovery path, driven by its test). Sessions created before the
