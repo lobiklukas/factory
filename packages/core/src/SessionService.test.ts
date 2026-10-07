@@ -2065,17 +2065,24 @@ describe("the abandoned-run sweep", () => {
    */
   it("runs before this file creates its own database", () => {
     const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
-    const sweep = source.indexOf("runPromise(sweepAbandonedRunDatabases");
-    const create = source.indexOf("sql`CREATE DATABASE");
+    // Anchored to the start of a line, and for exactly that statement. A bare `indexOf` on the
+    // callee's name is self-satisfying: this case's own failure message quotes the statement, so
+    // deleting the real call would still leave the needle in the file and the guard would go green
+    // on a sweep that no longer runs. Nothing here may quote the statement at the start of a line.
+    const call =
+      /^[ \t]*await maintenance\.runPromise\(sweepAbandonedRunDatabases/m.exec(
+        source,
+      );
+    const create = /sql`CREATE DATABASE/.exec(source);
     expect(
-      sweep,
-      `no module-level call to the sweep in this file, so a run killed between CREATE and afterAll leaks forever again: add \`await maintenance.runPromise(sweepAbandonedRunDatabases.pipe(Effect.orDie));\` above the CREATE.`,
-    ).toBeGreaterThan(-1);
-    expect(create).toBeGreaterThan(-1);
+      call?.index,
+      "this file never calls the sweep at module scope, so a run killed between CREATE and afterAll leaks forever again: put the call back above the CREATE.",
+    ).toBeDefined();
+    expect(create?.index).toBeDefined();
     expect(
-      sweep,
+      call?.index,
       "the sweep must run before the CREATE, or this run's own seconds-old database is a candidate for its own sweep",
-    ).toBeLessThan(create);
+    ).toBeLessThan(create?.index ?? 0);
   });
 
   /**
