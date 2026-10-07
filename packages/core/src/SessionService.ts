@@ -712,6 +712,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * keyset comparison is against the `timestamptz` Postgres ordered by and a page boundary
        * inside a group of rows sharing a millisecond loses none of it (LOB-95).
        *
+       * `nextCursor` is minted only when a row beyond this page exists: the query asks Postgres for
+       * `limit + 1` rows and a page that comes back short is the end of the walk. A page whose size
+       * equals the table's row count therefore carries no cursor, and paging from it repeats the
+       * page rather than continuing past it (LOB-140).
+       *
        * A *walk* — this call repeated from `nextCursor` until it is gone — is not a snapshot, and
        * cannot be one from here: the ordering key is `session_activity.last_activity_at`, which
        * every live event for an owned session rewrites to "now" (`recordActivity` reaches it

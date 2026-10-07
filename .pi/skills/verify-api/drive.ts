@@ -207,15 +207,22 @@ const program = Effect.gen(function* () {
     `${listKeys.length} keys, first=${listKeys[0]}`,
   );
 
-  const firstPage = yield* client.listSessions({ limit: 2 });
+  // One row per page, not two: the service mints a cursor only when a further row exists (it asks
+  // Postgres for `limit + 1`), so a page whose size equals the table's row count *ends* the walk
+  // instead of starting one. This driver creates exactly two sessions, so 1 is the largest limit
+  // that is guaranteed to leave a row behind. At 2 the first page covered a clean database,
+  // `nextCursor` was correctly absent, and the second call — made with an undefined cursor — was a
+  // repeat of the first (LOB-140).
+  const firstPage = yield* client.listSessions({ limit: 1 });
   const secondPage = yield* client.listSessions({
-    limit: 2,
+    limit: 1,
     cursor: firstPage.nextCursor,
   });
   assert(
     "listSessions pages by cursor without repeating a row",
-    firstPage.sessions.length === 2 &&
+    firstPage.sessions.length === 1 &&
       firstPage.nextCursor !== undefined &&
+      secondPage.sessions.length === 1 &&
       secondPage.sessions.every(
         (entry) => !firstPage.sessions.some((first) => first.id === entry.id),
       ),
