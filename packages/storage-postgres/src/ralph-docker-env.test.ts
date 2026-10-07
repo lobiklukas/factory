@@ -601,6 +601,7 @@ describe("the ralph driver's shell contract", () => {
 
       const out = bash(scratch, 'source "$LOOP"; docker_env; session 1 work', {
         DOCKER_HOST: EXPLICIT,
+        RALPH_AGENT: "pi",
         RALPH_WORKTREE: worktree,
         RALPH_FALLBACK_MODELS: "",
         RALPH_TIMEOUT: "5",
@@ -874,6 +875,54 @@ describe("the ralph driver's shell contract", () => {
         }
       }
       expect(missing).toEqual([]);
+    },
+  );
+
+  it(
+    "pins RALPH_AGENT=pi in every case that drives session, so it cannot launch the real agent CLI",
+    { timeout: 30_000 },
+    () => {
+      // Mutation: remove `RALPH_AGENT: "pi"` from the `session` case above — this guard reads the
+      // file back and fails, naming the case that drives `session` without pinning the agent.
+      // Without this case a future edit could silently drop the pin and the gate would go red
+      // when turbo's globalEnv includes RALPH_AGENT (which LOB-101 requests).
+      //
+      // The guard scans for `session` calls inside case bodies and verifies the `bash()` call
+      // that runs it has `RALPH_AGENT: "pi"` in its `extra` object. It does not enforce this
+      // for cases that only source the file without calling `session`.
+      const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const lines = source.split("\n");
+      const offending: string[] = [];
+
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i] ?? "";
+        // Find `it(` or `test(` declarations
+        if (/^\s*(?:it|test)\s*\(/.test(line)) {
+          const caseStart = i;
+          // Look for `session` call in the case body (within ~60 lines - case bodies can be long)
+          let hasSessionCall = false;
+          let hasRalphAgentPi = false;
+          for (let j = i + 1; j < Math.min(i + 60, lines.length); j++) {
+            const candidate = lines[j] ?? "";
+            if (/\bsession\s+[1-9]/.test(candidate)) {
+              hasSessionCall = true;
+            }
+            if (/RALPH_AGENT\s*:\s*"pi"/.test(candidate)) {
+              hasRalphAgentPi = true;
+            }
+            // Stop at the next case or end of describe (but only if we're past the case header)
+            if (/^\s*(?:it|test|describe)\s*\(/.test(candidate) && j > i + 5) {
+              break;
+            }
+          }
+          if (hasSessionCall && !hasRalphAgentPi) {
+            offending.push(`line ${String(caseStart + 1)}: ${line.trim()}`);
+          }
+        }
+        i++;
+      }
+      expect(offending).toEqual([]);
     },
   );
 });
