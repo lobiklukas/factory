@@ -2128,7 +2128,12 @@ describe("the abandoned-run sweep", () => {
     // sweep's `starts_with` has something a `LIKE` would take and it must not — the reach this
     // clause exists to prevent, which is dropping a database this file did not create.
     const wild = `${runDatabasePrefix.replace("_", "X")}${runDatabaseTail(now - TWO_HOURS)}`;
-    const decoys = [old, fresh, unstamped, wild];
+    // The same reach from the other side: a database under a *neighbouring* prefix, which a sweep
+    // that matched one prefix too widely would collect. `LIKE` misses it (`_core_` is not a
+    // wildcard-safe suffix for `%`) and `starts_with` on the real prefix does too, so only widening
+    // the matched prefix reaches it.
+    const neighbour = `${runDatabasePrefix.slice(0, -"_core_".length)}decoy_${runDatabaseTail(now - TWO_HOURS)}`;
+    const decoys = [old, fresh, unstamped, wild, neighbour];
     try {
       for (const name of decoys) await createDecoy(name);
       // Nothing was created by accident: every decoy the verdicts below turn on has to exist first,
@@ -2155,6 +2160,10 @@ describe("the abandoned-run sweep", () => {
       expect(
         await databaseExists(wild),
         "old, unclaimed and decodable, but its name is not under the prefix — a LIKE would match it and drop a database this file never created",
+      ).toBe(true);
+      expect(
+        await databaseExists(neighbour),
+        "old, unclaimed and decodable, but under a neighbouring prefix — a sweep matching one prefix too widely would collect a database this file never created",
       ).toBe(true);
       // This run's own database is the one a sweep must never touch, and it is the one under test.
       expect(await databaseExists(runDatabaseName)).toBe(true);
