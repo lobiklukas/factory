@@ -18,10 +18,10 @@ cursor comes from the previous page's `nextCursor`; anything else is `invalid_in
 **What proves it.** The cost claim is the interesting one, and it is asserted where it can be
 measured: `packages/core`'s suite counts SQL statements through `Statement.CurrentTransformer` and
 gets **1 page = 1 statement** for every page it takes — including over the hundreds of rows the test
-writes and the extra rows the shared database already holds — while a per-session fold would grow
-with the table. The loop that pages is bounded by `count(*)` over `session_activity`, not by a
-constant, and asserts the positive: every page it took was one statement, the cursor ran out (rather
-than the loop hitting its budget), every row the count says the list can see came back — that count
+writes — while a per-session fold would grow with the table. The loop that pages is bounded by
+`count(*)` over `session_activity`, not by a constant, and asserts the positive: every page it took
+was one statement, the cursor ran out (rather than the loop hitting its budget), every row the count
+says the list can see came back — that count
 is the exact listable set, because `session_activity.session_id` is the primary key — and each of
 the 280 filler rows the test wrote came back exactly once. A list that stops early, drops a row, or
 folds a log per session therefore fails the suite. Verified 2026-10-05 (LOB-93): green on the shared
@@ -29,9 +29,13 @@ folds a log per session therefore fails the suite. Verified 2026-10-05 (LOB-93):
 during the runs); reverting the bound to the old constant fails it on a table of six rows.
 Re-checked the same day after the completeness assertion was added: 4/4 on `factory_ralph` at
 312–321 rows, 3/3 on a scratch table of 340–346 rows, 10/10 for the whole file (`recheck-*.log` in
-the same evidence directory). The same suite also empties the index (`DELETE FROM sessions`), runs
-`rebuildIndexes`, and checks that every list field comes back from the logs — so the table is
-droppable, per D7.
+the same evidence directory). Since LOB-96 (2026-10-07) that suite runs against **a database it
+creates and drops for the run**, so the row counts above record the runs as they were rather than a
+property of the table it points at now, and the three cases at the end of `SessionService.test.ts`
+witness the isolation and the literal they share with `DatabaseConfig`. The gate measured 22/22 on
+the branch (`11-gate-final.log` in the LOB-96 evidence directory). The same suite also empties
+the index (`DELETE FROM sessions`), runs `rebuildIndexes`, and checks that every list field comes
+back from the logs — so the table is droppable, per D7, and now only ever the run's own table.
 
 **What it does not prove.** Nothing measures the list under load, and `rebuildIndexes` has no runtime
 caller yet (it is the recovery path, driven by its test). Sessions created before the
@@ -54,10 +58,12 @@ What is still millisecond-precise is the _displayed_ `lastActivityAt` (unchanged
 purpose: it is the wire shape the schema promises), so the same truncation has a second
 manifestation the suite can still hit: the ordering assertion compares the _rendered_
 `lastActivityAt`, so two rows that share a millisecond while differing in microseconds order the list
-differently than the assertion expects — it goes red when the two orders disagree, which a shared
-row landing in a filler's millisecond can arrange. That one reproduces deterministically (two seeded rows at
+differently than the assertion expects — it goes red when the two orders disagree, which a row the
+suite did not write landing in a filler's millisecond could arrange (before LOB-96, a shared row
+could). That one reproduces deterministically (two seeded rows at
 `…00.100456Z` and `…00.100Z`) and the pre-LOB-93 test file fails it identically
 (`recheck-2c-ms-ordering-pair-control.log`); it was also seen live on `factory_ralph`, where a filler
 row and a pre-existing row rendered to the same millisecond (`recheck-1-mutation-6-tail-truncation.log`,
 first run). The filler rows are distinct at second granularity, which rules out ties among themselves
-but not ties with rows the shared table already holds. LOB-100 owns that half.
+but not ties with rows the table already held. LOB-100 owns that half, and since LOB-96 the table
+is the run's own, so that half needs re-measuring before it is closed.
