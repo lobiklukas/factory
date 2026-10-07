@@ -566,6 +566,12 @@ const PAGE_SIZE = 25;
 const FILLERS = 280;
 
 describe("session list", () => {
+  // The page loop reads `SELECT count(*) FROM session_activity` and issues one list
+  // statement per page, so its cost scales with the *shared* table, not the 280 fillers
+  // this case writes. Measured 2026-10-07 at ~2 883 rows: ~360 ms, i.e. ~0.125 ms per
+  // row — the 5 s default is reached at ~40 000 rows. 30 000 is ~8x today's cost and
+  // gives the same headroom the rebuild guard uses; a database of its own per run
+  // (LOB-96) would also resolve it.
   it("shows a new session without a poll, pages by cursor, one statement per page", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -689,7 +695,7 @@ describe("session list", () => {
         [result.first.id, result.second.id, result.third.id].includes(id),
       );
     expect(mine).toEqual([result.third.id, result.second.id, result.first.id]);
-  });
+  }, 30_000);
 
   /**
    * A page boundary inside a group of rows that share a millisecond must not drop the rest of the
@@ -1663,6 +1669,93 @@ describe("request limits", () => {
     expect(failure.value.code).toBe("invalid_input");
   });
 });
+
+/**
+ * The pagination case's budget, guarded so it cannot silently go back to vitest's default (LOB-117).
+ *
+ * The case above reads `SELECT count(*) FROM session_activity` and issues one list statement per
+ * page, so its cost is the shared table's, not the 280 fillers it writes. Measured 2026-10-07 at
+ * ~2 883 rows: ~360 ms, i.e. ~0.125 ms per row — the 5 s default is reached at ~40 000 rows.
+ * 30 000 is ~8x today's cost and gives the same headroom the rebuild guard used; a database of its
+ * own per run (LOB-96) would also resolve it.
+ *
+ * What this cannot prove: that the declared budget is *enough*. No static check can — only the
+ * page loop's cost on the database in front of it, which is why the case itself is what fails when
+ * the deadline passes. Two other ways out of the problem satisfy the issue but not this reader, so
+ * the guard has to be updated with them: a repo-wide `testTimeout` in `vitest.config.ts`, and
+ * `it(name, { timeout }, fn)`. A skipped or excluded `describe("session list")` passes it as well,
+ * because every byte it reads is still in the file.
+ *
+ * If LOB-96's isolation makes the shared table's row count bounded by this file's own rows, delete
+ * this describe together with the case's third argument and the case comment that explains it, with
+ * the page loop's new cost in the commit message.
+ *
+ * Mutation checked: deleting the case's `, 30_000` back to `  });` — the budget case below goes red
+ * in 2-3 ms, with no database involved. `reads a budget only where one is declared` is the control
+ * that keeps it from passing on a reader that answers unconditionally.
+ */
+const PAGINATION_CASE =
+  "shows a new session without a poll, pages by cursor, one statement per page";
+
+/**
+ * The budget a case declares, or `undefined` when it would take vitest's default.
+ *
+ * The case's closing line is the first two-space-indented `}` after its `it(` — every nested
+ * callback in the body closes deeper — and the budget is the optional third argument on it.
+ */
+const declaredPaginationBudget = (
+  source: string,
+  caseName: string,
+): number | undefined => {
+  const start = source.indexOf(`it("${caseName}"`);
+  if (start < 0) return undefined;
+  const closing = /^ {2}\}(?:, (\d[\d_]*))?\);/m.exec(source.slice(start));
+  const digits = closing?.[1];
+  return digits === undefined ? undefined : Number(digits.replaceAll("_", ""));
+};
+
+describe("the pagination case's budget", () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+
+  it("declares a timeout big enough for the shared table's page loop", () => {
+    // The case has to be in the file at all, or the reader below would be reading nothing.
+    expect(source).toContain(PAGINATION_CASE);
+    const budget = declaredPaginationBudget(source, PAGINATION_CASE);
+    expect(
+      budget,
+      `no third-argument timeout on "${PAGINATION_CASE}", so it would take vitest's 5 s default, which is under the shared table's page loop at scale: declare \`, 30_000)\` on the case, or update this guard as its header says.`,
+    ).toBeDefined();
+    if (budget === undefined) throw new Error("unreachable");
+    // 30 000 is ~8x the ~360 ms the loop costs at ~2 883 rows. A smaller budget is a decision to
+    // re-measure the loop against the run-context database, not an edit.
+    expect(budget).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("reads a budget only where one is declared", () => {
+    // Negative control for the reader, on a source shaped like this file: a case whose body closes
+    // a nested callback first and then declares nothing. If this read as a budget, the case above
+    // would pass on a file that declares none.
+    const without = [
+      'describe("x", () => {',
+      `  it("${PAGINATION_CASE}", async () => {`,
+      "    const nested = (() => {",
+      "      return 1;",
+      "    });",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+    expect(declaredPaginationBudget(without, PAGINATION_CASE)).toBeUndefined();
+    // The same source with the third argument back reads as that number, underscore and all.
+    expect(
+      declaredPaginationBudget(
+        without.replace(/^ {2}\}\);$/m, "  }, 120_000);"),
+        PAGINATION_CASE,
+      ),
+    ).toBe(120_000);
+  });
+});
+
 /**
  * The run's own database, asserted rather than assumed (LOB-96).
  *
