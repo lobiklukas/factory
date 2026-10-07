@@ -19,7 +19,11 @@ and the port alone decides), and those changes are covered by
 `packages/storage-postgres/src/postgres-up.test.ts` rather than by a drive: with 5442 answering, a
 drive returns at the precondition's first probe and never reaches the compose line. The `bun
 drive.ts` half was re-run from the `ralph/LOB-106` worktree on 2026-10-06 (`:9400`, faux, Postgres on
-5442): **29/29**, evidence `.verify/evidence/lob-106/verify-api/`.
+5442): **29/29**, evidence `.verify/evidence/lob-106/verify-api/`. The `bun drive.ts` half was
+re-run from the `ralph/LOB-140` worktree on 2026-10-07 (`:9400`, faux): **29/29** on a database
+created empty for the run (two sessions, which is the case the paging check used to fail on) and
+**29/29** against the shared `factory_ralph` (2 883 rows in `session_activity`), evidence
+`.verify/evidence/lob-140/`.
 
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |

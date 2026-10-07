@@ -13,7 +13,12 @@ cursor comes from the previous page's `nextCursor`; anything else is `invalid_in
   "no poll" means: the index is written when the session is created;
 - a list entry carries the repo, a status, a real timestamp, and a spend field;
 - the page is ordered newest-activity-first;
-- a second page taken with `nextCursor` repeats no row from the first.
+- a second page taken with `nextCursor` repeats no row from the first. It is taken one row at a
+  time, because the service mints a cursor only when a row beyond the page exists (the query asks
+  Postgres for `limit + 1`): a page whose size equals the table's row count carries no cursor, and
+  paging from it repeats the page rather than continuing past it. The check asked for two rows per
+  page until LOB-140 (2026-10-07) and so failed on a database holding exactly two sessions, where
+  the first page covered the table and `nextCursor` was correctly absent.
 
 **What proves it.** The cost claim is the interesting one, and it is asserted where it can be
 measured: `packages/core`'s suite counts SQL statements through `Statement.CurrentTransformer` and
