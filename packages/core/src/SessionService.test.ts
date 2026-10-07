@@ -133,12 +133,18 @@ const configuredDatabase = new URL(configuredUrl).pathname.replace(/^\//, "");
 /**
  * How long a run's database has to sit unclaimed before the sweep will consider it abandoned.
  *
- * Generous on purpose, and for a measured reason: the alternative liveness signal — connections
- * alone — has a sub-millisecond gap between `CREATE DATABASE` and the first connect, so a sweep
- * running in that window would drop a database a *starting* run is about to use. An hour of encoded
- * age puts every honest run far inside the safe side of that gap, and only a run killed for longer
- * than an hour is ever a candidate. The cost of the margin is that a kill is not collected until a
- * later run, which is the residual leak the file header states.
+ * Generous on purpose, and the reason is structural rather than measured: the alternative liveness
+ * signal — connections alone — is empty for a *starting* run for far longer than anyone would
+ * guess. This file's own pool is a lazy `ManagedRuntime` built after its `CREATE DATABASE` and first
+ * used inside the first case, so between those two points the database it is about to use has zero
+ * backends for as long as module evaluation and test collection take. A sweep landing in that window
+ * would drop a database a run is about to need, so the age has to be long compared with *that*, and
+ * an hour is long compared with seconds.
+ *
+ * What the hour does not buy is certainty: a database under this prefix that is over an hour old and
+ * reads zero connections at the instant of the query is a candidate whatever it really is. A run that
+ * has outlived the hour and is between connections at that instant is the one case this sweep can
+ * misjudge, and it is the case the residual-leak note in the file header is about.
  */
 const STALE_RUN_AFTER_MS = 60 * 60 * 1000;
 
@@ -146,29 +152,40 @@ const STALE_RUN_AFTER_MS = 60 * 60 * 1000;
 const RUN_RANDOM_CHARS = 6;
 
 /**
+ * The widest a base-36 millisecond stamp gets before the year 2100, and the room every name this
+ * file mints reserves for its tail.
+ *
+ * Named and module-level because two places need it and they must not disagree: the reservation
+ * below cuts the base, and the case that checks every name fits inside 63 bytes measures the result.
+ * That case used to re-derive the arithmetic locally, and narrowing the real reservation by one
+ * character left it green while names overran the limit and Postgres truncated them silently.
+ */
+const MAX_STAMP_WIDTH = 9;
+const RUN_NAME_RESERVED =
+  `_core_`.length + RUN_RANDOM_CHARS + 1 + MAX_STAMP_WIDTH;
+
+/**
  * The head every database name this file mints shares, and therefore the prefix the sweep matches.
  *
  * Derived from the configured database with a *fixed* reservation for the tail, not with the tail's
  * measured length: the tail carries a base-36 millisecond stamp whose width changes (8 characters
- * today, 9 from 2059), and a prefix derived from a varying reservation would change with it, so
- * today's names would stop matching tomorrow's sweep.
+ * today, 9 from 2059-05-25, which is `36 ** 8` milliseconds after the epoch), and a prefix derived
+ * from a varying reservation would change with it, so today's names would stop matching tomorrow's
+ * sweep.
  *
  * Every identifier this file issues is quoted — `sql(name)` escapes it — so Postgres does not fold
  * the name to lower case and does not need it folded. What *is* real is the 63-byte limit, which
  * applies to a quoted identifier too: it truncates silently, and a truncated tail would collide.
- * The reservation below keeps every name this file can mint inside it.
+ * `RUN_NAME_RESERVED` keeps every name this file can mint inside it.
  */
 const runDatabasePrefix = (() => {
-  // Nine characters is the widest a base-36 millisecond stamp gets before the year 2100.
-  const reserved = `_core_`.length + RUN_RANDOM_CHARS + 1 + 9;
   // `configuredDatabase` may be empty, which leaves the name with a leading underscore — a legal
   // identifier, and this one is quoted anyway. There is nothing to pad it with.
   const base = configuredDatabase
     .replaceAll(/[^a-z0-9_]/g, "_")
-    .slice(0, 63 - reserved);
+    .slice(0, 63 - RUN_NAME_RESERVED);
   return `${base}_core_`;
 })();
-
 /** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
 const runDatabaseTail = (at: number) =>
   `${randomBytes(3).toString("hex")}_${Math.trunc(at).toString(36)}`;
@@ -272,25 +289,25 @@ const runDatabases = Effect.gen(function* () {
 });
 
 /**
- * Drop every database under the prefix that an hour-old, connection-free run left behind.
+ * Drop every database under the prefix that is over an hour old and reads no connections.
  *
  * Best-effort, and the file header says so. All three conditions are necessary and none is
  * sufficient alone:
  *
- * - `runDatabaseName` is excluded explicitly even though it is seconds old, because that exclusion
- *   is what keeps this safe to reorder against the `CREATE` below.
- * - `connections > 0` is what separates a live run from an orphan, and it is why the age check
- *   exists at all: between `CREATE` and a run's first query there is a sub-millisecond window with
- *   no connection, and without an hour of encoded age a sweep landing in it would drop a run's
- *   database out from under it.
- * - an undecodable stamp is *skipped*, not guessed at. Dropping a database whose age is unknown is
- *   the one thing the stamp exists to prevent.
+ * - `runDatabaseName` is excluded explicitly even though it is seconds old, because that exclusion is
+ *   what keeps this safe to reorder against the `CREATE` below.
+ * - `connections > 0` separates a live run from an orphan, and it is why the age check exists at all
+ *   (see `STALE_RUN_AFTER_MS`): a starting run's database has no connections for as long as module
+ *   evaluation takes, so without an hour of encoded age a sweep could drop one out from under it.
+ * - an undecodable stamp is *skipped*, not guessed at. Dropping a database whose age is unknown is the
+ *   one thing the stamp exists to prevent.
  *
  * `IF EXISTS`, and not for tidiness. Two runs on one server each read the same list of orphans and
- * each drop them, so the loser of every such pair gets `3D000 database does not exist` — measured,
- * and it fails the *whole file* at import rather than one case. The read and the drop cannot be
- * atomic without locking every candidate against every other run, which is far more coordination
- * than sweeping abandoned databases is worth; making the drop tolerant of the loser is enough.
+ * each drop them, so the loser of every such pair gets `3D000 database "…" does not exist` — measured
+ * against this container, and it fails the *whole file* at import rather than one case. The read and
+ * the drop cannot be made atomic without locking every candidate against every other run, which is far
+ * more coordination than sweeping abandoned databases is worth; `IF EXISTS` turns the loser's error
+ * into a NOTICE and a no-op, which is enough.
  */
 const sweepAbandonedRunDatabases = Effect.gen(function* () {
   const sql = yield* SqlClient;
@@ -315,10 +332,12 @@ const sweepAbandonedRunDatabases = Effect.gen(function* () {
  * Create the run's database, loudly, after collecting what earlier runs abandoned (LOB-134).
  *
  * The sweep is its own statement rather than part of this effect, because it is a different job with
- * a different blast radius: it touches *other* runs' databases, and a sweep that cannot run must not
- * stop this run from having one of its own. A failure in *this* effect is the loop's Postgres
- * precondition failing, which the gate must not paper over: there is no fallback to the configured
- * database, because pointing at that is the defect.
+ * a different blast radius: it drops *other* runs' databases, so a failure inside it is worth being
+ * able to read as a sweep failure rather than as a `CREATE` failure. It is not isolated from this
+ * file's fate, though — it is a top-level `await … orDie`, so a sweep that cannot run at all fails
+ * the whole file before this `CREATE` is reached. That is intended rather than tolerated: a role that
+ * cannot sweep a database also cannot create one, so the sweep failing is the Postgres precondition
+ * failing, and there is no fallback to the configured database because pointing at that is the defect.
  */
 await maintenance.runPromise(sweepAbandonedRunDatabases.pipe(Effect.orDie));
 
@@ -2024,11 +2043,138 @@ describe("this suite's database", () => {
  * case here goes red on it.
  */
 describe("the abandoned-run sweep", () => {
+  /** Create a database under this run's prefix, so the sweep below has something to decide about. */
+  const createDecoy = (name: string) =>
+    maintenance.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`CREATE DATABASE ${sql(name)}`;
+      }).pipe(Effect.orDie),
+    );
+
+  /** Drop a decoy whatever the case did, so a red case is not also a leaked database. */
+  const dropDecoy = (name: string) =>
+    maintenance.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DROP DATABASE IF EXISTS ${sql(name)} WITH (FORCE)`;
+      }).pipe(Effect.orDie),
+    );
+
+  const databaseExists = (name: string) =>
+    maintenance.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ present: boolean }>`
+          SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = ${name}) AS present
+        `;
+        return rows[0]?.present ?? false;
+      }).pipe(Effect.orDie),
+    );
+
+  /** The server's idea of now, read the way the sweep reads it. */
+  const nowMillis = () => maintenance.runPromise(Clock.currentTimeMillis);
+
   /**
-   * A fixed instant rather than `Date.now()`: the round trip is exact either way, and a literal
-   * makes the case a statement about the encoding instead of about when it happened to run.
+   * A fixed instant rather than the clock: the round trip is exact either way, and a literal makes
+   * the encoding cases statements about the encoding rather than about when they happened to run.
    */
   const AN_INSTANT = 1_789_000_000_000;
+  /** Far enough past the hour threshold that no run of this suite can make it young again. */
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+
+  /**
+   * The sweep's own decisions, driven against real databases.
+   *
+   * This is the case the issue asks for under AC3 ("a seeded orphan that survives a run is the
+   * shape"), and the reason it exists is that the module-level sweep runs at import — before any case
+   * in this file exists — so a seeded orphan cannot be watched disappear by the real call. Calling
+   * `sweepAbandonedRunDatabases` directly stages exactly what that call sees and nothing else, which
+   * turns three conditions into three assertions instead of leaving them to a hand-run drive.
+   *
+   * Both ages come from the clock rather than from `AN_INSTANT`, because a literal that is "fresh"
+   * today is an hour old next month, and a decoy meant to prove the age clause *keeps* a database
+   * must never be able to drift into the set it drops. That is not hypothetical: the first version
+   * of this case used a literal about ten days in the past and the sweep dropped its own "fresh"
+   * decoy, which is the age clause working and the fixture lying.
+   *
+   * The cleanup runs in a `finally`: this file creates and drops databases for its own reasons, and a
+   * case that leaked three more on failure would be the leak it exists to argue about.
+   */
+  it("drops only the database that is old, unclaimed and decodable", async () => {
+    const now = await nowMillis();
+    // Built through the same tail the sweep decodes, so the only thing separating these two is age.
+    const old = `${runDatabasePrefix}${runDatabaseTail(now - TWO_HOURS)}`;
+    const fresh = `${runDatabasePrefix}${runDatabaseTail(now)}`;
+    const unstamped = `${runDatabasePrefix}abcdef`;
+    const decoys = [old, fresh, unstamped];
+    try {
+      for (const name of decoys) await createDecoy(name);
+      // Nothing was created by accident: every decoy the verdicts below turn on has to exist first,
+      // or "the fresh one survived" would pass on a database that was never there.
+      for (const name of decoys) {
+        expect(await databaseExists(name), `${name} was never created`).toBe(
+          true,
+        );
+      }
+      await maintenance.runPromise(
+        sweepAbandonedRunDatabases.pipe(Effect.orDie),
+      );
+      expect(
+        await databaseExists(old),
+        "the hour-old, connection-free, decodable database is what the sweep exists to collect",
+      ).toBe(false);
+      expect(await databaseExists(fresh), "too young to be abandoned").toBe(
+        true,
+      );
+      expect(
+        await databaseExists(unstamped),
+        "no stamp, so no age to read, so not this sweep's to drop",
+      ).toBe(true);
+      // This run's own database is the one a sweep must never touch, and it is the one under test.
+      expect(await databaseExists(runDatabaseName)).toBe(true);
+    } finally {
+      for (const name of decoys) await dropDecoy(name);
+    }
+  });
+
+  /**
+   * A live run's database is not an orphan however old it is.
+   *
+   * The connection is a real one, held by a second `PgClient` on the decoy's own URL, because the
+   * condition under test is what `pg_stat_activity` reports — a faked count would test the faker.
+   */
+  it("keeps a database that still has a connection, however old it is", async () => {
+    const name = `${runDatabasePrefix}${runDatabaseTail((await nowMillis()) - TWO_HOURS)}`;
+    const url = new URL(configuredUrl);
+    url.pathname = `/${name}`;
+    const holder = ManagedRuntime.make(
+      PgClient.layer({
+        url: Redacted.make(url.toString()),
+        maxConnections: 1,
+      }).pipe(Layer.provide(BunServices.layer)),
+    );
+    try {
+      await createDecoy(name);
+      // Force the pool to open, so the backend exists and `pg_stat_activity` can count it.
+      await holder.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`SELECT 1`;
+        }).pipe(Effect.orDie),
+      );
+      await maintenance.runPromise(
+        sweepAbandonedRunDatabases.pipe(Effect.orDie),
+      );
+      expect(
+        await databaseExists(name),
+        "an old database with a live connection is a long run, not an orphan",
+      ).toBe(true);
+    } finally {
+      await holder.dispose();
+      await dropDecoy(name);
+    }
+  }, 30_000);
 
   it("reads back the start time it encoded", () => {
     const at = AN_INSTANT;
