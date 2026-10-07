@@ -89,9 +89,12 @@ export const MAX_MESSAGE_CHARS = 100_000;
 /** How often idle owners are swept, when sweeping is at all. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
-/** Page size for `listSessions` when the caller does not choose one, and the largest we serve. */
+/** Page size for `listSessions` when the caller does not choose one. */
 const DEFAULT_PAGE_SIZE = 25;
-const MAX_PAGE_SIZE = 100;
+/** Largest page `listSessions` will serve, however large a limit the caller asks for. Exported for
+ * the list tests: the cap is part of the service's contract, so a case that straddles it has to
+ * read the real value rather than a copy. */
+export const MAX_PAGE_SIZE = 100;
 
 export type SessionServiceShape = {
   readonly create: (
@@ -163,6 +166,14 @@ type ListRow = {
   readonly status: string;
   readonly createdAt: string;
   readonly lastActivityAt: string;
+  /**
+   * The same instant as `lastActivityAt` at full microsecond precision. The keyset cursor is built
+   * from this, not from `lastActivityAt`: the display value is truncated to milliseconds, and a
+   * cursor cast back from it is then strictly *less* than the stored `timestamptz`, so every
+   * remaining row in a same-millisecond group fails `(last_activity_at, id) < (cursor.at, cursor.id)`
+   * and the page ends early.
+   */
+  readonly lastActivityExact: string;
   readonly costTotal: number;
 };
 
@@ -719,6 +730,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 a.status,
                 a.cost_total,
                 to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_activity_at,
+                to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_activity_exact,
                 to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
               FROM session_activity a
               JOIN sessions s ON s.id = a.session_id
@@ -732,9 +744,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
           const page = rows.slice(0, limit);
           const last = page.at(-1);
+          // The cursor carries the exact instant, not the millisecond display value: the keyset
+          // comparison is against the stored `timestamptz`, so the cursor has to be too. A cursor
+          // minted by an older build is millisecond-truncated and stays lossy for that one page
+          // boundary; nothing can repair a value that has already been rounded.
           const nextCursor =
             rows.length > limit && last !== undefined
-              ? `${last.lastActivityAt}|${last.id}`
+              ? `${last.lastActivityExact}|${last.id}`
               : undefined;
           const sessions: SessionListEntry[] = [];
           for (const row of page) {
