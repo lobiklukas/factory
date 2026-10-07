@@ -50,6 +50,8 @@ interface Scratch {
  *
  * - `*-refused`: a top-level `error` event and exit 1, the way a refused model call looks.
  * - `*-prose`: a final text that does not end on a control line.
+ * - `*-quiet`: the model going quiet mid-turn: a first run that ends on a `step_start` and exits 0, and,
+ *   when it is resumed (`-s <session>`), a final text that ends on the control line.
  * - anything else: a final text whose last line is `` `<promise>NEXT</promise>` `` after prose.
  */
 const writeShim = (scratch: Scratch): void => {
@@ -69,6 +71,12 @@ const writeShim = (scratch: Scratch): void => {
       "  *-refused)",
       `    echo '{"type":"error","error":{"type":"provider.auth","message":"This model is not available in your country","status":403}}'`,
       "    exit 1 ;;",
+      "  *-quiet)",
+      '    case " $* " in',
+      '      *" -s ses_test "*) printf \'%s\\n\' \'{"type":"text","sessionID":"ses_test","part":{"text":"Resumed.\\n<promise>NEXT</promise>"}}\' ;;',
+      `      *) echo '{"type":"step_start","sessionID":"ses_test","part":{"type":"step-start"}}' ;;`,
+      "    esac",
+      "    exit 0 ;;",
       "  *-prose)",
       `    echo '{"type":"text","part":{"text":"All done, nothing more to say."}}'`,
       "    exit 0 ;;",
@@ -161,6 +169,12 @@ const run = (
   };
 };
 
+/** One record per shim call; the prompt inside a record spans lines, so split on the record marker. */
+const readCalls = (scratch: Scratch): string[] =>
+  readFileSync(scratch.calls, "utf8")
+    .split(/^argv=/m)
+    .filter((record) => record.length > 0);
+
 const readRuns = (scratch: Scratch): ReadonlyArray<Record<string, unknown>> =>
   readFileSync(path.join(scratch.worktree, ".ralph/runs.jsonl"), "utf8")
     .trim()
@@ -176,10 +190,7 @@ describe("RALPH_AGENT=opencode", () => {
       RALPH_MODEL: "opencode/free-ok",
     });
     expect(result.stdout.trim()).toBe("NEXT");
-    // One record per call; the prompt inside a record spans lines, so split on the record marker.
-    const calls = readFileSync(scratch.calls, "utf8")
-      .split(/^argv=/m)
-      .filter((record) => record.length > 0);
+    const calls = readCalls(scratch);
     expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call).toContain(
@@ -208,6 +219,40 @@ describe("RALPH_AGENT=opencode", () => {
     const records = readRuns(scratch);
     expect(records.map((r) => r["tag"])).toEqual(["NEXT", "NONE"]);
     expect(records.map((r) => r["exit"])).toEqual([0, 0]);
+    // Ending on text without a control line is the model's answer, not a cut-off: no resume.
+    expect(readCalls(scratch)).toHaveLength(2);
+  });
+
+  // Mutation: delete the `oc_cut_short` loop (the iteration ends NONE after one call and the whole
+  // orientation is redone), resume without `-s "$sid"` (a new session, not the same one), or drop the
+  // `RALPH_OC_RESUMES` bound.
+  it("resumes the same session when the model returns nothing mid-turn", () => {
+    const scratch = mkScratch();
+    const result = run(scratch, 'source "$LOOP"; session 1 work', {
+      RALPH_MODEL: "opencode/free-quiet",
+    });
+    expect(result.stdout.trim()).toBe("NEXT");
+    expect(result.stderr).toContain(
+      "opencode ended mid-turn on opencode/free-quiet (the model returned nothing); resuming ses_test (1/3)",
+    );
+    const calls = readCalls(scratch);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).not.toContain(" -s ");
+    expect(calls[1]).toContain("-m opencode/free-quiet -s ses_test");
+    const [record] = readRuns(scratch);
+    expect(record).toMatchObject({ tag: "NEXT", exit: 0, attempts: 1 });
+  });
+
+  it("stops resuming after RALPH_OC_RESUMES and leaves the iteration without a control line", () => {
+    const scratch = mkScratch();
+    // The shim answers a resume with the control line, so cap the resumes at zero: the first
+    // cut-off run is then final, which is what a bound of `n` does after `n` cut-offs.
+    const result = run(scratch, 'source "$LOOP"; session 1 work', {
+      RALPH_MODEL: "opencode/free-quiet",
+      RALPH_OC_RESUMES: "0",
+    });
+    expect(result.stdout.trim()).toBe("NONE");
+    expect(readCalls(scratch)).toHaveLength(1);
   });
 
   // Mutation: delete the `^{"type":"error"` clause from `provider_failed` — the shim's refusal

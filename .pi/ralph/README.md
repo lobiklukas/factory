@@ -89,6 +89,9 @@ RALPH_AGENT=opencode bun run ralph:run --max 3
 - **Stall watchdog.** pi's sessions are files; opencode's are a database. `oc_activity` reads the newest message
   time of any session (subagent children included) started from the worktree, so a parent waiting on a long
   subagent is not mistaken for a hung one.
+- **Resume.** A free model sometimes returns nothing mid-turn: opencode exits 0 on a log that ends on a `step_start`.
+  The driver resumes that session (`-s <id>`, up to `RALPH_OC_RESUMES`, default 3) instead of redoing the iteration.
+  A run that ends on text without a control line is not resumed.
 - **Fallback.** A top-level `error` event (a refused or failed model call) counts as a provider failure and moves to
   the next model, as pi's 429/overload patterns do.
 
