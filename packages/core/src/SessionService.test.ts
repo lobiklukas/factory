@@ -1441,16 +1441,17 @@ describe("session list", () => {
   // That was the whole shared database when this case ran against whatever `DATABASE_URL` named:
   // ~670 session logs / 11 754 commits measured 5.8-6.0 s on 2026-10-06, so the case needed a
   // 30 000 budget that expired at ~4 050 logs (LOB-113), and its `DELETE FROM sessions` reached
-  // every session on the machine (LOB-96). Both costs go with the same fix: this file runs against
-  // a database of its own (the block above), so the delete below and the fold that follows are
-  // about this run's rows — 157 ms measured, against vitest's 5 s default, where it used to take
-  // 20 s against the run-context database's 2 883 sessions.
+  // every session on the machine (LOB-96). Both costs go with two fixes: this file runs against a
+  // database of its own (the block above), so the delete below and the fold that follows are about
+  // this run's rows; and the fold itself is batched (LOB-115), so it no longer costs round trips
+  // per log or per index row. Measured against the run-context database's 2 883 session logs, the
+  // fold went 23 050 ms -> 818 ms and writes byte-identical rows; here it is a handful of rows.
   //
-  // Mutation checked: `rebuild.ts`'s `if (!Schema.is(SessionId)(log.logId)) continue;` to
-  // `if (true) continue;`, which makes the fold restore nothing — this case goes red 1 of 22 on
-  // `expect(result.report.sessions).toBeGreaterThan(0)`, which is the first assertion the emptied
-  // index reaches, and `describe("this suite's database")` stays green because the fold's job and
-  // the isolation's are separate claims and each is worth its own case.
+  // Mutation checked: `rebuild.ts`'s `logs.filter((log) => Schema.is(SessionId)(log.logId))` to
+  // `logs.filter(() => false)`, which makes the fold restore nothing — this case goes red 1 of 22
+  // on `expect(result.report.sessions).toBeGreaterThan(0)`, which is the first assertion the
+  // emptied index reaches, and `describe("this suite's database")` stays green because the fold's
+  // job and the isolation's are separate claims and each is worth its own case.
   it("rebuilds the index from the log after the index tables are emptied", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -1522,6 +1523,122 @@ describe("session list", () => {
       "https://github.com/lobiklukas/factory.git",
     );
     expect(result.repos[0]?.defaultBaseRef).toBe("main");
+  });
+
+  // The fold writes its index rows as one `INSERT … SELECT FROM unnest(…)` per batch rather than
+  // one statement per row (LOB-115). That is a change of SQL shape with no change of meaning, and
+  // the shape has one thing the per-row statements did not have to get right: a column's NULLs
+  // arrive inside an array. A scratch session is the row that has them — `repo` and `base_ref` are
+  // both NULL, and `session_activity.status` is 'idle' for every row in a batch, so a status array
+  // that were one element long would pad the rest with NULL and fail the NOT NULL. So this case is
+  // about columns that are NULL, columns that are constant, and two slugs in one batch.
+  it("folds a batch of logs into index rows, including a scratch session's NULL repo", async () => {
+    const otherRepo = RepoSlugSchema.make("lobiklukas/other");
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const onMain = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "batch main",
+        });
+        const onFeature = yield* sessions.create({
+          repo: otherRepo,
+          baseRef: "feature/board",
+          title: "batch feature",
+        });
+        const scratch = yield* sessions.create({ title: "batch scratch" });
+        yield* sessions.send({ sessionId: onMain.id, content: "hello" });
+        yield* sessions.send({ sessionId: onFeature.id, content: "hello" });
+        yield* sessions.send({ sessionId: scratch.id, content: "hello" });
+        for (const id of [onMain.id, onFeature.id, scratch.id]) {
+          yield* waitUntil(
+            sessions
+              .get(id)
+              .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+            "the turn to settle",
+          );
+        }
+
+        yield* sql`DELETE FROM sessions`;
+        const report = yield* rebuildIndexes;
+
+        const rows = yield* sql<{
+          id: string;
+          title: string;
+          repo: string | null;
+          baseRef: string | null;
+          requestId: string | null;
+        }>`
+          SELECT id, title, repo, base_ref AS "baseRef", request_id AS "requestId"
+          FROM sessions
+          WHERE id = ANY(${[onMain.id, onFeature.id, scratch.id]})
+          ORDER BY title
+        `;
+        const activity = yield* sql<{
+          sessionId: string;
+          status: string;
+          lastActivityAt: string;
+        }>`
+          SELECT session_id AS "sessionId", status, last_activity_at AS "lastActivityAt"
+          FROM session_activity
+          WHERE session_id = ANY(${[onMain.id, onFeature.id, scratch.id]})
+          ORDER BY session_id
+        `;
+        const repos = yield* sql<{ slug: string; defaultBaseRef: string }>`
+          SELECT slug, default_base_ref AS "defaultBaseRef"
+          FROM repos
+          WHERE slug = ANY(${[factoryRepo, otherRepo]})
+          ORDER BY slug
+        `;
+        return { report, rows, activity, repos };
+      }),
+    );
+
+    expect(result.report.sessions).toBeGreaterThanOrEqual(3);
+    expect(result.rows).toEqual([
+      {
+        id: expect.any(String),
+        title: "batch feature",
+        repo: "lobiklukas/other",
+        baseRef: "feature/board",
+        requestId: null,
+      },
+      {
+        id: expect.any(String),
+        title: "batch main",
+        repo: "lobiklukas/factory",
+        baseRef: "main",
+        requestId: null,
+      },
+      {
+        id: expect.any(String),
+        title: "batch scratch",
+        repo: null,
+        baseRef: null,
+        requestId: null,
+      },
+    ]);
+    // 'idle' for every row of the batch, not the first: a rebuild owns nothing (D8).
+    expect(result.activity.map((row) => row.status)).toEqual([
+      "idle",
+      "idle",
+      "idle",
+    ]);
+    expect(
+      result.activity.every((row) => Date.parse(row.lastActivityAt) > 0),
+    ).toBe(true);
+    // A slug a log names arrives with no URL; the one registered keeps its default base ref.
+    expect(result.repos).toEqual([
+      { slug: "lobiklukas/factory", defaultBaseRef: "main" },
+      { slug: "lobiklukas/other", defaultBaseRef: "feature/board" },
+    ]);
   });
 });
 

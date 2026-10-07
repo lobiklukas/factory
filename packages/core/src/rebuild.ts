@@ -19,6 +19,12 @@
  * What it always answers from the fold: title (`factory.title` entries), repo and base ref
  * (`factory.session`), spend (`pi.usage`), created/last activity (`commits.committed_at`), and
  * status — always `idle`, because a rebuild runs in a process that owns nothing (D8).
+ *
+ * How it is shaped, because a recovery path is only as good as how long it takes to run: the fold
+ * reads every session log in pages (`PostgresStorage.readers`) and writes the index rows in batches,
+ * so its cost is in the number of commits and rows rather than in the number of round trips. What
+ * it computes is unchanged by either — LOB-115 measured the batched fold writing byte-identical
+ * `sessions` and `session_activity` rows, 25x faster.
  */
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -92,14 +98,25 @@ export const rebuildIndexes: Effect.Effect<
   // read through `PostgresStorage.reader`.
   const sessionLogs = logs.filter((log) => Schema.is(SessionId)(log.logId));
   const folds = yield* Effect.tryPromise({
-    try: () => PostgresStorage.readers(sql, sessionLogs.map((log) => log.logId)),
+    try: () =>
+      PostgresStorage.readers(
+        sql,
+        sessionLogs.map((log) => log.logId),
+      ),
     catch: (cause) => storageError("read the session logs", cause),
   });
 
   const folded: FoldedRow[] = [];
   for (const log of sessionLogs) {
     const storage = folds.get(log.logId);
-    if (storage === undefined) continue;
+    // `readers` returns a store for every id it was given and this loop walks the same list, so a
+    // miss is a broken promise rather than a shape — and it is loud rather than a skip, because a
+    // skip writes an index that is missing a session and a count that agrees with the omission.
+    if (storage === undefined)
+      return yield* storageError(
+        `fold log ${log.logId}`,
+        "no store for a log the batched read was asked for",
+      );
     const sessionLog = yield* readSessionLog(storage);
 
     const title = sessionLog.entries
