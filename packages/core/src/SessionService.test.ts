@@ -16,9 +16,9 @@
  * any table in whatever `DATABASE_URL` points at. It does write two kinds of thing there that are
  * not rows: it adds and removes databases in the shared `pg_database` catalogue, and it reads that
  * catalogue and `pg_stat_activity`. Every statement it issues against the configured database is
- * one of seven, and the `describe("this suite's database")` block names the six that protect the
- * configured database; the seventh is the new cases' own `SELECT EXISTS … FROM pg_database`, which
- * only ever asks whether a database this file minted is still there.
+ * one of the shapes enumerated at `maintenance` below; the only ones that reach past a database
+ * this file minted are the `pg_database`/`pg_stat_activity` reads and a `SELECT EXISTS` asking
+ * whether a database it minted is still there.
  *
  * A run killed between `CREATE DATABASE` and `afterAll` — a signal, a crash, an OOM kill — never
  * reaches its own drop, so this file also sweeps what earlier runs abandoned before it creates its
@@ -258,14 +258,14 @@ const runDatabaseUrl = (() => {
  *
  * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops
  * databases, and migrating somebody else's would be the very reach this change is about. It never
- * writes a `sessions` row either. Seven *shapes* of statement reach the configured database and no
- * eighth — `CREATE DATABASE` and `DROP DATABASE` for the run's own, `DROP DATABASE` for an
- * abandoned one (the sweep), the sweep's own `pg_database`/`pg_stat_activity` read,
- * `current_database()`, a `to_regclass('public.sessions')` probe paired with a
- * `SELECT id FROM sessions` in one helper that `describe("this suite's database")` runs once
- * before any case and once after them, and the sweep cases' `SELECT EXISTS … FROM pg_database`.
- * That block names the first six by what each one protects; the seventh arrived with the sweep and
- * is a read of a database this file minted.
+ * writes a `sessions` row either. The shapes of statement that reach the configured database are:
+ * `CREATE DATABASE` for the run's own; `DROP DATABASE` for the run's own; `DROP DATABASE IF
+ * EXISTS` for a decoy, and for an abandoned one (the sweep); the sweep's `pg_database` /
+ * `pg_stat_activity` read; `current_database()`; a `to_regclass('public.sessions')` probe paired
+ * with a `SELECT id FROM sessions`, both in one helper; and the sweep cases' `SELECT EXISTS …
+ * FROM pg_database`. This list is the census — it is stated here rather than counted above because
+ * a count is ambiguous (the `to_regclass` pair) and would drift the first time a shape is added.
+ * Only the last two reach past a database this file minted, and neither writes.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -2289,7 +2289,10 @@ describe("the abandoned-run sweep", () => {
         "an old database with a live connection is a long run, not an orphan",
       ).toBe(true);
     } finally {
-      await held?.holder.dispose();
+      // The disposal is `.catch`ed before the drop loop, not after it or in a sibling `finally`:
+      // a rejecting `dispose` would abandon the loop and strand every name in `staged`, and a red
+      // case leaking the databases it made is the exact class of leak this issue exists to collect.
+      await held?.holder.dispose().catch(() => undefined);
       for (const name of staged) await dropDecoy(name);
     }
   }, 30_000);
