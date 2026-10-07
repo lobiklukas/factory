@@ -11,7 +11,7 @@ die() { log "error: $*"; exit 1; }
 # it. `$1` overrides the invocation name, because there is no path to print when bash read this file
 # from stdin (`$0` is the shell) and the file's own name is the useful thing to show there.
 usage() {
-  echo "usage: ${1:-$0} {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop}  (env: RALPH_MODEL RALPH_FALLBACK_MODELS RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2
+  echo "usage: ${1:-$0} {setup|plan|run [--max N]|start [--max N]|kill|merge|split|audit|status|stop|parallel ...}  (env: RALPH_MODEL RALPH_FALLBACK_MODELS RALPH_THINKING RALPH_PUSH RALPH_MERGE RALPH_MAX_ITER RALPH_WORKTREE ...)" >&2
 }
 
 # `bash < .pi/ralph/loop.sh` reads this file from stdin: `BASH_SOURCE[0]` is unset and `$0` is the
@@ -41,7 +41,14 @@ COMMON="$(git -C "$CHECKOUT" rev-parse --path-format=absolute --git-common-dir)"
 MAIN_ROOT="$(dirname "$COMMON")"
 
 # --- configuration (all overridable from the environment) -------------------------------------
-RALPH_WORKTREE="${RALPH_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
+# Parallel workers (RALPH_WORKER=N, see "Parallel workers" in README.md): worker 1 is the loop as it has always been;
+# worker N > 1 gets its own worktree, database and ports, and shares the plan, the progress notes and the claims.
+RALPH_WORKER="${RALPH_WORKER:-1}"
+case "$RALPH_WORKER" in ''|*[!0-9]*|0) echo "[ralph] error: RALPH_WORKER must be a positive integer, not '$RALPH_WORKER'" >&2; exit 64 ;; esac
+_sfx=""; [ "$RALPH_WORKER" -eq 1 ] || _sfx="-$RALPH_WORKER"
+RALPH_PRIMARY_WORKTREE="${RALPH_PRIMARY_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
+RALPH_SHARED="${RALPH_SHARED:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph-shared}"
+RALPH_WORKTREE="${RALPH_WORKTREE:-$RALPH_PRIMARY_WORKTREE$_sfx}"
 RALPH_AGENT="${RALPH_AGENT:-pi}"                # pi | opencode: the CLI that runs each session
 case "$RALPH_AGENT" in
   pi)       RALPH_MODEL="${RALPH_MODEL:-opencode-go/longcat-2.5-preview-free}" ;;
@@ -61,9 +68,10 @@ RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-5}"         # consecutive iterations with no
 RALPH_OC_RESUMES="${RALPH_OC_RESUMES:-3}"       # opencode: resumes of a session whose model returned nothing mid-turn
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
-RALPH_DB="${RALPH_DB:-factory_ralph}"
-RALPH_API_PORT="${RALPH_API_PORT:-9400}"
-RALPH_WEB_PORT="${RALPH_WEB_PORT:-3400}"
+RALPH_DB="${RALPH_DB:-factory_ralph${_sfx//-/_}}"
+RALPH_API_PORT="${RALPH_API_PORT:-$((9400 + 10 * (RALPH_WORKER - 1)))}"
+RALPH_WEB_PORT="${RALPH_WEB_PORT:-$((3400 + 10 * (RALPH_WORKER - 1)))}"
+RALPH_CLAIM_TTL="${RALPH_CLAIM_TTL:-10800}"      # seconds before another worker may take over an issue's claim
 
 WT="$RALPH_WORKTREE"
 STATE="$WT/.ralph"
@@ -128,6 +136,19 @@ ensure_db() {
 }
 
 # --- setup: worktree, dependencies, database ---------------------------------------------------
+# share_state: a worker beside worker 1 reads and writes worker 1's plan, progress notes, polish list and research
+# briefs (symlinks into its .ralph), so every worker sees one queue. Logs, sessions, runs and the lock stay its own.
+share_state() {
+  [ "$RALPH_WORKER" -gt 1 ] || return 0
+  local primary="$RALPH_PRIMARY_WORKTREE/.ralph" f
+  mkdir -p "$primary/research"
+  for f in plan.md progress.md polish.md; do
+    touch "$primary/$f" 2>/dev/null || true
+    [ -L "$STATE/$f" ] || { rm -f "$STATE/$f"; ln -s "$primary/$f" "$STATE/$f"; }
+  done
+  [ -L "$STATE/research" ] || { rm -rf "$STATE/research"; ln -s "$primary/research" "$STATE/research"; }
+}
+
 cmd_setup() {
   command -v "$RALPH_AGENT" >/dev/null || die "$RALPH_AGENT not on PATH"
   command -v gh >/dev/null || die "gh not on PATH"
@@ -143,6 +164,7 @@ cmd_setup() {
   git -C "$WT" switch --detach "$RALPH_BASE_REF" --quiet
   [ -f "$WT/.pi/ralph/work.prompt.md" ] || die "$RALPH_BASE_REF has no .pi/ralph/ - commit and push the ralph tooling (.pi/ralph, .pi/agents/ralph-*) to $RALPH_BASE_REF first"
   mkdir -p "$STATE/logs" "$STATE/sessions" "$STATE/research"
+  share_state
   # Credentials are local state: copy, never commit (gitignored).
   [ -f "$MAIN_ROOT/.env" ] && [ ! -f "$WT/.env" ] && cp "$MAIN_ROOT/.env" "$WT/.env"
   (cd "$WT" && bun install --frozen-lockfile)
@@ -218,6 +240,7 @@ run_context() {
 ## Run context (authoritative for this iteration)
 
 - iteration: $1 of $RALPH_MAX_ITER, mode: $2
+- worker: $RALPH_WORKER (other workers may run beside you; they share \`.ralph/plan.md\` and \`.ralph/progress.md\`: re-read before you edit, and change only your own row). Before you take an issue or fix a \`ralph-fix\` PR run \`bash .pi/ralph/claim.sh claim LOB-n\`; exit 1 means another worker holds it: take the next one.
 - worktree (your cwd): ${SESS_CWD:-$WT}
 - base ref: $RALPH_BASE_REF
 - RALPH_PUSH=$RALPH_PUSH  (1: push the branch and open a draft PR; 0: commit locally only, no push, no PR)
@@ -352,7 +375,8 @@ session() {
     (
       cd "${SESS_CWD:-$WT}"
       export COMPOSE_PROJECT_NAME=factory   # compose run from a worktree must target the shared project, not factory-ralph
-      export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH
+      export DATABASE_URL DOCKER_HOST="${DOCKER_HOST:-}" API_PORT="$RALPH_API_PORT" WEB_PORT="$RALPH_WEB_PORT" RALPH_PUSH \
+        RALPH_WORKER RALPH_SHARED RALPH_CLAIM_TTL
       [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
       local text; text="$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")"
       if [ "$RALPH_AGENT" = opencode ]; then
@@ -428,14 +452,35 @@ lock() { # [name]: the main loop holds `lock`; the splitter holds `lock-split`, 
 # label and no CHANGES_REQUESTED review; it touches no protected path; the worker's review record
 # (a PR comment) names the current head with clean verdicts; the driver re-ran the full gate on the
 # branch merged with main and it passed; and the GitHub `gate` check, if reported, passed.
-RALPH_MERGE="${RALPH_MERGE:-1}"
+# Only worker 1 merges and syncs Linear: two workers merging the same PR would race.
+if [ "$RALPH_WORKER" -eq 1 ]; then RALPH_MERGE="${RALPH_MERGE:-1}"; else RALPH_MERGE="${RALPH_MERGE:-0}"; fi
 RALPH_CI_TIMEOUT="${RALPH_CI_TIMEOUT:-1800}"
 PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$)'
 
 RALPH_FIX_MAX="${RALPH_FIX_MAX:-3}"   # automatic fix attempts per PR before a human is asked
 
+# --- parallel workers: claims ------------------------------------------------------------------
+# .pi/ralph/claim.sh holds the claims; the driver releases them so a finished, merged or flagged issue is free again.
+claim() { RALPH_SHARED="$RALPH_SHARED" RALPH_WORKER="$RALPH_WORKER" RALPH_CLAIM_TTL="$RALPH_CLAIM_TTL" bash "$HERE/claim.sh" "$@"; }
+# release_idle_claims: drop this worker's claims for issues that have no open PR (blocked, skipped, or finished
+# without one). An open PR keeps its claim until it merges or is flagged `ralph-fix`, so nobody else picks the issue up.
+release_idle_claims() {
+  local id open
+  while read -r id _; do
+    [ -n "$id" ] || continue
+    case "$(claim list | awk -v id="$id" '$1 == id { print $2 }')" in worker=$RALPH_WORKER) ;; *) continue ;; esac
+    open="$(cd "$WT" && gh pr list --state open --head "ralph/$id" --json number --jq length 2>/dev/null || echo 1)"
+    [ "${open:-1}" = 0 ] && { claim release "$id"; log "released claim on $id (no open PR)"; }
+  done < <(claim list)
+  return 0
+}
+
 pr_flag() { # <pr> <label> <message>
   local n="$1" label="$2" msg="$3"
+  if [ "$label" = ralph-fix ] || [ "$label" = needs-human-merge ]; then
+    local fixbranch; fixbranch="$(gh pr view "$n" --json headRefName --jq .headRefName 2>/dev/null || true)"
+    case "$fixbranch" in ralph/*) claim release --any "${fixbranch#ralph/}" || true ;; esac
+  fi
   if [ "$label" = ralph-fix ]; then
     local tries; tries="$(gh pr view "$n" --json comments --jq '[.comments[].body | select(contains("<!-- ralph-fix -->"))] | length' 2>/dev/null || echo 0)"
     if [ "${tries:-0}" -ge "$RALPH_FIX_MAX" ]; then
@@ -563,6 +608,7 @@ Fix the cause. If it also fails on a clean origin/main it is pre-existing: file 
   if gh pr merge "$n" --squash --match-head-commit "$head" --subject "$title (#$n)" --body "Merged by the ralph loop after: reviewer verdicts clean, merge gate green ($(basename "$glog")). Linear: $issue" >/dev/null; then
     git push origin --delete "$branch" --quiet 2>/dev/null || true
     echo "$issue $url" >>"$STATE/merged.txt"
+    claim release --any "${branch#ralph/}" || true
     log "merged PR #$n ($issue)"
     return 0
   fi
@@ -612,7 +658,9 @@ cmd_run() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
   lock; ensure_db
   rm -f "$STATE/STOP"
+  release_idle_claims
   if [ ! -f "$STATE/plan.md" ]; then
+    [ "$RALPH_WORKER" -eq 1 ] || die "worker $RALPH_WORKER has no plan: it shares worker 1's .ralph/plan.md - plan with worker 1 first"
     log "no plan yet - planning first"
     reset_worktree
     [ "$(session 0 plan)" = COMPLETE ] && [ -f "$STATE/plan.md" ] || die "planning failed"
@@ -624,6 +672,7 @@ cmd_run() {
     merge_ready
     reset_worktree
     local tag; tag="$(session "$i" work)"
+    release_idle_claims
     case "$tag" in
       NEXT)     fails=0 ;;
       COMPLETE) log "queue exhausted"; break ;;
@@ -633,6 +682,7 @@ cmd_run() {
     esac
     sleep "$RALPH_SLEEP"
   done
+  release_idle_claims
   merge_ready
   log "done after $i iteration(s)"
   reset_worktree
@@ -665,6 +715,38 @@ cmd_audit() {
   log "audit finished: $tag"
   reset_worktree
   [ "$tag" = COMPLETE ] || exit 3
+}
+
+# parallel start <N> [--max M] | stop | kill | status: run workers 1..N side by side, each its own worktree, database
+# and ports (RALPH_WORKER=i), staggered so they do not all hit the model provider in the same second.
+workers_existing() { # prints the worker numbers whose worktree exists
+  local i=1
+  [ -d "$RALPH_PRIMARY_WORKTREE" ] && echo 1
+  i=2; while [ -d "$RALPH_PRIMARY_WORKTREE-$i" ]; do echo "$i"; i=$((i + 1)); done
+}
+as_worker() { # <i> <subcommand> [args...]
+  local i="$1"; shift
+  if [ "$i" -eq 1 ]; then RALPH_WORKER=1 bash "$HERE/loop.sh" "$@"
+  else env -u RALPH_WORKTREE -u RALPH_DB -u RALPH_API_PORT -u RALPH_WEB_PORT RALPH_WORKER="$i" bash "$HERE/loop.sh" "$@"; fi
+}
+cmd_parallel() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    start)
+      local n="${1:?parallel start <N> [--max M]}"; shift
+      case "$n" in ''|*[!0-9]*|0) die "parallel start: N must be a positive integer" ;; esac
+      local i
+      for i in $(seq 1 "$n"); do
+        [ -d "$RALPH_PRIMARY_WORKTREE$([ "$i" -eq 1 ] || echo "-$i")" ] || as_worker "$i" setup
+        as_worker "$i" start "$@"
+        [ "$i" -eq "$n" ] || sleep "${RALPH_STAGGER:-60}"
+      done ;;
+    stop|kill|status)
+      local i
+      for i in $(workers_existing); do echo "--- worker $i"; as_worker "$i" "$sub" || true; done
+      echo "--- claims"; claim list ;;
+    *) die "usage: $0 parallel {start <N> [--max M]|stop|kill|status}" ;;
+  esac
 }
 
 cmd_status() {
@@ -738,5 +820,6 @@ case "${1:-}" in
   kill)   cmd_kill ;;
   status) cmd_status ;;
   stop)   cmd_stop ;;
+  parallel) shift; cmd_parallel "$@" ;;
   *) usage; exit 64 ;;
 esac
