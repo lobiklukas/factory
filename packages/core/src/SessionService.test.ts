@@ -165,28 +165,33 @@ const RUN_NAME_RESERVED =
   `_core_`.length + RUN_RANDOM_CHARS + 1 + MAX_STAMP_WIDTH;
 
 /**
- * The head every database name this file mints shares, and therefore the prefix the sweep matches.
+ * The head every name for `database` gets, and therefore the prefix the sweep matches.
  *
- * Derived from the configured database with a *fixed* reservation for the tail, not with the tail's
- * measured length: the tail carries a base-36 millisecond stamp whose width changes (8 characters
- * today, 9 from 2059-05-25, which is `36 ** 8` milliseconds after the epoch), and a prefix derived
- * from a varying reservation would change with it, so today's names would stop matching tomorrow's
- * sweep.
+ * A function of the database's name rather than a constant over the configured one, so the case
+ * that checks the 63-byte limit can ask about a name long enough to hit the limit. It could not do
+ * that by measuring this run's own prefix: `factory_ralph` is fourteen characters, so the limit is
+ * nowhere near it and every reservation this file gets wrong still fits — the check was green on a
+ * reservation narrowed by a whole character.
+ *
+ * The reservation is *fixed* rather than taken from the tail's measured length: the tail carries a
+ * base-36 millisecond stamp whose width changes (8 characters today, 9 from 2059-05-25, which is
+ * `36 ** 8` milliseconds after the epoch), and a prefix derived from a varying reservation would
+ * change with it, so today's names would stop matching tomorrow's sweep.
  *
  * Every identifier this file issues is quoted — `sql(name)` escapes it — so Postgres does not fold
  * the name to lower case and does not need it folded. What *is* real is the 63-byte limit, which
  * applies to a quoted identifier too: it truncates silently, and a truncated tail would collide.
  * `RUN_NAME_RESERVED` keeps every name this file can mint inside it.
  */
-const runDatabasePrefix = (() => {
-  // `configuredDatabase` may be empty, which leaves the name with a leading underscore — a legal
-  // identifier, and this one is quoted anyway. There is nothing to pad it with.
-  const base = configuredDatabase
-    .replaceAll(/[^a-z0-9_]/g, "_")
-    .slice(0, 63 - RUN_NAME_RESERVED);
+const runDatabasePrefixFor = (database: string) => {
+  // The name may be empty, which leaves a leading underscore — a legal identifier, and one this
+  // file quotes anyway. There is nothing to pad it with.
+  const base = database.replaceAll(/[^a-z0-9_]/g, "_").slice(0, 63 - RUN_NAME_RESERVED);
   return `${base}_core_`;
-})();
-/** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
+};
+
+/** This run's own prefix: the one over `configuredDatabase`. */
+const runDatabasePrefix = runDatabasePrefixFor(configuredDatabase);/** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
 const runDatabaseTail = (at: number) =>
   `${randomBytes(3).toString("hex")}_${Math.trunc(at).toString(36)}`;
 
