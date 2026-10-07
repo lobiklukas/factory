@@ -58,6 +58,7 @@ RALPH_TIMEOUT="${RALPH_TIMEOUT:-7200}"          # seconds per iteration
 RALPH_SPLIT_MAX="${RALPH_SPLIT_MAX:-10}"        # parents split per `split` run
 RALPH_STALL="${RALPH_STALL:-1500}"                # seconds with no session/subagent write before the agent is killed
 RALPH_MAX_FAILS="${RALPH_MAX_FAILS:-5}"         # consecutive iterations with no valid control line
+RALPH_OC_RESUMES="${RALPH_OC_RESUMES:-3}"       # opencode: resumes of a session whose model returned nothing mid-turn
 RALPH_PUSH="${RALPH_PUSH:-1}"                   # 1: push branch + draft PR; 0: local branch only
 RALPH_BASE_REF="${RALPH_BASE_REF:-origin/main}"
 RALPH_DB="${RALPH_DB:-factory_ralph}"
@@ -282,6 +283,32 @@ oc_activity() {
   case "$t" in ''|*[!0-9]*|0) date +%s ;; *) echo $((t / 1000)) ;; esac
 }
 
+# oc_cut_short <out>: succeeds when an `opencode run --format json` log ends on anything but a text (or error) event:
+# the model went quiet in the middle of a turn. oc_session_id <out>: the top-level session, the first event's.
+oc_cut_short() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import json, sys
+last = None
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        last = json.loads(line).get("type")
+    except ValueError:
+        pass
+sys.exit(0 if last not in (None, "text", "error") else 1)
+PY
+}
+oc_session_id() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        print(json.loads(line).get("sessionID") or "")
+        break
+    except ValueError:
+        pass
+PY
+}
+
 # oc_last_line <out>: the last non-empty line of the final assistant text in an `opencode run --format json` log,
 # stripped the way the control-line check strips pi's output.
 oc_last_line() {
@@ -333,9 +360,24 @@ session() {
         # the loop's process group instead of leaving a shared background service holding a stale one.
         # --format json: one event per line, so the log both proves liveness and holds the final text.
         oc_prepare "$PWD" "$m"
+        local orc=0 resumes=0 sid
         RALPH_STALL_CMD="oc_activity '$PWD'" with_timeout "$RALPH_TIMEOUT" \
           opencode run --standalone --auto --format json -m "$m" \
-          --title "ralph-$mode-$n" "$text" </dev/null >"$out" 2>"$err"
+          --title "ralph-$mode-$n" "$text" </dev/null >"$out" 2>"$err" || orc=$?
+        # A free model sometimes returns nothing mid-turn: opencode then exits 0 on a log that ends on a
+        # `step_start`, with no text and no error. Starting the iteration over would redo the whole orientation
+        # (and, on a big issue, an hour of work the WIP commit only partly keeps); the session is intact, so
+        # resume it. A run that ended on text without a control line is a different failure and is not resumed.
+        while [ "$orc" -eq 0 ] && [ "$resumes" -lt "$RALPH_OC_RESUMES" ] && oc_cut_short "$out"; do
+          sid="$(oc_session_id "$out")"; [ -n "$sid" ] || break
+          resumes=$((resumes + 1))
+          log "opencode ended mid-turn on $m (the model returned nothing); resuming $sid ($resumes/$RALPH_OC_RESUMES)"
+          RALPH_STALL_CMD="oc_activity '$PWD'" with_timeout "$RALPH_TIMEOUT" \
+            opencode run --standalone --auto --format json -m "$m" -s "$sid" \
+            "Your previous reply stopped part-way: the model returned nothing. Continue exactly where you stopped and finish the iteration. Your last line must be the control line." \
+            </dev/null >>"$out" 2>>"$err" || orc=$?
+        done
+        exit "$orc"
       else
         RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
           --model "$m" --thinking "$RALPH_THINKING" \
