@@ -9,12 +9,21 @@
  * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
  * postgres`. It also needs the role to hold `CREATEDB`, because the block below creates the
  * database it runs against; `compose.yaml` satisfies that by making the bootstrap user the
- * superuser, and a role without it fails the whole file at import rather than one case. It creates a database of its own for the run and drops it at the end, so it never
- * writes a row of any table in whatever `DATABASE_URL` points at. It does write two things there
- * that are not rows: it adds and removes its own database in the shared `pg_database` catalogue,
- * and it reads that database five times over the run. Every statement it issues against the
- * configured database is one of five, and `describe("this suite's database")` at the end of this
- * file names all of them.
+ * superuser, and a role without it fails the whole file at import rather than one case.
+ *
+ * It creates a database of its own for the run and drops it at the end, so it never writes a row of
+ * any table in whatever `DATABASE_URL` points at. It does write two kinds of thing there that are
+ * not rows: it adds and removes databases in the shared `pg_database` catalogue, and it reads that
+ * catalogue and `pg_stat_activity`. Every statement it issues against the configured database is
+ * one of six, and `describe("this suite's database")` at the end of this file names all of them.
+ *
+ * A run killed between `CREATE DATABASE` and `afterAll` — a signal, a crash, an OOM kill — never
+ * reaches its own drop, so this file also sweeps what earlier runs abandoned before it creates its
+ * own (LOB-134). That reduces the leak, it does not close it, and both halves of the remainder are
+ * worth stating rather than rounding off: the killed run's database stays until some *later* run
+ * drops it, so a server nobody ever runs this file against keeps it forever; and a database minted
+ * before the start time was encoded into the name carries no age to read, so nothing will ever drop
+ * it. Best-effort collection, not a guarantee — do not read the sweep as one.
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +43,7 @@ import type {
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
 import { DatabaseConfig, DatabaseLive } from "@repo/storage-postgres";
 import {
+  Clock,
   ConfigProvider,
   Effect,
   Exit,
@@ -121,26 +131,89 @@ const configuredUrl =
 const configuredDatabase = new URL(configuredUrl).pathname.replace(/^\//, "");
 
 /**
- * A database name for this run: the configured one, a marker, and six random characters, so two
- * runs of this suite against one server cannot collide (measured: two concurrent runs of this file,
- * and two concurrent gates, both clean).
+ * How long a run's database has to sit unclaimed before the sweep will consider it abandoned.
+ *
+ * Generous on purpose, and for a measured reason: the alternative liveness signal — connections
+ * alone — has a sub-millisecond gap between `CREATE DATABASE` and the first connect, so a sweep
+ * running in that window would drop a database a *starting* run is about to use. An hour of encoded
+ * age puts every honest run far inside the safe side of that gap, and only a run killed for longer
+ * than an hour is ever a candidate. The cost of the margin is that a kill is not collected until a
+ * later run, which is the residual leak the file header states.
+ */
+const STALE_RUN_AFTER_MS = 60 * 60 * 1000;
+
+/** How many random characters disambiguate two runs that start in the same millisecond. */
+const RUN_RANDOM_CHARS = 6;
+
+/**
+ * The head every database name this file mints shares, and therefore the prefix the sweep matches.
+ *
+ * Derived from the configured database with a *fixed* reservation for the tail, not with the tail's
+ * measured length: the tail carries a base-36 millisecond stamp whose width changes (8 characters
+ * today, 9 from 2059), and a prefix derived from a varying reservation would change with it, so
+ * today's names would stop matching tomorrow's sweep.
  *
  * Every identifier this file issues is quoted — `sql(name)` escapes it — so Postgres does not fold
  * the name to lower case and does not need it folded. What *is* real is the 63-byte limit, which
  * applies to a quoted identifier too: it truncates silently, and a truncated tail would collide.
- * So the base is cut to `63 - tail.length` characters and the replacement below keeps characters
- * and bytes the same length, which is what makes that cut exact for a name that was not plain ASCII
- * to begin with.
+ * The reservation below keeps every name this file can mint inside it.
  */
-const runDatabaseName = (() => {
-  const tail = `_core_${randomBytes(3).toString("hex")}`;
+const runDatabasePrefix = (() => {
+  // Nine characters is the widest a base-36 millisecond stamp gets before the year 2100.
+  const reserved = `_core_`.length + RUN_RANDOM_CHARS + 1 + 9;
   // `configuredDatabase` may be empty, which leaves the name with a leading underscore — a legal
   // identifier, and this one is quoted anyway. There is nothing to pad it with.
   const base = configuredDatabase
     .replaceAll(/[^a-z0-9_]/g, "_")
-    .slice(0, 63 - tail.length);
-  return `${base}${tail}`;
+    .slice(0, 63 - reserved);
+  return `${base}_core_`;
 })();
+
+/** A tail for a run that started at `at`: random characters, then the stamp in base 36. */
+const runDatabaseTail = (at: number) =>
+  `${randomBytes(3).toString("hex")}_${Math.trunc(at).toString(36)}`;
+
+/**
+ * The start time encoded in a tail, or `undefined` when the tail does not carry one.
+ *
+ * `undefined` means *unproven*, not *fresh*: a database minted before this file encoded the stamp
+ * has no age to read, so the sweep skips it. Dropping those would be the one thing the stamp exists
+ * to prevent — deciding an unknown-age database is old — and the header states the leak they leave.
+ *
+ * A stamp is rejected by *length* as well as by character, and the length bound is the interesting
+ * half. Base 36 is dense: `notbase36` is nine legal base-36 digits, so a character-set check alone
+ * decodes it to a year-4085 timestamp. Nothing breaks today — such a value is far in the future, so
+ * the sweep's cutoff skips it, which is the safe direction — but the safety would rest on an
+ * accident of magnitude rather than on a rule. The bound is `Date.now()`'s own digit count: no stamp
+ * this file mints is longer than the current one (base-36 width only grows, at 2059), so anything
+ * longer was never minted here. That turns "happens to be safe" into "rejected by construction".
+ */
+const runStartedAt = (tail: string): number | undefined => {
+  const match = /^([0-9a-f]+)_([0-9a-z]+)$/.exec(tail);
+  if (match === null) return undefined;
+  const stamp = match[2] as string;
+  // The wall clock, outside an Effect and on purpose: this is a pure function of a string that both
+  // the sweep (inside an Effect) and the cases below call, so taking the bound as an argument would
+  // push the reading of the clock onto every caller to satisfy a lint rule about where clocks live.
+  // What it is reading is a property of the calendar, not of the test's subject.
+  // oxlint-disable-next-line effecttsgo/global-date -- a test harness mints a real name at module scope; see above.
+  if (stamp.length > Date.now().toString(36).length) return undefined;
+  const at = Number.parseInt(stamp, 36);
+  return Number.isSafeInteger(at) && at > 0 ? at : undefined;
+};
+
+/**
+ * A database name for this run: the shared prefix, then this run's own tail.
+ *
+ * The random characters are what keep two runs of this suite against one server from colliding
+ * (measured: two concurrent runs of this file, and two concurrent gates, both clean); the stamp is
+ * what lets a later run tell an abandoned database from a live one (LOB-134).
+ */
+// The run's name is minted at module scope, before the runtime that would let `Clock` answer —
+// which is the same ordering constraint the `DATABASE_URL` assignment below is written around. The
+// stamp is this run's real start time, so the real clock is what has to be read here.
+// oxlint-disable-next-line effecttsgo/global-date -- a test harness mints its name before any runtime exists.
+const runDatabaseName = `${runDatabasePrefix}${runDatabaseTail(Date.now())}`;
 
 /** The same URL with a different database on it, and every other parameter left alone. */
 const runDatabaseUrl = (() => {
@@ -152,13 +225,14 @@ const runDatabaseUrl = (() => {
 /**
  * The only connection to the configured database this file ever opens.
  *
- * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops the
- * run's own database, and migrating somebody else's would be the very reach this change is about.
- * It never writes a `sessions` row either. Five *shapes* of statement reach the configured
- * database and no sixth — seven executions of them over a run: `CREATE DATABASE` and
- * `DROP DATABASE` for the run's own, `current_database()`, and a `to_regclass('public.sessions')`
- * probe paired with a `SELECT id FROM sessions` in one helper that the witness at the end of this
- * file runs once before any case and once after them. The witness's header names all five.
+ * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops
+ * databases, and migrating somebody else's would be the very reach this change is about. It never
+ * writes a `sessions` row either. Six *shapes* of statement reach the configured database and no
+ * seventh — `CREATE DATABASE` and `DROP DATABASE` for the run's own, `DROP DATABASE` for an
+ * abandoned one (the sweep), the sweep's own `pg_database`/`pg_stat_activity` read,
+ * `current_database()`, and a `to_regclass('public.sessions')` probe paired with a
+ * `SELECT id FROM sessions` in one helper that the witness at the end of this file runs once before
+ * any case and once after them. The witness's header names all six.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -168,11 +242,86 @@ const maintenance = ManagedRuntime.make(
 );
 
 /**
- * Create the run's database, loudly.
+ * The databases under this file's prefix, with the two facts that decide whether each is an orphan.
  *
- * A failure here is the loop's Postgres precondition failing, which the gate must not paper over:
- * there is no fallback to the configured database, because pointing at that is the defect.
+ * `connections` comes from `pg_stat_activity` rather than from the absence of rows, because a
+ * connection that has not issued a query yet is exactly the state a *starting* run is in and a
+ * *finishing* run is leaving. This client is connected to the configured database, never to one of
+ * these, so its own backend is not in the count and no `pid` filter is needed.
+ *
+ * `started_at` is decoded in TypeScript rather than in SQL, by `runStartedAt`. A name is not
+ * arithmetic — the stamp is a suffix whose width changes with the calendar, and a `LIKE`-then-cast
+ * would have to re-derive the encoding in a second language to read it back.
+ *
+ * `starts_with` rather than `LIKE`, for a reason that is easy to get wrong: the prefix is derived
+ * from the configured database's name, which routinely contains `_`, and `_` is a LIKE wildcard
+ * matching *any* one character. `LIKE 'factory_ralph_core_%'` therefore also matches a database
+ * named `factoryXralph_core_…` — and dropping a database this file did not create is exactly the
+ * reach it exists to prevent. `starts_with` (Postgres 11) has no wildcard to escape.
  */
+const runDatabases = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  return yield* sql<{ datname: string; connections: number }>`
+    SELECT d.datname, (
+      SELECT count(*)::int FROM pg_stat_activity a WHERE a.datname = d.datname
+    ) AS connections
+    FROM pg_database d
+    WHERE starts_with(d.datname, ${runDatabasePrefix})
+    ORDER BY d.datname
+  `;
+});
+
+/**
+ * Drop every database under the prefix that an hour-old, connection-free run left behind.
+ *
+ * Best-effort, and the file header says so. All three conditions are necessary and none is
+ * sufficient alone:
+ *
+ * - `runDatabaseName` is excluded explicitly even though it is seconds old, because that exclusion
+ *   is what keeps this safe to reorder against the `CREATE` below.
+ * - `connections > 0` is what separates a live run from an orphan, and it is why the age check
+ *   exists at all: between `CREATE` and a run's first query there is a sub-millisecond window with
+ *   no connection, and without an hour of encoded age a sweep landing in it would drop a run's
+ *   database out from under it.
+ * - an undecodable stamp is *skipped*, not guessed at. Dropping a database whose age is unknown is
+ *   the one thing the stamp exists to prevent.
+ *
+ * `IF EXISTS`, and not for tidiness. Two runs on one server each read the same list of orphans and
+ * each drop them, so the loser of every such pair gets `3D000 database does not exist` — measured,
+ * and it fails the *whole file* at import rather than one case. The read and the drop cannot be
+ * atomic without locking every candidate against every other run, which is far more coordination
+ * than sweeping abandoned databases is worth; making the drop tolerant of the loser is enough.
+ */
+const sweepAbandonedRunDatabases = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  // `Clock`, not `Date.now()`: the file's own rule (`effecttsgo/global-date-in-effect`, and
+  // `denyWarnings: true` in the lint config, so a warning fails the gate) says time inside an
+  // Effect is reached through `Clock`. The same word the service writes `last_activity_at` with.
+  const now = yield* Clock.currentTimeMillis;
+  const cutoff = now - STALE_RUN_AFTER_MS;
+  for (const database of yield* runDatabases) {
+    if (database.datname === runDatabaseName) continue;
+    if (database.connections > 0) continue;
+    const startedAt = runStartedAt(
+      database.datname.slice(runDatabasePrefix.length),
+    );
+    if (startedAt === undefined) continue;
+    if (startedAt >= cutoff) continue;
+    yield* sql`DROP DATABASE IF EXISTS ${sql(database.datname)} WITH (FORCE)`;
+  }
+});
+
+/**
+ * Create the run's database, loudly, after collecting what earlier runs abandoned (LOB-134).
+ *
+ * The sweep is its own statement rather than part of this effect, because it is a different job with
+ * a different blast radius: it touches *other* runs' databases, and a sweep that cannot run must not
+ * stop this run from having one of its own. A failure in *this* effect is the loop's Postgres
+ * precondition failing, which the gate must not paper over: there is no fallback to the configured
+ * database, because pointing at that is the defect.
+ */
+await maintenance.runPromise(sweepAbandonedRunDatabases.pipe(Effect.orDie));
+
 await maintenance.runPromise(
   Effect.gen(function* () {
     const sql = yield* SqlClient;
@@ -1772,12 +1921,12 @@ describe("the pagination case's budget", () => {
  * file spells `DatabaseConfig`'s default URL out again, and a comment asking the two to stay in
  * step is not enforcement.
  *
- * What this block cannot witness is the drop itself. `afterAll` runs after every case in the file,
- * so no case here can observe whether the run's database went away, and a neutralised `DROP
- * DATABASE` leaves the suite green (measured). A run killed between `CREATE DATABASE` and
- * `afterAll` — a signal, a crash — therefore leaves one database behind, and nothing collects it.
- * That is a leak of *empty databases* in the shared catalogue, not of session rows, which is what
- * the first two cases below are about; LOB-134 owns the sweep that would collect them.
+ * What this block cannot witness is the run's own drop. `afterAll` runs after every case in the
+ * file, so no case here can observe whether the run's database went away, and a neutralised `DROP
+ * DATABASE` leaves the suite green (measured). The sweep for *abandoned* databases has the mirror
+ * problem, and worse: it runs at import, before any case exists. So neither is witnessed here —
+ * they are driven by the drive in the PR body and by the shape of the sweep itself, which is
+ * `CREATE`-first-per-run plus an hour of encoded age, not by anything a case in this file could see.
  *
  * Mutation checked: deleting the `process.env["DATABASE_URL"] = runDatabaseUrl;` line above. The
  * first case then reads the configured database's name from both pools and goes red on it. The
@@ -1855,5 +2004,75 @@ describe("this suite's database", () => {
       fallback?.[1],
       `the fallback literal this file reads DATABASE_URL against, which \`packages/storage-postgres/src/Database.ts\` also spells out`,
     ).toBe(expected);
+  });
+});
+
+/**
+ * The stamp in a run's database name, round-tripped and refused (LOB-134).
+ *
+ * The sweep reads an orphan's age out of its name and nothing else, so the only thing standing
+ * between "a killed run's database" and "someone's database" is this decode. It has to fail *closed*
+ * — a name it cannot read is one it must not drop — which is why every refusal below is a value, not
+ * a throw: a throw at import would stop the run, which is the wrong failure for a bookkeeping step.
+ *
+ * These are pure functions over strings, so they are asserted here rather than through a real
+ * `DROP DATABASE`. The end-to-end sweep is proved by the drive (a seeded orphan that outlives a run
+ * is not something this file can stage for itself, since the sweep runs before the first case).
+ *
+ * Mutation checked: making `runStartedAt` return `0` for an unreadable tail instead of `undefined`.
+ * The sweep would then read an unknown-age database as an hour-old one and drop it, and the last
+ * case here goes red on it.
+ */
+describe("the abandoned-run sweep", () => {
+  /**
+   * A fixed instant rather than `Date.now()`: the round trip is exact either way, and a literal
+   * makes the case a statement about the encoding instead of about when it happened to run.
+   */
+  const AN_INSTANT = 1_789_000_000_000;
+
+  it("reads back the start time it encoded", () => {
+    const at = AN_INSTANT;
+    const name = `${runDatabasePrefix}${runDatabaseTail(at)}`;
+    expect(name.startsWith(runDatabasePrefix)).toBe(true);
+    // Exact, not approximate: an hour of margin on the age check is worth nothing if the round trip
+    // is lossy, and the stamp is the only age there is.
+    expect(runStartedAt(name.slice(runDatabasePrefix.length))).toBe(at);
+  });
+
+  it("refuses a tail it cannot read rather than guessing at its age", () => {
+    // The shape a database minted before this file encoded a stamp has: prefix, random characters,
+    // nothing else. Dropping it would mean deciding an unknown age is old, which is the exact
+    // mistake the stamp exists to prevent.
+    expect(runStartedAt("33d7d8")).toBeUndefined();
+    // Random characters with no separator, so the base-36 half is absent.
+    expect(runStartedAt("33d7d8_")).toBeUndefined();
+    // Base 36 is dense enough that `notbase36` is nine *legal* digits, so it parses — to a year far
+    // past any run, which is what makes rejecting it by width worth a case. What rejects it is the
+    // width: no stamp this file mints is longer than the current one.
+    expect(Number.parseInt("notbase36", 36)).toBeGreaterThan(AN_INSTANT);
+    expect(runStartedAt("33d7d8_notbase36")).toBeUndefined();
+    // And a zero stamp is not a time, however well shaped.
+    expect(runStartedAt("33d7d8_0")).toBeUndefined();
+  });
+
+  it("keeps every name it can mint inside Postgres' 63-byte identifier limit", () => {
+    // The limit applies to a quoted identifier too, and a truncated tail would collide two runs.
+    // Asked with a base long enough to hit the limit, not the run-context database's short one, and
+    // with the widest stamp base 36 can hold — nine digits — rather than today's eight.
+    const widestStamp = "zzzzzzzzz";
+    const widest = `${"a".repeat(63)}_core_${randomBytes(3).toString("hex")}_${widestStamp}`;
+    expect(widest.length).toBeGreaterThan(63);
+    const reserved =
+      `_core_`.length + RUN_RANDOM_CHARS + 1 + widestStamp.length;
+    const base = widest.replaceAll(/[^a-z0-9_]/g, "_").slice(0, 63 - reserved);
+    // `runDatabaseTail` is asked for an instant that renders as nine base-36 digits, so the name
+    // measured here is the longest this file can ever mint, not merely the longest minted today.
+    const widestInstant = Number.parseInt(widestStamp, 36);
+    expect(`${runDatabaseTail(widestInstant)}`.length).toBe(
+      RUN_RANDOM_CHARS + 1 + 9,
+    );
+    expect(
+      `${base}_core_${runDatabaseTail(widestInstant)}`.length,
+    ).toBeLessThanOrEqual(63);
   });
 });
