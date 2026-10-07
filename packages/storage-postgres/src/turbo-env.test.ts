@@ -110,6 +110,62 @@ const resolveScript = (
   return JSON.parse(result.stdout) as DryRun;
 };
 
+/**
+ * Result of running a gate script with --dry=json, including stderr which shows
+ * the command that gets executed (with the shell prefix from package.json).
+ */
+interface ScriptResult {
+  readonly dryRun: DryRun;
+  readonly stderr: string;
+}
+
+/**
+ * Resolve one of the gate's own scripts WITHOUT explicitly setting telemetry opt-outs.
+ *
+ * This verifies that the gate's own package.json scripts (build, test, dev, type-check, clean)
+ * provide the opt-outs via the shell prefix (DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1
+ * TURBO_NO_UPDATE_NOTIFIER=1). The command that gets executed is printed to stderr by turbo
+ * and includes the shell prefix with the opt-outs.
+ */
+const resolveScriptNoOptOuts = (
+  script: "test" | "dev" | "build" | "type-check" | "clean",
+  filter: string,
+  url: string,
+): ScriptResult => {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("TURBO_")),
+  );
+  const result = spawnSync(
+    "bun",
+    ["run", script, "--", "--dry=json", `--filter=${filter}`],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...env,
+        DATABASE_URL: url,
+        // Intentionally NOT setting TURBO_TELEMETRY_DISABLED or DO_NOT_TRACK here.
+        // The gate's own scripts must provide them via the shell prefix in package.json.
+      },
+      timeout: 60_000,
+    },
+  );
+  if (result.error !== undefined) {
+    throw new Error(
+      `\`bun run ${script} --dry=json\` failed: ${result.error.message}`,
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `\`bun run ${script} --dry=json\` exited ${String(result.status)}: ${result.stderr}`,
+    );
+  }
+  return {
+    dryRun: JSON.parse(result.stdout) as DryRun,
+    stderr: result.stderr,
+  };
+};
+
 describe("the gate's turbo configuration", () => {
   it("hands DATABASE_URL to the test task in Strict Mode", () => {
     const dryRun = resolveScript(
@@ -160,4 +216,24 @@ describe("the gate's turbo configuration", () => {
       taskOf(second, TEST_TASK).hash,
     );
   }, 120_000);
+
+  describe("the gate's own scripts provide telemetry opt-outs", () => {
+    const GATE_SCRIPTS = ["test", "build", "type-check", "dev"] as const;
+    // "clean" is excluded because it's a compound command (&&) that doesn't support --dry=json
+
+    for (const script of GATE_SCRIPTS) {
+      it(`provides TURBO_TELEMETRY_DISABLED and DO_NOT_TRACK for ${script}`, () => {
+        const { stderr } = resolveScriptNoOptOuts(
+          script,
+          "@repo/storage-postgres",
+          databaseUrl("factory_probe_optout"),
+        );
+        // The command printed to stderr includes the shell prefix from package.json.
+        // Verify the opt-outs are present in the command that gets executed.
+        expect(stderr).toContain("DO_NOT_TRACK=1");
+        expect(stderr).toContain("TURBO_TELEMETRY_DISABLED=1");
+        expect(stderr).toContain("TURBO_NO_UPDATE_NOTIFIER=1");
+      }, 90_000);
+    }
+  });
 });
