@@ -45,6 +45,12 @@ skills before writing Effect/TypeScript, and `tdd` if you add behaviour.
 
 ### 2. Pick
 
+- **Other workers may be running beside you** (the Run context names yours). Before you commit to an
+  issue, or to the issue behind a `ralph-fix` PR (its branch is `ralph/LOB-n`), run
+  `bash .pi/ralph/claim.sh claim LOB-n`. Exit 0 means it is yours; exit 1 means another worker holds it:
+  treat that row as taken and move to the next. Claim before you edit the plan or Linear, never after.
+  `.ralph/plan.md` and `.ralph/progress.md` are shared: re-read a file right before you edit it, and
+  change only your own row.
 - **Fix first.** `gh pr list --state open --label ralph-fix --json number,headRefName,title`. The driver
   puts that label on a PR it could not merge (conflict with main, red CI or merge gate, head moved after
   review); it gives up after 3 attempts and asks a human, so make this one count. If there is one,
