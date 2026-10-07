@@ -8,22 +8,27 @@
  *
  * Deterministic and offline (faux model), but it needs Postgres: `docker compose up -d --wait
  * postgres`. It also needs the role to hold `CREATEDB`, because the block below creates the
- * database it runs against; `compose.yaml` satisfies that by making the bootstrap user the
- * superuser, and a role without it fails the whole file at import rather than one case.
+ * database it runs against, and enough privilege over `pg_database` to drop one it does not own,
+ * which the sweep does; `compose.yaml` satisfies both by making the bootstrap user the superuser,
+ * and a role without them fails the whole file at import rather than one case.
  *
  * It creates a database of its own for the run and drops it at the end, so it never writes a row of
  * any table in whatever `DATABASE_URL` points at. It does write two kinds of thing there that are
  * not rows: it adds and removes databases in the shared `pg_database` catalogue, and it reads that
  * catalogue and `pg_stat_activity`. Every statement it issues against the configured database is
- * one of six, and `describe("this suite's database")` at the end of this file names all of them.
+ * one of seven, and the `describe("this suite's database")` block names the six that protect the
+ * configured database; the seventh is the new cases' own `SELECT EXISTS … FROM pg_database`, which
+ * only ever asks whether a database this file minted is still there.
  *
  * A run killed between `CREATE DATABASE` and `afterAll` — a signal, a crash, an OOM kill — never
  * reaches its own drop, so this file also sweeps what earlier runs abandoned before it creates its
- * own (LOB-134). That reduces the leak, it does not close it, and both halves of the remainder are
- * worth stating rather than rounding off: the killed run's database stays until some *later* run
- * drops it, so a server nobody ever runs this file against keeps it forever; and a database minted
+ * own (LOB-134). That reduces the leak, it does not close it, and all three parts of the remainder
+ * are worth stating rather than rounding off: the killed run's database stays until some *later* run
+ * drops it, so a server nobody ever runs this file against keeps it forever; a database minted
  * before the start time was encoded into the name carries no age to read, so nothing will ever drop
- * it. Best-effort collection, not a guarantee — do not read the sweep as one.
+ * it; and a run *older than the hour* that happens to be between connections at the instant the
+ * sweep reads `pg_stat_activity` reads as an orphan and is collected, `WITH (FORCE)` taking its
+ * backends with it. Best-effort collection, not a guarantee — do not read the sweep as one.
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -210,20 +215,20 @@ const runDatabaseTail = (at: number) =>
  * half. Base 36 is dense: `notbase36` is nine legal base-36 digits, so a character-set check alone
  * decodes it to a year-4085 timestamp. Nothing breaks today — such a value is far in the future, so
  * the sweep's cutoff skips it, which is the safe direction — but the safety would rest on an
- * accident of magnitude rather than on a rule. The bound is `Date.now()`'s own digit count: no stamp
- * this file mints is longer than the current one (base-36 width only grows, at 2059), so anything
- * longer was never minted here. That turns "happens to be safe" into "rejected by construction".
+ * accident of magnitude rather than on a rule. The bound is *`now`'s* own digit count: no stamp this
+ * file mints is longer than the current one (base-36 width only grows, at 2059), so anything longer
+ * was never minted here. That turns "happens to be safe" into "rejected by construction".
+ *
+ * `now` is a parameter rather than a `Date.now()` read so that one decision does not read two
+ * clocks: the caller is inside an Effect and already has `Clock.currentTimeMillis` in hand, and
+ * under a `TestClock` a bound taken from the wall clock would disagree with the cutoff it is
+ * compared against.
  */
-const runStartedAt = (tail: string): number | undefined => {
+const runStartedAt = (tail: string, now: number): number | undefined => {
   const match = /^([0-9a-f]+)_([0-9a-z]+)$/.exec(tail);
   if (match === null) return undefined;
   const stamp = match[2] as string;
-  // The wall clock, outside an Effect and on purpose: this is a pure function of a string that both
-  // the sweep (inside an Effect) and the cases below call, so taking the bound as an argument would
-  // push the reading of the clock onto every caller to satisfy a lint rule about where clocks live.
-  // What it is reading is a property of the calendar, not of the test's subject.
-  // oxlint-disable-next-line effecttsgo/global-date -- a test harness mints a real name at module scope; see above.
-  if (stamp.length > Date.now().toString(36).length) return undefined;
+  if (stamp.length > now.toString(36).length) return undefined;
   const at = Number.parseInt(stamp, 36);
   return Number.isSafeInteger(at) && at > 0 ? at : undefined;
 };
@@ -253,12 +258,14 @@ const runDatabaseUrl = (() => {
  *
  * `PgClient.layer` with an explicit URL, never `DatabaseLive`: this client creates and drops
  * databases, and migrating somebody else's would be the very reach this change is about. It never
- * writes a `sessions` row either. Six *shapes* of statement reach the configured database and no
- * seventh — `CREATE DATABASE` and `DROP DATABASE` for the run's own, `DROP DATABASE` for an
+ * writes a `sessions` row either. Seven *shapes* of statement reach the configured database and no
+ * eighth — `CREATE DATABASE` and `DROP DATABASE` for the run's own, `DROP DATABASE` for an
  * abandoned one (the sweep), the sweep's own `pg_database`/`pg_stat_activity` read,
- * `current_database()`, and a `to_regclass('public.sessions')` probe paired with a
- * `SELECT id FROM sessions` in one helper that the witness at the end of this file runs once before
- * any case and once after them. The witness's header names all six.
+ * `current_database()`, a `to_regclass('public.sessions')` probe paired with a
+ * `SELECT id FROM sessions` in one helper that `describe("this suite's database")` runs once
+ * before any case and once after them, and the sweep cases' `SELECT EXISTS … FROM pg_database`.
+ * That block names the first six by what each one protects; the seventh arrived with the sweep and
+ * is a read of a database this file minted.
  */
 const maintenance = ManagedRuntime.make(
   PgClient.layer({
@@ -275,9 +282,9 @@ const maintenance = ManagedRuntime.make(
  * *finishing* run is leaving. This client is connected to the configured database, never to one of
  * these, so its own backend is not in the count and no `pid` filter is needed.
  *
- * `started_at` is decoded in TypeScript rather than in SQL, by `runStartedAt`. A name is not
- * arithmetic — the stamp is a suffix whose width changes with the calendar, and a `LIKE`-then-cast
- * would have to re-derive the encoding in a second language to read it back.
+ * The age is deliberately *not* selected here: it is decoded in TypeScript by `runStartedAt`,
+ * below. A name is not arithmetic — the stamp is a suffix whose width changes with the calendar,
+ * so a cast in SQL would have to re-derive the encoding in a second language to read it back.
  *
  * `starts_with` rather than `LIKE`, for a reason that is easy to get wrong: the prefix is derived
  * from the configured database's name, which routinely contains `_`, and `_` is a LIKE wildcard
@@ -315,6 +322,15 @@ const runDatabases = Effect.gen(function* () {
  *   leave the age clause as the only thing standing, and the ordering is asserted by the case
  *   "runs before this file creates its own database" rather than by this line.
  *
+ * `WITH (FORCE)`, and it is the sibling of the `IF EXISTS` below. The connection count is read in
+ * one statement and the drop issued in another, so nothing serialises them, and a run that
+ * connects in that gap loses its database. `FORCE` makes that loss total — the drop takes the
+ * run's backends with it — where without it the same race would answer `55006 object_in_use` and,
+ * under this file's `orDie` at import, redden the *whole* file. Collecting a rare long run's
+ * database is the lesser of the two failures, and it is the one the file header names. No case
+ * here can witness it: every in-file drop target reads zero connections in the statement that
+ * selected it.
+ *
  * `IF EXISTS`, and not for tidiness. Two runs on one server each read the same list of orphans and
  * each drop them, so the loser of every such pair gets `3D000 database "…" does not exist` — and it
  * fails the *whole file* at import rather than one case, so it is a red gate rather than a red case.
@@ -336,6 +352,7 @@ const sweepAbandonedRunDatabases = Effect.gen(function* () {
     if (database.connections > 0) continue;
     const startedAt = runStartedAt(
       database.datname.slice(runDatabasePrefix.length),
+      now,
     );
     if (startedAt === undefined) continue;
     if (startedAt >= cutoff) continue;
@@ -893,7 +910,7 @@ describe("session list", () => {
   // that the block at the top of this file creates is the durable fix (LOB-96): against a table
   // this run alone fills, the nine cases below cost 11-30 ms each (measured), so they take
   // vitest's 5 s default again.
-  // `describe("this suite's database")` at the end of this file is what notices if that stops being
+  // `describe("this suite's database")` further down this file is what notices if that stops being
   // the database they run against, since a shared one would make the cost a table's again.
   it("returns every row of a same-millisecond group exactly once", async () => {
     const GROUP = 12;
@@ -2125,7 +2142,7 @@ describe("the abandoned-run sweep", () => {
     // no `_`, so nothing decodes an age out of it. The random characters are load-bearing and not
     // decoration: a *fixed* literal here collides with a concurrent run of this same file on the
     // same server, which answers `42P04 database … already exists` and reds this case (measured,
-    // and it is the shape the `randombits` clause in the file header exists to prevent). The other
+    // and it is the shape the `runDatabaseName` doc comment's random-characters rationale prevents). The other
     // four decoys get their uniqueness from `runDatabaseTail` for the same reason.
     const unstamped = `${runDatabasePrefix}${randomBytes(3).toString("hex")}`;
     // Old, unclaimed and decodable like `old`, and *not* this file's: the prefix's first `_` is
@@ -2144,7 +2161,14 @@ describe("the abandoned-run sweep", () => {
       for (const name of decoys) await createDecoy(name);
       // Nothing was created by accident: every decoy the verdicts below turn on has to exist first,
       // or "the fresh one survived" would pass on a database that was never there.
-      for (const name of decoys) {
+      //
+      // `old` is deliberately excluded from this pre-check. It is a two-hour-old, zero-connection
+      // database under the prefix — precisely what a *concurrent* run's import-time sweep collects —
+      // so asserting its presence here races that sweep and would fail this case on the fixture
+      // rather than on the sweep (a low-probability window, but the whole test body is inside it).
+      // It needs no pre-check: its own verdict is `toBe(false)`, which cannot pass on a database
+      // that was never there, and the four that must *survive* all would.
+      for (const name of [fresh, unstamped, wild, neighbour]) {
         expect(await databaseExists(name), `${name} was never created`).toBe(
           true,
         );
@@ -2184,19 +2208,33 @@ describe("the abandoned-run sweep", () => {
    * The connection is a real one, held by a second `PgClient` on the decoy's own URL, because the
    * condition under test is what `pg_stat_activity` reports — a faked count would test the faker.
    *
-   * Staging it is a race this case has to win, and losing it is not a failure. The decoy must be old
-   * (that is half of what is under test) and it cannot be connected to until it exists, so between
-   * the `CREATE` and the first connect it is *old, unclaimed and decodable* — precisely the set the
-   * sweep collects. Under two concurrent runs of this file the other run's module-level sweep can
-   * land in that window (measured: `effect/sql/SqlError: PgConnection: Connection closed`, which is
-   * the holder discovering the database it was told to connect to had been collected). The sweep
-   * behaving as specified is not a red case, so the case restages instead of failing, bounded and
-   * with the last attempt rethrown, so a genuine inability to stage still surfaces.
+   * Staging it is a race this case has to win, and losing *that* is not a failure. The decoy must be
+   * old (that is half of what is under test) and it cannot be connected to until it exists, so
+   * between the `CREATE` and the first connect it is *old, unclaimed and decodable* — precisely the
+   * set the sweep collects. Under two concurrent runs of this file the other run's module-level
+   * sweep can land in that window (measured: `effect/sql/SqlError: PgConnection: Connection closed`,
+   * which is the holder discovering the database it was told to connect to had been collected). The
+   * sweep behaving as specified is not a red case, so **only the staging is retried** — bounded, with
+   * the last attempt rethrown so a genuine inability to stage still surfaces.
+   *
+   * The retry deliberately stops before the sweep and the assertion. An earlier version had the
+   * `expect` inside the retried `try`, which meant an *intermittent* misjudgement by the sweep —
+   * dropping a database that really did hold a connection — would be swallowed as if it were a lost
+   * staging race and retried until it passed. Only `createDecoy` and the holder's first connect are
+   * the race; after the connection is established the case asserts once, and a red there is a real
+   * finding. (`mutation-M3-connections-check-dropped` reddens deterministically and so never
+   * exposed this; only the intermittent form would have.)
    */
   it("keeps a database that still has a connection, however old it is", async () => {
     const ATTEMPTS = 6;
     /** Every name this case minted, so a stranded one is dropped rather than left for the sweep. */
     const staged: string[] = [];
+    // Set by the staging loop and read after it: a fresh holder per attempt is disposable, the
+    // connected database it holds is not, so only the last one is kept for the assertion.
+    let held:
+      | { name: string; holder: ReturnType<typeof ManagedRuntime.make> }
+      | undefined;
+    let stagingError: unknown;
     try {
       for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
         // A fresh name per attempt, because a run's module-level sweep happens exactly once at
@@ -2225,22 +2263,27 @@ describe("the abandoned-run sweep", () => {
               yield* sql`SELECT 1`;
             }).pipe(Effect.orDie),
           );
-          await maintenance.runPromise(
-            sweepAbandonedRunDatabases.pipe(Effect.orDie),
-          );
-          expect(
-            await databaseExists(name),
-            "an old database with a live connection is a long run, not an orphan",
-          ).toBe(true);
-          return;
+          held = { name, holder };
+          break;
         } catch (error) {
-          if (attempt === ATTEMPTS) throw error;
-        } finally {
-          await holder.dispose();
-          await dropDecoy(name);
+          // Disposal is inside this `catch` rather than a sibling `finally`: an exception thrown
+          // from a `finally` is *not* caught by the `catch` beside it, so a failing `dispose` would
+          // abandon the retry loop entirely instead of restaging.
+          await holder.dispose().catch(() => undefined);
+          await dropDecoy(name).catch(() => undefined);
+          stagingError = error;
         }
       }
+      if (held === undefined) throw stagingError;
+      await maintenance.runPromise(
+        sweepAbandonedRunDatabases.pipe(Effect.orDie),
+      );
+      expect(
+        await databaseExists(held.name),
+        "an old database with a live connection is a long run, not an orphan",
+      ).toBe(true);
     } finally {
+      await held?.holder.dispose();
       for (const name of staged) await dropDecoy(name);
     }
   }, 30_000);
@@ -2251,23 +2294,23 @@ describe("the abandoned-run sweep", () => {
     expect(name.startsWith(runDatabasePrefix)).toBe(true);
     // Exact, not approximate: an hour of margin on the age check is worth nothing if the round trip
     // is lossy, and the stamp is the only age there is.
-    expect(runStartedAt(name.slice(runDatabasePrefix.length))).toBe(at);
+    expect(runStartedAt(name.slice(runDatabasePrefix.length), at)).toBe(at);
   });
 
   it("refuses a tail it cannot read rather than guessing at its age", () => {
     // The shape a database minted before this file encoded a stamp has: prefix, random characters,
     // nothing else. Dropping it would mean deciding an unknown age is old, which is the exact
     // mistake the stamp exists to prevent.
-    expect(runStartedAt("33d7d8")).toBeUndefined();
+    expect(runStartedAt("33d7d8", AN_INSTANT)).toBeUndefined();
     // Random characters with no separator, so the base-36 half is absent.
-    expect(runStartedAt("33d7d8_")).toBeUndefined();
+    expect(runStartedAt("33d7d8_", AN_INSTANT)).toBeUndefined();
     // Base 36 is dense enough that `notbase36` is nine *legal* digits, so it parses — to a year far
     // past any run, which is what makes rejecting it by width worth a case. What rejects it is the
     // width: no stamp this file mints is longer than the current one.
     expect(Number.parseInt("notbase36", 36)).toBeGreaterThan(AN_INSTANT);
-    expect(runStartedAt("33d7d8_notbase36")).toBeUndefined();
+    expect(runStartedAt("33d7d8_notbase36", AN_INSTANT)).toBeUndefined();
     // And a zero stamp is not a time, however well shaped.
-    expect(runStartedAt("33d7d8_0")).toBeUndefined();
+    expect(runStartedAt("33d7d8_0", AN_INSTANT)).toBeUndefined();
   });
 
   /**

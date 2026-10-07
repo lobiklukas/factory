@@ -31,11 +31,16 @@ Re-checked the same day after the completeness assertion was added: 4/4 on `fact
 312–321 rows, 3/3 on a scratch table of 340–346 rows, 10/10 for the whole file (`recheck-*.log` in
 the same evidence directory). Since LOB-96 (2026-10-07) that suite runs against **a database it
 creates and drops for the run**, so the row counts above record the runs as they were rather than a
-property of the table it points at now, and the three cases at the end of `SessionService.test.ts`
-witness the isolation and the literal they share with `DatabaseConfig`. The gate measured 22/22 on
+property of the table it points at now, and `describe("this suite's database")`
+witnesses the isolation and the literal they share with `DatabaseConfig`. The gate measured 22/22 on
 the branch (`11-gate-final.log` in the LOB-96 evidence directory). The same suite also empties
 the index (`DELETE FROM sessions`), runs `rebuildIndexes`, and checks that every list field comes
-back from the logs — so the table is droppable, per D7, and now only ever the run's own table.
+back from the logs — so the table is droppable, per D7, and only ever the run's own table. Since
+LOB-134 (2026-10-07) that suite also **sweeps** abandoned `<db>_core_*` databases out of the shared
+`pg_database` catalogue before it creates its own: one that is over an hour old by an encoded stamp
+in its name and reads zero connections. That is the one way it reaches beyond its own database, and
+it is best-effort — the file header states the two leaks it leaves and the one live run it can
+misjudge.
 
 **What it does not prove.** Nothing measures the list under load, and `rebuildIndexes` has no runtime
 caller yet (it is the recovery path, driven by its test). Sessions created before the
