@@ -252,7 +252,8 @@ describe("worker identity in loop.sh", () => {
     const left = claim(scratch, "1", "list").stdout;
     expect(left).not.toContain("LOB-1 ");
     expect(left).toContain("LOB-2 worker=1");
-    // Worker 2's claim is not worker 1's to release, whatever its PR state.
+    // Worker 2's claim is not worker 1's to release, whatever its PR state (`claim.sh release` also
+    // refuses a non-holder, so no mutation of the driver's own filter alone shows here).
     expect(left).toContain("LOB-3 worker=2");
   });
 });
