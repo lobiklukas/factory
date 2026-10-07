@@ -160,7 +160,7 @@ await maintenance.runPromise(
 // Before the runtime below and before any case can run it, and before this process has read any
 // config at all — see the note on `configuredUrl`.
 // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
-// MUTATION M1: the env assignment is gone.
+process.env["DATABASE_URL"] = runDatabaseUrl;
 
 const runtime = ManagedRuntime.make(
   // `provideMerge` keeps the database in the runtime's context, so a test can run SQL and the
@@ -1405,6 +1405,11 @@ describe("session list", () => {
   // a database of its own (the block above), so the delete below and the fold that follows are
   // about this run's rows — 157 ms measured, against vitest's 5 s default, where it used to take
   // 20 s against the run-context database's 2 883 sessions.
+  //
+  // Mutation checked: `rebuild.ts`'s `if (!Schema.is(SessionId)(log.logId)) continue;` to
+  // `if (true) continue;`, which makes the fold restore nothing — this case goes red on
+  // `result.after` being undefined, and `describe("this suite's database")` stays green, because the
+  // fold's job and the isolation's are separate claims and each is worth its own case.
   it("rebuilds the index from the log after the index tables are emptied", async () => {
     const result = await program(
       Effect.gen(function* () {
