@@ -46,12 +46,21 @@ import { describe, expect, it } from "vitest";
  * The scan is the same line-and-span loop `postgres-up.test.ts:1438-1460` and
  * `ralph-docker-env.test.ts:859-877` already use, and it inherits their blind spots rather than
  * inventing a parser to avoid them: it reads a `timeout:` from anywhere in a declaration's span, so
- * a `timeout` belonging to something *inside* a case body would pass as that case's budget (no such
- * line exists in the guarded files today, and `grep -n timeout` over both returns only the budgets
- * themselves); and it cannot see a declaration whose table is a tagged template
- * (`it.each\`…\`(…)`), which is the blind spot **LOB-119** was filed for on the sibling guard. Two
- * things here are deliberately stricter than the siblings: the budget must *exceed* the 5 000 ms
- * default it exists to beat, and the scan reaches every suite file in the package rather than one.
+ * a `timeout` belonging to something *inside* a case body would pass as that case's budget. In the
+ * three files the scan is pointed at besides this one — `PostgresStorage.test.ts`,
+ * `ralph-opencode.test.ts` and `ralph-parallel.test.ts` — `grep -n timeout` finds nothing but case
+ * budgets and two `spawnSync` kill budgets, both above every declaration
+ * (`ralph-opencode.test.ts:152`, `ralph-parallel.test.ts:88`), so the blind spot is not live in any
+ * of them. It **is** live in this file, whose three fixture cases carry the shape inside their own
+ * bodies and so protect nothing; **LOB-138** is that ticket. The scan also cannot see a declaration
+ * whose table is a tagged template (`it.each\`…\`(…)`), which is the blind spot **LOB-119** was
+ * filed for on the sibling guard. Two things here are deliberately stricter than the siblings: the
+ * budget must *exceed* the 5 000 ms default it exists to beat, and the scan reaches every suite
+ * file in the package rather than one.
+ *
+ * That last clause is the one that has already fired. `ralph-parallel.test.ts` landed on `main`
+ * (`f1343e8`) after this branch was cut, so the partition case reddened in CI with the file on
+ * neither list — the guard working as advertised, one merge late.
  */
 
 /** The budget a case must beat to count: vitest's default, which is what this issue is about. */
@@ -61,6 +70,12 @@ const DEFAULT_MS = 5_000;
 const GUARDED = [
   "PostgresStorage.test.ts",
   "ralph-opencode.test.ts",
+  // Landed on `main` after this branch was cut (parallel workers, `f1343e8`), and it belongs with
+  // the other two: it spawns `bash` per case and sources `.pi/ralph/loop.sh`, so it is the class
+  // that inherits the load the 5 s default cannot survive. Worst case of three runs at 2 046 ms —
+  // inside the default today, unlike the two files above it, so it is not red yet; the class and
+  // the cost are why it is guarded rather than listed as unchecked.
+  "ralph-parallel.test.ts",
   "case-budgets.test.ts",
 ] as const;
 
