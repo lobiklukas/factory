@@ -661,14 +661,15 @@ describe("session list", () => {
    */
   const alignedInstant = Effect.gen(function* () {
     const at = yield* newestInstant;
-    // Sliced, not `replace`d: a regex would quietly become a no-op if `newestInstant` ever stopped
-    // emitting microseconds, leaving this a ninth copy of the lossless case — green, and testing
-    // nothing. The length check dies instead.
-    if (at.length !== 27 || !at.endsWith("000Z")) {
+    // Sliced, not `replace`d: a regex that quietly stopped matching would leave this a ninth copy
+    // of the lossless case — green, and testing nothing. Asserting the six-digit shape first makes
+    // a change to `newestInstant`'s format string die here instead.
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(at)) {
       throw new Error(
-        `alignedInstant expected a microsecond rendering to zero out, got ${at}`,
+        `alignedInstant expected newestInstant's six-digit rendering, got ${at}`,
       );
     }
+    // `2027-01-01T00:00:00.123456Z` → `2027-01-01T00:00:00.123Z`, the same instant at `MS`.
     return at.slice(0, -4) + "Z";
   });
 
