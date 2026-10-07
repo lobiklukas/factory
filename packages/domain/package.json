@@ -17,6 +17,7 @@
   "exports": {
     "./Api": "./src/Api.ts",
     "./Rpc": "./src/Rpc.ts",
-    "./Session": "./src/Session.ts"
+    "./Session": "./src/Session.ts",
+    "./Task": "./src/Task.ts"
   }
 }

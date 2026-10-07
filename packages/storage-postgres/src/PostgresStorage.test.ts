@@ -12,11 +12,12 @@ import {
   createStorageConformance,
   registerStorageConformance,
 } from "@earendil-works/pi-durable/testing";
-import { Clock, Effect, ManagedRuntime, Random } from "effect";
+import { Clock, Effect, ManagedRuntime, Random, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "./index";
 import { PostgresStorage, READER_PAGE_ROWS } from "./PostgresStorage";
+import { BoardDefinition } from "@repo/domain/Task";
 
 /**
  * Pi Durable's storage conformance suite is the acceptance oracle (docs/design.md M1).
@@ -467,6 +468,222 @@ describe("PostgresStorage.readers", () => {
       await expect(PostgresStorage.readers(sql, [broken])).rejects.toThrow(
         `of log ${broken} is not a write array`,
       );
+    },
+  );
+});
+
+/**
+ * The board's tables and the default pipeline seed (docs/board.md B1–B6, migration 0007).
+ *
+ * These cases read the database rather than the migration's source, because the claim being made is
+ * about what a reader finds after the migration has run: the seed is a fact in the database, not a
+ * string in a file. The one exception is the second-run case, which drives the migration's own
+ * default export twice — `PgMigrator` records what it has already applied, so going through the
+ * layer again would prove nothing about the seed's idempotence.
+ *
+ * Needs the same Postgres as the rest of this file.
+ */
+describe("the board's tables and seed", () => {
+  const table = (name: string) =>
+    Effect.runPromise(
+      sql<{ table_name: string }>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ${name}
+      `,
+    );
+
+  /**
+   * The SQLSTATE of a failed statement, which is the part of a Postgres error that does not depend
+   * on how the driver words it. Effect wraps it two levels deep (`SqlError` -> the reason -> the
+   * driver's own error), and the message a caller sees is `PgConnection: Query failed` either way.
+   */
+  const sqlstate = (error: unknown): string | undefined => {
+    let current: unknown = error;
+    for (
+      let depth = 0;
+      current !== null && typeof current === "object";
+      depth += 1
+    ) {
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === "string") return code;
+      current = (current as { cause?: unknown }).cause;
+      if (depth > 6) break;
+    }
+    return undefined;
+  };
+
+  it(
+    "creates the five tables the board's contract names",
+    { timeout: 30_000 },
+    async () => {
+      for (const name of [
+        "tasks",
+        "task_events",
+        "task_runs",
+        "board_definitions",
+        "board_instances",
+      ]) {
+        expect(await table(name)).toHaveLength(1);
+      }
+    },
+  );
+
+  it(
+    "seeds definition version 1 as B4's seven columns, with their kinds and requires",
+    { timeout: 30_000 },
+    async () => {
+      const [row] = await Effect.runPromise(
+        sql<{ id: string; version: number; name: string; columns: unknown }>`
+          SELECT id, version, name, columns FROM board_definitions
+        `,
+      );
+      expect(row).toBeDefined();
+
+      // Decoded through the domain contract, not asserted field by field against a hand-written
+      // copy: the claim is that the database holds what `BoardDefinition` says a definition is, so
+      // a column set the contract rejects is a failure here rather than in a reader.
+      const definition = Schema.decodeUnknownSync(BoardDefinition)(row);
+      expect(definition.id).toBe("default");
+      expect(definition.version).toBe(1);
+      expect(definition.name).toBe("Default pipeline");
+
+      expect(definition.columns.map((column) => column.name)).toEqual([
+        "intake",
+        "specifying",
+        "planning",
+        "building",
+        "review",
+        "done",
+        "canceled",
+      ]);
+
+      const byName = new Map(
+        definition.columns.map((column) => [column.name, column]),
+      );
+      const column = (name: string) => {
+        const found = byName.get(name);
+        if (found === undefined)
+          throw new Error(`seed is missing the ${name} column`);
+        return found;
+      };
+
+      // B4's kinds: one resting, four working, two terminal.
+      expect(column("intake").kind).toBe("resting");
+      for (const name of ["specifying", "planning", "building", "review"]) {
+        expect(column(name).kind).toBe("working");
+      }
+      for (const name of ["done", "canceled"]) {
+        expect(column(name).kind).toBe("terminal");
+      }
+
+      // B4's roles: the four working columns name one, the rest have none.
+      expect(column("intake").role).toBeUndefined();
+      expect(column("specifying").role).toBe("specifier");
+      expect(column("planning").role).toBe("planner");
+      expect(column("building").role).toBe("builder");
+      expect(column("review").role).toBe("reviewer");
+      expect(column("done").role).toBeUndefined();
+      expect(column("canceled").role).toBeUndefined();
+
+      // B4's exit requirements, by key. `intake` and the two terminal columns gate nothing on exit;
+      // `planning` and `review` each carry B5's human gate as a requirement the board can name.
+      expect(column("intake").requires).toEqual([]);
+      expect(column("done").requires).toEqual([]);
+      expect(column("canceled").requires).toEqual([]);
+      expect(
+        column("specifying").requires.map((requirement) => requirement.key),
+      ).toEqual(["spec_doc"]);
+      expect(
+        column("planning").requires.map((requirement) => requirement.key),
+      ).toEqual(["plan_doc", "human_move"]);
+      expect(
+        column("building").requires.map((requirement) => requirement.key),
+      ).toEqual(["run_completed", "non_empty_diff", "pr_link"]);
+      expect(
+        column("review").requires.map((requirement) => requirement.key),
+      ).toEqual(["review_verdict", "human_merge"]);
+
+      // Every requirement carries the key B5 requires a refusal to name, and the description a
+      // person reads — a requirement with either missing is prose the gate cannot check.
+      for (const column of definition.columns) {
+        for (const requirement of column.requires) {
+          expect(requirement.key).toMatch(/^[a-z][a-z0-9_]*$/);
+          expect(requirement.description.length).toBeGreaterThan(0);
+        }
+      }
+    },
+  );
+
+  it(
+    "leaves one definition row when the migration runs a second time",
+    { timeout: 30_000 },
+    async () => {
+      const migration = (await import("./migrations/0007_create_tasks"))
+        .default;
+      // Run directly, not through `MigratedLive`: the migrator records what it has applied, so a
+      // second trip through the layer would skip 0007 and prove nothing about the seed.
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+
+      const rows = await Effect.runPromise(
+        sql<{ id: string; version: number }>`
+          SELECT id, version FROM board_definitions
+        `,
+      );
+      expect(rows).toEqual([{ id: "default", version: 1 }]);
+    },
+  );
+
+  it(
+    "refuses a card that is blocked without the column it blocked from",
+    { timeout: 30_000 },
+    async () => {
+      const [instance] = await Effect.runPromise(
+        sql<{
+          id: string;
+        }>`SELECT id FROM board_instances LIMIT 1`,
+      );
+      // No instance exists until something creates one, so this case makes its own rather than
+      // depending on a writer that does not exist yet.
+      const boardId = instance?.id ?? "brd_test_board_instance";
+      if (instance === undefined) {
+        await Effect.runPromise(
+          sql`INSERT INTO board_instances (id, repo, definition_id, definition_version)
+              VALUES (${boardId}, 'factory/test', 'default', 1)`,
+        );
+      }
+
+      const refused = await Effect.runPromise(
+        sql`INSERT INTO tasks (id, board_id, title, "column", definition_version, revision, blocked_reason)
+            VALUES ('tsk_test_blocked_card', ${boardId}, 'blocked', 'building', 1, 1, 'needs_input')`,
+      ).then(
+        () => {
+          throw new Error("the half-blocked card was accepted");
+        },
+        (error: unknown) => error,
+      );
+      // 23514 is check_violation. Asserted by code rather than by the constraint's name because the
+      // name is generated from the table and column and would make this case brittle to a rename.
+      expect(sqlstate(refused)).toBe("23514");
+    },
+  );
+
+  it(
+    "refuses a board instance that names a definition version which does not exist",
+    { timeout: 30_000 },
+    async () => {
+      const refused = await Effect.runPromise(
+        sql`INSERT INTO board_instances (id, repo, definition_id, definition_version)
+            VALUES ('brd_test_unknown_version', 'factory/test', 'default', 99)`,
+      ).then(
+        () => {
+          throw new Error("the unknown definition version was accepted");
+        },
+        (error: unknown) => error,
+      );
+      // 23503 is foreign_key_violation.
+      expect(sqlstate(refused)).toBe("23503");
     },
   );
 });
