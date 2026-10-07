@@ -518,23 +518,27 @@ const colimaHome = async (): Promise<{
 };
 
 describe("the verify-* skills' Postgres precondition", () => {
-  it("leaves a database that already answers alone, without calling docker", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const database = await answeringPort();
-    try {
-      const result = ensurePostgres(scratch, database.port);
-      expect(result.status, result.stderr).toBe(0);
-      // Mutation checked: dropping the `pg_port_open && return 0` line at the top of
-      // `ensure_postgres` — the helper goes on to ask compose about a database that is already up,
-      // which is the LOB-57 bug from the caller's side.
-      expect(dockerCalls(scratch)).toEqual([]);
-      // The helper is silent on the path every skill takes on a developer machine.
-      expect(result.stdout).toBe("");
-    } finally {
-      await database.close();
-    }
-  });
+  it(
+    "leaves a database that already answers alone, without calling docker",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const database = await answeringPort();
+      try {
+        const result = ensurePostgres(scratch, database.port);
+        expect(result.status, result.stderr).toBe(0);
+        // Mutation checked: dropping the `pg_port_open && return 0` line at the top of
+        // `ensure_postgres` — the helper goes on to ask compose about a database that is already up,
+        // which is the LOB-57 bug from the caller's side.
+        expect(dockerCalls(scratch)).toEqual([]);
+        // The helper is silent on the path every skill takes on a developer machine.
+        expect(result.stdout).toBe("");
+      } finally {
+        await database.close();
+      }
+    },
+  );
 
   it("starts Postgres with compose when nothing answers on the port", async () => {
     const scratch = mkScratch();
@@ -619,49 +623,57 @@ describe("the verify-* skills' Postgres precondition", () => {
     }
   }, 30_000);
 
-  it("fails loudly on the command to run, and removes the container a failed start created", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const port = await closedPort();
-    const result = ensurePostgres(scratch, port, {
-      FAKE_DOCKER_CREATED: "faux-created",
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      `postgres is not up on port ${String(port)}`,
-    );
-    expect(result.stderr).toContain("docker compose up -d --wait postgres");
-    // "Loudly" means one line on stderr naming the command — not a hint on stdout that a caller's
-    // own output would bury, and not a bare non-zero exit. Mutation checked: `printf` without the
-    // `>&2` redirection.
-    expect(result.stdout).toBe("");
-    expect(result.stderr.endsWith("\n")).toBe(true);
-    expect(result.stderr.trimEnd().split("\n")).toHaveLength(1);
-    // The exact argv, in order: nothing else may touch a container on this path.
-    expect(subcommands(scratch)).toEqual([
-      "compose up -d --wait postgres",
-      "compose ps -aq --status created postgres",
-      "rm -f faux-created",
-    ]);
-  });
+  it(
+    "fails loudly on the command to run, and removes the container a failed start created",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const port = await closedPort();
+      const result = ensurePostgres(scratch, port, {
+        FAKE_DOCKER_CREATED: "faux-created",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `postgres is not up on port ${String(port)}`,
+      );
+      expect(result.stderr).toContain("docker compose up -d --wait postgres");
+      // "Loudly" means one line on stderr naming the command — not a hint on stdout that a caller's
+      // own output would bury, and not a bare non-zero exit. Mutation checked: `printf` without the
+      // `>&2` redirection.
+      expect(result.stdout).toBe("");
+      expect(result.stderr.endsWith("\n")).toBe(true);
+      expect(result.stderr.trimEnd().split("\n")).toHaveLength(1);
+      // The exact argv, in order: nothing else may touch a container on this path.
+      expect(subcommands(scratch)).toEqual([
+        "compose up -d --wait postgres",
+        "compose ps -aq --status created postgres",
+        "rm -f faux-created",
+      ]);
+    },
+  );
 
-  it("does not delete a container the failed start did not create", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const result = ensurePostgres(scratch, await closedPort());
-    expect(result.status).toBe(1);
-    // A running container is someone's database and an `exited` one is not this call's to delete:
-    // only `--status created` containers are removed, and there are none here. Mutation checked:
-    // collapsing the cleanup's `for container in $created` loop into one unquoted
-    // `pg_docker rm -f $created` — with nothing to delete, that is a stray `rm -f`.
-    expect(composeCalls(scratch)).toEqual([
-      "compose up -d --wait postgres",
-      "compose ps -aq --status created postgres",
-    ]);
-    expect(
-      subcommands(scratch).filter((call) => call.startsWith("rm ")),
-    ).toEqual([]);
-  });
+  it(
+    "does not delete a container the failed start did not create",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const result = ensurePostgres(scratch, await closedPort());
+      expect(result.status).toBe(1);
+      // A running container is someone's database and an `exited` one is not this call's to delete:
+      // only `--status created` containers are removed, and there are none here. Mutation checked:
+      // collapsing the cleanup's `for container in $created` loop into one unquoted
+      // `pg_docker rm -f $created` — with nothing to delete, that is a stray `rm -f`.
+      expect(composeCalls(scratch)).toEqual([
+        "compose up -d --wait postgres",
+        "compose ps -aq --status created postgres",
+      ]);
+      expect(
+        subcommands(scratch).filter((call) => call.startsWith("rm ")),
+      ).toEqual([]);
+    },
+  );
 
   it.each(UP_SCRIPTS)(
     "lets %s/up.sh start while another container holds 5442",
@@ -767,103 +779,119 @@ describe("the verify-* skills' Postgres precondition", () => {
     }
   }, 30_000);
 
-  it("defaults the port to the one compose.yaml publishes, under a caller's strict shell", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 0);
-    // Every caller runs `set -euo pipefail`; sourcing must not need PG_PORT to be set, and the
-    // default must be the host port compose.yaml maps, because that is the one the skills' own
-    // DATABASE_URL points at. Mutation checked: dropping the `:-5442` default (unbound under `-u`).
-    const strict = spawnSync(
-      "bash",
-      ["-c", 'set -euo pipefail; source "$PG_LIB"; echo "$PG_PORT"'],
-      {
-        cwd: scratch.root,
-        encoding: "utf8",
-        env: { ...envWithoutPort(scratch), PG_LIB: LIB },
-        timeout: 30_000,
-      },
-    );
-    const published = /- "(\d+):5432"/.exec(
-      readFileSync(path.join(REPO_ROOT, "compose.yaml"), "utf8"),
-    )?.[1];
-    expect(published).toBeDefined();
-    expect(strict.status, strict.stderr).toBe(0);
-    expect(strict.stdout).toBe(`${String(published)}\n`);
+  it(
+    "defaults the port to the one compose.yaml publishes, under a caller's strict shell",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 0);
+      // Every caller runs `set -euo pipefail`; sourcing must not need PG_PORT to be set, and the
+      // default must be the host port compose.yaml maps, because that is the one the skills' own
+      // DATABASE_URL points at. Mutation checked: dropping the `:-5442` default (unbound under `-u`).
+      const strict = spawnSync(
+        "bash",
+        ["-c", 'set -euo pipefail; source "$PG_LIB"; echo "$PG_PORT"'],
+        {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: { ...envWithoutPort(scratch), PG_LIB: LIB },
+          timeout: 30_000,
+        },
+      );
+      const published = /- "(\d+):5432"/.exec(
+        readFileSync(path.join(REPO_ROOT, "compose.yaml"), "utf8"),
+      )?.[1];
+      expect(published).toBeDefined();
+      expect(strict.status, strict.stderr).toBe(0);
+      expect(strict.stdout).toBe(`${String(published)}\n`);
 
-    // `set -u` alone, the mode sigterm.sh and degraded.sh run in: an unguarded expansion anywhere
-    // in the library would abort the caller before its first check.
-    const nounset = spawnSync(
-      "bash",
-      ["-c", 'set -u; source "$PG_LIB"; echo sourced'],
-      {
-        cwd: scratch.root,
-        encoding: "utf8",
-        env: { ...envWithoutPort(scratch), PG_LIB: LIB },
-        timeout: 30_000,
-      },
-    );
-    expect(nounset.status, nounset.stderr).toBe(0);
-    expect(nounset.stdout).toBe("sourced\n");
-    expect(dockerCalls(scratch)).toEqual([]);
-  });
-
-  it("treats a port that accepts and hangs up as an answered database", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const database = await hangUpPort();
-    try {
-      const result = ensurePostgres(scratch, database.port);
-      // The precondition asks "is something listening on the session log's port", not "does it
-      // speak Postgres". A probe that waits for a greeting would call compose and, in a worktree,
-      // fail the bind — which is the bug this file exists for. Mutation checked: making
-      // `pg_port_open` read from the socket instead of only connecting.
-      expect(result.status, result.stderr).toBe(0);
+      // `set -u` alone, the mode sigterm.sh and degraded.sh run in: an unguarded expansion anywhere
+      // in the library would abort the caller before its first check.
+      const nounset = spawnSync(
+        "bash",
+        ["-c", 'set -u; source "$PG_LIB"; echo sourced'],
+        {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: { ...envWithoutPort(scratch), PG_LIB: LIB },
+          timeout: 30_000,
+        },
+      );
+      expect(nounset.status, nounset.stderr).toBe(0);
+      expect(nounset.stdout).toBe("sourced\n");
       expect(dockerCalls(scratch)).toEqual([]);
-    } finally {
-      await database.close();
-    }
-  });
+    },
+  );
 
-  it("names one owner when several containers publish the port, and nothing when none does", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 0);
-    const run = (extra: Record<string, string>) =>
-      spawnSync("bash", ["-c", 'source "$PG_LIB"; pg_port_owner'], {
-        cwd: scratch.root,
-        encoding: "utf8",
-        env: { ...childEnv(scratch, 5442, extra), PG_LIB: LIB },
-        timeout: 30_000,
+  it(
+    "treats a port that accepts and hangs up as an answered database",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const database = await hangUpPort();
+      try {
+        const result = ensurePostgres(scratch, database.port);
+        // The precondition asks "is something listening on the session log's port", not "does it
+        // speak Postgres". A probe that waits for a greeting would call compose and, in a worktree,
+        // fail the bind — which is the bug this file exists for. Mutation checked: making
+        // `pg_port_open` read from the socket instead of only connecting.
+        expect(result.status, result.stderr).toBe(0);
+        expect(dockerCalls(scratch)).toEqual([]);
+      } finally {
+        await database.close();
+      }
+    },
+  );
+
+  it(
+    "names one owner when several containers publish the port, and nothing when none does",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 0);
+      const run = (extra: Record<string, string>) =>
+        spawnSync("bash", ["-c", 'source "$PG_LIB"; pg_port_owner'], {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: { ...childEnv(scratch, 5442, extra), PG_LIB: LIB },
+          timeout: 30_000,
+        });
+
+      // degraded.sh passes this straight to `docker stop`, so a two-line answer would be one
+      // container name with a newline in it — nothing would stop. Mutation checked: dropping the
+      // `| head -n 1`.
+      const several = run({
+        FAKE_DOCKER_PS: "factory-postgres-1\nanother-owner",
       });
+      expect(several.status, several.stderr).toBe(0);
+      expect(several.stdout).toBe("factory-postgres-1\n");
 
-    // degraded.sh passes this straight to `docker stop`, so a two-line answer would be one
-    // container name with a newline in it — nothing would stop. Mutation checked: dropping the
-    // `| head -n 1`.
-    const several = run({
-      FAKE_DOCKER_PS: "factory-postgres-1\nanother-owner",
-    });
-    expect(several.status, several.stderr).toBe(0);
-    expect(several.stdout).toBe("factory-postgres-1\n");
+      const none = run({});
+      expect(none.status, none.stderr).toBe(0);
+      expect(none.stdout).toBe("");
+    },
+  );
 
-    const none = run({});
-    expect(none.status, none.stderr).toBe(0);
-    expect(none.stdout).toBe("");
-  });
-
-  it("does nothing on a second run while the port still answers", async () => {
-    const scratch = mkScratch();
-    writeFakeDocker(scratch, 1);
-    const database = await answeringPort();
-    try {
-      // `up.sh` twice in a row, which is what a re-run of a skill does: the second call must not
-      // reach compose either. Mutation checked: the same one as the first case — removing
-      // `pg_port_open && return 0` from `ensure_postgres`.
-      expect(ensurePostgres(scratch, database.port).status).toBe(0);
-      expect(ensurePostgres(scratch, database.port).status).toBe(0);
-      expect(dockerCalls(scratch)).toEqual([]);
-    } finally {
-      await database.close();
-    }
-  });
+  it(
+    "does nothing on a second run while the port still answers",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      const database = await answeringPort();
+      try {
+        // `up.sh` twice in a row, which is what a re-run of a skill does: the second call must not
+        // reach compose either. Mutation checked: the same one as the first case — removing
+        // `pg_port_open && return 0` from `ensure_postgres`.
+        expect(ensurePostgres(scratch, database.port).status).toBe(0);
+        expect(ensurePostgres(scratch, database.port).status).toBe(0);
+        expect(dockerCalls(scratch)).toEqual([]);
+      } finally {
+        await database.close();
+      }
+    },
+  );
 
   it.each(CALLERS)(
     "lets %s refuse before it starts anything when nothing answers",
@@ -1050,36 +1078,40 @@ describe("the verify-* skills' Postgres precondition", () => {
     30_000,
   );
 
-  it("lets degraded.sh refuse loudly when the port answers but no container publishes it", async () => {
-    const scratch = mkScratch();
-    // No `FAKE_DOCKER_PS`: the port is served by something docker does not know about — a native
-    // server, a tunnel, or a container another daemon owns. `degraded.sh` cannot take that database
-    // away and give it back, so it must say so instead of stopping the wrong thing.
-    writeFakeDocker(scratch, 0);
-    writeMarkingBunAndReadyCurl(scratch);
-    const staged = stageCaller(scratch, ".pi/skills/verify-api/degraded.sh");
-    const database = await answeringPort();
-    try {
-      const result = spawnSync("bash", [staged], {
-        cwd: scratch.root,
-        encoding: "utf8",
-        env: childEnv(scratch, database.port),
-        timeout: 30_000,
-      });
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
-      expect(result.stderr).toContain(
-        `port ${String(database.port)} answers but no container publishes it`,
-      );
-      expect(existsSync(scratch.bunRan)).toBe(false);
-      // The refusal happens before the trap is armed, so nothing is stopped, started or removed.
-      // Mutation checked: dropping the `[ -z "$PG_CONTAINER" ]` guard (a `docker stop ""` appears).
-      expect(subcommands(scratch)).toEqual([
-        `ps --filter publish=${String(database.port)} --format {{.Names}}`,
-      ]);
-    } finally {
-      await database.close();
-    }
-  });
+  it(
+    "lets degraded.sh refuse loudly when the port answers but no container publishes it",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      // No `FAKE_DOCKER_PS`: the port is served by something docker does not know about — a native
+      // server, a tunnel, or a container another daemon owns. `degraded.sh` cannot take that database
+      // away and give it back, so it must say so instead of stopping the wrong thing.
+      writeFakeDocker(scratch, 0);
+      writeMarkingBunAndReadyCurl(scratch);
+      const staged = stageCaller(scratch, ".pi/skills/verify-api/degraded.sh");
+      const database = await answeringPort();
+      try {
+        const result = spawnSync("bash", [staged], {
+          cwd: scratch.root,
+          encoding: "utf8",
+          env: childEnv(scratch, database.port),
+          timeout: 30_000,
+        });
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+        expect(result.stderr).toContain(
+          `port ${String(database.port)} answers but no container publishes it`,
+        );
+        expect(existsSync(scratch.bunRan)).toBe(false);
+        // The refusal happens before the trap is armed, so nothing is stopped, started or removed.
+        // Mutation checked: dropping the `[ -z "$PG_CONTAINER" ]` guard (a `docker stop ""` appears).
+        expect(subcommands(scratch)).toEqual([
+          `ps --filter publish=${String(database.port)} --format {{.Names}}`,
+        ]);
+      } finally {
+        await database.close();
+      }
+    },
+  );
 
   it("stops the container that publishes the port and starts it again, by name", async () => {
     const scratch = mkScratch();
@@ -1200,78 +1232,82 @@ describe("the verify-* skills' Postgres precondition", () => {
     }
   }, 30_000);
 
-  it("drives docker only through the shim on PATH, and starts nothing but its own runtime", async () => {
-    const scratch = mkScratch();
-    const port = await closedPort();
-    writeFakeDocker(scratch, 0, { opensPort: port });
+  it(
+    "drives docker only through the shim on PATH, and starts nothing but its own runtime",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      const port = await closedPort();
+      writeFakeDocker(scratch, 0, { opensPort: port });
 
-    // 1. The shim is what every child of this file resolves `docker` to. A call through an absolute
-    //    path or a login shell would bypass it and read as "docker was never called" — a false green
-    //    for every case above, and a real daemon behind the ones that assert it was never reached.
-    const resolved = spawnSync("bash", ["-c", "command -v docker || true"], {
-      cwd: scratch.root,
-      encoding: "utf8",
-      env: childEnv(scratch, port),
-      timeout: 30_000,
-    });
-    expect(resolved.stdout.trim()).toBe(path.join(scratch.bin, "docker"));
-    expect(
-      childEnv(scratch, port)["PATH"]?.startsWith(
-        `${scratch.bin}${path.delimiter}`,
-      ),
-    ).toBe(true);
+      // 1. The shim is what every child of this file resolves `docker` to. A call through an absolute
+      //    path or a login shell would bypass it and read as "docker was never called" — a false green
+      //    for every case above, and a real daemon behind the ones that assert it was never reached.
+      const resolved = spawnSync("bash", ["-c", "command -v docker || true"], {
+        cwd: scratch.root,
+        encoding: "utf8",
+        env: childEnv(scratch, port),
+        timeout: 30_000,
+      });
+      expect(resolved.stdout.trim()).toBe(path.join(scratch.bin, "docker"));
+      expect(
+        childEnv(scratch, port)["PATH"]?.startsWith(
+          `${scratch.bin}${path.delimiter}`,
+        ),
+      ).toBe(true);
 
-    // 2. A text guard on the shape of the fake, not a behavioural one: it can only fail if these
-    //    constants are edited, and it is here to keep them edited together. What it is worth is that
-    //    the shim starts the runtime running this suite on one file rather than a `node` looked up
-    //    on `PATH` or a shell one-liner. The *clients* in this file are pinned to loopback by the
-    //    cases that connect; the listener's own bind address is guarded here, because a listener on
-    //    `0.0.0.0` would answer those same connections just as well.
-    const shim = readFileSync(path.join(scratch.bin, "docker"), "utf8");
-    expect(shim).toContain(process.execPath);
-    const listener = readFileSync(
-      path.join(scratch.root, "listener.cjs"),
-      "utf8",
-    );
-    expect(listener).toContain('require("node:net")');
-    expect(listener).toContain(
-      'server.listen(Number(process.argv[2]), "127.0.0.1")',
-    );
-    expect(listener).not.toContain("0.0.0.0");
+      // 2. A text guard on the shape of the fake, not a behavioural one: it can only fail if these
+      //    constants are edited, and it is here to keep them edited together. What it is worth is that
+      //    the shim starts the runtime running this suite on one file rather than a `node` looked up
+      //    on `PATH` or a shell one-liner. The *clients* in this file are pinned to loopback by the
+      //    cases that connect; the listener's own bind address is guarded here, because a listener on
+      //    `0.0.0.0` would answer those same connections just as well.
+      const shim = readFileSync(path.join(scratch.bin, "docker"), "utf8");
+      expect(shim).toContain(process.execPath);
+      const listener = readFileSync(
+        path.join(scratch.root, "listener.cjs"),
+        "utf8",
+      );
+      expect(listener).toContain('require("node:net")');
+      expect(listener).toContain(
+        'server.listen(Number(process.argv[2]), "127.0.0.1")',
+      );
+      expect(listener).not.toContain("0.0.0.0");
 
-    // 3. The helper itself names the CLI in exactly two places, both inside `pg_docker` — the
-    //    function that owns the colima fallback. Anywhere else in the file is a call the cases could
-    //    not drive, and a call that skipped the fallback. Mutation checked: adding a `docker ps ...`
-    //    beside `pg_port_open`.
-    const helper = readFileSync(LIB, "utf8");
-    const code = helper
-      .split("\n")
-      .filter((line) => !/^\s*#/.test(line))
-      .join("\n")
-      .replace(/'[^']*'/g, "''")
-      .replace(/"[^"]*"/g, '""');
-    const pgDocker = code.slice(
-      code.indexOf("pg_docker() {"),
-      code.indexOf("}", code.indexOf("pg_docker() {")),
-    );
-    expect(code.match(/\bdocker\b/g)).toHaveLength(2);
-    expect(pgDocker.match(/\bdocker\b/g)).toHaveLength(2);
-    // The probe is loopback on the overridable port: never a host name, never every interface.
-    // `${PG_PORT}` counts as well as `$PG_PORT` — the property is the address, not the spelling.
-    const noComments = helper
-      .split("\n")
-      .filter((line) => !/^\s*#/.test(line))
-      .join("\n");
-    expect(noComments).toMatch(/\/dev\/tcp\/127\.0\.0\.1\/\$\{?PG_PORT\}?/);
-    expect(noComments).not.toMatch(/localhost|0\.0\.0\.0/);
+      // 3. The helper itself names the CLI in exactly two places, both inside `pg_docker` — the
+      //    function that owns the colima fallback. Anywhere else in the file is a call the cases could
+      //    not drive, and a call that skipped the fallback. Mutation checked: adding a `docker ps ...`
+      //    beside `pg_port_open`.
+      const helper = readFileSync(LIB, "utf8");
+      const code = helper
+        .split("\n")
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n")
+        .replace(/'[^']*'/g, "''")
+        .replace(/"[^"]*"/g, '""');
+      const pgDocker = code.slice(
+        code.indexOf("pg_docker() {"),
+        code.indexOf("}", code.indexOf("pg_docker() {")),
+      );
+      expect(code.match(/\bdocker\b/g)).toHaveLength(2);
+      expect(pgDocker.match(/\bdocker\b/g)).toHaveLength(2);
+      // The probe is loopback on the overridable port: never a host name, never every interface.
+      // `${PG_PORT}` counts as well as `$PG_PORT` — the property is the address, not the spelling.
+      const noComments = helper
+        .split("\n")
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n");
+      expect(noComments).toMatch(/\/dev\/tcp\/127\.0\.0\.1\/\$\{?PG_PORT\}?/);
+      expect(noComments).not.toMatch(/localhost|0\.0\.0\.0/);
 
-    // 4. And this file's own connections go to ports it started or proved closed: no `host:port`
-    //    literal to inherit a real service by accident, and no URL at all. The literal 5442 in the
-    //    `pg_port_owner` case feeds `docker ps --filter`, which opens no socket.
-    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
-    expect(self).not.toMatch(/https?:\/\//);
-    expect(self).not.toMatch(/port:\s*\d/);
-  });
+      // 4. And this file's own connections go to ports it started or proved closed: no `host:port`
+      //    literal to inherit a real service by accident, and no URL at all. The literal 5442 in the
+      //    `pg_port_owner` case feeds `docker ps --filter`, which opens no socket.
+      const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      expect(self).not.toMatch(/https?:\/\//);
+      expect(self).not.toMatch(/port:\s*\d/);
+    },
+  );
 
   it("leaves the listener alone when there is none, and never signals a malformed pid", async () => {
     const scratch = mkScratch();
@@ -1306,65 +1342,123 @@ describe("the verify-* skills' Postgres precondition", () => {
     }
   }, 30_000);
 
-  it("keeps the compose call inside the one helper the callers share", () => {
-    // The bug existed in five copies of the same stanza. This is the drift guard: a new `up.sh`
-    // that copy-pastes `docker compose up` re-introduces it, and the cases above would not see a
-    // script they are not told about. Mutation checked: adding `docker compose up -d --wait
-    // postgres` to any caller below, under whatever name it is sourced as.
-    for (const caller of CALLERS) {
-      const source = readFileSync(path.join(REPO_ROOT, caller), "utf8");
-      expect(source, caller).toContain(".pi/skills/lib/postgres.sh");
-      expect(source, caller).not.toContain("docker compose up");
-    }
-  });
+  it(
+    "keeps the compose call inside the one helper the callers share",
+    { timeout: 30_000 },
+    () => {
+      // The bug existed in five copies of the same stanza. This is the drift guard: a new `up.sh`
+      // that copy-pastes `docker compose up` re-introduces it, and the cases above would not see a
+      // script they are not told about. Mutation checked: adding `docker compose up -d --wait
+      // postgres` to any caller below, under whatever name it is sourced as.
+      for (const caller of CALLERS) {
+        const source = readFileSync(path.join(REPO_ROOT, caller), "utf8");
+        expect(source, caller).toContain(".pi/skills/lib/postgres.sh");
+        expect(source, caller).not.toContain("docker compose up");
+      }
+    },
+  );
 
-  it("reaches docker nowhere but through the helper and the library", () => {
-    // `not.toContain("docker compose up")` above misses `docker  compose up`, `pg_docker compose
-    // up` and `docker ps`. Strip the comments and the quoted strings — a message that mentions
-    // docker is not a call — and no caller may name the CLI at all: everything goes through
-    // `pg_docker`/`pg_compose`, which the cases above drive.
-    // Mutation checked: adding `pg_docker compose up -d --wait postgres` to any caller.
-    for (const caller of CALLERS) {
-      const code = readFileSync(path.join(REPO_ROOT, caller), "utf8")
-        .split("\n")
-        .filter((line) => !/^\s*#/.test(line))
-        .join("\n")
-        .replace(/'[^']*'/g, "''")
-        .replace(/"[^"]*"/g, '""');
-      expect(code, caller).not.toMatch(/\bdocker\b/);
-      expect(code, caller).not.toMatch(/(^|[^_\w])compose\b/);
-    }
-  });
+  it(
+    "reaches docker nowhere but through the helper and the library",
+    { timeout: 30_000 },
+    () => {
+      // `not.toContain("docker compose up")` above misses `docker  compose up`, `pg_docker compose
+      // up` and `docker ps`. Strip the comments and the quoted strings — a message that mentions
+      // docker is not a call — and no caller may name the CLI at all: everything goes through
+      // `pg_docker`/`pg_compose`, which the cases above drive.
+      // Mutation checked: adding `pg_docker compose up -d --wait postgres` to any caller.
+      for (const caller of CALLERS) {
+        const code = readFileSync(path.join(REPO_ROOT, caller), "utf8")
+          .split("\n")
+          .filter((line) => !/^\s*#/.test(line))
+          .join("\n")
+          .replace(/'[^']*'/g, "''")
+          .replace(/"[^"]*"/g, '""');
+        expect(code, caller).not.toMatch(/\bdocker\b/);
+        expect(code, caller).not.toMatch(/(^|[^_\w])compose\b/);
+      }
+    },
+  );
 
-  it("leaves no case unaccounted for in the mutation note every case carries", () => {
-    // The header's claim is a property of this file, so it is checked like one: a case declares
-    // itself on a line that starts with `it(` or `test(`, and its mutation note is a comment line
-    // inside it. The scan is structural — a note anywhere between two declarations belongs to the
-    // earlier one — because a hand-kept list of exceptions in the header is exactly what drifted
-    // (LOB-107, six cases). Mutation checked: deleting every `Mutation checked:` line a case
-    // carries, whose case then appears in `unaccounted` — this case included, since its own note is
-    // the only place the marker is written inside it.
-    const lines = readFileSync(fileURLToPath(import.meta.url), "utf8").split(
-      "\n",
-    );
-    // Vitest's modifiers included, in both spellings: `it.each(UP_SCRIPTS)(` and
-    // `it.skip("name", fn)` both declare a case that carries a note like any other, and neither is
-    // a case the scan may walk past. `it.todo` counts too — it has no assertion, so it has no
-    // mutation to name, and the honest answer is a red guard rather than a silent exemption.
-    const declarations = lines.flatMap((line, index) =>
-      /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line) ? [index] : [],
-    );
-    // A scan that stopped finding declarations would leave nothing to check and pass vacuously.
-    // The count is a tripwire, not an invariant: bump the 28 when a case is added, and give the new
-    // case its note.
-    expect(
-      declarations,
-      "declaration count changed — bump the 28 and keep every case's mutation note",
-    ).toHaveLength(28);
-    const unaccounted = declarations.filter((start, position) => {
-      const end = declarations[position + 1] ?? lines.length;
-      return !lines.slice(start, end).some(isMutationNote);
-    });
-    expect(unaccounted.map((index) => lines[index]?.trim())).toEqual([]);
-  });
+  it(
+    "leaves no case unaccounted for in the mutation note every case carries",
+    { timeout: 30_000 },
+    () => {
+      // The header's claim is a property of this file, so it is checked like one: a case declares
+      // itself on a line that starts with `it(` or `test(`, and its mutation note is a comment line
+      // inside it. The scan is structural — a note anywhere between two declarations belongs to the
+      // earlier one — because a hand-kept list of exceptions in the header is exactly what drifted
+      // (LOB-107, six cases). Mutation checked: deleting every `Mutation checked:` line a case
+      // carries, whose case then appears in `unaccounted` — this case included, since its own note is
+      // the only place the marker is written inside it.
+      const lines = readFileSync(fileURLToPath(import.meta.url), "utf8").split(
+        "\n",
+      );
+      // Vitest's modifiers included, in both spellings: `it.each(UP_SCRIPTS)(` and
+      // `it.skip("name", fn)` both declare a case that carries a note like any other, and neither is
+      // a case the scan may walk past. `it.todo` counts too — it has no assertion, so it has no
+      // mutation to name, and the honest answer is a red guard rather than a silent exemption.
+      const declarations = lines.flatMap((line, index) =>
+        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+          ? [index]
+          : [],
+      );
+      // A scan that stopped finding declarations would leave nothing to check and pass vacuously.
+      // The count is a tripwire, not an invariant: bump the 28 when a case is added, and give the new
+      // case its note.
+      expect(
+        declarations,
+        "declaration count changed — bump the 29 and keep every case's mutation note",
+      ).toHaveLength(29);
+      const unaccounted = declarations.filter((start, position) => {
+        const end = declarations[position + 1] ?? lines.length;
+        return !lines.slice(start, end).some(isMutationNote);
+      });
+      expect(unaccounted.map((index) => lines[index]?.trim())).toEqual([]);
+    },
+  );
+
+  it(
+    "gives every case a budget, so none relies on vitest's 5 s default",
+    { timeout: 30_000 },
+    () => {
+      // Mutation checked: deleting the `timeout: 30_000` from this case's own options makes
+      // the guard below redden with this case's line number.
+      // Mutation: delete `{ timeout: 30_000 },` from any case above — the guard reads the file
+      // back and fails, naming the case that lost its budget. Without this case a future edit
+      // could silently drop a budget and the gate would go red intermittently under parallel
+      // load, which is the failure this issue exists to prevent.
+      //
+      // The guard enforces this file's convention — a per-case `{ timeout }` option or a
+      // trailing `, 30_000)` argument — not the only possible way to budget a case. A future
+      // `test.timeout` in `vitest.config.ts` would be a legitimate fix that this guard does
+      // not recognise; that is a limitation to note, not a false green today (the config sets
+      // no timeout).
+      const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const lines = source.split("\n");
+      const declarations = lines.flatMap((line, index) =>
+        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+          ? [index]
+          : [],
+      );
+      const missing: string[] = [];
+      for (let position = 0; position < declarations.length; position++) {
+        const start = declarations[position]!;
+        const end = declarations[position + 1] ?? lines.length;
+        const caseLines = lines.slice(start, end);
+        // Vitest timeout in this file appears as either:
+        // - `{ timeout: 30_000 }` as the second argument (on the `it(` line or next line)
+        // - `, 30_000)` as the last argument (at the end of the test case)
+        const hasTimeout = caseLines.some(
+          (candidate) =>
+            /\btimeout\s*:\s*30_000\b/.test(candidate) ||
+            /,\s*30_000\s*[)}]\s*;?\s*$/.test(candidate),
+        );
+        if (!hasTimeout) {
+          missing.push(`line ${String(start + 1)}: ${lines[start]!.trim()}`);
+        }
+      }
+      expect(missing).toEqual([]);
+    },
+  );
 });
