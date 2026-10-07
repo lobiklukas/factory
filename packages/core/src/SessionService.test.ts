@@ -300,23 +300,29 @@ const runDatabases = Effect.gen(function* () {
 /**
  * Drop every database under the prefix that is over an hour old and reads no connections.
  *
- * Best-effort, and the file header says so. All three conditions are necessary and none is
+ * Best-effort, and the file header says so. Three conditions decide each candidate, and none is
  * sufficient alone:
  *
- * - `runDatabaseName` is excluded explicitly even though it is seconds old, because that exclusion is
- *   what keeps this safe to reorder against the `CREATE` below.
  * - `connections > 0` separates a live run from an orphan, and it is why the age check exists at all
  *   (see `STALE_RUN_AFTER_MS`): a starting run's database has no connections for as long as module
  *   evaluation takes, so without an hour of encoded age a sweep could drop one out from under it.
  * - an undecodable stamp is *skipped*, not guessed at. Dropping a database whose age is unknown is the
  *   one thing the stamp exists to prevent.
+ * - `runDatabaseName` is skipped by name, and this one is deliberately redundant: the other two
+ *   conditions already cover it, because this run's database is seconds old and — once a case calls
+ *   this effect directly — connected. Deleting the line leaves the suite 32/32 green (measured), so no
+ *   case here can redden it. It is kept because a reordering of this effect past the `CREATE` would
+ *   leave the age clause as the only thing standing, and the ordering is asserted by the case
+ *   "runs before this file creates its own database" rather than by this line.
  *
  * `IF EXISTS`, and not for tidiness. Two runs on one server each read the same list of orphans and
- * each drop them, so the loser of every such pair gets `3D000 database "…" does not exist` — measured
- * against this container, and it fails the *whole file* at import rather than one case. The read and
- * the drop cannot be made atomic without locking every candidate against every other run, which is far
- * more coordination than sweeping abandoned databases is worth; `IF EXISTS` turns the loser's error
- * into a NOTICE and a no-op, which is enough.
+ * each drop them, so the loser of every such pair gets `3D000 database "…" does not exist` — and it
+ * fails the *whole file* at import rather than one case, so it is a red gate rather than a red case.
+ * The read and the drop cannot be made atomic without locking every candidate against every other
+ * run, which is far more coordination than sweeping abandoned databases is worth; `IF EXISTS` turns
+ * the loser's error into a NOTICE and a no-op, which is enough. No case here reddens its removal —
+ * the two concurrent runs that produce the loser are the drive, not a single-file run — which is why
+ * this comment names what is witnessed here and what is not.
  */
 const sweepAbandonedRunDatabases = Effect.gen(function* () {
   const sql = yield* SqlClient;
@@ -2116,7 +2122,13 @@ describe("the abandoned-run sweep", () => {
     const old = `${runDatabasePrefix}${runDatabaseTail(now - TWO_HOURS)}`;
     const fresh = `${runDatabasePrefix}${runDatabaseTail(now)}`;
     const unstamped = `${runDatabasePrefix}abcdef`;
-    const decoys = [old, fresh, unstamped];
+    // Old, unclaimed and decodable like `old`, and *not* this file's: the prefix's first `_` is
+    // spelled `X`, so the name differs by one character from anything this file can mint while still
+    // matching the prefix under `LIKE`, where `_` is a single-character wildcard. It is here so the
+    // sweep's `starts_with` has something a `LIKE` would take and it must not — the reach this
+    // clause exists to prevent, which is dropping a database this file did not create.
+    const wild = `${runDatabasePrefix.replace("_", "X")}${runDatabaseTail(now - TWO_HOURS)}`;
+    const decoys = [old, fresh, unstamped, wild];
     try {
       for (const name of decoys) await createDecoy(name);
       // Nothing was created by accident: every decoy the verdicts below turn on has to exist first,
@@ -2139,6 +2151,10 @@ describe("the abandoned-run sweep", () => {
       expect(
         await databaseExists(unstamped),
         "no stamp, so no age to read, so not this sweep's to drop",
+      ).toBe(true);
+      expect(
+        await databaseExists(wild),
+        "old, unclaimed and decodable, but its name is not under the prefix — a LIKE would match it and drop a database this file never created",
       ).toBe(true);
       // This run's own database is the one a sweep must never touch, and it is the one under test.
       expect(await databaseExists(runDatabaseName)).toBe(true);
