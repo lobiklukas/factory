@@ -1,5 +1,6 @@
 import { Clock, Effect, Random } from "effect";
 import { SessionId } from "@repo/domain/Session";
+import { TaskId } from "@repo/domain/Task";
 
 /**
  * Session ids: Crockford base32 (no `i`, `l`, `o`, `u`) with ten characters of millisecond
@@ -30,4 +31,18 @@ export const mintSessionId: Effect.Effect<SessionId> = Effect.gen(function* () {
     random.push(encode(yield* Random.nextIntBetween(0, 2 ** 20), RANDOM_CHARS));
   }
   return SessionId.make(`ses_${encode(millis, TIME_CHARS)}${random.join("")}`);
+});
+
+/**
+ * Task ids: `tsk_` and the same ten-plus-sixteen shape as a session id (`TaskId` in the domain),
+ * minted by the server. A card is typed by a person, so its id is the only handle the board has on
+ * it; it is sortable and unique for the same reason a session id is.
+ */
+export const mintTaskId: Effect.Effect<TaskId> = Effect.gen(function* () {
+  const millis = yield* Clock.currentTimeMillis;
+  const random: string[] = [];
+  for (let index = 0; index < RANDOM_CHUNKS; index += 1) {
+    random.push(encode(yield* Random.nextIntBetween(0, 2 ** 20), RANDOM_CHARS));
+  }
+  return TaskId.make(`tsk_${encode(millis, TIME_CHARS)}${random.join("")}`);
 });

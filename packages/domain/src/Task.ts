@@ -267,3 +267,34 @@ export const TaskRun = Schema.Struct({
   finishedAt: Schema.optional(Timestamp),
 });
 export type TaskRun = typeof TaskRun.Type;
+
+/**
+ * Why a board operation was refused (B5: "a refusal names the failing requirement").
+ *
+ * - `not_found` — no such task or board.
+ * - `stale_revision` — the expected revision is not the card's current one (B3, B5). A move that
+ *   loses a race to another move lands here too.
+ * - `undeclared_transition` — the card's column declares no transition to the requested column,
+ *   or the requested column is not in the card's pinned definition.
+ * - `human_gate` — a run tried to cross a column's human gate; only a person may (B5).
+ * - `blocked` — a move was asked of a card that is blocked; it is unblocked first.
+ * - `already_blocked` / `not_blocked` — a block or an unblock against the wrong state.
+ * - `storage` — the database could not be read or written, or a row failed the domain contract.
+ */
+export const TaskErrorCode = Schema.Literals([
+  "not_found",
+  "stale_revision",
+  "undeclared_transition",
+  "human_gate",
+  "blocked",
+  "already_blocked",
+  "not_blocked",
+  "storage",
+]);
+export type TaskErrorCode = typeof TaskErrorCode.Type;
+
+/** A refused board operation: the code a caller can branch on, and the message a person reads. */
+export class TaskError extends Schema.TaggedError<TaskError>()("TaskError", {
+  code: TaskErrorCode,
+  message: Schema.String,
+}) {}
