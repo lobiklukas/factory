@@ -1,5 +1,8 @@
 import { Rpc, RpcGroup } from "effect/rpc";
+import { Schema } from "effect";
 import {
+  ApprovalDecision,
+  ApprovalRequest,
   CreateSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -62,6 +65,16 @@ export class SessionRpc extends RpcGroup.make(
     success: SessionEvent,
     error: SessionError,
     stream: true,
+  }),
+  Rpc.make("createApproval", {
+    payload: ApprovalRequest,
+    success: Schema.String,
+    error: SessionError,
+  }),
+  Rpc.make("decideApproval", {
+    payload: ApprovalDecision,
+    success: Schema.String,
+    error: SessionError,
   }),
 ) {}
 

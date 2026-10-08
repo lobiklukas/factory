@@ -149,6 +149,27 @@ export const SessionUsage = Schema.Struct({
 });
 export type SessionUsage = typeof SessionUsage.Type;
 
+/** A request to create a pending approval for a session. */
+export const ApprovalRequest = Schema.Struct({
+  sessionId: Schema.String,
+  /** Actor who requested the approval, supplied by the caller. */
+  actor: Schema.String,
+  /** Optional comment/context for the approval. */
+  comment: Schema.optional(Schema.String),
+});
+export type ApprovalRequest = typeof ApprovalRequest.Type;
+
+/** The result of settling an approval decision. */
+export const ApprovalDecision = Schema.Struct({
+  /** The session id this decision applies to. */
+  sessionId: Schema.String,
+  /** `approve` or `reject`. */
+  action: Schema.Literals(["approve", "reject"]),
+  /** Actor who made the decision, supplied by the caller. */
+  actor: Schema.String,
+});
+export type ApprovalDecision = typeof ApprovalDecision.Type;
+
 /**
  * Where a session's work actually lives, as the server resolved it (docs/features.md §3 A1).
  *

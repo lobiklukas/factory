@@ -80,6 +80,16 @@ export const SessionDoc = defineDoc({
   initial: () => ({ repo: "", baseRef: "" }),
 });
 
+/** The entry kind for approval-request documents. */
+export const APPROVAL_REQUEST_ENTRY_KIND = "factory.approval-request";
+
+/** The approval-request entry, committed to the log so folds can see pending approvals. */
+export const ApprovalRequestEntry = defineEntry<{
+  readonly sessionId: string;
+  readonly actor: string;
+  readonly comment: string;
+}>(APPROVAL_REQUEST_ENTRY_KIND);
+
 /** The repo a session is bound to, as the log records it. */
 export type RepoBinding = {
   readonly repo: string;

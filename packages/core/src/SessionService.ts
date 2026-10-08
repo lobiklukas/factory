@@ -34,6 +34,8 @@ import {
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type {
+  ApprovalDecision,
+  ApprovalRequest,
   CreateSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -43,7 +45,6 @@ import type {
   SendMessageResult,
   SessionError,
   SessionEvent,
-  SessionId,
   SessionListEntry,
   SessionMode,
   SessionSnapshot,
@@ -52,10 +53,11 @@ import type {
   SessionUsage,
   SessionWorkspace,
 } from "@repo/domain/Session";
+import { SessionId } from "@repo/domain/Session";
 import {
   RepoSlug,
   SessionError as SessionErrorClass,
-  SessionId as SessionIdSchema,
+  SessionId as SessionIdValue,
 } from "@repo/domain/Session";
 import type {
   Conversation,
@@ -123,6 +125,14 @@ export type SessionServiceShape = {
   ) => Stream.Stream<SessionEvent, SessionError>;
   /** Close every harness this process owns. */
   readonly close: Effect.Effect<void>;
+  /** Record a pending approval request for a session. */
+  readonly createApproval: (
+    input: ApprovalRequest,
+  ) => Effect.Effect<Schema.String, SessionError>;
+  /** Settle an approval decision (approve/reject). Idempotent: second call with same requestId is no-op. */
+  readonly decideApproval: (
+    input: ApprovalDecision,
+  ) => Effect.Effect<Schema.String, SessionError>;
 };
 
 export class SessionService extends Context.Service<
@@ -233,7 +243,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         raw: string,
       ): Effect.Effect<SessionId, SessionError> =>
         Effect.try({
-          try: () => SessionIdSchema.make(raw),
+          try: () => SessionId.make(raw),
           catch: () =>
             new SessionErrorClass({
               code: "storage",
@@ -817,7 +827,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const separator = raw.indexOf("|");
           const at = separator === -1 ? "" : raw.slice(0, separator);
           const id = separator === -1 ? "" : raw.slice(separator + 1);
-          if (at === "" || !Schema.is(SessionIdSchema)(id)) {
+          if (at === "" || !Schema.is(SessionId)(id)) {
             return yield* new SessionErrorClass({
               code: "invalid_input",
               message: `"${raw}" is not a list cursor`,
@@ -988,6 +998,80 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         }).pipe(Effect.forkScoped);
       }
 
+      if (options.idleTimeoutMs !== undefined) {
+        // Sweep at least twice per timeout window, so the timeout means what it says. Idle here
+        // means nobody has touched the session: a read counts as use, so a client watching a
+        // session keeps it open, and only a genuinely quiet session is released to its log.
+        const sweepIntervalMs =
+          options.sweepIntervalMs ??
+          Math.max(
+            250,
+            Math.min(DEFAULT_SWEEP_INTERVAL_MS, options.idleTimeoutMs / 2),
+          );
+        yield* Effect.gen(function* () {
+          for (;;) {
+            yield* Effect.sleep(sweepIntervalMs);
+            yield* sweep;
+          }
+        }).pipe(Effect.forkScoped);
+      }
+
+      const createApproval = (
+        input: ApprovalRequest,
+      ): Effect.Effect<Schema.String, SessionError> =>
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          // Check if an approval with this requestId already exists (idempotency).
+          const existing = yield* paper(
+            "read approval by request",
+            sql`SELECT id, session_id, action, status FROM approvals WHERE request_id = ${input.actor}-${input.sessionId} LIMIT 1`,
+          ) as readonly {
+            id: string;
+            session_id: string;
+            action: string;
+            status: string;
+          }[];
+          if (existing !== undefined && existing.length > 0) {
+            return Schema.String.make(existing[0].id);
+          }
+          // Insert a new pending approval.
+          const id = yield* paper(
+            "create approval",
+            sql`INSERT INTO approvals (id, session_id, actor, action, status, request_id)
+            VALUES (gen_random_uuid()::text, ${input.sessionId}, ${input.actor}, 'pending', 'pending', ${input.actor}-${input.sessionId})
+            RETURNING id`,
+          );
+          return Schema.String.make(id[0]);
+        });
+
+      const decideApproval = (
+        input: ApprovalDecision,
+      ): Effect.Effect<Schema.String, SessionError> =>
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const existing = yield* paper(
+            "read approval by request",
+            sql`SELECT id, session_id, action, status FROM approvals WHERE request_id = ${input.actor}-${input.sessionId} LIMIT 1`,
+          );
+          // If no approval found or already decided, return approved as a sentinel.
+          if (
+            existing === undefined ||
+            existing.length === 0 ||
+            existing[0].status !== "pending"
+          ) {
+            return Schema.String.make("approved");
+          }
+          // Update the status to the decided action.
+          yield* paper(
+            "update approval status",
+            sql`
+            UPDATE approvals SET action = ${input.action}, status = '${input.action}', decided_at = to_timestamp(${Date.now() / 1000})
+            WHERE id = ${existing[0].id}
+            `,
+          );
+          return Schema.String.make(existing[0].id);
+        });
+
       return SessionService.of({
         create,
         get,
@@ -997,6 +1081,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         registerRepo,
         events,
         close: closeAll,
+        createApproval,
+        decideApproval,
       });
     }),
   );
