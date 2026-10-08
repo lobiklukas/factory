@@ -807,8 +807,12 @@ describe("the board's tables and seed", () => {
    *
    * The database is this case's own, minted here and dropped in the `finally`; the configured
    * database only ever sees the `CREATE DATABASE` and the `DROP DATABASE` below. A run killed
-   * between the two leaks its database — empty, seconds old, and swept by nothing here;
-   * `packages/core/src/SessionService.test.ts` carries the sweep and the argument for one.
+   * between the two leaks its database — empty, seconds old — and **nothing sweeps it**: the sweep
+   * in `packages/core/src/SessionService.test.ts` is prefix-scoped to `${base}_core_`, which
+   * `factory_lob58_*` is not. So these leaks are real and currently uncollected; a sweep that
+   * takes a prefix rather than a hard-coded one would collect them, and until then a killed run of
+   * this file leaves a database behind. (The DDL suite below has the same window around its
+   * `beforeAll`/`afterAll` pair and the same absence of a collector.)
    *
    * The client mirrors `DatabaseLive`: `DatabaseConfig`'s own URL with the database swapped, and the
    * same name transforms, so the migration runs against the client shape `db:migrate` gives it.
@@ -1138,24 +1142,144 @@ describe("the board's DDL, as 0007 writes it", () => {
   );
 
   /**
-   * The three indexes the migration creates, by name — B9's ordering clause (`board_id, priority,
-   * created_at`) is the one a reader of a lane would use, and it is named here because dropping it
-   * is invisible everywhere else (A5).
+   * The three indexes the migration creates, by name **and `tasks_by_board` by column list**, plus
+   * `title`'s default.
    *
-   * Asserted as *containment* rather than equality: Postgres names the primary keys and the unique
-   * constraint too, and a case that listed all of them would be asserting the key declarations as
-   * well as the three `CREATE INDEX` lines, which the other cases already cover.
+   * B9's ordering clause (`board_id, priority, created_at`) is the index a reader of a lane would
+   * use, and asserting its *name* alone leaves the columns free: `(board_id)` alone stayed green
+   * when the three columns were measured as unwitnessed.
    *
-   * Mutation: delete the `tasks_by_board` line from 0007 — the first assertion goes.
+   * The names are asserted as *containment* rather than equality: Postgres names the primary keys
+   * and the unique constraint too, and listing all of them would be asserting the key declarations
+   * as well as the three `CREATE INDEX` lines, which the other cases already cover. The *columns*
+   * are asserted exactly, because that is the part B9 is about.
+   *
+   * `pg_index.indkey` is the column numbers as an array of attribute numbers, so this joins
+   * `pg_attribute` for the names and orders by the number's position in that array — rather than
+   * reading the migration's source, which is the thing under test.
+   *
+   * Mutation: delete the `tasks_by_board` line from 0007 — the first assertion goes. Mutation:
+   * narrow it to `(board_id)` — the columns assertion goes. Mutation: drop `NOT NULL DEFAULT `\'\'`
+   * from `title` — the last assertion goes.
    */
   it(
-    "indexes the three reads a board makes, by name",
+    "indexes the three reads a board makes, with tasks_by_board's columns and title's default",
     { timeout: 30_000 },
     async () => {
       const names = await indexNames();
       expect(names).toContain("tasks_by_board");
       expect(names).toContain("task_events_by_task");
       expect(names).toContain("task_runs_by_task");
+
+      // `pg_index.indkey` is an `int2vector`, whose subscripting is **0-based** and which is not an
+      // array, so `a.attnum = ANY(i.indkey)` silently matches one column. `generate_series` over
+      // `indnkeyatts` and `i.indkey[k]` is the idiom that reads all of them, in order.
+      const ordered = await Effect.runPromise(
+        scratchSql<{ column: string }>`
+          SELECT a.attname AS column
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN LATERAL generate_series(0, i.indnkeyatts - 1) AS k(pos)
+          JOIN pg_attribute a
+            ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.pos]
+          WHERE n.nspname = 'public' AND c.relname = 'tasks_by_board'
+          ORDER BY k.pos
+        `,
+      ).then((rows) => rows.map((row) => row.column));
+      expect(ordered).toEqual(["board_id", "priority", "created_at"]);
+
+      // `title TEXT NOT NULL DEFAULT ''`: a card inserted without a title reads back as the empty
+      // string, not null, which is what an `intake` card that is "nearly empty" (B4) needs. Every
+      // other insert in both suites supplies a title, so nothing else would notice the default.
+      const board = boardId();
+      await Effect.runPromise(
+        scratchSql`INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    VALUES (${board}, 'factory/test', 'default', 1)`,
+      );
+      const untitled = taskId();
+      await Effect.runPromise(
+        scratchSql`INSERT INTO tasks (id, board_id, "column", definition_version, revision)
+                    VALUES (${untitled}, ${board}, 'intake', 1, 1)`,
+      );
+      const [row] = await Effect.runPromise(
+        scratchSql<{
+          title: string | null;
+        }>`SELECT title FROM tasks WHERE id = ${untitled}`,
+      );
+      expect(row?.title).toBe("");
+    },
+  );
+
+  /**
+   * The four `>= 1` floors and `blocked_reason`'s four literals — the database's side of two things
+   * `Task.ts` states, and the elements the previous pass of this suite left unwitnessed.
+   *
+   * `BlockReason` (`Task.ts:132-138`) is pinned tightly by `Task.test.ts`, but that pins the
+   * *contract*: nothing tied `tasks.blocked_reason` to it, so the list could be narrowed, widened
+   * or deleted in 0007 with every case green while the table and the contract silently drifted
+   * apart. The same is true of the `>= 1` on `board_definitions.version`,
+   * `board_instances.definition_version` and `tasks.definition_version`: the pin case above inserts
+   * 99, which any `>= 1` accepts.
+   *
+   * Mutation: delete `CHECK (blocked_reason IN (...))` from 0007 — the first assertion goes.
+   * Mutation: delete `CHECK (version >= 1)` from `board_definitions` — the second. From
+   * `board_instances` — the third. From `tasks` — the fourth. Each names its own assertion, which
+   * is why they are four separate refusals rather than one loop.
+   */
+  it(
+    "refuses a version below 1 on all three tables and a block reason outside B4's four",
+    { timeout: 30_000 },
+    async () => {
+      // A board of this case's own rather than one borrowed from the table: an insert whose
+      // `board_id` subquery found nothing would be refused by the foreign key instead of the CHECK
+      // under test, and a refusal for the wrong reason is what this suite exists to catch.
+      const board = boardId();
+      await Effect.runPromise(
+        scratchSql`INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    VALUES (${board}, 'factory/test', 'default', 1)`,
+      );
+
+      // B4's four, verbatim, in the order `Task.ts` declares them.
+      expect(
+        constraint(
+          await refusedBy(
+            scratchSql`INSERT INTO tasks (id, board_id, "column", definition_version, revision, blocked_reason, blocked_column, blocked_since)
+                        VALUES (${taskId()}, ${board}, 'building', 1, 1, 'sideways', 'building', now())`,
+          ),
+        ),
+      ).toBe("tasks_blocked_reason_check");
+
+      // A definition version below 1 on each of the three tables that carries one. Each insert
+      // mints its own id, because on the failure path a row *is* left behind and a second run
+      // against one database would then collide on the primary key instead of reaching the CHECK.
+      const instance = boardId();
+      expect(
+        constraint(
+          await refusedBy(
+            scratchSql`INSERT INTO board_definitions (id, version, name, columns)
+                        VALUES ('below_one', 0, 'a version below one', '[]'::jsonb)`,
+          ),
+        ),
+      ).toBe("board_definitions_version_check");
+
+      expect(
+        constraint(
+          await refusedBy(
+            scratchSql`INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                        VALUES (${instance}, 'factory/test', 'default', 0)`,
+          ),
+        ),
+      ).toBe("board_instances_definition_version_check");
+
+      expect(
+        constraint(
+          await refusedBy(
+            scratchSql`INSERT INTO tasks (id, board_id, "column", definition_version, revision)
+                        VALUES (${taskId()}, ${board}, 'building', 0, 1)`,
+          ),
+        ),
+      ).toBe("tasks_definition_version_check");
     },
   );
 

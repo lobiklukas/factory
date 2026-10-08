@@ -48,9 +48,9 @@ const ALPHABET26 = "0".repeat(26);
 const A_TASK_ID = `tsk_${ALPHABET26}`;
 /** A board id in the shape `Task.ts:45` promises. */
 const A_BOARD_ID = `brd_${ALPHABET26}` as BoardInstanceId;
-/** A session id in the shape `Session.ts:12` promises. */
+/** A session id in the shape `Session.ts:16` promises. */
 const A_SESSION_ID = `ses_${ALPHABET26}`;
-/** An instant in the shape `Session.ts:26` promises, which is `Schema.String`. */
+/** An instant in the shape `Session.ts:29` promises, which is `Schema.String`. */
 const AN_INSTANT = "2026-10-08T00:00:00.000Z";
 /** A board instance in the shape `Task.ts:112` promises. */
 const aBoardInstance = {
@@ -97,11 +97,14 @@ describe("the board's ids", () => {
   });
 
   /**
-   * The three ids are three different namespaces, not three spellings of one. `Task.ts:7` calls the
-   * task id "as much a label for a human as a key for a database", which is only true while the
-   * prefixes stay distinct — a card whose id read `ses_…` would be a session id in a card's field.
+   * The three ids are three different namespaces, not three spellings of one. `Task.ts:27-28`
+   * calls the task id "as much a label for a human as a key for a database", which is only true
+   * while the prefixes stay distinct — a card whose id read `ses_…` would be a session id in a
+   * card's field.
    *
-   * Mutation: copy `TaskId`'s pattern into `BoardInstanceId` — the first refusal below goes.
+   * Mutation: copy `TaskId`'s pattern into `BoardInstanceId` — the refusals below that pass a task
+   * id where a *board* id belongs (the `BoardInstance` decode at the bottom of this case) go,
+   * because a board then accepts `A_TASK_ID`. The first two refusals do not depend on it.
    */
   it("keeps TaskId, SessionId and BoardInstanceId in three separate namespaces", () => {
     expect(refuses(TaskId, A_SESSION_ID)).toBe(true);
@@ -157,7 +160,8 @@ describe("the board's columns", () => {
    * The pattern is `^[a-z][a-z0-9_]*$`: lowercase, a leading letter, then snake_case. Every refusal
    * below is a spelling that would break a machine matching against it.
    *
-   * Mutation: widen the pattern to `^\\S+$` — the third refusal goes.
+   * Mutation: widen the pattern to `^\\S+$` — the first and second refusals go; the third
+   * (`"spec doc"`) is a space, which `^\\S+$` still refuses.
    */
   it("refuses a requirement key a refusal could not name", () => {
     expect(
@@ -183,8 +187,11 @@ describe("the board's columns", () => {
       expect(refuses(ColumnRequirement, { key, description: "d" })).toBe(true);
     }
 
-    // `description` is required and is what a person reads, so an empty one is a requirement with
-    // nothing to show a reader — the key alone would be all the board could say.
+    // `description` is required and is what a person reads, but an empty one is deliberately
+    // *accepted*: a requirement with nothing to show a reader is a content question for whoever
+    // writes the definition, and this schema states the mechanism (the key), not the prose. The
+    // `Actor` case below proves the same kind of looseness on purpose; this one is not pinned by a
+    // refusal, and tightening it would be a product decision rather than a bug fix.
     expect(
       refuses(ColumnRequirement, { key: "spec_doc", description: "" }),
     ).toBe(false);
@@ -491,12 +498,12 @@ describe("a card, a run and an event", () => {
   });
 
   /**
-   * `Timestamp` is `Schema.String` (`Session.ts:26`), so every instant on a card, a run and a block
+   * `Timestamp` is `Schema.String` (`Session.ts:29`), so every instant on a card, a run and a block
    * is an unvalidated string — `"whenever"` decodes. The database's columns are `TIMESTAMPTZ` and
    * would refuse it.
    *
    * Written down rather than left implicit because the reuse is deliberate (`Task.ts:24` imports
-   * `Timestamp` from `./Session` for exactly this reason) and a reader may otherwise assume the
+   * `Timestamp` from `@repo/domain/Session` for exactly this reason) and a reader may otherwise assume the
    * board's instants are checked somewhere.
    */
   it("takes any string where a Timestamp is named", () => {
@@ -524,8 +531,12 @@ describe("a card, a run and an event", () => {
    *
    * Mutation: rename `BoardDefinition.version` — a stored row stops decoding and the first refusal
    * goes. Note that adding `onExcessProperty: "error"` to the `Schema.Struct` does *not* do it:
-   * measured against effect 4.0.0 that option is a JSON-Schema derivation option, and the decoder
-   * needs its own flag (`node_modules/effect/dist/Schema.d.ts:10662-10673`).
+   * measured against effect 4.0.0 that option is declared exactly once in `Schema.d.ts`, at
+   * `:10673`, inside `interface ToJsonSchemaOptions` — a JSON-Schema *derivation* option
+   * (`node_modules/effect/dist/Schema.d.ts:10662-10673`). No decoder-side option of that name
+   * exists in 4.0.0 (`grep -rn onExcessProperty node_modules/effect/dist` finds only the
+   * declaration above and the JSON-Schema compiler), so the mutation below is the only one this
+   * case can pin.
    */
   it("decodes a board_definitions row as stored, and refuses a column set it rejects", () => {
     const stored = {

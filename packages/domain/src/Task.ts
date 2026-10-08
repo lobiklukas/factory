@@ -182,13 +182,21 @@ export type Actor = typeof Actor.Type;
  * One append-only event on a task (B3, B5, B7, B9).
  *
  * Events are the card's history: what happened, who did it, and under which expected `revision`.
- * They are never updated or deleted — the same rule `commits` enforces with a trigger
- * (`0002_create_commits.ts`) — because a card's history is the audit trail for a gated move.
+ * **Append-only is a rule the writer upholds, not one the database enforces.** `commits` does
+ * enforce it, with a trigger (`0002_create_commits.ts`); `task_events` has no trigger, so an
+ * `UPDATE` or a `DELETE` on it succeeds today. That gap is not an oversight in either direction: a
+ * `commits`-style `BEFORE DELETE` trigger would reject migration 0007's own `ON DELETE CASCADE`
+ * from `board_instances`, so the two cannot both hold until someone decides which gives. The case
+ * in `PostgresStorage.test.ts` that lets an event be rewritten and deleted asserts the real
+ * behaviour on purpose, so these words and that test redden together when the decision is made.
+ * It is a card's history either way — the audit trail for a gated move.
  *
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
  * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), and a priority
  * change (B9, "priority changes are recorded as events"). A run starting or finishing is a later
- * issue's event: LOB-60 owns `task_runs` and the `factory.task` log document.
+ * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
+ * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
+ * because B1 makes a run a first-class thing a task owns.
  */
 export const TaskEvent = Schema.TaggedUnion({
   created: {
@@ -243,6 +251,12 @@ export type TaskEvent = typeof TaskEvent.Type;
  *
  * There is deliberately no `outcome` here: B10's failure mapping (`orphaned`, `faulted`, `failed`,
  * `aborted`) is wave 2, recorded so the MVP does not contradict it rather than implemented.
+ *
+ * `id` is the one id in this file that carries no pattern, and that is a decision rather than an
+ * oversight: the run's natural key is `sessionId` (B1 — a run *is* one session), which 0007 makes
+ * `UNIQUE`, while this row's own `id` exists only as the primary key the events and the UI would
+ * reference. `Task.test.ts` pins the untypedness on both sides — the schema accepts any string and
+ * so does `id TEXT PRIMARY KEY`. LOB-60 owns the run id when it owns the run's events.
  */
 export const TaskRun = Schema.Struct({
   id: Schema.String,

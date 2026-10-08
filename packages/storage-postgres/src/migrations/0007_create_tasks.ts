@@ -16,9 +16,15 @@ import { BoardColumn } from "@repo/domain/Task";
  * pins the version it started under. One row per definition _version_ (never an update in place) is
  * what makes that pin meaningful — editing a definition cannot mutate work in flight.
  *
- * The contracts these rows satisfy are `packages/domain/src/Task.ts`; the service that writes them
- * is a later issue. `task_runs` is created here because B1 makes a run a first-class thing a task
- * owns, but its typed contract and the `factory.task` log document belong to that issue.
+ * The contracts these rows satisfy are `packages/domain/src/Task.ts`. **No `PostgresStorage` method
+ * is added here, and none is needed for DDL plus a seed:** every reader and writer of these tables
+ * lands with the service that owns them (LOB-59 for cards, LOB-60 for runs and events), which is
+ * also where the revision CAS and the declared-transition refusals live. The issue text named
+ * "the PostgresStorage methods they need" because it could not know in advance; what the tables
+ * need for *this* issue is the migration and the seed, and both are here. `task_runs` is created
+ * here because B1 makes a run a first-class thing a task owns, and its typed contract
+ * (`TaskRun`, in `Task.ts`) is in this change too — what LOB-60 owns is the run-start and
+ * run-finish events and the `factory.task` log document.
  *
  * The seed is idempotent: `ON CONFLICT (id, version) DO NOTHING`, so a second run over the same
  * database leaves one definition row rather than a second copy of the pipeline.
@@ -90,9 +96,15 @@ export default Effect.gen(function* () {
     CREATE INDEX IF NOT EXISTS tasks_by_board ON tasks (board_id, priority, created_at)
   `;
 
-  // Append-only, like `commits`: a card's history is the audit trail for a gated move (B5), so an
-  // event is never updated or deleted. `revision` is the revision the mutation expected, which is
-  // what makes a stale write detectable after the fact as well as at the time.
+  // Append-only by convention, not by trigger: a card's history is the audit trail for a gated
+  // move (B5), so the writer must never update or delete an event. The database does **not**
+  // enforce that here — `commits` does, with `commits_append_only` in `0002_create_commits.ts`,
+  // and this table has no equivalent, because a `BEFORE DELETE` trigger would reject this
+  // migration's own `ON DELETE CASCADE` from `board_instances`. Adding one is a decision about
+  // which of the two gives, and the case in `PostgresStorage.test.ts` asserts the real behaviour
+  // (an event can be rewritten and deleted today) so the gap is visible rather than assumed away.
+  // `revision` is the revision the mutation expected, which is what makes a stale write detectable
+  // after the fact as well as at the time.
   yield* sql`
     CREATE TABLE IF NOT EXISTS task_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -133,9 +145,12 @@ export default Effect.gen(function* () {
   // `done` or `canceled`. `planning` and `review` each carry B5's human gate as a requirement,
   // because a human move is a fact the board has to be able to name even though no code checks it.
   // The seed's JSON is produced by the domain schema's own encoder rather than `JSON.stringify`, so
-  // a column set `BoardColumn` would reject cannot reach the database through a typo in a
-  // hand-written literal: the value is schema-valid by construction, and the case in
-  // `PostgresStorage.test.ts` proves the database holds it.
+  // the value is schema-valid by construction: a typo in the literal above is a decode failure here
+  // rather than a bad row in the database. **What is not claimed here:** that the *column* is
+  // checked. `board_definitions.columns` is unconstrained JSONB, so any other writer can store a
+  // column set `BoardColumn` rejects — the case in `PostgresStorage.test.ts` that writes exactly
+  // that proves it. The encoder's refusal on the seed path is the migration's own decode failing
+  // loudly; no case in this diff mutates the encoder to witness it.
   const columns = [
     { name: "intake", kind: "resting", skills: [], requires: [] },
     {
