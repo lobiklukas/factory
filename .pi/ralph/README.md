@@ -2,7 +2,7 @@
 
 An autonomous backlog loop for this repo: a **fresh `pi -p` session per iteration** (or `opencode run`, see below), **one Linear
 issue per iteration**, state kept outside the model (Linear, `.ralph/`, git). Every agent runs on
-`opencode-go/longcat-2.5-preview-free` (override with `RALPH_MODEL`). Nothing merges; the output is a
+`anthropic/claude-haiku-5-5` under `pi` (override with `RALPH_MODEL`). Nothing merges; the output is a
 reviewed **draft PR** per issue and the issue moved to _In Review_.
 
 Pattern sources: Huntley's bash loop; fresh context per iteration (Galarza's Linear loop, edxeth's
@@ -63,7 +63,7 @@ RALPH_API_PORT RALPH_WEB_PORT`.
 
 ## Model fallback
 
-`RALPH_MODEL` (default `opencode-go/longcat-2.5-preview-free`) is tried first. On a provider error (429, overload, quota, outage) the driver retries the same iteration on each model in `RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free`; empty disables). A timeout, or a run that merely forgot the control line, is not retried. `pi-subagents` never falls back by itself, so the worker is told to relaunch a failed subagent once per fallback model with a per-run `model` override. `runs.jsonl` records the model that finished each run and the attempts.
+`RALPH_MODEL` (default `anthropic/claude-haiku-5-5`) is tried first. On a provider error (429, overload, quota, outage) the driver retries the same iteration on each model in `RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free`; empty disables). A timeout, or a run that merely forgot the control line, is not retried. `pi-subagents` never falls back by itself, so the worker is told to relaunch a failed subagent once per fallback model with a per-run `model` override. `runs.jsonl` records the model that finished each run and the attempts.
 
 ## Parallel workers
 

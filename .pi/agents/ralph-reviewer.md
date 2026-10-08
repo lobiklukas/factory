@@ -1,7 +1,7 @@
 ---
 name: ralph-reviewer
 description: Fresh-context reviewer for the ralph loop - reviews one angle (spec, standards, or tests/risk) of an uncommitted diff against a Linear issue
-model: opencode-go/longcat-2.5-preview-free
+model: anthropic/claude-haiku-5-5
 thinking: medium
 tools: read, grep, find, ls, bash
 systemPromptMode: replace

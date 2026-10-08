@@ -1,7 +1,7 @@
 ---
 name: ralph-scout
 description: Read-only recon for the ralph loop - checks whether an issue's evidence still holds, which files it touches, and what it depends on
-model: opencode-go/longcat-2.5-preview-free
+model: anthropic/claude-haiku-5-5
 thinking: medium
 tools: read, grep, find, ls
 systemPromptMode: replace

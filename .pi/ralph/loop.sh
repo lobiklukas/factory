@@ -51,7 +51,7 @@ RALPH_SHARED="${RALPH_SHARED:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-r
 RALPH_WORKTREE="${RALPH_WORKTREE:-$RALPH_PRIMARY_WORKTREE$_sfx}"
 RALPH_AGENT="${RALPH_AGENT:-pi}"                # pi | opencode: the CLI that runs each session
 case "$RALPH_AGENT" in
-  pi)       RALPH_MODEL="${RALPH_MODEL:-opencode-go/longcat-2.5-preview-free}" ;;
+  pi)       RALPH_MODEL="${RALPH_MODEL:-anthropic/claude-haiku-5-5}" ;;
   opencode) RALPH_MODEL="${RALPH_MODEL:-opencode/space-bunny-free}" ;;
   *) echo "[ralph] error: RALPH_AGENT must be pi or opencode, not '$RALPH_AGENT'" >&2; exit 64 ;;
 esac
