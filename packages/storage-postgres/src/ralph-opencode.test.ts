@@ -24,7 +24,11 @@ import { afterAll, describe, expect, it } from "vitest";
  * the next model. What the real CLI does with that command line is proven by running it, not here
  * (see the PR for the run).
  *
- * Each case names the mutation it was checked against.
+ * Each case names the mutation it was checked against. No case asserts on the wall clock: the cases
+ * that would have are asserted by what the driver asks `sleep` for, or by a `date` shim's epoch
+ * (LOB-143). No assertion in `packages/storage-postgres/src/*.test.ts` compares against the clock
+ * (grep `Date.now`, `date +%s`, `+%s` to check); the `date +%s` text here is the driver's, the shim's
+ * and comments.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -175,6 +179,49 @@ const readCalls = (scratch: Scratch): string[] =>
     .split(/^argv=/m)
     .filter((record) => record.length > 0);
 
+/** Single-quote a path for a shell script the shim writes; a temp path can hold no quote, but this does not depend on it. */
+const shq = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * A `sleep` shim: appends each call's argument to a log and returns at once. Returns the log's path.
+ */
+const installSleepShim = (scratch: Scratch): string => {
+  const log = path.join(scratch.root, "sleep.calls");
+  const file = path.join(scratch.bin, "sleep");
+  writeFileSync(
+    file,
+    ["#!/usr/bin/env bash", `printf '%s\\n' "$1" >> ${shq(log)}`].join("\n") +
+      "\n",
+  );
+  chmodSync(file, 0o755);
+  return log;
+};
+
+/**
+ * A `date` shim: `date +%s` prints `epoch`; every other call is forwarded to the real `date`, found
+ * before `PATH` is changed. The case asserts the exact epoch, so it never reads the wall clock.
+ */
+const installDateShim = (scratch: Scratch, epoch: number): void => {
+  const real = spawnSync("which", ["date"], { encoding: "utf8" }).stdout.trim();
+  const file = path.join(scratch.bin, "date");
+  writeFileSync(
+    file,
+    [
+      "#!/usr/bin/env bash",
+      `if [ "$1" = "+%s" ]; then echo ${String(epoch)}; exit 0; fi`,
+      `exec ${shq(real)} "$@"`,
+    ].join("\n") + "\n",
+  );
+  chmodSync(file, 0o755);
+};
+
+const readSleeps = (log: string): string[] =>
+  existsSync(log)
+    ? readFileSync(log, "utf8")
+        .split("\n")
+        .filter((line) => line.length > 0)
+    : [];
+
 const readRuns = (scratch: Scratch): ReadonlyArray<Record<string, unknown>> =>
   readFileSync(path.join(scratch.worktree, ".ralph/runs.jsonl"), "utf8")
     .trim()
@@ -320,20 +367,31 @@ describe("RALPH_AGENT=opencode", () => {
     },
   );
 
-  // Mutation: sleep the whole backoff in one `sleep` — `stop` would wait out a ten-minute backoff.
+  // `nap` is asserted by what it asks `sleep` for, not by how long it took. A wall-clock ceiling on a
+  // case that spawns `bash` inherits the gate's load: this one's fixed cost is ~6 s, so a 10 s ceiling
+  // left ~3.6 s of headroom and reddened under parallel load (LOB-143). The shim returns at once.
+  // Mutation: sleep the whole backoff in one call (`nap() { sleep "$1"; }`) — the shim records `600`.
+  // Mutation: drop the STOP test from nap's loop — the shim records twenty `30`s, not none.
   it(
-    "wakes from a backoff as soon as a STOP file appears",
+    "issues no sleep once a STOP file exists, and sleeps in chunks of at most 30 s otherwise",
     { timeout: 30_000 },
     () => {
       const scratch = mkScratch();
-      const started = spawnSync("date", ["+%s"], { encoding: "utf8" });
-      const result = run(
+      const sleeps = installSleepShim(scratch);
+      const stopped = run(
         scratch,
         'source "$LOOP"; mkdir -p "$STATE"; touch "$STATE/STOP"; nap 600',
       );
-      const ended = spawnSync("date", ["+%s"], { encoding: "utf8" });
-      expect(result.status, result.stderr).toBe(0);
-      expect(Number(ended.stdout) - Number(started.stdout)).toBeLessThan(10);
+      expect(stopped.status, stopped.stderr).toBe(0);
+      expect(readSleeps(sleeps)).toEqual([]);
+      // Control: with no STOP file the same nap does sleep, in chunks of at most 30 s. Without it the
+      // empty list above could be a shim that never ran.
+      const running = run(
+        scratch,
+        'source "$LOOP"; rm -f "$STATE/STOP"; nap 60',
+      );
+      expect(running.status, running.stderr).toBe(0);
+      expect(readSleeps(sleeps)).toEqual(["30", "30"]);
     },
   );
 
@@ -420,23 +478,23 @@ describe("RALPH_AGENT=opencode", () => {
   );
 
   // Mutation: return `0` (or nothing) when the database cannot be read — the watchdog would then see
-  // "no activity since 1970" and kill the first iteration it checks.
+  // "no activity since 1970" and kill the first iteration it checks. Mutation: read the real clock
+  // instead of `date +%s` — the shim's epoch is not what it prints.
+  // Asserted by value, not by elapsed time: a wall-clock ceiling around a `bash` that sources the
+  // whole driver reddens under the gate's parallel load (LOB-143).
   it(
     "reports now, never a stall, when the database cannot be read",
     { timeout: 30_000 },
     () => {
       const scratch = mkScratch();
-      // The wall clock, read the way the driver reads it (`date +%s`): `Date` is Effect's `Clock` in this repo.
-      const clock = () =>
-        Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim());
-      const before = clock();
+      const epoch = 1_234_567_890;
+      installDateShim(scratch, epoch);
       const result = run(
         scratch,
         `source "$LOOP"; oc_activity "${scratch.worktree}"`,
       );
-      const seen = Number(result.stdout.trim());
-      expect(seen).toBeGreaterThanOrEqual(before);
-      expect(seen).toBeLessThanOrEqual(before + 10);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe(String(epoch));
     },
   );
 
