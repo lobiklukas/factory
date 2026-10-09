@@ -287,3 +287,99 @@ describe("worker identity in loop.sh", () => {
     },
   );
 });
+
+describe("review_ok in loop.sh", () => {
+  const FULL = "88b91cc8c486f95bae1e9be260b6c28d916d7b3b";
+
+  // The record as a reviewer posts it: a summary, then one JSON line in an HTML comment.
+  const record = (head: string) =>
+    `Review summary.\n\n<!-- ralph-review: ${JSON.stringify({
+      head,
+      spec: "OK",
+      standards: "OK",
+      tests: "OK",
+      design: "n/a",
+      p0p1_open: 0,
+      gate: "green",
+    })} -->\n`;
+
+  // `review_ok 34 <PR head>`, with `gh pr view` answering with `body` as the PR's last comment.
+  const reviewOk = (scratch: Scratch, body: string, prHead = FULL) => {
+    const file = path.join(scratch.root, "record.txt");
+    writeFileSync(file, body);
+    const gh = path.join(scratch.bin, "gh");
+    writeFileSync(
+      gh,
+      ["#!/usr/bin/env bash", `cat ${JSON.stringify(file)}`, ""].join("\n"),
+    );
+    chmodSync(gh, 0o755);
+    const result = sh(
+      scratch,
+      'source "$LOOP"; why="$(review_ok 34 "$PR_HEAD")" && rc=0 || rc=$?; printf "rc=%s\\n%s" "$rc" "$why"',
+      { PR_HEAD: prHead },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const [first = "", ...rest] = result.stdout.split("\n");
+    return {
+      rc: Number(first.slice("rc=".length)),
+      message: rest.join("\n").trimEnd(),
+    };
+  };
+
+  // Mutation: keep `d.get("head") != head` — a 7-character record is then refused with rc 2 as "the head
+  // moved", which is the defect LOB-144 was filed for.
+  it(
+    "accepts a record that names the PR head by its seven-character abbreviation, or in full",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      expect(reviewOk(scratch, record("88b91cc"))).toEqual({
+        rc: 0,
+        message: "",
+      });
+      expect(reviewOk(scratch, record(FULL))).toEqual({ rc: 0, message: "" });
+      expect(reviewOk(scratch, record(FULL.slice(0, 12)))).toEqual({
+        rc: 0,
+        message: "",
+      });
+    },
+  );
+
+  // Mutation: accept any head (drop the prefix test) — `88b91cd` and a full sha for another commit then
+  // pass, and the "head moved" refusal this driver relies on is gone.
+  it(
+    "refuses a record for a different commit, whether it is abbreviated or in full",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      expect(reviewOk(scratch, record("88b91cd")).rc).toBe(2);
+      expect(reviewOk(scratch, record(`${FULL.slice(0, 39)}0`)).rc).toBe(2);
+    },
+  );
+
+  // Mutation: drop the seven-character floor — a three- or six-character prefix of the head is then
+  // accepted, and a short sha can name more than one commit.
+  it(
+    "refuses a record whose head is shorter than seven characters, even when it is a prefix",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      expect(reviewOk(scratch, record("88b")).rc).toBe(2);
+      expect(reviewOk(scratch, record("88b91c")).rc).toBe(2);
+    },
+  );
+
+  // Mutation: truncate both shas to seven characters again — the message then prints the short forms and
+  // fails the exact-message assertion below, so the full-length, labelled message is what this case pins.
+  it(
+    "states both heads in full, with their lengths, when it refuses",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      expect(reviewOk(scratch, record("88b91cd"))).toEqual({
+        rc: 2,
+        message: `review record is for 88b91cd (7 chars), PR head is ${FULL} (40 chars)`,
+      });
+    },
+  );
+});

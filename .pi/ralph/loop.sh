@@ -511,6 +511,8 @@ pr_flag() { # <pr> <label> <message>
 }
 
 # review_ok <pr> <head-sha>: 0 = clean record for this head; 2 = record is for another head; 1 = missing/unclean
+# The record may name the head by any prefix of at least 7 characters (`git log --oneline`, the GitHub UI):
+# the sha is the same commit, so spelling it short must not read as a moved head.
 review_ok() {
   local body json out rc=0
   body="$(gh pr view "$1" --json comments --jq '[.comments[].body | select(contains("ralph-review:"))] | last // ""' 2>/dev/null || true)"
@@ -523,8 +525,9 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     print("review record is not valid JSON"); sys.exit(1)
-if d.get("head") != head:
-    print("review record is for %s, PR head is %s" % (str(d.get("head"))[:7], head[:7])); sys.exit(2)
+recorded = d.get("head")
+if not (isinstance(recorded, str) and len(recorded) >= 7 and head.startswith(recorded)):
+    print("review record is for %s (%d chars), PR head is %s (%d chars)" % (recorded, len(str(recorded)), head, len(head))); sys.exit(2)
 ok = lambda k: str(d.get(k, "")).strip().upper().startswith("OK")
 design_ok = ok("design") or str(d.get("design", "")).strip().lower() in ("n/a", "na")
 if not (ok("spec") and ok("standards") and ok("tests") and design_ok) or d.get("p0p1_open", 1) != 0 or d.get("gate") != "green":
