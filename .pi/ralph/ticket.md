@@ -5,7 +5,8 @@ written down, then left for a human to schedule. The loop does **not** pick it u
 
 ## Which form
 
-- **Red gate on `origin/main`**: a Linear issue, state **Todo**, priority 2. The loop works it next.
+- **Red gate on `origin/main`**, or a **security or data-loss defect** (a credential reaching a session, a
+  path escaping the worktree, a lost write): a Linear issue, state **Todo**, priority 2. The loop works it next.
 - **A real defect** (broken or flaky test, a bug in code you read, a test that can reach a real third party,
   a drifted verify skill): a Linear issue, state **Backlog**, priority 3. A human moves it to Todo if it is
   worth an iteration.
