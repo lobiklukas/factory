@@ -54,7 +54,9 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:17-alpine
+        # AWS Public ECR mirror of Docker's official image (same tag, same digest). Docker Hub's anonymous
+        # pull rate limit failed this job before `bun run test` ran (LOB-145).
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           POSTGRES_USER: factory
           POSTGRES_PASSWORD: factory
