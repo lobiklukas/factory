@@ -1,5 +1,6 @@
 import { Clock, Effect, Random } from "effect";
 import { SessionId } from "@repo/domain/Session";
+import { TaskId } from "@repo/domain/Task";
 
 /**
  * Session ids: Crockford base32 (no `i`, `l`, `o`, `u`) with ten characters of millisecond
@@ -23,11 +24,23 @@ const encode = (value: number, chars: number): string => {
   return out.join("");
 };
 
-export const mintSessionId: Effect.Effect<SessionId> = Effect.gen(function* () {
-  const millis = yield* Clock.currentTimeMillis;
-  const random: string[] = [];
-  for (let index = 0; index < RANDOM_CHUNKS; index += 1) {
-    random.push(encode(yield* Random.nextIntBetween(0, 2 ** 20), RANDOM_CHARS));
-  }
-  return SessionId.make(`ses_${encode(millis, TIME_CHARS)}${random.join("")}`);
-});
+const mint = (prefix: string): Effect.Effect<string> =>
+  Effect.gen(function* () {
+    const millis = yield* Clock.currentTimeMillis;
+    const random: string[] = [];
+    for (let index = 0; index < RANDOM_CHUNKS; index += 1) {
+      random.push(
+        encode(yield* Random.nextIntBetween(0, 2 ** 20), RANDOM_CHARS),
+      );
+    }
+    return `${prefix}${encode(millis, TIME_CHARS)}${random.join("")}`;
+  });
+
+export const mintSessionId: Effect.Effect<SessionId> = mint("ses_").pipe(
+  Effect.map((id) => SessionId.make(id)),
+);
+
+/** Task ids (`tsk_`, same alphabet and shape as session ids; see `packages/domain/src/Task.ts`). */
+export const mintTaskId: Effect.Effect<TaskId> = mint("tsk_").pipe(
+  Effect.map((id) => TaskId.make(id)),
+);
