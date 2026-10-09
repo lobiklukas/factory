@@ -5,7 +5,8 @@ run with a fresh context, possibly **beside a live worker**: never touch the cod
 Your output is Linear issues only.
 
 Read `AGENTS.md`, `docs/board.md` and `.pi/ralph/ticket.md` (the description shape). Linear is reached through
-`codemode` (`tools.mcp__linear__*`; results are `{content:[{type:"text",text:"<json>"}]}`). Subagents are
+`codemode` (`tools.mcp__linear__*`; results are `{content:[{type:"text",text:"<json>"}]}`; a failed call returns `isError: true` instead of throwing, so check it
+after every write). Subagents are
 authorized: `ralph-scout` (read-only) to find the footprint of a parent.
 
 ## Which parents
