@@ -30,7 +30,14 @@
  * sweep reads `pg_stat_activity` reads as an orphan and is collected, `WITH (FORCE)` taking its
  * backends with it. Best-effort collection, not a guarantee — do not read the sweep as one.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -55,15 +62,17 @@ import {
   Fiber,
   Layer,
   ManagedRuntime,
+  Option,
   Redacted,
   Ref,
   Stream,
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
+import { staticTokenProvider } from "./credentials";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -2849,5 +2858,85 @@ describe("the autonomy configuration reaches the session's policy", () => {
       "pushing refs/heads/factory/ses_1 is refused",
     );
     expect(result?.text).toContain("refs/heads/sandbox/");
+  });
+});
+
+/**
+ * A session's directory and tool environment hold no credential (LOB-51, docs/design.md D14).
+ *
+ * The control plane resolves a token from `CredentialProvider` only at the point a caller needs one
+ * (the push path, the PR client). Nothing hands it to a session, so a real `bash` call in a faux
+ * session sees none of its bytes: not in the environment the command prints, not in any file under
+ * the session's working directory, not in the path itself.
+ */
+describe("a session holds no credential", () => {
+  const credentialRoot = mkdtempSync(
+    join(tmpdir(), "factory-core-credential-"),
+  );
+  const token = "ghp_TESTONLY_static_token_0123456789";
+  const provider = staticTokenProvider(Option.some(Redacted.make(token)));
+  // oxlint-disable-next-line effecttsgo/process-env -- the test sets the variable the tool would inherit.
+  const env = process.env;
+  const previousEnv = env["GITHUB_TOKEN"];
+  const runtime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createModelAccess("faux", {
+        fauxCommand: "printenv; find . -type f -exec cat {} + 2>/dev/null; pwd",
+      }),
+      sessionRoot: credentialRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+
+  beforeAll(() => {
+    // The configured token sits in the process environment the tool would inherit, so the
+    // assertions below are not vacuous: a leak through the environment would show up.
+    env["GITHUB_TOKEN"] = token;
+  });
+
+  afterAll(async () => {
+    if (previousEnv === undefined) delete env["GITHUB_TOKEN"];
+    else env["GITHUB_TOKEN"] = previousEnv;
+    await runtime.dispose();
+  });
+
+  it("runs a bash call that cannot see the configured token", async () => {
+    expect(env["GITHUB_TOKEN"]).toBe(token);
+    // The consumer resolves the token itself, as the push path would, and then does its work.
+    const resolved = await Effect.runPromise(provider.tokenFor(factoryRepo));
+    expect(Redacted.value(resolved)).toBe(token);
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "no credential" });
+        yield* sessions.send({ sessionId: created.id, content: "look" });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn to settle",
+        );
+        const snapshot = yield* sessions.get(created.id);
+        const toolResult = snapshot.entries.find(
+          (entry) => entry.kind === "toolResult",
+        );
+        return { toolResult, workspace: snapshot.workspace.path };
+      }),
+    );
+
+    // The tool ran: its output is the environment and the working directory.
+    expect(result.toolResult?.isError).not.toBe(true);
+    expect(result.toolResult?.text).toContain(result.workspace);
+    expect(result.toolResult?.text).not.toContain(token);
+    expect(result.workspace).not.toContain(token);
+
+    // Every regular file under the session root (the session directory included) is free of it.
+    const files = (
+      readdirSync(credentialRoot, { recursive: true }) as string[]
+    ).filter((file) => statSync(join(credentialRoot, file)).isFile());
+    for (const file of files) {
+      const contents = readFileSync(join(credentialRoot, file), "utf8");
+      expect(contents).not.toContain(token);
+    }
   });
 });

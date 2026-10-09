@@ -150,6 +150,26 @@ export type OpenSession = {
   readonly root: Conversation;
 };
 
+/**
+ * Credential-shaped variables the control plane holds in its own environment (LOB-51, D14).
+ *
+ * `NodeExecutionEnv` hands every tool command the whole process environment, so a token the server
+ * reads at boot would reach the session's shell. A session never needs one: model calls happen in
+ * the control plane, and anything that needs a forge token gets it from `CredentialProvider` per
+ * call. Each such variable is set to the empty string for the session's commands, which overrides
+ * the inherited value and leaves no token bytes in the environment.
+ */
+const CREDENTIAL_VARIABLE = /(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)/i;
+
+export const sessionShellEnv = (
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.keys(env)
+      .filter((name) => CREDENTIAL_VARIABLE.test(name))
+      .map((name) => [name, ""]),
+  );
+
 /** Open a harness over one session's log and ensure its root conversation exists. */
 export const openSession = (
   options: OpenSessionOptions,
@@ -173,7 +193,10 @@ export const openSession = (
           models: options.model.models,
           registry,
           env: (target) =>
-            new NodeExecutionEnv({ cwd: target.cwd ?? options.cwd }),
+            new NodeExecutionEnv({
+              cwd: target.cwd ?? options.cwd,
+              shellEnv: sessionShellEnv(),
+            }),
           settings: { progress: SESSION_PROGRESS },
         },
         BACKGROUND_CONTEXT,
