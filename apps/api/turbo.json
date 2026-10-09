@@ -1,0 +1,29 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "dev": {
+      // Every variable apps/api reads at boot (ServerConfig, the model backend, the session root,
+      // the Motel and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres). Strict Mode
+      // strips anything not declared here, so a value set in the shell silently does nothing (LOB-101).
+      "env": [
+        "PORT",
+        "HOST",
+        "IDLE_TIMEOUT",
+        "ALLOWED_ORIGINS",
+        "MAX_REQUEST_BODY_BYTES",
+        "MODEL_BACKEND",
+        "FAUX_COMMAND",
+        "SESSION_ROOT",
+        "SESSION_IDLE_TIMEOUT_MS",
+        "DATABASE_MAX_CONNECTIONS",
+        "MOTEL_URL",
+        "OTEL_SERVICE_NAME",
+        "DEVTOOLS",
+        "DEVTOOLS_URL"
+      ],
+      // A secret: it must reach the process but must not enter the task hash or the cache key.
+      "passThroughEnv": ["ANTHROPIC_API_KEY"]
+    }
+  }
+}

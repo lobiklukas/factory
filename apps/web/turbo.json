@@ -1,0 +1,17 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "dev": {
+      // What the dashboard's dev server reads: the port vite.config.ts binds, and the API and DevTools
+      // URLs lib/rpc-client.ts and lib/devtools.ts read from import.meta.env (LOB-101). Declared rather
+      // than left to framework inference, so the dry run names them as this task's own variables.
+      "env": [
+        "VITE_PORT",
+        "VITE_SERVER_URL",
+        "VITE_ENABLE_DEVTOOLS",
+        "VITE_DEVTOOLS_URL"
+      ]
+    }
+  }
+}
