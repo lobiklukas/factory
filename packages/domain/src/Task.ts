@@ -182,6 +182,7 @@ export type Actor = typeof Actor.Type;
  * One append-only event on a task (B3, B5, B7, B9).
  *
  * Events are the card's history: what happened, who did it, and under which expected `revision`.
+ * `created` records the initial revision (1); every other kind records the revision the mutation expected.
  * **Append-only is a rule the writer upholds, not one the database enforces.** `commits` does
  * enforce it, with a trigger (`0002_create_commits.ts`); `task_events` has no trigger, so an
  * `UPDATE` or a `DELETE` on it succeeds today. That gap is not an oversight in either direction: a
