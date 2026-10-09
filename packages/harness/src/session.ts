@@ -42,6 +42,7 @@ import type {
   Timestamp,
   TranscriptEntry,
 } from "@repo/domain/Session";
+import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { ModelAccess } from "./models";
 import {
@@ -57,6 +58,8 @@ import {
   projectView,
   SESSION_DOC_KIND,
   TITLE_ENTRY_KIND,
+  APPROVAL_DECIDED_KIND,
+  APPROVAL_REQUESTED_KIND,
   USAGE_DOC,
   type JsonRecord,
 } from "./projection";
@@ -217,6 +220,64 @@ export const openSession = (
 
     return { harness, root };
   });
+
+/**
+ * An approval request, committed to the log the moment the session asks (D11). Like the title it
+ * carries no model content, so the agent never sees it.
+ */
+export const ApprovalRequestedEntry = defineEntry<{
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+}>(APPROVAL_REQUESTED_KIND);
+
+/** The answer to one approval request, committed beside it. */
+export const ApprovalDecidedEntry = defineEntry<{
+  readonly requestId: string;
+  readonly decision: ApprovalVerdict;
+  readonly actor: string;
+  readonly decidedAt: string;
+}>(APPROVAL_DECIDED_KIND);
+
+/** Commit an approval request. Appends to the log; the pending set is the caller's to update. */
+export const writeApprovalRequested = (
+  conversation: Conversation,
+  data: {
+    readonly requestId: string;
+    readonly action: string;
+    readonly detail: string;
+    readonly requestedAt: string;
+  },
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write approval request", () =>
+    conversation
+      .commit(
+        (tx) =>
+          tx.appendEntry(ApprovalRequestedEntry, conversation.id, { data }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
+
+/** Commit an approval decision. Appends to the log; the pending set is the caller's to update. */
+export const writeApprovalDecided = (
+  conversation: Conversation,
+  data: {
+    readonly requestId: string;
+    readonly decision: ApprovalVerdict;
+    readonly actor: string;
+    readonly decidedAt: string;
+  },
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write approval decision", () =>
+    conversation
+      .commit(
+        (tx) => tx.appendEntry(ApprovalDecidedEntry, conversation.id, { data }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
 
 /** Commit a title. Appends to the log; the `sessions` index is the caller's to update. */
 export const writeTitle = (

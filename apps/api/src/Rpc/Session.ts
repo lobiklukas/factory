@@ -2,6 +2,7 @@ import { SessionService } from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/rpc";
+import { ApprovalsRpcHandlers } from "./Approvals";
 
 /**
  * The session RPC surface (docs/design.md D9).
@@ -30,6 +31,6 @@ export const SessionRpcLive = RpcServer.layerHttp({
   path: "/rpc",
   protocol: "http",
 }).pipe(
-  Layer.provide(SessionRpcHandlers),
+  Layer.provide(Layer.merge(SessionRpcHandlers, ApprovalsRpcHandlers)),
   Layer.provide(RpcSerialization.layerNdjson),
 );

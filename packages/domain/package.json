@@ -17,6 +17,7 @@
   },
   "exports": {
     "./Api": "./src/Api.ts",
+    "./Approval": "./src/Approval.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Session": "./src/Session.ts",
     "./Task": "./src/Task.ts"

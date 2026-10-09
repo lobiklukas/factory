@@ -2257,6 +2257,134 @@ describe("session list", () => {
   });
 });
 
+describe("approvals", () => {
+  it("records a request, settles it with the caller's actor, and drops it from the pending list", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "approvals" });
+        const before = (yield* sessions.get(created.id)).entries.length;
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-1",
+          action: "push refs/heads/main",
+          detail: "from the agent",
+        });
+        const afterRequest = yield* sessions.get(created.id);
+        const pending = yield* sessions.listApprovals(created.id);
+        const decision = yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "apr-1",
+          decision: "denied",
+          actor: "lukas@laptop",
+        });
+        const afterDecision = yield* sessions.get(created.id);
+        const remaining = yield* sessions.listApprovals(created.id);
+        return {
+          request,
+          pending,
+          decision,
+          remaining,
+          appended: [
+            afterRequest.entries.length - before,
+            afterDecision.entries.length - afterRequest.entries.length,
+          ],
+          sessionId: created.id,
+        };
+      }),
+    );
+    expect(outcome.request.action).toBe("push refs/heads/main");
+    expect(outcome.request.requestId).toBe("apr-1");
+    expect(outcome.pending.approvals).toEqual([outcome.request]);
+    expect(outcome.decision.decision).toBe("denied");
+    expect(outcome.decision.actor).toBe("lukas@laptop");
+    expect(outcome.decision.sessionId).toBe(outcome.sessionId);
+    expect(outcome.remaining.approvals).toEqual([]);
+    // One log entry for the request and one for the decision: the record is in the log, not only here.
+    expect(outcome.appended).toEqual([1, 1]);
+  });
+
+  it("does not create a second pending row for a repeated request id", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "repeat" });
+        const first = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-dup",
+          action: "push",
+        });
+        const again = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-dup",
+          action: "push",
+        });
+        const pending = yield* sessions.listApprovals(created.id);
+        const entries = (yield* sessions.get(created.id)).entries.filter(
+          (entry) => entry.kind === "other",
+        );
+        return { first, again, pending, entries: entries.length };
+      }),
+    );
+    expect(outcome.again).toEqual(outcome.first);
+    expect(outcome.pending.approvals).toHaveLength(1);
+    expect(outcome.entries).toBe(1);
+  });
+
+  it("refuses a decision on a request that was never made", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "unknown" });
+        return yield* Effect.exit(
+          sessions.decideApproval({
+            sessionId: created.id,
+            requestId: "apr-missing",
+            decision: "approved",
+            actor: "lukas",
+          }),
+        );
+      }),
+    );
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value.code).toBe("not_found");
+  });
+
+  it("refuses a second, different decision on a settled request", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "settled" });
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-settled",
+          action: "push",
+        });
+        yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "apr-settled",
+          decision: "approved",
+          actor: "lukas",
+        });
+        return yield* Effect.exit(
+          sessions.decideApproval({
+            sessionId: created.id,
+            requestId: "apr-settled",
+            decision: "denied",
+            actor: "lukas",
+          }),
+        );
+      }),
+    );
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value.code).toBe("invalid_input");
+  });
+});
+
 describe("request limits", () => {
   it("refuses a message over the length cap with a typed error", async () => {
     const outcome = await program(
