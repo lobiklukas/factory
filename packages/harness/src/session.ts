@@ -45,6 +45,12 @@ import type {
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { ModelAccess } from "./models";
 import {
+  autonomyPolicy,
+  DEFAULT_AUTONOMY,
+  policyExtension,
+  type SessionPolicy,
+} from "./policy";
+import {
   diffView,
   projectEntry,
   projectUsageDoc,
@@ -131,6 +137,12 @@ export type OpenSessionOptions = {
   readonly model: ModelAccess;
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
+  /**
+   * What may run unattended here (D11, `./policy`). Absent: D11's defaults resolved for `cwd`, so a
+   * session opened without a policy is still policed — an unpoliced session is not a default anyone
+   * can reach by forgetting an argument.
+   */
+  readonly policy?: SessionPolicy;
 };
 
 export type OpenSession = {
@@ -145,6 +157,14 @@ export const openSession = (
   Effect.gen(function* () {
     const registry = createRegistry();
     registry.install(CodingTools);
+    // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
+    // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
+    // task result the model reads, not an exception somewhere in the call path.
+    registry.install(
+      policyExtension(
+        options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd),
+      ),
+    );
 
     const harness = yield* attempt("open harness", () =>
       HarnessRuntime.open(

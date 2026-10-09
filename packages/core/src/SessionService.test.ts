@@ -2797,3 +2797,57 @@ describe("the abandoned-run sweep", () => {
     ).toBeLessThanOrEqual(63);
   });
 });
+
+/**
+ * The autonomy configuration is a config surface, not a constant (LOB-8, docs/design.md D11).
+ *
+ * `SessionServiceOptions.autonomy` is what a deployment narrows or widens, and nothing else in this
+ * suite can tell whether it reaches the hook: D11's default *allows* a push to
+ * `refs/heads/factory/**`, so the session below runs a command the default permits and the narrowed
+ * configuration must refuse. A `SessionServiceLive` that forgot to hand the policy to
+ * `openSession` would fall back to the default and fail here.
+ */
+describe("the autonomy configuration reaches the session's policy", () => {
+  const autonomyRoot = mkdtempSync(join(tmpdir(), "factory-core-autonomy-"));
+  const runtime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createModelAccess("faux", {
+        fauxCommand: "git push origin refs/heads/factory/ses_1",
+      }),
+      sessionRoot: autonomyRoot,
+      autonomy: { pushRefPrefixes: ["refs/heads/sandbox/"], allowedHosts: [] },
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+
+  afterAll(async () => {
+    await runtime.dispose();
+  });
+
+  it("refuses a push the default would allow", async () => {
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "narrowed" });
+        const sent = yield* sessions.send({
+          sessionId: created.id,
+          content: "push",
+        });
+        expect(sent.placement).toBe("run");
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn to settle",
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return snapshot.entries.find((entry) => entry.kind === "toolResult");
+      }),
+    );
+
+    expect(result?.isError).toBe(true);
+    expect(result?.text).toContain(
+      "pushing refs/heads/factory/ses_1 is refused",
+    );
+    expect(result?.text).toContain("refs/heads/sandbox/");
+  });
+});
