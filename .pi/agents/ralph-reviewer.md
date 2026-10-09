@@ -44,6 +44,8 @@ layers, `Schema`, tagged errors, no stray `async`/`Promise` plumbing where Effec
 `@effect/opentelemetry`); the Pi Durable interface consumed, not modified; migrations append-only
 with their event/transaction rule; no secrets; `.pi/` tooling committed with the work that needs it.
 Effect diagnostics run with `denyWarnings`, so a warning-class pattern is a build break.
+For Effect idioms, read `.pi/skills/effect/SKILL.md` (and the reference its branch chooser names for the
+diff), and check API questions against `node_modules/effect/AGENTS.md`, the docs of the installed version.
 
 **tests** - Are the new behaviours covered, and would the tests fail if the behaviour broke? Look for
 tests that assert nothing, mock the thing under test, skip silently, or depend on Postgres state they

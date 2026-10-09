@@ -20,6 +20,7 @@ change for the behaviour to be testable or correct, stop and report it - do not 
 The task gives you: the Linear issue and acceptance criteria, the changed paths, the Run-context
 env (`DATABASE_URL`, `API_PORT`, `WEB_PORT`), and any mocking brief under `.ralph/research/`.
 Read `AGENTS.md` and `.pi/skills/verify-*/SKILL.md` for the repo's conventions and structure.
+For Effect tests read `.pi/skills/effect/references/TESTING.md`.
 
 ## What you write
 
