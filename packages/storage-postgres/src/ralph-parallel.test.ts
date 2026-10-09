@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   rmSync,
   writeFileSync,
@@ -64,6 +65,7 @@ const baseEnv = (
     "RALPH_SHARED",
     "RALPH_CLAIM_TTL",
     "RALPH_PRIMARY_WORKTREE",
+    "RALPH_PUSH",
   ]) {
     delete inherited[key];
   }
@@ -215,10 +217,10 @@ describe("worker identity in loop.sh", () => {
     },
   );
 
-  // Mutation: skip the symlinks — worker 2 would plan and note in a private copy and never see worker
-  // 1's queue; or link `logs` too, and the workers would interleave one log.
+  // Mutation: skip the symlinks — worker 2 would note in a private copy and never see worker 1's
+  // notes; or link `logs` too, and the workers would interleave one log.
   it(
-    "shares worker 1's plan, notes and research with worker 2, and nothing else",
+    "shares worker 1's notes and research with worker 2, and nothing else",
     { timeout: 30_000 },
     () => {
       const scratch = mkScratch();
@@ -226,7 +228,7 @@ describe("worker identity in loop.sh", () => {
       const second = path.join(scratch.root, "repo-ralph-2");
       mkdirSync(path.join(primary, ".ralph"), { recursive: true });
       mkdirSync(path.join(second, ".ralph/logs"), { recursive: true });
-      writeFileSync(path.join(primary, ".ralph/plan.md"), "| 1 | LOB-1 |\n");
+      writeFileSync(path.join(primary, ".ralph/progress.md"), "## LOB-1\n");
       const result = sh(
         scratch,
         'source "$LOOP"; mkdir -p "$STATE"; share_state',
@@ -237,7 +239,7 @@ describe("worker identity in loop.sh", () => {
         },
       );
       expect(result.status, result.stderr).toBe(0);
-      for (const name of ["plan.md", "progress.md", "polish.md", "research"]) {
+      for (const name of ["progress.md", "polish.md", "research"]) {
         const link = path.join(second, ".ralph", name);
         expect(lstatSync(link).isSymbolicLink(), name).toBe(true);
         expect(readlinkSync(link), name).toBe(
@@ -288,98 +290,57 @@ describe("worker identity in loop.sh", () => {
   );
 });
 
-describe("review_ok in loop.sh", () => {
-  const FULL = "88b91cc8c486f95bae1e9be260b6c28d916d7b3b";
-
-  // The record as a reviewer posts it: a summary, then one JSON line in an HTML comment.
-  const record = (head: string) =>
-    `Review summary.\n\n<!-- ralph-review: ${JSON.stringify({
-      head,
-      spec: "OK",
-      standards: "OK",
-      tests: "OK",
-      design: "n/a",
-      p0p1_open: 0,
-      gate: "green",
-    })} -->\n`;
-
-  // `review_ok 34 <PR head>`, with `gh pr view` answering with `body` as the PR's last comment.
-  const reviewOk = (scratch: Scratch, body: string, prHead = FULL) => {
-    const file = path.join(scratch.root, "record.txt");
-    writeFileSync(file, body);
+describe("arm_automerge in loop.sh", () => {
+  // A `gh` that records every call and answers `pr list` with three ralph PRs (the driver's own `--jq`
+  // filter is what gh would apply, so the shim prints its output) and `pr diff` with each PR's files.
+  const drive = (scratch: Scratch, worker: string) => {
+    const worktree = path.join(scratch.root, "repo-ralph");
+    mkdirSync(worktree, { recursive: true });
+    const calls = path.join(scratch.root, "gh-calls.txt");
+    writeFileSync(calls, "");
     const gh = path.join(scratch.bin, "gh");
     writeFileSync(
       gh,
-      ["#!/usr/bin/env bash", `cat ${JSON.stringify(file)}`, ""].join("\n"),
+      [
+        "#!/usr/bin/env bash",
+        `echo "$*" >> ${JSON.stringify(calls)}`,
+        'case "$1 $2" in',
+        "  'pr list') printf '7 false CLEAN\\n8 true BEHIND\\n9 false CLEAN\\n' ;;",
+        "  'pr diff') case \"$3\" in 9) echo .github/workflows/gate.yml ;; *) echo packages/core/src/x.ts ;; esac ;;",
+        "esac",
+        "exit 0",
+        "",
+      ].join("\n"),
     );
     chmodSync(gh, 0o755);
-    const result = sh(
-      scratch,
-      'source "$LOOP"; why="$(review_ok 34 "$PR_HEAD")" && rc=0 || rc=$?; printf "rc=%s\\n%s" "$rc" "$why"',
-      { PR_HEAD: prHead },
-    );
+    const result = sh(scratch, 'source "$LOOP"; arm_automerge', {
+      RALPH_WORKER: worker,
+      RALPH_WORKTREE: worktree,
+      RALPH_PUSH: "1",
+    });
     expect(result.status, result.stderr).toBe(0);
-    const [first = "", ...rest] = result.stdout.split("\n");
-    return {
-      rc: Number(first.slice("rc=".length)),
-      message: rest.join("\n").trimEnd(),
-    };
+    return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean);
   };
 
-  // Mutation: keep `d.get("head") != head` — a 7-character record is then refused with rc 2 as "the head
-  // moved", which is the defect LOB-144 was filed for.
+  // Mutation: drop the protected-path check — PR 9 is then armed and would merge a CI change unreviewed.
+  // Mutation: arm every PR whatever `autoMergeRequest` says — PR 8 gets a second `--auto` call.
+  // Mutation: drop the BEHIND branch — PR 8 waits forever on a required check that needs an up-to-date branch.
   it(
-    "accepts a record that names the PR head by its seven-character abbreviation, or in full",
+    "arms unarmed PRs, updates a PR behind main, and hands a protected PR to a human",
     { timeout: 30_000 },
     () => {
-      const scratch = mkScratch();
-      expect(reviewOk(scratch, record("88b91cc"))).toEqual({
-        rc: 0,
-        message: "",
-      });
-      expect(reviewOk(scratch, record(FULL))).toEqual({ rc: 0, message: "" });
-      expect(reviewOk(scratch, record(FULL.slice(0, 12)))).toEqual({
-        rc: 0,
-        message: "",
-      });
+      const calls = drive(mkScratch(), "1");
+      expect(calls).toContain("pr merge 7 --auto --squash");
+      expect(calls).not.toContain("pr merge 8 --auto --squash");
+      expect(calls).toContain("pr update-branch 8");
+      expect(calls).not.toContain("pr merge 9 --auto --squash");
+      expect(calls).toContain("pr merge 9 --disable-auto");
+      expect(calls).toContain("pr edit 9 --add-label needs-human-merge");
     },
   );
 
-  // Mutation: accept any head (drop the prefix test) — `88b91cd` and a full sha for another commit then
-  // pass, and the "head moved" refusal this driver relies on is gone.
-  it(
-    "refuses a record for a different commit, whether it is abbreviated or in full",
-    { timeout: 30_000 },
-    () => {
-      const scratch = mkScratch();
-      expect(reviewOk(scratch, record("88b91cd")).rc).toBe(2);
-      expect(reviewOk(scratch, record(`${FULL.slice(0, 39)}0`)).rc).toBe(2);
-    },
-  );
-
-  // Mutation: drop the seven-character floor — a three- or six-character prefix of the head is then
-  // accepted, and a short sha can name more than one commit.
-  it(
-    "refuses a record whose head is shorter than seven characters, even when it is a prefix",
-    { timeout: 30_000 },
-    () => {
-      const scratch = mkScratch();
-      expect(reviewOk(scratch, record("88b")).rc).toBe(2);
-      expect(reviewOk(scratch, record("88b91c")).rc).toBe(2);
-    },
-  );
-
-  // Mutation: truncate both shas to seven characters again — the message then prints the short forms and
-  // fails the exact-message assertion below, so the full-length, labelled message is what this case pins.
-  it(
-    "states both heads in full, with their lengths, when it refuses",
-    { timeout: 30_000 },
-    () => {
-      const scratch = mkScratch();
-      expect(reviewOk(scratch, record("88b91cd"))).toEqual({
-        rc: 2,
-        message: `review record is for 88b91cd (7 chars), PR head is ${FULL} (40 chars)`,
-      });
-    },
-  );
+  // Mutation: let every worker arm — two workers would label and comment on the same PR twice.
+  it("does nothing on a worker other than 1", { timeout: 30_000 }, () => {
+    expect(drive(mkScratch(), "2")).toEqual([]);
+  });
 });
