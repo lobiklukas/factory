@@ -1,5 +1,10 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
-import { SessionService, SessionServiceLive } from "@repo/core";
+import {
+  CredentialProvider,
+  CredentialProviderLive,
+  SessionService,
+  SessionServiceLive,
+} from "@repo/core";
 import { Api } from "@repo/domain/Api";
 import {
   createModelAccess,
@@ -123,6 +128,20 @@ const MigrationsDaemon = Layer.effectDiscard(
   Effect.forkScoped(applyMigrations),
 );
 
+/**
+ * Say which credential source the process selected (LOB-51). Building the provider is what refuses
+ * an unsupported configuration (a GitHub App id with no App flow), so this line is also the boot's
+ * evidence that the static token, not an App, is what the control plane will use.
+ */
+const CredentialSelectionLog = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const credentials = yield* CredentialProvider;
+    yield* Effect.logInfo(
+      `credentials: ${credentials.source} (no GitHub App configured; sessions receive no token)`,
+    );
+  }),
+).pipe(Layer.provide(CredentialProviderLive));
+
 // HTTP API Router
 const ApiRouter = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(HealthGroupLive),
@@ -173,6 +192,7 @@ const HttpLive = Effect.gen(function* () {
   const RouterDependencies = Layer.mergeAll(
     SessionShutdown.pipe(Layer.provideMerge(SessionDeps)),
     MigrationsDaemon,
+    CredentialSelectionLog,
   ).pipe(Layer.provideMerge(Layer.mergeAll(PostgresLive, BunServices.layer)));
 
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);

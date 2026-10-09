@@ -20,10 +20,11 @@
         "MOTEL_URL",
         "OTEL_SERVICE_NAME",
         "DEVTOOLS",
-        "DEVTOOLS_URL"
+        "DEVTOOLS_URL",
+        "GITHUB_APP_ID"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
-      "passThroughEnv": ["ANTHROPIC_API_KEY"]
+      "passThroughEnv": ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
     }
   }
 }
