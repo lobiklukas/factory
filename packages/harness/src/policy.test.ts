@@ -287,3 +287,33 @@ describe("the autonomy configuration is the boundary", () => {
     ).toEqual({ _tag: "allow" });
   });
 });
+
+describe("a session pushes its own branch only", () => {
+  const owned = autonomyRules(DEFAULT_AUTONOMY, "/work/ses_1", "ses_1");
+
+  it("allows the session's own factory branch", () => {
+    expect(
+      decideToolCall(owned, bash("git push origin refs/heads/factory/ses_1")),
+    ).toEqual({ _tag: "allow" });
+  });
+
+  it("refuses a sibling session's factory branch", () => {
+    const decision = decideToolCall(
+      owned,
+      bash("git push origin HEAD:refs/heads/factory/ses_2"),
+    );
+    expect(decision._tag).toBe("block");
+    if (decision._tag !== "block") throw new Error("unreachable");
+    expect(decision.reason).toContain("refs/heads/factory/ses_2");
+    expect(decision.reason).toContain("refs/heads/factory/ses_1");
+  });
+
+  it("keeps the prefix rule when no session is named", () => {
+    expect(
+      decideToolCall(
+        autonomyRules(DEFAULT_AUTONOMY, "/work/ses_1"),
+        bash("git push origin refs/heads/factory/ses_2"),
+      ),
+    ).toEqual({ _tag: "allow" });
+  });
+});

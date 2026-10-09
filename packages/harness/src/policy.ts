@@ -75,16 +75,27 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
 export type AutonomyRules = {
   /** The session's working directory. Writes outside it are refused; pushes are relative to it. */
   readonly worktree: string;
+  /**
+   * The session this policy belongs to. Set, a push into `refs/heads/factory/` is allowed only to
+   * `refs/heads/factory/<sessionId>`: D11's "push to `refs/heads/factory/<session-id>`", not any
+   * session's branch. Absent (no session known), the prefixes alone decide.
+   */
+  readonly sessionId?: string;
   readonly pushRefPrefixes: readonly string[];
   readonly allowedHosts: readonly string[];
 };
+
+/** The namespace D11 gives sessions for their own branches. */
+const SESSION_BRANCH_NAMESPACE = "refs/heads/factory/";
 
 /** Resolve a deployment's configuration for one session's worktree. */
 export const autonomyRules = (
   config: AutonomyConfig,
   worktree: string,
+  sessionId?: string,
 ): AutonomyRules => ({
   worktree: normalize(worktree),
+  ...(sessionId === undefined ? {} : { sessionId }),
   pushRefPrefixes: config.pushRefPrefixes,
   allowedHosts: config.allowedHosts.map((host) => host.toLowerCase()),
 });
@@ -549,6 +560,15 @@ const decidePush = (
     if (!rules.pushRefPrefixes.some((prefix) => ref.startsWith(prefix))) {
       return block(
         `pushing ${ref} is refused: this session may only push ${rules.pushRefPrefixes.join(", ")}. Push refs/heads/factory/<session-id> instead.`,
+      );
+    }
+    if (
+      rules.sessionId !== undefined &&
+      ref.startsWith(SESSION_BRANCH_NAMESPACE) &&
+      ref !== `${SESSION_BRANCH_NAMESPACE}${rules.sessionId}`
+    ) {
+      return block(
+        `pushing ${ref} is refused: this session owns ${SESSION_BRANCH_NAMESPACE}${rules.sessionId} and may not push another session's branch. Push refs/heads/factory/${rules.sessionId} instead.`,
       );
     }
   }
@@ -1037,8 +1057,9 @@ export type SessionPolicy = {
 export const autonomyPolicy = (
   config: AutonomyConfig,
   worktree: string,
+  sessionId?: string,
 ): SessionPolicy => {
-  const rules = autonomyRules(config, worktree);
+  const rules = autonomyRules(config, worktree, sessionId);
   return {
     rules,
     decide: (call) => Effect.sync(() => decideToolCall(rules, call)),
@@ -1052,8 +1073,8 @@ export const autonomyPolicy = (
 export type PolicyShape = {
   /** The configuration this deployment runs under. */
   readonly config: AutonomyConfig;
-  /** The policy for one session's worktree. */
-  readonly forWorktree: (worktree: string) => SessionPolicy;
+  /** The policy for one session's worktree, and the session that owns its branch. */
+  readonly forWorktree: (worktree: string, sessionId?: string) => SessionPolicy;
 };
 
 export class Policy extends Context.Service<Policy, PolicyShape>()(
@@ -1066,7 +1087,8 @@ export const PolicyLive = (
 ): Layer.Layer<Policy> =>
   Layer.succeed(Policy, {
     config,
-    forWorktree: (worktree) => autonomyPolicy(config, worktree),
+    forWorktree: (worktree, sessionId) =>
+      autonomyPolicy(config, worktree, sessionId),
   });
 
 /**

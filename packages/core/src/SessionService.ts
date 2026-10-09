@@ -469,7 +469,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               cwd: workspace.path,
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
-              policy: policy.forWorktree(workspace.path),
+              policy: policy.forWorktree(workspace.path, id),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
