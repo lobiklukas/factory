@@ -5,11 +5,11 @@
 #   claim.sh release <id>      drop your claim (`--any`: drop it whoever holds it)
 #   claim.sh list              one line per claim: <id> worker=<n> age=<seconds>
 #
-# <id> is an issue id (`LOB-95`): the unit of work, and the key for a `ralph-fix` PR too (the issue its branch
+# <id> is an issue id (`LOB-95`): the unit of work, and the key for a ralph PR being fixed too (the issue its branch
 # `ralph/LOB-95` belongs to). A claim is a directory under $RALPH_SHARED/claims created with `mkdir`, which is
 # atomic, so two workers never both win. It goes stale after RALPH_CLAIM_TTL seconds (default 3 h) so a killed
 # worker cannot hold an issue forever; the driver also releases a worker's claims for issues without an open PR
-# at the end of each iteration, and the merging worker releases a claim when its PR merges.
+# at the end of each iteration, which also frees an issue once its PR merges.
 set -euo pipefail
 
 SHARED="${RALPH_SHARED:?RALPH_SHARED must name the directory the workers share}"

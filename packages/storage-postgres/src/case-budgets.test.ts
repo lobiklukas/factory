@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
  * package is putting on the machine. Measured across four `bunx turbo run test --force` runs of the
  * whole gate (`02-baseline-full-gate-verbose.log`, `02-`, `03-` and `04-full-gate-verbose.log` in
  * `.verify/evidence/lob-136/`), the two slowest cases in the guarded files reached 4 741 ms
- * (`ralph-opencode.test.ts`, which sources the driver and runs a shim through it) and 4 231 ms
+ * (`ralph-opencode.test.ts`, since deleted with the driver's opencode support) and 4 231 ms
  * (`PostgresStorage.test.ts`'s fat-log paging case, which seeds 2 001 commits one at a time) — both
  * inside the 5 000 ms default, which is the red this issue was filed for. Which case lands on top
  * moves from run to run, which is the signature of load rather than of one slow case. `30_000` is
@@ -47,11 +47,10 @@ import { describe, expect, it } from "vitest";
  * `ralph-docker-env.test.ts:859-877` already use, and it inherits their blind spots rather than
  * inventing a parser to avoid them: it reads a `timeout:` from anywhere in a declaration's span, so
  * a `timeout` belonging to something *inside* a case body would pass as that case's budget. In the
- * three files the scan is pointed at besides this one — `PostgresStorage.test.ts`,
- * `ralph-opencode.test.ts` and `ralph-parallel.test.ts` — `grep -n timeout` finds nothing but case
- * budgets and two `spawnSync` kill budgets, both above every declaration
- * (`ralph-opencode.test.ts:152`, `ralph-parallel.test.ts:88`), so the blind spot is not live in any
- * of them. It **is** live in this file, whose three fixture cases carry the shape inside their own
+ * two files the scan is pointed at besides this one — `PostgresStorage.test.ts` and
+ * `ralph-parallel.test.ts` — `grep -n timeout` finds nothing but case budgets and one `spawnSync`
+ * kill budget above every declaration (`ralph-parallel.test.ts`'s `sh`), so the blind spot is not
+ * live in either. It **is** live in this file, whose three fixture cases carry the shape inside their own
  * bodies and so protect nothing; **LOB-138** is that ticket. The scan also cannot see a declaration
  * whose table is a tagged template (`it.each\`…\`(…)`), which is the blind spot **LOB-119** was
  * filed for on the sibling guard. Two things here are deliberately stricter than the siblings: the
@@ -69,7 +68,6 @@ const DEFAULT_MS = 5_000;
 /** Files whose every case is checked, relative to this file's directory. */
 const GUARDED = [
   "PostgresStorage.test.ts",
-  "ralph-opencode.test.ts",
   // Landed on `main` after this branch was cut (parallel workers, `f1343e8`), and it belongs with
   // the other two: it spawns `bash` per case and sources `.pi/ralph/loop.sh`, so it is the class
   // that inherits the load the 5 s default cannot survive. Worst case of three runs at 2 046 ms —
