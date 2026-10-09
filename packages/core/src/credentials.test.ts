@@ -5,6 +5,7 @@
  * sees the token, lives beside the session service's own suite, which owns the Postgres fixture.
  */
 import { ConfigProvider, Effect, Exit, Option, Redacted } from "effect";
+import { FetchHttpClient } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { RepoSlug } from "@repo/domain/Session";
 import {
@@ -58,26 +59,39 @@ describe("the static-token provider", () => {
 describe("the selection", () => {
   it("selects the static token when no GitHub App is configured, and says so", async () => {
     const provider = await Effect.runPromise(
-      selectCredentialProvider(configFrom({ GITHUB_TOKEN: "ghp_example" })),
+      selectCredentialProvider(
+        configFrom({ GITHUB_TOKEN: "ghp_example" }),
+      ).pipe(Effect.provide(FetchHttpClient.layer)),
     );
     expect(provider.source).toBe("static-token");
   });
 
   it("selects the static token with no token at all, and fails only at resolution", async () => {
     const provider = await Effect.runPromise(
-      selectCredentialProvider(configFrom({})),
+      selectCredentialProvider(configFrom({})).pipe(
+        Effect.provide(FetchHttpClient.layer),
+      ),
     );
     expect(provider.source).toBe("static-token");
     const exit = await Effect.runPromiseExit(provider.tokenFor(repo));
     expect(Exit.isFailure(exit)).toBe(true);
   });
 
-  it("refuses a GitHub App configuration rather than falling back to the static token", async () => {
+  it("refuses a GitHub App id with no private key, naming the missing setting, never the static token", async () => {
     const exit = await Effect.runPromiseExit(
       selectCredentialProvider(
         configFrom({ GITHUB_APP_ID: "123", GITHUB_TOKEN: "ghp_example" }),
-      ),
+      ).pipe(Effect.provide(FetchHttpClient.layer)),
     );
     expect(Exit.isFailure(exit)).toBe(true);
+    const error = Exit.isFailure(exit)
+      ? exit.cause.reasons.flatMap((r) =>
+          r._tag === "Fail" ? [r.error] : [],
+        )[0]
+      : undefined;
+    expect(error?._tag).toBe("CredentialError");
+    expect(error?.code).toBe("missing");
+    expect(error?.message).toContain("GITHUB_APP_PRIVATE_KEY");
+    expect(error?.message).toContain("GITHUB_APP_INSTALLATION_ID");
   });
 });
