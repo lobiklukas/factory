@@ -24,12 +24,13 @@ Launch `ralph-verifier` and `ralph-researcher` with `async: true`. Linear is rea
    Add the missing entries (launching `ralph-researcher` per system, `async: true`) or file them.
 6. **Every failure that needs production code, and every problem you find but do not fix, is a
    ticket.** Read `.pi/ralph/ticket.md` and file per it (labels `ralph`, `Bug`), with the exact failing
-   check, output and evidence path. The audit's whole value is that nothing it finds stays unfiled.
-   Add each row to `.ralph/plan.md`.
+   check, output and evidence path. The audit's whole value is that nothing it finds stays unfiled. The
+   3-ticket cap does not apply here; group by root cause.
 7. **Gate** (`format:check`, `build`, `lint`, `test`, `type-check`), then one `ralph-reviewer` (`tests`
    angle) over the diff. Fix P0/P1.
-8. **Deliver:** when `RALPH_PUSH=1`, push and open a **draft** PR titled `chore(verify): audit <date>`
-   with the table from step 2, the before/after counts, issues filed (ids). Never merge it yourself. Post the review record the worker prompt describes (`<!-- ralph-review: {...} -->`, with `design` `n/a`) once the reviewer is clean, so the driver can merge it. Append a short
+8. **Deliver:** when `RALPH_PUSH=1`, push and open a PR (not a draft) titled `chore(verify): audit <date>`
+   with the table from step 2, the before/after counts, issues filed (ids). The driver arms auto-merge, so
+   open it only once the gate is green and the reviewer is clean. Never merge it yourself. Append a short
    entry to `.ralph/progress.md`. Finally `git switch --detach origin/main`.
 
 Hard rules: never weaken or delete a check to make it pass; status `passing` only for what ran

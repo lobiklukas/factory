@@ -310,18 +310,16 @@ function corpus(): Source[] {
  * purpose.
  */
 const CALLING_FILES: Record<string, number> = {
-  ".pi/ralph/close.prompt.md": 1,
-  ".pi/ralph/plan.prompt.md": 1,
   ".pi/ralph/split.prompt.md": 1,
   ".pi/ralph/ticket.md": 1,
-  ".pi/ralph/work.prompt.md": 4,
+  ".pi/ralph/work.prompt.md": 2,
 };
 
 /**
  * What the map above must add up to, as a literal. Without it, emptying the map would make the loop
  * in the case below vacuous — the same hole a literal `CALLING_FILES` array had before it.
  */
-const TOTAL_CALL_SITES = 8;
+const TOTAL_CALL_SITES = 4;
 
 describe("the loop's save_comment call sites", () => {
   it("names issueId at every call site in the instructions", () => {
