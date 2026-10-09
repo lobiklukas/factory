@@ -137,7 +137,7 @@ const CredentialSelectionLog = Layer.effectDiscard(
   Effect.gen(function* () {
     const credentials = yield* CredentialProvider;
     yield* Effect.logInfo(
-      `credentials: ${credentials.source} (no GitHub App configured; sessions receive no token)`,
+      `credentials: ${credentials.source} (sessions receive no token)`,
     );
   }),
 ).pipe(Layer.provide(CredentialProviderLive));
