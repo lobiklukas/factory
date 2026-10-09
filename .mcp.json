@@ -3,7 +3,7 @@
     "linear": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+      "args": ["-y", "mcp-remote@0.14.3", "https://mcp.linear.app/mcp"]
     }
   }
 }

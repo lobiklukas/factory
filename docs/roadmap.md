@@ -1,7 +1,7 @@
 # Roadmap
 
 What we build, in what order, and what "done" means. `docs/design.md` holds the settled decisions
-(D1–D16) and the milestone definitions; `docs/features.md` holds the research behind each item.
+and the milestone definitions; `docs/features.md` holds the research behind each item.
 This document is the plan: priority by MVP distance, and the Linear project that tracks it.
 
 Tracked in Linear: **[Factory MVP](https://linear.app/lobiklukas/project/factory-mvp-8d860fd4312a)**
@@ -202,9 +202,13 @@ once B lands.
   `observability`, `infra`, `self-hosting`, `board` refine the area within a track.
 - **Milestones:** the eleven above — M2 … M7, **B (the board MVP, before T)**, T, **L (the local-run
   gate)**, S, V2.
-- **MCP:** `.mcp.json` at the repo root runs `npx mcp-remote https://mcp.linear.app/mcp`, which every
-  stdio MCP client (OMP, Claude Code) picks up. First use authorizes in a browser; the token is
-  cached in `~/.mcp-auth` and shared by all of them. No API key is stored in the repo.
+- **MCP:** `.mcp.json` at the repo root runs a pinned `npx -y mcp-remote` against
+  `https://mcp.linear.app/mcp`, which every stdio MCP client (OMP, Claude Code) picks up. The pin is
+  an exact version in `.mcp.json` rather than a float: `docs/next-agent.md` says which file is
+  authoritative and how to bump it, and `packages/storage-postgres/src/mcp-pin.test.ts` fails when the
+  pin and the version `docs/testing-third-parties.md` records disagree. This bullet names no version
+  on purpose, so a bump cannot go stale here. First use authorizes in a browser; the token is cached
+  in `~/.mcp-auth` and shared by all of them. No API key is stored in the repo.
 
 ## Not on this roadmap
 

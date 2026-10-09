@@ -83,11 +83,10 @@ stop_api() {
 
 trap 'stop_api' EXIT
 
-if ! (cd "$ROOT" && DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}" \
-        docker compose up -d --wait postgres >/dev/null 2>&1); then
-  echo "postgres is not up: docker compose up -d --wait postgres" >&2
-  exit 1
-fi
+# The session log is Postgres; the shared check asks the port before it asks compose, so this works
+# from a ralph worktree (LOB-57).
+source "$ROOT/.pi/skills/lib/postgres.sh"
+ensure_postgres || exit 1
 
 : > "$LOG"
 # The faux tool call sleeps, so the run is genuinely in flight when the signal lands.

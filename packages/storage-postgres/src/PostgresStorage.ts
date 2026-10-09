@@ -59,6 +59,15 @@ export class StorageLogError extends Data.TaggedError("StorageLogError")<{
 
 const BATCH_SIZE = 500;
 
+/**
+ * Commit rows one batched read answers per round trip (`PostgresStorage.readers`).
+ *
+ * A page bounds the result set, not the number of queries: a table of many thin logs pages a few
+ * times, and one fat log pages by its own row count. Exported so a test can straddle the boundary
+ * with a log of more rows than this, which is the case paging exists for.
+ */
+export const READER_PAGE_ROWS = 2_000;
+
 const WritesFromJson = Schema.fromJsonString(Schema.Unknown);
 const encodeWrites = Schema.encodeSync(WritesFromJson);
 const decodeWrites = Schema.decodeUnknownSync(WritesFromJson);
@@ -67,6 +76,9 @@ const isWrites = (value: unknown): value is readonly StorageWrite[] =>
   Array.isArray(value);
 
 type Row = { readonly seq: string | number | bigint; readonly writes: string };
+
+/** One commit row of one of the logs a batched read asked for. */
+type BatchedRow = Row & { readonly logId: string };
 
 export class PostgresStorage implements Storage {
   private readonly store = new MemoryStorage();
@@ -120,6 +132,81 @@ export class PostgresStorage implements Storage {
       { logId, mode: "reader" },
       BACKGROUND_CONTEXT,
     );
+  }
+
+  /**
+   * Read-only folds of many logs at once, for a caller that indexes logs it does not own.
+   *
+   * `reader()` costs one round trip per read, and a `Storage` read is several, so a caller walking a
+   * whole log table (the control plane's index rebuild) pays that per log. This pays it per page
+   * instead: one paged `SELECT … WHERE log_id = ANY(…)` seeds a `MemoryStorage` per requested id,
+   * each folded by the same `MemoryStorage.prepareCommit` the single-log reader uses — so
+   * validation, id minting and the resulting state are Pi Durable's own and cannot drift from it.
+   *
+   * Two properties the single-log path has and this keeps. Every id in `logIds` is present in the
+   * result even when its log holds no commits, because `reader()` on an empty log answers as an
+   * empty fold and a missing key would be a different answer. And commits still arrive in `seq`
+   * order per log: the page is ordered by `(log_id, seq)` and keyed on that pair, so a page may
+   * split a log across two queries without reordering or dropping the half that did not fit.
+   *
+   * The stores are detached and hold no connection, so the caller drops the map when it is done.
+   */
+  static readers(
+    sql: SqlClient,
+    logIds: readonly string[],
+  ): Promise<ReadonlyMap<string, Storage>> {
+    const stores = new Map<string, MemoryStorage>(
+      logIds.map((logId) => [logId, new MemoryStorage()]),
+    );
+    if (stores.size === 0) return Promise.resolve(stores);
+    const ids = [...stores.keys()];
+    const fold = Effect.gen(function* () {
+      let after: { readonly logId: string; readonly seq: number } | undefined;
+      for (;;) {
+        const rows =
+          after === undefined
+            ? yield* sql<BatchedRow>`
+                SELECT log_id AS "logId", seq, writes::text AS writes
+                FROM commits
+                WHERE log_id = ANY(${ids})
+                ORDER BY log_id, seq
+                LIMIT ${READER_PAGE_ROWS}
+              `
+            : yield* sql<BatchedRow>`
+                SELECT log_id AS "logId", seq, writes::text AS writes
+                FROM commits
+                WHERE log_id = ANY(${ids})
+                  AND (log_id, seq) > (${after.logId}, ${after.seq})
+                ORDER BY log_id, seq
+                LIMIT ${READER_PAGE_ROWS}
+              `;
+        for (const row of rows) {
+          const store = stores.get(row.logId);
+          // Unreachable: `ANY(ids)` bounds the rows to ids `stores` holds. Left explicit because
+          // the fold below assumes the store exists, and a missing one would be a silent skip.
+          if (store === undefined) continue;
+          const seq = Number(row.seq);
+          const writes = decodeWrites(row.writes);
+          if (!isWrites(writes)) {
+            return yield* new StorageLogError({
+              reason: `commit ${seq} of log ${row.logId} is not a write array`,
+            });
+          }
+          yield* Effect.try({
+            try: () => store.prepareCommit(writes, seq as Seq).apply(),
+            catch: (cause) =>
+              new StorageLogError({
+                reason: `commit ${seq} of log ${row.logId} does not fold`,
+                cause,
+              }),
+          });
+        }
+        const last = rows.at(-1);
+        if (last === undefined || rows.length < READER_PAGE_ROWS) return;
+        after = { logId: last.logId, seq: Number(last.seq) };
+      }
+    });
+    return Effect.runPromise(fold).then(() => stores);
   }
 
   /** `close()` with the never-cancelling context, for Effect callers. */

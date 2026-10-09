@@ -17,7 +17,8 @@
   "devDependencies": {
     "@repo/config-typescript": "workspace:*",
     "vitest": "^4.1.4",
-    "@effect/platform-bun": "4.0.0"
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-pg": "4.0.0"
   },
   "exports": {
     ".": "./src/index.ts"

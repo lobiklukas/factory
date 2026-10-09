@@ -1,7 +1,7 @@
 # Handoff
 
 State of the work and what to do next. Read `docs/design.md` before changing an architectural
-decision — the decisions (D1–D16), the build order (M0–M7), and the open risks (R1–R6) are all
+decision — the decisions, the build order (M0–M7), and the open risks (R1–R6) are all
 settled there and this document does not restate them. `docs/features.md` sits beside them: it
 ranks _what to build next and why_ from the code audit, the Pi Durable API surface, and a survey of
 13 comparable products, and it changes no decision.

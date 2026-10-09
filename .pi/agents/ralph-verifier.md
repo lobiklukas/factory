@@ -1,8 +1,8 @@
 ---
 name: ralph-verifier
 description: Writer agent for the ralph loop - writes tests, e2e drives, fakes, and the .pi/skills/verify-* skills from acceptance criteria, in fresh context separate from the implementer
-model: opencode-go/deepseek-v4.1-flash
-thinking: high
+model: anthropic/claude-haiku-5-5
+thinking: medium
 tools: read, grep, find, ls, bash, edit, write
 systemPromptMode: replace
 inheritProjectContext: true

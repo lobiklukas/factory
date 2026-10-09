@@ -90,9 +90,12 @@ export const MAX_MESSAGE_CHARS = 100_000;
 /** How often idle owners are swept, when sweeping is at all. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 
-/** Page size for `listSessions` when the caller does not choose one, and the largest we serve. */
+/** Page size for `listSessions` when the caller does not choose one. */
 const DEFAULT_PAGE_SIZE = 25;
-const MAX_PAGE_SIZE = 100;
+/** Largest page `listSessions` will serve, however large a limit the caller asks for. Exported for
+ * the list tests: the cap is part of the service's contract, so a case that straddles it has to
+ * read the real value rather than a copy. */
+export const MAX_PAGE_SIZE = 100;
 
 export type SessionServiceShape = {
   readonly create: (
@@ -169,6 +172,14 @@ type ListRow = {
   readonly status: string;
   readonly createdAt: string;
   readonly lastActivityAt: string;
+  /**
+   * The same instant as `lastActivityAt` at full microsecond precision. The keyset cursor is built
+   * from this, not from `lastActivityAt`: the display value is truncated to milliseconds, and a
+   * cursor cast back from it is then strictly *less* than the stored `timestamptz`, so every
+   * remaining row in a same-millisecond group fails `(last_activity_at, id) < (cursor.at, cursor.id)`
+   * and the page ends early.
+   */
+  readonly lastActivityExact: string;
   readonly costTotal: number;
 };
 
@@ -704,6 +715,38 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         }).pipe(Effect.ignore);
 
+      /**
+       * One page of the session list, newest activity first.
+       *
+       * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
+       * keyset comparison is against the `timestamptz` Postgres ordered by and a page boundary
+       * inside a group of rows sharing a millisecond loses none of it (LOB-95).
+       *
+       * `nextCursor` is minted only when a row beyond this page exists: the query asks Postgres for
+       * `limit + 1` rows and a page that comes back short is the end of the walk. A page whose size
+       * equals the table's row count therefore carries no cursor, and paging from it repeats the
+       * page rather than continuing past it (LOB-140).
+       *
+       * A *walk* — this call repeated from `nextCursor` until it is gone — is not a snapshot, and
+       * cannot be one from here: the ordering key is `session_activity.last_activity_at`, which
+       * every live event for an owned session rewrites to "now" (`recordActivity` reaches it
+       * through `touch`, `setActivityStatus` and `setActivityCost`). So a row can move between two
+       * pages of the same walk, and both directions are observable:
+       *
+       * - A row below the cursor whose key advances *above* it leaves the range the walk is
+       *   traversing. It is not returned by that walk, and `nextCursor` still reports the walk
+       *   finished. It is not lost: a session that just became active now belongs at the head, and
+       *   the next walk finds it there.
+       * - A row already returned whose key moves *back below* the cursor is returned again. Only
+       *   `rebuildIndexes` moves a key backwards — every incremental writer sets it to "now" — so
+       *   reaching this needs a whole-table rewrite in flight, and it is still a wrong answer.
+       *
+       * Callers that page the whole table should therefore treat a walk as a best-effort snapshot
+       * rather than a count, and should re-walk from the top to pick up what moved. Making a walk
+       * a true snapshot needs either one transaction spanning every page — impossible from here, a
+       * walk is a client's loop across calls — or a materialised snapshot id carried in the cursor;
+       * both are a decision about this contract rather than a fix, so neither is taken.
+       */
       const list = (
         input: ListSessionsInput,
       ): Effect.Effect<ListSessionsOutput, SessionError> =>
@@ -729,6 +772,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 a.status,
                 a.cost_total,
                 to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_activity_at,
+                to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_activity_exact,
                 to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
               FROM session_activity a
               JOIN sessions s ON s.id = a.session_id
@@ -742,9 +786,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
           const page = rows.slice(0, limit);
           const last = page.at(-1);
+          // The cursor carries the exact instant, not the millisecond display value: the keyset
+          // comparison is against the stored `timestamptz`, so the cursor has to be too. A cursor
+          // minted by an older build is millisecond-truncated and stays lossy for that one page
+          // boundary; nothing can repair a value that has already been rounded.
           const nextCursor =
             rows.length > limit && last !== undefined
-              ? `${last.lastActivityAt}|${last.id}`
+              ? `${last.lastActivityExact}|${last.id}`
               : undefined;
           const sessions: SessionListEntry[] = [];
           for (const row of page) {

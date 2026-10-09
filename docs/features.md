@@ -1,7 +1,7 @@
 # Agent Software Factory — Feature Research
 
 What to build next, ranked, with the evidence for each call. `docs/design.md` holds the settled
-decisions (D1–D16) and the build order (M0–M7); `docs/handoff.md` holds the state. This document
+decisions and the build order (M0–M7); `docs/handoff.md` holds the state. This document
 does not restate either — it adds the thing both leave out: **which features are worth building,
 in what order, and why.**
 
@@ -463,7 +463,7 @@ API resume-run, checks auto-fixer) · `docs.tembo.io` · `optio.host/docs/task-l
 
 ## 12. Sources
 
-Repo: `docs/design.md` (D1–D16, M0–M7, R1–R6), `docs/handoff.md`, the audit's file:line evidence
+Repo: `docs/design.md` (M0–M7, R1–R6), `docs/handoff.md`, the audit's file:line evidence
 (§2), `packages/harness/src/*`, and the installed
 `@earendil-works/pi-durable@1.0.3` type surface (`dist/**/*.d.ts`, README, CHANGELOG).
 

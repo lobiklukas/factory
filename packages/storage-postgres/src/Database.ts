@@ -4,6 +4,9 @@ import { Config, Layer, Redacted, String } from "effect";
 
 export const DatabaseConfig = Config.all({
   url: Config.Redacted("DATABASE_URL").pipe(
+    // This default is spelled out again in `packages/core/src/SessionService.test.ts`, which has to
+    // read `DATABASE_URL` before any config is resolved. A case there reads this one back, so the
+    // two literals cannot drift without turning the suite red.
     Config.withDefault(
       Redacted.make("postgres://factory:factory@localhost:5442/factory"),
     ),

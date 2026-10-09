@@ -3,8 +3,11 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified run: 2026-10-05, API on `:9300`, `MODEL_BACKEND=faux`,
-`./drive.sh` in tmux — 14/14 required checks passed.
+Status reflects the last verified run: **2026-10-06**, from the `ralph/LOB-57` worktree with the
+human's `factory-postgres-1` holding 5442, API on `:9400` (not the usual `:9300`),
+`MODEL_BACKEND=faux`, `./drive.sh` in tmux — **14/14** required checks passed. `./up.sh` started
+while 5442 was taken (LOB-57). Evidence: `.verify/evidence/lob-57/` (`33-cli-drive-final.log` with
+`33-cli-drive-final-observed.json`).
 
 | Feature         | Status  | File                   |
 | --------------- | ------- | ---------------------- |

@@ -1,7 +1,7 @@
 ---
 name: ralph-designer
 description: Design agent for the ralph loop - writes a short UI spec before an apps/web change and critiques the rendered result after it
-model: opencode-go/deepseek-v4.1-flash
+model: anthropic/claude-haiku-5-5
 thinking: medium
 tools: read, grep, find, ls, bash
 skills: verify-web

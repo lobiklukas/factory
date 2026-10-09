@@ -5,7 +5,8 @@
 #
 #   ./degraded.sh
 #
-# This script stops and starts the local Postgres container. It always brings it back up — a trap,
+# This script stops and starts the local Postgres container — the container publishing 5442, by
+# name, whichever compose project owns it. It always brings it back up — a trap,
 # so a failure half way through does not leave the database down — and it leaves no API running.
 #
 # Evidence: .verify/evidence/latest/api/degraded-{down,up}.json, degraded-process.json, and
@@ -19,8 +20,6 @@ RUN_DIR="$ROOT/.verify/run/degraded"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
 DRIVER="$ROOT/.pi/skills/verify-api/degraded.ts"
 LOG="$RUN_DIR/api.log"
-
-export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 
@@ -70,17 +69,35 @@ stop_api() {
   rm -f "$pidfile"
 }
 
-postgres_up() { (cd "$ROOT" && docker compose up -d --wait postgres >/dev/null 2>&1); }
-postgres_down() { (cd "$ROOT" && docker compose stop postgres >/dev/null 2>&1); }
+source "$ROOT/.pi/skills/lib/postgres.sh"
+
+# The database has to come down and go back up, so this needs the container that actually serves
+# 5442, addressed by name: `docker compose stop postgres` names this directory's project, which in
+# a ralph worktree is `factory-ralph` and owns no such container, while the human's
+# `factory-postgres-1` keeps the port (LOB-57).
+ensure_postgres || exit 1
+PG_CONTAINER="$(pg_port_owner)"
+if [ -z "$PG_CONTAINER" ]; then
+  echo "port $PG_PORT answers but no container publishes it; stop that database yourself and re-run" >&2
+  exit 1
+fi
+
+postgres_down() { pg_docker stop "$PG_CONTAINER" >/dev/null 2>&1; }
+postgres_up() {
+  pg_docker start "$PG_CONTAINER" >/dev/null 2>&1 || return 1
+  # Up means the port answers again; the healthcheck is not visible from here and the `up` phase
+  # polls `/readyz` for the rest of the recovery.
+  for _ in $(seq 1 120); do pg_port_open && return 0; sleep 0.5; done
+  return 1
+}
 
 # The database comes back whatever happens: leaving it down would break every other suite here.
-trap 'stop_api; postgres_up' EXIT
+trap 'stop_api || true; postgres_up || echo "warning: $PG_CONTAINER did not come back" >&2' EXIT
 
-postgres_up || { echo "postgres is not up" >&2; exit 1; }
 : > "$LOG"
 
 postgres_down
-check "postgres is stopped for the test" "$(docker ps --format '{{.Names}}' | grep -q '^factory-postgres-1$' && echo 1 || echo 0)" "container absent from docker ps"
+check "postgres is stopped for the test" "$(pg_docker ps --format '{{.Names}}' | grep -qxF "$PG_CONTAINER" && echo 1 || echo 0)" "container $PG_CONTAINER absent from docker ps"
 
 start_api
 # The server must bind with no database at all: wait for the liveness probe, not readiness.

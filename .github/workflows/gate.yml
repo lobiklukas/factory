@@ -1,7 +1,7 @@
 # The gate AGENTS.md asks for, one job per command so a failure names its cause. Runs on every PR and
 # on main. The `gate` job at the bottom is the single check to look at: it fails if any job failed.
-# The ralph loop (.pi/ralph) reads these results: a red check on a ralph PR is sent back to an agent
-# to fix (label `ralph-fix`), and a red main becomes a Linear ticket.
+# `gate` is the required check on main: ralph PRs auto-merge when it passes, a red one is sent back to
+# the loop to fix (.pi/ralph/work.prompt.md), and a red main becomes a Linear ticket.
 name: gate
 
 on:
@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:17-alpine
+        image: mirror.gcr.io/library/postgres:17-alpine # Docker Hub rate-limits unauthenticated pulls from shared runners
         env:
           POSTGRES_USER: factory
           POSTGRES_PASSWORD: factory
