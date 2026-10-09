@@ -32,6 +32,8 @@ export const LIVE_DOC = "pi.live";
 export const USAGE_DOC = "pi.usage";
 export const SESSION_DOC_KIND = "factory.session";
 export const TITLE_ENTRY_KIND = "factory.title";
+export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
+export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 
 type ContentBlock = TextContent | ThinkingContent | ToolCall | ImageContent;
 

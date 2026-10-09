@@ -1,5 +1,12 @@
 import { Rpc, RpcGroup } from "effect/rpc";
 import {
+  ApprovalDecision,
+  DecideApprovalInput,
+  ListApprovalsOutput,
+  RequestApprovalInput,
+  ApprovalRequest,
+} from "./Approval";
+import {
   CreateSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -65,5 +72,27 @@ export class SessionRpc extends RpcGroup.make(
   }),
 ) {}
 
-// NOTE: Sandbox, approval, and sandbox-status groups merge in here.
-export const RpcApi = SessionRpc;
+/**
+ * The approval surface (docs/design.md D11, LOB-146): request, decide, and the pending list. The
+ * list reads the service's pending set; a session's approvals are committed to its log either way.
+ */
+export class ApprovalsRpc extends RpcGroup.make(
+  Rpc.make("requestApproval", {
+    payload: RequestApprovalInput,
+    success: ApprovalRequest,
+    error: SessionError,
+  }),
+  Rpc.make("decideApproval", {
+    payload: DecideApprovalInput,
+    success: ApprovalDecision,
+    error: SessionError,
+  }),
+  Rpc.make("listApprovals", {
+    payload: SessionIdInput,
+    success: ListApprovalsOutput,
+    error: SessionError,
+  }),
+) {}
+
+// NOTE: The sandbox and sandbox-status groups merge in here next.
+export const RpcApi = SessionRpc.merge(ApprovalsRpc);

@@ -20,6 +20,7 @@
 import {
   Clock,
   Context,
+  DateTime,
   Effect,
   FiberMap,
   FileSystem,
@@ -33,6 +34,13 @@ import {
   Stream,
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  DecideApprovalInput,
+  ListApprovalsOutput,
+  RequestApprovalInput,
+} from "@repo/domain/Approval";
 import type {
   CreateSessionInput,
   ListSessionsInput,
@@ -74,6 +82,8 @@ import {
   readLiveSnapshot,
   snapshotEvent,
   submitMessage,
+  writeApprovalDecided,
+  writeApprovalRequested,
   writeRepoBinding,
   writeTitle,
 } from "@repo/harness";
@@ -122,6 +132,21 @@ export type SessionServiceShape = {
   readonly events: (
     sessionId: SessionId,
   ) => Stream.Stream<SessionEvent, SessionError>;
+  /**
+   * Ask a person before a gated action runs. Idempotent on `requestId`: a repeat returns the
+   * request already on file, with no second pending row and no second log entry.
+   */
+  readonly requestApproval: (
+    input: RequestApprovalInput,
+  ) => Effect.Effect<ApprovalRequest, SessionError>;
+  /** Settle a pending request. Repeating the same decision and actor returns it unchanged. */
+  readonly decideApproval: (
+    input: DecideApprovalInput,
+  ) => Effect.Effect<ApprovalDecision, SessionError>;
+  /** The requests of one session still waiting for a decision, oldest first. */
+  readonly listApprovals: (
+    sessionId: SessionId,
+  ) => Effect.Effect<ListApprovalsOutput, SessionError>;
   /** Close every harness this process owns. */
   readonly close: Effect.Effect<void>;
 };
@@ -188,6 +213,15 @@ type Binding = {
   readonly repo?: RepoSlug;
   readonly baseRef?: string;
   readonly localPath?: string;
+};
+
+/**
+ * One approval as this process knows it. The log holds the same two facts (the request and the
+ * decision entries); this set is what the pending list reads until the snapshot fold does (LOB-147).
+ */
+type ApprovalRecord = {
+  readonly request: ApprovalRequest;
+  readonly decision?: ApprovalDecision;
 };
 
 type LiveOwner = {
@@ -649,6 +683,166 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* describe(sessionId, row);
         });
 
+      /** Every approval this process has seen, per session, keyed by request id. */
+      const approvals = yield* Ref.make(
+        HashMap.empty<SessionId, HashMap.HashMap<string, ApprovalRecord>>(),
+      );
+      /** Serializes approval writes so a repeated request id cannot commit twice. */
+      const approvalGate = yield* Semaphore.make(1);
+
+      const requireRequestId = (
+        requestId: string,
+      ): Effect.Effect<void, SessionError> =>
+        requestId.trim().length === 0
+          ? Effect.fail(
+              new SessionErrorClass({
+                code: "invalid_input",
+                message: "an approval needs a non-empty requestId",
+              }),
+            )
+          : Effect.void;
+
+      const recordOf = (
+        sessionId: SessionId,
+        requestId: string,
+      ): Effect.Effect<ApprovalRecord | undefined> =>
+        Effect.map(Ref.get(approvals), (all) =>
+          Option.getOrUndefined(
+            HashMap.get(all, sessionId).pipe(
+              Option.flatMap((byRequest) => HashMap.get(byRequest, requestId)),
+            ),
+          ),
+        );
+
+      const putRecord = (
+        sessionId: SessionId,
+        record: ApprovalRecord,
+      ): Effect.Effect<void> =>
+        Ref.update(approvals, (all) => {
+          const byRequest = Option.getOrElse(HashMap.get(all, sessionId), () =>
+            HashMap.empty<string, ApprovalRecord>(),
+          );
+          return HashMap.set(
+            all,
+            sessionId,
+            HashMap.set(byRequest, record.request.requestId, record),
+          );
+        });
+
+      const requestApproval = (
+        input: RequestApprovalInput,
+      ): Effect.Effect<ApprovalRequest, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireRequestId(input.requestId);
+          const row = yield* requireSession(input.sessionId);
+          return yield* approvalGate.withPermits(1)(
+            Effect.gen(function* () {
+              const known = yield* recordOf(input.sessionId, input.requestId);
+              if (known !== undefined) return known.request;
+              const owner = yield* acquireOwner(input.sessionId, row);
+              const requestedAt = DateTime.formatIso(yield* DateTime.now);
+              const request: ApprovalRequest = {
+                sessionId: input.sessionId,
+                requestId: input.requestId,
+                action: input.action,
+                detail: input.detail ?? "",
+                requestedAt,
+              };
+              yield* paper(
+                "record approval request",
+                writeApprovalRequested(owner.root, {
+                  requestId: request.requestId,
+                  action: request.action,
+                  detail: request.detail,
+                  requestedAt,
+                }),
+              );
+              yield* putRecord(input.sessionId, { request });
+              yield* touchActivity(input.sessionId);
+              return request;
+            }),
+          );
+        });
+
+      const decideApproval = (
+        input: DecideApprovalInput,
+      ): Effect.Effect<ApprovalDecision, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireRequestId(input.requestId);
+          if (input.actor.trim().length === 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: "a decision needs the actor who made it",
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          return yield* approvalGate.withPermits(1)(
+            Effect.gen(function* () {
+              const known = yield* recordOf(input.sessionId, input.requestId);
+              if (known === undefined) {
+                return yield* new SessionErrorClass({
+                  code: "not_found",
+                  message: `no approval ${input.requestId} in ${input.sessionId}`,
+                });
+              }
+              if (known.decision !== undefined) {
+                if (
+                  known.decision.decision === input.decision &&
+                  known.decision.actor === input.actor
+                ) {
+                  return known.decision;
+                }
+                return yield* new SessionErrorClass({
+                  code: "invalid_input",
+                  message: `approval ${input.requestId} was already ${known.decision.decision} by ${known.decision.actor}`,
+                });
+              }
+              const owner = yield* acquireOwner(input.sessionId, row);
+              const decidedAt = DateTime.formatIso(yield* DateTime.now);
+              const decision: ApprovalDecision = {
+                sessionId: input.sessionId,
+                requestId: input.requestId,
+                decision: input.decision,
+                actor: input.actor,
+                decidedAt,
+              };
+              yield* paper(
+                "record approval decision",
+                writeApprovalDecided(owner.root, {
+                  requestId: input.requestId,
+                  decision: input.decision,
+                  actor: input.actor,
+                  decidedAt,
+                }),
+              );
+              yield* putRecord(input.sessionId, { ...known, decision });
+              yield* touchActivity(input.sessionId);
+              return decision;
+            }),
+          );
+        });
+
+      const listApprovals = (
+        sessionId: SessionId,
+      ): Effect.Effect<ListApprovalsOutput, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(sessionId);
+          const all = yield* Ref.get(approvals);
+          const pending = Option.match(HashMap.get(all, sessionId), {
+            onNone: () => [] as ApprovalRequest[],
+            onSome: (byRequest) =>
+              Array.from(HashMap.values(byRequest))
+                .filter((record) => record.decision === undefined)
+                .map((record) => record.request)
+                .sort((a, b) =>
+                  a.requestedAt === b.requestedAt
+                    ? a.requestId.localeCompare(b.requestId)
+                    : a.requestedAt.localeCompare(b.requestedAt),
+                ),
+          });
+          return { approvals: pending };
+        });
+
       const recordActivity = (
         sessionId: SessionId,
         event: SessionEvent,
@@ -1006,6 +1200,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         list,
         registerRepo,
         events,
+        requestApproval,
+        decideApproval,
+        listApprovals,
         close: closeAll,
       });
     }),
