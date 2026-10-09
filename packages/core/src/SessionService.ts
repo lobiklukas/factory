@@ -216,8 +216,9 @@ type Binding = {
 };
 
 /**
- * One approval as this process knows it. The log holds the same two facts (the request and the
- * decision entries); this set is what the pending list reads until the snapshot fold does (LOB-147).
+ * One approval as this process knows it, for the idempotence checks: a repeated request returns the
+ * request on file, and a repeated decision returns the decision. The log holds the same two facts,
+ * and `session_approvals` holds the pending ones; this set is never the only copy.
  */
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
@@ -729,6 +730,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         });
 
+      /** The derived pending row for a request. Idempotent: a repeat is `ON CONFLICT DO NOTHING`. */
+      const insertPending = (
+        request: ApprovalRequest,
+      ): Effect.Effect<void, SessionError> =>
+        paper(
+          "record pending approval",
+          sql`
+            INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at)
+            VALUES (${request.sessionId}, ${request.requestId}, ${request.action}, ${request.detail}, ${request.requestedAt})
+            ON CONFLICT (session_id, request_id) DO NOTHING
+          `,
+        ).pipe(Effect.asVoid);
+
+      /** Drops the derived pending row once settled. Idempotent: deleting nothing is fine. */
+      const removePending = (
+        sessionId: SessionId,
+        requestId: string,
+      ): Effect.Effect<void, SessionError> =>
+        paper(
+          "settle pending approval",
+          sql`
+            DELETE FROM session_approvals
+            WHERE session_id = ${sessionId} AND request_id = ${requestId}
+          `,
+        ).pipe(Effect.asVoid);
+
       const requestApproval = (
         input: RequestApprovalInput,
       ): Effect.Effect<ApprovalRequest, SessionError> =>
@@ -738,7 +765,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* approvalGate.withPermits(1)(
             Effect.gen(function* () {
               const known = yield* recordOf(input.sessionId, input.requestId);
-              if (known !== undefined) return known.request;
+              if (known !== undefined) {
+                // A retry after a failed table write must still write it: both statements are
+                // idempotent, so re-running them on the known path repairs a missed row.
+                if (known.decision === undefined) {
+                  yield* insertPending(known.request);
+                } else {
+                  yield* removePending(input.sessionId, input.requestId);
+                }
+                return known.request;
+              }
               const owner = yield* acquireOwner(input.sessionId, row);
               const requestedAt = DateTime.formatIso(yield* DateTime.now);
               const request: ApprovalRequest = {
@@ -758,6 +794,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
               );
               yield* putRecord(input.sessionId, { request });
+              yield* insertPending(request);
               yield* touchActivity(input.sessionId);
               return request;
             }),
@@ -790,6 +827,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   known.decision.decision === input.decision &&
                   known.decision.actor === input.actor
                 ) {
+                  // Re-run the removal: a retry after a failed table write must repair it.
+                  yield* removePending(input.sessionId, input.requestId);
                   return known.decision;
                 }
                 return yield* new SessionErrorClass({
@@ -816,6 +855,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
               );
               yield* putRecord(input.sessionId, { ...known, decision });
+              yield* removePending(input.sessionId, input.requestId);
               yield* touchActivity(input.sessionId);
               return decision;
             }),
@@ -827,20 +867,30 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<ListApprovalsOutput, SessionError> =>
         Effect.gen(function* () {
           yield* requireSession(sessionId);
-          const all = yield* Ref.get(approvals);
-          const pending = Option.match(HashMap.get(all, sessionId), {
-            onNone: () => [] as ApprovalRequest[],
-            onSome: (byRequest) =>
-              Array.from(HashMap.values(byRequest))
-                .filter((record) => record.decision === undefined)
-                .map((record) => record.request)
-                .sort((a, b) =>
-                  a.requestedAt === b.requestedAt
-                    ? a.requestId.localeCompare(b.requestId)
-                    : a.requestedAt.localeCompare(b.requestedAt),
-                ),
-          });
-          return { approvals: pending };
+          const rows = yield* paper(
+            "read pending approvals",
+            sql<{
+              readonly requestId: string;
+              readonly action: string;
+              readonly detail: string;
+              readonly requestedAt: string;
+            }>`
+              SELECT request_id, action, detail, requested_at
+              FROM session_approvals
+              WHERE session_id = ${sessionId}
+              ORDER BY requested_at, request_id
+            `,
+          );
+          // The client renames result columns to camelCase.
+          return {
+            approvals: rows.map((row) => ({
+              sessionId,
+              requestId: row.requestId,
+              action: row.action,
+              detail: row.detail,
+              requestedAt: row.requestedAt,
+            })),
+          };
         });
 
       const recordActivity = (

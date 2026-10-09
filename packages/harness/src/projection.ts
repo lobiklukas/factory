@@ -16,8 +16,10 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import type {
+  ApprovalRequest,
   ModelUsage,
   SessionEvent,
+  SessionId,
   SessionLive,
   SessionStatus,
   SessionUsage,
@@ -225,6 +227,49 @@ export type SessionProjection = {
   readonly live: SessionLive;
   readonly usage: SessionUsage;
   readonly status: SessionStatus;
+};
+
+/**
+ * The approvals still waiting for a decision, folded from the log's approval entries. A request is
+ * identified by its `requestId`: the first request for an id counts and a repeat is ignored, and a
+ * decision for the id settles it. Folding the same records twice gives the same list.
+ *
+ * An entry with a missing field is skipped rather than guessed at, the same rule the other
+ * projections follow. Oldest first, ties broken by request id, so the order is the one the
+ * control plane's pending list has always had.
+ */
+export const foldApprovals = (
+  sessionId: SessionId,
+  records: readonly EntryRecord[],
+): readonly ApprovalRequest[] => {
+  const requests = new Map<string, ApprovalRequest>();
+  const settled = new Set<string>();
+  for (const record of records) {
+    const requestId = stringAt(record.data, "requestId");
+    if (requestId === undefined) continue;
+    if (record.kind === APPROVAL_REQUESTED_KIND) {
+      const action = stringAt(record.data, "action");
+      const requestedAt = stringAt(record.data, "requestedAt");
+      if (action === undefined || requestedAt === undefined) continue;
+      if (requests.has(requestId)) continue;
+      requests.set(requestId, {
+        sessionId,
+        requestId,
+        action,
+        detail: stringAt(record.data, "detail") ?? "",
+        requestedAt,
+      });
+    } else if (record.kind === APPROVAL_DECIDED_KIND) {
+      settled.add(requestId);
+    }
+  }
+  return Array.from(requests.values())
+    .filter((request) => !settled.has(request.requestId))
+    .sort((a, b) =>
+      a.requestedAt === b.requestedAt
+        ? a.requestId.localeCompare(b.requestId)
+        : a.requestedAt.localeCompare(b.requestedAt),
+    );
 };
 
 /** A live conversation view → a snapshot. */

@@ -25,7 +25,7 @@ import type { SqlError } from "effect/sql/SqlError";
  * selects the real columns), so this list only has to be right enough to name the ledger state in
  * the probe's body.
  */
-const REQUIRED_MIGRATIONS: ReadonlyArray<number> = [1, 2, 3, 4, 5, 6];
+const REQUIRED_MIGRATIONS: ReadonlyArray<number> = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /** One named readiness check, as it appears in `/readyz`. */
 type CheckResult =
@@ -95,6 +95,7 @@ const schemaCheck: Check = Effect.gen(function* () {
   const sql = yield* SqlClient;
   yield* sql`SELECT id, title, repo, base_ref, created_at FROM sessions LIMIT 1`;
   yield* sql`SELECT session_id, status, cost_total, last_activity_at FROM session_activity LIMIT 1`;
+  yield* sql`SELECT session_id, request_id, action, detail, requested_at FROM session_approvals LIMIT 1`;
   yield* sql`SELECT slug, url, default_base_ref, local_path, registered_at FROM repos LIMIT 1`;
   yield* sql`SELECT log_id, seq, writes, committed_at FROM commits LIMIT 1`;
   return undefined;

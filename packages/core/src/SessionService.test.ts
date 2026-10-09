@@ -2385,6 +2385,82 @@ describe("approvals", () => {
   });
 });
 
+describe("approvals after the owner is released", () => {
+  it("folds the pending request from the log, repeatably, and drops the settled one", async () => {
+    const { sessionId, waiting } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "fold approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-waiting",
+          action: "push refs/heads/main",
+          detail: "from the agent",
+        });
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-settled",
+          action: "tag v1",
+        });
+        yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "apr-settled",
+          decision: "approved",
+          actor: "lukas",
+        });
+        // Release the owner: nothing in this process holds the session any more.
+        yield* sessions.close;
+        return { sessionId: created.id, waiting: request };
+      }),
+    );
+
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const first = yield* sessions.get(sessionId);
+        const second = yield* sessions.get(sessionId);
+        const pending = yield* sessions.listApprovals(sessionId);
+        return { first, second, pending };
+      }),
+    );
+
+    expect(outcome.first.session.mode).toBe("historical");
+    expect(outcome.first.approvals).toEqual([waiting]);
+    // Folding the same log again gives the same pending list.
+    expect(outcome.second.approvals).toEqual(outcome.first.approvals);
+    expect(outcome.pending.approvals).toEqual(outcome.first.approvals);
+  });
+});
+
+describe("approval table repair", () => {
+  it("re-writes a pending row a failed write missed when the request is retried", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({ title: "repair" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-repair",
+          action: "push",
+        });
+        // Simulate the derived insert having failed after the log entry was written.
+        yield* sql`DELETE FROM session_approvals WHERE request_id = ${"apr-repair"}`;
+        const missing = yield* sessions.listApprovals(created.id);
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-repair",
+          action: "push",
+        });
+        const repaired = yield* sessions.listApprovals(created.id);
+        return { request, missing, repaired };
+      }),
+    );
+    expect(outcome.missing.approvals).toEqual([]);
+    expect(outcome.repaired.approvals).toEqual([outcome.request]);
+  });
+});
+
 describe("request limits", () => {
   it("refuses a message over the length cap with a typed error", async () => {
     const outcome = await program(

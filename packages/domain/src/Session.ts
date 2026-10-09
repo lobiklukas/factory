@@ -166,12 +166,32 @@ export const SessionWorkspace = Schema.Struct({
 });
 export type SessionWorkspace = typeof SessionWorkspace.Type;
 
+/**
+ * An approval request, as the session's log records it (docs/design.md D11). It lives here rather
+ * than in `./Approval` because the snapshot carries the pending ones, and `./Approval` imports this
+ * file; `./Approval` re-exports it.
+ *
+ * A request is pending until a decision for the same `requestId` is in the log.
+ */
+export const ApprovalRequest = Schema.Struct({
+  sessionId: SessionId,
+  requestId: Schema.String,
+  /** The gated action, in the words the policy used (for example `push refs/heads/main`). */
+  action: Schema.String,
+  /** Whatever the asker wants a person to see before deciding. May be empty. */
+  detail: Schema.String,
+  requestedAt: Timestamp,
+});
+export type ApprovalRequest = typeof ApprovalRequest.Type;
+
 export const SessionSnapshotFields = {
   session: SessionSummary,
   workspace: SessionWorkspace,
   entries: Schema.Array(TranscriptEntry),
   live: SessionLive,
   usage: SessionUsage,
+  /** The requests still waiting for a decision, folded from the log, oldest first. */
+  approvals: Schema.Array(ApprovalRequest),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);

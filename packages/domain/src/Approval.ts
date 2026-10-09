@@ -8,19 +8,10 @@
  * who is at the other end (LOB-20 owns identity).
  */
 import { Schema } from "effect";
-import { SessionId, Timestamp } from "./Session";
+import { ApprovalRequest, SessionId, Timestamp } from "./Session";
 
 /** What a session asks to do, and why. The request is pending until a decision settles it. */
-export const ApprovalRequest = Schema.Struct({
-  sessionId: SessionId,
-  requestId: Schema.String,
-  /** The gated action, in the words the policy used (for example `push refs/heads/main`). */
-  action: Schema.String,
-  /** Whatever the asker wants a person to see before deciding. May be empty. */
-  detail: Schema.String,
-  requestedAt: Timestamp,
-});
-export type ApprovalRequest = typeof ApprovalRequest.Type;
+export { ApprovalRequest };
 
 export const ApprovalVerdict = Schema.Literals(["approved", "denied"]);
 export type ApprovalVerdict = typeof ApprovalVerdict.Type;

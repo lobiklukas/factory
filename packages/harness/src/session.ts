@@ -53,6 +53,7 @@ import {
 } from "./policy";
 import {
   diffView,
+  foldApprovals,
   projectEntry,
   projectUsageDoc,
   projectView,
@@ -468,22 +469,35 @@ const bindingString = (value: JsonValue | undefined, key: string): string =>
  * opened: Pi Durable allows exactly one owner, and this is the read-only path D7 asks for — the
  * control plane must be able to read a session without owning it.
  */
-export const readSessionLog = (
+/** The raw active records and documents of a log, before any projection. */
+const readLogRecords = (
   storage: Storage,
-): Effect.Effect<SessionLog, SessionError> =>
+): Effect.Effect<
+  {
+    readonly records: readonly EntryRecord[];
+    readonly usage: JsonRecord | undefined;
+    readonly binding: JsonRecord | undefined;
+  },
+  SessionError
+> =>
   Effect.gen(function* () {
     const records = yield* readActiveEntries(storage);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
-    return {
-      entries: records.map(projectEntry),
-      usage: projectUsageDoc(usage),
-      binding: {
-        repo: bindingString(binding, "repo"),
-        baseRef: bindingString(binding, "baseRef"),
-      },
-    };
+    return { records, usage, binding };
   });
+
+export const readSessionLog = (
+  storage: Storage,
+): Effect.Effect<SessionLog, SessionError> =>
+  Effect.map(readLogRecords(storage), ({ records, usage, binding }) => ({
+    entries: records.map(projectEntry),
+    usage: projectUsageDoc(usage),
+    binding: {
+      repo: bindingString(binding, "repo"),
+      baseRef: bindingString(binding, "baseRef"),
+    },
+  }));
 
 export type { Conversation, ConversationView, Harness, Storage };
 
@@ -517,6 +531,7 @@ const snapshotOf = (
     entries: projection.entries,
     live: projection.live,
     usage: projection.usage,
+    approvals: foldApprovals(ref.id, view.entries),
   };
 };
 
@@ -591,7 +606,8 @@ export const readHistoricalSnapshot = (
   ref: SessionRef,
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
-    const log = yield* readSessionLog(storage);
+    const log = yield* readLogRecords(storage);
+    const entries = log.records.map(projectEntry);
     return {
       session: {
         id: ref.id,
@@ -608,9 +624,10 @@ export const readHistoricalSnapshot = (
           : { baseRef: ref.workspace.baseRef }),
       },
       workspace: ref.workspace,
-      entries: log.entries,
+      entries,
       live: { busy: false, tools: [] },
-      usage: log.usage,
+      usage: projectUsageDoc(log.usage),
+      approvals: foldApprovals(ref.id, log.records),
     };
   });
 
