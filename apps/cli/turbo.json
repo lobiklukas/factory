@@ -1,0 +1,18 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "dev": {
+      // What the CLI's dev task reads when it runs `src/index.ts`: the API it calls
+      // (resolveApiUrl in src/api.ts), and the DevTools and Motel exporters in src/observability (LOB-101).
+      "env": [
+        "FACTORY_API_URL",
+        "API_URL",
+        "DEVTOOLS",
+        "DEVTOOLS_URL",
+        "MOTEL_URL",
+        "OTEL_SERVICE_NAME"
+      ]
+    }
+  }
+}

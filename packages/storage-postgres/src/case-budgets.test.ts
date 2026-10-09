@@ -96,7 +96,7 @@ const NOT_GUARDED: Readonly<Record<string, string>> = {
   "ralph-settled-decisions.test.ts":
     "reads docs/design.md and the instruction files, asserts on text; no database, no subprocess; 791 ms worst of four gate runs",
   "turbo-env.test.ts":
-    "every case already budgets itself with a trailing `, 90_000)` or `, 120_000)` (LOB-92); 4 declarations",
+    "every case already budgets itself with a trailing `, 90_000)` or `, 120_000)` (LOB-92)",
 };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
