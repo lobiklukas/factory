@@ -20,6 +20,8 @@ const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const TEST_TASK = "@repo/storage-postgres#test";
 const DEV_TASK = "@repo/api#dev";
+const WEB_DEV_TASK = "@repo/web#dev";
+const CLI_DEV_TASK = "@repo/cli#dev";
 
 /** A URL nothing connects to: a dry run resolves the config and executes no task. */
 const databaseUrl = (database: string) =>
@@ -39,6 +41,9 @@ interface DryRun {
     readonly taskId: string;
     readonly hash: string;
     readonly environmentVariables: ResolvedEnvironment;
+    readonly resolvedTaskDefinition: {
+      readonly passThroughEnv: readonly string[] | null;
+    };
   }[];
 }
 
@@ -236,4 +241,93 @@ describe("the gate's turbo configuration", () => {
       }, 90_000);
     }
   });
+});
+
+/**
+ * Every variable a dev task reads must be declared on that task, or Strict Mode strips it before the
+ * process starts: `MODEL_BACKEND=anthropic bun run dev` then runs the faux provider (LOB-101). Declared
+ * per package, so each case names the task that reads the variable. `VITE_PORT` is declared on the web
+ * task explicitly, though turbo's framework inference already passes `VITE_*` on this version.
+ */
+describe("the dev tasks' environment", () => {
+  const API_DEV_VARIABLES = [
+    "PORT",
+    "HOST",
+    "IDLE_TIMEOUT",
+    "ALLOWED_ORIGINS",
+    "MAX_REQUEST_BODY_BYTES",
+    "MODEL_BACKEND",
+    "FAUX_COMMAND",
+    "SESSION_ROOT",
+    "SESSION_IDLE_TIMEOUT_MS",
+    "DATABASE_MAX_CONNECTIONS",
+    "MOTEL_URL",
+    "OTEL_SERVICE_NAME",
+    "DEVTOOLS",
+    "DEVTOOLS_URL",
+  ] as const;
+  const WEB_DEV_VARIABLES = [
+    "VITE_PORT",
+    "VITE_SERVER_URL",
+    "VITE_ENABLE_DEVTOOLS",
+    "VITE_DEVTOOLS_URL",
+  ] as const;
+  const CLI_DEV_VARIABLES = [
+    "FACTORY_API_URL",
+    "API_URL",
+    "DEVTOOLS",
+    "DEVTOOLS_URL",
+    "MOTEL_URL",
+    "OTEL_SERVICE_NAME",
+  ] as const;
+
+  it("declares each variable @repo/api#dev reads on that task", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    for (const name of API_DEV_VARIABLES) {
+      expect(declared(dryRun, DEV_TASK)).toContain(name);
+    }
+  }, 90_000);
+
+  it("declares each variable @repo/web#dev reads on that task", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/web",
+      databaseUrl("factory_probe"),
+    );
+    for (const name of WEB_DEV_VARIABLES) {
+      expect(declared(dryRun, WEB_DEV_TASK)).toContain(name);
+    }
+  }, 90_000);
+
+  it("declares each variable @repo/cli#dev reads on that task", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/cli",
+      databaseUrl("factory_probe"),
+    );
+    for (const name of CLI_DEV_VARIABLES) {
+      expect(declared(dryRun, CLI_DEV_TASK)).toContain(name);
+    }
+  }, 90_000);
+
+  it("passes ANTHROPIC_API_KEY through to @repo/api#dev without declaring it, so it stays out of the hash", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    expect(
+      taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv,
+    ).toContain("ANTHROPIC_API_KEY");
+    expect(declared(dryRun, DEV_TASK)).not.toContain("ANTHROPIC_API_KEY");
+    expect(
+      configured(dryRun, DEV_TASK).some((entry) =>
+        entry.startsWith("ANTHROPIC_API_KEY="),
+      ),
+    ).toBe(false);
+  }, 90_000);
 });
