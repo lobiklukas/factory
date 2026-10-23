@@ -11,6 +11,12 @@ server for every agent, so new work is created there rather than in a local back
 **The immediate objective is milestone L:** run the whole workflow locally, end to end, before
 anything is provisioned in the cloud. Every other milestone is ordered relative to that gate.
 
+**Scope (adjusted):** local run first, cloud later. Work that needs local kind, Kubernetes, or GKE
+provisioning is deferred — the former M4 (kind runtime) and M7 (GKE/isolation) issues are moved to the
+Linear milestone "Deferred: infra, kind, and GKE (post-local run)" and lowered to Low priority until
+LOB-40 passes. The local run uses the in-process `ExecutionEnv` adapter; no cluster is required to
+reach L.
+
 ---
 
 ## Goal

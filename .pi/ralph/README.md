@@ -73,7 +73,7 @@ JSON
 ## Model fallback and limits
 
 On a provider error (429, overload, quota, outage) the driver retries the iteration on each model in
-`RALPH_FALLBACK_MODELS` (default `opencode-go/space-bunny-free`; empty disables). When every model refuses, it
+`RALPH_FALLBACK_MODELS` (default `opencode-go/beam-free`; empty disables). When every model refuses, it
 waits `RALPH_PROVIDER_BACKOFF` (10 min) without counting a failure, up to `RALPH_PROVIDER_BACKOFFS` (36) times.
 An iteration is killed after `RALPH_TIMEOUT` (1 h) or after `RALPH_STALL` (20 min) with no session write.
 

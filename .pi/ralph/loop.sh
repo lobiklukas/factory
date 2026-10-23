@@ -33,9 +33,9 @@ _sfx=""; [ "$RALPH_WORKER" -eq 1 ] || _sfx="-$RALPH_WORKER"
 RALPH_PRIMARY_WORKTREE="${RALPH_PRIMARY_WORKTREE:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph}"
 RALPH_SHARED="${RALPH_SHARED:-$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-ralph-shared}"
 RALPH_WORKTREE="${RALPH_WORKTREE:-$RALPH_PRIMARY_WORKTREE$_sfx}"
-RALPH_MODEL="${RALPH_MODEL:-anthropic/claude-haiku-5-5}"
+RALPH_MODEL="${RALPH_MODEL:-opencode-go/beam-free}"
 RALPH_THINKING="${RALPH_THINKING:-medium}"
-RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/space-bunny-free}"  # comma list; empty disables
+RALPH_FALLBACK_MODELS="${RALPH_FALLBACK_MODELS-opencode-go/beam-free}"  # comma list; empty disables
 RALPH_MAX_ITER="${RALPH_MAX_ITER:-10}"          # iterations per `run`
 RALPH_SLEEP="${RALPH_SLEEP:-5}"                 # seconds between iterations
 RALPH_TIMEOUT="${RALPH_TIMEOUT:-3600}"          # seconds per iteration

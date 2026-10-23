@@ -140,6 +140,12 @@ passes ten.
 **The brief for a fresh session is `docs/next-agent.md`** — it names the issues for this stretch, the
 gates, and the traps. This section is the longer view behind it.
 
+**Scope (adjusted, 2026-10-05).** Local run first, cloud later. The kind (M4) and GKE/isolation (M7)
+issues are moved to the Linear milestone "Deferred: infra, kind, and GKE (post-local run)" and lowered
+to Low priority; the local run uses the in-process `ExecutionEnv` adapter and needs no cluster. The
+roadmap's P0 line is the target: 20 Urgent issues remain (M3 approvals/credentials, M6 worktree/push/PR,
+the Linear trigger and write-back, plus the approval records and LOB-40 as the gate).
+
 **Where we are in the build order (design §4).** M2 is done: the control plane is proven end to end,
 the CLI drives it from a terminal, and the deployment floor is real. What is left from that stretch is
 the pair of verification holes task 4 opened (steering at the RPC surface, `usage.tools`) — item 6
