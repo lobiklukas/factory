@@ -7,6 +7,7 @@
 //                still be there, and a new message must continue the session rather than restart it.
 //
 // Env: API_URL, MODE, SIGTERM_STATE, EVIDENCE_DIR.
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
@@ -126,6 +127,19 @@ const verify = Effect.gen(function* () {
       reopened.session.status === "idle",
     `mode=${reopened.session.mode} status=${reopened.session.status}`,
   );
+  assert(
+    "the worktree survived the interruption (reused or recreated)",
+    existsSync(reopened.workspace.path),
+    `path=${reopened.workspace.path} exists=${existsSync(reopened.workspace.path)}`,
+  );
+  if (reopened.workspace.branch !== undefined) {
+    assert(
+      "the branch still holds the committed work",
+      existsSync(reopened.workspace.path) &&
+        reopened.workspace.branch.startsWith("factory/"),
+      `branch=${reopened.workspace.branch}`,
+    );
+  }
   assert(
     "the task the run was given survived the interruption",
     reopened.entries.some(
