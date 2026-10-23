@@ -2,6 +2,7 @@ import type {
   SessionEvent,
   SessionId,
   SessionLive,
+  QueuedMessage,
   SessionSummary,
   SessionUsage,
   TranscriptEntry,
@@ -23,6 +24,7 @@ export type SessionView = {
   readonly entries: readonly TranscriptEntry[];
   readonly live: SessionLive;
   readonly usage: SessionUsage;
+  readonly queued: readonly QueuedMessage[];
 };
 
 const emptyView = (summary: SessionSummary): SessionView => ({
@@ -30,6 +32,7 @@ const emptyView = (summary: SessionSummary): SessionView => ({
   entries: [],
   live: { busy: false, tools: [] },
   usage: { models: [], tools: [] },
+  queued: [],
 });
 
 /**
@@ -51,6 +54,7 @@ export const foldSessionEvent = (
         entries: event.entries,
         live: event.live,
         usage: event.usage,
+        queued: event.queued,
       };
     case "entry":
       return { ...state, entries: [...state.entries, event.entry] };
@@ -58,6 +62,8 @@ export const foldSessionEvent = (
       return { ...state, live: event.live };
     case "usage":
       return { ...state, usage: event.usage };
+    case "queued":
+      return { ...state, queued: event.queued };
     case "status":
       return { ...state, summary: { ...state.summary, status: event.status } };
   }

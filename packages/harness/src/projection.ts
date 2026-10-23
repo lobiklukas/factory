@@ -17,6 +17,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type {
   ModelUsage,
+  QueuedMessage,
   SessionEvent,
   SessionLive,
   SessionStatus,
@@ -30,6 +31,7 @@ import type {
 /** The conversation documents this projection reads, and the entry kind this package writes. */
 export const LIVE_DOC = "pi.live";
 export const USAGE_DOC = "pi.usage";
+export const INBOX_DOC = "pi.inbox";
 export const SESSION_DOC_KIND = "factory.session";
 export const TITLE_ENTRY_KIND = "factory.title";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
@@ -225,6 +227,27 @@ export type SessionProjection = {
   readonly live: SessionLive;
   readonly usage: SessionUsage;
   readonly status: SessionStatus;
+  readonly queued: readonly QueuedMessage[];
+};
+
+/** `pi.inbox` → queued messages. */
+export const projectInbox = (
+  docs: Readonly<Record<string, JsonValue>>,
+): readonly QueuedMessage[] => {
+  const inbox = docs[INBOX_DOC];
+  const items = arrayAt(inbox, "items");
+  return items.flatMap((item) => {
+    const obj = asObject(item);
+    if (obj === undefined) return [];
+    const id = stringAt(obj, "id");
+    if (id === undefined) return [];
+    const modeRaw = stringAt(obj, "mode");
+    const mode =
+      modeRaw === "steer" || modeRaw === "followUp" || modeRaw === "write"
+        ? modeRaw
+        : "followUp";
+    return [{ id, mode, content: obj["content"] ?? obj["entry"] }];
+  });
 };
 
 /** A live conversation view → a snapshot. */
@@ -235,6 +258,7 @@ export const projectView = (view: ConversationView): SessionProjection => {
     live,
     usage: projectUsageDoc(view.docs[USAGE_DOC]),
     status: live.busy ? "busy" : "idle",
+    queued: projectInbox(view.docs),
   };
 };
 
@@ -271,6 +295,13 @@ export const diffView = (
     events.push({
       _tag: "usage",
       usage: projectUsageDoc(next.docs[USAGE_DOC]),
+    });
+  }
+
+  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
+    events.push({
+      _tag: "queued",
+      queued: projectInbox(next.docs),
     });
   }
 
