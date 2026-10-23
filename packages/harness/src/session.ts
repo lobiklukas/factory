@@ -325,6 +325,27 @@ export const writeRepoBinding = (
     ),
   );
 
+export type TaskBinding = {
+  readonly taskId: string;
+  readonly column: string;
+};
+
+/** Commit the task binding. */
+export const writeTaskBinding = (
+  conversation: Conversation,
+  binding: TaskBinding,
+): Effect.Effect<void, SessionError> =>
+  attempt("write task binding", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(TaskDoc, conversation.id).then((doc) => {
+          (doc as { taskId?: string; column?: string }).taskId = binding.taskId;
+          (doc as { taskId?: string; column?: string }).column = binding.column;
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
 /** The message a caller sends a session, in the control plane's terms. */
 export type MessageDraft = {
   readonly content: string;
@@ -463,6 +484,8 @@ export type SessionLog = {
   readonly usage: SessionUsage;
   /** The repo binding the log records, empty when the session is a scratch one. */
   readonly binding: RepoBinding;
+  /** The task binding the log records, when the session runs against a task. */
+  readonly task?: { readonly taskId: string; readonly column: string };
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -486,6 +509,8 @@ export const readSessionLog = (
     const records = yield* readActiveEntries(storage);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
+    const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
+    const taskId = bindingString(taskDoc, "taskId");
     return {
       entries: records.map(projectEntry),
       usage: projectUsageDoc(usage),
@@ -493,6 +518,14 @@ export const readSessionLog = (
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
       },
+      ...(taskId === ""
+        ? {}
+        : {
+            task: {
+              taskId,
+              column: bindingString(taskDoc, "column") || "building",
+            },
+          }),
     };
   });
 

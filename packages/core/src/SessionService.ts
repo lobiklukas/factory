@@ -88,6 +88,7 @@ import {
   writeApprovalDecided,
   writeApprovalRequested,
   writeRepoBinding,
+  writeTaskBinding,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
@@ -609,6 +610,19 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               repo: binding.repo,
               baseRef: binding.baseRef,
             });
+          }
+          if (input.taskId !== undefined) {
+            const column = input.taskColumn ?? "building";
+            yield* writeTaskBinding(owner.root, {
+              taskId: input.taskId,
+              column,
+            });
+            yield* paper(
+              "write task run",
+              sql`INSERT INTO task_runs (id, task_id, session_id, "column")
+                  VALUES (${id}, ${input.taskId}, ${id}, ${column})
+                  ON CONFLICT (session_id) DO NOTHING`,
+            );
           }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);

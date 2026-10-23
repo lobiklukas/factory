@@ -107,6 +107,12 @@ export const rebuildIndexes: Effect.Effect<
   });
 
   const folded: FoldedRow[] = [];
+  const taskRuns: {
+    id: string;
+    taskId: string;
+    sessionId: string;
+    column: string;
+  }[] = [];
   for (const log of sessionLogs) {
     const storage = folds.get(log.logId);
     // `readers` returns a store for every id it was given and this loop walks the same list, so a
@@ -137,6 +143,14 @@ export const rebuildIndexes: Effect.Effect<
       lastActivityAt: log.lastActivityAt,
       costTotal,
     });
+    if (sessionLog.task !== undefined) {
+      taskRuns.push({
+        id: log.logId,
+        taskId: sessionLog.task.taskId,
+        sessionId: log.logId,
+        column: sessionLog.task.column,
+      });
+    }
   }
 
   const repoDefaults = new Map<string, string>();
@@ -188,6 +202,16 @@ export const rebuildIndexes: Effect.Effect<
       ON CONFLICT (slug) DO NOTHING
     `;
   }
+
+  // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links.
+  for (const run of taskRuns) {
+    yield* sql`
+      INSERT INTO task_runs (id, task_id, session_id, "column")
+      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column})
+      ON CONFLICT (session_id) DO NOTHING
+    `;
+  }
+  yield* sql`DELETE FROM task_runs WHERE session_id NOT IN (SELECT DISTINCT log_id FROM commits)`;
 
   // Index rows that can no longer be true: an id that is not a session's, or a log that is gone.
   const present = yield* sql<{ id: string }>`SELECT id FROM sessions`;
