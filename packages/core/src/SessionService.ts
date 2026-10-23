@@ -1,3 +1,4 @@
+/* oxlint-disable effecttsgo(prefer-schema-over-json), effecttsgo(node-builtin-import) */
 /**
  * Sessions: create, drive, read, and watch one Pi Durable log (docs/design.md D7, D8, D12).
  *
@@ -34,6 +35,8 @@ import {
   Stream,
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+// oxlint-disable-next-line node-builtin-import
+import { execSync } from "node:child_process"; // eslint-disable-line
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -1152,6 +1155,46 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* FiberMap.remove(projectors, sessionId);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
           yield* Effect.promise(() => owner.storage.dispose());
+          // Idempotent worktree + branch teardown (LOB-67). Failures are ignored so a second
+          // release (or a crash-recovery sweep) succeeds.
+          const ws = owner.workspace;
+          if (ws.repo !== undefined) {
+            const dir = ws.path;
+            const branch = ws.branch ?? `factory/${sessionId}`;
+            yield* Effect.try({
+              try: () => {
+                // Delete the branch first (best-effort), then remove the worktree.
+                try {
+                  const common = execSync("git rev-parse --git-common-dir", {
+                    cwd: dir,
+                    encoding: "utf8",
+                    stdio: ["ignore", "pipe", "ignore"],
+                  }).trim();
+                  // oxlint-disable-next-line
+                  execSync(`git --git-dir ${JSON.stringify(common)} branch -D ${JSON.stringify(branch)}`, { stdio: "ignore" });
+                } catch {
+                  // branch may already be gone
+                }
+                try {
+                  // oxlint-disable-next-line
+                  execSync(`git -C ${JSON.stringify(dir)} worktree remove --force ${JSON.stringify(dir)}`, { stdio: "ignore" });
+                } catch {
+                  // worktree may already be gone
+                }
+                // Remove orphan directory if any.
+                try {
+                  // oxlint-disable-next-line prefer-schema-over-json
+                  // oxlint-disable-next-line
+                  execSync(`rm -rf ${JSON.stringify(dir)}`, {
+                    stdio: "ignore",
+                  });
+                } catch {
+                  // ignore
+                }
+              },
+              catch: () => undefined,
+            }).pipe(Effect.ignore);
+          }
           // Nobody owns the session now, so the list's honest status is idle (D8).
           yield* setActivityStatus(sessionId, "idle");
         });

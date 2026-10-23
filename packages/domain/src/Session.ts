@@ -161,6 +161,7 @@ export const SessionWorkspace = Schema.Struct({
   path: Schema.String,
   repo: Schema.optional(RepoSlug),
   baseRef: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
   commands: RepoCommands,
   commandsSource: Schema.Literals(["repo", "none"]),
 });

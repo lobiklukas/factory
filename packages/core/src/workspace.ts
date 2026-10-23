@@ -109,6 +109,8 @@ export const resolveWorkspace = (
       input.sessionId,
       input.repo,
     );
+    const branch =
+      input.repo === undefined ? undefined : `factory/${input.sessionId}`;
     // M6: cut a linked worktree at the base ref off the registered repo's local_path.
     if (input.repo !== undefined && input.localPath !== undefined) {
       const isGit = yield* Effect.try({
@@ -133,13 +135,24 @@ export const resolveWorkspace = (
           try: () => {
             const parent = deps.path.dirname(directory);
             execSync(`mkdir -p ${JSON.stringify(parent)}`);
-            execSync(
-              `git worktree add --detach ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`,
-              {
-                cwd: input.localPath,
-                stdio: "ignore",
-              },
-            );
+            // Reuse an existing branch if a previous attempt left one (crash recovery),
+            // otherwise create it at the base ref.
+            let created = false;
+            try {
+              execSync(
+                `git worktree add ${JSON.stringify(directory)} ${JSON.stringify(branch)}`,
+                { cwd: input.localPath, stdio: "ignore" },
+              );
+              created = true;
+            } catch {
+              // branch may not exist yet
+            }
+            if (!created) {
+              execSync(
+                `git worktree add -b ${JSON.stringify(branch)} ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`,
+                { cwd: input.localPath, stdio: "ignore" },
+              );
+            }
           },
           // oxlint-disable-next-line global-error-in-effect-catch
           catch: (e) =>
@@ -161,6 +174,7 @@ export const resolveWorkspace = (
       ...(input.repo === undefined || input.baseRef === undefined
         ? {}
         : { baseRef: input.baseRef }),
+      ...(input.repo === undefined ? {} : { branch }),
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
     };
