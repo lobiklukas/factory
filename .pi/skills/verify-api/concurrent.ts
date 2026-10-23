@@ -80,8 +80,16 @@ if (exit._tag !== "Success") {
   console.error(exit);
   process.exit(1);
 }
+const failed = Object.entries(observed.checks).filter(
+  ([, check]) => (check as { passed?: boolean }).passed === false,
+);
 await writeFile(
   path.join(EVIDENCE_DIR, "concurrent-observed.json"),
   JSON.stringify(observed, null, 2),
 );
-console.log("concurrent: all checks passed");
+if (failed.length > 0) {
+  console.error(`\n${failed.length} required check(s) failed`);
+  process.exitCode = 1;
+} else {
+  console.log("concurrent: all checks passed");
+}
