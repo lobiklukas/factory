@@ -57,6 +57,7 @@ import {
   projectUsageDoc,
   projectView,
   SESSION_DOC_KIND,
+  TASK_DOC_KIND,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
@@ -87,6 +88,16 @@ export const SessionDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ repo: "", baseRef: "" }),
+});
+
+/** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
+export const TaskDoc = defineDoc({
+  kind: TASK_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({}),
 });
 
 /** The repo a session is bound to, as the log records it. */
