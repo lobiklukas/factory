@@ -343,6 +343,7 @@ cmd_run() {
   release_idle_claims
   arm_automerge
   local i=0 fails=0 waits=0
+  local split_done=0
   while [ "$i" -lt "$RALPH_MAX_ITER" ]; do
     i=$((i + 1))
     [ ! -f "$STATE/STOP" ] || { log "STOP file found"; break; }
@@ -352,7 +353,7 @@ cmd_run() {
     arm_automerge
     case "$tag" in
       NEXT)     fails=0; waits=0 ;;
-      COMPLETE) log "queue exhausted"; break ;;
+      COMPLETE) if [ "$split_done" = 0 ]; then split_done=1; log "queue exhausted - running split"; "$0" split; continue; else log "queue exhausted"; break; fi ;;
       PROVIDER) waits=$((waits + 1)); i=$((i - 1))
                 [ "$waits" -lt "$RALPH_PROVIDER_BACKOFFS" ] || { log "every model has been refusing for $waits waits - giving up"; exit 3; }
                 log "every model is refusing (rate limit, quota or outage): waiting ${RALPH_PROVIDER_BACKOFF}s ($waits/$RALPH_PROVIDER_BACKOFFS)"
