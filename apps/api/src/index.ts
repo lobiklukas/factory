@@ -16,6 +16,7 @@ import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
+import { WebhookLive } from "./Api/Webhook";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
@@ -148,7 +149,12 @@ const ApiRouter = HttpApiBuilder.layer(Api).pipe(
 );
 
 // NOTE: Modules append additional routers here through Layer.mergeAll.
-const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive, ProbesLive);
+const AllRouters = Layer.mergeAll(
+  ApiRouter,
+  SessionRpcLive,
+  ProbesLive,
+  WebhookLive,
+);
 
 // NOTE: Modules append additional server layers here through Layer.mergeAll.
 const ServerLayers = Layer.mergeAll(
