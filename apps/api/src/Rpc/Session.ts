@@ -1,8 +1,9 @@
-import { SessionService } from "@repo/core";
+import { SessionService, TaskServiceLive } from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
+import { TaskRpcHandlers } from "./Task";
 
 /**
  * The session RPC surface (docs/design.md D9).
@@ -31,6 +32,9 @@ export const SessionRpcLive = RpcServer.layerHttp({
   path: "/rpc",
   protocol: "http",
 }).pipe(
-  Layer.provide(Layer.merge(SessionRpcHandlers, ApprovalsRpcHandlers)),
+  Layer.provide(
+    Layer.mergeAll(SessionRpcHandlers, ApprovalsRpcHandlers, TaskRpcHandlers),
+  ),
   Layer.provide(RpcSerialization.layerNdjson),
+  Layer.provide(TaskServiceLive),
 );

@@ -268,3 +268,106 @@ export const TaskRun = Schema.Struct({
   finishedAt: Schema.optional(Timestamp),
 });
 export type TaskRun = typeof TaskRun.Type;
+
+export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
+  "TaskNotFound",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+export class BoardNotFound extends Schema.TaggedError<BoardNotFound>()(
+  "BoardNotFound",
+  { boardId: Schema.String, message: Schema.String },
+) {}
+
+export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
+  "StaleRevision",
+  {
+    taskId: Schema.String,
+    expected: Schema.Int,
+    actual: Schema.Int,
+    message: Schema.String,
+  },
+) {}
+
+export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransition>()(
+  "UndeclaredTransition",
+  { from: Schema.String, to: Schema.String, message: Schema.String },
+) {}
+
+export class HumanGateRequired extends Schema.TaggedError<HumanGateRequired>()(
+  "HumanGateRequired",
+  {
+    gate: Schema.String,
+    from: Schema.String,
+    to: Schema.String,
+    actor: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
+export class AlreadyBlocked extends Schema.TaggedError<AlreadyBlocked>()(
+  "AlreadyBlocked",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+export class NotBlocked extends Schema.TaggedError<NotBlocked>()("NotBlocked", {
+  taskId: Schema.String,
+  message: Schema.String,
+}) {}
+
+export class TaskStorageError extends Schema.TaggedError<TaskStorageError>()(
+  "TaskStorageError",
+  { message: Schema.String },
+) {}
+
+export type TaskError =
+  | TaskNotFound
+  | BoardNotFound
+  | StaleRevision
+  | UndeclaredTransition
+  | HumanGateRequired
+  | AlreadyBlocked
+  | NotBlocked
+  | TaskStorageError;
+
+export const CreateTaskInput = Schema.Struct({
+  boardId: BoardInstanceId,
+  title: Schema.String,
+  repo: Schema.optional(RepoSlug),
+  priority: Schema.optional(TaskPriority),
+  actor: Schema.String,
+});
+export type CreateTaskInput = typeof CreateTaskInput.Type;
+
+export const GetTaskInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskInput = typeof GetTaskInput.Type;
+
+export const ListTasksInput = Schema.Struct({
+  boardId: BoardInstanceId,
+  column: Schema.optional(Schema.String),
+});
+export type ListTasksInput = typeof ListTasksInput.Type;
+
+export const MoveTaskInput = Schema.Struct({
+  taskId: TaskId,
+  expectedRevision: Schema.Int,
+  to: Schema.String,
+  actor: Schema.String,
+});
+export type MoveTaskInput = typeof MoveTaskInput.Type;
+
+export const BlockTaskInput = Schema.Struct({
+  taskId: TaskId,
+  expectedRevision: Schema.Int,
+  reason: Schema.String,
+  note: Schema.optional(Schema.String),
+  actor: Schema.String,
+});
+export type BlockTaskInput = typeof BlockTaskInput.Type;
+
+export const UnblockTaskInput = Schema.Struct({
+  taskId: TaskId,
+  expectedRevision: Schema.Int,
+  actor: Schema.String,
+});
+export type UnblockTaskInput = typeof UnblockTaskInput.Type;
