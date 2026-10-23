@@ -107,12 +107,17 @@ export const SessionPane = ({
   const record = useAtomSet(recordSession);
   const forget = useAtomSet(forgetSession);
   const [draft, setDraft] = useState("");
+  const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   useEffect(() => {
     attach(sessionId);
   }, [attach, sessionId]);
 
   const view = AsyncResult.getOrElse(result, () => null);
+  const queued =
+    view === null ? [] : view.queued.filter((q) => !withdrawn.has(q.id));
 
   // The registry is written here rather than in the atom: writing an atom from
   // an atom needs an `AtomRegistry` in context, and the pane is already the
@@ -140,6 +145,11 @@ export const SessionPane = ({
             <Spinner className="size-3.5 text-muted-foreground" />
           ) : null}
           {view !== null ? <StatusChip view={view} /> : null}
+          {queued.length > 0 ? (
+            <Badge variant="secondary" className="font-mono text-[10px]">
+              {queued.length} queued
+            </Badge>
+          ) : null}
           <Button
             type="button"
             variant="ghost"
@@ -209,6 +219,36 @@ export const SessionPane = ({
         </div>
       </MessageScrollerProvider>
 
+      {queued.length > 0 ? (
+        <div className="shrink-0 border-t border-border px-6 py-2">
+          <div className="mx-auto flex max-w-[68ch] flex-col gap-1">
+            {queued.map((q) => (
+              <div
+                key={q.id}
+                className="flex items-center justify-between gap-2 font-mono text-[11px] text-muted-foreground"
+              >
+                <span className="truncate">
+                  {typeof q.content === "string"
+                    ? q.content
+                    : q.content == null
+                      ? q.id
+                      : JSON.stringify(q.content)}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    setWithdrawn((prev) => new Set([...prev, q.id]))
+                  }
+                >
+                  Withdraw
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="shrink-0 border-t border-border px-6 py-3">
         <form
           className="mx-auto flex max-w-[68ch] flex-col gap-2"
