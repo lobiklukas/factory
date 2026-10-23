@@ -261,6 +261,23 @@ reconciliation job); a board-scope log under `commits` (possible — `log_id` is
 _input_: a person typed it, and there is no log to replay it from); modeling cards as Pi Durable
 `Task`s (tasks are created through a `Session` commit, and a card must exist before any session does).
 
+### D18 — `listSessions` walk is best-effort, not a snapshot
+
+A page-by-page walk of `listSessions` is **not** a snapshot of the table as of its first page. The
+ordering key is `session_activity.last_activity_at`, which every live event for an owned session
+rewrites to "now" (`recordActivity` → `touch` / `setActivityStatus` / `setActivityCost`), so a row can
+move between two pages of the same walk: it can leave the range being traversed and be omitted, or
+move back below the cursor and be returned twice (the latter needs `rebuildIndexes`, the only writer
+that moves a key backwards). A walk is a client's loop across independent calls, so a true snapshot
+would need either one transaction spanning every page or a materialised snapshot id carried in the
+cursor; both change the contract and carry costs (pinning `xmin` for the walk's duration, or growing
+the cursor with a third field that collides with the millisecond-truncated cursor case). We keep the
+best-effort walk and document the contract in `SessionService.list`'s doc comment; callers that page
+the whole table re-walk from the top.
+_Rejected:_ materialised snapshot via `pg_export_snapshot()` (collides with the millisecond-truncated
+cursor tolerance in `parseCursor` and pins `xmin` for the walk's duration, for a case ordinary traffic
+can only reach in the skip direction).
+
 ---
 
 ## 3. Architecture
