@@ -1,3 +1,4 @@
+import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import {
   ApprovalDecision,
@@ -6,6 +7,23 @@ import {
   RequestApprovalInput,
   ApprovalRequest,
 } from "@repo/domain/Approval";
+import {
+  AlreadyBlocked,
+  BlockTaskInput,
+  BoardNotFound,
+  CreateTaskInput,
+  GetTaskInput,
+  HumanGateRequired,
+  ListTasksInput,
+  MoveTaskInput,
+  NotBlocked,
+  StaleRevision,
+  Task,
+  TaskNotFound,
+  TaskStorageError,
+  UndeclaredTransition,
+  UnblockTaskInput,
+} from "@repo/domain/Task";
 import {
   CreateSessionInput,
   ListSessionsInput,
@@ -94,5 +112,49 @@ export class ApprovalsRpc extends RpcGroup.make(
   }),
 ) {}
 
+const TaskErrorSchema = Schema.Union([
+  TaskNotFound,
+  BoardNotFound,
+  StaleRevision,
+  UndeclaredTransition,
+  HumanGateRequired,
+  AlreadyBlocked,
+  NotBlocked,
+  TaskStorageError,
+]);
+
+export class TasksRpc extends RpcGroup.make(
+  Rpc.make("createTask", {
+    payload: CreateTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("getTask", {
+    payload: GetTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("listTasks", {
+    payload: ListTasksInput,
+    success: Schema.Array(Task),
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("moveTask", {
+    payload: MoveTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("blockTask", {
+    payload: BlockTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("unblockTask", {
+    payload: UnblockTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+) {}
+
 // NOTE: The sandbox and sandbox-status groups merge in here next.
-export const RpcApi = SessionRpc.merge(ApprovalsRpc);
+export const RpcApi = SessionRpc.merge(ApprovalsRpc).merge(TasksRpc);
