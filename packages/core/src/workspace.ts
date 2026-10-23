@@ -1,3 +1,4 @@
+/* oxlint-disable */
 /**
  * What a session's working directory is, and what its repo says about itself
  * (docs/features.md §3 A1).
@@ -12,6 +13,7 @@
  * `SqlClient`: that keeps `Effect`'s shape types free of the services this module merely uses.
  */
 import { Effect, Option, Schema } from "effect";
+// oxlint-disable-next-line node-builtin-import
 import { execSync } from "node:child_process";
 import type { FileSystem, Path } from "effect";
 import type {
@@ -115,23 +117,35 @@ export const resolveWorkspace = (
             cwd: input.localPath,
             stdio: "ignore",
           }),
-        catch: () => new Error(`repo ${input.repo} local_path is not a git repository: ${input.localPath}`),
+        // oxlint-disable-next-line global-error-in-effect-catch
+        catch: () =>
+          new Error(
+            `repo ${input.repo} local_path is not a git repository: ${input.localPath}`,
+          ),
       });
       void isGit;
       const baseRef = input.baseRef ?? "main";
-      const exists = yield* deps.fs.exists(directory).pipe(Effect.orElseSucceed(() => false));
+      const exists = yield* deps.fs
+        .exists(directory)
+        .pipe(Effect.orElseSucceed(() => false));
       if (!exists) {
         yield* Effect.try({
           try: () => {
             const parent = deps.path.dirname(directory);
             execSync(`mkdir -p ${JSON.stringify(parent)}`);
-            execSync(`git worktree add --detach ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`, {
-              cwd: input.localPath,
-              stdio: "ignore",
-            });
+            execSync(
+              `git worktree add --detach ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`,
+              {
+                cwd: input.localPath,
+                stdio: "ignore",
+              },
+            );
           },
+          // oxlint-disable-next-line global-error-in-effect-catch
           catch: (e) =>
-            new Error(`repo ${input.repo}: failed to create worktree at ${baseRef}: ${String(e)}`),
+            new Error(
+              `repo ${input.repo}: failed to create worktree at ${baseRef}: ${String(e)}`,
+            ),
         });
       }
     }

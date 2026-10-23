@@ -89,7 +89,10 @@ mkdirSync(join(repoRoot, ".factory"), { recursive: true });
 execSync("git init -b main", { cwd: repoRoot, stdio: "ignore" });
 execSync("git config user.email t@t.com", { cwd: repoRoot, stdio: "ignore" });
 execSync("git config user.name t", { cwd: repoRoot, stdio: "ignore" });
-execSync("git commit --allow-empty -m init", { cwd: repoRoot, stdio: "ignore" });
+execSync("git commit --allow-empty -m init", {
+  cwd: repoRoot,
+  stdio: "ignore",
+});
 writeFileSync(
   join(repoRoot, ".factory", "config"),
   JSON.stringify({
@@ -102,9 +105,15 @@ writeFileSync(
 
 const emptyRepoRoot = mkdtempSync(join(tmpdir(), "factory-repo-empty-"));
 execSync("git init -b main", { cwd: emptyRepoRoot, stdio: "ignore" });
-execSync("git config user.email t@t.com", { cwd: emptyRepoRoot, stdio: "ignore" });
+execSync("git config user.email t@t.com", {
+  cwd: emptyRepoRoot,
+  stdio: "ignore",
+});
 execSync("git config user.name t", { cwd: emptyRepoRoot, stdio: "ignore" });
-execSync("git commit --allow-empty -m init", { cwd: emptyRepoRoot, stdio: "ignore" });
+execSync("git commit --allow-empty -m init", {
+  cwd: emptyRepoRoot,
+  stdio: "ignore",
+});
 execSync("git branch -m trunk", { cwd: emptyRepoRoot, stdio: "ignore" });
 
 const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
