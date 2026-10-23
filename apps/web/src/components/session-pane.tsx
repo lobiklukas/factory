@@ -227,7 +227,13 @@ export const SessionPane = ({
                 key={q.id}
                 className="flex items-center justify-between gap-2 font-mono text-[11px] text-muted-foreground"
               >
-                <span className="truncate">{String(q.content ?? q.id)}</span>
+                <span className="truncate">
+                  {typeof q.content === "string"
+                    ? q.content
+                    : q.content == null
+                      ? q.id
+                      : JSON.stringify(q.content)}
+                </span>
                 <Button
                   type="button"
                   variant="ghost"
