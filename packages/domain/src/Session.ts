@@ -235,6 +235,10 @@ export const CreateSessionInput = Schema.Struct({
   repo: Schema.optional(RepoSlug),
   /** The ref the session starts from. Defaults to the repo registry's default base ref. */
   baseRef: Schema.optional(Schema.String),
+  /** The task this session runs against. Absent means a scratch session. */
+  taskId: Schema.optional(Schema.String),
+  /** The column the run was started from. Defaults to "building". */
+  taskColumn: Schema.optional(Schema.String),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 
