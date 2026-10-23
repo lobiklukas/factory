@@ -8,7 +8,7 @@
  * who is at the other end (LOB-20 owns identity).
  */
 import { Schema } from "effect";
-import { SessionId, Timestamp } from "./Session";
+import { SessionId, Timestamp } from "@repo/domain/Session";
 
 /** What a session asks to do, and why. The request is pending until a decision settles it. */
 export const ApprovalRequest = Schema.Struct({

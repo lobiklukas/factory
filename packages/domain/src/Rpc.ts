@@ -5,7 +5,7 @@ import {
   ListApprovalsOutput,
   RequestApprovalInput,
   ApprovalRequest,
-} from "./Approval";
+} from "@repo/domain/Approval";
 import {
   CreateSessionInput,
   ListSessionsInput,
@@ -19,7 +19,7 @@ import {
   SessionIdInput,
   SessionSnapshot,
   SessionSummary,
-} from "./Session";
+} from "@repo/domain/Session";
 
 /**
  * The session RPC surface (docs/design.md D8/D9): create, read, drive, interrupt, watch, list.
