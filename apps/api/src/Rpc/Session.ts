@@ -32,7 +32,9 @@ export const SessionRpcLive = RpcServer.layerHttp({
   path: "/rpc",
   protocol: "http",
 }).pipe(
-  Layer.provide(Layer.mergeAll(SessionRpcHandlers, ApprovalsRpcHandlers, TaskRpcHandlers)),
+  Layer.provide(
+    Layer.mergeAll(SessionRpcHandlers, ApprovalsRpcHandlers, TaskRpcHandlers),
+  ),
   Layer.provide(RpcSerialization.layerNdjson),
   Layer.provide(TaskServiceLive),
 );

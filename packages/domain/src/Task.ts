@@ -269,7 +269,6 @@ export const TaskRun = Schema.Struct({
 });
 export type TaskRun = typeof TaskRun.Type;
 
-
 export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   "TaskNotFound",
   { taskId: Schema.String, message: Schema.String },
@@ -282,7 +281,12 @@ export class BoardNotFound extends Schema.TaggedError<BoardNotFound>()(
 
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
-  { taskId: Schema.String, expected: Schema.Int, actual: Schema.Int, message: Schema.String },
+  {
+    taskId: Schema.String,
+    expected: Schema.Int,
+    actual: Schema.Int,
+    message: Schema.String,
+  },
 ) {}
 
 export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransition>()(
@@ -292,7 +296,13 @@ export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransitio
 
 export class HumanGateRequired extends Schema.TaggedError<HumanGateRequired>()(
   "HumanGateRequired",
-  { gate: Schema.String, from: Schema.String, to: Schema.String, actor: Schema.String, message: Schema.String },
+  {
+    gate: Schema.String,
+    from: Schema.String,
+    to: Schema.String,
+    actor: Schema.String,
+    message: Schema.String,
+  },
 ) {}
 
 export class AlreadyBlocked extends Schema.TaggedError<AlreadyBlocked>()(
@@ -300,10 +310,10 @@ export class AlreadyBlocked extends Schema.TaggedError<AlreadyBlocked>()(
   { taskId: Schema.String, message: Schema.String },
 ) {}
 
-export class NotBlocked extends Schema.TaggedError<NotBlocked>()(
-  "NotBlocked",
-  { taskId: Schema.String, message: Schema.String },
-) {}
+export class NotBlocked extends Schema.TaggedError<NotBlocked>()("NotBlocked", {
+  taskId: Schema.String,
+  message: Schema.String,
+}) {}
 
 export class TaskStorageError extends Schema.TaggedError<TaskStorageError>()(
   "TaskStorageError",
