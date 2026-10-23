@@ -99,10 +99,39 @@ export const followSession = (
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);
               }
+              for (const q of event.queued) {
+                yield* Console.log(
+                  `[queued:${q.mode}] ${
+                    typeof q.content === "string"
+                      ? q.content
+                      : q.content == null
+                        ? q.id
+                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
+                            q.content,
+                          )
+                  }`,
+                );
+              }
               break;
             }
             case "entry": {
               yield* printEntry(state, event.entry);
+              break;
+            }
+            case "queued": {
+              for (const q of event.queued) {
+                yield* Console.log(
+                  `[queued:${q.mode}] ${
+                    typeof q.content === "string"
+                      ? q.content
+                      : q.content == null
+                        ? q.id
+                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
+                            q.content,
+                          )
+                  }`,
+                );
+              }
               break;
             }
             default:
