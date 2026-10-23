@@ -392,6 +392,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               localPath,
             },
             { fs, path },
+          ).pipe(
+            Effect.mapError(
+              (e) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: e.message,
+                }),
+            ),
           );
         });
 
