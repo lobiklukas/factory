@@ -101,11 +101,15 @@ export const followSession = (
               }
               for (const q of event.queued) {
                 yield* Console.log(
-                  `[queued:${q.mode}] ${typeof q.content === "string"
+                  `[queued:${q.mode}] ${
+                    typeof q.content === "string"
                       ? q.content
                       : q.content == null
                         ? q.id
-                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(q.content)}`,
+                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
+                            q.content,
+                          )
+                  }`,
                 );
               }
               break;
@@ -117,11 +121,15 @@ export const followSession = (
             case "queued": {
               for (const q of event.queued) {
                 yield* Console.log(
-                  `[queued:${q.mode}] ${typeof q.content === "string"
+                  `[queued:${q.mode}] ${
+                    typeof q.content === "string"
                       ? q.content
                       : q.content == null
                         ? q.id
-                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(q.content)}`,
+                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
+                            q.content,
+                          )
+                  }`,
                 );
               }
               break;
