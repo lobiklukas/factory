@@ -111,7 +111,7 @@ conventions around this.
 
 | Document                                         | The question it answers                                                                                                                        |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`docs/design.md`](docs/design.md)               | What is the architecture, and which decisions (D1-D17) are settled, over which milestones (M0-M7) and risks (R1-R6)?                           |
+| [`docs/design.md`](docs/design.md)               | What is the architecture, and which decisions (D1-D18) are settled, over which milestones (M0-M7) and risks (R1-R6)?                           |
 | [`docs/board.md`](docs/board.md)                 | How does work move? The settled board decisions (B1-B12), the default pipeline, the human gates, and the MVP/wave-2 cut.                       |
 | [`docs/roadmap.md`](docs/roadmap.md)             | In what order do we build, and what does "done" mean? Priority tiers and the Linear project that tracks them.                                  |
 | [`docs/features.md`](docs/features.md)           | What should we build next, and why? A ranked backlog from a code audit, the installed Pi Durable surface, and a survey of comparable products. |
