@@ -99,10 +99,25 @@ export const followSession = (
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);
               }
+              if (event.queued.length > 0) {
+                for (const q of event.queued) {
+                  yield* Console.log(
+                    `[queued:${q.mode}] ${typeof q.content === "string" ? q.content : q.id}`,
+                  );
+                }
+              }
               break;
             }
             case "entry": {
               yield* printEntry(state, event.entry);
+              break;
+            }
+            case "queued": {
+              for (const q of event.queued) {
+                yield* Console.log(
+                  `[queued:${q.mode}] ${typeof q.content === "string" ? q.content : q.id}`,
+                );
+              }
               break;
             }
             default:
