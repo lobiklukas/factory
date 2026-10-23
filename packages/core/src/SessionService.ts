@@ -36,7 +36,7 @@ import {
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 // oxlint-disable-next-line node-builtin-import
-import { execSync } from "node:child_process"; // eslint-disable-line
+import { execSync, execFileSync } from "node:child_process"; // eslint-disable-line
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -1170,24 +1170,26 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     encoding: "utf8",
                     stdio: ["ignore", "pipe", "ignore"],
                   }).trim();
-                  // oxlint-disable-next-line
-                  execSync(`git --git-dir ${JSON.stringify(common)} branch -D ${JSON.stringify(branch)}`, { stdio: "ignore" });
+                  execFileSync(
+                    "git",
+                    ["--git-dir", common, "branch", "-D", branch],
+                    { stdio: "ignore" },
+                  );
                 } catch {
                   // branch may already be gone
                 }
                 try {
-                  // oxlint-disable-next-line
-                  execSync(`git -C ${JSON.stringify(dir)} worktree remove --force ${JSON.stringify(dir)}`, { stdio: "ignore" });
+                  execFileSync(
+                    "git",
+                    ["-C", dir, "worktree", "remove", "--force", dir],
+                    { stdio: "ignore" },
+                  );
                 } catch {
                   // worktree may already be gone
                 }
                 // Remove orphan directory if any.
                 try {
-                  // oxlint-disable-next-line prefer-schema-over-json
-                  // oxlint-disable-next-line
-                  execSync(`rm -rf ${JSON.stringify(dir)}`, {
-                    stdio: "ignore",
-                  });
+                  execFileSync("rm", ["-rf", dir], { stdio: "ignore" });
                 } catch {
                   // ignore
                 }
