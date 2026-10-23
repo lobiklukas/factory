@@ -517,6 +517,7 @@ const snapshotOf = (
     entries: projection.entries,
     live: projection.live,
     usage: projection.usage,
+    queued: projection.queued,
   };
 };
 
@@ -611,6 +612,7 @@ export const readHistoricalSnapshot = (
       entries: log.entries,
       live: { busy: false, tools: [] },
       usage: log.usage,
+      queued: [],
     };
   });
 

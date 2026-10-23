@@ -109,6 +109,14 @@ export const TranscriptEntry = Schema.Struct({
 });
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
+/** A queued submission waiting in `pi.inbox` for a boundary. */
+export const QueuedMessage = Schema.Struct({
+  id: Schema.String,
+  mode: Schema.Literals(["steer", "followUp", "write"]),
+  content: Schema.optional(Schema.Unknown),
+});
+export type QueuedMessage = typeof QueuedMessage.Type;
+
 /** A tool of the round the current generation is running. */
 export const ToolSlotView = Schema.Struct({
   callId: Schema.String,
@@ -173,6 +181,7 @@ export const SessionSnapshotFields = {
   entries: Schema.Array(TranscriptEntry),
   live: SessionLive,
   usage: SessionUsage,
+  queued: Schema.Array(QueuedMessage),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
@@ -196,6 +205,7 @@ export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("live", { live: SessionLive }),
   Schema.TaggedStruct("usage", { usage: SessionUsage }),
   Schema.TaggedStruct("status", { status: SessionStatus }),
+  Schema.TaggedStruct("queued", { queued: Schema.Array(QueuedMessage) }),
 ]);
 export type SessionEvent = typeof SessionEvent.Type;
 
