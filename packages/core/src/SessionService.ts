@@ -72,9 +72,17 @@ import type {
   Conversation,
   Harness,
   ModelAccess,
+  RunColumn,
+  RunProfile,
   SessionRef,
 } from "@repo/harness";
-import { Policy, PolicyLive, type AutonomyConfig } from "@repo/harness";
+import {
+  EMPTY_RUN_PROFILE,
+  loadRun,
+  Policy,
+  PolicyLive,
+  type AutonomyConfig,
+} from "@repo/harness";
 import {
   closeHarness,
   interrupt as interruptConversation,
@@ -92,7 +100,9 @@ import {
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
+import { BoardColumn } from "@repo/domain/Task";
 import { mintSessionId } from "./ids";
+import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
 
 /** Longest title we derive from a first message, in characters. */
@@ -268,6 +278,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const policy = yield* Policy;
+      const skills = yield* SkillService;
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -377,6 +388,87 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               onSome: (owner) =>
                 HashMap.set(owners, sessionId, { ...owner, lastUsedAt: now }),
             }),
+          );
+        });
+
+      /**
+       * The column the run started in, as the card's pinned definition declares it (B6).
+       *
+       * One statement: the run row names the card, the card pins a definition version, and that
+       * version's columns are the set the column has to be found in — a board that has moved on to a
+       * newer version must not change what a run already started under is told. `undefined` is the
+       * honest answer for a session with no card, and for a column the pinned version does not
+       * declare (a stale run row is not a reason to refuse to open the session).
+       */
+      const runColumnFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<RunColumn | undefined, SessionError> =>
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read run column",
+            sql<{ column: string; columns: string }>`
+              SELECT tr."column", bd.columns::text AS columns
+              FROM task_runs tr
+              JOIN tasks t ON t.id = tr.task_id
+              JOIN board_instances bi ON bi.id = t.board_id
+              JOIN board_definitions bd
+                ON bd.id = bi.definition_id AND bd.version = t.definition_version
+              WHERE tr.session_id = ${sessionId}
+            `,
+          );
+          const row = rows[0];
+          if (row === undefined) return undefined;
+          const columns = yield* Schema.decodeEffect(
+            Schema.fromJsonString(Schema.Array(BoardColumn)),
+          )(row.columns).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `the board definition holds an invalid column set: ${String(cause)}`,
+                }),
+            ),
+          );
+          const declared = columns.find((column) => column.name === row.column);
+          return declared === undefined
+            ? undefined
+            : { name: declared.name, skills: declared.skills };
+        });
+
+      /**
+       * What the run's column gives its prompt: the skill records the column names, resolved in the
+       * column's order (`@repo/harness`'s `loadRun`). A column that names no skills costs no query.
+       */
+      const runProfileFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<RunProfile, SessionError> =>
+        Effect.gen(function* () {
+          const column = yield* runColumnFor(sessionId);
+          if (column === undefined || column.skills.length === 0) {
+            return column === undefined
+              ? EMPTY_RUN_PROFILE
+              : { column: column.name, skills: [] };
+          }
+          const library = yield* skills.list.pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `read skills: ${cause.message}`,
+                }),
+            ),
+          );
+          return yield* loadRun(
+            column,
+            library.map((skill) => ({ name: skill.name, body: skill.body })),
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "invalid_input",
+                  message: cause.message,
+                }),
+            ),
           );
         });
 
@@ -509,6 +601,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
             );
             const storage = yield* openStorage(id, "owner");
+            // The run's prompt comes from its column (B6), read on every owner acquisition: a
+            // resumed session re-reads the skill bodies as they are *now*, so an edit made between
+            // two runs of one session reaches the next run too. Pinning a body to the run that
+            // started under it is B6's "per-run version pinning", which is wave 2.
+            const run = yield* runProfileFor(id);
             const opened = yield* openSession({
               storage,
               model: options.model,
@@ -516,6 +613,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
               policy: policy.forWorktree(workspace.path, id),
+              run,
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -599,6 +697,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The index row is written before the log because it carries the request-id dedupe key.
           // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
           // re-derives the truth from the log rather than trusting the row.
+          const column =
+            input.taskId === undefined
+              ? undefined
+              : (input.taskColumn ?? "building");
+          if (input.taskId !== undefined && column !== undefined) {
+            // The run row is written before the harness opens, because it is where `acquireOwner`
+            // reads the run's column from (B6) — the prompt this session is told is resolved from
+            // it. `ON CONFLICT DO NOTHING` keeps a retried create from writing a second run.
+            yield* paper(
+              "write task run",
+              sql`INSERT INTO task_runs (id, task_id, session_id, "column")
+                  VALUES (${id}, ${input.taskId}, ${id}, ${column})
+                  ON CONFLICT (session_id) DO NOTHING`,
+            );
+          }
           const owner = yield* acquireOwner(id, row);
           if (title.length > 0) {
             // The log keeps the title too, so rebuilding the index does not lose it.
@@ -611,18 +724,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: binding.baseRef,
             });
           }
-          if (input.taskId !== undefined) {
-            const column = input.taskColumn ?? "building";
+          if (input.taskId !== undefined && column !== undefined) {
             yield* writeTaskBinding(owner.root, {
               taskId: input.taskId,
               column,
             });
-            yield* paper(
-              "write task run",
-              sql`INSERT INTO task_runs (id, task_id, session_id, "column")
-                  VALUES (${id}, ${input.taskId}, ${id}, ${column})
-                  ON CONFLICT (session_id) DO NOTHING`,
-            );
           }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
@@ -1278,4 +1384,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
     // only implementation is the autonomy rules, and `options.autonomy` is how a deployment
     // narrows or widens them.
     Layer.provide(PolicyLive(options.autonomy)),
+    // The run's prompt is assembled from the factory's skill records (B6), so the service reads
+    // them through `SkillService` rather than a second reader of the `skills` table.
+    Layer.provide(SkillServiceLive),
   );
