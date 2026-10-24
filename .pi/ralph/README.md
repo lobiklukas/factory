@@ -53,8 +53,7 @@ bun run ralph:audit              # maintenance pass over the verify-* skills
 RALPH_PUSH=0 bun run ralph:run   # commit locally, no push, no PR
 ```
 
-Exit codes: `0` done, `2` worker reported `BLOCKED` (infrastructure: Linear, Docker, auth), `3` too many
-iterations without a valid control line. Logs: `.ralph/logs/` and `.ralph/runs.jsonl` in the worktree.
+Exit codes: `0` done, `1` driver error (die), `2` worker reported `BLOCKED` (infrastructure: Linear, Docker, auth), `3` too many iterations without a valid control line or too many failed iterations, `64` usage error (no/unknown subcommand, `RALPH_WORKER` not a positive integer, or the driver read from stdin). Logs: `.ralph/logs/` and `.ralph/runs.jsonl` in the worktree.
 
 ## Repository settings (once)
 
