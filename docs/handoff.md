@@ -58,7 +58,7 @@ passes ten.
   document in the log, so `sessions.repo`/`base_ref` and the `repos` row are derivable from it.
 - **The session list without a fold** (LOB-6): `listSessions` answers from the derived
   `session_activity` index in **one SQL statement whatever the row count** — asserted by counting
-  statements through `Statement.CurrentTransformer` over 3 rows and 30 — pages by keyset cursor
+  statements through `Statement.CurrentTransformer` over 3 rows plus 280 filler rows the test writes itself (plus whatever the shared database holds) — pages by keyset cursor
   without repeating a row, and orders by newest activity. `rebuildIndexes` empties-and-rebuilds the
   claim: `DELETE FROM sessions`, rebuild, and every list field (title, repo, base ref, spend,
   creation time) comes back from the logs alone.
@@ -404,8 +404,9 @@ How `PostgresStorage` works, so the next agent does not have to re-derive it:
   `repos.local_path` are the only columns the log cannot reconstruct.
 - **`session_activity` hangs off `sessions`** with `ON DELETE CASCADE`, and migration `0005`
   backfills it from `sessions` so a pre-existing database does not silently lose sessions from the
-  list. Its `last_activity_at` is a `TIMESTAMPTZ` on purpose: the keyset cursor carries the exact
-  value Postgres ordered by, so pagination cannot skip or repeat a row.
+  list. Its `last_activity_at` is a `TIMESTAMPTZ`, but the keyset cursor is rendered at millisecond
+  precision (`SessionService.ts` formats it with `to_char(... 'MS')`), so a page boundary inside a
+  same-millisecond group can skip rows; see LOB-95.
 - **`sessions.repo` is nullable and `base_ref` is only allowed next to a repo** (a CHECK constraint),
   so "no repo" is one state rather than two. Migration `0006` leaves existing rows `NULL` rather than
   guessing a binding from the id.
