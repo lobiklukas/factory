@@ -25,6 +25,10 @@ created empty for the run (two sessions, which is the case the paging check used
 **29/29** against the shared `factory_ralph` (2 883 rows in `session_activity`), evidence
 `.verify/evidence/lob-140/`.
 
+The approval checks (LOB-148) were run from the `ralph/LOB-148` branch on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442): `bun drive.ts` with the approval block added, evidence
+`.verify/evidence/lob-148/verify-api/`. `./sigterm.sh` and `./degraded.sh` were not re-run there.
+
 The reset checks (LOB-181) were run from the `ralph/LOB-181` worktree on 2026-10-24 (API on `:9400`,
 faux, Postgres on 5442): **32/32**, evidence `.verify/evidence/lob-181/`. `./sigterm.sh` and
 `./degraded.sh` were not re-run there; neither touches the reset path.
@@ -55,6 +59,7 @@ plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run t
 | One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
 | Inbound triggers        | passing | [trigger.md](trigger.md)           |
 | Jira adapter            | passing | [jira.md](jira.md)                 |
+| Approvals               | passing | [approvals.md](approvals.md)       |
 
 ## Deliberately absent
 
