@@ -144,6 +144,27 @@ describe("SkillService", () => {
     }
   });
 
+  it("refuses a row whose attachments are not a string array, and names it", async () => {
+    const name = `test-corrupt-${hex(6)}`;
+    try {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`
+            INSERT INTO skills (name, version, description, body, attachments)
+            VALUES (${name}, '1', '', '', '{"nope": true}'::jsonb)
+          `;
+        }),
+      );
+      const error = await refusal((s) => s.get(name));
+      expect(error._tag).toBe("SkillStorageError");
+      if (error._tag !== "SkillStorageError") throw new Error("unreachable");
+      expect(error.message).toContain(name);
+    } finally {
+      await removeSkill(name);
+    }
+  });
+
   it("replaces the document of an existing name instead of adding a second row", async () => {
     const skill = newSkill();
     const replaced: Skill = {
