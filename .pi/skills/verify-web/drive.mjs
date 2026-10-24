@@ -294,17 +294,80 @@ if (childId !== "") {
     fullPage: true,
   });
 
+  // The sidebar reads the browser-local registry (its summaries), so the checks above prove the
+  // summary path only. `SessionListEntry.forkedFrom` is the index fold's half of the contract
+  // (LOB-182): ask the control plane's own list from inside the page, so the assertion covers the
+  // RPC, the schema, and the CORS path the dashboard uses. `_tag: "Request"` + a trailing newline
+  // is the NDJSON envelope `RpcClient.layerProtocolHttp` writes — the same bytes
+  // `apps/web/src/lib/rpc-client.ts` would send for `listSessions`.
+  const listRpc = `drive-list-${Date.now()}`;
+  observed.listSessions = await page.evaluate(
+    async ({ apiUrl, requestId }) => {
+      const response = await fetch(`${apiUrl}/rpc`, {
+        method: "POST",
+        headers: { "content-type": "application/ndjson" },
+        body: `${JSON.stringify({
+          _tag: "Request",
+          id: requestId,
+          tag: "listSessions",
+          payload: { limit: 100 },
+          headers: [],
+        })}\n`,
+      });
+      const text = await response.text();
+      const envelope = text
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .find((message) => message?.requestId === requestId);
+      return {
+        status: response.status,
+        exit: envelope?.exit?._tag ?? null,
+        sessions: envelope?.exit?.value?.sessions ?? null,
+        raw: envelope === undefined ? text.slice(0, 400) : null,
+      };
+    },
+    { apiUrl: API_URL, requestId: listRpc },
+  );
+  const indexSessions = observed.listSessions.sessions ?? [];
+  const indexParent = indexSessions.find((entry) => entry.id === parentId);
+  const indexChild = indexSessions.find((entry) => entry.id === childId);
+  assert(
+    "the list RPC serves the fork's lineage on the child only",
+    indexChild?.forkedFrom === parentId &&
+      indexParent !== undefined &&
+      indexParent.forkedFrom === undefined,
+    `exit ${String(observed.listSessions.exit)}, child forkedFrom ` +
+      `${JSON.stringify(indexChild?.forkedFrom ?? null)}, parent forkedFrom ` +
+      `${JSON.stringify(indexParent?.forkedFrom ?? null)}`,
+  );
+
   // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
   // this proves is that the new third line truncates inside the row instead of pushing the document
   // wider. The header's own clipping at 390 px is pre-existing (the unchanged Forget button is cut
   // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
   // `.ralph/polish.md` and the ticket filed for it.
   await page.setViewportSize({ width: 390, height: 844 });
-  observed.narrowWidth = await page.evaluate(() => {
+  observed.narrowWidth = await page.evaluate((child) => {
     const fork = Array.from(document.querySelectorAll("header button")).find(
       (button) => button.getAttribute("aria-label") === "Fork from here",
     );
     const box = fork?.getBoundingClientRect();
+    // Readability, not just layout: the lineage line has to sit inside its own row (a `truncate`d
+    // span that broke out of the row would be the same defect as widening the page, one level
+    // down) and still have a box tall enough to be read.
+    const row = document.querySelector(`aside a[href='/sessions/${child}']`);
+    const lineage = Array.from(row?.querySelectorAll("span") ?? []).find(
+      (span) => (span.textContent ?? "").startsWith("forked from "),
+    );
+    const rowBox = row?.getBoundingClientRect();
+    const lineageBox = lineage?.getBoundingClientRect();
     return {
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
@@ -312,12 +375,31 @@ if (childId !== "") {
         box === undefined
           ? null
           : { left: box.left, right: box.right, width: box.width },
+      lineageBox:
+        lineageBox === undefined || rowBox === undefined
+          ? null
+          : {
+              left: lineageBox.left,
+              right: lineageBox.right,
+              width: lineageBox.width,
+              height: lineageBox.height,
+              rowRight: rowBox.right,
+            },
     };
-  });
+  }, childId);
   assert(
     "the lineage line does not widen the page at 390px",
     observed.narrowWidth.scrollWidth <= observed.narrowWidth.clientWidth,
     `scrollWidth ${observed.narrowWidth.scrollWidth} vs clientWidth ${observed.narrowWidth.clientWidth}`,
+  );
+  const lineageBox = observed.narrowWidth.lineageBox;
+  assert(
+    "the lineage line stays readable inside its row at 390px",
+    lineageBox !== null &&
+      lineageBox.width > 0 &&
+      lineageBox.height > 0 &&
+      lineageBox.right <= lineageBox.rowRight + 1,
+    `lineage ${JSON.stringify(lineageBox)}`,
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "fork-lineage-narrow.png"),

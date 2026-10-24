@@ -1026,6 +1026,35 @@ describe("fork", () => {
     expect(result.blankedRow?.forkedFrom).toBeUndefined();
     expect(result.refoldedRow?.forkedFrom).toBe(result.parent);
   }, 120_000);
+
+  /**
+   * Lineage is a display field, so a broken index value must not fail the page (LOB-182). A row
+   * whose `forked_from` is not a session id is a corrupted index, not a session the list cannot
+   * name: the row still renders, without lineage, and `rebuildIndexes` is what repairs the column.
+   */
+  it("drops a malformed lineage instead of failing the list", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "malformed lineage" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        yield* sql`UPDATE sessions SET forked_from = ${"not a session id"} WHERE id = ${fork.id}`;
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        const row = listed.find((entry) => entry.id === fork.id);
+        const report = yield* rebuildIndexes;
+        const refolded = (yield* sessions.list({ limit: 100 })).sessions.find(
+          (entry) => entry.id === fork.id,
+        );
+        return { parent: parent.id, row, report, refolded };
+      }),
+    );
+
+    expect(result.row).toBeDefined();
+    expect(result.row?.forkedFrom).toBeUndefined();
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.refolded?.forkedFrom).toBe(result.parent);
+  }, 120_000);
 });
 
 /**

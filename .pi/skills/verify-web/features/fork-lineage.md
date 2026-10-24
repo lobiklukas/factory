@@ -30,18 +30,30 @@ focused control's accessible name, and requires **Fork from here** to appear —
 to become a _different_
 `/sessions/ses_…`. Finally it requires at least two sidebar rows, the child's row to contain
 `forked from <parent id>`, the parent's row to carry no `forked from` text, and the document to fit a
-390 px viewport with the lineage line present. Evidence: `fork-lineage.png`,
-`fork-lineage-narrow.png` and the recorded `narrowWidth` numbers.
+390 px viewport with the lineage line present — including the lineage line's own box staying inside
+its row, so "readable" is asserted as a box rather than inferred from the page not widening.
+Evidence: `fork-lineage.png`, `fork-lineage-narrow.png` and the recorded `narrowWidth` numbers.
 
 All of these are required checks; the run exits non-zero without them.
 
+## The two data paths, and which check proves which
+
+`SessionListEntry.forkedFrom` reaches a screen by two routes, and the drive used to prove only the
+first:
+
+- **The summary path.** The fork RPC answers the child's `SessionSummary`, the pane records it in the
+  browser-local registry, and the sidebar renders it. Proved by the sidebar row checks above.
+- **The index fold.** `listSessions` folds `sessions.forked_from` into each `SessionListEntry`. The
+  dashboard does not call `listSessions` yet (see the gap in `features/README.md`), so the drive asks
+  the control plane directly: it posts the NDJSON request envelope that
+  `apps/web/src/lib/rpc-client.ts` writes for `listSessions` **from inside the page**, which makes the
+  check cover the RPC, the `SessionListEntry` schema and the browser's CORS path at once. It requires
+  `forkedFrom` on the child's entry and its absence on the parent's.
+
 ## What this does not prove
 
-- The sidebar lists the browser-local registry (`sessionStorage`), not `listSessions`, so the drive
-  proves lineage on the **summary** the stream reported. `SessionListEntry.forkedFrom` — the index
-  fold's half of the contract — is proven in `packages/core/src/SessionService.test.ts` ("shows the
-  lineage on the fork's list row and only there"), which also asserts that a blanked index row loses
-  the lineage and a `rebuildIndexes` restores it. Switching the sidebar to `listSessions` is the gap
-  `features/README.md` records, not this feature's.
 - A refused fork's toast is not driven: the drive has no way to make `forkSession` fail without
   editing the session out from under the pane.
+- The list-RPC check reads the response body rather than going through `RpcClient.make`, so a wrong
+  method tag or a renamed field fails it, while a change to the _transport_ would not (there is no
+  client in the page to reuse). `verify-api` drives the typed client.
