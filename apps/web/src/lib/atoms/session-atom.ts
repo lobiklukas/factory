@@ -31,7 +31,7 @@ const emptyView = (summary: SessionSummary): SessionView => ({
   summary,
   entries: [],
   live: { busy: false, tools: [] },
-  usage: { models: [], tools: [] },
+  usage: { models: [] },
   queued: [],
 });
 
@@ -66,6 +66,8 @@ export const foldSessionEvent = (
       return { ...state, queued: event.queued };
     case "status":
       return { ...state, summary: { ...state.summary, status: event.status } };
+    case "prOpened":
+      return { ...state, summary: { ...state.summary, prUrl: event.prUrl } };
   }
 };
 

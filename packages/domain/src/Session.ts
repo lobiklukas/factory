@@ -73,6 +73,8 @@ export const SessionSummary = Schema.Struct({
   /** The repo this session works on, absent for a scratch session. */
   repo: Schema.optional(RepoSlug),
   baseRef: Schema.optional(Schema.String),
+  /** The URL of the PR opened for this session, once one exists. */
+  prUrl: Schema.optional(Schema.String),
 });
 export type SessionSummary = typeof SessionSummary.Type;
 
@@ -153,7 +155,6 @@ export const SessionUsage = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({ key: Schema.String, usage: ModelUsage }),
   ),
-  tools: Schema.Array(Schema.Struct({ key: Schema.String, usage: ModelUsage })),
 });
 export type SessionUsage = typeof SessionUsage.Type;
 
@@ -206,6 +207,7 @@ export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("usage", { usage: SessionUsage }),
   Schema.TaggedStruct("status", { status: SessionStatus }),
   Schema.TaggedStruct("queued", { queued: Schema.Array(QueuedMessage) }),
+  Schema.TaggedStruct("prOpened", { prUrl: Schema.String }),
 ]);
 export type SessionEvent = typeof SessionEvent.Type;
 
@@ -265,6 +267,8 @@ export const SessionListEntry = Schema.Struct({
   createdAt: Timestamp,
   lastActivityAt: Timestamp,
   costTotal: Schema.Finite,
+  /** The URL of the PR opened for this session, once one exists. */
+  prUrl: Schema.optional(Schema.String),
 });
 export type SessionListEntry = typeof SessionListEntry.Type;
 

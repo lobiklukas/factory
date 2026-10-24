@@ -64,6 +64,7 @@ import {
   Layer,
   ManagedRuntime,
   Option,
+  Random,
   Redacted,
   Ref,
   Stream,
@@ -827,16 +828,27 @@ describe("session list", () => {
   // gives the same headroom the rebuild guard uses; a database of its own per run
   // (LOB-96) would also resolve it.
   it("shows a new session without a poll, pages by cursor, one statement per page", async () => {
+    // Run-private identity for this test's filler rows and its three sessions, so two
+    // runs against one database cannot collide on primary keys (LOB-98).
+    const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+    const token = Array.from(
+      { length: 5 },
+      () =>
+        alphabet[Effect.runSync(Random.nextIntBetween(0, alphabet.length - 1))],
+    ).join("");
+    const runPrefix = `ses_f${token}`;
+    const mineIds: string[] = [];
     const result = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
         // The filler rows are this test's, so its own leftovers are the only ones to clear here.
-        yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_f%'`;
+        yield* sql`DELETE FROM sessions WHERE starts_with(id, ${runPrefix})`;
 
         const first = yield* sessions.create({ title: "older" });
         const second = yield* sessions.create({ title: "newer" });
         const third = yield* sessions.create({ title: "newest" });
+        mineIds.push(first.id, second.id, third.id);
         // A session created a moment ago is in the list already: no read, no fold, no poll.
         const immediately = (yield* sessions.list({
           limit: PAGE_SIZE,
@@ -853,12 +865,12 @@ describe("session list", () => {
         // their own, whatever the table already holds.
         yield* sql`
           INSERT INTO sessions (id, title)
-          SELECT 'ses_f' || lpad(n::text, 25, '0'), 'filler ' || n
+          SELECT ${runPrefix} || lpad(n::text, 20, '0'), 'filler ' || n
           FROM generate_series(0, ${FILLERS - 1}) AS g(n)
         `;
         yield* sql`
           INSERT INTO session_activity (session_id, last_activity_at)
-          SELECT 'ses_f' || lpad(n::text, 25, '0'), now() - make_interval(secs => 300 + n)
+          SELECT ${runPrefix} || lpad(n::text, 20, '0'), now() - make_interval(secs => 300 + n)
           FROM generate_series(0, ${FILLERS - 1}) AS g(n)
         `;
 
@@ -910,7 +922,10 @@ describe("session list", () => {
         Effect.ensuring(
           Effect.gen(function* () {
             const sql = yield* SqlClient;
-            yield* sql`DELETE FROM sessions WHERE id LIKE 'ses\_f%'`;
+            yield* sql`DELETE FROM sessions WHERE starts_with(id, ${runPrefix})`;
+            for (const id of mineIds) {
+              yield* sql`DELETE FROM sessions WHERE id = ${id}`;
+            }
           }).pipe(
             // A cleanup that cannot run is a defect, not a silent 280-row leak.
             Effect.orDie,
@@ -923,8 +938,16 @@ describe("session list", () => {
 
     const entries = result.pages.flatMap((page) => page.value.sessions);
     const keys = entries.map((entry) => `${entry.lastActivityAt}|${entry.id}`);
-    // Ordering contract, page after page: newest activity first, id descending to break ties.
-    expect(keys).toEqual([...keys].sort().reverse());
+    // Ordering contract, page after page: newest activity first. The wire renders
+    // `lastActivityAt` at millisecond precision, so rows sharing a millisecond
+    // are not totally ordered by the rendered key — only the timestamp itself
+    // must be non-increasing; the id tie-break lives in the cursor, not here.
+    // (See LOB-100.) The rendered timestamp must never rise as we page.
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i]!.lastActivityAt <= entries[i - 1]!.lastActivityAt).toBe(
+        true,
+      );
+    }
     expect(new Set(keys).size).toBe(keys.length);
     // The loop ended because the cursor ran out, not because it hit its budget: the list pages to
     // the end of a database of any size. This is the assertion the old constant bound broke.
@@ -940,9 +963,9 @@ describe("session list", () => {
     expect(result.leftOver).toEqual([]);
     // Every filler row this test wrote comes back exactly once, so a list that stops early inside
     // them cannot pass by landing on the three sessions below.
-    expect(entries.filter((entry) => entry.id.startsWith("ses_f")).length).toBe(
-      FILLERS,
-    );
+    expect(
+      entries.filter((entry) => entry.id.startsWith(runPrefix)).length,
+    ).toBe(FILLERS);
     // Cost is one statement per page whatever the row count: never a fold per session (R6).
     for (const page of result.pages) expect(page.statements).toBe(1);
 

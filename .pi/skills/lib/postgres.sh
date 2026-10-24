@@ -75,9 +75,12 @@ ensure_postgres() {
   # compose that failed and left nothing answering is caught by the same probe.
   pg_compose up -d --wait postgres >/dev/null 2>&1 || true
   if ! pg_port_open; then
-    # A failed start leaves a `Created` container holding the port reservation, which is what makes
-    # the next run fail even after 5442 is free. Remove exactly that, and nothing else: a running
-    # container is someone's database, and an `exited` one is not this call's to delete.
+    # A failed start that left nothing answering leaves a `Created` container holding the port
+    # reservation, which is what makes the next run fail even after 5442 is free. Remove exactly
+    # that, and nothing else: a running container is someone's database, and an `exited` one is not
+    # this call's to delete. (When the port *does* answer after a failed compose, this branch is
+    # not taken: the database is up, so any `Created` container is left behind deliberately rather
+    # than risk touching a running one — see the deferring case in postgres-up.test.ts.)
     created="$(pg_compose ps -aq --status created postgres 2>/dev/null || true)"
     for container in $created; do
       pg_docker rm -f "$container" >/dev/null 2>&1 || true

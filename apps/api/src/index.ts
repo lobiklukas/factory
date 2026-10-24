@@ -16,6 +16,7 @@ import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
+import { WebhookLive } from "./Api/Webhook";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
@@ -91,8 +92,17 @@ const SessionShutdown = Layer.effectDiscard(
         yield* Effect.logInfo(
           "shutdown: releasing every session owner held by this process",
         );
+        // Flush before the process exits: under SIGTERM the runtime interrupts the main
+        // fiber and tears down this scope; stdout to a file is block-buffered, so without an
+        // explicit flush the finalizer's lines (and the evidence they carry) never land.
+        yield* Effect.callback<void>((resume) => {
+          process.stdout.write("", () => resume(Effect.void));
+        });
         yield* sessions.close;
         yield* Effect.logInfo("shutdown: session owners released");
+        yield* Effect.callback<void>((resume) => {
+          process.stdout.write("", () => resume(Effect.void));
+        });
       }),
     );
   }),
@@ -148,7 +158,12 @@ const ApiRouter = HttpApiBuilder.layer(Api).pipe(
 );
 
 // NOTE: Modules append additional routers here through Layer.mergeAll.
-const AllRouters = Layer.mergeAll(ApiRouter, SessionRpcLive, ProbesLive);
+const AllRouters = Layer.mergeAll(
+  ApiRouter,
+  SessionRpcLive,
+  ProbesLive,
+  WebhookLive,
+);
 
 // NOTE: Modules append additional server layers here through Layer.mergeAll.
 const ServerLayers = Layer.mergeAll(

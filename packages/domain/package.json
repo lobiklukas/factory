@@ -20,6 +20,7 @@
     "./Approval": "./src/Approval.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Session": "./src/Session.ts",
-    "./Task": "./src/Task.ts"
+    "./Task": "./src/Task.ts",
+    "./Skill": "./src/Skill.ts"
   }
 }

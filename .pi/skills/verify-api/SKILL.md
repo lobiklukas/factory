@@ -106,7 +106,7 @@ proven on one session id.
 
 ## Evidence
 
-Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored. Note that
+Written to `.verify/evidence/latest/` relative to the current working directory (so running `bun drive.ts` from `.pi/skills/verify-api` lands in `.pi/skills/verify-api/.verify/evidence/latest/`). Override with `EVIDENCE_DIR` (e.g. `EVIDENCE_DIR=/path/to/repo/.verify/evidence/latest bun drive.ts`), gitignored. Note that
 `.pi/skills/verify-web` writes to the same directory: the last drive run wins, so run them in the
 order you want the evidence to end in.
 
@@ -141,7 +141,7 @@ Proof standards for this app:
 ## Cleanup
 
 ```sh
-./down.sh        # kills only the recorded pid, removes .verify/run/
+./down.sh        # kills only the recorded pid; removes .verify/run/api.pid and .verify/run/sessions/, leaves .verify/run/api.log
 ```
 
 Never kill by process name. Cleanup does not touch `.verify/evidence/` and does not delete session

@@ -46,7 +46,7 @@ import { afterAll, describe, expect, it } from "vitest";
  * The file lives in `@repo/storage-postgres` for the same reason `turbo-env.test.ts` does: it is a
  * repo-level Postgres claim that belongs to no package, and it needs no database to run.
  *
- * Each case below names the mutation it was checked against — the one-line change that makes it go
+ * Each case below names the mutation it was checked against — the change that makes it go
  * red. A case whose mutation nobody can state is not testing anything. "Names" is meant
  * mechanically: the note is a `//` comment line inside the case that carries the marker
  * `Mutation checked:` on that one line, and the last case in this file reads the file back and
@@ -596,7 +596,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     // Acceptance criterion 1 in full: compose exits 0 with nothing answering *and* left no
     // `Created` container, so the cleanup must ask, find nothing, and remove nothing.
     // Mutation checked: the same dropped probe as the case above (`if ! pg_compose up -d --wait
-    // postgres >/dev/null 2>&1; then`) — the status is 0 and every assertion here is red.
+    // postgres >/dev/null 2>&1; then`) — the status is 0 and it fails at the status assertion.
     writeFakeDocker(scratch, 0);
     const port = await closedPort();
     const result = ensurePostgres(scratch, port);
@@ -768,8 +768,10 @@ describe("the verify-* skills' Postgres precondition", () => {
       expect(pid).not.toBe(process.ppid);
       expect(isAlive(pid ?? 0)).toBe(true);
       expect(await doesAnswer(port)).toBe(true);
-      // Mutation checked: dropping `opensPort` from this case (nothing answers, the status is 1),
-      // and `stopOpenedListener` not killing (the port stays open and the wait below times out).
+      // Mutation checked: making the re-probe in `.pi/skills/lib/postgres.sh` read a greeting
+      // instead of only connecting (`pg_isready`, or any check that waits for Postgres to talk) — the
+      // re-probe would then pass against a listener that only accepts TCP, so the port check would
+      // not catch it.
       await stopOpenedListener(scratch, port);
       expect(await doesAnswer(port)).toBe(false);
       expect(isAlive(pid ?? 0)).toBe(false);
@@ -1010,9 +1012,6 @@ describe("the verify-* skills' Postgres precondition", () => {
     // layer down with the exit status of a `docker compose up`.
     // Mutation checked: dropping `|| true` from the compose line. This is the only case that
     // mutation reddens (dropping it alone left 39 of 40 green) — no other case in this file pins it.
-    // The marker avoids `port:` followed by a digit on purpose: the case further down that guards
-    // this file's own connections reads them out of its own source, and that pattern is one of its
-    // assertions.
     writeFakeDocker(scratch, 1, { opensPort: port });
     try {
       const strict = spawnSync(
@@ -1220,7 +1219,7 @@ describe("the verify-* skills' Postgres precondition", () => {
       });
       expect(result.status, result.stderr).toBe(0);
       // Mutation checked: dropping the `[ -z "${DOCKER_HOST:-}" ]` condition from `pg_docker`
-      // (LOB-105's guard) — the fallback overwrites the socket the caller chose.
+      // (the rule LOB-57 gave `pg_docker`) — the fallback overwrites the socket the caller chose.
       expect(
         recordOf(scratch, "compose up -d --wait postgres").dockerHost,
       ).toBe("unix:///var/run/docker.sock");
@@ -1304,8 +1303,12 @@ describe("the verify-* skills' Postgres precondition", () => {
       //    literal to inherit a real service by accident, and no URL at all. The literal 5442 in the
       //    `pg_port_owner` case feeds `docker ps --filter`, which opens no socket.
       const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const selfCode = self
+        .split("\n")
+        .filter((line) => !/\s*\/\//.test(line))
+        .join("\n");
       expect(self).not.toMatch(/https?:\/\//);
-      expect(self).not.toMatch(/port:\s*\d/);
+      expect(selfCode).not.toMatch(/port:\s*\d/);
     },
   );
 
@@ -1322,8 +1325,10 @@ describe("the verify-* skills' Postgres precondition", () => {
     // group (this suite included) and -1 every process the user owns, so only a positive integer is
     // treated as a listener. This case survives those records; a `<= 0` guard that loosened would
     // not be an assertion failure here but a dead runner, which is why the values are exercised.
-    // Mutation checked: dropping the `pid > 0` guard from `recordedListener` — `kill -1` takes the
-    // suite and the shell that started it with it.
+    // Mutation checked: the guard is unobservable in-process — `process.kill(-1, "SIGKILL")` signals
+    // every process the user owns (including this runner), so it cannot be applied here; the cost is
+    // that the `pid > 0` guard in `.pi/skills/lib/postgres.sh`'s `recordedListener` rests on prose,
+    // and a `<= 0` regression (e.g. `kill(0)`) would only surface as a dead runner, not a red test.
     for (const malformed of ["", "0", "-1", "12 34\n", "not-a-pid\n"]) {
       writeFileSync(scratch.listenerPid, malformed);
       await stopOpenedListener(scratch, port);
@@ -1398,8 +1403,13 @@ describe("the verify-* skills' Postgres precondition", () => {
       // `it.skip("name", fn)` both declare a case that carries a note like any other, and neither is
       // a case the scan may walk past. `it.todo` counts too — it has no assertion, so it has no
       // mutation to name, and the honest answer is a red guard rather than a silent exemption.
+      // A tagged-template argument (`it.each\`a | b\``) is consumed too. A case declared through
+      // a wrapper helper, an aliased import, or a re-declared form is invisible to a source-text
+      // scan and cannot be guarded here.
       const declarations = lines.flatMap((line, index) =>
-        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+        /^\s*(?:it|test)(?:<[^>]*>)?(?:\.[\w$]+(?:\([^)]*\)|`[^`]*`)?)*\(/.test(
+          line,
+        )
           ? [index]
           : [],
       );
@@ -1437,7 +1447,9 @@ describe("the verify-* skills' Postgres precondition", () => {
       const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
       const lines = source.split("\n");
       const declarations = lines.flatMap((line, index) =>
-        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+        /^\s*(?:it|test)(?:<[^>]*>)?(?:\.[\w$]+(?:\([^)]*\)|`[^`]*`)?)*\(/.test(
+          line,
+        )
           ? [index]
           : [],
       );
