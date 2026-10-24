@@ -189,7 +189,7 @@ describe("a session over PostgresStorage", () => {
           requestId: "reset-before",
         });
         yield* Effect.promise(() => submitted.submission.wait(context));
-        const before = yield* readLiveSnapshot(root, ref);
+        const before = yield* readLiveSnapshot({ harness, root }, ref);
         expect(before.entries.map((entry) => entry.kind)).toContain("user");
 
         yield* resetSession(root, handoff);
@@ -199,7 +199,7 @@ describe("a session over PostgresStorage", () => {
         expect(messageTexts(opened.messages)).toEqual([handoff]);
 
         // What a reader sees: the whole transcript, with the reset marked where it happened.
-        const after = yield* readLiveSnapshot(root, ref);
+        const after = yield* readLiveSnapshot({ harness, root }, ref);
         const kinds = after.entries.map((entry) => entry.kind);
         expect(kinds.slice(0, before.entries.length)).toEqual(
           before.entries.map((entry) => entry.kind),
@@ -244,7 +244,7 @@ describe("a session over PostgresStorage", () => {
         yield* resetSession(root, undefined);
 
         const opened = yield* Effect.promise(() => root.context(context));
-        const after = yield* readLiveSnapshot(root, ref);
+        const after = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return {
           emptyContext: messageTexts(opened.messages),
@@ -312,7 +312,7 @@ describe("compaction", () => {
         // What the model sees: a context that starts at the summary entry.
         const opened = yield* Effect.promise(() => root.context(context));
         // What a reader sees: the transcript, summary included.
-        const snapshot = yield* readLiveSnapshot(root, ref);
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return { head: opened.head?.kind, entries: snapshot.entries };
       }),
@@ -378,7 +378,7 @@ describe("compaction", () => {
           );
           expect(settled.status).toBe("done");
         }
-        const snapshot = yield* readLiveSnapshot(root, ref);
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return snapshot.entries;
       }),

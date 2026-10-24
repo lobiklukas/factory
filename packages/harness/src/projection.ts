@@ -6,7 +6,11 @@
  * (`ConversationView.docs`), so they are read defensively: an unknown or renamed field drops out
  * of the projection instead of breaking it, which is the point of having a projection at all.
  */
-import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
+import type {
+  ConversationView,
+  EntryRecord,
+  TaskGraph,
+} from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
   ImageContent,
@@ -22,6 +26,7 @@ import type {
   SessionLive,
   SessionStatus,
   SessionUsage,
+  SessionTask,
   ToolCallRef,
   ToolSlotView,
   TranscriptEntry,
@@ -253,6 +258,50 @@ export const projectUsageDoc = (
 ): SessionUsage => ({
   models: bucketEntries(objectAt(value, "models")),
 });
+
+/**
+ * `Harness.taskGraph()` → the live tasks a session reports (LOB-183).
+ *
+ * Sorted by id so two projections of the same graph compare equal and a client's list does not
+ * reshuffle: the graph is keyed by decimal id, and object key order is not a contract.
+ */
+export const projectTasks = (graph: TaskGraph): readonly SessionTask[] =>
+  Object.entries(graph.tasks)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([id, node]) => ({
+      id,
+      kind: node.kind,
+      status: node.state.status,
+      ...(node.state.status === "completing"
+        ? {}
+        : { phase: node.state.phase }),
+      waitingOn:
+        node.state.status === "waiting" ? node.state.on.map(String) : [],
+      ...(node.owner === undefined ? {} : { owner: String(node.owner) }),
+      conversations: node.conversations.map(String),
+    }));
+
+/** Whether two task projections say the same thing, field by field. */
+export const sameTasks = (
+  left: readonly SessionTask[],
+  right: readonly SessionTask[],
+): boolean =>
+  left.length === right.length &&
+  left.every((task, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      task.id === other.id &&
+      task.kind === other.kind &&
+      task.status === other.status &&
+      task.phase === other.phase &&
+      task.owner === other.owner &&
+      task.waitingOn.length === other.waitingOn.length &&
+      task.waitingOn.every((id, at) => id === other.waitingOn[at]) &&
+      task.conversations.length === other.conversations.length &&
+      task.conversations.every((id, at) => id === other.conversations[at])
+    );
+  });
 
 /** Everything a snapshot of one session carries, from either the live view or a fold. */
 export type SessionProjection = {

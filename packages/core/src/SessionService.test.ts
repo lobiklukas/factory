@@ -551,6 +551,9 @@ describe("SessionService", () => {
 
         const live = yield* sessions.get(created.id);
         expect(live.session.mode).toBe("live");
+        // A session that started no durable task reports an empty live-task list (LOB-183): the
+        // field is present on every snapshot, so a client never has to tell "none" from "not sent".
+        expect(live.tasks).toEqual([]);
         expect(live.entries.map((entry) => entry.kind)).toEqual([
           "title",
           "user",

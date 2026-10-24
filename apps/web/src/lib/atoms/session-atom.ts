@@ -4,6 +4,7 @@ import type {
   SessionLive,
   QueuedMessage,
   SessionSummary,
+  SessionTask,
   SessionUsage,
   TranscriptEntry,
 } from "@repo/domain/Session";
@@ -25,6 +26,7 @@ export type SessionView = {
   readonly live: SessionLive;
   readonly usage: SessionUsage;
   readonly queued: readonly QueuedMessage[];
+  readonly tasks: readonly SessionTask[];
 };
 
 const emptyView = (summary: SessionSummary): SessionView => ({
@@ -33,6 +35,7 @@ const emptyView = (summary: SessionSummary): SessionView => ({
   live: { busy: false, tools: [] },
   usage: { models: [] },
   queued: [],
+  tasks: [],
 });
 
 /**
@@ -55,6 +58,7 @@ export const foldSessionEvent = (
         live: event.live,
         usage: event.usage,
         queued: event.queued,
+        tasks: event.tasks,
       };
     case "entry":
       return { ...state, entries: [...state.entries, event.entry] };
@@ -64,6 +68,8 @@ export const foldSessionEvent = (
       return { ...state, usage: event.usage };
     case "queued":
       return { ...state, queued: event.queued };
+    case "tasks":
+      return { ...state, tasks: event.tasks };
     case "status":
       return { ...state, summary: { ...state.summary, status: event.status } };
     case "prOpened":
