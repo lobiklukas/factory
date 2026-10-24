@@ -739,6 +739,187 @@ describe("SessionService", () => {
   });
 });
 
+/**
+ * Forking a session at one of its entries (LOB-180).
+ *
+ * A session is a log (D7), so every claim here is about two logs: the fork keeps the parent's
+ * entries through the fork point and nothing after it, and a message admitted to either one lands
+ * in that one only. The parent is deliberately left owned while the fork is taken — that is the
+ * interesting case, because the fork reads a log another owner is writing.
+ */
+describe("fork", () => {
+  it("forks at the last entry and the two transcripts diverge", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the parent's first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        const forked = yield* sessions.get(fork.id);
+
+        // The fork's own turn: it must not reach the parent's transcript.
+        yield* sessions.send({ sessionId: fork.id, content: "fork only" });
+        yield* waitUntil(
+          sessions.get(fork.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the fork's turn to settle",
+        );
+        const diverged = yield* sessions.get(fork.id);
+        const parentAfter = yield* sessions.get(parent.id);
+
+        return {
+          parent: parent.id,
+          before,
+          fork,
+          forked,
+          diverged,
+          parentAfter,
+        };
+      }),
+    );
+
+    expect(result.fork.id).not.toBe(result.parent);
+    expect(result.fork.forkedFrom).toBe(result.parent);
+    expect(result.fork.mode).toBe("live");
+    expect(result.fork.title).toBe("forking");
+
+    // The fork's transcript starts as the parent's, text for text and kind for kind.
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+    expect(result.forked.session.forkedFrom).toBe(result.parent);
+
+    // Both transcripts grow, and neither carries the other's message.
+    expect(result.diverged.entries.length).toBeGreaterThan(
+      result.forked.entries.length,
+    );
+    expect(
+      result.diverged.entries.some((entry) => entry.text.includes("fork only")),
+    ).toBe(true);
+    expect(
+      result.parentAfter.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("forks at a named entry, so the fork ends where the parent had not", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "at an entry" });
+        yield* sessions.send({ sessionId: parent.id, content: "first" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+        // An entry in the middle of the transcript, not its last one.
+        const at = before.entries[1];
+        if (at === undefined) throw new Error("unreachable");
+        const fork = yield* sessions.fork({ sessionId: parent.id, at: at.id });
+        const forked = yield* sessions.get(fork.id);
+        return { before, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.before.entries
+        .slice(0, 2)
+        .map((entry) => [entry.kind, entry.text]),
+    );
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("refuses an entry id that belongs to another session", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        // Deliberately longer than the parent: entry ids are per-log numbers, so an id from another
+        // session that happened to name an entry here would *be* this session's entry, and there is
+        // nothing else it could mean. What a foreign id can be is absent, and that is what this
+        // case drives.
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        for (const content of ["other", "and another"]) {
+          yield* sessions.send({ sessionId: elsewhere.id, content });
+          yield* waitUntil(
+            sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+            "the other turn to settle",
+          );
+        }
+        const other = yield* sessions.get(elsewhere.id);
+        const foreign = other.entries.at(-1);
+        if (foreign === undefined) throw new Error("unreachable");
+        return yield* Effect.exit(
+          sessions.fork({ sessionId: parent.id, at: foreign.id }),
+        );
+      }),
+    );
+
+    expect(Exit.isFailure(outcome)).toBe(true);
+    if (Exit.isSuccess(outcome)) throw new Error("unreachable");
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value._tag).toBe("SessionError");
+    expect(failure.value.code).toBe("invalid_input");
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("keeps the lineage in the fork's log, so a rebuild recovers it", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "lineage" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        yield* sessions.close;
+        // The index is a cache: wiping the column must not lose who the fork came from, because
+        // the fork's log carries its own `factory.fork` document (D7).
+        yield* sql`UPDATE sessions SET forked_from = NULL WHERE id = ${fork.id}`;
+        const blanked = yield* sessions.get(fork.id);
+        const report = yield* rebuildIndexes;
+        const refolded = yield* sessions.get(fork.id);
+        return { parent: parent.id, fork: fork.id, blanked, report, refolded };
+      }),
+    );
+
+    expect(result.blanked.session.forkedFrom).toBeUndefined();
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.refolded.session.forkedFrom).toBe(result.parent);
+  }, 120_000);
+});
+
 describe("repo binding", () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(

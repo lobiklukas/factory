@@ -32,6 +32,7 @@ created empty for the run (two sessions, which is the case the paging check used
 | Session list            | passing | [session-list.md](session-list.md) |
 | Watch a live session    | passing | [live-stream.md](live-stream.md)   |
 | Fold a released session | passing | [fold.md](fold.md)                 |
+| Fork a session          | passing | [fork.md](fork.md)                 |
 | Request limits          | passing | [limits.md](limits.md)             |
 | Probes and readiness    | passing | [probes.md](probes.md)             |
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |

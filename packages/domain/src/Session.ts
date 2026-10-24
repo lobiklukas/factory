@@ -75,6 +75,8 @@ export const SessionSummary = Schema.Struct({
   baseRef: Schema.optional(Schema.String),
   /** The URL of the PR opened for this session, once one exists. */
   prUrl: Schema.optional(Schema.String),
+  /** The session this one was forked from, once one was (LOB-180). */
+  forkedFrom: Schema.optional(SessionId),
 });
 export type SessionSummary = typeof SessionSummary.Type;
 
@@ -298,6 +300,20 @@ export type SendMessageInput = typeof SendMessageInput.Type;
 
 export const SessionIdInput = Schema.Struct({ sessionId: SessionId });
 export type SessionIdInput = typeof SessionIdInput.Type;
+
+/**
+ * Fork a session at one of its entries (LOB-180, D7).
+ *
+ * `at` is the id of a transcript entry — the `id` a `TranscriptEntry` carries — and the fork keeps
+the parent's entries through it. Absent, the fork is taken at the parent's last entry. An id that
+is not an entry of this session is refused as `invalid_input`: the entry ids of another session are
+not this session's history, and accepting one would fork a transcript that never existed.
+ */
+export const ForkSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  at: Schema.optional(Schema.String),
+});
+export type ForkSessionInput = typeof ForkSessionInput.Type;
 
 /**
  * A session request that cannot be served. `code` is the part callers branch on.
