@@ -47,7 +47,7 @@ import type {
   Timestamp,
   TranscriptEntry,
 } from "@repo/domain/Session";
-import type { ApprovalVerdict } from "@repo/domain/Approval";
+import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
@@ -62,6 +62,8 @@ import {
 } from "./policy";
 import {
   diffView,
+  pendingApprovals,
+  projectApprovals,
   projectEntry,
   projectPrDoc,
   projectPages,
@@ -84,6 +86,7 @@ import {
   FORK_DOC_KIND,
   REPLAY_DOC_KIND,
   USAGE_DOC,
+  type ApprovalLogRecord,
   type JsonRecord,
 } from "./projection";
 
@@ -985,6 +988,11 @@ export type SessionLog = {
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
   /**
+   * Every approval the log records, requested order (LOB-147). Pending ones are what a snapshot
+   * reports; the settled ones are here because the index rows a rebuild derives cover both.
+   */
+  readonly approvals: readonly ApprovalLogRecord[];
+  /**
    * The cited knowledge pages the log holds, by name (LOB-204), folded from the `factory.page`
    * entries. Read from the raw entries rather than from the transcript projection, because a page
    * is not a transcript entry a client renders.
@@ -1040,6 +1048,7 @@ export const readSessionLog = (
       entries: records.map(projectEntry),
       pages,
       usage: projectUsageDoc(usage),
+      approvals: projectApprovals(records),
       binding: {
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
@@ -1137,6 +1146,18 @@ export type SessionRef = {
   readonly forkedFrom?: SessionId;
 };
 
+const pendingOf = (
+  sessionId: SessionId,
+  records: readonly ApprovalLogRecord[],
+): readonly ApprovalRequest[] =>
+  pendingApprovals(records).map((record) => ({
+    sessionId,
+    requestId: record.requestId,
+    action: record.action,
+    detail: record.detail,
+    requestedAt: record.requestedAt,
+  }));
+
 const snapshotOf = (
   view: ConversationView,
   tasks: readonly SessionTask[],
@@ -1164,6 +1185,9 @@ const snapshotOf = (
     usage: projection.usage,
     queued: projection.queued,
     tasks,
+    // Folded from the whole log, not from the view: an approval is not a turn, and the view holds
+    // the active window only — a request older than a compaction still has to be answered.
+    approvals: pendingOf(ref.id, projectApprovals(entries)),
   };
 };
 
@@ -1304,6 +1328,9 @@ export const readHistoricalSnapshot = (
       queued: [],
       // Nobody owns this log, so nothing runs in it: a sandbox that ran it is paused or gone (D8).
       tasks: [],
+      // The point of the fold (LOB-147): a request committed before the owner was released is still
+      // waiting here, so a restarted control plane asks a person for the same answer, not again.
+      approvals: pendingOf(ref.id, log.approvals),
     };
   });
 

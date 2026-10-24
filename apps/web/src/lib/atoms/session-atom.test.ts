@@ -62,6 +62,7 @@ describe("foldSessionEvent and the live-task list", () => {
       usage: { models: [] },
       queued: [],
       tasks: [held, waiting],
+      approvals: [],
     } satisfies SessionEvent);
     expect(attached.tasks).toEqual([held, waiting]);
 

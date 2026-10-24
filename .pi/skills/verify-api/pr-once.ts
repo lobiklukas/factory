@@ -59,8 +59,8 @@ const observed: {
   mode: string;
   sessionId: SessionId | null;
   secondSessionId: SessionId | null;
-  opened: { number: number; url: string } | null;
-  repeated: { number: number; url: string } | null;
+  opened: { number: number; url: string; outcome: string } | null;
+  repeated: { number: number; url: string; outcome: string } | null;
   prOpened: number;
   checks: Record<string, CheckRecord>;
 } = {
@@ -158,6 +158,11 @@ const reopen = Effect.gen(function* () {
   const opened = yield* step(sessions, sessionId);
   observed.opened = opened;
 
+  assert(
+    "and it says it made the GitHub call, rather than reading a record (LOB-212)",
+    opened.outcome === "opened",
+    `outcome=${opened.outcome}`,
+  );
   const after = yield* sessions.get(sessionId);
   observed.prOpened = prEntries(after.entries);
 
@@ -185,6 +190,13 @@ const reopen = Effect.gen(function* () {
     "a repeated step returns the same PR",
     repeated.number === opened.number && repeated.url === opened.url,
     `number=${repeated.number} url=${repeated.url}`,
+  );
+  // The tag is what a caller could not get before it: the repeat is answered by the log, so the
+  // link is the same and the path is not.
+  assert(
+    "and the repeat is tagged already-open: the log answered it, GitHub was not asked (LOB-212)",
+    repeated.outcome === "already-open",
+    `outcome=${repeated.outcome}`,
   );
   const settled = yield* sessions.get(sessionId);
   assert(
@@ -218,6 +230,13 @@ const second = Effect.gen(function* () {
     "and records it in its own log, exactly once",
     prEntries(itsOwn.entries) === 1,
     `prUrl=${String(itsOwn.session.prUrl)} prOpened=${prEntries(itsOwn.entries)}`,
+  );
+  // The guard is the session's own log, so this session had nothing recorded to read: it is
+  // `opened` on the same branch the first session already opened a PR from (LOB-212).
+  assert(
+    "and it is tagged opened for its own call, not borrowed from the first session's record",
+    opened.outcome === "opened",
+    `outcome=${opened.outcome}`,
   );
   // The first session is untouched by the second one's step.
   const firstSession = yield* sessions.get(first);

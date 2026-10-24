@@ -16,6 +16,11 @@
  * therefore never share a memo, and this step is not a task at all. They can share the session's
  * log, which is what this reads.
  *
+ * The answer says which path produced it (`outcome`, LOB-212): the same `{number, url}` comes from a
+ * fresh GitHub call and from a retry that never made one, and a caller that has to tell them apart
+ * cannot do it from the link. The tag is additive — a reader that wants only the link still decodes
+ * the answer with `PullRequest`.
+ *
  * The guard is keyed by the session, never by the branch: two sessions that push the same head and
  * base each open their own PR, because each reads its own `factory.pr` document.
  *
@@ -40,7 +45,7 @@ import {
   type PullRequestRecord,
 } from "@repo/harness";
 import type { CredentialError, CredentialProvider } from "./credentials";
-import type { PrError, PullRequest } from "./pr";
+import type { OpenedPullRequest, PrError } from "./pr";
 import { buildPrBody, createPullRequest } from "./pr";
 
 export type OpenPullRequestInput = {
@@ -68,7 +73,7 @@ export type OpenPullRequestInput = {
 export const openPullRequest = (
   input: OpenPullRequestInput,
 ): Effect.Effect<
-  PullRequest,
+  OpenedPullRequest,
   PrError | CredentialError | SessionError,
   CredentialProvider | HttpClient.HttpClient | SqlClient
 > =>
@@ -77,6 +82,9 @@ export const openPullRequest = (
       input.harness,
       input.conversation,
     );
+    // Read before the call, so the tag names the path this invocation took rather than what the
+    // document ends the turn holding: a first open that lost its index row is still "opened".
+    const outcome = recorded === undefined ? "opened" : "already-open";
     const pr = recorded ?? (yield* open(input));
 
     const sql = yield* SqlClient;
@@ -92,7 +100,7 @@ export const openPullRequest = (
       ),
     );
 
-    return { number: pr.number, url: pr.url };
+    return { number: pr.number, url: pr.url, outcome };
   });
 
 /** The one call to GitHub, its record, and the event an attached client sees. */

@@ -88,6 +88,7 @@ import {
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { PullRequest } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
@@ -1561,8 +1562,13 @@ describe("the PR step", () => {
     expect(github.requests).toEqual([
       { method: "POST", url: "/repos/lobiklukas/factory/pulls" },
     ]);
-    expect(result.opened).toEqual({ number: 7, url });
-    expect(result.repeated).toEqual({ number: 7, url });
+    // The first call made the request, so it says so; the retry read the log, so it says that.
+    expect(result.opened).toEqual({ number: 7, url, outcome: "opened" });
+    expect(result.repeated).toEqual({
+      number: 7,
+      url,
+      outcome: "already-open",
+    });
     expect(result.summary.prUrl).toBe(url);
     expect(result.listed?.prUrl).toBe(url);
     // The lost row is restored from the log by a retry, and there is no second PR to show for it.
@@ -1603,11 +1609,48 @@ describe("the PR step", () => {
     );
 
     expect(github.requests).toHaveLength(1);
-    expect(pair.opened).toEqual([
+    // Serialized, so exactly one of the two overlapped calls is the one that opened it.
+    expect(pair.opened.map((answer) => answer.outcome).sort()).toEqual([
+      "already-open",
+      "opened",
+    ]);
+    expect(
+      pair.opened.map(({ number, url: link }) => ({ number, url: link })),
+    ).toEqual([
       { number: 9, url },
       { number: 9, url },
     ]);
     expect(pair.prUrl).toBe(url);
+  }, 120_000);
+
+  it("answers a client that reads only {number, url} exactly as it did before the tag", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/13";
+    const github = makeGithubFake(201, { number: 13, url });
+
+    const answer = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          title: "open a PR for a narrow client",
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR for a narrow client",
+          head: "factory/ses_13",
+          base: "main",
+        };
+        return yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+      }),
+    );
+
+    // The tag is additive: a client holding only `PullRequest` still decodes the answer, and it
+    // holds only the two fields it knows.
+    const narrow = Schema.decodeSync(PullRequest)(answer);
+    expect(narrow).toEqual({ number: 13, url });
+    expect(github.requests).toHaveLength(1);
   }, 120_000);
 
   it("opens one PR per session, not one per branch: the guard is the session's own log", async () => {
@@ -1660,9 +1703,21 @@ describe("the PR step", () => {
     // The ledger, not the answer: a step that reads the log makes no request to make its answer.
     expect(onFirst.requests).toHaveLength(1);
     expect(onSecond.requests).toHaveLength(1);
-    expect(result.openedOne).toEqual({ number: 11, url: firstUrl });
-    expect(result.openedTwo).toEqual({ number: 12, url: secondUrl });
-    expect(result.repeatedOne).toEqual({ number: 11, url: firstUrl });
+    expect(result.openedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "opened",
+    });
+    expect(result.openedTwo).toEqual({
+      number: 12,
+      url: secondUrl,
+      outcome: "opened",
+    });
+    expect(result.repeatedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "already-open",
+    });
     // Each session reports the PR it opened, so neither link was borrowed from the other.
     expect(result.oneUrl).toBe(firstUrl);
     expect(result.twoUrl).toBe(secondUrl);
@@ -3332,6 +3387,99 @@ describe("approvals", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
   });
+});
+
+/**
+ * An approval is durable across release (LOB-147): the request is committed into the log, and both
+ * answers to "what is waiting" are folds of it — the snapshot folds the entries, the list reads the
+ * `session_approvals` row that indexes them, and `rebuildIndexes` re-derives the row from the log.
+ */
+describe("approvals after the owner is released", () => {
+  it("reports the pending approval from the fold, twice, and re-asks for nothing", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "durable approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+          detail: "a person has to answer this",
+        });
+        // The row is written with the request, so the pending list answers before anything folds.
+        const indexed = yield* sessions.listApprovals(created.id);
+
+        // Release the owner: from here the session is read by folding its log (D8).
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        const refolded = yield* sessions.get(created.id);
+        const listed = yield* sessions.listApprovals(created.id);
+        // A repeat after the release reads what the first request left behind — the row and the
+        // entry — rather than asking again.
+        const repeated = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+        });
+        const entries = (yield* sessions.get(created.id)).entries.filter(
+          (entry) => entry.kind === "other",
+        ).length;
+        // Leave no owner running: an owned session rewrites its own activity row on every event.
+        yield* sessions.close;
+        return {
+          request,
+          indexed,
+          folded,
+          refolded,
+          listed,
+          repeated,
+          entries,
+        };
+      }),
+    );
+
+    expect(outcome.indexed.approvals).toEqual([outcome.request]);
+    // The fold, not a remembered set: this snapshot comes from the log alone.
+    expect(outcome.folded.session.mode).toBe("historical");
+    expect(outcome.folded.approvals).toEqual([outcome.request]);
+    // Folding the same log again yields the same list, id by id.
+    expect(outcome.refolded.approvals).toEqual(outcome.folded.approvals);
+    expect(outcome.listed.approvals).toEqual([outcome.request]);
+    expect(outcome.repeated).toEqual(outcome.request);
+    // One request, one entry: the retry was answered by the record, not appended beside it.
+    expect(outcome.entries).toBe(1);
+  }, 120_000);
+
+  it("rebuilds the pending row from the log when the row is lost", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "rebuilt approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-rebuilt",
+          action: "tag v1",
+        });
+        yield* sessions.close;
+        // Lose the derived row, the way a dropped table or a write killed before it committed
+        // loses it. The log still holds the request.
+        yield* sql`DELETE FROM session_approvals WHERE session_id = ${created.id}`;
+        const withoutRow = yield* sessions.listApprovals(created.id);
+        const stillFolded = yield* sessions.get(created.id);
+        const report = yield* rebuildIndexes;
+        const rebuilt = yield* sessions.listApprovals(created.id);
+        return { request, withoutRow, stillFolded, report, rebuilt };
+      }),
+    );
+
+    // The list is an index: with the row gone it answers nothing until a rebuild refolds.
+    expect(outcome.withoutRow.approvals).toEqual([]);
+    // The snapshot never depended on the row — it folds the log.
+    expect(outcome.stillFolded.approvals).toEqual([outcome.request]);
+    expect(outcome.report.sessions).toBeGreaterThan(0);
+    expect(outcome.rebuilt.approvals).toEqual([outcome.request]);
+  }, 120_000);
 });
 
 /**
