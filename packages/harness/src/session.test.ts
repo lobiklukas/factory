@@ -310,7 +310,7 @@ describe("compaction", () => {
         // What the model sees: a context that starts at the summary entry.
         const opened = yield* Effect.promise(() => root.context(context));
         // What a reader sees: the transcript, summary included.
-        const snapshot = yield* readLiveSnapshot(root, ref);
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return { head: opened.head?.kind, entries: snapshot.entries };
       }),
@@ -376,7 +376,7 @@ describe("compaction", () => {
           );
           expect(settled.status).toBe("done");
         }
-        const snapshot = yield* readLiveSnapshot(root, ref);
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return snapshot.entries;
       }),
