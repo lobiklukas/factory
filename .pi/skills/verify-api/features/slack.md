@@ -25,7 +25,7 @@ also Slack's replay guard: a delivery more than `SLACK_REPLAY_WINDOW_SECONDS` (3
 refused. `verifySlackSignature` answers a **typed** verdict — `missing-signature`,
 `missing-timestamp`, `bad-timestamp`, `outside-window`, `bad-signature` — so a route can tell "unsigned"
 from "wrong secret" from "captured and replayed later", which is the fix each one needs. The window is
-checked *before* the HMAC on purpose: a replayed delivery is one whose signature is right.
+checked _before_ the HMAC on purpose: a replayed delivery is one whose signature is right.
 
 **How the skill drives it.** `./slack.sh` boots `./slack-fake.ts` on the run's `API_PORT` and runs
 `bun slack.ts`, which builds the **real** seam, the real `SessionService` and the real write-back client

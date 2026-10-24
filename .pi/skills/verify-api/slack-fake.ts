@@ -123,7 +123,11 @@ const server = Bun.serve({
         (existing) =>
           existing.channel === reply.channel && existing.root === reply.root,
       ).length;
-      if (failAfterWrite !== "" && reply.root === failAfterWrite && already === 0) {
+      if (
+        failAfterWrite !== "" &&
+        reply.root === failAfterWrite &&
+        already === 0
+      ) {
         // The reply is in the thread; the caller sees a failure and will retry.
         return json(500, { ok: false, error: "internal_error" });
       }

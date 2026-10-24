@@ -193,9 +193,9 @@ describe("verifySlackSignature", () => {
   });
 
   it("accepts a delivery at the edge of the window, and refuses one past it", () => {
-    expect(
-      signed({ nowSeconds: now + SLACK_REPLAY_WINDOW_SECONDS }),
-    ).toEqual({ ok: true });
+    expect(signed({ nowSeconds: now + SLACK_REPLAY_WINDOW_SECONDS })).toEqual({
+      ok: true,
+    });
     expect(
       signed({ nowSeconds: now + SLACK_REPLAY_WINDOW_SECONDS + 1 }),
     ).toEqual({ ok: false, refusal: "outside-window" });
@@ -277,9 +277,7 @@ describe("slackEvent", () => {
       filter,
     );
     expect(threaded?.title).toBe("Fix the widget");
-    expect(threaded?.key).toBe(
-      "C0ENG:1699999999.000000:1699999999.000100",
-    );
+    expect(threaded?.key).toBe("C0ENG:1699999999.000000:1699999999.000100");
     expect(parseSlackAddress(threaded?.key ?? "")).toEqual({
       channel: "C0ENG",
       rootTs: "1699999999.000000",
@@ -333,12 +331,11 @@ describe("slackRequestId", () => {
   it("is the message, so Slack's retries of it are one delivery", () => {
     const first = slackDelivery(payload({}), filter);
     // Slack re-sends with a different `event_id` and an `x-slack-retry-num` header.
-    const retry = slackDelivery(
-      payload({ eventId: "Ev0RETRY" }),
-      filter,
-    );
+    const retry = slackDelivery(payload({ eventId: "Ev0RETRY" }), filter);
     expect(retry?.requestId).toBe(first?.requestId);
-    expect(first?.requestId).toBe("slack:C0ENG:1699999999.000100:1699999999.000100");
+    expect(first?.requestId).toBe(
+      "slack:C0ENG:1699999999.000100:1699999999.000100",
+    );
   });
 
   it("is a different delivery for a different message in the same thread", () => {
@@ -389,16 +386,12 @@ describe("slackConfigFromEnv", () => {
 
   it("is one app or none: a missing token or secret configures nothing", () => {
     expect(slackConfigFromEnv({ ...env, botToken: undefined })).toBeUndefined();
-    expect(
-      slackConfigFromEnv({ ...env, signingSecret: "  " }),
-    ).toBeUndefined();
+    expect(slackConfigFromEnv({ ...env, signingSecret: "  " })).toBeUndefined();
   });
 
   it("watches nothing when no channel is configured", () => {
     expect(slackConfigFromEnv({ ...env, channels: "" })).toBeUndefined();
-    expect(
-      slackConfigFromEnv({ ...env, channels: " , " }),
-    ).toBeUndefined();
+    expect(slackConfigFromEnv({ ...env, channels: " , " })).toBeUndefined();
   });
 
   it("carries the optional address and phrase, trimmed", () => {
@@ -409,9 +402,7 @@ describe("slackConfigFromEnv", () => {
       text: " deploy ",
     });
     expect(app?.config.apiUrl).toBe("http://127.0.0.1:9414");
-    expect(app?.config.sessionUrlBase).toBe(
-      "http://localhost:3000/sessions/",
-    );
+    expect(app?.config.sessionUrlBase).toBe("http://localhost:3000/sessions/");
     expect(app?.filter.text).toBe("deploy");
     expect(app?.signingSecret).toEqual(Redacted.make(SECRET));
   });
@@ -427,9 +418,7 @@ describe("SlackWriteBack", () => {
     ]);
     expect(fake.requests[0]?.path).toBe("/api/conversations.replies");
     expect(fake.requests[0]?.query).toContain("channel=C0ENG");
-    expect(fake.requests[0]?.query).toContain(
-      "ts=1699999999.000000",
-    );
+    expect(fake.requests[0]?.query).toContain("ts=1699999999.000000");
     const post = fake.requests[1];
     expect(post?.path).toBe("/api/chat.postMessage");
     expect(post?.authorization).toBe("Bearer xoxb-test-token");
@@ -445,7 +434,9 @@ describe("SlackWriteBack", () => {
 
   it("replies nothing when the thread already carries this session's reply", async () => {
     const { fake, layer } = writeBack({
-      existing: [{ text: `Factory started session ${sessionId} for this message.` }],
+      existing: [
+        { text: `Factory started session ${sessionId} for this message.` },
+      ],
     });
     expect((await write(layer))._tag).toBe("Success");
     expect(fake.requests.map((request) => request.method)).toEqual(["GET"]);
@@ -453,7 +444,9 @@ describe("SlackWriteBack", () => {
 
   it("still replies when the thread carries another session's reply", async () => {
     const { fake, layer } = writeBack({
-      existing: [{ text: "Factory started session 01J8ZOTHER for this message." }],
+      existing: [
+        { text: "Factory started session 01J8ZOTHER for this message." },
+      ],
     });
     expect((await write(layer))._tag).toBe("Success");
     expect(fake.requests.map((request) => request.method)).toEqual([
@@ -463,10 +456,7 @@ describe("SlackWriteBack", () => {
   });
 
   it("names the session in the reply, and links to it when the deployment knows where", () => {
-    const withoutLink = slackReply(
-      { botToken: Redacted.make("x") },
-      sessionId,
-    );
+    const withoutLink = slackReply({ botToken: Redacted.make("x") }, sessionId);
     expect(withoutLink).toContain(sessionId);
     expect(withoutLink).not.toContain("http://localhost:3000");
     expect(

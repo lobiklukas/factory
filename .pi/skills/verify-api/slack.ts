@@ -59,7 +59,8 @@ import { DatabaseLive } from "@repo/storage-postgres";
 import { makeChecker } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const SESSION_ROOT = process.env["SESSION_ROOT"] ?? ".verify/run/slack/sessions";
+const SESSION_ROOT =
+  process.env["SESSION_ROOT"] ?? ".verify/run/slack/sessions";
 /**
  * A per-run stamp. The repo carries it so the drive can be re-run against the same database: a
  * delivery id is stable for one run (which is what the replay checks need) and new for the next
@@ -238,7 +239,10 @@ const deliveryOf = (
   return slackDelivery(body, which);
 };
 
-const deliver = (body: Record<string, unknown>, which: SlackFilter = filter) => {
+const deliver = (
+  body: Record<string, unknown>,
+  which: SlackFilter = filter,
+) => {
   const delivery = deliveryOf(body, which);
   if (delivery === undefined) {
     throw new Error(`the payload did not normalize: ${JSON.stringify(body)}`);
@@ -315,9 +319,7 @@ const run = Effect.gen(function* () {
     "Slack's two calls: the thread is read first, then one chat.postMessage, as the bot token",
     afterCreate.requests[0]?.method === "GET" &&
       afterCreate.requests[0]?.path === "/api/conversations.replies" &&
-      (afterCreate.requests[0]?.query ?? "").includes(
-        `channel=${WATCHED}`,
-      ) &&
+      (afterCreate.requests[0]?.query ?? "").includes(`channel=${WATCHED}`) &&
       posts.length === 1 &&
       posts[0]?.path === "/api/chat.postMessage" &&
       posts[0]?.authorization === `Bearer ${BOT_TOKEN}`,
@@ -326,7 +328,10 @@ const run = Effect.gen(function* () {
 
   // 5: Slack's retry of the same message carries a new `event_id`; it is the same delivery.
   const retried = yield* deliver(
-    payload({ eventId: "Ev0RETRY", text: "Fix the widget\nIt wobbles when it spins." }),
+    payload({
+      eventId: "Ev0RETRY",
+      text: "Fix the widget\nIt wobbles when it spins.",
+    }),
   );
   assert(
     "the same message again — a new event_id, a fresh signature — is a replay",
@@ -349,12 +354,15 @@ const run = Effect.gen(function* () {
   );
   assert(
     "and the refused delivery starts nothing, because no delivery was made from it",
-    deliveryOf(payload({ ts: messageTs(2) }), filter, staleAt) ===
-      undefined && (yield* sessionCount) === 1,
+    deliveryOf(payload({ ts: messageTs(2) }), filter, staleAt) === undefined &&
+      (yield* sessionCount) === 1,
     `sessions=${yield* sessionCount}`,
   );
   // The window is symmetric and Slack's own edge is inclusive: one second inside it still passes.
-  const edge = signed(payload({ ts: messageTs(3) }), NOW - SLACK_REPLAY_WINDOW_SECONDS);
+  const edge = signed(
+    payload({ ts: messageTs(3) }),
+    NOW - SLACK_REPLAY_WINDOW_SECONDS,
+  );
   assert(
     "a delivery exactly at the edge of the window is still accepted",
     edge.verdict.ok === true,
@@ -393,7 +401,9 @@ const run = Effect.gen(function* () {
   );
 
   // 8: a message in a channel the filter does not watch creates nothing, and the skip says why.
-  const unwatched = yield* deliver(payload({ channel: UNWATCHED, ts: messageTs(5) }));
+  const unwatched = yield* deliver(
+    payload({ channel: UNWATCHED, ts: messageTs(5) }),
+  );
   observed.skipped.push({
     why: "unwatched channel",
     status: unwatched.status,
@@ -490,14 +500,13 @@ const run = Effect.gen(function* () {
   assert(
     "the retry reads the thread before it replies, and posts no second reply",
     forThread("GET") >= 2 &&
-      retryLedger.replies.filter((entry) => entry.root === LOST_ACK_TS).length ===
-        1,
+      retryLedger.replies.filter((entry) => entry.root === LOST_ACK_TS)
+        .length === 1,
     `gets=${forThread("GET")} repliesInThread=${retryLedger.replies.filter((entry) => entry.root === LOST_ACK_TS).length}`,
   );
   assert(
     "and the retry is processed, reusing the session the failed attempt opened",
-    retry.status === "processed" &&
-      (yield* sessionCount) === beforeRetry,
+    retry.status === "processed" && (yield* sessionCount) === beforeRetry,
     `status=${retry.status} sessions=${yield* sessionCount} before=${beforeRetry}`,
   );
 

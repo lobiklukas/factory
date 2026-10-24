@@ -91,14 +91,17 @@ export const slackSignature = (
  * checked before the signature because a replayed delivery is one whose signature is *correct* — it
  * was a real delivery once — so "outside-window" is the honest answer, not "bad-signature".
  *
- * `nowSeconds` is injectable so the window is a fact a test can state rather than a wait.
+ * `nowSeconds` is required: this adapter reads no ambient clock, so the window is a fact the caller
+ * states — a test's fixed instant, a drive's run moment, or a route's Effect `Clock` — instead of
+ * something a signature check hides.
  */
 export const verifySlackSignature = (input: {
   readonly raw: string;
   readonly signature: string | undefined;
   readonly timestamp: string | undefined;
   readonly signingSecret: string;
-  readonly nowSeconds?: number;
+  /** The current time in seconds. Required: nothing here reads the wall clock itself. */
+  readonly nowSeconds: number;
 }): SlackSignatureVerdict => {
   const signature = input.signature ?? "";
   if (signature === "") return { ok: false, refusal: "missing-signature" };
@@ -106,8 +109,7 @@ export const verifySlackSignature = (input: {
   if (timestamp === "") return { ok: false, refusal: "missing-timestamp" };
   const seconds = Number(timestamp);
   if (!Number.isFinite(seconds)) return { ok: false, refusal: "bad-timestamp" };
-  const now = input.nowSeconds ?? Math.floor(Date.now() / 1000);
-  if (Math.abs(now - seconds) > SLACK_REPLAY_WINDOW_SECONDS) {
+  if (Math.abs(input.nowSeconds - seconds) > SLACK_REPLAY_WINDOW_SECONDS) {
     return { ok: false, refusal: "outside-window" };
   }
   const expected = slackSignature(input.raw, timestamp, input.signingSecret);
@@ -249,7 +251,8 @@ export const slackEvent = (
   // A non-message event has no message address; it is identified by Slack's event id so the skip it
   // records is one row per delivery.
   if (type !== "message" || channel === undefined || ts === undefined) {
-    const key = eventId ?? `${type ?? "unknown"}:${stringField(event, "event_ts") ?? ""}`;
+    const key =
+      eventId ?? `${type ?? "unknown"}:${stringField(event, "event_ts") ?? ""}`;
     return {
       source: "slack",
       key,
@@ -359,7 +362,10 @@ export const slackConfigFromEnv = (env: SlackEnv): SlackApp | undefined => {
       ...(sessionUrlBase === undefined ? {} : { sessionUrlBase }),
     },
     signingSecret: Redacted.make(signingSecret),
-    filter: { channels, ...(text === undefined || text === "" ? {} : { text }) },
+    filter: {
+      channels,
+      ...(text === undefined || text === "" ? {} : { text }),
+    },
   };
 };
 
@@ -420,8 +426,13 @@ export const SlackWriteBack = (
         new TriggerError({ code: "write-back", message });
 
       /** Slack's own error name when it refused on an HTTP 200. */
-      const slackFailure = (what: string, body: { error?: string }): TriggerError =>
-        fail(`${what}: Slack answered ok=false${body.error === undefined ? "" : ` (${body.error})`}`);
+      const slackFailure = (
+        what: string,
+        body: { readonly error?: string | undefined },
+      ): TriggerError =>
+        fail(
+          `${what}: Slack answered ok=false${body.error === undefined ? "" : ` (${body.error})`}`,
+        );
 
       return TriggerWriteBack.of({
         write: (input) =>
@@ -446,14 +457,15 @@ export const SlackWriteBack = (
                 `Slack answered HTTP ${replies.status} reading ${input.event.key}'s thread`,
               );
             }
-            const page = yield* HttpClientResponse.schemaBodyJson(
-              SlackReplies,
-            )(replies).pipe(
+            const page = yield* HttpClientResponse.schemaBodyJson(SlackReplies)(
+              replies,
+            ).pipe(
               Effect.mapError(() =>
                 fail(`Slack's thread for ${input.event.key} could not be read`),
               ),
             );
-            if (!page.ok) return yield* slackFailure("reading the thread", page);
+            if (!page.ok)
+              return yield* slackFailure("reading the thread", page);
             const already = (page.messages ?? []).some((message) =>
               (message.text ?? "").includes(input.sessionId),
             );
@@ -498,4 +510,3 @@ export const SlackWriteBack = (
       });
     }),
   );
-
