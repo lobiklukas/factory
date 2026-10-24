@@ -5,7 +5,19 @@
  * running the step twice returns the first answer instead of opening a second PR. That is why it
  * reads `factory.pr` before it reads a credential: the retry path never reaches the network, and a
  * process that restarted mid-step finds the link if the commit landed and calls GitHub if it did
- * not (the remaining window is LOB-178's).
+ * not (the remaining window is LOB-179's, and closing it means adopting the PR GitHub already
+ * opened when it refuses a duplicate, not a second local record).
+ *
+ * The record is the durable answer, and it is deliberately *not* `api.memo`. A memo belongs to one
+ * task invocation — `@earendil-works/pi-durable`'s `TaskExecutionApi.memo` is documented as "a
+ * durable memo of this task", and the scheduler keeps it on that task's record, read by
+ * `invocation.taskId` — while `TaskOptions` names only `ownership`, `conversationId` and
+ * `background`, so `createTask` takes no caller-chosen id. Two separate calls of this step can
+ * therefore never share a memo, and this step is not a task at all. They can share the session's
+ * log, which is what this reads.
+ *
+ * The guard is keyed by the session, never by the branch: two sessions that push the same head and
+ * base each open their own PR, because each reads its own `factory.pr` document.
  *
  * The index write runs on *both* paths, before anything is returned. It is one idempotent
  * `UPDATE`, and the case that needs it is exactly the retry: a first attempt whose commit landed
