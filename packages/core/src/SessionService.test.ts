@@ -833,7 +833,8 @@ describe("session list", () => {
     const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
     const token = Array.from(
       { length: 5 },
-      () => alphabet[Effect.runSync(Random.nextIntBetween(0, alphabet.length - 1))],
+      () =>
+        alphabet[Effect.runSync(Random.nextIntBetween(0, alphabet.length - 1))],
     ).join("");
     const runPrefix = `ses_f${token}`;
     const mineIds: string[] = [];
