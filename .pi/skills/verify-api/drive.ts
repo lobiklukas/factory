@@ -569,6 +569,64 @@ const program = Effect.gen(function* () {
     `reset entries=${bareEntries.length} last=${JSON.stringify(bareEntries.at(-1)?.text ?? null)}`,
   );
 
+  // Feature: compaction (LOB-185). `compactSession` admits a compaction task in the log and
+  // answers its id; the summary it writes is a `compaction` entry, and everything it stands in for
+  // is still in the transcript. The message before it is long on purpose: Pi Durable summarizes an
+  // old prefix and keeps the newest `keepRecentTokens` (20k on this window's policy) verbatim, so a
+  // shorter transcript has nothing to compact and the task completes without a summary.
+  const toCompact = yield* client.createSession({
+    requestId: `verify-api-compact-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toCompact.id,
+    content: "y".repeat(90_000),
+  });
+  // Wait for the answer, not for `busy` to clear: a compaction admitted before the run has written
+  // its entries would have nothing to summarize.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map(
+          (state) =>
+            !state.live.busy &&
+            state.entries.some((entry) => entry.kind === "assistant"),
+        ),
+      ),
+    "the turn before the compaction to settle",
+  );
+  const compactAdmitted = yield* client.compactSession({
+    sessionId: toCompact.id,
+    instructions: "the long probe message",
+  });
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some((entry) => entry.kind === "compaction"),
+        ),
+      ),
+    "the compaction's summary entry",
+  );
+  const afterCompact = yield* client.getSession({ sessionId: toCompact.id });
+  const summary = afterCompact.entries.find(
+    (entry) => entry.kind === "compaction",
+  );
+  assert(
+    "compactSession answers a task id and its summary lands in the transcript",
+    compactAdmitted.taskId.length > 0 &&
+      compactAdmitted.session.id === toCompact.id &&
+      compactAdmitted.session.status === "idle" &&
+      summary !== undefined &&
+      summary.text.length > 0 &&
+      // Nothing is dropped: what the summary stands in for is still readable.
+      afterCompact.entries.some(
+        (entry) => entry.kind === "user" && entry.text.startsWith("y"),
+      ),
+    `taskId=${compactAdmitted.taskId} status=${compactAdmitted.session.status} kinds=${afterCompact.entries.map((entry) => entry.kind).join(", ")}`,
+  );
+
   return { id: created.id };
 }).pipe(Effect.provide(ProtocolLive), Effect.scoped);
 

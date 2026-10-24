@@ -14,10 +14,20 @@ import {
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import {
+  DEFAULT_COMPACTION_POLICY,
+  type CompactionPolicy,
+} from "@earendil-works/pi-durable";
 
 export type ModelBackend = "anthropic" | "faux";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
+
+/**
+ * The id pi-ai's faux provider publishes its model under, so a session can name it before the
+ * provider is registered (`fauxProvider` defaults to it).
+ */
+const FAUX_MODEL_ID = "faux-1";
 
 /** The command the faux script runs unless a caller scripts another one. */
 export const FAUX_COMMAND = "echo faux-ok";
@@ -28,6 +38,11 @@ export type ModelAccess = {
   /** Provider id and model id stored in a conversation's agent. */
   readonly provider: string;
   readonly modelId: string;
+  /**
+   * The context window the provider's catalog publishes for this model, which is what a session's
+   * compaction thresholds are derived from; `0` when the catalog does not say.
+   */
+  readonly contextWindow: number;
 };
 
 /** The text of the newest `toolName` result in the transcript, or `undefined` if it has not run. */
@@ -65,6 +80,9 @@ const lastUserText = (messages: readonly Message[]): string => {
   return "";
 };
 
+/** How a compaction task opens the conversation it wants summarized. */
+const SUMMARY_PROMPT_PREFIX = "<conversation>";
+
 /**
  * The answer a faux session gives, derived from its own transcript rather than from a queue: the
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
@@ -77,6 +95,13 @@ export const fauxAnswer = (
   messages: readonly Message[],
   command: string = FAUX_COMMAND,
 ): AssistantMessage => {
+  // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
+  // text, because a tool call there fails the compaction and the run that waited for it.
+  if (lastUserText(messages).trimStart().startsWith(SUMMARY_PROMPT_PREFIX)) {
+    return fauxAssistantMessage(
+      "Summary: the session ran its tools and kept working.",
+    );
+  }
   const output = toolResultText(messages, "bash");
   if (output === undefined) {
     // `toolUse` is what a real provider reports for a tool-calling answer; without it the
@@ -93,7 +118,16 @@ export const fauxAnswer = (
 export type ModelAccessOptions = {
   /** The command the faux script runs, for a run that needs a turn to take a known time. */
   readonly fauxCommand?: string | undefined;
+  /**
+   * The context window the faux model is published with (pi-ai's default is 128k). Lowering it is
+   * how a test drives a session past a compaction threshold without a 100k-token transcript.
+   */
+  readonly contextWindow?: number | undefined;
 };
+
+/** What the provider's catalog says this model's window is, or `0` when it says nothing. */
+const windowOf = (models: Models, provider: string, modelId: string): number =>
+  models.getModel(provider, modelId)?.contextWindow ?? 0;
 
 export const createModelAccess = (
   backend: ModelBackend,
@@ -103,7 +137,15 @@ export const createModelAccess = (
   const fauxCommand = options.fauxCommand ?? FAUX_COMMAND;
 
   if (backend === "faux") {
-    const faux = fauxProvider();
+    const faux = fauxProvider(
+      options.contextWindow === undefined
+        ? {}
+        : {
+            models: [
+              { id: FAUX_MODEL_ID, contextWindow: options.contextWindow },
+            ],
+          },
+    );
     models.setProvider(faux.provider);
     // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
     const repeat: FauxResponseFactory = (context) => {
@@ -111,11 +153,13 @@ export const createModelAccess = (
       return fauxAnswer(context.messages, fauxCommand);
     };
     faux.setResponses([repeat]);
+    const modelId = faux.models[0].id;
     return {
       backend,
       models,
       provider: "faux",
-      modelId: faux.models[0].id,
+      modelId,
+      contextWindow: windowOf(models, "faux", modelId),
     };
   }
 
@@ -125,5 +169,47 @@ export const createModelAccess = (
     models,
     provider: "anthropic",
     modelId: DEFAULT_ANTHROPIC_MODEL,
+    contextWindow: windowOf(models, "anthropic", DEFAULT_ANTHROPIC_MODEL),
+  };
+};
+
+/** The largest share of the window one of pi-durable's thresholds may take. */
+const WINDOW_SHARE = 0.25;
+
+/**
+ * The compaction thresholds for one model's window (B4).
+ *
+ * pi-durable's `DEFAULT_COMPACTION_POLICY` assumes a window of a few hundred thousand tokens: an
+ * answer reserve of 16k, 20k of recent context kept verbatim, and 32k of background room are
+ * proportions of such a window and nonsense beside a small one. With a 4k window the reserve alone
+ * is bigger than the window, so the blocking threshold is negative — every request is over it —
+ * while the 20k tail the policy keeps is longer than the whole transcript, so range selection finds
+ * nothing to summarize and the session never compacts at all.
+ *
+ * Each threshold is therefore capped by a quarter of the window and never grows past the pinned
+ * default: a large model keeps today's behaviour to the token, and a small one gets thresholds it
+ * can reach. Background compaction — summarizing ahead of a request rather than blocking on it —
+ * is only worth having when a quarter of the window is still room to work in, so it is off below
+ * that.
+ */
+export const compactionPolicyFor = (
+  contextWindow: number,
+): CompactionPolicy => {
+  if (contextWindow <= 0) {
+    // Nothing to derive from: the package's own defaults are the only honest answer.
+    return { ...DEFAULT_COMPACTION_POLICY };
+  }
+  const share = Math.floor(contextWindow * WINDOW_SHARE);
+  return {
+    enabled: DEFAULT_COMPACTION_POLICY.enabled,
+    reserveTokens: Math.min(DEFAULT_COMPACTION_POLICY.reserveTokens, share),
+    keepRecentTokens: Math.min(
+      DEFAULT_COMPACTION_POLICY.keepRecentTokens,
+      share,
+    ),
+    backgroundTokens:
+      contextWindow >= 4 * DEFAULT_COMPACTION_POLICY.reserveTokens
+        ? Math.min(DEFAULT_COMPACTION_POLICY.backgroundTokens, share)
+        : 0,
   };
 };

@@ -49,7 +49,7 @@ import type {
 import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
-import type { ModelAccess } from "./models";
+import { compactionPolicyFor, type ModelAccess } from "./models";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -247,7 +247,13 @@ export const openSession = (
               cwd: target.cwd ?? options.cwd,
               shellEnv: sessionShellEnv(),
             }),
-          settings: { progress: SESSION_PROGRESS },
+          settings: {
+            progress: SESSION_PROGRESS,
+            // Long sessions compact (B4). The thresholds follow the model's context window
+            // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
+            // never, and a large one keeps pi-durable's pinned defaults.
+            compaction: compactionPolicyFor(options.model.contextWindow),
+          },
         },
         BACKGROUND_CONTEXT,
       ),
@@ -464,6 +470,23 @@ export const resetSession = (
 
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
+
+/**
+ * Compact the session on demand (B4): Pi Durable admits a compaction task that summarizes an old
+ * prefix of the model context and places the summary as the new head marker, so the transcript
+ * keeps every entry and the model's next request starts from the summary.
+ *
+ * The task id is the wire form of Pi Durable's branded id, like a submission's. Nothing to compact
+ * — a context shorter than the policy keeps verbatim — completes the task without a summary, which
+ * is the package's rule (range selection finds no cut), not a failure here.
+ */
+export const compactSession = (
+  conversation: Conversation,
+  instructions: string | undefined,
+): Effect.Effect<string, SessionError> =>
+  attempt("compact session", () =>
+    conversation.compact(instructions, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(String));
 
 /**
  * Whether a run is in flight. Read from the committed `pi.live` document, so it is what the log

@@ -1061,6 +1061,82 @@ describe("reset", () => {
   });
 });
 
+/**
+ * B4's manual half (LOB-185): `compact` admits a compaction task, answers its id, and the summary
+ * the task writes is a transcript entry — one the fold agrees with, so a released session shows it
+ * too. The model context itself (that the next request starts at the summary) is the harness's
+ * contract and is read there (`packages/harness/src/session.test.ts`).
+ *
+ * The message is long on purpose: Pi Durable summarizes an *old prefix* and keeps the newest
+ * `keepRecentTokens` verbatim, so a transcript shorter than that tail has nothing to compact and
+ * the task completes without a summary. 90k characters is ~22.5k tokens, past the 20k tail this
+ * window's policy keeps.
+ */
+describe("compact", () => {
+  it("admits a compaction task and lands its summary in the transcript", async () => {
+    const { result, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "compacting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "z".repeat(90_000),
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the compaction to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const result = yield* sessions.compact({
+          sessionId: created.id,
+          instructions: "  focus on the long message  ",
+        });
+        // The task settles in the background, so the entry is what to wait for — not `busy`,
+        // which a compaction never sets (it is not a run).
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map((snapshot) =>
+                snapshot.entries.some((entry) => entry.kind === "compaction"),
+              ),
+            ),
+          "the compaction's summary entry",
+        );
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { result, before, live, folded };
+      }),
+    );
+
+    // The call answers the task's id and the session it belongs to; the work is the task's.
+    expect(result.taskId.length).toBeGreaterThan(0);
+    expect(result.session.id).toBe(live.session.id);
+    // A compaction is not a run: the session is idle before it, while it works, and after it.
+    expect(result.session.status).toBe("idle");
+
+    const summaries = live.entries.filter(
+      (entry) => entry.kind === "compaction",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.text.length).toBeGreaterThan(0);
+    // Nothing is dropped: the turns the summary stands in for are still readable above it.
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, summary included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+});
+
 describe("repo binding", () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(
