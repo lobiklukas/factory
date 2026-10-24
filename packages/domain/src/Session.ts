@@ -150,6 +150,29 @@ export const ModelUsage = Schema.Struct({
 });
 export type ModelUsage = typeof ModelUsage.Type;
 
+/**
+ * One live task in a session: what is running right now, in which phase, on whose behalf, and what
+ * it waits for. Mirrors Pi Durable's `TaskGraph` node (LOB-183).
+ *
+ * Only live tasks appear — `pending`, `running`, `waiting` and `completing`. A settled task is gone
+ * from the list rather than carried as a fourth kind of history, because the durable record is the
+ * log and this is the "what is happening now" projection.
+ *
+ * `phase` is absent for `completing`: a task that has decided its outcome runs no more phases. `id`
+ * and `owner` are strings because a Pi Durable id is a number that clients should not do arithmetic
+ * on; `waitingOn` names the live task ids a `waiting` task joins.
+ */
+export const SessionTask = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  status: Schema.Literals(["pending", "running", "waiting", "completing"]),
+  phase: Schema.optional(Schema.String),
+  waitingOn: Schema.Array(Schema.String),
+  owner: Schema.optional(Schema.String),
+  conversations: Schema.Array(Schema.String),
+});
+export type SessionTask = typeof SessionTask.Type;
+
 /** Spend, keyed the way Pi Durable keys it: `provider/modelId` for models, tool name for tools. */
 export const SessionUsage = Schema.Struct({
   models: Schema.Array(
@@ -183,6 +206,7 @@ export const SessionSnapshotFields = {
   live: SessionLive,
   usage: SessionUsage,
   queued: Schema.Array(QueuedMessage),
+  tasks: Schema.Array(SessionTask),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
@@ -198,7 +222,8 @@ export type SessionSnapshot = typeof SessionSnapshot.Type;
  *
  * The snapshot's `session` is the summary at attachment. Later changes to it arrive as events of
  * their own: `status` when the run starts or stops, and a `title` entry (the control plane commits
- * one, D7) when the session is renamed.
+ * one, D7) when the session is renamed. `tasks` is the live-task list, sent when Pi Durable's task
+ * graph changes — on a commit, not on a poll — so a panel of live work settles with the work.
  */
 export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("snapshot", SessionSnapshotFields),
@@ -207,6 +232,7 @@ export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("usage", { usage: SessionUsage }),
   Schema.TaggedStruct("status", { status: SessionStatus }),
   Schema.TaggedStruct("queued", { queued: Schema.Array(QueuedMessage) }),
+  Schema.TaggedStruct("tasks", { tasks: Schema.Array(SessionTask) }),
   Schema.TaggedStruct("prOpened", { prUrl: Schema.String }),
 ]);
 export type SessionEvent = typeof SessionEvent.Type;

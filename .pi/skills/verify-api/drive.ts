@@ -291,6 +291,16 @@ const program = Effect.gen(function* () {
       snapshot.entries.length === 0,
     `first event=${snapshot?._tag} mode=${snapshot?.session?.mode}`,
   );
+  // Feature: the live-task list (LOB-183). No durable task is started here — this driver has no
+  // RPC that starts one — so the list is present and empty, which is what an idle session's panel
+  // reads. The projection itself is proven in `packages/harness/src/tasks.test.ts`.
+  assert(
+    "the snapshot carries the live-task list",
+    snapshot?._tag === "snapshot" &&
+      Array.isArray(snapshot.tasks) &&
+      snapshot.tasks.length === 0,
+    `tasks=${JSON.stringify(snapshot?._tag === "snapshot" ? snapshot.tasks : null)}`,
+  );
   assert(
     "the stream carries entries as they commit",
     events.some((event) => event._tag === "entry"),
