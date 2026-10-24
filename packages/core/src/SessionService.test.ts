@@ -923,8 +923,16 @@ describe("session list", () => {
 
     const entries = result.pages.flatMap((page) => page.value.sessions);
     const keys = entries.map((entry) => `${entry.lastActivityAt}|${entry.id}`);
-    // Ordering contract, page after page: newest activity first, id descending to break ties.
-    expect(keys).toEqual([...keys].sort().reverse());
+    // Ordering contract, page after page: newest activity first. The wire renders
+    // `lastActivityAt` at millisecond precision, so rows sharing a millisecond
+    // are not totally ordered by the rendered key — only the timestamp itself
+    // must be non-increasing; the id tie-break lives in the cursor, not here.
+    // (See LOB-100.) The rendered timestamp must never rise as we page.
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i]!.lastActivityAt <= entries[i - 1]!.lastActivityAt).toBe(
+        true,
+      );
+    }
     expect(new Set(keys).size).toBe(keys.length);
     // The loop ended because the cursor ran out, not because it hit its budget: the list pages to
     // the end of a database of any size. This is the assertion the old constant bound broke.
