@@ -3,11 +3,19 @@ import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import { GitForkIcon, SquareIcon, XIcon } from "lucide-react";
+import { GitForkIcon, Minimize2Icon, SquareIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
+import type { CompactionWindow } from "@/lib/compaction-view";
 import {
+  compactionDelta,
+  compactionRow,
+  formatSpend,
+  spendOf,
+} from "@/lib/compaction-view";
+import {
+  compactSessionAtom,
   forkSessionAtom,
   sendMessageAtom,
   sessionAtom,
@@ -109,11 +117,15 @@ export const SessionPane = ({
   const [result, attach] = useAtom(sessionAtom);
   const send = useAtomSet(sendMessageAtom);
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
+  const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const record = useAtomSet(recordSession);
   const forget = useAtomSet(forgetSession);
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [forking, setForking] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [compactionWindow, setCompactionWindow] =
+    useState<CompactionWindow | null>(null);
   const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -133,8 +145,55 @@ export const SessionPane = ({
     if (view !== null) record(view.summary);
   }, [record, view]);
 
+  /**
+   * Freeze a compaction's end reading once its spend has landed (LOB-223).
+   *
+   * The summary row and the usage event are separate stream events, so the row can appear before
+   * the summarizer's own spend is written. Waiting for both is why this is an effect rather than a
+   * value computed at press time: the delta is read live until the transcript holds the row *and*
+   * the session has spent more than it had at the press, and from then on it is a fixed number, so
+   * later turns cannot quietly grow it.
+   */
+  useEffect(() => {
+    if (view === null || compactionWindow === null) return;
+    if (compactionWindow.after !== null) return;
+    if (compactionRow(compactionWindow, sessionId, view.entries) === undefined)
+      return;
+    const began = spendOf(compactionWindow.before);
+    const now = spendOf(view.usage);
+    if (began.tokens === now.tokens && began.costTotal === now.costTotal)
+      return;
+    setCompactionWindow({ ...compactionWindow, after: view.usage });
+  }, [compactionWindow, sessionId, view]);
+
   const attaching = AsyncResult.isInitial(result);
   const failure = AsyncResult.isFailure(result) ? result.cause : null;
+
+  /**
+   * The row the current compaction window belongs to (LOB-223). Computed once for the transcript:
+   * "which summary did my press write" is a question about the list, not about a row.
+   */
+  const compactionSummaryRow =
+    view === null
+      ? undefined
+      : compactionRow(compactionWindow, sessionId, view.entries);
+
+  /**
+   * Why Compact cannot be pressed right now, or `null` when it can (LOB-223).
+   *
+   * A disabled button that says nothing is a dead control: the same header either has a run in
+   * flight (compact at the next boundary is a different action from compacting now, so this one
+   * waits) or a pane that has not attached. Both reasons are in the DOM — as the button's `title`
+   * and, for a screen reader, as the description it points at.
+   */
+  const compactBlocked =
+    view === null
+      ? failure === null
+        ? "Attaching to the session"
+        : "This session could not be read"
+      : view.live.busy
+        ? "Wait for this run to finish before compacting"
+        : null;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -157,6 +216,76 @@ export const SessionPane = ({
               {queued.length} queued
             </Badge>
           ) : null}
+          {/*
+           * The session's own spend, beside the actions that change it (LOB-223). It is a running
+           * total for the whole session, so it is the reading a compaction is measured against —
+           * and it prints no dollar figure when the provider reported none.
+           */}
+          {view === null ? null : (
+            <span
+              data-session-usage
+              className="font-mono text-[10px] text-muted-foreground tabular-nums"
+              title="This session's usage so far"
+            >
+              {formatSpend(spendOf(view.usage))}
+            </span>
+          )}
+          {/*
+           * Compact now (LOB-185's RPC, LOB-222's atom, LOB-223's action). The call admits a task
+           * and answers its id; the summary lands in the transcript over the stream, so there is
+           * nothing to await here and nothing to navigate to.
+           */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Compact session"
+            title={
+              compacting
+                ? "Compacting"
+                : (compactBlocked ?? "Compact this session now")
+            }
+            aria-busy={compacting}
+            aria-describedby={
+              compactBlocked === null ? undefined : "compact-blocked"
+            }
+            disabled={compactBlocked !== null || compacting}
+            onClick={() => {
+              if (view === null) return;
+              setCompacting(true);
+              // The before reading, and where the transcript ended: the summary the task writes is
+              // the first compaction entry after this one, and its spend is the difference.
+              setCompactionWindow({
+                sessionId,
+                before: view.usage,
+                entriesBefore: view.entries.length,
+                after: null,
+              });
+              void compact({ sessionId })
+                .catch((cause: unknown) => {
+                  // Nothing was admitted, so there is no row to measure; drop the readings too, so
+                  // a later compaction is not charged for this attempt.
+                  setCompactionWindow(null);
+                  toast.error("No compaction was started", {
+                    description:
+                      cause instanceof Error ? cause.message : String(cause),
+                  });
+                })
+                .finally(() => setCompacting(false));
+            }}
+          >
+            {compacting ? (
+              <Spinner className="size-3.5 text-muted-foreground" />
+            ) : (
+              <Minimize2Icon className="size-4" strokeWidth={1.75} />
+            )}
+            Compact
+          </Button>
+          {compactBlocked === null ? null : (
+            <span id="compact-blocked" className="sr-only">
+              {compactBlocked}
+            </span>
+          )}
           {/*
            * Fork from here (LOB-182). A text button, not an icon-only one: the header has the room,
            * and "Fork" beside the status chip says what the live session can become without the
@@ -258,7 +387,15 @@ export const SessionPane = ({
                     messageId={entry.id}
                     scrollAnchor={index === view.entries.length - 1}
                   >
-                    <TranscriptRow entry={entry} />
+                    <TranscriptRow
+                      entry={entry}
+                      spend={
+                        compactionSummaryRow === index &&
+                        compactionWindow !== null
+                          ? compactionDelta(compactionWindow, view.usage)
+                          : undefined
+                      }
+                    />
                   </MessageScrollerItem>
                 ))}
 
