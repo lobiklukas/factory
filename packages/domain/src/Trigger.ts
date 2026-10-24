@@ -12,6 +12,11 @@
  *   not a row, because which label means which repo is a deployment's opinion and not a fact the
  *   log should carry.
  *
+ * A rule's `repo` is the fallback, not the answer: a source that knows its own repository —
+ * GitHub's `repository.full_name` (LOB-190), where the same label means a different repo per
+ * installation — puts it on the event, and the event's repo wins. A deployment-level default would
+ * silently run the wrong repo's work on the right issue's words.
+ *
  * `resolveMapping` and `renderPrompt` are pure, so the mapping half is testable with no database
  * and the service half (dedupe, create) is the only part that needs one.
  */
@@ -20,9 +25,15 @@ import { RepoSlug, SessionId } from "@repo/domain/Session";
 
 /**
  * Where a delivery came from. `generic` is the plain inbound webhook: the caller names the label
- * its payload carries and the seam does the rest. `jira` is the Jira Cloud issue webhook (LOB-189).
+ * its payload carries and the seam does the rest. `jira` is the Jira Cloud issue webhook (LOB-189),
+ * `github` GitHub's issues webhook (LOB-190).
  */
-export const TriggerSource = Schema.Literals(["linear", "generic", "jira"]);
+export const TriggerSource = Schema.Literals([
+  "linear",
+  "generic",
+  "jira",
+  "github",
+]);
 export type TriggerSource = typeof TriggerSource.Type;
 
 /**
@@ -39,6 +50,10 @@ export const TriggerEvent = Schema.Struct({
   title: Schema.String,
   body: Schema.String,
   labels: Schema.Array(Schema.String),
+  /**
+   * The repository the payload names, when the source names one. Absent means "the rule decides".
+   */
+  repo: Schema.optional(RepoSlug),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
 
@@ -156,6 +171,9 @@ export const renderPrompt = (template: string, event: TriggerEvent): string => {
 /**
  * The first rule whose label the event carries, as the mapping it implies. `undefined` is
  * `unmappable`: the seam has no opinion about this event, so it starts nothing and says so.
+ *
+ * The event's own repo wins over the rule's when it names one: a rule says *which label starts
+ * work*, and for GitHub the answer to *which repo* is in the payload.
  */
 export const resolveMapping = (
   rules: ReadonlyArray<TriggerRule>,
@@ -166,7 +184,7 @@ export const resolveMapping = (
   );
   if (rule === undefined) return undefined;
   return {
-    repo: rule.repo,
+    repo: event.repo ?? rule.repo,
     prompt: renderPrompt(rule.prompt, event),
     label: rule.label,
     ...(rule.baseRef === undefined ? {} : { baseRef: rule.baseRef }),

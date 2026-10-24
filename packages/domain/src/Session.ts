@@ -171,11 +171,22 @@ export const SessionTask = Schema.Struct({
 });
 export type SessionTask = typeof SessionTask.Type;
 
-/** Spend, keyed the way Pi Durable keys it: `provider/modelId` for models, tool name for tools. */
+/**
+ * Spend, keyed the way Pi Durable keys it: `provider/modelId` for models, tool name for tools.
+ *
+ * Both buckets carry the same counters, because a tool result may report spend of its own (an
+ * execution that calls a model, like a subagent) and it lands in `pi.usage.tools` with no model
+ * identity. A session's total is therefore the two buckets added, never `models` alone — which is
+ * what `usageCostTotal` in the harness does, for both the live writer and the rebuild fold.
+ *
+ * `tools` is empty rather than absent for a session whose tools report nothing: an empty list is
+ * "nothing to attribute", and the list surface's cost total is unaffected by the distinction.
+ */
 export const SessionUsage = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({ key: Schema.String, usage: ModelUsage }),
   ),
+  tools: Schema.Array(Schema.Struct({ key: Schema.String, usage: ModelUsage })),
 });
 export type SessionUsage = typeof SessionUsage.Type;
 

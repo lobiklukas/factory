@@ -33,7 +33,7 @@ const emptyView = (summary: SessionSummary): SessionView => ({
   summary,
   entries: [],
   live: { busy: false, tools: [] },
-  usage: { models: [] },
+  usage: { models: [], tools: [] },
   queued: [],
   tasks: [],
 });

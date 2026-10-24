@@ -113,6 +113,7 @@ import {
   resetSession,
   snapshotEvent,
   submitMessage,
+  usageCostTotal,
   writeApprovalDecided,
   writeApprovalRequested,
   writeCurationUsage,
@@ -415,9 +416,12 @@ const sameStrings = (
   left.length === right.length &&
   left.every((value, index) => value === right[index]);
 
-/** Total spend, which is what the list shows; per-model detail stays in the snapshot. */
-const costOf = (usage: SessionUsage): number =>
-  usage.models.reduce((total, model) => total + model.usage.costTotal, 0);
+/**
+ * Total spend, which is what the list shows: both `pi.usage` buckets, models and tools (LOB-153).
+ * The harness exports the sum because the rebuild fold writes the same number, and a session whose
+ * spend is a tool's would otherwise show a live total the rebuilt index cannot reproduce.
+ */
+const costOf = (usage: SessionUsage): number => usageCostTotal(usage);
 
 const paper = <A, E>(
   what: string,

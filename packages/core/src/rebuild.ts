@@ -37,7 +37,7 @@ import {
   SessionError as SessionErrorClass,
   SessionId,
 } from "@repo/domain/Session";
-import { readSessionLog } from "@repo/harness";
+import { readSessionLog, usageCostTotal } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 
 export type RebuildReport = {
@@ -155,10 +155,10 @@ export const rebuildIndexes: Effect.Effect<
     const title = sessionLog.entries
       .filter((entry) => entry.kind === "title")
       .at(-1)?.text;
-    const costTotal = sessionLog.usage.models.reduce(
-      (total, model) => total + model.usage.costTotal,
-      0,
-    );
+    // Both `pi.usage` buckets, models and tools: the live writer (`SessionService`'s projector)
+    // adds them the same way, so a rebuilt `cost_total` matches the number the list showed before
+    // the index was emptied. Model-only would quietly drop a tool's spend (LOB-153).
+    const costTotal = usageCostTotal(sessionLog.usage);
     const repo =
       sessionLog.binding.repo === "" ? null : sessionLog.binding.repo;
     folded.push({

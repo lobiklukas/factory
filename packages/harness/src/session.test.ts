@@ -10,14 +10,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
+import {
+  createRegistry,
+  defineExtension,
+  Harness as HarnessRuntime,
+  hook,
+  ToolTask,
+  type ToolExecutionResult,
+} from "@earendil-works/pi-durable";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
-import { diffView, projectView } from "./projection";
+import { autonomyPolicy, DEFAULT_AUTONOMY, policyExtension } from "./policy";
+import { diffView, projectView, usageCostTotal } from "./projection";
 import {
+  attempt,
   closeHarness,
   forkSession,
   isBusy,
@@ -29,6 +41,7 @@ import {
   readPullRequestDoc,
   readSessionLog,
   resetSession,
+  SESSION_PROGRESS,
   submitMessage,
   writeApprovalDecided,
   writeApprovalRequested,
@@ -788,5 +801,131 @@ describe("the cited pages a session recorded", () => {
     // The entry, not the document, is what a fold reads — and it keeps the citation of a session
     // that does not exist.
     expect(recorded.folded).toEqual([recorded.page]);
+  }, 120_000);
+});
+
+const usageLogId = `${logId}-usage`;
+
+/**
+ * A tool result's own spend, as a self-reporting tool would return it: an execution that calls a
+ * model (a subagent, a summarizer) carries usage with no model identity of its own. No tool in
+ * `CodingTools` reports any, so the probe below plays that role through Pi Durable's real
+ * `afterTool` hook — the same seam the policy uses — which is what makes `pi.usage.tools` non-empty
+ * in a real log rather than only in a hand-written JSON fixture.
+ */
+const TOOL_USAGE = {
+  input: 1_200,
+  output: 300,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 1_500,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.02 },
+};
+
+const reportingToolUsage = defineExtension({
+  name: "probe-tool-usage",
+  hooks: [
+    hook(ToolTask, {
+      afterTool: (_call, result): ToolExecutionResult => ({
+        ...result,
+        usage: TOOL_USAGE,
+      }),
+    }),
+  ],
+});
+
+/**
+ * LOB-153: the spend ledger has two buckets and the session's numbers are both.
+ *
+ * `pi.usage` keys model spend `provider/modelId` and tool spend by tool name, and the projection
+ * used to read only the first — so a session whose tools report spend attributed none of it, and
+ * the list surface's total quietly left it out. The faux model's own cost is zero (pi-ai hard-codes
+ * `cost.total = 0`), which is exactly why the probe reports a non-zero one: a zero-cost tool bucket
+ * would let a broken projection pass.
+ */
+describe("the spend a session recorded", () => {
+  it("attributes a tool's own usage to the tools bucket, live and folded", async () => {
+    const recorded = await runtime.runPromise(
+      Effect.gen(function* () {
+        const faux = createModelAccess("faux");
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.open(
+            sql,
+            { logId: usageLogId, mode: "owner" },
+            context,
+          ),
+        );
+        // The harness `openSession` builds, plus the probe: the point is a real tool result whose
+        // usage Pi Durable records, and `openSession` takes no extensions.
+        const registry = createRegistry();
+        registry.install(CodingTools);
+        registry.install(reportingToolUsage);
+        registry.install(
+          policyExtension(autonomyPolicy(DEFAULT_AUTONOMY, workdir)),
+        );
+        const harness = yield* attempt("open harness", () =>
+          HarnessRuntime.open(
+            storage,
+            {
+              models: faux.models,
+              registry,
+              env: (target) =>
+                new NodeExecutionEnv({ cwd: target.cwd ?? workdir }),
+              settings: { progress: SESSION_PROGRESS },
+            },
+            BACKGROUND_CONTEXT,
+          ),
+        );
+        const root = yield* attempt("open root conversation", () =>
+          harness.root(BACKGROUND_CONTEXT, {
+            agent: {
+              model: { provider: faux.provider, modelId: faux.modelId },
+              cwd: workdir,
+            },
+          }),
+        );
+        const submitted = yield* submitMessage(root, {
+          content: "spend something",
+          requestId: "tool-usage",
+        });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        // The live read path first, while this process owns the log.
+        const live = yield* readLiveSnapshot({ harness, root }, ref);
+        yield* closeHarness(harness);
+        // Then the fold, which is what a rebuild of the index reads.
+        const reader = yield* Effect.promise(() =>
+          PostgresStorage.open(
+            sql,
+            { logId: usageLogId, mode: "reader" },
+            context,
+          ),
+        );
+        const folded = yield* readSessionLog(reader);
+        yield* Effect.promise(() => reader.dispose());
+        return { live, folded };
+      }),
+    );
+
+    // The tool's numbers are projected, keyed by tool name, not dropped for having no model.
+    expect(recorded.folded.usage.tools).toEqual([
+      {
+        key: "bash",
+        usage: {
+          input: 1_200,
+          output: 300,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 1_500,
+          costTotal: 0.02,
+        },
+      },
+    ]);
+    // The model's own spend is still there: one bucket does not replace the other.
+    expect(recorded.folded.usage.models.length).toBeGreaterThan(0);
+    expect(recorded.folded.usage.models[0]?.key).toContain("faux/");
+    // Two read paths, one ledger: the snapshot's usage is the fold's usage.
+    expect(recorded.live.usage).toEqual(recorded.folded.usage);
+    // The total the list shows is both buckets, which is the number a rebuild has to reproduce.
+    expect(usageCostTotal(recorded.folded.usage)).toBeCloseTo(0.02);
   }, 120_000);
 });
