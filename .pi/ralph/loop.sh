@@ -52,8 +52,9 @@ RALPH_WEB_PORT="${RALPH_WEB_PORT:-$((3400 + 10 * (RALPH_WORKER - 1)))}"
 RALPH_CLAIM_TTL="${RALPH_CLAIM_TTL:-10800}"     # seconds before another worker may take over a claim
 # Only worker 1 arms auto-merge and labels protected PRs, so two workers never comment on one PR twice.
 if [ "$RALPH_WORKER" -eq 1 ]; then RALPH_MERGE="${RALPH_MERGE:-1}"; else RALPH_MERGE="${RALPH_MERGE:-0}"; fi
-# A PR touching these is never auto-merged: a human merges changes to CI, the loop itself, or lint/format/test config.
-PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$)'
+# A PR touching these is never auto-merged: a human merges changes to CI, the loop itself,
+# lint/format/test config, or infrastructure-as-code (live GitHub settings and cluster declarations).
+PROTECTED_RE='^(\.github/|\.pi/ralph/|\.pi/agents/ralph-|\.oxlintrc\.json$|\.oxfmtrc\.jsonc$|vitest\.config\.ts$|infra/|.*\.tf$|.*\.tfvars$)'
 
 WT="$RALPH_WORKTREE"
 STATE="$WT/.ralph"
