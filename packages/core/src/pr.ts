@@ -93,11 +93,13 @@ export type CreatePullRequestInput = {
 const DEFAULT_API_URL = "https://api.github.com";
 
 /**
- * Where this client sends its requests: `GITHUB_API_URL` when set, `https://api.github.com` when
- * not. Read per call rather than at module load so a test or a verify script can point the same
- * process at a loopback endpoint, and an empty value is an unset one (as `GITHUB_TOKEN` is).
+ * Where the GitHub clients send their requests: `GITHUB_API_URL` when set, `https://api.github.com`
+ * when not. Read per call rather than at module load so a test or a verify script can point the same
+ * process at a loopback endpoint, and an empty value is an unset one (as `GITHUB_TOKEN` is). The PR
+ * step (here) and the issue write-back (`GitHub.ts`) both read it, so one variable points both at
+ * the same forge.
  */
-const configuredApiUrl = (): string => {
+export const githubApiUrl = (): string => {
   // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam; a `Config` here would add a requirement to every caller of the step.
   const configured = process.env["GITHUB_API_URL"];
   return configured === undefined || configured === ""
@@ -118,7 +120,7 @@ export const createPullRequest = (
     const token = yield* provider.tokenFor(input.repo);
     const [owner, repo] = input.repo.split("/");
     const ref = `${input.repo}:${input.head}->${input.base}`;
-    const apiUrl = input.apiUrl ?? configuredApiUrl();
+    const apiUrl = input.apiUrl ?? githubApiUrl();
     const request = yield* HttpClientRequest.post(
       `${apiUrl}/repos/${owner}/${repo}/pulls`,
       {

@@ -79,6 +79,8 @@ running, and writes its own evidence:
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401 and 413
+./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
+./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the
