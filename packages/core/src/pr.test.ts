@@ -49,14 +49,16 @@ const makeFakeHttp = (status: number, body: unknown) => {
  * check which API root the client called, not only which path.
  */
 const makeRoutedFake = (
-  answers: (
-    request: { readonly method: string; readonly path: string },
-  ) => { readonly status: number; readonly body: unknown },
+  answers: (request: { readonly method: string; readonly path: string }) => {
+    readonly status: number;
+    readonly body: unknown;
+  },
 ) => {
   const requests: Array<{
     method: string;
     path: string;
     href: string;
+    authorization: string | undefined;
     body: unknown;
   }> = [];
   const Json = Schema.fromJsonString(Schema.Unknown);
@@ -75,6 +77,7 @@ const makeRoutedFake = (
           method: request.method,
           path: url.pathname,
           href: url.href,
+          authorization: request.headers["authorization"],
           body: reqBody,
         });
         const text = yield* Schema.encodeEffect(Json)(answer.body).pipe(
@@ -199,6 +202,9 @@ describe("createPullRequest", () => {
     expect(requests[1]!.href).toContain("base=main");
     // And it is the configured root, not api.github.com: the fake never sees github.com.
     expect(requests[0]!.href.startsWith("http://127.0.0.1:9411/")).toBe(true);
+    // The lookup is authenticated like the create: a private repo refuses the GET otherwise, and
+    // an unauthenticated answer is exactly the case a fake that ignores headers would hide.
+    expect(requests[1]!.authorization).toBe("Bearer tok");
   });
 
   it("reports a duplicate that names no existing PR as a typed failure", async () => {
@@ -235,7 +241,9 @@ describe("createPullRequest", () => {
   });
 
   it("calls GITHUB_API_URL when the caller names no root", async () => {
+    // oxlint-disable-next-line effecttsgo/process-env -- a case points the client at a loopback root.
     const previous = process.env["GITHUB_API_URL"];
+    // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam under test.
     process.env["GITHUB_API_URL"] = "http://127.0.0.1:9411";
     try {
       const { requests, client } = makeRoutedFake(() => ({
@@ -258,8 +266,9 @@ describe("createPullRequest", () => {
       );
       expect(requests[0]!.href.startsWith("http://127.0.0.1:9411/")).toBe(true);
     } finally {
-      if (previous === undefined) delete process.env["GITHUB_API_URL"];
-      else process.env["GITHUB_API_URL"] = previous;
+      // An empty value is an unset one to the client, so the restore needs no delete.
+      // oxlint-disable-next-line effecttsgo/process-env -- restoring what the case found.
+      process.env["GITHUB_API_URL"] = previous ?? "";
     }
   });
 });

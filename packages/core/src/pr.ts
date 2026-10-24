@@ -68,8 +68,7 @@ const DEFAULT_API_URL = "https://api.github.com";
  * process at a loopback endpoint, and an empty value is an unset one (as `GITHUB_TOKEN` is).
  */
 const configuredApiUrl = (): string => {
-  // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam, read by the effect that
-  // builds the request; a `Config` here would add a requirement to every caller of the step.
+  // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam; a `Config` here would add a requirement to every caller of the step.
   const configured = process.env["GITHUB_API_URL"];
   return configured === undefined || configured === ""
     ? DEFAULT_API_URL
@@ -137,6 +136,7 @@ export const createPullRequest = (
         head: input.head,
         base: input.base,
         ref,
+        authorization: `Bearer ${Redacted.value(token)}`,
       });
       if (existing !== undefined) return existing;
     }
@@ -174,6 +174,8 @@ const findPullRequest = (input: {
   readonly head: string;
   readonly base: string;
   readonly ref: string;
+  /** The same bearer the create sent: the lookup reads a repo the token already reaches. */
+  readonly authorization: string;
 }): Effect.Effect<PullRequest | undefined, PrError> =>
   Effect.gen(function* () {
     const [owner, repo] = input.repo.split("/");
@@ -186,6 +188,7 @@ const findPullRequest = (input: {
       `${input.apiUrl}/repos/${owner}/${repo}/pulls?${query.toString()}`,
       {
         headers: {
+          authorization: input.authorization,
           accept: "application/vnd.github+json",
           "x-github-api-version": "2022-11-28",
         },
@@ -193,7 +196,9 @@ const findPullRequest = (input: {
     );
     return yield* input.http.execute(request).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Array(PullRequest))),
+      Effect.flatMap(
+        HttpClientResponse.schemaBodyJson(Schema.Array(PullRequest)),
+      ),
       Effect.map((found) => found[0]),
       Effect.mapError(
         () =>

@@ -17,7 +17,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 type Ledger = {
-  readonly requests: ReadonlyArray<{ readonly method: string; readonly path: string }>;
+  readonly requests: ReadonlyArray<{
+    readonly method: string;
+    readonly path: string;
+  }>;
   readonly pulls: ReadonlyArray<{
     readonly number: number;
     readonly url: string;
@@ -127,7 +130,9 @@ const server = Bun.serve({
       const base = url.searchParams.get("base") ?? "";
       // GitHub spells the head as the repo owner's branch (`owner:branch`); the fake matches on
       // the branch half, because that is what identifies the PR here.
-      const branch = head.includes(":") ? head.slice(head.indexOf(":") + 1) : head;
+      const branch = head.includes(":")
+        ? head.slice(head.indexOf(":") + 1)
+        : head;
       return json(
         200,
         read()

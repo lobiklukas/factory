@@ -14,27 +14,27 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 
 ## What it proves
 
-| Feature                      | Check in the driver                                                                       | Why it matters                                     |
-| ---------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Create a session (D7)        | `createSession`, and a retried `requestId`                                                | one log per session; retries must not leak logs    |
-| Repo binding (A1)            | `registerRepo`, then `repo`/`baseRef`/`workspace`                                         | a session names the repo it works on               |
-| Session list (A2)            | `listSessions` sees the new session, paged                                                | the list is a server read, not a client guess      |
-| Send a message               | `sendMessage` → `placement: run`, title set                                               | a message admits durably and names the session     |
-| Watch a live session (D8)    | snapshot first, then entries, then run state                                              | the UI's live path, including `busy → idle`        |
-| Read the transcript          | `getSession` → the `bash` tool result                                                     | the run really happened, usage is attributed       |
-| Fold a released session (D8) | the same session reads `historical`, same entries                                         | a paused session is served by folding the log      |
-| Fork a session (LOB-180)     | `forkSession` → the parent's prefix, then a fork-only message                             | a fork is its own log, not a rewrite of the parent |
-| A fold's stream ends         | exactly one `snapshot` event                                                              | complete is distinguishable from dropped           |
-| Request limits (LOB-21)      | an oversized message → `invalid_input`                                                    | a refusal is typed, not a truncation or a crash    |
-| Transport cap (LOB-21)       | a 2 MiB body → 413, and `/livez` still answers                                            | the configured cap, not Bun's 128 MiB default      |
-| Probes (LOB-21)              | `/livez` 200; `/readyz` 200 naming every check                                            | liveness is cheap; readiness is a live answer      |
-| Degraded readiness (LOB-21)  | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid  | an outage is not a crash loop                      |
-| SIGTERM mid-run (LOB-21)     | the owners are released, and the interrupted session folds and continues                  | a killed run is resumable, not lost                |
-| One PR across a kill (LOB-179) | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one `prOpened` | a lost acknowledgement is not a second PR        |
-| Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`                                            | callers can branch on `code`, not on text          |
-| Interrupt wakes, then stops  | `interruptSession` → idle                                                                 | steering wakes a session before acting on it       |
-| Reset a session (LOB-181)    | `resetSession` with and without a handoff: the past, then the `reset` entry               | a new context is a marker, not a truncation        |
-| Compact on demand (LOB-185)  | `compactSession` → a task id, then the summary entry, nothing dropped from the transcript | long sessions summarize on demand, not by luck     |
+| Feature                        | Check in the driver                                                                        | Why it matters                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| Create a session (D7)          | `createSession`, and a retried `requestId`                                                 | one log per session; retries must not leak logs    |
+| Repo binding (A1)              | `registerRepo`, then `repo`/`baseRef`/`workspace`                                          | a session names the repo it works on               |
+| Session list (A2)              | `listSessions` sees the new session, paged                                                 | the list is a server read, not a client guess      |
+| Send a message                 | `sendMessage` → `placement: run`, title set                                                | a message admits durably and names the session     |
+| Watch a live session (D8)      | snapshot first, then entries, then run state                                               | the UI's live path, including `busy → idle`        |
+| Read the transcript            | `getSession` → the `bash` tool result                                                      | the run really happened, usage is attributed       |
+| Fold a released session (D8)   | the same session reads `historical`, same entries                                          | a paused session is served by folding the log      |
+| Fork a session (LOB-180)       | `forkSession` → the parent's prefix, then a fork-only message                              | a fork is its own log, not a rewrite of the parent |
+| A fold's stream ends           | exactly one `snapshot` event                                                               | complete is distinguishable from dropped           |
+| Request limits (LOB-21)        | an oversized message → `invalid_input`                                                     | a refusal is typed, not a truncation or a crash    |
+| Transport cap (LOB-21)         | a 2 MiB body → 413, and `/livez` still answers                                             | the configured cap, not Bun's 128 MiB default      |
+| Probes (LOB-21)                | `/livez` 200; `/readyz` 200 naming every check                                             | liveness is cheap; readiness is a live answer      |
+| Degraded readiness (LOB-21)    | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid   | an outage is not a crash loop                      |
+| SIGTERM mid-run (LOB-21)       | the owners are released, and the interrupted session folds and continues                   | a killed run is resumable, not lost                |
+| One PR across a kill (LOB-179) | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one PR entry | a lost acknowledgement is not a second PR          |
+| Typed errors over the wire     | unknown id → `SessionError{code: "not_found"}`                                             | callers can branch on `code`, not on text          |
+| Interrupt wakes, then stops    | `interruptSession` → idle                                                                  | steering wakes a session before acting on it       |
+| Reset a session (LOB-181)      | `resetSession` with and without a handoff: the past, then the `reset` entry                | a new context is a marker, not a truncation        |
+| Compact on demand (LOB-185)    | `compactSession` → a task id, then the summary entry, nothing dropped from the transcript  | long sessions summarize on demand, not by luck     |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -79,15 +79,19 @@ running, and writes its own evidence:
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ```
 
-`pr-once.sh` is the third of those, and it needs no API at all: it builds the real `SessionService`
-in each driver process against the run's `DATABASE_URL` and its own session root, and points the PR
-client at a loopback fake through `GITHUB_API_URL` (the key the App token flow already reads), so
-nothing here can reach `github.com`. Four processes run in sequence: one is killed with `SIGKILL`
+`pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the
+RPC surface, so each driver process builds the real `SessionService` itself, against the run's
+`DATABASE_URL` and its own session root. Its HTTP endpoint is the fake GitHub, which listens on the
+run's `API_PORT` (9411 when unset; `PR_ONCE_PORT` overrides it for a second concurrent run) — the
+port the run reserves for this surface, spent on the only server the script needs. The PR client
+reaches it through `GITHUB_API_URL` (the key the App token flow already reads), so nothing here can
+reach `github.com`. Three processes run in sequence: one is killed with `SIGKILL`
 while the fake holds its create request open (the acknowledgement was never committed), one replays
-the step and must land on the PR GitHub already has, one makes the call a step with its
-recorded-document read removed would make (the negative control that keeps the "no second create"
-check from passing vacuously), and one is a genuinely second session, which must open a second PR.
-The ledger is a file precisely so that it outlives the process that was killed.
+the step and must land on the PR GitHub already has, and one is a genuinely second session, which
+must open a second PR. The ledger is a file precisely so that it outlives the process that was
+killed. That the checks are not vacuous is a hand mutation run recorded in
+`.verify/evidence/lob-179/`: with the recorded-document read removed from `prStep.ts`, the replay's
+repeat posts again and the script exits non-zero. See `features/pr-once.md`.
 
 `degraded.sh` stops the container that publishes 5442 — by the name `docker ps --filter publish=5442`
 reports, because the compose project owning the port is not necessarily the one this directory would
@@ -136,10 +140,10 @@ order you want the evidence to end in.
 - `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
   `./degraded.sh`: the probes with Postgres stopped and back, and the process facts (one pid served
   both phases)
-- `pr-once-arm.json`, `pr-once-reopen.json`, `pr-once-unguarded.json`, `pr-once-second.json`,
-  `pr-once-process.json`, `pr-once-ledger.json` — from `./pr-once.sh`: what each process saw (the
-  arm phase reaches GitHub and dies there), the script's own checks, and the fake's ledger of every
-  request and every PR that exists
+- `pr-once-reopen.json`, `pr-once-second.json`, `pr-once-process.json`, `pr-once-ledger.json`,
+  `pr-once-fake.log` — from `./pr-once.sh`: what each surviving process saw, the script's own checks,
+  and the fake's ledger of every request and every PR that exists. There is no `pr-once-arm.json`:
+  that phase is killed inside its call and writes nothing, which is the state it exists to reach
 
 Proof standards for this app:
 

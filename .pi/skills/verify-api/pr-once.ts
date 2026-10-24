@@ -9,9 +9,11 @@
 //                   process died before it could commit anything.
 //   MODE=second     a genuinely second session, with its own head: it opens a second PR, because
 //                   the guard is the session's log, not a global lock.
-//   MODE=unguarded  the negative control: the call the step would make with its recorded-document
-//                   read removed. It reaches GitHub again (and adopts the same PR), which is what
-//                   makes ./pr-once.sh's "no second call" check non-vacuous.
+//
+// The non-vacuity of that check is a mutation run, recorded in `.verify/evidence/lob-179/`:
+// removing the recorded-document read from `prStep.ts` makes the replay's repeat post a second
+// time and the script exit non-zero. A control call made from here would prove nothing — it would
+// reach GitHub whether or not the step still held its guard.
 //
 // The service is the real one, on the run's Postgres and session root; only GitHub is a loopback
 // fake (./github-fake.ts). Nothing here calls api.github.com.
@@ -31,7 +33,6 @@ import {
   CredentialProvider,
   SessionService,
   SessionServiceLive,
-  createPullRequest,
   staticTokenProvider,
 } from "@repo/core";
 import { makeChecker } from "./harness.ts";
@@ -39,7 +40,8 @@ import type { CheckRecord } from "./harness.ts";
 
 const MODE = process.env["MODE"] ?? "arm";
 const STATE = process.env["PR_ONCE_STATE"] ?? ".verify/run/pr-once/session-id";
-const SESSION_ROOT = process.env["SESSION_ROOT"] ?? ".verify/run/pr-once/sessions";
+const SESSION_ROOT =
+  process.env["SESSION_ROOT"] ?? ".verify/run/pr-once/sessions";
 const REPO = RepoSlugSchema.make(
   process.env["PR_ONCE_REPO"] ?? "lobiklukas/factory",
 );
@@ -78,9 +80,10 @@ const assert = makeChecker(observed);
  * reads. The fake is reached through `GITHUB_API_URL`, which `./pr-once.sh` points at loopback.
  */
 const runtime = ManagedRuntime.make(
-  SessionServiceLive({ model: createModelAccess("faux"), sessionRoot: SESSION_ROOT }).pipe(
-    Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
-  ),
+  SessionServiceLive({
+    model: createModelAccess("faux"),
+    sessionRoot: SESSION_ROOT,
+  }).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer))),
 );
 
 const github = Layer.merge(
@@ -106,8 +109,7 @@ const readState = Effect.promise(() =>
 const prEntries = (
   entries: ReadonlyArray<{ readonly kind: string; readonly text: string }>,
 ): number =>
-  entries.filter((entry) => entry.kind === "other" && entry.text === "")
-    .length;
+  entries.filter((entry) => entry.kind === "other" && entry.text === "").length;
 
 const step = (sessions: SessionService, sessionId: SessionId) =>
   sessions
@@ -226,37 +228,7 @@ const second = Effect.gen(function* () {
   );
 });
 
-/**
- * The call a step makes when its recorded-document read is removed: straight to the client. It
- * reaches GitHub again and adopts the same PR, which is why the shell's request count — not the PR
- * count — is what proves the guard.
- */
-const unguarded = Effect.gen(function* () {
-  const sessionId = yield* readState;
-  observed.sessionId = sessionId;
-  const opened = yield* createPullRequest({
-    repo: REPO,
-    base: "main",
-    head: headFor(sessionId),
-    title: TASK,
-    body: "the unguarded call, for the negative control",
-  }).pipe(Effect.provide(github));
-  observed.opened = opened;
-  assert(
-    "the unguarded call reaches GitHub and adopts the same PR",
-    opened.number === 1,
-    `number=${opened.number} url=${opened.url}`,
-  );
-});
-
-const phase =
-  MODE === "arm"
-    ? arm
-    : MODE === "reopen"
-      ? reopen
-      : MODE === "second"
-        ? second
-        : unguarded;
+const phase = MODE === "arm" ? arm : MODE === "reopen" ? reopen : second;
 
 try {
   await runtime.runPromise(phase);

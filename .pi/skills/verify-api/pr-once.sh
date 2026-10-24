@@ -13,7 +13,7 @@
 #
 #   ./pr-once.sh
 #
-# Env: PR_ONCE_PORT (9411), PR_ONCE_DB (a database name to use on the run's server), DATABASE_URL,
+# Env: API_PORT (the port the fake uses; 9411 when unset), PR_ONCE_PORT (override), DATABASE_URL,
 # PR_ONCE_REPO, EVIDENCE_DIR. The run's `DATABASE_URL` is what the driver connects with; the session
 # root is a throwaway git repo whose origin is a local bare repository, so no git call can reach a
 # real remote (LOB-94).
@@ -24,7 +24,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${PR_ONCE_PORT:-9411}"
+# The fake takes the run's `API_PORT` when one is set: there is no API in this script (the driver
+# builds the service in-process), so the port a run reserved for this surface is the port the fake
+# listens on. `PR_ONCE_PORT` overrides it for a second concurrent run.
+PORT="${PR_ONCE_PORT:-${API_PORT:-9411}}"
 GH_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/pr-once"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
@@ -172,25 +175,9 @@ POSTS_AFTER_REOPEN="$(ledger_count posts)"
 # The replay *must* reach GitHub: the killed process never committed its record, so this is the
 # window itself — one create that GitHub refuses, one adopted PR, and the repeat inside the same
 # process adds nothing on top of that (which is why the count is 2 and not 3).
-check "the replayed step asks GitHub once and creates nothing new" \
+check "the replayed step asks GitHub once, adopts that PR, and its repeat asks nothing" \
   "$([ "$POSTS_AFTER_REOPEN" = "2" ] && [ "$(ledger_count pulls)" = "1" ] && echo 0 || echo 1)" \
-  "posts=$POSTS_AFTER_REOPEN prs=$(ledger_count pulls) (2 = the killed attempt + the replay)"
-check "the repeat inside that process reads the record and makes no create call" \
-  "$([ "$POSTS_AFTER_REOPEN" -le 2 ] && echo 0 || echo 1)" \
-  "posts=$POSTS_AFTER_REOPEN after three step calls in one process"
-
-# --- the negative control: the call the step makes with its guard removed ---------------------------
-"${driver_env[@]}" MODE=unguarded bun "$DRIVER" > "$RUN_DIR/unguarded.log" 2>&1
-UNGUARDED_RC=$?
-cat "$RUN_DIR/unguarded.log"
-check "the unguarded call passes its own checks (it adopts the same PR)" \
-  "$([ "$UNGUARDED_RC" = "0" ] && echo 0 || echo 1)" "exit=$UNGUARDED_RC"
-# One more create, and still one PR: the call the step would make with its recorded-document read
-# removed reaches GitHub again. That extra POST is exactly what the two checks above would see, so
-# this proves those checks are not vacuous.
-check "removing the guard does reach GitHub again: the checks above are not vacuous" \
-  "$([ "$(ledger_count posts)" = "3" ] && [ "$(ledger_count pulls)" = "1" ] && echo 0 || echo 1)" \
-  "posts=$(ledger_count posts) prs=$(ledger_count pulls) (3 = the killed attempt + the replay + the unguarded call)"
+  "posts=$POSTS_AFTER_REOPEN prs=$(ledger_count pulls) after two step calls (2 = the killed attempt + the replay)"
 
 # --- a genuinely second session --------------------------------------------------------------------
 "${driver_env[@]}" MODE=second bun "$DRIVER" > "$RUN_DIR/second.log" 2>&1

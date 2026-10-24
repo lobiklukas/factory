@@ -47,6 +47,7 @@ The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 20
 | Probes and readiness    | passing | [probes.md](probes.md)             |
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |
 | Errors over the wire    | passing | [errors.md](errors.md)             |
+| One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
 
 ## Deliberately absent
 
