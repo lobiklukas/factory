@@ -69,6 +69,14 @@ describe("resolveMapping", () => {
     );
     expect(resolveMapping([], event())).toBeUndefined();
   });
+
+  it("takes the repo the event names over the rule's, because a source that knows its own repo does (LOB-190)", () => {
+    const mapping = resolveMapping(rules, event({ repo: otherRepo }));
+    expect(mapping?.repo).toBe(otherRepo);
+    // Everything else is still the rule's: the label is still what chose it.
+    expect(mapping?.label).toBe("factory");
+    expect(mapping?.prompt).toBe("Fix the widget: It wobbles.");
+  });
 });
 
 describe("renderPrompt", () => {
