@@ -37,6 +37,7 @@ faux, Postgres on 5442): **32/32**, evidence `.verify/evidence/lob-181/`. `./sig
 | Watch a live session    | passing | [live-stream.md](live-stream.md)   |
 | Reset a session         | passing | [reset.md](reset.md)               |
 | Fold a released session | passing | [fold.md](fold.md)                 |
+| Fork a session          | passing | [fork.md](fork.md)                 |
 | Request limits          | passing | [limits.md](limits.md)             |
 | Probes and readiness    | passing | [probes.md](probes.md)             |
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |

@@ -26,6 +26,7 @@ import {
 } from "@repo/domain/Task";
 import {
   CreateSessionInput,
+  ForkSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
@@ -70,6 +71,11 @@ export class SessionRpc extends RpcGroup.make(
   }),
   Rpc.make("interruptSession", {
     payload: SessionIdInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  Rpc.make("forkSession", {
+    payload: ForkSessionInput,
     success: SessionSummary,
     error: SessionError,
   }),

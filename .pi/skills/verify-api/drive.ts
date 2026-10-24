@@ -381,6 +381,89 @@ const program = Effect.gen(function* () {
     `${historicalEvents.length} event(s): ${historicalEvents.map((event) => event._tag).join(", ")}`,
   );
 
+  // Feature: fork (LOB-180). A session is one log (D7), so a fork is a second log holding the
+  // parent's entries through the fork point. Its transcript must start as the parent's and then
+  // diverge: a message admitted to the fork must not reach the parent, or the "try a different
+  // approach" action would rewrite the history it was meant to leave alone.
+  const forked = yield* client.forkSession({ sessionId: created.id });
+  assert(
+    "forkSession",
+    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(forked.id) &&
+      forked.id !== created.id &&
+      forked.forkedFrom === created.id,
+    `id=${forked.id} parent=${created.id} forkedFrom=${forked.forkedFrom}`,
+  );
+  const forkPrefix = yield* client.getSession({ sessionId: forked.id });
+  assert(
+    "the fork's transcript is the parent's prefix, text for text",
+    JSON.stringify(forkPrefix.entries.map(textOf)) ===
+      JSON.stringify(folded.entries.map(textOf)),
+    `${forkPrefix.entries.length} fork entries, parent had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork's summary names the session it came from",
+    forkPrefix.session.forkedFrom === created.id,
+    `forkedFrom=${forkPrefix.session.forkedFrom}`,
+  );
+
+  const FORKED_PROMPT = `${PROMPT} fork`;
+  yield* client.sendMessage({ sessionId: forked.id, content: FORKED_PROMPT });
+  const forkSettled = yield* waitUntil(
+    client
+      .getSession({ sessionId: forked.id })
+      .pipe(
+        Effect.map((snapshot) => (snapshot.live.busy ? undefined : snapshot)),
+      ),
+    "the fork's run to settle",
+  );
+  const parentAfter = yield* client.getSession({ sessionId: created.id });
+  assert(
+    "a message sent to the fork does not appear in the parent",
+    parentAfter.entries.every((entry) => !entry.text.includes(FORKED_PROMPT)) &&
+      JSON.stringify(parentAfter.entries.map(textOf)) ===
+        JSON.stringify(folded.entries.map(textOf)),
+    `parent has ${parentAfter.entries.length} entries, folded read had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork keeps its prefix and answers on its own",
+    forkSettled.entries.length > forkPrefix.entries.length &&
+      forkSettled.entries
+        .slice(0, forkPrefix.entries.length)
+        .every(
+          (entry, index) => entry.text === forkPrefix.entries[index]?.text,
+        ) &&
+      forkSettled.entries.some(
+        (entry) => entry.text === `faux-ok (re: ${FORKED_PROMPT})`,
+      ),
+    `${forkSettled.entries.length} entries, last=${JSON.stringify(forkSettled.entries.at(-1)?.text)}`,
+  );
+  // Feature: the fork point is an entry of *this* session. The fork has grown past the parent's
+  // last entry, so its newest entry id names no entry of the parent: asking the parent to fork there
+  // must be a typed `invalid_input`, not a crash and not a fork of a history it never had. (Entry
+  // ids are per-log numbers, so an id that exists in both logs *is* this session's entry; what a
+  // foreign id can be is absent.)
+  const foreignEntry = forkSettled.entries.at(-1)?.id ?? "0";
+  const foreign = yield* Effect.exit(
+    client.forkSession({ sessionId: created.id, at: foreignEntry }),
+  );
+  const foreignFailure = Exit.findErrorOption(foreign);
+  assert(
+    "forking at another session's entry is refused as invalid_input",
+    Exit.isFailure(foreign) &&
+      foreignFailure._tag === "Some" &&
+      foreignFailure.value._tag === "SessionError" &&
+      foreignFailure.value.code === "invalid_input",
+    `at=${foreignEntry} ${JSON.stringify(foreignFailure)}`,
+  );
+
+  observed.fork = {
+    id: forked.id,
+    forkedFrom: forked.forkedFrom,
+    prefixEntries: forkPrefix.entries.length,
+    divergedEntries: forkSettled.entries.length,
+    foreignRefusal: foreignEntry,
+  };
+
   // Feature: request limits. An oversized message is refused with a typed error rather than
   // crashing the server or being silently truncated.
   const oversized = yield* Effect.exit(

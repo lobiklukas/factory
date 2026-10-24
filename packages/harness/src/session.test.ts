@@ -19,6 +19,7 @@ import { createModelAccess } from "./models";
 import { projectView } from "./projection";
 import {
   closeHarness,
+  forkSession,
   isBusy,
   openSession,
   readLiveSnapshot,
@@ -257,6 +258,99 @@ describe("a session over PostgresStorage", () => {
     expect(entries.some((entry) => entry.text === "a turn to forget")).toBe(
       true,
     );
+  }, 120_000);
+});
+
+/**
+ * A fork copies the parent's entries, so the interesting part is not the entries — it is the head
+ * marker a `reset` writes: entry ids are minted per log, so the copy has to rewrite the marker to
+ * the copy of the entry it names, and a copy that drops it makes the fork's model context reach
+ * back past what the parent's own context carries. This case therefore resets the parent in the
+ * middle, so that the parent's transcript and its *context* differ (LOB-181: a head marker bounds
+ * the context, not the transcript): a fork that copied the entries but not the marker would show
+ * `before the reset` in its context where the parent shows nothing.
+ */
+describe("forking a session", () => {
+  it("copies the parent's transcript through the fork point, head marker included", async () => {
+    const parentLog = `${logId}-fork-parent`;
+    const childLog = `${logId}-fork-child`;
+    const owner = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "owner" }, context);
+    const reader = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "reader" }, context);
+
+    const parentContext = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage: yield* Effect.promise(() => owner(parentLog)),
+          model,
+          cwd: workdir,
+        });
+        const before = yield* submitMessage(root, {
+          content: "before the reset",
+          requestId: "before the reset",
+        });
+        yield* Effect.promise(() => before.submission.wait(context));
+        // A reset starts a new context and carries the handoff as a user message (Pi Durable's
+        // `Conversation.reset`).
+        yield* Effect.promise(() => root.reset("handoff note", context));
+        const after = yield* submitMessage(root, {
+          content: "after the reset",
+          requestId: "after the reset",
+        });
+        yield* Effect.promise(() => after.submission.wait(context));
+        // What the parent's model is sent, which is what the copied head marker has to reproduce.
+        const opened = yield* Effect.promise(() => root.context(context));
+        yield* closeHarness(harness);
+        return messageTexts(opened.messages);
+      }),
+    );
+
+    const parentFold = await runtime.runPromise(
+      Effect.gen(function* () {
+        const opened = yield* Effect.promise(() => reader(parentLog));
+        return yield* readSessionLog(opened);
+      }),
+    );
+    // The premise: the parent's *context* begins at the reset, so the turn before it is still in the
+    // transcript and no longer in what the model is sent.
+    expect(
+      parentFold.entries.filter((entry) => entry.kind === "reset"),
+    ).toHaveLength(1);
+    expect(
+      parentFold.entries.some((entry) => entry.text === "before the reset"),
+    ).toBe(true);
+    expect(parentContext).not.toContain("before the reset");
+    expect(parentContext).toContain("handoff note");
+
+    const forked = await runtime.runPromise(
+      Effect.gen(function* () {
+        const child = yield* Effect.promise(() => owner(childLog));
+        const opened = yield* forkSession({
+          parent: yield* Effect.promise(() => reader(parentLog)),
+          child,
+          lineage: parentLog,
+          model,
+          cwd: workdir,
+        });
+        const view = yield* Effect.promise(() => opened.root.context(context));
+        yield* closeHarness(opened.harness);
+        const reread = yield* Effect.promise(() => reader(childLog));
+        const log = yield* readSessionLog(reread);
+        yield* Effect.promise(() => reread.dispose());
+        return { at: opened.at, log, context: messageTexts(view.messages) };
+      }),
+    );
+
+    // The fork's transcript is the parent's, entry for entry — the prefix the issue asks for.
+    expect(forked.log.entries.map((entry) => entry.text)).toEqual(
+      parentFold.entries.map((entry) => entry.text),
+    );
+    // And its context is the parent's too, which is only true if the head marker was copied and
+    // rewritten to the fork's own entry id.
+    expect(forked.context).toEqual(parentContext);
+    expect(forked.log.forkedFrom).toBe(parentLog);
+    expect(forked.at).not.toBe("");
   }, 120_000);
 });
 
