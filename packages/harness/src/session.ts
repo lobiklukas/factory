@@ -53,7 +53,7 @@ import { skillsExtension, type RunProfile } from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
-import { PrDoc } from "./docs";
+import { PageDoc, PrDoc } from "./docs";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -64,6 +64,7 @@ import {
   diffView,
   projectEntry,
   projectPrDoc,
+  projectPages,
   projectTasks,
   projectUsageDoc,
   projectView,
@@ -74,6 +75,8 @@ import {
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
   PR_OPENED_ENTRY_KIND,
+  PAGE_ENTRY_KIND,
+  type PageLogRecord,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
@@ -450,6 +453,83 @@ export const readPullRequestDoc = (
       base: doc.base,
       head: doc.head,
       openedAt: doc.openedAt,
+    };
+  });
+
+/**
+ * A cited knowledge page, announced in the transcript (LOB-204).
+ *
+ * It carries no model content, so the agent never sees it; the fold over these entries is what a
+ * rebuild reads, because a document is not part of `commits`.
+ */
+export const PageEntry = defineEntry<{
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: string[];
+  readonly sources: string[];
+}>(PAGE_ENTRY_KIND);
+
+/**
+ * Commit one page: the `factory.page` family member, keyed by its name, and the entry that
+ * announces it, in one commit (LOB-204).
+ *
+ * Two shapes of one fact, for the reason the PR step has two (LOB-177): the document is the typed
+ * record a reader asks for by name, and the entry is what a fold — a rebuild included — can see.
+ * The row `session_pages` reads is the caller's to write, as the `sessions` row is the PR step's.
+ */
+export const writePage = (
+  conversation: Conversation,
+  page: PageLogRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write page", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PageDoc, conversation.id, page.name, page.name).then((doc) => {
+            doc.name = page.name;
+            doc.kind = page.kind;
+            doc.content = page.content;
+            doc.links = [...page.links];
+            doc.sources = [...page.sources];
+          }),
+          tx.appendEntry(PageEntry, conversation.id, {
+            // Copied into mutable arrays: the entry's data is JSON, and a `readonly string[]` is
+            // not one (`JsonValue` wants the mutable array).
+            data: {
+              name: page.name,
+              kind: page.kind,
+              content: page.content,
+              links: [...page.links],
+              sources: [...page.sources],
+            },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * One page, read from the committed document. `undefined` when this session never committed one by
+ * that name — a family member that was never written has no record to read, and an empty seed is
+ * not a page.
+ */
+export const readPage = (
+  harness: Harness,
+  conversation: Conversation,
+  name: string,
+): Effect.Effect<PageLogRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const doc = yield* attempt("read page", () =>
+      harness.snapshot(PageDoc, conversation.id, name, BACKGROUND_CONTEXT),
+    );
+    if (doc === undefined || doc.kind === "") return undefined;
+    return {
+      name: doc.name,
+      kind: doc.kind,
+      content: doc.content,
+      links: doc.links,
+      sources: doc.sources,
     };
   });
 
@@ -902,6 +982,12 @@ export type SessionLog = {
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
+  /**
+   * The cited knowledge pages the log holds, by name (LOB-204), folded from the `factory.page`
+   * entries. Read from the raw entries rather than from the transcript projection, because a page
+   * is not a transcript entry a client renders.
+   */
+  readonly pages: readonly PageLogRecord[];
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -923,6 +1009,7 @@ export const readSessionLog = (
 ): Effect.Effect<SessionLog, SessionError> =>
   Effect.gen(function* () {
     const records = yield* readAllEntries(storage);
+    const pages = projectPages(records);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
@@ -936,6 +1023,7 @@ export const readSessionLog = (
     const forkedFrom = bindingString(forkDoc, "parent");
     return {
       entries: records.map(projectEntry),
+      pages,
       usage: projectUsageDoc(usage),
       binding: {
         repo: bindingString(binding, "repo"),

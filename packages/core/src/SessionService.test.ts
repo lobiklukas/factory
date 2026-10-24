@@ -3160,6 +3160,172 @@ describe("approvals", () => {
  * its own card. Sessions here are scratch ones (no repo), because the column is the only thing
  * under test — a repo would add a clone that says nothing about the prompt.
  */
+/**
+ * Cited knowledge pages (LOB-204, part 1 of LOB-47).
+ *
+ * A page is a log fact and a derived row: `recordPage` commits the `factory.page` document and the
+ * entry that announces it, `listPages` reads the rows, and `rebuildIndexes` refills those rows from
+ * the entries. The three cases below are the acceptance criteria in that order — round trip with
+ * citations, a rebuild that reproduces pages after the rows are deleted, and a citation of a session
+ * that does not exist still reading back.
+ */
+describe("cited pages", () => {
+  it("records two pages with their citations and reads them back by name", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "the session a page learned from",
+        });
+        const host = yield* sessions.create({ title: "cited pages" });
+        // `ses_` with zeros is syntactically a session id and is nobody's: the citation is data.
+        const unknown = "ses_0000000000000000";
+        const traps = yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "b-batch-the-fold",
+          kind: "trap",
+          content: "a per-batch delete clobbers another batch's rows",
+          links: ["a-the-log-is-the-truth"],
+          sources: [source.id],
+        });
+        const decisions = yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "a-the-log-is-the-truth",
+          kind: "decision",
+          content: "the log is the truth; the rows are a cache",
+          links: [],
+          sources: [source.id, unknown],
+        });
+        const listed = yield* sessions.listPages({ sessionId: host.id });
+        const rows = yield* sql<{ name: string }>`
+          SELECT name FROM session_pages WHERE session_id = ${host.id}
+        `;
+        const empty = yield* sessions.create({ title: "no pages" });
+        const nothing = yield* sessions.listPages({ sessionId: empty.id });
+        return {
+          traps,
+          decisions,
+          listed,
+          nothing,
+          rows: rows.length,
+          sessionId: host.id,
+        };
+      }),
+    );
+
+    // Ordered by name, not by the order they were written: two logs that recorded them in a
+    // different order read back the same way.
+    expect(outcome.listed.pages.map((page) => page.name)).toEqual([
+      "a-the-log-is-the-truth",
+      "b-batch-the-fold",
+    ]);
+    expect(outcome.listed.pages[0]).toEqual({
+      name: "a-the-log-is-the-truth",
+      kind: "decision",
+      content: "the log is the truth; the rows are a cache",
+      links: [],
+      sources: [outcome.decisions.sources[0], "ses_0000000000000000"],
+    });
+    // The citation of a session nobody can find is stored as given (criterion 3).
+    expect(outcome.listed.pages[0]?.sources).toContain("ses_0000000000000000");
+    expect(outcome.listed.pages[1]?.links).toEqual(["a-the-log-is-the-truth"]);
+    expect(outcome.rows).toBe(2);
+    // A session that taught nothing has no pages, and reads as none rather than as an error.
+    expect(outcome.nothing.pages).toEqual([]);
+  }, 120_000);
+
+  it("replaces a page it already holds, and refuses one with no name", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({ title: "replace a page" });
+        const first = yield* sessions.recordPage({
+          sessionId: created.id,
+          name: "a-page",
+          kind: "guide",
+          content: "first draft",
+          links: [],
+          sources: [],
+        });
+        const second = yield* sessions.recordPage({
+          sessionId: created.id,
+          name: "a-page",
+          kind: "guide",
+          content: "second draft",
+          links: ["another-page"],
+          sources: [],
+        });
+        const listed = yield* sessions.listPages({ sessionId: created.id });
+        const rows = yield* sql<{ name: string }>`
+          SELECT name FROM session_pages WHERE session_id = ${created.id}
+        `;
+        const refused = yield* Effect.exit(
+          sessions.recordPage({
+            sessionId: created.id,
+            name: "  ",
+            kind: "guide",
+            content: "nobody can cite this",
+            links: [],
+            sources: [],
+          }),
+        );
+        return { first, second, listed, rows: rows.length, refused };
+      }),
+    );
+
+    expect(outcome.listed.pages).toHaveLength(1);
+    expect(outcome.listed.pages[0]?.content).toBe("second draft");
+    expect(outcome.rows).toBe(1);
+    const failure = Exit.findErrorOption(outcome.refused);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.isSome(failure) ? failure.value._tag : undefined).toBe(
+      "SessionError",
+    );
+  }, 120_000);
+
+  it("reproduces the pages from the log after the derived rows are deleted", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({ title: "a citation to keep" });
+        const host = yield* sessions.create({ title: "rebuild the pages" });
+        yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "b-second",
+          kind: "trap",
+          content: "the second page",
+          links: ["a-first"],
+          sources: [source.id],
+        });
+        yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "a-first",
+          kind: "decision",
+          content: "the first page",
+          links: [],
+          sources: ["ses_0000000000000001"],
+        });
+        const before = yield* sessions.listPages({ sessionId: host.id });
+        // The rows are the cache, so deleting them must cost nothing a rebuild cannot refill.
+        yield* sql`DELETE FROM session_pages WHERE session_id = ${host.id}`;
+        const blanked = yield* sessions.listPages({ sessionId: host.id });
+        const report = yield* rebuildIndexes;
+        const refolded = yield* sessions.listPages({ sessionId: host.id });
+        return { before, blanked, report, refolded, sessionId: host.id };
+      }),
+    );
+
+    expect(outcome.before.pages).toHaveLength(2);
+    expect(outcome.blanked.pages).toEqual([]);
+    expect(outcome.report.sessions).toBeGreaterThan(0);
+    // Same pages, same citations, same order — from the `factory.page` entries in the log.
+    expect(outcome.refolded.pages).toEqual(outcome.before.pages);
+  }, 120_000);
+});
+
 describe("a run's prompt comes from its column", () => {
   /** A board instance over the definition version that binds skills to the stages (0010). */
   const newBoard = Effect.gen(function* () {

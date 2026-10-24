@@ -24,6 +24,7 @@ import {
   UndeclaredTransition,
   UnblockTaskInput,
 } from "@repo/domain/Task";
+import { ListPagesInput, ListPagesOutput } from "@repo/domain/Page";
 import {
   CompactSessionInput,
   CompactSessionResult,
@@ -98,6 +99,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("listSessions", {
     payload: ListSessionsInput,
     success: ListSessionsOutput,
+    error: SessionError,
+  }),
+  // The cited knowledge pages a session's log holds (LOB-204), read from the derived rows a rebuild
+  // refills from that log.
+  Rpc.make("listPages", {
+    payload: ListPagesInput,
+    success: ListPagesOutput,
     error: SessionError,
   }),
   Rpc.make("registerRepo", {

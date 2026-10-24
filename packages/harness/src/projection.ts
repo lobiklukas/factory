@@ -52,6 +52,12 @@ export const TITLE_ENTRY_KIND = "factory.title";
  * visible to an attached client, so the record and the announcement are two writes in one commit.
  */
 export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
+/**
+ * The entry a recorded page is announced with. Distinct from the document kind (`factory.page`), as
+ * `factory.pr` is announced by `factory.pr.opened`: documents and entries are different namespaces,
+ * and one name for both would make a fold over entries unable to say which it was reading.
+ */
+export const PAGE_ENTRY_KIND = "factory.page.written";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 
@@ -90,6 +96,15 @@ const arrayAt = (
   const value = asObject(parent)?.[key];
   return Array.isArray(value) ? value : [];
 };
+
+/** A JSON array of strings, with anything else at an element dropped rather than guessed. */
+const stringsAt = (
+  parent: JsonValue | undefined,
+  key: string,
+): readonly string[] =>
+  arrayAt(parent, key).flatMap((value) =>
+    typeof value === "string" ? [value] : [],
+  );
 
 /** Flatten model content blocks to their text. */
 const blocksText = (blocks: readonly ContentBlock[]): string =>
@@ -406,4 +421,45 @@ export const diffView = (
   }
 
   return events;
+};
+
+/**
+ * The cited knowledge pages a log holds (LOB-204), folded from the `factory.page` entries that
+ * announce each one.
+ *
+ * The entries, not the `factory.page` documents, are what a rebuild can see: a fold reads `commits`,
+ * and a document is a separate record. So every page is committed twice in one transaction — the
+ * document for the typed read, the entry for this fold — exactly as the PR step announces itself
+ * (LOB-177).
+ *
+ * A later entry for the same name replaces the earlier one, and the fold is ordered by name, so two
+ * logs that committed the same pages in a different order read back the same way.
+ */
+export type PageLogRecord = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: readonly string[];
+  readonly sources: readonly string[];
+};
+
+export const projectPages = (
+  entries: readonly EntryRecord[],
+): readonly PageLogRecord[] => {
+  const pages = new Map<string, PageLogRecord>();
+  for (const entry of entries) {
+    if (entry.kind !== PAGE_ENTRY_KIND) continue;
+    const name = stringAt(entry.data, "name");
+    if (name === undefined || name === "") continue;
+    pages.set(name, {
+      name,
+      kind: stringAt(entry.data, "kind") ?? "",
+      content: stringAt(entry.data, "content") ?? "",
+      links: stringsAt(entry.data, "links"),
+      sources: stringsAt(entry.data, "sources"),
+    });
+  }
+  return [...pages.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
 };

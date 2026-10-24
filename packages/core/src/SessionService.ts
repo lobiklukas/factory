@@ -108,11 +108,19 @@ import {
   writeApprovalRequested,
   writeRepoBinding,
   writeTaskBinding,
+  writePage,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
+import type {
+  ListPagesInput,
+  ListPagesOutput,
+  Page,
+  RecordPageInput,
+} from "@repo/domain/Page";
+import { PageStrings } from "@repo/domain/Page";
 import { mintSessionId } from "./ids";
 import type { PrError, PullRequest } from "./pr";
 import { openPullRequest } from "./prStep";
@@ -196,6 +204,21 @@ export type SessionServiceShape = {
   readonly listApprovals: (
     sessionId: SessionId,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
+  /**
+   * Record (or replace) one cited knowledge page (LOB-204).
+   *
+   * A page is committed to the log — the `factory.page` document a reader asks for by name, and the
+   * entry a fold and a rebuild can see — and its row is written in the same effect so `listPages`
+   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller, exactly as
+   * the PR step's is `openPullRequest` and no `SessionRpc` member.
+   */
+  readonly recordPage: (
+    input: RecordPageInput,
+  ) => Effect.Effect<Page, SessionError>;
+  /** The pages one session's log holds, by name, read from the derived rows a rebuild refills. */
+  readonly listPages: (
+    input: ListPagesInput,
+  ) => Effect.Effect<ListPagesOutput, SessionError>;
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
    *
@@ -299,6 +322,15 @@ type Binding = {
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
   readonly decision?: ApprovalDecision;
+};
+
+/** One `session_pages` row as the driver returns it; the two jsonb columns are selected as text. */
+type PageRow = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: string;
+  readonly sources: string;
 };
 
 type LiveOwner = {
@@ -1363,6 +1395,123 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         }).pipe(Effect.ignore);
 
+      const pageFromRow = (row: PageRow): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          const links = yield* Schema.decodeEffect(PageStrings)(row.links).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable links: ${String(cause)}`,
+                }),
+            ),
+          );
+          const sources = yield* Schema.decodeEffect(PageStrings)(
+            row.sources,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable sources: ${String(cause)}`,
+                }),
+            ),
+          );
+          return {
+            name: row.name,
+            kind: row.kind,
+            content: row.content,
+            links,
+            sources,
+          };
+        });
+
+      /**
+       * Record (or replace) one cited knowledge page (LOB-204).
+       *
+       * The log is the truth and it is committed once: the `factory.page` member and the entry that
+       * announces it are one commit, exactly as the PR step's document and entry are. The row is a
+       * second statement after it — the same shape as that step's index write — so a failure between
+       * the two leaves the log ahead of `session_pages` until a rebuild refills it, which is why the
+       * rebuild fold exists rather than being an optimisation.
+       *
+       * A citation is stored exactly as given, unknown session id included: `sources` is data, not a
+       * foreign key, so a page that names a session nobody can find still reads back.
+       */
+      const recordPage = (
+        input: RecordPageInput,
+      ): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          // Trimmed once, and the trimmed name is the one written: whitespace is not part of an
+          // identity, and a name that differs only in its padding would be a second page.
+          const name = input.name.trim();
+          if (name.length === 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: "a page needs a non-empty name",
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const page: Page = {
+            name,
+            kind: input.kind,
+            content: input.content,
+            links: input.links,
+            sources: input.sources,
+          };
+          yield* paper("record page", writePage(owner.root, page));
+          const links = yield* paper(
+            "encode page links",
+            Schema.encodeEffect(PageStrings)(page.links),
+          );
+          const sources = yield* paper(
+            "encode page sources",
+            Schema.encodeEffect(PageStrings)(page.sources),
+          );
+          yield* paper(
+            "write page row",
+            sql`
+              INSERT INTO session_pages (session_id, name, kind, content, links, sources)
+              VALUES (
+                ${input.sessionId},
+                ${page.name},
+                ${page.kind},
+                ${page.content},
+                ${links}::jsonb,
+                ${sources}::jsonb
+              )
+              ON CONFLICT (session_id, name) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                content = EXCLUDED.content,
+                links = EXCLUDED.links,
+                sources = EXCLUDED.sources
+            `,
+          );
+          yield* touchActivity(input.sessionId);
+          return page;
+        });
+
+      /** The pages one session's log holds, by name — one query, never a fold of the log. */
+      const listPages = (
+        input: ListPagesInput,
+      ): Effect.Effect<ListPagesOutput, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(input.sessionId);
+          const rows = yield* paper(
+            "list pages",
+            sql<PageRow>`
+              SELECT name, kind, content, links::text AS links, sources::text AS sources
+              FROM session_pages
+              WHERE session_id = ${input.sessionId}
+              ORDER BY name
+            `,
+          );
+          const pages: Page[] = [];
+          for (const row of rows) pages.push(yield* pageFromRow(row));
+          return { pages };
+        });
+
       /**
        * One page of the session list, newest activity first.
        *
@@ -1721,6 +1870,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestApproval,
         decideApproval,
         listApprovals,
+        recordPage,
+        listPages,
         openPullRequest: openPr,
         close: closeAll,
       });
