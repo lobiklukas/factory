@@ -162,6 +162,12 @@ const childEnv = (
     LIB,
   };
   delete env["DOCKER_HOST"];
+  // The ralph driver's pi session reads PI_* model selectors from its environment; an ambient
+  // value (e.g. PI_PROVIDER) would leak into the child and change the case's outcome, so scrub
+  // them the same way DOCKER_HOST is scrubbed above. LOB-149.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PI_")) delete env[key];
+  }
   return { ...env, ...extra };
 };
 
@@ -923,6 +929,26 @@ describe("the ralph driver's shell contract", () => {
         i++;
       }
       expect(offending).toEqual([]);
+    },
+  );
+
+  it(
+    "README exit-code list names every status the driver exits with (LOB-131)",
+    { timeout: 30_000 },
+    () => {
+      const readme = readFileSync(
+        path.join(REPO_ROOT, ".pi/ralph/README.md"),
+        "utf8",
+      );
+      const loop = readFileSync(LOOP, "utf8");
+      const codes = new Set(
+        [...loop.matchAll(/\bexit (\d+)\b/g)].map((m) => m[1]),
+      );
+      const line = readme.split("\n").find((l) => l.startsWith("Exit codes:"));
+      expect(line).toBeTruthy();
+      for (const code of codes) {
+        expect(line).toContain("`" + code + "`");
+      }
     },
   );
 });

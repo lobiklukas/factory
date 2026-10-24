@@ -45,7 +45,6 @@
         "@effect/platform-bun": "4.0.0",
         "@repo/domain": "workspace:*",
         "effect": "4.0.0",
-        "effect-boxes": "^0.17.3",
       },
       "devDependencies": {
         "@repo/config-typescript": "workspace:*",
@@ -892,8 +891,6 @@
     "ee-first": ["ee-first@1.1.1", "", {}, "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="],
 
     "effect": ["effect@4.0.0", "", {}, "sha512-ooc1TG5t+FfzgYnFz2ff6BBKyZ7EwBRVXC7c4RhQUAD6/TZ2gTXXMeb4WX7a19ozQo4J73/QW+S00YAIresoMQ=="],
-
-    "effect-boxes": ["effect-boxes@0.17.3", "", { "peerDependencies": { "effect": ">=4.0.0" } }, "sha512-tf2LrW4OB7QexZPkhuWHQcHkBGj0s8DRYvr4tFOzSXt6WbrdNo09LHZ+wCFSrJwjeqDx+BwWObtMaqELH/XbvQ=="],
 
     "electron-to-chromium": ["electron-to-chromium@1.5.444", "", {}, "sha512-5ss/uJfoDYDHT0lfJzT6FbcskIzROIOPf0BbbFkGcvDzoJU7i//9GDrwwIHQVmIsrAGiF3ihpADBRIsrEFt1rQ=="],
 

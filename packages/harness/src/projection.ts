@@ -223,7 +223,6 @@ export const projectUsageDoc = (
   value: JsonRecord | undefined,
 ): SessionUsage => ({
   models: bucketEntries(objectAt(value, "models")),
-  tools: bucketEntries(objectAt(value, "tools")),
 });
 
 /** Everything a snapshot of one session carries, from either the live view or a fold. */
