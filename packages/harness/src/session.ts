@@ -45,6 +45,7 @@ import type {
 } from "@repo/domain/Session";
 import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
+import { skillsExtension, type RunProfile } from "./loader";
 import type { ModelAccess } from "./models";
 import {
   autonomyPolicy,
@@ -160,6 +161,12 @@ export type OpenSessionOptions = {
    * can reach by forgetting an argument.
    */
   readonly policy?: SessionPolicy;
+  /**
+   * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
+   * by the control plane from the card's pinned board definition. Absent: no card, or a column that
+   * names no skills, so nothing is injected.
+   */
+  readonly run?: RunProfile;
 };
 
 export type OpenSession = {
@@ -193,6 +200,10 @@ export const openSession = (
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
+    // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
+    // the whole code extension — tools and sections — renders after the run's own instructions.
+    const skills = options.run?.skills ?? [];
+    if (skills.length > 0) registry.install(skillsExtension(skills));
     registry.install(CodingTools);
     // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
     // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
@@ -512,6 +523,40 @@ const readConversationEntries = (
     ),
   );
 
+/**
+ * The *active window*: the newest head marker, then the entries from its head. That is what Pi
+ * Durable folds into a request, so it is the right slice for a question about the model's current
+ * context — the prompt sections a run has in effect — and the wrong one for the transcript, which
+ * is `readAllEntries`, because a `pi.reset` would truncate it.
+ */
+const readActiveEntries = (
+  storage: Storage,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
+    const marker = yield* attempt("find head marker", () =>
+      storage.findLatestHeadMarker(
+        ROOT_CONVERSATION_ID,
+        undefined,
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    return yield* scanEntries((cursor) =>
+      attempt("scan entries", () =>
+        storage.scanEntries(
+          marker === undefined
+            ? { conversationId: ROOT_CONVERSATION_ID }
+            : {
+                conversationId: ROOT_CONVERSATION_ID,
+                minEntryId: marker.head,
+              },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      ),
+    );
+  });
+
 export type SessionLog = {
   readonly entries: readonly TranscriptEntry[];
   readonly usage: SessionUsage;
@@ -570,6 +615,38 @@ export const readSessionLog = (
             },
           }),
     };
+  });
+
+/** The Pi Durable entry kind that carries system prompt sections. */
+const PROMPT_ENTRY_KIND = "pi.system";
+
+export type PromptSections = Readonly<Record<string, string>>;
+
+/**
+ * The prompt sections a session's log leaves in effect, folded the way Pi Durable folds them: a
+ * later `pi.system` entry replaces a section by name, and a `null` removes it.
+ *
+ * This is what the run was actually told, read from the log rather than from the extension that
+ * built it, so a caller can show or measure the injected text (B6's "its size measurable") and a
+ * test can assert on the prompt without intercepting a model request.
+ */
+export const readPromptSections = (
+  storage: Storage,
+): Effect.Effect<PromptSections, SessionError> =>
+  Effect.gen(function* () {
+    const records = yield* readActiveEntries(storage);
+    const shown: Record<string, string> = {};
+    for (const record of records) {
+      if (record.kind !== PROMPT_ENTRY_KIND) continue;
+      for (const message of record.model ?? []) {
+        if (message.role !== "system") continue;
+        for (const [key, value] of Object.entries(message.sections ?? {})) {
+          if (value === null) delete shown[key];
+          else shown[key] = value;
+        }
+      }
+    }
+    return shown;
   });
 
 export type { Conversation, ConversationView, Harness, Storage };

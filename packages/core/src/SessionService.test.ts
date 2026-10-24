@@ -54,7 +54,11 @@ import type {
   SessionListEntry,
 } from "@repo/domain/Session";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import { DatabaseConfig, DatabaseLive } from "@repo/storage-postgres";
+import {
+  DatabaseConfig,
+  DatabaseLive,
+  PostgresStorage,
+} from "@repo/storage-postgres";
 import {
   Clock,
   ConfigProvider,
@@ -72,9 +76,10 @@ import {
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createModelAccess } from "@repo/harness";
+import { createModelAccess, readPromptSections } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { staticTokenProvider } from "./credentials";
+import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -2502,6 +2507,200 @@ describe("approvals", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
   });
+});
+
+/**
+ * The run's prompt is resolved from its column (docs/board.md B6, LOB-174).
+ *
+ * The claim is about what the model was *told*, so it is read from the log rather than from the
+ * extension that built it: `pi.system` entries are the system prompt Pi Durable replays before a
+ * request, and they are committed, so a run that has already answered still says what it was told.
+ *
+ * Each case makes its own board instance over definition version 2
+ * (`0010_seed_pipeline_skills.ts`), the version that binds the seeded skills to their stages, and
+ * its own card. Sessions here are scratch ones (no repo), because the column is the only thing
+ * under test — a repo would add a clone that says nothing about the prompt.
+ */
+describe("a run's prompt comes from its column", () => {
+  /** A board instance over the definition version that binds skills to the stages (0010). */
+  const newBoard = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const id = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (
+        ${id},
+        ${`factory-test/${randomBytes(3).toString("hex")}`},
+        'default',
+        2
+      )
+    `;
+    return id;
+  });
+
+  /**
+   * A card in `column` on `boardId`, pinned to the definition version it started under. The id's
+   * shape is the domain's, not the table's.
+   */
+  const newCard = (boardId: string, column: string, version = 2) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const id = `tsk_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
+        VALUES (${id}, ${boardId}, ${`a card in ${column}`}, ${column}, ${version}, 1)
+      `;
+      return id;
+    });
+
+  /** Start a run on a card and let it settle, so the log holds the prompt it ran under. */
+  const startRun = (
+    cardId: string,
+    column: string,
+  ): Effect.Effect<SessionId, SessionError, SessionService> =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const created = yield* sessions.create({
+        taskId: cardId,
+        taskColumn: column,
+      });
+      yield* sessions.send({
+        sessionId: created.id,
+        content: `begin in ${column}`,
+      });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        `the ${column} run to settle`,
+      );
+      return created.id;
+    });
+
+  /** The prompt sections the run's own log leaves in effect. */
+  const promptSections = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readPromptSections(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
+
+  /** Edit the `specify` skill's body through the service that owns it, returning what it was. */
+  const editSpecifyBody = (body: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const skills = yield* SkillService;
+        const before = yield* skills.get("specify");
+        yield* skills.upsert({ ...before, body });
+        return before;
+      }).pipe(Effect.provide(SkillServiceLive)),
+    );
+
+  it("tells a specifying run the specify skill, and a building run nothing of it", async () => {
+    const prompts = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const specCard = yield* newCard(boardId, "specifying");
+        const buildCard = yield* newCard(boardId, "building");
+        return {
+          specifying: yield* promptSections(
+            yield* startRun(specCard, "specifying"),
+          ),
+          building: yield* promptSections(
+            yield* startRun(buildCard, "building"),
+          ),
+        };
+      }),
+    );
+
+    // 0009's seeded body, which is what "the run receives the specify skill text" means.
+    expect(prompts.specifying["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(prompts.building["skill_specify"]).toBeUndefined();
+    // The building run is not prompt-less: it carries its own column's skill, so the absence above
+    // is the column's doing rather than a session that was told nothing at all.
+    expect(prompts.building["skill_implement"]).toContain("smallest change");
+  }, 120_000);
+
+  it("changes the next run's prompt when a seeded body is edited", async () => {
+    const marker = `# Specify\n\nAsk about ${randomBytes(4).toString("hex")} before writing code.`;
+
+    const before = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+
+    const seeded = await editSpecifyBody(marker);
+    const after = await program(
+      Effect.gen(function* () {
+        // A new card and a new run: what a run is told is resolved when its session opens, so the
+        // next run is where an edited body shows up.
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+    // Put the seed back, so a later case reads what 0009 wrote rather than this one's text.
+    await editSpecifyBody(seeded.body);
+
+    expect(before["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(before["skill_specify"]).not.toContain(marker);
+    expect(after["skill_specify"]).toContain(marker);
+  }, 120_000);
+
+  it("refuses to open a run whose column names a skill the factory does not hold", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        // A definition of its own, so the seeded pipeline is left exactly as 0010 wrote it.
+        const definitionId = `dangling${randomBytes(3).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns)
+          VALUES (
+            ${definitionId}, 1, 'Dangling pipeline',
+            ${JSON.stringify([
+              { name: "intake", kind: "resting", skills: [], requires: [] },
+              {
+                name: "specifying",
+                kind: "working",
+                role: "specifier",
+                skills: ["explain"],
+                requires: [],
+              },
+            ])}::jsonb
+          )
+        `;
+        const boardId = `brd_${randomBytes(13).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_instances (id, repo, definition_id, definition_version)
+          VALUES (${boardId}, ${`factory-test/${randomBytes(3).toString("hex")}`}, ${definitionId}, 1)
+        `;
+        const cardId = yield* newCard(boardId, "specifying", 1);
+        const sessions = yield* SessionService;
+        return yield* Effect.exit(
+          sessions.create({ taskId: cardId, taskColumn: "specifying" }),
+        );
+      }),
+    );
+
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value.code).toBe("invalid_input");
+    expect(failure.value.message).toContain('skill "explain"');
+  }, 120_000);
 });
 
 describe("request limits", () => {
