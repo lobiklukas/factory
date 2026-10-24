@@ -85,6 +85,7 @@ import {
   createModelAccess,
   readPromptSections,
   readSessionLog,
+  usageCostTotal,
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
@@ -581,6 +582,15 @@ describe("SessionService", () => {
         expect(live.entries.at(-1)?.text).toBe("faux-ok (re: hello)");
         // The faux provider reports token usage, so spend survives the projection.
         expect(live.usage.models[0]?.usage.totalTokens).toBeGreaterThan(0);
+        // The list shows cost per session, and the number it shows is the snapshot's ledger added
+        // up (LOB-153): both buckets, through the one helper the rebuild fold also uses. It is 0
+        // here — neither the faux model nor a built-in tool charges — so the arithmetic with a
+        // non-zero tool bucket is pinned in the harness's `projection.test.ts`, and that a tool's
+        // bucket reaches a real log is pinned in `session.test.ts`.
+        const listed = (yield* sessions.list({ limit: 100 })).sessions.find(
+          (entry) => entry.id === created.id,
+        );
+        expect(listed?.costTotal).toBe(usageCostTotal(live.usage));
 
         return { id: created.id, entries: live.entries };
       }),
@@ -3097,6 +3107,12 @@ describe("session list", () => {
         const find = (entries: readonly SessionListEntry[]) =>
           entries.find((entry) => entry.id === created.id);
         const before = find((yield* sessions.list({ limit: 100 })).sessions);
+        // The list's cost is the index column, not a fold per read (R6): a corrupted column is
+        // what the list shows, and the rebuild below is what puts the log's number back. Both
+        // halves matter for LOB-153 — the fold has to write `cost_total` from `pi.usage`, or a
+        // stale number would outlive the repair.
+        yield* sql`UPDATE session_activity SET cost_total = 9.99 WHERE session_id = ${created.id}`;
+        const corrupted = find((yield* sessions.list({ limit: 100 })).sessions);
 
         // Drop the derived rows, as losing an index table would. Every row, not just this case's:
         // the claim under test is that the whole index comes back from the log, and the database
@@ -3113,10 +3129,11 @@ describe("session list", () => {
         }>`
           SELECT slug, url, default_base_ref FROM repos WHERE slug = ${factoryRepo}
         `;
-        return { before, empty, report, after, repos };
+        return { before, corrupted, empty, report, after, repos };
       }),
     );
 
+    expect(result.corrupted?.costTotal).toBe(9.99);
     expect(result.empty).toBe(0);
     expect(result.report.sessions).toBeGreaterThan(0);
     expect(result.after).toBeDefined();
