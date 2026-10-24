@@ -959,7 +959,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const owner = yield* acquireOwner(input.sessionId, row);
             yield* touch(input.sessionId);
             const snapshot = yield* readLiveSnapshot(
-              owner.root,
+              owner,
               refOf(input.sessionId, row, owner.workspace),
             );
             const model = snapshot.usage.models.reduce<
