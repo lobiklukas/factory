@@ -21,6 +21,31 @@ export const PullRequest = Schema.Struct({
 });
 export type PullRequest = typeof PullRequest.Type;
 
+/**
+ * Which of the PR step's two paths answered (LOB-212).
+ *
+ * `"opened"` is the GitHub call; `"already-open"` is the retry that read the `factory.pr` document
+ * its log already held and never reached the network. The link is the same either way, which is
+ * exactly why the tag has to be here: before it, a first open and a replay were indistinguishable
+ * from the answer.
+ */
+export const PullRequestOutcome = Schema.Literals(["opened", "already-open"]);
+export type PullRequestOutcome = typeof PullRequestOutcome.Type;
+
+/**
+ * The PR step's answer: the link plus the path that produced it.
+ *
+ * A superset of `PullRequest`, not a replacement — a client that reads only `{number, url}` keeps
+ * decoding this answer with `PullRequest` and is unaffected, which is why the tag lives on the
+ * step's result rather than on the forge's own shape.
+ */
+export const OpenedPullRequest = Schema.Struct({
+  number: Schema.Finite,
+  url: Schema.String,
+  outcome: PullRequestOutcome,
+});
+export type OpenedPullRequest = typeof OpenedPullRequest.Type;
+
 export type PrBodyInput = {
   readonly sessionId: SessionId;
   readonly prompt: string;

@@ -114,7 +114,7 @@ import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
 import { mintSessionId } from "./ids";
-import type { PrError, PullRequest } from "./pr";
+import type { OpenedPullRequest, PrError } from "./pr";
 import { openPullRequest } from "./prStep";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
@@ -199,6 +199,9 @@ export type SessionServiceShape = {
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
    *
+   * The answer carries which path produced it (LOB-212): `opened` for the GitHub call, `already-open`
+   * for a retry that the log answered. Additive on the shape — the link is unchanged.
+   *
    * The forge client and the credential are the *caller's* to provide rather than this layer's:
    * the control plane's own HTTP layer is not a dependency of every session operation, and a
    * deployment that never opens a PR should not have to wire one. So the requirements appear on
@@ -207,7 +210,7 @@ export type SessionServiceShape = {
   readonly openPullRequest: (
     input: OpenPullRequestArgs,
   ) => Effect.Effect<
-    PullRequest,
+    OpenedPullRequest,
     SessionError | PrError | CredentialError,
     CredentialProvider | HttpClient.HttpClient
   >;
@@ -943,7 +946,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const openPr = (
         input: OpenPullRequestArgs,
       ): Effect.Effect<
-        PullRequest,
+        OpenedPullRequest,
         SessionError | PrError | CredentialError,
         CredentialProvider | HttpClient.HttpClient
       > =>
