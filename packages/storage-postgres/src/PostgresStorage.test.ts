@@ -316,7 +316,7 @@ describe("PostgresStorage.readers", () => {
   /**
    * Everything the fold reads of one log, as one comparable value.
    *
-   * Paged and reversed the way `readActiveEntries` pages and reverses (`ENTRY_PAGE` in
+   * Paged and reversed the way `readAllEntries` pages and reverses (`ENTRY_PAGE` in
    * `@repo/harness`), because a scan answers newest first and a limit that fits only the first page
    * would make a long log look like a short one — the batched read's whole risk is reading a page
    * and believing it was the log.

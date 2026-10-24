@@ -326,6 +326,19 @@ export const SessionIdInput = Schema.Struct({ sessionId: SessionId });
 export type SessionIdInput = typeof SessionIdInput.Type;
 
 /**
+ * Start a new model context for a session (LOB-181).
+ *
+ * `handoff` is what the fresh context opens with, as its first user message; absent or empty means
+ * the context starts from nothing. The transcript keeps everything before the reset and marks where
+ * it happened, so a handoff note is a summary the reader can check against the turns above it.
+ */
+export const ResetSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  handoff: Schema.optional(Schema.String),
+});
+export type ResetSessionInput = typeof ResetSessionInput.Type;
+
+/**
  * A session request that cannot be served. `code` is the part callers branch on.
  *
  * - `not_found` — no such session.

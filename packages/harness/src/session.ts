@@ -16,6 +16,7 @@ import type {
   EntryId,
   EntryRecord,
   Harness,
+  Page,
   Storage,
   Submission,
 } from "@earendil-works/pi-durable";
@@ -422,6 +423,19 @@ export const interrupt = (
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
 
+/**
+ * Start a new model context (LOB-181). Pi Durable appends a `pi.reset` entry that heads the next
+ * context, carrying `handoff` as its user message when given; the entries before it stay in the
+ * log, so the transcript keeps the past and marks where the reset happened.
+ */
+export const resetSession = (
+  conversation: Conversation,
+  handoff: string | undefined,
+): Effect.Effect<void, SessionError> =>
+  attempt("reset session", () =>
+    conversation.reset(handoff, BACKGROUND_CONTEXT),
+  );
+
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
 
@@ -462,8 +476,61 @@ const readDocument = (
 const ENTRY_PAGE = 500;
 
 /**
- * The active transcript: the newest head marker, then the entries from its head. That is the same
- * slice `viewState()` shows, so a fold and a live attach describe the same session.
+ * The transcript: every entry the conversation ever committed, oldest first.
+ *
+ * It is read from the start of the log rather than from the newest head marker, because a head
+ * marker (`pi.reset`, `pi.compaction`) says where the *model's* context begins, not where the
+ * transcript does. A reset keeps the past and marks where it happened (LOB-181), and a fold that
+ * started at the head would also drop the `factory.title` entry a rebuild reads the title from.
+ * Both read paths use this, so a fold and a live attach still describe the same session.
+ */
+const scanEntries = (
+  scan: (
+    cursor: Cursor | undefined,
+  ) => Effect.Effect<Page<EntryRecord, Cursor>, SessionError>,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
+    const records: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* scan(cursor);
+      records.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    // Storage scans newest first.
+    return records.reverse();
+  });
+
+const readAllEntries = (
+  storage: Storage,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      storage.scanEntries(
+        { conversationId: ROOT_CONVERSATION_ID },
+        ENTRY_PAGE,
+        cursor,
+        BACKGROUND_CONTEXT,
+      ),
+    ),
+  );
+
+/** The same transcript for a session this process owns, read through its conversation. */
+const readConversationEntries = (
+  conversation: Conversation,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      conversation.entries({}, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
+    ),
+  );
+
+/**
+ * The *active window*: the newest head marker, then the entries from its head. That is what Pi
+ * Durable folds into a request, so it is the right slice for a question about the model's current
+ * context — the prompt sections a run has in effect — and the wrong one for the transcript, which
+ * is `readAllEntries`, because a `pi.reset` would truncate it.
  */
 const readActiveEntries = (
   storage: Storage,
@@ -476,23 +543,21 @@ const readActiveEntries = (
         BACKGROUND_CONTEXT,
       ),
     );
-    const query =
-      marker === undefined
-        ? { conversationId: ROOT_CONVERSATION_ID }
-        : { conversationId: ROOT_CONVERSATION_ID, minEntryId: marker.head };
-
-    const records: EntryRecord[] = [];
-    let cursor: Cursor | undefined;
-    for (;;) {
-      const page = yield* attempt("scan entries", () =>
-        storage.scanEntries(query, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
-      );
-      records.push(...page.items);
-      cursor = page.next;
-      if (cursor === undefined) break;
-    }
-    // Storage scans newest first.
-    return records.reverse();
+    return yield* scanEntries((cursor) =>
+      attempt("scan entries", () =>
+        storage.scanEntries(
+          marker === undefined
+            ? { conversationId: ROOT_CONVERSATION_ID }
+            : {
+                conversationId: ROOT_CONVERSATION_ID,
+                minEntryId: marker.head,
+              },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      ),
+    );
   });
 
 export type SessionLog = {
@@ -526,7 +591,7 @@ export const readSessionLog = (
   storage: Storage,
 ): Effect.Effect<SessionLog, SessionError> =>
   Effect.gen(function* () {
-    const records = yield* readActiveEntries(storage);
+    const records = yield* readAllEntries(storage);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
@@ -614,8 +679,9 @@ const snapshotOf = (
   view: ConversationView,
   tasks: readonly SessionTask[],
   ref: SessionRef,
+  entries: readonly EntryRecord[],
 ): SessionSnapshot => {
-  const projection = projectView(view);
+  const projection = projectView(view, entries);
   return {
     session: {
       id: ref.id,
@@ -651,14 +717,22 @@ export const readLiveSnapshot = (
     const state = yield* attempt("read conversation view", () =>
       session.root.viewState(BACKGROUND_CONTEXT),
     );
-    const graph = yield* attempt("read task graph", () =>
-      session.harness.taskGraph(BACKGROUND_CONTEXT),
-    );
-    const tasks = projectTasks(graph.value);
-    graph.dispose();
-    const snapshot = snapshotOf(state.value, tasks, ref);
-    state.dispose();
-    return snapshot;
+    // The view holds the active window only; the transcript is the whole log. The scan is fallible,
+    // so the handle is released whether it answers or not — a leaked mount keeps this session's
+    // projections alive in the process for as long as the API runs. The task graph is a third mount
+    // and is released the same way: it is session-wide, so only the harness can answer "what is
+    // running here".
+    return yield* Effect.gen(function* () {
+      const graph = yield* attempt("read task graph", () =>
+        session.harness.taskGraph(BACKGROUND_CONTEXT),
+      );
+      const tasks = yield* Effect.ensuring(
+        Effect.succeed(projectTasks(graph.value)),
+        Effect.sync(() => graph.dispose()),
+      );
+      const entries = yield* readConversationEntries(session.root);
+      return snapshotOf(state.value, tasks, ref, entries);
+    }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
 /**
@@ -689,6 +763,8 @@ export const liveSessionEvents = (
       let unsubscribe: (() => void) | undefined;
       let unsubscribeTasks: (() => void) | undefined;
 
+      // Registered before the fallible scan below, so a failed read releases the mount instead of
+      // leaving this session's projections running in the process.
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           unsubscribe?.();
@@ -698,8 +774,15 @@ export const liveSessionEvents = (
         }),
       );
 
+      // The transcript the snapshot below carries is the whole log, while the view the diffs come
+      // from holds the active window: a `pi.reset` truncates the view. Entry ids already sent are
+      // tracked here so an entry committed between the view read and the scan reaches the client
+      // exactly once, whether it arrives in the snapshot or as an event.
+      const entries = yield* readConversationEntries(session.root);
+      const sent = new Set(entries.map((entry) => String(entry.id)));
+
       unsubscribe = state.subscribe((next) => {
-        const events = diffView(previous, next);
+        const events = diffView(previous, next, sent);
         previous = next;
         for (const event of events) Queue.offerUnsafe(queue, event);
       });
@@ -715,7 +798,7 @@ export const liveSessionEvents = (
       // sees an event for a session it has not been told about.
       yield* Queue.offer(
         queue,
-        snapshotEvent(snapshotOf(state.value, previousTasks, ref)),
+        snapshotEvent(snapshotOf(state.value, previousTasks, ref, entries)),
       );
       return Stream.fromQueue(queue);
     }),

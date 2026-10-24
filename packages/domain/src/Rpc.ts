@@ -30,6 +30,7 @@ import {
   ListSessionsOutput,
   RegisterRepoInput,
   RepoSummary,
+  ResetSessionInput,
   SendMessageInput,
   SendMessageResult,
   SessionError,
@@ -69,6 +70,13 @@ export class SessionRpc extends RpcGroup.make(
   }),
   Rpc.make("interruptSession", {
     payload: SessionIdInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  // A reset is not an interrupt: it starts a new model context (with the handoff note as its first
+  // message) and leaves the transcript's past in place, marked by the `reset` entry (LOB-181).
+  Rpc.make("resetSession", {
+    payload: ResetSessionInput,
     success: SessionSummary,
     error: SessionError,
   }),

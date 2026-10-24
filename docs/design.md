@@ -137,8 +137,10 @@ _Rejected:_ always read the projection (two read paths with different staleness)
 
 _As built (M2)._ Ownership decides the path, and it is a registry in the control plane process: a
 session this process holds open streams from the live view; one it does not is a reader-mode fold.
-The two paths project the _same_ active transcript (newest head marker onward), and both are
-asserted to agree entry for entry. `mode` is on every snapshot, and a historical stream sends its
+The two paths project the _same_ transcript, read from the start of the log, and both are
+asserted to agree entry for entry. (A head marker — `pi.reset`, `pi.compaction` — says where the
+_model's_ context begins, not where the transcript does: a reset keeps the past and marks where it
+happened, LOB-181.) `mode` is on every snapshot, and a historical stream sends its
 snapshot and then **ends**, so a completed fold is distinguishable from a dropped connection. The
 projection diffs whole views rather than forwarding operations, so a subscriber that falls behind
 still converges. `notify`-driven catch-up — the third branch, for a session owned elsewhere — waits

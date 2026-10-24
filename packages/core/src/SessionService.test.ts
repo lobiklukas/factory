@@ -747,6 +747,83 @@ describe("SessionService", () => {
   });
 });
 
+/**
+ * Reset (LOB-181): a new model context, opened with the handoff note, over the same transcript.
+ *
+ * What the service owes: the entry is in the log (not in this process), the transcript keeps the
+ * turns before it, and a released session folds to the same thing the live read showed. The model
+ * context itself is read at the harness boundary, where a `ContextView` is available
+ * (`packages/harness/src/session.test.ts`); this is the contract the RPC surface serves.
+ */
+describe("reset", () => {
+  it("keeps the transcript, marks the boundary, and folds to the same entries", async () => {
+    const { resetSummary, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "resetting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "the turn the reset ends",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the reset to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const resetSummary = yield* sessions.reset({
+          sessionId: created.id,
+          handoff: "we were fixing the flaky login test",
+        });
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { resetSummary, before, live, folded };
+      }),
+    );
+
+    expect(resetSummary.id).toBe(live.session.id);
+    expect(resetSummary.status).toBe("idle");
+    // The title is untouched: a reset clears the context, not the session.
+    expect(live.session.title).toBe("resetting");
+
+    const resetEntry = live.entries.find((entry) => entry.kind === "reset");
+    expect(resetEntry?.text).toBe("we were fixing the flaky login test");
+    expect(live.entries.length).toBe(before.entries.length + 1);
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, history included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  });
+
+  it("resets to an entry with no text for a missing or blank handoff", async () => {
+    const entries = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "bare reset" });
+        yield* sessions.reset({ sessionId: created.id });
+        // A whitespace-only note is no note: a context that opens with a blank message is worse
+        // than one that opens with nothing, and the service is where that is decided.
+        yield* sessions.reset({ sessionId: created.id, handoff: "   \n " });
+        const snapshot = yield* sessions.get(created.id);
+        yield* sessions.close;
+        return snapshot.entries;
+      }),
+    );
+
+    const resets = entries.filter((entry) => entry.kind === "reset");
+    expect(resets).toHaveLength(2);
+    expect(resets.map((entry) => entry.text)).toEqual(["", ""]);
+  });
+});
+
 describe("repo binding", () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(
