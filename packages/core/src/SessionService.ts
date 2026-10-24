@@ -94,23 +94,29 @@ import {
 } from "@repo/harness";
 import {
   closeHarness,
+  clampCurationPages,
   compactSession,
+  curationProposals,
   forkSession,
   modelAccessFor,
+  modelKey,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readCurationUsage,
   readReplaySource,
   replaySession,
+  requestCuration,
   resetSession,
   snapshotEvent,
   submitMessage,
   usageCostTotal,
   writeApprovalDecided,
   writeApprovalRequested,
+  writeCurationUsage,
   writeRepoBinding,
   writeTaskBinding,
   writePage,
@@ -120,6 +126,8 @@ import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
 import type {
+  CurateSessionInput,
+  CurateSessionResult,
   ListPagesInput,
   ListPagesOutput,
   Page,
@@ -231,6 +239,17 @@ export type SessionServiceShape = {
   readonly listPages: (
     input: ListPagesInput,
   ) => Effect.Effect<ListPagesOutput, SessionError>;
+  /**
+   * One bounded curator pass over a finished session (LOB-206, part 3 of LOB-47).
+   *
+   * One model call reads the session's transcript and the pages it already holds and proposes page
+   * writes; at most `maxPages` of them are committed, and none of them when the session taught
+   * nothing new. The call's spend lands in the curated session's own ledger, because there is no
+   * curator session to carry it — the pass is a call, not a run.
+   */
+  readonly curate: (
+    input: CurateSessionInput,
+  ) => Effect.Effect<CurateSessionResult, SessionError>;
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
    *
@@ -372,6 +391,34 @@ const titleFrom = (content: string): string => {
   const line =
     content.split("\n").find((candidate) => candidate.trim().length > 0) ?? "";
   return line.trim().slice(0, TITLE_MAX);
+};
+
+/**
+ * Whether a curation proposed a page the session already holds, field for field.
+ *
+ * A page is its name, kind, content and two citation lists; a proposal that matches all five would
+ * be a rewrite of what is already there, so the pass skips it and writes nothing.
+ */
+const samePage = (existing: readonly Page[], proposal: Page): boolean =>
+  existing.some(
+    (page) =>
+      page.name === proposal.name &&
+      page.kind === proposal.kind &&
+      page.content === proposal.content &&
+      sameStrings(page.links, proposal.links) &&
+      sameStrings(page.sources, proposal.sources),
+  );
+
+const sameStrings = (
+  left: readonly string[],
+  right: readonly string[],
+): boolean => {
+  // A citation list is a set: the same names in another order are the same page, not a rewrite, and
+  // a repeat inside one list is one citation. Comparing index-wise would let a page that was
+  // recorded in a different order be written again for having "changed".
+  const a = new Set(left);
+  const b = new Set(right);
+  return a.size === b.size && [...a].every((value) => b.has(value));
 };
 
 /**
@@ -1689,6 +1736,89 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * One curator pass over a finished session (LOB-206, part 3 of LOB-47).
+       *
+       * The pass is one model call and nothing else: no scheduler, no embedding, no second request,
+       * and no curator session of its own. The session is read as a live snapshot — its transcript as
+       * folded and the pages it already holds — and the answer is written back through `recordPage`,
+       * so a curated page is the same log fact as a page a session recorded itself.
+       *
+       * Three decisions are worth naming:
+       *
+       * - A **running** session is refused rather than curated. The transcript a pass reads would be
+       *   half a piece of work, and its spend would race the run's own. The status is read once, so
+       *   a message sent *during* the call is not refused: the charge and the activity index are
+       *   both written from the ledger read after the call, so neither loses that run's spend.
+       * - A proposal the session **already holds**, field for field, is not written. `recordPage`
+       *   upserts, so writing it again would be a second log entry for an unchanged page: "learned
+       *   nothing new" would cost a commit, which is the one thing this pass promises it does not.
+       * - The call's spend is charged to the curated session **before** the page writes, in that
+       *   session's `pi.usage` and in its activity row: the session paid for the call whether or not
+       *   a later write succeeds, and a curator is not a session with a bill of its own.
+       */
+      const curate = (
+        input: CurateSessionInput,
+      ): Effect.Effect<CurateSessionResult, SessionError> =>
+        Effect.gen(function* () {
+          const maxPages = clampCurationPages(input.maxPages);
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const snapshot = yield* readLiveSnapshot(
+            owner,
+            refOf(input.sessionId, row, owner.workspace),
+          );
+          if (snapshot.session.status === "busy") {
+            return yield* new SessionErrorClass({
+              code: "busy",
+              message: `session ${input.sessionId} is running; a curator reads finished work`,
+            });
+          }
+          const existing = yield* listPages({ sessionId: input.sessionId });
+          const request = yield* requestCuration({
+            model: options.model,
+            sourceId: input.sessionId,
+            entries: snapshot.entries,
+            pages: existing.pages,
+            maxPages,
+          });
+          // The spend is charged before the answer is read, not after it is liked: the call was
+          // made and billed either way, and a curator that answers unreadably is the case where
+          // forgetting the charge would silently lose it.
+          yield* writeCurationUsage(
+            owner.root,
+            modelKey(options.model),
+            request.usage,
+          );
+          // The activity index is derived from the ledger *after* the charge, never from the
+          // pre-call snapshot plus an increment: a run that emitted its own usage event while the
+          // call was in flight would otherwise have its spend overwritten by the snapshot's total.
+          // Reading the ledger back can only be at least that event's value.
+          const ledger = yield* readCurationUsage(owner.harness, owner.root);
+          yield* setActivityCost(input.sessionId, costOf(ledger));
+          const curation = yield* curationProposals(request, {
+            sourceId: input.sessionId,
+            maxPages,
+          });
+          const written: Page[] = [];
+          for (const proposal of curation.proposals) {
+            // Skip a page the session already holds, and a repeat inside the answer itself: a
+            // curation that names the same page twice is one page, and the second write would be a
+            // log entry for nothing.
+            if (
+              samePage(existing.pages, proposal) ||
+              samePage(written, proposal)
+            ) {
+              continue;
+            }
+            written.push(
+              yield* recordPage({ sessionId: input.sessionId, ...proposal }),
+            );
+          }
+          yield* touchActivity(input.sessionId);
+          return { pages: written, proposed: curation.proposed };
+        });
+
+      /**
        * One page of the session list, newest activity first.
        *
        * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
@@ -2049,6 +2179,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         listApprovals,
         recordPage,
         listPages,
+        curate,
         openPullRequest: openPr,
         close: closeAll,
       });

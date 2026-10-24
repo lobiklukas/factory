@@ -24,7 +24,12 @@ import {
   UndeclaredTransition,
   UnblockTaskInput,
 } from "@repo/domain/Task";
-import { ListPagesInput, ListPagesOutput } from "@repo/domain/Page";
+import {
+  CurateSessionInput,
+  CurateSessionResult,
+  ListPagesInput,
+  ListPagesOutput,
+} from "@repo/domain/Page";
 import {
   CompactSessionInput,
   CompactSessionResult,
@@ -114,6 +119,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("listPages", {
     payload: ListPagesInput,
     success: ListPagesOutput,
+    error: SessionError,
+  }),
+  // One bounded curator pass over a finished session (LOB-206): the answer is what it wrote, and an
+  // empty list is a pass that found nothing new rather than a pass that did not run.
+  Rpc.make("curateSession", {
+    payload: CurateSessionInput,
+    success: CurateSessionResult,
     error: SessionError,
   }),
   Rpc.make("registerRepo", {
