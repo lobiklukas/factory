@@ -58,9 +58,13 @@ beforeAll(async () => {
   try {
     sql = await runtime.runPromise(SqlClient);
   } catch (cause) {
+    const configuredUrl = process.env["DATABASE_URL"];
+    const urlNote = configuredUrl
+      ? `(DATABASE_URL=${configuredUrl})`
+      : `(DATABASE_URL defaults to postgres://factory:factory@localhost:5442/factory)`;
     throw new Error(
       "Postgres is unreachable. Start it with `docker compose up -d --wait postgres` " +
-        `(DATABASE_URL defaults to postgres://factory:factory@localhost:5442/factory). ${String(cause)}`,
+        `${urlNote}. ${String(cause)}`,
       { cause },
     );
   }
