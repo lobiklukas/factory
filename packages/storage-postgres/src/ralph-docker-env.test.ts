@@ -925,4 +925,24 @@ describe("the ralph driver's shell contract", () => {
       expect(offending).toEqual([]);
     },
   );
+
+  it(
+    "README exit-code list names every status the driver exits with (LOB-131)",
+    { timeout: 30_000 },
+    () => {
+      const readme = readFileSync(
+        path.join(REPO_ROOT, ".pi/ralph/README.md"),
+        "utf8",
+      );
+      const loop = readFileSync(LOOP, "utf8");
+      const codes = new Set(
+        [...loop.matchAll(/\bexit (\d+)\b/g)].map((m) => m[1]),
+      );
+      const line = readme.split("\n").find((l) => l.startsWith("Exit codes:"));
+      expect(line).toBeTruthy();
+      for (const code of codes) {
+        expect(line).toContain("`" + code + "`");
+      }
+    },
+  );
 });
