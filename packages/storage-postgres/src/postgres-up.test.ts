@@ -46,7 +46,7 @@ import { afterAll, describe, expect, it } from "vitest";
  * The file lives in `@repo/storage-postgres` for the same reason `turbo-env.test.ts` does: it is a
  * repo-level Postgres claim that belongs to no package, and it needs no database to run.
  *
- * Each case below names the mutation it was checked against — the one-line change that makes it go
+ * Each case below names the mutation it was checked against — the change that makes it go
  * red. A case whose mutation nobody can state is not testing anything. "Names" is meant
  * mechanically: the note is a `//` comment line inside the case that carries the marker
  * `Mutation checked:` on that one line, and the last case in this file reads the file back and
@@ -596,7 +596,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     // Acceptance criterion 1 in full: compose exits 0 with nothing answering *and* left no
     // `Created` container, so the cleanup must ask, find nothing, and remove nothing.
     // Mutation checked: the same dropped probe as the case above (`if ! pg_compose up -d --wait
-    // postgres >/dev/null 2>&1; then`) — the status is 0 and every assertion here is red.
+    // postgres >/dev/null 2>&1; then`) — the status is 0 and it fails at the status assertion.
     writeFakeDocker(scratch, 0);
     const port = await closedPort();
     const result = ensurePostgres(scratch, port);
@@ -1222,7 +1222,7 @@ describe("the verify-* skills' Postgres precondition", () => {
       });
       expect(result.status, result.stderr).toBe(0);
       // Mutation checked: dropping the `[ -z "${DOCKER_HOST:-}" ]` condition from `pg_docker`
-      // (LOB-105's guard) — the fallback overwrites the socket the caller chose.
+      // (the rule LOB-57 gave `pg_docker`) — the fallback overwrites the socket the caller chose.
       expect(
         recordOf(scratch, "compose up -d --wait postgres").dockerHost,
       ).toBe("unix:///var/run/docker.sock");
