@@ -11,6 +11,7 @@ import {
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { forgetSession, recordSession } from "@/lib/atoms/session-registry";
+import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -161,6 +162,16 @@ export const SessionPane = ({
           </Button>
         </div>
       </header>
+
+      {/*
+       * What the run is doing right now, before what it said (LOB-184). The list is the stream's
+       * projection of Pi Durable's task graph, so a task that settles leaves the strip as it left
+       * the graph — no reload, no history to keep.
+       */}
+      <TaskPanel
+        tasks={view === null ? [] : view.tasks}
+        attaching={attaching}
+      />
 
       {/*
        * The scroller follows the stream: a live run appends while you read, and
