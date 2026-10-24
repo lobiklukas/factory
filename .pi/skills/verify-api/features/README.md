@@ -33,6 +33,11 @@ The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 20
 `:9400`, faux, Postgres on 5442): **33/33**, evidence `.verify/evidence/lob-185/`. `./sigterm.sh` and
 `./degraded.sh` were not re-run there; neither touches the compaction path.
 
+The trigger checks (LOB-188) were run from the `ralph/LOB-188` worktree on 2026-10-24 (API on
+`:9400`, faux, Postgres on 5442): **12/12** via `./webhook.sh`, evidence
+`.verify/evidence/lob-188/`. They are a separate drive from `bun drive.ts` — the trigger routes are
+plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run there.
+
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
 | Create a session        | passing | [create.md](create.md)             |
@@ -48,6 +53,7 @@ The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 20
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |
 | Errors over the wire    | passing | [errors.md](errors.md)             |
 | One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
+| Inbound triggers        | passing | [trigger.md](trigger.md)           |
 
 ## Deliberately absent
 
