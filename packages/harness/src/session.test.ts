@@ -9,6 +9,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Message } from "@earendil-works/pi-ai";
+import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -20,9 +22,12 @@ import {
   forkSession,
   isBusy,
   openSession,
+  readLiveSnapshot,
   readPromptSections,
   readSessionLog,
+  resetSession,
   submitMessage,
+  type SessionRef,
 } from "./session";
 
 const runtime = ManagedRuntime.make(DatabaseLive);
@@ -31,6 +36,24 @@ const model = createModelAccess("faux");
 
 const workdir = mkdtempSync(join(tmpdir(), "factory-harness-"));
 const logId = `harness-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+/** The control plane's view of this log, for the tests that read a snapshot rather than a fold. */
+const ref: SessionRef = {
+  id: SessionIdSchema.make(`ses_${"0".repeat(26)}`),
+  title: "",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  workspace: { path: workdir, commands: {}, commandsSource: "none" },
+};
+
+/** Model messages as text, so a context can be compared to what was written into it. */
+const messageTexts = (messages: readonly Message[]): readonly string[] =>
+  messages.map((message) =>
+    typeof message.content === "string"
+      ? message.content
+      : message.content
+          .flatMap((block) => (block.type === "text" ? [block.text] : []))
+          .join(""),
+  );
 
 let sql: SqlClient;
 
@@ -50,8 +73,8 @@ afterAll(async () => {
   await runtime.dispose();
 });
 
-const openStorage = () =>
-  PostgresStorage.open(sql, { logId, mode: "owner" }, context);
+const openStorage = (id: string = logId) =>
+  PostgresStorage.open(sql, { logId: id, mode: "owner" }, context);
 
 /** One turn through the session, returning the settled transcript. */
 const turn = (
@@ -137,15 +160,115 @@ describe("a session over PostgresStorage", () => {
       first.entries,
     );
   }, 120_000);
+
+  /**
+   * LOB-181: a reset is a new model context, not a lost transcript.
+   *
+   * The two halves are the point and they pull in opposite directions: `ContextView.messages` — what
+   * the next provider request carries — must hold the handoff alone, while the transcript must still
+   * hold the turns before it, with the `reset` entry between them. Mutation checked: dropping the
+   * full-log scan in `readConversationEntries` / `readAllEntries` (back to the newest head marker)
+   * leaves the transcript starting at the reset entry, and both transcript assertions go red.
+   */
+  it("a reset starts a fresh context and keeps the past in the transcript", async () => {
+    const handoff = "we were fixing the flaky login test; continue from there";
+    const resetLog = `${logId}-reset`;
+    const storage = await openStorage(resetLog);
+
+    const live = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, {
+          content: "before the reset",
+          requestId: "reset-before",
+        });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const before = yield* readLiveSnapshot(root, ref);
+        expect(before.entries.map((entry) => entry.kind)).toContain("user");
+
+        yield* resetSession(root, handoff);
+
+        // What the model sees: the handoff, and nothing from before it.
+        const opened = yield* Effect.promise(() => root.context(context));
+        expect(messageTexts(opened.messages)).toEqual([handoff]);
+
+        // What a reader sees: the whole transcript, with the reset marked where it happened.
+        const after = yield* readLiveSnapshot(root, ref);
+        const kinds = after.entries.map((entry) => entry.kind);
+        expect(kinds.slice(0, before.entries.length)).toEqual(
+          before.entries.map((entry) => entry.kind),
+        );
+        expect(kinds).toContain("reset");
+        expect(
+          after.entries.find((entry) => entry.kind === "reset")?.text,
+        ).toBe(handoff);
+        expect(after.entries.length).toBe(before.entries.length + 1);
+
+        yield* closeHarness(harness);
+        return after;
+      }),
+    );
+
+    // The fold is the other read path (D8), and it has to agree — including the history.
+    const folded = await runtime.runPromise(
+      readSessionLog(await openStorage(resetLog)),
+    );
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+
+  /**
+   * LOB-181: a reset with no handoff still starts a context (an empty one) and still marks the
+   * boundary, so "reset" and "reset with notes" are one behaviour with one shape.
+   */
+  it("a reset with no handoff leaves an empty context and marks the entry", async () => {
+    const storage = await openStorage(`${logId}-bare-reset`);
+    const { emptyContext, entries } = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, {
+          content: "a turn to forget",
+          requestId: "bare-reset-before",
+        });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+
+        yield* resetSession(root, undefined);
+
+        const opened = yield* Effect.promise(() => root.context(context));
+        const after = yield* readLiveSnapshot(root, ref);
+        yield* closeHarness(harness);
+        return {
+          emptyContext: messageTexts(opened.messages),
+          entries: after.entries,
+        };
+      }),
+    );
+
+    expect(emptyContext).toEqual([]);
+    const resetEntry = entries.find((entry) => entry.kind === "reset");
+    expect(resetEntry?.text).toBe("");
+    // The turn before it is still readable, which is what makes the entry a boundary.
+    expect(entries.some((entry) => entry.text === "a turn to forget")).toBe(
+      true,
+    );
+  }, 120_000);
 });
 
 /**
  * A fork copies the parent's entries, so the interesting part is not the entries — it is the head
  * marker a `reset` writes: entry ids are minted per log, so the copy has to rewrite the marker to
- * the copy of the entry it names, and a copy that drops it makes the fork's active transcript reach
- * back past the parent's own context. This case therefore resets the parent in the middle, so that
- * the parent's transcript and its *log* differ: a fork that copied the entries but not the marker
- * would show `before the reset` where the parent shows nothing.
+ * the copy of the entry it names, and a copy that drops it makes the fork's model context reach
+ * back past what the parent's own context carries. This case therefore resets the parent in the
+ * middle, so that the parent's transcript and its *context* differ (LOB-181: a head marker bounds
+ * the context, not the transcript): a fork that copied the entries but not the marker would show
+ * `before the reset` in its context where the parent shows nothing.
  */
 describe("forking a session", () => {
   it("copies the parent's transcript through the fork point, head marker included", async () => {
@@ -156,7 +279,7 @@ describe("forking a session", () => {
     const reader = (id: string) =>
       PostgresStorage.open(sql, { logId: id, mode: "reader" }, context);
 
-    await runtime.runPromise(
+    const parentContext = await runtime.runPromise(
       Effect.gen(function* () {
         const { harness, root } = yield* openSession({
           storage: yield* Effect.promise(() => owner(parentLog)),
@@ -176,7 +299,10 @@ describe("forking a session", () => {
           requestId: "after the reset",
         });
         yield* Effect.promise(() => after.submission.wait(context));
+        // What the parent's model is sent, which is what the copied head marker has to reproduce.
+        const opened = yield* Effect.promise(() => root.context(context));
         yield* closeHarness(harness);
+        return messageTexts(opened.messages);
       }),
     );
 
@@ -186,14 +312,16 @@ describe("forking a session", () => {
         return yield* readSessionLog(opened);
       }),
     );
-    // The premise: the parent's active transcript begins at the reset, so the entries before it are
-    // in its log and not in its transcript.
+    // The premise: the parent's *context* begins at the reset, so the turn before it is still in the
+    // transcript and no longer in what the model is sent.
     expect(
       parentFold.entries.filter((entry) => entry.kind === "reset"),
     ).toHaveLength(1);
     expect(
       parentFold.entries.some((entry) => entry.text === "before the reset"),
-    ).toBe(false);
+    ).toBe(true);
+    expect(parentContext).not.toContain("before the reset");
+    expect(parentContext).toContain("handoff note");
 
     const forked = await runtime.runPromise(
       Effect.gen(function* () {
@@ -205,19 +333,22 @@ describe("forking a session", () => {
           model,
           cwd: workdir,
         });
+        const view = yield* Effect.promise(() => opened.root.context(context));
         yield* closeHarness(opened.harness);
         const reread = yield* Effect.promise(() => reader(childLog));
         const log = yield* readSessionLog(reread);
         yield* Effect.promise(() => reread.dispose());
-        return { at: opened.at, log };
+        return { at: opened.at, log, context: messageTexts(view.messages) };
       }),
     );
 
-    // The fork's active transcript is the parent's, entry for entry — which is only true if the
-    // head marker was copied and rewritten to the fork's own entry id.
+    // The fork's transcript is the parent's, entry for entry — the prefix the issue asks for.
     expect(forked.log.entries.map((entry) => entry.text)).toEqual(
       parentFold.entries.map((entry) => entry.text),
     );
+    // And its context is the parent's too, which is only true if the head marker was copied and
+    // rewritten to the fork's own entry id.
+    expect(forked.context).toEqual(parentContext);
     expect(forked.log.forkedFrom).toBe(parentLog);
     expect(forked.at).not.toBe("");
   }, 120_000);

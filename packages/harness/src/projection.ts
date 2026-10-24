@@ -257,10 +257,15 @@ export const projectInbox = (
 };
 
 /** A live conversation view → a snapshot. */
-export const projectView = (view: ConversationView): SessionProjection => {
+export const projectView = (
+  view: ConversationView,
+  /** The transcript to project. Defaults to the view's active window; the read paths pass the
+   * whole log, so a `pi.reset` is a marker in the transcript rather than a truncation of it. */
+  entries: readonly EntryRecord[] = view.entries,
+): SessionProjection => {
   const live = projectLive(view.docs);
   return {
-    entries: view.entries.map(projectEntry),
+    entries: entries.map(projectEntry),
     live,
     usage: projectUsageDoc(view.docs[USAGE_DOC]),
     status: live.busy ? "busy" : "idle",
@@ -278,14 +283,20 @@ export const projectView = (view: ConversationView): SessionProjection => {
 export const diffView = (
   previous: ConversationView,
   next: ConversationView,
+  /** Entry ids the receiver already has. Defaults to what `previous` holds, which is right for a
+   * diff against a view; an attach seeds it with the snapshot it sent. Ids are added as they are
+   * reported, so an entry is never sent twice. */
+  sent: Set<string> = new Set(
+    previous.entries.map((entry) => String(entry.id)),
+  ),
 ): readonly SessionEvent[] => {
   const events: SessionEvent[] = [];
 
-  const known = new Set(previous.entries.map((entry) => String(entry.id)));
   for (const entry of next.entries) {
-    if (!known.has(String(entry.id))) {
-      events.push({ _tag: "entry", entry: projectEntry(entry) });
-    }
+    const id = String(entry.id);
+    if (sent.has(id)) continue;
+    sent.add(id);
+    events.push({ _tag: "entry", entry: projectEntry(entry) });
   }
 
   if (previous.docs[LIVE_DOC] !== next.docs[LIVE_DOC]) {

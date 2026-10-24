@@ -32,6 +32,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | SIGTERM mid-run (LOB-21)     | the owners are released, and the interrupted session folds and continues                 | a killed run is resumable, not lost                |
 | Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`                                           | callers can branch on `code`, not on text          |
 | Interrupt wakes, then stops  | `interruptSession` → idle                                                                | steering wakes a session before acting on it       |
+| Reset a session (LOB-181)    | `resetSession` with and without a handoff: the past, then the `reset` entry              | a new context is a marker, not a truncation        |
 
 Every check is required: the driver exits non-zero when one fails.
 

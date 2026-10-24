@@ -21,6 +21,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       sendMessage: (input) => sessions.send(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
       forkSession: (input) => sessions.fork(input),
+      resetSession: (input) => sessions.reset(input),
       listSessions: (input) => sessions.list(input),
       registerRepo: (input) => sessions.registerRepo(input),
       watchSession: (input) => sessions.events(input.sessionId),

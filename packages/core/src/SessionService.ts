@@ -51,6 +51,7 @@ import type {
   ListSessionsOutput,
   RegisterRepoInput,
   RepoSummary,
+  ResetSessionInput,
   SendMessageInput,
   SendMessageResult,
   SessionError,
@@ -95,6 +96,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  resetSession,
   snapshotEvent,
   submitMessage,
   writeApprovalDecided,
@@ -144,6 +146,13 @@ export type SessionServiceShape = {
    */
   readonly fork: (
     input: ForkSessionInput,
+  ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Start a new model context, opened with the handoff note (LOB-181). The transcript keeps the
+   * past; the reset entry marks where the old context ended.
+   */
+  readonly reset: (
+    input: ResetSessionInput,
   ) => Effect.Effect<SessionSummary, SessionError>;
   /** What exists, newest activity first, from the activity index — never a fold (R6). */
   readonly list: (
@@ -965,6 +974,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* describe(id, row);
         });
 
+      /**
+       * A reset starts a new model context (LOB-181). It is committed to the log, not held in this
+       * process, so a released session resets the same way a owned one does — and the entry it
+       * appends is what the transcript shows as the boundary. An empty handoff is no handoff: a
+       * context that opens with a blank message is worse than one that opens with nothing.
+       */
+      const reset = (
+        input: ResetSessionInput,
+      ): Effect.Effect<SessionSummary, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          const handoff = input.handoff?.trim();
+          const owner = yield* acquireOwner(input.sessionId, row);
+          yield* resetSession(
+            owner.root,
+            handoff === undefined || handoff === "" ? undefined : handoff,
+          );
+          yield* touchActivity(input.sessionId);
+          return yield* describe(input.sessionId, row);
+        });
+
       /** Every approval this process has seen, per session, keyed by request id. */
       const approvals = yield* Ref.make(
         HashMap.empty<SessionId, HashMap.HashMap<string, ApprovalRecord>>(),
@@ -1527,6 +1557,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         interrupt,
         fork,
+        reset,
         list,
         registerRepo,
         events,

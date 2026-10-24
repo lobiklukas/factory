@@ -505,6 +505,70 @@ const program = Effect.gen(function* () {
     `mode=${interrupted.mode} status=${interrupted.status}`,
   );
 
+  // Feature: reset (LOB-181). A reset starts a new model context whose first message is the handoff
+  // note. The transcript keeps what came before it and marks the boundary with the `reset` entry,
+  // so the old turns are still readable above the new context rather than truncated by it.
+  const toReset = yield* client.createSession({
+    requestId: `verify-api-reset-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toReset.id,
+    content: "reset probe: before",
+  });
+  // Wait for the answer itself, not for `busy` to be false: a read taken before the run starts would
+  // see `idle`, the wait would pass at once, and the reset could land before the turn it is meant to
+  // end — which would make the "one entry longer" assertion below meaningless.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toReset.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some(
+            (entry) => entry.kind === "assistant" && entry.text.length > 0,
+          ),
+        ),
+      ),
+    "the pre-reset turn to settle",
+  );
+  const beforeReset = yield* client.getSession({ sessionId: toReset.id });
+  const handoff = "reset probe: carry on from here";
+  const resetSummary = yield* client.resetSession({
+    sessionId: toReset.id,
+    handoff,
+  });
+  const afterReset = yield* client.getSession({ sessionId: toReset.id });
+  const resetKinds = afterReset.entries.map((entry) => entry.kind);
+  const resetEntry = afterReset.entries.find((entry) => entry.kind === "reset");
+  assert(
+    "resetSession answers with the session",
+    resetSummary.id === toReset.id && resetSummary.status === "idle",
+    `id=${resetSummary.id} mode=${resetSummary.mode} status=${resetSummary.status}`,
+  );
+  assert(
+    "a reset keeps the transcript and marks where it happened",
+    resetEntry?.text === handoff &&
+      afterReset.entries.length === beforeReset.entries.length + 1 &&
+      JSON.stringify(beforeReset.entries.map((entry) => entry.id)) ===
+        JSON.stringify(
+          afterReset.entries
+            .slice(0, beforeReset.entries.length)
+            .map((entry) => entry.id),
+        ),
+    `kinds=${resetKinds.join(", ")} reset=${JSON.stringify(resetEntry?.text ?? null)}`,
+  );
+  // A second reset with no handoff leaves an empty context and still marks the boundary, so
+  // "reset" and "reset with notes" are one shape rather than two.
+  yield* client.resetSession({ sessionId: toReset.id });
+  const bareReset = yield* client.getSession({ sessionId: toReset.id });
+  const bareEntries = bareReset.entries.filter(
+    (entry) => entry.kind === "reset",
+  );
+  assert(
+    "a reset with no handoff still marks the entry",
+    bareEntries.length === 2 && bareEntries.at(-1)?.text === "",
+    `reset entries=${bareEntries.length} last=${JSON.stringify(bareEntries.at(-1)?.text ?? null)}`,
+  );
+
   return { id: created.id };
 }).pipe(Effect.provide(ProtocolLive), Effect.scoped);
 
