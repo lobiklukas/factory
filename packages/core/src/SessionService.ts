@@ -412,9 +412,14 @@ const samePage = (existing: readonly Page[], proposal: Page): boolean =>
 const sameStrings = (
   left: readonly string[],
   right: readonly string[],
-): boolean =>
-  left.length === right.length &&
-  left.every((value, index) => value === right[index]);
+): boolean => {
+  // A citation list is a set: the same names in another order are the same page, not a rewrite, and
+  // a repeat inside one list is one citation. Comparing index-wise would let a page that was
+  // recorded in a different order be written again for having "changed".
+  const a = new Set(left);
+  const b = new Set(right);
+  return a.size === b.size && [...a].every((value) => b.has(value));
+};
 
 /**
  * Total spend, which is what the list shows: both `pi.usage` buckets, models and tools (LOB-153).

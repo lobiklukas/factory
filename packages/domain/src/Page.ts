@@ -68,7 +68,12 @@ export type CurateSessionInput = typeof CurateSessionInput.Type;
 export const CurateSessionResult = Schema.Struct({
   /** The pages this pass committed, in the order it committed them (by name when read back). */
   pages: Schema.Array(Page),
-  /** What the model proposed, including the proposals the cap dropped and the ones it already held. */
+  /**
+   * What the model proposed: the cap's dropped proposals, the ones the session already held, a
+   * repeat inside the answer itself, and any entry the parse kept but the blank-name filter refused.
+   * It is the model's count, not the server's, so it can exceed `pages.length` and never undercounts
+   * a call.
+   */
   proposed: Schema.Int,
 });
 export type CurateSessionResult = typeof CurateSessionResult.Type;

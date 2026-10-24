@@ -102,6 +102,13 @@ observed.probes = {
 };
 
 const textOf = (entry) => entry.text;
+
+/** Both `pi.usage` buckets, as one number: the total a session has spent on models and tools. */
+const tokensOf = (snapshot) =>
+  [...snapshot.usage.models, ...snapshot.usage.tools].reduce(
+    (total, bucket) => total + bucket.usage.totalTokens,
+    0,
+  );
 const lastAssistant = (entries) =>
   entries.filter((entry) => entry.kind === "assistant").at(-1);
 
@@ -723,6 +730,91 @@ const program = Effect.gen(function* () {
       pendingFolded: pendingFolded.approvals,
       decision,
       pendingAfterDecide: pendingAfterDecide.approvals,
+    },
+  });
+
+  // Feature: curate a finished session's pages (LOB-206). One bounded model call over the transcript
+  // and the pages the session already holds proposes page writes; the server commits at most
+  // `maxPages` of them, cites the curated session, and commits nothing when it taught nothing new.
+  // Driven over the RPC client, on a session of its own, so the contract is what is proven — and
+  // with the faux model deriving its answer from the transcript, so a page can only exist if this
+  // session really ran a tool.
+  const toCurate = yield* client.createSession({
+    requestId: `verify-api-curate-${Date.now()}`,
+  });
+  yield* client.sendMessage({ sessionId: toCurate.id, content: PROMPT });
+  const curatedIdle = yield* waitUntil(
+    client
+      .getSession({ sessionId: toCurate.id })
+      .pipe(
+        Effect.map((state) =>
+          !state.live.busy &&
+          state.entries.some(
+            (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+          )
+            ? state
+            : undefined,
+        ),
+      ),
+    "the curated session's bash result",
+  );
+  const spentBefore = tokensOf(curatedIdle);
+  const knownIds = new Set(
+    (yield* client.listSessions({ limit: 250 })).sessions.map(
+      (session) => session.id,
+    ),
+  );
+  const curated = yield* client.curateSession({
+    sessionId: toCurate.id,
+    maxPages: 1,
+  });
+  const heldPages = yield* client.listPages({ sessionId: toCurate.id });
+  const afterCurate = yield* client.getSession({ sessionId: toCurate.id });
+  const spentAfter = tokensOf(afterCurate);
+  assert(
+    "curateSession writes a page citing the session, and charges the call to it",
+    curated.pages.length === 1 &&
+      curated.proposed >= 1 &&
+      curated.pages[0]?.sources.includes(toCurate.id) === true &&
+      heldPages.pages.some((page) => page.name === curated.pages[0]?.name) &&
+      // The call's spend lands in the curated session's own ledger, not a curator's.
+      spentAfter > spentBefore,
+    `pages=${curated.pages.map((page) => page.name).join(", ")} proposed=${curated.proposed} sources=${curated.pages[0]?.sources.join(", ")} tokens=${spentBefore}->${spentAfter}`,
+  );
+
+  // A curator is a call, not a run: no session of its own may appear on the list for having
+  // curated. The curated session was already known before the call, so a new row is a curator's.
+  const listedAfterCurate = yield* client.listSessions({ limit: 250 });
+  const curatorSessions = listedAfterCurate.sessions.filter(
+    (session) => !knownIds.has(session.id),
+  );
+  assert(
+    "a curation opens no session of its own",
+    curatorSessions.length === 0,
+    `new sessions: ${curatorSessions.map((session) => session.id).join(", ") || "none"}`,
+  );
+
+  // The same pass again: the session already holds what the model proposes, so it commits nothing.
+  // It still costs its one call, which is what makes "learned nothing new" cheap rather than free.
+  const repeatCurated = yield* client.curateSession({
+    sessionId: toCurate.id,
+    maxPages: 1,
+  });
+  const heldAfterRepeat = yield* client.listPages({ sessionId: toCurate.id });
+  assert(
+    "a second curation commits nothing when the session already holds the proposal",
+    repeatCurated.pages.length === 0 &&
+      repeatCurated.proposed >= 1 &&
+      heldAfterRepeat.pages.length === heldPages.pages.length,
+    `pages=${repeatCurated.pages.length} proposed=${repeatCurated.proposed} held=${heldPages.pages.length}->${heldAfterRepeat.pages.length}`,
+  );
+  Object.assign(observed, {
+    curation: {
+      sessionId: toCurate.id,
+      first: curated,
+      pagesHeld: heldPages.pages,
+      repeat: repeatCurated,
+      tokens: { before: spentBefore, after: spentAfter },
     },
   });
 

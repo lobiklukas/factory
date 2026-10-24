@@ -47,25 +47,31 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
 and the fake listens on the port the run reserves for this surface.
 
-| Feature                 | Status  | File                               |
-| ----------------------- | ------- | ---------------------------------- |
-| Create a session        | passing | [create.md](create.md)             |
-| Repo binding            | passing | [repo-binding.md](repo-binding.md) |
-| Session list            | passing | [session-list.md](session-list.md) |
-| Watch a live session    | passing | [live-stream.md](live-stream.md)   |
-| Reset a session         | passing | [reset.md](reset.md)               |
-| Compact on demand       | passing | [compact.md](compact.md)           |
-| Fold a released session | passing | [fold.md](fold.md)                 |
-| Fork a session          | passing | [fork.md](fork.md)                 |
-| Request limits          | passing | [limits.md](limits.md)             |
-| Probes and readiness    | passing | [probes.md](probes.md)             |
-| Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |
-| Errors over the wire    | passing | [errors.md](errors.md)             |
-| One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
-| Inbound triggers        | passing | [trigger.md](trigger.md)           |
-| Jira adapter            | passing | [jira.md](jira.md)                 |
-| GitHub issues adapter   | passing | [github.md](github.md)             |
-| Approvals               | passing | [approvals.md](approvals.md)       |
+The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
+`:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
+the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the curation path.
+
+| Feature                  | Status  | File                               |
+| ------------------------ | ------- | ---------------------------------- |
+| Create a session         | passing | [create.md](create.md)             |
+| Repo binding             | passing | [repo-binding.md](repo-binding.md) |
+| Session list             | passing | [session-list.md](session-list.md) |
+| Watch a live session     | passing | [live-stream.md](live-stream.md)   |
+| Reset a session          | passing | [reset.md](reset.md)               |
+| Compact on demand        | passing | [compact.md](compact.md)           |
+| Fold a released session  | passing | [fold.md](fold.md)                 |
+| Fork a session           | passing | [fork.md](fork.md)                 |
+| Request limits           | passing | [limits.md](limits.md)             |
+| Probes and readiness     | passing | [probes.md](probes.md)             |
+| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)       |
+| Errors over the wire     | passing | [errors.md](errors.md)             |
+| One PR across a kill     | passing | [pr-once.md](pr-once.md)           |
+| Inbound triggers         | passing | [trigger.md](trigger.md)           |
+| Jira adapter             | passing | [jira.md](jira.md)                 |
+| GitHub issues adapter    | passing | [github.md](github.md)             |
+| Approvals                | passing | [approvals.md](approvals.md)       |
+| Curate a session's pages | passing | [curate.md](curate.md)             |
 
 ## Deliberately absent
 
