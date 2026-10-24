@@ -41,6 +41,7 @@ import type {
   SessionEvent,
   SessionId,
   SessionSnapshot,
+  SessionTask,
   SessionUsage,
   SessionWorkspace,
   Timestamp,
@@ -49,7 +50,10 @@ import type {
 import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
-import type { ModelAccess } from "./models";
+import { compactionPolicyFor, type ModelAccess } from "./models";
+// The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
+// the shapes they promise have a single writer and a single reader.
+import { PrDoc } from "./docs";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -59,12 +63,17 @@ import {
 import {
   diffView,
   projectEntry,
+  projectPrDoc,
+  projectTasks,
   projectUsageDoc,
   projectView,
+  sameTasks,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
+  PR_DOC_KIND,
+  PR_OPENED_ENTRY_KIND,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
@@ -247,7 +256,13 @@ export const openSession = (
               cwd: target.cwd ?? options.cwd,
               shellEnv: sessionShellEnv(),
             }),
-          settings: { progress: SESSION_PROGRESS },
+          settings: {
+            progress: SESSION_PROGRESS,
+            // Long sessions compact (B4). The thresholds follow the model's context window
+            // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
+            // never, and a large one keeps pi-durable's pinned defaults.
+            compaction: compactionPolicyFor(options.model.contextWindow),
+          },
         },
         BACKGROUND_CONTEXT,
       ),
@@ -366,6 +381,78 @@ export type TaskBinding = {
   readonly column: string;
 };
 
+/** The PR a session opened, as the log records it. */
+export type PullRequestRecord = {
+  readonly url: string;
+  readonly number: number;
+  readonly base: string;
+  readonly head: string;
+  readonly openedAt: string;
+};
+
+/**
+ * The PR a session opened, announced in the transcript so an attached client learns the link
+ * (LOB-177). It carries no model content, so the agent never sees it.
+ */
+export const PrOpenedEntry = defineEntry<{
+  readonly url: string;
+  readonly number: number;
+}>(PR_OPENED_ENTRY_KIND);
+
+/**
+ * Commit the PR a session opened. The log, not the `sessions` row, is what makes the link survive a
+ * dropped index; the caller updates the row as well so a list needs no fold (LOB-177).
+ *
+ * One commit, two shapes of the same fact, because they answer different questions: the `factory.pr`
+ * document is the record a retried step reads before it calls GitHub, and the entry is what an
+ * attached client can see — Pi Durable mounts only its own documents in a conversation view, so a
+ * document alone would open the PR silently for everyone already watching.
+ */
+export const writePullRequestDoc = (
+  conversation: Conversation,
+  pullRequest: PullRequestRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write pull request", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PrDoc, conversation.id).then((doc) => {
+            doc.url = pullRequest.url;
+            doc.number = pullRequest.number;
+            doc.base = pullRequest.base;
+            doc.head = pullRequest.head;
+            doc.openedAt = pullRequest.openedAt;
+          }),
+          tx.appendEntry(PrOpenedEntry, conversation.id, {
+            data: { url: pullRequest.url, number: pullRequest.number },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * The PR this session already opened, read from the committed document — so a step that runs twice
+ * reads the first run's answer instead of asking GitHub again. `undefined` when there is none.
+ */
+export const readPullRequestDoc = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<PullRequestRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const doc = yield* attempt("read pull request", () =>
+      harness.snapshot(PrDoc, conversation.id, BACKGROUND_CONTEXT),
+    );
+    if (doc === undefined || doc.url === "") return undefined;
+    return {
+      url: doc.url,
+      number: doc.number,
+      base: doc.base,
+      head: doc.head,
+      openedAt: doc.openedAt,
+    };
+  });
+
 /** Commit the task binding. */
 export const writeTaskBinding = (
   conversation: Conversation,
@@ -464,6 +551,23 @@ export const resetSession = (
 
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
+
+/**
+ * Compact the session on demand (B4): Pi Durable admits a compaction task that summarizes an old
+ * prefix of the model context and places the summary as the new head marker, so the transcript
+ * keeps every entry and the model's next request starts from the summary.
+ *
+ * The task id is the wire form of Pi Durable's branded id, like a submission's. Nothing to compact
+ * — a context shorter than the policy keeps verbatim — completes the task without a summary, which
+ * is the package's rule (range selection finds no cut), not a failure here.
+ */
+export const compactSession = (
+  conversation: Conversation,
+  instructions: string | undefined,
+): Effect.Effect<string, SessionError> =>
+  attempt("compact session", () =>
+    conversation.compact(instructions, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(String));
 
 /**
  * Whether a run is in flight. Read from the committed `pi.live` document, so it is what the log
@@ -788,6 +892,8 @@ export type SessionLog = {
   readonly usage: SessionUsage;
   /** The repo binding the log records, empty when the session is a scratch one. */
   readonly binding: RepoBinding;
+  /** The PR the log records, when the session opened one. */
+  readonly pr?: PullRequestRecord;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
   /** The job spec committed to the log, when present. */
@@ -822,6 +928,7 @@ export const readSessionLog = (
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
+    const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
     const taskId = bindingString(taskDoc, "taskId");
     const spec = bindingString(specDoc, "spec");
@@ -834,6 +941,17 @@ export const readSessionLog = (
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
       },
+      ...(prDoc.url === ""
+        ? {}
+        : {
+            pr: {
+              url: prDoc.url,
+              number: prDoc.number,
+              base: prDoc.base,
+              head: prDoc.head,
+              openedAt: prDoc.openedAt,
+            },
+          }),
       ...(spec === "" ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
@@ -882,6 +1000,18 @@ export const readPromptSections = (
 
 export type { Conversation, ConversationView, Harness, Storage };
 
+/**
+ * A session this process owns: the conversation its transcript lives in, and the harness whose
+ * task graph says what is running there (LOB-183).
+ *
+ * Both are needed to answer "what is this session doing": entries and documents come from the
+ * conversation view, and tasks are session-wide, so only the harness sees them.
+ */
+export type LiveSession = {
+  readonly harness: Harness;
+  readonly root: Conversation;
+};
+
 /** What the control plane knows about a session outside its log. */
 export type SessionRef = {
   readonly id: SessionId;
@@ -889,12 +1019,15 @@ export type SessionRef = {
   readonly createdAt: Timestamp;
   /** Where the session works, already resolved by the control plane (`@repo/domain/Session`). */
   readonly workspace: SessionWorkspace;
+  /** The PR the index remembers, so a read needs no fold to report it (LOB-177). */
+  readonly prUrl?: string;
   /** The session this one was forked from, when the index row says so (LOB-180). */
   readonly forkedFrom?: SessionId;
 };
 
 const snapshotOf = (
   view: ConversationView,
+  tasks: readonly SessionTask[],
   ref: SessionRef,
   entries: readonly EntryRecord[],
 ): SessionSnapshot => {
@@ -910,6 +1043,7 @@ const snapshotOf = (
       ...(ref.workspace.baseRef === undefined
         ? {}
         : { baseRef: ref.workspace.baseRef }),
+      ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
       ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
     },
     workspace: ref.workspace,
@@ -917,6 +1051,7 @@ const snapshotOf = (
     live: projection.live,
     usage: projection.usage,
     queued: projection.queued,
+    tasks,
   };
 };
 
@@ -927,49 +1062,67 @@ const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
 
 /** A live session's current state, read without subscribing to anything. */
 export const readLiveSnapshot = (
-  conversation: Conversation,
+  session: LiveSession,
   ref: SessionRef,
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const state = yield* attempt("read conversation view", () =>
-      conversation.viewState(BACKGROUND_CONTEXT),
+      session.root.viewState(BACKGROUND_CONTEXT),
     );
     // The view holds the active window only; the transcript is the whole log. The scan is fallible,
     // so the handle is released whether it answers or not — a leaked mount keeps this session's
-    // projections alive in the process for as long as the API runs.
+    // projections alive in the process for as long as the API runs. The task graph is a third mount
+    // and is released the same way: it is session-wide, so only the harness can answer "what is
+    // running here".
     return yield* Effect.gen(function* () {
-      const entries = yield* readConversationEntries(conversation);
-      return snapshotOf(state.value, ref, entries);
+      const graph = yield* attempt("read task graph", () =>
+        session.harness.taskGraph(BACKGROUND_CONTEXT),
+      );
+      const tasks = yield* Effect.ensuring(
+        Effect.succeed(projectTasks(graph.value)),
+        Effect.sync(() => graph.dispose()),
+      );
+      const entries = yield* readConversationEntries(session.root);
+      return snapshotOf(state.value, tasks, ref, entries);
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
 /**
- * A live session's events: a snapshot of the committed view, then one event per change for as long
- * as the stream runs.
+ * A live session's events: a snapshot of the committed view and the live-task list, then one event
+ * per change for as long as the stream runs.
  *
  * Views are diffed rather than op streams are forwarded, so a subscriber that falls behind still
  * receives a correct picture: entries are appended, and a document compared by reference tells us
- * it changed.
+ * it changed. The task graph is diffed the same way, through its projection: a task that appears,
+ * changes phase or settles publishes a graph revision, and a revision that projects the same list
+ * is dropped so the panel is not woken for nothing.
  */
 export const liveSessionEvents = (
-  conversation: Conversation,
+  session: LiveSession,
   ref: SessionRef,
 ): Stream.Stream<SessionEvent, SessionError> =>
   Stream.unwrap(
     Effect.gen(function* () {
       const state = yield* attempt("read conversation view", () =>
-        conversation.viewState(BACKGROUND_CONTEXT),
+        session.root.viewState(BACKGROUND_CONTEXT),
+      );
+      const graph = yield* attempt("read task graph", () =>
+        session.harness.taskGraph(BACKGROUND_CONTEXT),
       );
       const queue = yield* Queue.unbounded<SessionEvent>();
       let previous = state.value;
+      let previousTasks = projectTasks(graph.value);
       let unsubscribe: (() => void) | undefined;
+      let unsubscribeTasks: (() => void) | undefined;
 
       // Registered before the fallible scan below, so a failed read releases the mount instead of
       // leaving this session's projections running in the process.
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           unsubscribe?.();
+          unsubscribeTasks?.();
           state.dispose();
+          graph.dispose();
         }),
       );
 
@@ -977,7 +1130,7 @@ export const liveSessionEvents = (
       // from holds the active window: a `pi.reset` truncates the view. Entry ids already sent are
       // tracked here so an entry committed between the view read and the scan reaches the client
       // exactly once, whether it arrives in the snapshot or as an event.
-      const entries = yield* readConversationEntries(conversation);
+      const entries = yield* readConversationEntries(session.root);
       const sent = new Set(entries.map((entry) => String(entry.id)));
 
       unsubscribe = state.subscribe((next) => {
@@ -986,11 +1139,18 @@ export const liveSessionEvents = (
         for (const event of events) Queue.offerUnsafe(queue, event);
       });
 
+      unsubscribeTasks = graph.subscribe((next) => {
+        const tasks = projectTasks(next);
+        if (sameTasks(previousTasks, tasks)) return;
+        previousTasks = tasks;
+        Queue.offerUnsafe(queue, { _tag: "tasks", tasks });
+      });
+
       // Offer the snapshot before subscribing has a chance to enqueue anything, so a client never
       // sees an event for a session it has not been told about.
       yield* Queue.offer(
         queue,
-        snapshotEvent(snapshotOf(state.value, ref, entries)),
+        snapshotEvent(snapshotOf(state.value, previousTasks, ref, entries)),
       );
       return Stream.fromQueue(queue);
     }),
@@ -1022,6 +1182,7 @@ export const readHistoricalSnapshot = (
         ...(ref.workspace.baseRef === undefined
           ? {}
           : { baseRef: ref.workspace.baseRef }),
+        ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
         ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
       },
       workspace: ref.workspace,
@@ -1029,6 +1190,8 @@ export const readHistoricalSnapshot = (
       live: { busy: false, tools: [] },
       usage: log.usage,
       queued: [],
+      // Nobody owns this log, so nothing runs in it: a sandbox that ran it is paused or gone (D8).
+      tasks: [],
     };
   });
 

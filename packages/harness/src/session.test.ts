@@ -16,7 +16,7 @@ import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
-import { projectView } from "./projection";
+import { diffView, projectView } from "./projection";
 import {
   closeHarness,
   forkSession,
@@ -24,9 +24,11 @@ import {
   openSession,
   readLiveSnapshot,
   readPromptSections,
+  readPullRequestDoc,
   readSessionLog,
   resetSession,
   submitMessage,
+  writePullRequestDoc,
   type SessionRef,
 } from "./session";
 
@@ -187,7 +189,7 @@ describe("a session over PostgresStorage", () => {
           requestId: "reset-before",
         });
         yield* Effect.promise(() => submitted.submission.wait(context));
-        const before = yield* readLiveSnapshot(root, ref);
+        const before = yield* readLiveSnapshot({ harness, root }, ref);
         expect(before.entries.map((entry) => entry.kind)).toContain("user");
 
         yield* resetSession(root, handoff);
@@ -197,7 +199,7 @@ describe("a session over PostgresStorage", () => {
         expect(messageTexts(opened.messages)).toEqual([handoff]);
 
         // What a reader sees: the whole transcript, with the reset marked where it happened.
-        const after = yield* readLiveSnapshot(root, ref);
+        const after = yield* readLiveSnapshot({ harness, root }, ref);
         const kinds = after.entries.map((entry) => entry.kind);
         expect(kinds.slice(0, before.entries.length)).toEqual(
           before.entries.map((entry) => entry.kind),
@@ -242,7 +244,7 @@ describe("a session over PostgresStorage", () => {
         yield* resetSession(root, undefined);
 
         const opened = yield* Effect.promise(() => root.context(context));
-        const after = yield* readLiveSnapshot(root, ref);
+        const after = yield* readLiveSnapshot({ harness, root }, ref);
         yield* closeHarness(harness);
         return {
           emptyContext: messageTexts(opened.messages),
@@ -258,6 +260,132 @@ describe("a session over PostgresStorage", () => {
     expect(entries.some((entry) => entry.text === "a turn to forget")).toBe(
       true,
     );
+  }, 120_000);
+});
+
+/**
+ * A window whose derived thresholds a test can actually reach: 8000 tokens leaves 2000 for the
+ * answer, so a context past 6000 blocks and compacts before its next request. The default faux
+ * window (128k) would need a sixty-thousand-token transcript to prove the same thing.
+ */
+const smallWindow = createModelAccess("faux", { contextWindow: 8_000 });
+
+/**
+ * LOB-185: a session compacts on a policy (B4), and the policy is the model's window.
+ *
+ * Mutation checked: opening the session without `compactionPolicyFor` reverts to pi-durable's
+ * pinned defaults, which keep 20k tokens verbatim — more than this whole transcript — so range
+ * selection finds no cut, no summary is committed, and the first case's head assertion goes red
+ * (`expected undefined to be 'pi.compaction'`). The second case is the other half of the same rule:
+ * a session that stays under the threshold must not summarize anything, so a policy that compacts
+ * on every turn fails it.
+ */
+describe("compaction", () => {
+  it("compacts once past the model's threshold and heads the context with the summary", async () => {
+    const compactLog = `${logId}-threshold`;
+    const storage = await openStorage(compactLog);
+
+    const live = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model: smallWindow,
+          cwd: workdir,
+        });
+        const first = yield* submitMessage(root, {
+          content: "the turn before the threshold",
+          requestId: "compact-before",
+        });
+        yield* Effect.promise(() => first.submission.wait(context));
+
+        // One long message crosses the threshold. The *next* request is what compacts: it blocks
+        // on the summarizer, then goes out from the summary.
+        const crossing = yield* submitMessage(root, {
+          content: "x".repeat(40_000),
+          requestId: "compact-crossing",
+        });
+        const settled = yield* Effect.promise(() =>
+          crossing.submission.wait(context),
+        );
+        expect(settled.status).toBe("done");
+
+        // What the model sees: a context that starts at the summary entry.
+        const opened = yield* Effect.promise(() => root.context(context));
+        // What a reader sees: the transcript, summary included.
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
+        yield* closeHarness(harness);
+        return { head: opened.head?.kind, entries: snapshot.entries };
+      }),
+    );
+
+    expect(live.head).toBe("pi.compaction");
+
+    // A head marker is committed state, so a reopen has to find it again instead of folding a
+    // transcript whose model context starts at the beginning (the point of D8's head marker).
+    const reopenedHead = await runtime.runPromise(
+      Effect.gen(function* () {
+        const reopened = yield* openSession({
+          storage: yield* Effect.promise(() => openStorage(compactLog)),
+          model: smallWindow,
+          cwd: workdir,
+        });
+        const opened = yield* Effect.promise(() =>
+          reopened.root.context(context),
+        );
+        yield* closeHarness(reopened.harness);
+        return opened.head?.kind;
+      }),
+    );
+    expect(reopenedHead).toBe("pi.compaction");
+    const summaries = live.entries.filter(
+      (entry) => entry.kind === "compaction",
+    );
+    // One crossing, one summary: a policy that compacted on every turn would leave more.
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.text).toContain("summary");
+    // The transcript keeps everything the summary stands in for, which is what makes it checkable.
+    expect(
+      live.entries.some(
+        (entry) => entry.text === "the turn before the threshold",
+      ),
+    ).toBe(true);
+
+    // The fold is the other read path (D8) and must not disagree, summary included.
+    const folded = await runtime.runPromise(
+      readSessionLog(await openStorage(compactLog)),
+    );
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+
+  it("commits no compaction entry while the context stays under the threshold", async () => {
+    const storage = await openStorage(`${logId}-under-threshold`);
+    const entries = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model: smallWindow,
+          cwd: workdir,
+        });
+        // Two ordinary turns are a thousand tokens: nowhere near the blocking threshold, so
+        // nothing may be summarized away from the model.
+        for (const [index, content] of ["one", "two"].entries()) {
+          const submitted = yield* submitMessage(root, {
+            content,
+            requestId: `under-threshold-${index}`,
+          });
+          const settled = yield* Effect.promise(() =>
+            submitted.submission.wait(context),
+          );
+          expect(settled.status).toBe("done");
+        }
+        const snapshot = yield* readLiveSnapshot({ harness, root }, ref);
+        yield* closeHarness(harness);
+        return snapshot.entries;
+      }),
+    );
+
+    expect(entries.some((entry) => entry.kind === "compaction")).toBe(false);
+    expect(entries.filter((entry) => entry.kind === "user")).toHaveLength(2);
   }, 120_000);
 });
 
@@ -424,5 +552,79 @@ describe("a run's column decides its prompt", () => {
     );
 
     expect(sections).toEqual({});
+  }, 120_000);
+});
+
+const prLogId = `harness-pr-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+const openPrStorage = (mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId: prLogId, mode }, context);
+
+describe("the PR a session opened", () => {
+  it("commits one link, emits one prOpened, and folds the link back", async () => {
+    const opened = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() => openPrStorage("owner"));
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const before = yield* Effect.promise(() => root.viewState(context));
+        const beforeValue = before.value;
+        before.dispose();
+        // No PR until the step commits one: the document's initial URL is the empty string.
+        const unpublished = yield* readPullRequestDoc(harness, root);
+
+        const url = "https://github.com/lobiklukas/factory/pull/7";
+        yield* writePullRequestDoc(root, {
+          url,
+          number: 7,
+          base: "main",
+          head: "factory/ses_1",
+          openedAt: "2026-10-24T17:00:00.000Z",
+        });
+
+        const after = yield* Effect.promise(() => root.viewState(context));
+        const afterValue = after.value;
+        after.dispose();
+        const recorded = yield* readPullRequestDoc(harness, root);
+        yield* closeHarness(harness);
+        return {
+          unpublished,
+          recorded,
+          opened: diffView(beforeValue, afterValue),
+          // A second diff of the same revision is nobody's opening: an attached client sees the
+          // event once, not once per read.
+          again: diffView(afterValue, afterValue),
+        };
+      }),
+    );
+
+    expect(opened.unpublished).toBeUndefined();
+    expect(opened.recorded).toEqual({
+      url: "https://github.com/lobiklukas/factory/pull/7",
+      number: 7,
+      base: "main",
+      head: "factory/ses_1",
+      openedAt: "2026-10-24T17:00:00.000Z",
+    });
+    // Exactly one, by count: the emit is a single event, not one per attached reader.
+    expect(opened.opened.filter((event) => event._tag === "prOpened")).toEqual([
+      {
+        _tag: "prOpened",
+        prUrl: "https://github.com/lobiklukas/factory/pull/7",
+      },
+    ]);
+    expect(opened.again.filter((event) => event._tag === "prOpened")).toEqual(
+      [],
+    );
+
+    // The link is in the log, not only in the view: a reader folds it back.
+    const reader = await openPrStorage("reader");
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.pr?.url).toBe("https://github.com/lobiklukas/factory/pull/7");
+    expect(folded.pr?.number).toBe(7);
   }, 120_000);
 });

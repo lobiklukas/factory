@@ -17,9 +17,9 @@
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
  *
  * What it always answers from the fold: title (`factory.title` entries), repo and base ref
- * (`factory.session`), the parent a fork was taken from (`factory.fork`), spend (`pi.usage`),
- * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
- * in a process that owns nothing (D8).
+ * (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
+ * (`factory.pr`), spend (`pi.usage`), created/last activity (`commits.committed_at`), and status —
+ * always `idle`, because a rebuild runs in a process that owns nothing (D8).
  *
  * How it is shaped, because a recovery path is only as good as how long it takes to run: the fold
  * reads every session log in pages (`PostgresStorage.readers`) and writes the index rows in batches,
@@ -58,6 +58,7 @@ type FoldedRow = {
   readonly repo: string | null;
   readonly baseRef: string | null;
   readonly forkedFrom: string | null;
+  readonly prUrl: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
   readonly costTotal: number;
@@ -142,6 +143,7 @@ export const rebuildIndexes: Effect.Effect<
       repo,
       baseRef: repo === null ? null : sessionLog.binding.baseRef,
       forkedFrom: sessionLog.forkedFrom ?? null,
+      prUrl: sessionLog.pr?.url ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
       costTotal,
@@ -167,20 +169,21 @@ export const rebuildIndexes: Effect.Effect<
   //
   // `NULLIF(…, '')` rather than passing nulls: the client's array encoder refuses an array whose
   // values are *all* null (it has no element to infer a type from), and a batch of scratch sessions
-  // is exactly that for `repo` and `base_ref` — which is why `forked_from`, null for every session
-  // that is not a fork, cannot be passed as an array of nulls either. An empty string is never a
-  // legal slug or session id, so the sentinel cannot collide with a real value.
+  // is exactly that for `repo` and `base_ref` — and a batch of sessions that are not forks, or have
+  // no PR, is exactly that for `forked_from` and `pr_url`. An empty string is never a legal slug,
+  // session id, or URL, so the sentinel cannot collide with a real value.
   for (let at = 0; at < folded.length; at += WRITE_BATCH_ROWS) {
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, forked_from, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, forked_from, pr_url, created_at)
       SELECT
         id,
         title,
         NULLIF(repo, ''),
         NULLIF(base_ref, ''),
         NULLIF(forked_from, ''),
+        NULLIF(pr_url, ''),
         created_at
       FROM unnest(
         ${ids}::text[],
@@ -188,13 +191,15 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.repo ?? "")}::text[],
         ${batch.map((row) => row.baseRef ?? "")}::text[],
         ${batch.map((row) => row.forkedFrom ?? "")}::text[],
+        ${batch.map((row) => row.prUrl ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      ) AS folded(id, title, repo, base_ref, forked_from, created_at)
+      ) AS folded(id, title, repo, base_ref, forked_from, pr_url, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
         base_ref = EXCLUDED.base_ref,
         forked_from = EXCLUDED.forked_from,
+        pr_url = EXCLUDED.pr_url,
         created_at = EXCLUDED.created_at
     `;
     yield* sql`
