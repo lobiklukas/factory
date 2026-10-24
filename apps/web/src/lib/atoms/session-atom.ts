@@ -1,4 +1,5 @@
 import type {
+  CompactSessionInput,
   SessionEvent,
   SessionId,
   SessionLive,
@@ -128,6 +129,25 @@ export const forkSessionAtom = runtime.fn((sessionId: SessionId) =>
   Effect.gen(function* () {
     const rpc = yield* RpcClient;
     return yield* rpc.client.forkSession({ sessionId });
+  }),
+);
+
+/**
+ * Asks the server to compact a session now (LOB-185's RPC, LOB-222's action).
+ *
+ * A compaction is a task in the log, not a request that answers with a summary: the call admits it
+ * and answers its `taskId`, and the summary arrives later as a `compaction` entry over the same
+ * stream the pane is already following. So the caller branches on the task settling in
+ * `view.tasks` rather than awaiting a result here — a short transcript has no cut and no entry
+ * ever appears, which is why the pane cannot treat "the call returned" as "it compacted".
+ *
+ * `input` is typed from the RPC group, so a payload the server would refuse fails at compile time
+ * in the pane instead of becoming a toast in the browser.
+ */
+export const compactSessionAtom = runtime.fn((input: CompactSessionInput) =>
+  Effect.gen(function* () {
+    const rpc = yield* RpcClient;
+    return yield* rpc.client.compactSession(input);
   }),
 );
 

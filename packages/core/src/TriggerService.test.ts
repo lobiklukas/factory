@@ -7,6 +7,11 @@
  * NOTHING RETURNING`, and a mutation that removes it (or that replaces it with a `SELECT` first)
  * turns "exactly one session" red.
  *
+ * What a race *cannot* prove is which of two honest answers the loser gives: it reads the row the
+ * winner claimed, and whether the winner has recorded its outcome by then is a scheduling fact
+ * (LOB-217). So the concurrent case asserts the outcome set, and the case after it holds the
+ * winner inside that window with a `Deferred` and pins the in-flight answer exactly.
+ *
  * The sessions are a counting fake: the seam's question is *whether* work starts, and a real
  * harness would prove the same count more slowly. `verify-api`'s `webhook.ts` drive is where the
  * same path runs with the real `SessionService`.
@@ -24,7 +29,7 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import {
@@ -93,6 +98,15 @@ const withRuntime = async <A>(
     readonly failCreateTimes?: number;
     /** Die (a defect, not a typed failure) on the first `create` that many times. */
     readonly dieCreateTimes?: number;
+    /**
+     * Park the winning delivery in `send`, i.e. after its claim and before its outcome, until
+     * `release` fires: the window in which a second delivery of the same id is a replay of work
+     * that is still running.
+     */
+    readonly holdInFlight?: {
+      readonly arrived: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    };
   } = {},
 ): Promise<A> => {
   const created: Array<Created> = [];
@@ -131,7 +145,12 @@ const withRuntime = async <A>(
         },
       ),
     send: (input) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
+        const hold = options.holdInFlight;
+        if (hold !== undefined) {
+          yield* Deferred.succeed(hold.arrived, undefined);
+          yield* Deferred.await(hold.release);
+        }
         const index = created.findIndex(
           (entry) => entry.id === input.sessionId,
         );
@@ -207,10 +226,54 @@ describe("the trigger seam", () => {
         expect(first).toHaveLength(1);
         expect(replays).toHaveLength(1);
         expect(first[0]?.sessionId).toBe(created[0]?.id);
-        // A replay answers what the first delivery recorded, including its outcome.
-        expect(replays[0]?.status).toBe("processed");
+        expect(first[0]?.status).toBe("processed");
+        // The loser answers what the winner had recorded when it read the row: `processed` once
+        // the winner had finished, `received` while it was still working (`TriggerOutcome` says
+        // so). Which one a loaded machine sees is a scheduling fact the seam never promised, so
+        // this case asserts the set; the case below pins each member exactly (LOB-217).
+        expect(["processed", "received"]).toContain(replays[0]?.status);
       },
       { registerRepo: [repo] },
+    );
+  }, 60_000);
+
+  it("answers a delivery that arrives mid-flight with received, and its session is not a second one", async () => {
+    const holdInFlight = {
+      arrived: Deferred.makeUnsafe<void>(),
+      release: Deferred.makeUnsafe<void>(),
+    };
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const requestId = `${runId}-inflight`;
+        // Not awaited: the winner claims the row, opens its session, and parks in `send`.
+        const winner = run(trigger.deliver(deliver(requestId)));
+        try {
+          // Raced against the winner, so a winner that fails before `send` — and so never arrives —
+          // fails this case with its own cause instead of waiting out the timeout. The race also
+          // leaves the winner handled when an assertion below throws.
+          await Promise.race([
+            run(Deferred.await(holdInFlight.arrived)),
+            winner,
+          ]);
+
+          // The second delivery lands inside the window between the claim and the outcome.
+          const loser = await run(trigger.deliver(deliver(requestId)));
+          expect(loser.replayed).toBe(true);
+          expect(loser.status).toBe("received");
+          expect(loser.sessionId).toBeUndefined();
+          expect(created).toHaveLength(1);
+        } finally {
+          // A failed assertion must not leave the winner parked: the runtime's dispose waits.
+          await run(Deferred.succeed(holdInFlight.release, undefined));
+        }
+
+        const won = await winner;
+        expect(won.replayed).toBe(false);
+        expect(won.status).toBe("processed");
+        expect(won.sessionId).toBe(created[0]?.id);
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo], holdInFlight },
     );
   }, 60_000);
 
@@ -224,6 +287,9 @@ describe("the trigger seam", () => {
         expect(first.status).toBe("processed");
         expect(first.replayed).toBe(false);
         expect(second.replayed).toBe(true);
+        // The other member of the set the concurrent case accepts: a replay of a *finished*
+        // delivery answers its outcome. Sequential, so this one can be exact.
+        expect(second.status).toBe("processed");
         expect(created).toHaveLength(1);
       },
       { registerRepo: [repo] },
