@@ -1398,8 +1398,13 @@ describe("the verify-* skills' Postgres precondition", () => {
       // `it.skip("name", fn)` both declare a case that carries a note like any other, and neither is
       // a case the scan may walk past. `it.todo` counts too — it has no assertion, so it has no
       // mutation to name, and the honest answer is a red guard rather than a silent exemption.
+      // A tagged-template argument (`it.each\`a | b\``) is consumed too. A case declared through
+      // a wrapper helper, an aliased import, or a re-declared form is invisible to a source-text
+      // scan and cannot be guarded here.
       const declarations = lines.flatMap((line, index) =>
-        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+        /^\s*(?:it|test)(?:<[^>]*>)?(?:\.[\w$]+(?:\([^)]*\)|`[^`]*`)?)*\(/.test(
+          line,
+        )
           ? [index]
           : [],
       );
@@ -1437,7 +1442,9 @@ describe("the verify-* skills' Postgres precondition", () => {
       const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
       const lines = source.split("\n");
       const declarations = lines.flatMap((line, index) =>
-        /^\s*(?:it|test)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)
+        /^\s*(?:it|test)(?:<[^>]*>)?(?:\.[\w$]+(?:\([^)]*\)|`[^`]*`)?)*\(/.test(
+          line,
+        )
           ? [index]
           : [],
       );
