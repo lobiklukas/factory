@@ -92,8 +92,23 @@ const SessionShutdown = Layer.effectDiscard(
         yield* Effect.logInfo(
           "shutdown: releasing every session owner held by this process",
         );
+        // Flush before the process exits: under SIGTERM the runtime interrupts the main
+        // fiber and tears down this scope; stdout to a file is block-buffered, so without an
+        // explicit flush the finalizer's lines (and the evidence they carry) never land.
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              process.stdout.write("", () => resolve());
+            }),
+        );
         yield* sessions.close;
         yield* Effect.logInfo("shutdown: session owners released");
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              process.stdout.write("", () => resolve());
+            }),
+        );
       }),
     );
   }),
