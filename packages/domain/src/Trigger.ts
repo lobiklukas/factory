@@ -1,8 +1,8 @@
 /**
  * Inbound triggers (LOB-188, part 1 of LOB-34): one typed path from a delivery to a session.
  *
- * Every way work arrives from outside — Linear today, a generic webhook, and the Jira, GitHub and
- * Slack adapters that are the rest of LOB-34 — goes through the same five steps:
+ * Every way work arrives from outside — Linear today, a generic webhook, Jira (LOB-189), and the
+ * GitHub and Slack adapters that are the rest of LOB-34 — goes through the same five steps:
  * authenticate, dedupe, filter, map, create. This file is the two shapes those steps agree on:
  *
  * - `TriggerEvent` is what an adapter normalizes its payload into. The adapter owns the wire
@@ -20,9 +20,9 @@ import { RepoSlug, SessionId } from "@repo/domain/Session";
 
 /**
  * Where a delivery came from. `generic` is the plain inbound webhook: the caller names the label
- * its payload carries and the seam does the rest.
+ * its payload carries and the seam does the rest. `jira` is the Jira Cloud issue webhook (LOB-189).
  */
-export const TriggerSource = Schema.Literals(["linear", "generic"]);
+export const TriggerSource = Schema.Literals(["linear", "generic", "jira"]);
 export type TriggerSource = typeof TriggerSource.Type;
 
 /**

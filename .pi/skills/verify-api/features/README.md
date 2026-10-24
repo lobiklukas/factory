@@ -54,6 +54,7 @@ plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run t
 | Errors over the wire    | passing | [errors.md](errors.md)             |
 | One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
 | Inbound triggers        | passing | [trigger.md](trigger.md)           |
+| Jira adapter            | passing | [jira.md](jira.md)                 |
 
 ## Deliberately absent
 
