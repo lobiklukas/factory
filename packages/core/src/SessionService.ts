@@ -48,6 +48,7 @@ import type {
   CompactSessionInput,
   CompactSessionResult,
   CreateSessionInput,
+  ForkSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
@@ -75,6 +76,7 @@ import type {
   Conversation,
   Harness,
   ModelAccess,
+  OpenSession,
   RunColumn,
   RunProfile,
   SessionRef,
@@ -85,10 +87,12 @@ import {
   Policy,
   PolicyLive,
   type AutonomyConfig,
+  type SessionPolicy,
 } from "@repo/harness";
 import {
   closeHarness,
   compactSession,
+  forkSession,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
@@ -138,6 +142,13 @@ export type SessionServiceShape = {
   ) => Effect.Effect<SendMessageResult, SessionError>;
   readonly interrupt: (
     sessionId: SessionId,
+  ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Fork a session at one of its entries: a new session whose transcript is the parent's prefix
+   * (LOB-180). The fork's log is its own, so neither transcript can reach the other.
+   */
+  readonly fork: (
+    input: ForkSessionInput,
   ) => Effect.Effect<SessionSummary, SessionError>;
   /**
    * Start a new model context, opened with the handoff note (LOB-181). The transcript keeps the
@@ -211,9 +222,10 @@ type SessionRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The session this one was forked from, from the index row (LOB-180). */
+  readonly forkedFrom: string | null;
   readonly createdAt: string;
 };
-
 type RepoRow = {
   readonly slug: string;
   readonly url: string;
@@ -335,6 +347,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+          const forkedFrom =
+            row.forkedFrom === null
+              ? undefined
+              : yield* toSessionId(row.forkedFrom);
           return {
             id,
             title: row.title,
@@ -345,6 +361,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(repo === undefined || row.baseRef === null
               ? {}
               : { baseRef: row.baseRef }),
+            ...(forkedFrom === undefined ? {} : { forkedFrom }),
           };
         });
 
@@ -352,12 +369,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         id: SessionId,
         row: SessionRow,
         workspace: SessionWorkspace,
-      ): SessionRef => ({
-        id,
-        title: row.title,
-        createdAt: row.createdAt,
-        workspace,
-      });
+      ): SessionRef => {
+        // The index row is the only reader of lineage a summary needs; a malformed value is a
+        // broken index rather than a reason to fail a read, and `rebuildIndexes` refolds it.
+        const forkedFrom = row.forkedFrom;
+        return {
+          id,
+          title: row.title,
+          createdAt: row.createdAt,
+          workspace,
+          ...(forkedFrom !== null && Schema.is(SessionIdSchema)(forkedFrom)
+            ? { forkedFrom }
+            : {}),
+        };
+      };
 
       const openStorage = (
         logId: SessionId,
@@ -590,14 +615,29 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * How an owner's harness is opened: a plain session, or a fork of another session's log.
+       *
+       * The storage handed in is already this process's single-writer handle for the session, so a
+       * fork is the same acquisition with the entries copied in before the owner is published.
+       */
+      type OwnerOpening = (input: {
+        readonly storage: PostgresStorage;
+        readonly cwd: string;
+        readonly policy: SessionPolicy;
+        readonly run: RunProfile;
+      }) => Effect.Effect<OpenSession, SessionError>;
+
+      /**
        * Open this process's owner of one session, or return the one already open.
        *
        * Opening means: resolve the workspace, create its directory, take the single-writer log, and
-       * start the activity projection that keeps the list index current from the log.
+       * start the activity projection that keeps the list index current from the log. `open` is how
+       * a fork opens the log it has just created rather than an empty one.
        */
-      const acquireOwner = (
+      const acquireOwnerWith = (
         id: SessionId,
         row: SessionRow,
+        open: OwnerOpening,
       ): Effect.Effect<LiveOwner, SessionError> =>
         gate.withPermits(1)(
           Effect.gen(function* () {
@@ -625,12 +665,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // two runs of one session reaches the next run too. Pinning a body to the run that
             // started under it is B6's "per-run version pinning", which is wave 2.
             const run = yield* runProfileFor(id);
-            const opened = yield* openSession({
+            const opened = yield* open({
               storage,
-              model: options.model,
               cwd: workspace.path,
-              // D11's boundary, resolved for this session's worktree: the one place the policy
-              // needs a fact the service does not hold as data.
               policy: policy.forWorktree(workspace.path, id),
               run,
             }).pipe(
@@ -658,6 +695,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* Ref.update(live, HashMap.set(id, owner));
             return owner;
           }),
+        );
+
+      const acquireOwner = (
+        id: SessionId,
+        row: SessionRow,
+      ): Effect.Effect<LiveOwner, SessionError> =>
+        acquireOwnerWith(
+          id,
+          row,
+          ({ storage, cwd, policy: sessionPolicy, run }) =>
+            openSession({
+              storage,
+              model: options.model,
+              cwd,
+              // D11's boundary, resolved for this session's worktree: the one place the policy
+              // needs a fact the service does not hold as data.
+              policy: sessionPolicy,
+              run,
+            }),
         );
 
       const describe = (
@@ -704,13 +760,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
           const inserted = yield* paper(
             "create session",
-            insertSession(id, title, input.requestId, binding),
+            insertSession(id, title, input.requestId, binding, null),
           );
           const row = inserted[0] ?? {
             id,
             title,
             repo: binding.repo ?? null,
             baseRef: binding.baseRef ?? null,
+            forkedFrom: null,
             createdAt: "",
           };
           // The index row is written before the log because it carries the request-id dedupe key.
@@ -831,6 +888,100 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* interruptConversation(owner.root);
           yield* touchActivity(sessionId);
           return yield* describe(sessionId, row);
+        });
+
+      /**
+       * Fork a session at one of its entries (LOB-180, D7).
+       *
+       * A session *is* a log, so the fork is a second log with the parent's entries copied into it
+       * before anyone can read it: `forkSession` copies them in one commit and this method registers
+       * the new log only after that commit succeeded. The fork's transcript is the parent's prefix
+       * and nothing else — no title entry of its own, so a fork taken at the parent's last entry has
+       * exactly the parent's entries.
+       *
+       * The parent is read in reader mode whether or not this process owns it: a fork must not take
+       * ownership of the log it copies from, and a reader never does.
+       */
+      const fork = (
+        input: ForkSessionInput,
+      ): Effect.Effect<SessionSummary, SessionError> =>
+        Effect.gen(function* () {
+          const parent = yield* requireSession(input.sessionId);
+          const id = yield* mintSessionId;
+          // A fork works where its parent worked: the same transcript reopened against another repo
+          // would be a history that never happened.
+          const binding: Binding = {
+            ...(parent.repo === null
+              ? {}
+              : { repo: yield* toRepoSlug(parent.repo) }),
+            ...(parent.baseRef === null ? {} : { baseRef: parent.baseRef }),
+          };
+          // The index row is written first, as `create` writes it, so the fork exists for a retried
+          // read the moment its log does; a failure between the two leaves a row whose log is empty,
+          // and `rebuildIndexes` removes a row with no log rather than trusting it.
+          const inserted = yield* paper(
+            "create session",
+            insertSession(
+              id,
+              parent.title,
+              undefined,
+              binding,
+              input.sessionId,
+            ),
+          );
+          const row = inserted[0] ?? {
+            id,
+            title: parent.title,
+            repo: parent.repo,
+            baseRef: parent.baseRef,
+            forkedFrom: input.sessionId,
+            createdAt: "",
+          };
+          // The entries, the lineage and the repo binding land in one commit: a fork that exists
+          // at all exists with everything `rebuildIndexes` folds, so there is no window in which a
+          // read shows a fork whose parent the index cannot name. A fork refused after its row was
+          // written (`at` names no entry of the parent, say) removes that row again: an index row
+          // with no log is invisible to the list — which joins the activity index — and would wait
+          // for a rebuild to be swept, so it is not left behind.
+          yield* acquireOwnerWith(
+            id,
+            row,
+            ({ storage, cwd, policy: sessionPolicy, run }) =>
+              Effect.acquireUseRelease(
+                openStorage(input.sessionId, "reader"),
+                (parentStorage) =>
+                  forkSession({
+                    parent: parentStorage,
+                    child: storage,
+                    ...(input.at === undefined ? {} : { at: input.at }),
+                    lineage: input.sessionId,
+                    run,
+                    ...(binding.repo === undefined ||
+                    binding.baseRef === undefined
+                      ? {}
+                      : {
+                          binding: {
+                            repo: binding.repo,
+                            baseRef: binding.baseRef,
+                          },
+                        }),
+                    model: options.model,
+                    cwd,
+                    policy: sessionPolicy,
+                  }),
+                (parentStorage) =>
+                  Effect.promise(() => parentStorage.dispose()),
+              ).pipe(
+                Effect.tapError(() =>
+                  paper(
+                    "remove the refused fork's index row",
+                    sql`DELETE FROM sessions WHERE id = ${id}`,
+                  ).pipe(Effect.ignore),
+                ),
+              ),
+          );
+          yield* touchActivity(id);
+          return yield* describe(id, row);
         });
 
       /**
@@ -1232,6 +1383,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
           WHERE id = ${sessionId}
@@ -1244,6 +1396,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
           WHERE request_id = ${requestId}
@@ -1254,21 +1407,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         title: string,
         requestId: string | undefined,
         binding: Binding,
+        forkedFrom: string | null,
       ) =>
         sql<SessionRow>`
-          INSERT INTO sessions (id, title, request_id, repo, base_ref)
+          INSERT INTO sessions (id, title, request_id, repo, base_ref, forked_from)
           VALUES (
             ${id},
             ${title},
             ${requestId ?? null},
             ${binding.repo ?? null},
-            ${binding.baseRef ?? null}
+            ${binding.baseRef ?? null},
+            ${forkedFrom}
           )
           RETURNING
             id,
             title,
             repo,
             base_ref,
+            forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
         `;
 
@@ -1434,6 +1590,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         get,
         send,
         interrupt,
+        fork,
         reset,
         compact,
         list,

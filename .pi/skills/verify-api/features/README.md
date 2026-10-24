@@ -42,6 +42,7 @@ The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 20
 | Reset a session         | passing | [reset.md](reset.md)               |
 | Compact on demand       | passing | [compact.md](compact.md)           |
 | Fold a released session | passing | [fold.md](fold.md)                 |
+| Fork a session          | passing | [fork.md](fork.md)                 |
 | Request limits          | passing | [limits.md](limits.md)             |
 | Probes and readiness    | passing | [probes.md](probes.md)             |
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |
