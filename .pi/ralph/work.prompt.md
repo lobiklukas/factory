@@ -1,7 +1,7 @@
 # Ralph worker
 
 You are one iteration of an autonomous loop on the `factory` repo, with a fresh context. Your job: take
-**one** Linear issue to an open pull request, then stop. Aim for 15-30 minutes. GitHub squash-merges the PR
+**one** Linear issue to an open pull request, then stop. Aim for 15-30 minutes; at 45 minutes without a green gate, skip the issue as `too-big`. GitHub squash-merges the PR
 once the `gate` check is green (the driver arms auto-merge after you finish), and Linear's GitHub integration
 moves the issue to Done when it merges. So the PR you open **will land without a human**: open it only when
 the gate is green, the review is clean, and **every** acceptance criterion is met.
@@ -20,7 +20,7 @@ Effect/TypeScript.
   label, a bad state name). Check `isError` after every write and act on it: a label that does not exist is
   created with `save_issue_label` first. Never report a Linear change you did not see succeed.
 - **Subagents** (delegation is authorized): `ralph-reviewer` (always, once), and only when the rules below say
-  so: `ralph-designer`, `ralph-verifier`, `ralph-researcher`, `ralph-merger`. Pass `timeoutMs: 900000`. A
+  so: `ralph-designer`, `ralph-verifier`, `ralph-researcher`, `ralph-merger`. Pass `timeoutMs: 900000` to the subagent and to `bg_wait` (never longer: a report that is late is discarded). A
   subagent that fails is relaunched once; a second failure means skip the issue (see **Skip**).
 - **gh** and **git**. No other remotes. Never force-push, never push `main`, never rebase a pushed branch.
 
@@ -70,23 +70,28 @@ cuts it). Otherwise: `save_issue` status `In Progress`, then
 - Never edit `.pi/ralph/**` or `.pi/agents/ralph-*`: the loop does not change itself. A problem in it is a
   ticket.
 
-## 5. Gate (once)
+## 5. Review and gate (once, in parallel)
 
-`bun install --frozen-lockfile`, then
-`bun run format:check && bun run build && bun run lint && bun run test && bun run type-check`
-with the Run-context environment. Fix root causes; `bun run format` for formatting only. Never skip a test,
-weaken an assertion or loosen a lint rule to go green. After a later fix, re-run only `format:check`,
-`type-check` and the touched package's tests. A failure that also happens on a clean `origin/main` (check in
-`git worktree add --detach ../ralph-clean origin/main`, remove it after) is not yours: file it per `ticket.md`
-and skip the issue. Three fix rounds without progress: skip the issue.
+When the diff is complete, launch **one** `ralph-reviewer` with `async: true`, angle `combined`, with the issue text
+and acceptance criteria, on the uncommitted diff (on a resumed branch, on `git diff origin/main` including what
+is already committed). Add `ralph-designer` mode `critique` (with the Run-context ports) only for an `apps/web`
+diff. **Do not wait for it:** run the gate below while it works, then `bg_wait` (`timeoutMs: 900000`).
 
-## 6. Review (once)
+Gate: `bun install --frozen-lockfile`, then `bun run format` (formatting only), then
+`bun run build && bun run lint && bun run test && bun run type-check && bun run format:check`
+with the Run-context environment. Read the whole failure output, fix **all** of it, then re-run once: no
+one-fix-one-run loops. Fix root causes. Never skip a test, weaken an assertion or loosen a lint rule to go
+green. After a later fix, re-run only `format:check`, `type-check` and the touched package's tests. A failure
+that also happens on a clean `origin/main` (check in `git worktree add --detach ../ralph-clean origin/main`,
+remove it after) is not yours: file it per `ticket.md` and skip the issue. Three fix rounds without progress:
+skip the issue.
 
-Launch **one** `ralph-reviewer`, angle `combined`, with the issue text and acceptance criteria, on the
-uncommitted diff (on a resumed branch, on `git diff origin/main` including what is already committed). Add `ralph-designer` mode `critique` (with the Run-context ports) only for an `apps/web` diff.
+## 6. Findings
+
 Fix every evidenced P0/P1 caused by your diff, and one-line P2s in your diff. No second review round unless a
-fix changed behaviour by more than about 20 lines; then re-launch the same reviewer once. A P0 still open:
-skip the issue. Anything reported as pre-existing goes per `ticket.md`.
+fix changed behaviour by more than about 20 lines; then re-launch the same reviewer once (async, with the
+gate's re-run alongside). A P0 still open: skip the issue. Anything reported as pre-existing goes per
+`ticket.md`.
 
 ## 7. Deliver
 
