@@ -72,6 +72,8 @@ const scripted = (
     models,
     provider: "faux",
     modelId: faux.models[0].id,
+    // This file's script answers every turn, so nothing here depends on a compaction threshold.
+    contextWindow: faux.models[0].contextWindow,
   };
 };
 

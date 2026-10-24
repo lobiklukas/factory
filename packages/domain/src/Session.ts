@@ -313,6 +313,29 @@ export const ResetSessionInput = Schema.Struct({
 export type ResetSessionInput = typeof ResetSessionInput.Type;
 
 /**
+ * Compact a session's model context on demand (B4).
+ *
+ * `instructions` is what the summarizer should focus on, when the caller has a reason to steer it.
+ * The compaction is a task in the log: this call admits it and answers the task's id, and the
+ * summary arrives as a `compaction` entry when the task settles, so a caller watches the
+ * transcript rather than waiting on this call. Nothing is dropped: entries before the summary
+ * stay in the transcript, which is what makes the summary checkable.
+ */
+export const CompactSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  instructions: Schema.optional(Schema.String),
+});
+export type CompactSessionInput = typeof CompactSessionInput.Type;
+
+/** The admitted compaction task, and the session it belongs to. */
+export const CompactSessionResult = Schema.Struct({
+  session: SessionSummary,
+  /** Opaque, like a submission id; the log's own numbering is not the wire contract. */
+  taskId: Schema.String,
+});
+export type CompactSessionResult = typeof CompactSessionResult.Type;
+
+/**
  * A session request that cannot be served. `code` is the part callers branch on.
  *
  * - `not_found` — no such session.

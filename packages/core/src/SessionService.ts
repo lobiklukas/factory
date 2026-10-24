@@ -45,6 +45,8 @@ import type {
   RequestApprovalInput,
 } from "@repo/domain/Approval";
 import type {
+  CompactSessionInput,
+  CompactSessionResult,
   CreateSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -86,6 +88,7 @@ import {
 } from "@repo/harness";
 import {
   closeHarness,
+  compactSession,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
@@ -143,6 +146,13 @@ export type SessionServiceShape = {
   readonly reset: (
     input: ResetSessionInput,
   ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Compact the model context on demand (B4): admit the compaction task and answer its id. The
+   * summary lands in the transcript as a `compaction` entry when the task settles.
+   */
+  readonly compact: (
+    input: CompactSessionInput,
+  ) => Effect.Effect<CompactSessionResult, SessionError>;
   /** What exists, newest activity first, from the activity index — never a fold (R6). */
   readonly list: (
     input: ListSessionsInput,
@@ -844,6 +854,30 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* describe(input.sessionId, row);
         });
 
+      /**
+       * A manual compaction (B4). The task is what does the work — it summarizes the oldest part of
+       * the model context and places the summary as the new head — so this call only admits it:
+       * the session may be idle, in which case the summary lands at once, or running, in which case
+       * it lands at the next boundary. Either way the transcript keeps everything.
+       */
+      const compact = (
+        input: CompactSessionInput,
+      ): Effect.Effect<CompactSessionResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          const instructions = input.instructions?.trim();
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const taskId = yield* compactSession(
+            owner.root,
+            instructions === undefined || instructions === ""
+              ? undefined
+              : instructions,
+          );
+          yield* touchActivity(input.sessionId);
+          const session = yield* describe(input.sessionId, row);
+          return { session, taskId };
+        });
+
       /** Every approval this process has seen, per session, keyed by request id. */
       const approvals = yield* Ref.make(
         HashMap.empty<SessionId, HashMap.HashMap<string, ApprovalRecord>>(),
@@ -1401,6 +1435,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         interrupt,
         reset,
+        compact,
         list,
         registerRepo,
         events,
