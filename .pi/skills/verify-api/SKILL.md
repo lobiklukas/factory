@@ -30,6 +30,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Probes (LOB-21)              | `/livez` 200; `/readyz` 200 naming every check                                            | liveness is cheap; readiness is a live answer      |
 | Degraded readiness (LOB-21)  | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid  | an outage is not a crash loop                      |
 | SIGTERM mid-run (LOB-21)     | the owners are released, and the interrupted session folds and continues                  | a killed run is resumable, not lost                |
+| One PR across a kill (LOB-179) | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one `prOpened` | a lost acknowledgement is not a second PR        |
 | Typed errors over the wire   | unknown id → `SessionError{code: "not_found"}`                                            | callers can branch on `code`, not on text          |
 | Interrupt wakes, then stops  | `interruptSession` → idle                                                                 | steering wakes a session before acting on it       |
 | Reset a session (LOB-181)    | `resetSession` with and without a handoff: the past, then the `reset` entry               | a new context is a marker, not a truncation        |
@@ -75,7 +76,18 @@ running, and writes its own evidence:
 ```sh
 ./sigterm.sh     # api on :9400 — a busy session, then SIGTERM, then a fresh process resumes it
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
+./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ```
+
+`pr-once.sh` is the third of those, and it needs no API at all: it builds the real `SessionService`
+in each driver process against the run's `DATABASE_URL` and its own session root, and points the PR
+client at a loopback fake through `GITHUB_API_URL` (the key the App token flow already reads), so
+nothing here can reach `github.com`. Four processes run in sequence: one is killed with `SIGKILL`
+while the fake holds its create request open (the acknowledgement was never committed), one replays
+the step and must land on the PR GitHub already has, one makes the call a step with its
+recorded-document read removed would make (the negative control that keeps the "no second create"
+check from passing vacuously), and one is a genuinely second session, which must open a second PR.
+The ledger is a file precisely so that it outlives the process that was killed.
 
 `degraded.sh` stops the container that publishes 5442 — by the name `docker ps --filter publish=5442`
 reports, because the compose project owning the port is not necessarily the one this directory would
@@ -124,6 +136,10 @@ order you want the evidence to end in.
 - `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
   `./degraded.sh`: the probes with Postgres stopped and back, and the process facts (one pid served
   both phases)
+- `pr-once-arm.json`, `pr-once-reopen.json`, `pr-once-unguarded.json`, `pr-once-second.json`,
+  `pr-once-process.json`, `pr-once-ledger.json` — from `./pr-once.sh`: what each process saw (the
+  arm phase reaches GitHub and dies there), the script's own checks, and the fake's ledger of every
+  request and every PR that exists
 
 Proof standards for this app:
 
