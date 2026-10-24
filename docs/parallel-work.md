@@ -12,12 +12,12 @@ project), `AGENTS.md` (the gates and the conventions).
 
 They differ in exactly one thing that matters: **what is isolated**.
 
-| Shape                                                              | Isolates                                                                                        | Cost                                                    | Use when                                                                                               |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Subagents, shared checkout** (the default)                       | Nothing. Same filesystem, same cwd, same `node_modules`.                                        | Cheapest: context only.                                 | Read-only research, and edits to disjoint files with one integration owner.                            |
-| **Isolated subagents** (`isolated: true` on a `task` item)         | A copy-on-write checkout per spawn, under `~/.omp/wt/<hash>/<n>`; changes come back as a patch. | A clone (APFS CoW — see §7) plus a merge.               | Several agents editing at once, when you want their work reviewed as patches rather than applied live. |
-| **Separate OMP sessions in separate `git worktree add` checkouts** | Everything, including per-directory OMP session state, ports, `.verify/`, and the turbo cache.  | One more process, one more gate run, one more database. | Work that lasts hours and would otherwise fight your own session.                                      |
-| **Factory sessions** (after milestone **L**)                       | A sandbox, the policy boundary, and your machine's CPU.                                         | An issue, a sandbox, and inference spend.               | Delegated, repo-bound, unattended work whose output is a PR.                                           |
+| Shape                                                              | Isolates                                                                                                                                    | Cost                                                    | Use when                                                                                               |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **Subagents, shared checkout** (the default)                       | Nothing. Same filesystem, same cwd, same `node_modules`.                                                                                    | Cheapest: context only.                                 | Read-only research, and edits to disjoint files with one integration owner.                            |
+| **Isolated subagents** (`isolated: true` on a `task` item)         | A copy-on-write checkout per spawn, under `~/.omp/wt/<hash>/<n>`; changes come back as a patch.                                             | A clone (APFS CoW — see §7) plus a merge.               | Several agents editing at once, when you want their work reviewed as patches rather than applied live. |
+| **Separate OMP sessions in separate `git worktree add` checkouts** | Everything, including per-directory OMP session state, ports, and `.verify/`; the turbo cache is shared across worktrees of the same clone. | One more process, one more gate run, one more database. | Work that lasts hours and would otherwise fight your own session.                                      |
+| **Factory sessions** (after milestone **L**)                       | A sandbox, the policy boundary, and your machine's CPU.                                                                                     | An issue, a sandbox, and inference spend.               | Delegated, repo-bound, unattended work whose output is a PR.                                           |
 
 Read the last two rows as the same idea at different levels of automation: the factory's per-session
 worktree (design D10, `factory/<session-id>`) is this repo's manual `git worktree add` with a
@@ -87,9 +87,10 @@ These are the reasons a naive `N agents in N worktrees` plan goes wrong here.
 4. **Branches are shared through `.git`.** A `git worktree add` worktree shares refs and config with
    the primary checkout, so use a unique branch per worktree (`wip/<slug>`, and `factory/<session-id>`
    for factory sessions).
-5. **Turbo's cache is per checkout, and test caching is already off** where it matters
-   (`packages/{core,harness,storage-postgres}/turbo.json`). A cached `build`/`type-check` is fine; do
-   not let a cached `test` outlive the Postgres it lied about.
+5. **Turbo's cache is shared across worktrees of the same clone** (unless `cacheDir` is set per
+   worktree), so a cached `build`/`type-check` produced in one worktree can be restored in another;
+   test caching is already off where it matters (`packages/{core,harness,storage-postgres}/turbo.json`).
+   A cached `build`/`type-check` is fine; do not let a cached `test` outlive the Postgres it lied about.
 6. **`.pi/` and `.omp/` are shared tooling.** A skill or agent added inside a worktree does not exist
    anywhere else until it is committed and merged. The same is true of `.omp/config.yml` — it is
    committed on purpose.
