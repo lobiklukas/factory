@@ -31,7 +31,8 @@ ensure_postgres || exit 1
 # FAUX_COMMAND sleeps on purpose: the live-tasks panel (LOB-184) can only be driven
 # while a task is on screen, and the bash tool's own task lasts exactly as long as the
 # command it runs. `echo faux-ok` still ends the run, so the transcript checks are
-# unaffected.
+# unaffected. This default applies to every verify-web drive, not only the live-tasks
+# one: the run takes ~12s longer and up.sh's readiness wait is unaffected.
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \

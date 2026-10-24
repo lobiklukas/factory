@@ -180,6 +180,9 @@ export const TaskPanel = ({
           className="mt-1.5 flex max-h-[40vh] flex-col gap-1 overflow-y-auto focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
         >
           {tasks.map((task) => {
+            // Reading the stamp ref here is display-only: a task with no stamp yet is one this
+            // render is the first to see, so it reads 0 and the effect above stamps it for the next
+            // tick. Nothing in this render depends on the write having happened.
             const firstSeen = seen.current.get(task.id);
             return (
               <TaskRow
