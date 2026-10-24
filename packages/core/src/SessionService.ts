@@ -676,7 +676,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* FiberMap.run(
               projectors,
               id,
-              liveSessionEvents(opened.root, refOf(id, row, workspace)).pipe(
+              liveSessionEvents(opened, refOf(id, row, workspace)).pipe(
                 Stream.runForEach((event) => recordActivity(id, event)),
                 Effect.catchCause((cause) =>
                   Effect.logWarning(
@@ -821,7 +821,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           if (Option.isSome(owner)) {
             yield* touch(sessionId);
             return yield* readLiveSnapshot(
-              owner.value.root,
+              owner.value,
               refOf(sessionId, row, owner.value.workspace),
             );
           }
@@ -1472,7 +1472,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             if (Option.isSome(owner)) {
               yield* touch(sessionId);
               return liveSessionEvents(
-                owner.value.root,
+                owner.value,
                 refOf(sessionId, row, owner.value.workspace),
               );
             }
