@@ -8,3 +8,5 @@ export * from "./pr";
 export * from "./prStep";
 
 export * from "./SkillService";
+export * from "./TriggerService";
+export * from "./Jira";
