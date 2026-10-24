@@ -162,6 +162,12 @@ const childEnv = (
     LIB,
   };
   delete env["DOCKER_HOST"];
+  // The ralph driver's pi session reads PI_* model selectors from its environment; an ambient
+  // value (e.g. PI_PROVIDER) would leak into the child and change the case's outcome, so scrub
+  // them the same way DOCKER_HOST is scrubbed above. LOB-149.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PI_")) delete env[key];
+  }
   return { ...env, ...extra };
 };
 
