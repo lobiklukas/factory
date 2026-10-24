@@ -98,6 +98,102 @@ await page.waitForFunction(
 const sessionPath = new URL(page.url()).pathname;
 observed.sessionPath = sessionPath;
 
+// Feature: the live-tasks panel (LOB-184). Pi Durable's task graph is what the run is doing right
+// now, and `up.sh` scripts a faux command that sleeps, so the bash tool's own task stays on screen
+// long enough to read twice. This block runs before the answer wait on purpose: the task exists only
+// while the tool call is in flight.
+const taskPanel = page.locator("section[aria-label='Live tasks']");
+const taskRows = taskPanel.locator("ul[aria-label='Live task rows'] > li");
+const toolRow = taskRows.filter({ hasText: "pi.tool" }).first();
+const tasksObserved = {};
+let tasksWorked = false;
+try {
+  // A reload would drop this marker, which is how the settle check below stays honest about
+  // "without a reload" rather than inferring it from a screenshot.
+  await page.evaluate(() => {
+    window.__liveTasksNoReload = true;
+  });
+
+  await toolRow.waitFor({ timeout: 20_000 });
+  tasksObserved.row = (await toolRow.innerText()).replaceAll("\n", " ").trim();
+  tasksObserved.count = await taskRows.count();
+
+  // Keyboard: the header's last control tabs into the task list, and the list carries a name.
+  await page.getByRole("button", { name: "Forget this session" }).focus();
+  await page.keyboard.press("Tab");
+  tasksObserved.focus = await page.evaluate(() => ({
+    label: document.activeElement?.getAttribute("aria-label") ?? null,
+    tag: document.activeElement?.tagName ?? null,
+  }));
+
+  // 1280x800: neither the document nor the panel may overflow sideways, and no row may run its
+  // cells into each other (a row whose middle column cannot shrink overlaps instead of scrolling,
+  // so scrollWidth alone cannot see it).
+  await page.setViewportSize({ width: 1280, height: 800 });
+  tasksObserved.overflow = await page.evaluate(() => {
+    const panel = document.querySelector("section[aria-label='Live tasks']");
+    const rows = [
+      ...document.querySelectorAll("ul[aria-label='Live task rows'] > li"),
+    ];
+    const overlapping = rows.filter((row) => {
+      const [badge, middle, age] = [...row.children].map((child) =>
+        child.getBoundingClientRect(),
+      );
+      if (badge === undefined || middle === undefined || age === undefined)
+        return false;
+      return badge.right > middle.left + 0.5 || middle.right > age.left + 0.5;
+    }).length;
+    return {
+      document:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+      panel: panel === null ? -1 : panel.scrollWidth - panel.clientWidth,
+      overlapping,
+    };
+  });
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "live-tasks-1280x800.png"),
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // An age that grows: the row's own clock advances while the task runs.
+  const ageCell = toolRow.locator("[data-task-age]");
+  tasksObserved.ageFirst = Number(await ageCell.getAttribute("data-task-age"));
+  tasksObserved.ageText = (await ageCell.innerText()).trim();
+  await page.waitForTimeout(3_000);
+  tasksObserved.ageSecond = Number(await ageCell.getAttribute("data-task-age"));
+  tasksWorked = true;
+} catch (error) {
+  tasksObserved.error = String(error).slice(0, 300);
+}
+
+assert(
+  "the live task tree shows a running task",
+  tasksWorked && (tasksObserved.row ?? "").toLowerCase().includes("running"),
+  tasksWorked
+    ? `row: ${JSON.stringify(tasksObserved.row)}`
+    : `no pi.tool row within 20s (${tasksObserved.error ?? ""}); panel: ${JSON.stringify((await taskPanel.innerText()).slice(0, 200))}`,
+);
+assert(
+  "the task's age grows",
+  tasksWorked && tasksObserved.ageSecond > tasksObserved.ageFirst,
+  `age ${tasksObserved.ageFirst}s -> ${tasksObserved.ageSecond}s (row said ${JSON.stringify(tasksObserved.ageText)})`,
+);
+assert(
+  "the task list is reachable by keyboard",
+  tasksObserved.focus?.label === "Live task rows",
+  `Tab from the header landed on ${JSON.stringify(tasksObserved.focus)}`,
+);
+assert(
+  "the panel does not overflow at 1280x800",
+  tasksObserved.overflow !== undefined &&
+    tasksObserved.overflow.document <= 0 &&
+    tasksObserved.overflow.panel <= 0 &&
+    tasksObserved.overflow.overlapping === 0,
+  `overflow ${JSON.stringify(tasksObserved.overflow)}`,
+);
+observed.tasks = tasksObserved;
+
 let sessionWorked = false;
 try {
   // Require the end of the story, not the beginning: the answer is rendered only
@@ -128,6 +224,32 @@ assert(
   sessionWorked
     ? `transcript rendered: ${JSON.stringify(paneText.slice(0, 200))}`
     : `no tool result within 40s; pane: ${JSON.stringify(paneText.slice(0, 200))}`,
+);
+
+// A task that settles leaves the panel: the graph no longer carries it, the stream says so, and the
+// strip goes back to its empty state in the same document the run started in.
+await page
+  .waitForFunction(
+    () =>
+      document.querySelectorAll("ul[aria-label='Live task rows'] > li")
+        .length === 0,
+    null,
+    { timeout: 5_000 },
+  )
+  .catch(() => undefined);
+const settledRows = await taskRows.count();
+const settledPanel = (await taskPanel.innerText()).trim();
+const noReload = await page.evaluate(() => window.__liveTasksNoReload === true);
+observed.tasksSettled = { settledRows, settledPanel, noReload };
+assert(
+  "a settled task leaves the panel without a reload",
+  sessionWorked && settledRows === 0 && noReload,
+  `${settledRows} row(s) after the run settled; same document: ${noReload}; panel: ${JSON.stringify(settledPanel.slice(0, 160))}`,
+);
+assert(
+  "an idle session says there are no tasks",
+  settledPanel.includes("No tasks"),
+  `panel: ${JSON.stringify(settledPanel.slice(0, 160))}`,
 );
 
 // The header must label the read path (docs/design.md D8): a fold and a live

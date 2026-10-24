@@ -1424,6 +1424,64 @@ describe("the PR step", () => {
     expect(pair.prUrl).toBe(url);
   }, 120_000);
 
+  it("opens one PR per session, not one per branch: the guard is the session's own log", async () => {
+    const firstUrl = "https://github.com/lobiklukas/factory/pull/11";
+    const secondUrl = "https://github.com/lobiklukas/factory/pull/12";
+    const onFirst = makeGithubFake(201, { number: 11, url: firstUrl });
+    const onSecond = makeGithubFake(201, { number: 12, url: secondUrl });
+
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const one = yield* sessions.create({
+          repo: factoryRepo,
+          title: "one session on the branch",
+        });
+        const two = yield* sessions.create({
+          repo: factoryRepo,
+          title: "a second session on the same branch",
+        });
+        // The same head and base for both. A guard keyed by the branch would answer the second
+        // session with the first one's PR and leave it with no link of its own; the guard is the
+        // session's `factory.pr`, so each session opens its PR.
+        const asked = {
+          title: "factory: one branch, two sessions",
+          head: "factory/ses_shared",
+          base: "main",
+        };
+        const openedOne = yield* sessions
+          .openPullRequest({ ...asked, sessionId: one.id })
+          .pipe(Effect.provide(onFirst.layer));
+        const openedTwo = yield* sessions
+          .openPullRequest({ ...asked, sessionId: two.id })
+          .pipe(Effect.provide(onSecond.layer));
+        // The retry of the first session is still answered by its log: one session, one call.
+        const repeatedOne = yield* sessions
+          .openPullRequest({ ...asked, sessionId: one.id })
+          .pipe(Effect.provide(onFirst.layer));
+        const readOne = yield* sessions.get(one.id);
+        const readTwo = yield* sessions.get(two.id);
+        return {
+          openedOne,
+          openedTwo,
+          repeatedOne,
+          oneUrl: readOne.session.prUrl,
+          twoUrl: readTwo.session.prUrl,
+        };
+      }),
+    );
+
+    // The ledger, not the answer: a step that reads the log makes no request to make its answer.
+    expect(onFirst.requests).toHaveLength(1);
+    expect(onSecond.requests).toHaveLength(1);
+    expect(result.openedOne).toEqual({ number: 11, url: firstUrl });
+    expect(result.openedTwo).toEqual({ number: 12, url: secondUrl });
+    expect(result.repeatedOne).toEqual({ number: 11, url: firstUrl });
+    // Each session reports the PR it opened, so neither link was borrowed from the other.
+    expect(result.oneUrl).toBe(firstUrl);
+    expect(result.twoUrl).toBe(secondUrl);
+  }, 120_000);
+
   it("restores the link from the log after the index rows are deleted", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/8";
     const github = makeGithubFake(201, { number: 8, url });
