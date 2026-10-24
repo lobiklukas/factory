@@ -28,6 +28,11 @@ export type PullRequest = typeof PullRequest.Type;
  * its log already held and never reached the network. The link is the same either way, which is
  * exactly why the tag has to be here: before it, a first open and a replay were indistinguishable
  * from the answer.
+ *
+ * `"opened"` means *this invocation made the call*, not *this invocation created the PR*: since
+ * LOB-179 the call adopts the PR a killed attempt left behind when GitHub refuses the duplicate, and
+ * that is still the call path. The tag separates "went to GitHub" from "the log answered", which is
+ * the distinction a caller can act on; whether the PR existed before the call is the log's business.
  */
 export const PullRequestOutcome = Schema.Literals(["opened", "already-open"]);
 export type PullRequestOutcome = typeof PullRequestOutcome.Type;
