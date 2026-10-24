@@ -52,6 +52,9 @@ import type {
   SessionEvent,
   SessionId,
   SessionListEntry,
+  SessionSnapshot,
+  SessionSummary,
+  SessionUsage,
 } from "@repo/domain/Session";
 import {
   RepoSlug as RepoSlugSchema,
@@ -82,6 +85,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  createFauxModelAccess,
   createModelAccess,
   readPromptSections,
   readSessionLog,
@@ -3564,6 +3568,373 @@ describe("cited pages", () => {
     expect(outcome.report.sessions).toBeGreaterThan(0);
     // Same pages, same citations, same order — from the `factory.page` entries in the log.
     expect(outcome.refolded.pages).toEqual(outcome.before.pages);
+  }, 120_000);
+});
+
+/**
+ * The bounded curator pass (LOB-206, part 3 of LOB-47).
+ *
+ * The pass is one call over a finished session, and what it may write is bounded by `maxPages`. The
+ * cases below are the acceptance criteria in order: a session that taught something writes at most
+ * K pages for exactly one call, a session that taught nothing new writes nothing for exactly one
+ * call, and the call's spend is charged to the curated session rather than to a curator's own.
+ *
+ * The request count is read from the model provider's counter, not from the pass's answer: a suite
+ * that trusted the pass to report its own call count would pass a regression that made two.
+ */
+describe("the curator pass over a finished session", () => {
+  const curateRoot = mkdtempSync(join(tmpdir(), "factory-core-curate-"));
+
+  /** A service over a scripted model, so the cap and the "nothing new" answer can both happen. */
+  const withCuration = (fauxCuration: string, fauxCommand?: string) => {
+    const faux = createFauxModelAccess({
+      fauxCuration,
+      ...(fauxCommand === undefined ? {} : { fauxCommand }),
+    });
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot: curateRoot }).pipe(
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    const program = <A, E>(
+      effect: Effect.Effect<A, E, SessionService | SqlClient>,
+    ) => runtime.runPromise(effect);
+    return { faux, runtime, program };
+  };
+
+  /** Three proposals, so a cap of two has work to do. */
+  const threeProposals = JSON.stringify(
+    Array.from({ length: 3 }, (_, index) => ({
+      name: `page-${index}`,
+      kind: "trap",
+      content: `what the session taught number ${index}`,
+      links: [],
+      sources: [],
+    })),
+  );
+
+  /** A session that ran one turn: a real transcript with a tool result in it. */
+  const taught = (
+    sessions: {
+      create: (input: {
+        title: string;
+      }) => Effect.Effect<SessionSummary, SessionError>;
+      send: (input: {
+        sessionId: SessionId;
+        content: string;
+      }) => Effect.Effect<{ placement: string }, SessionError>;
+      get: (id: SessionId) => Effect.Effect<SessionSnapshot, SessionError>;
+    },
+    title: string,
+  ) =>
+    Effect.gen(function* () {
+      const created = yield* sessions.create({ title });
+      yield* sessions.send({ sessionId: created.id, content: "do the work" });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        "the turn to settle",
+      );
+      return created;
+    });
+
+  it("writes at most maxPages from one call, and cites the session it curated", async () => {
+    const { faux, runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(
+            sessions,
+            "a session that taught something",
+          );
+          const before = faux.faux.state.callCount;
+          const curated = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 2,
+          });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, calls, pages: pages.pages, sessionId: created.id };
+        }),
+      );
+
+      // K configured is K written, from a model that proposed more.
+      expect(outcome.curated.pages.map((page) => page.name)).toEqual([
+        "page-0",
+        "page-1",
+      ]);
+      expect(outcome.curated.proposed).toBe(3);
+      expect(outcome.calls).toBe(1);
+      // The pages are the session's own: a derived row and a log fact, read back by `listPages`.
+      expect(outcome.pages.map((page) => page.name)).toEqual([
+        "page-0",
+        "page-1",
+      ]);
+      for (const page of outcome.pages) {
+        expect(page.sources).toEqual([outcome.sessionId]);
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("commits nothing, for one call, when the session already holds what was proposed", async () => {
+    const { faux, runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(sessions, "a session curated twice");
+          const first = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 3,
+          });
+          const before = faux.faux.state.callCount;
+          const second = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 3,
+          });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { first, second, calls, pages: pages.pages };
+        }),
+      );
+
+      expect(outcome.first.pages).toHaveLength(3);
+      // Learned nothing new: the second pass wrote no page, and still made exactly one call.
+      expect(outcome.second.pages).toEqual([]);
+      expect(outcome.second.proposed).toBe(3);
+      expect(outcome.calls).toBe(1);
+      expect(outcome.pages).toHaveLength(3);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("charges the call to the curated session, and opens no session of its own", async () => {
+    const { runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(
+            sessions,
+            "a session that pays for its curation",
+          );
+          const before = yield* sessions.get(created.id);
+          const listedBefore = yield* sessions.list({ limit: 100 });
+          yield* sessions.curate({ sessionId: created.id, maxPages: 3 });
+          const after = yield* sessions.get(created.id);
+          const listedAfter = yield* sessions.list({ limit: 100 });
+          return { created, before, after, listedBefore, listedAfter };
+        }),
+      );
+
+      const tokens = (usage: SessionUsage): number =>
+        usage.models.reduce(
+          (total, model) => total + model.usage.totalTokens,
+          0,
+        );
+      // The spend is the curated session's: its own ledger grew by the call.
+      expect(tokens(outcome.after.usage)).toBeGreaterThan(
+        tokens(outcome.before.usage),
+      );
+      // And there is no curator session anywhere to carry it instead.
+      expect(outcome.listedAfter.sessions).toHaveLength(
+        outcome.listedBefore.sessions.length,
+      );
+      expect(
+        outcome.listedAfter.sessions.some(
+          (session) => session.id === outcome.created.id,
+        ),
+      ).toBe(true);
+      // The index row agrees with the ledger: what `listSessions` reports as spend is what the log
+      // says the session spent, curation included.
+      const curatedRow = outcome.listedAfter.sessions.find(
+        (session) => session.id === outcome.created.id,
+      );
+      const totalCost = outcome.after.usage.models.reduce(
+        (total, model) => total + model.usage.costTotal,
+        0,
+      );
+      expect(curatedRow?.costTotal).toBeCloseTo(totalCost);
+      // A curated session has not started running: both its summary and the pass itself stay idle.
+      expect(outcome.after.session.status).toBe("idle");
+      expect(outcome.after.live.busy).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("commits no page, for one call, when the model proposes nothing", async () => {
+    const { faux, runtime, program } = withCuration("[]");
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a session that taught nothing",
+          });
+          const before = faux.faux.state.callCount;
+          const curated = yield* sessions.curate({ sessionId: created.id });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, calls, pages: pages.pages };
+        }),
+      );
+
+      // An empty answer is an answer: no page, and the one call the pass is allowed to make.
+      expect(outcome.curated.pages).toEqual([]);
+      expect(outcome.calls).toBe(1);
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("writes a page the model proposed twice only once", async () => {
+    const twice = JSON.stringify([
+      {
+        name: "a-trap",
+        kind: "trap",
+        content: "the same lesson",
+        links: [],
+        sources: [],
+      },
+      {
+        name: "a-trap",
+        kind: "trap",
+        content: "the same lesson",
+        links: [],
+        sources: [],
+      },
+      {
+        name: "another",
+        kind: "guide",
+        content: "a second lesson",
+        links: [],
+        sources: [],
+      },
+    ]);
+    const { runtime, program } = withCuration(twice);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a repeated proposal",
+          });
+          const curated = yield* sessions.curate({ sessionId: created.id });
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, pages: pages.pages };
+        }),
+      );
+
+      expect(outcome.curated.proposed).toBe(3);
+      expect(outcome.curated.pages.map((page) => page.name)).toEqual([
+        "a-trap",
+        "another",
+      ]);
+      expect(outcome.pages.map((page) => page.name)).toEqual([
+        "a-trap",
+        "another",
+      ]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("charges an answer it cannot read to the curated session, then refuses it", async () => {
+    const { runtime, program } = withCuration(
+      "I think the session taught one useful thing.",
+    );
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "an unreadable curation",
+          });
+          const before = yield* sessions.get(created.id);
+          const refused = yield* Effect.exit(
+            sessions.curate({ sessionId: created.id }),
+          );
+          const after = yield* sessions.get(created.id);
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { refused, before, after, pages: pages.pages };
+        }),
+      );
+
+      const failure = Exit.findErrorOption(outcome.refused);
+      expect(Option.isSome(failure)).toBe(true);
+      expect(Option.getOrThrow(failure).code).toBe("harness");
+      // The call was made and billed, so the session carries it even though nothing was written.
+      const tokens = (usage: SessionUsage): number =>
+        usage.models.reduce(
+          (total, model) => total + model.usage.totalTokens,
+          0,
+        );
+      expect(tokens(outcome.after.usage)).toBeGreaterThan(
+        tokens(outcome.before.usage),
+      );
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a session that is still running, without asking the model", async () => {
+    // A command that takes long enough for a curation attempt to arrive while it runs.
+    const { faux, runtime, program } = withCuration(threeProposals, "sleep 3");
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a running session",
+          });
+          // The counter is read before the turn and after it settles: the in-flight turn spends its
+          // own two calls (the tool call and the answer), so a third would be the refusal asking the
+          // model anyway — which spends a call and writes nothing, worse than either answer.
+          const before = faux.faux.state.callCount;
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "take your time",
+          });
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+            "the turn to start",
+          );
+          const refused = yield* Effect.exit(
+            sessions.curate({ sessionId: created.id }),
+          );
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+            "the turn to settle",
+          );
+          const calls = faux.faux.state.callCount - before;
+          return { refused, calls, pages: pages.pages };
+        }),
+      );
+
+      const failure = Exit.findErrorOption(outcome.refused);
+      expect(Option.isSome(failure)).toBe(true);
+      const error = Option.getOrThrow(failure);
+      expect(error._tag).toBe("SessionError");
+      expect(error.code).toBe("busy");
+      // Exactly the turn's own two calls: the refused curation added none.
+      expect(outcome.calls).toBe(2);
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
   }, 120_000);
 });
 
