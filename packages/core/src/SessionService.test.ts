@@ -982,6 +982,45 @@ describe("fork", () => {
     expect(result.report.sessions).toBeGreaterThan(0);
     expect(result.refolded.session.forkedFrom).toBe(result.parent);
   }, 120_000);
+
+  /**
+   * The list is where the operator sees lineage (LOB-182): one page names the fork's parent and
+   * leaves the parent's own row alone. The field comes from the index row, not from the session's
+   * log, so the same case checks both halves of that claim — a blanked row loses the lineage and a
+   * rebuild puts it back, which is what makes the list's cost one query rather than a fold (R6).
+   */
+  it("shows the lineage on the fork's list row and only there", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "lineage list" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        const find = (entries: readonly SessionListEntry[], id: string) =>
+          entries.find((entry) => entry.id === id);
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        // The index is a cache: blanking the column must remove the lineage from the list, or the
+        // field is being served from somewhere a rebuild would disagree with.
+        yield* sql`UPDATE sessions SET forked_from = NULL WHERE id = ${fork.id}`;
+        const blanked = (yield* sessions.list({ limit: 100 })).sessions;
+        yield* rebuildIndexes;
+        const refolded = (yield* sessions.list({ limit: 100 })).sessions;
+        return {
+          parent: parent.id,
+          fork: fork.id,
+          parentRow: find(listed, parent.id),
+          forkRow: find(listed, fork.id),
+          blankedRow: find(blanked, fork.id),
+          refoldedRow: find(refolded, fork.id),
+        };
+      }),
+    );
+
+    expect(result.parentRow?.forkedFrom).toBeUndefined();
+    expect(result.forkRow?.forkedFrom).toBe(result.parent);
+    expect(result.blankedRow?.forkedFrom).toBeUndefined();
+    expect(result.refoldedRow?.forkedFrom).toBe(result.parent);
+  }, 120_000);
 });
 
 /**

@@ -167,6 +167,165 @@ await page.screenshot({
   fullPage: true,
 });
 
+// Feature: fork lineage and the fork action (LOB-182). The action has to be reachable with the
+// keyboard alone, so the fork below is taken with Tab and Enter, not a mouse click. See
+// features/fork-lineage.md.
+const parentId = sessionPath.replace("/sessions/", "");
+const focusedName = () =>
+  page.evaluate(() => {
+    const element = document.activeElement;
+    if (!(element instanceof HTMLElement)) return "";
+    return (
+      element.getAttribute("aria-label") ??
+      (element.textContent ?? "").trim().slice(0, 40)
+    );
+  });
+// Start the keyboard walk from the document, so the order recorded below is the tab order a
+// reader gets after a reload rather than whatever the previous check left focused.
+await page.evaluate(() => {
+  if (document.activeElement instanceof HTMLElement)
+    document.activeElement.blur();
+});
+const tabOrder = [];
+for (let step = 0; step < 30; step += 1) {
+  await page.keyboard.press("Tab");
+  const name = await focusedName();
+  tabOrder.push(name);
+  if (
+    tabOrder.includes("Fork from here") &&
+    tabOrder.includes("Forget this session")
+  )
+    break;
+}
+const forkIndex = tabOrder.indexOf("Fork from here");
+const forgetIndex = tabOrder.indexOf("Forget this session");
+observed.tabOrder = tabOrder;
+assert(
+  "the fork action is reachable by keyboard",
+  forkIndex !== -1,
+  `tab order: ${JSON.stringify(tabOrder)}`,
+);
+assert(
+  "the fork action comes before Forget",
+  forgetIndex !== -1 && forkIndex < forgetIndex,
+  `fork at ${forkIndex}, Forget at ${forgetIndex}`,
+);
+// Walk back to the Fork control and activate it with Enter, so the fork below is taken with the
+// keyboard alone rather than by a click the reader could not repeat.
+let onFork = false;
+for (let step = 0; step < 30; step += 1) {
+  if ((await focusedName()) === "Fork from here") {
+    onFork = true;
+    break;
+  }
+  await page.keyboard.press("Shift+Tab");
+}
+assert(
+  "focus returns to the fork action",
+  onFork,
+  `focus is ${await focusedName()}`,
+);
+
+let forkedPath = null;
+try {
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    (previous) => {
+      const match = window.location.pathname.match(/^\/sessions\/(ses_[^/]+)$/);
+      return match !== null && match[1] !== previous;
+    },
+    parentId,
+    { timeout: 30_000 },
+  );
+  forkedPath = new URL(page.url()).pathname;
+} catch {
+  forkedPath = null;
+}
+const childId = forkedPath === null ? "" : forkedPath.replace("/sessions/", "");
+observed.fork = { parentId, forkedPath, childId };
+assert(
+  "the fork action opens the new session",
+  childId !== "" && childId !== parentId,
+  `parent ${parentId}, after Enter ${JSON.stringify(forkedPath ?? page.url())}`,
+);
+
+// Both sessions are listed, and only the child carries the lineage. A row that renders `forked
+// from` for the parent would mean the field is being read off the wrong row.
+let rows = [];
+if (childId !== "") {
+  try {
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll("aside a[href^='/sessions/']").length >= 2,
+      null,
+      { timeout: 15_000 },
+    );
+  } catch {
+    // The assertion below reports the rows it did get.
+  }
+  rows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("aside a[href^='/sessions/']")).map(
+      (anchor) => ({
+        href: anchor.getAttribute("href") ?? "",
+        text: (anchor.textContent ?? "").replace(/\s+/g, " ").trim(),
+      }),
+    ),
+  );
+  observed.sidebarRows = rows;
+  const parentRow = rows.find((row) => row.href === `/sessions/${parentId}`);
+  const childRow = rows.find((row) => row.href === `/sessions/${childId}`);
+  assert(
+    "the sidebar lists both the parent and the fork",
+    parentRow !== undefined && childRow !== undefined,
+    `rows: ${JSON.stringify(rows.map((row) => row.href))}`,
+  );
+  assert(
+    "the fork's row shows its lineage",
+    childRow !== undefined && childRow.text.includes(`forked from ${parentId}`),
+    `child row: ${JSON.stringify(childRow?.text ?? null)}`,
+  );
+  assert(
+    "the parent's row shows no lineage",
+    parentRow !== undefined && !parentRow.text.includes("forked from"),
+    `parent row: ${JSON.stringify(parentRow?.text ?? null)}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "fork-lineage.png"),
+    fullPage: true,
+  });
+
+  // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
+  // this proves is that the new third line truncates inside the row instead of pushing the document
+  // wider. The header's own clipping at 390 px is pre-existing (the unchanged Forget button is cut
+  // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
+  // `.ralph/polish.md` and the ticket filed for it.
+  await page.setViewportSize({ width: 390, height: 844 });
+  observed.narrowWidth = await page.evaluate(() => {
+    const fork = Array.from(document.querySelectorAll("header button")).find(
+      (button) => button.getAttribute("aria-label") === "Fork from here",
+    );
+    const box = fork?.getBoundingClientRect();
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      forkBox:
+        box === undefined
+          ? null
+          : { left: box.left, right: box.right, width: box.width },
+    };
+  });
+  assert(
+    "the lineage line does not widen the page at 390px",
+    observed.narrowWidth.scrollWidth <= observed.narrowWidth.clientWidth,
+    `scrollWidth ${observed.narrowWidth.scrollWidth} vs clientWidth ${observed.narrowWidth.clientWidth}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "fork-lineage-narrow.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+}
+
 // Feature: the tool-call disclosure. Collapsed by default (a coding run emits
 // dozens), and it opens. See features/transcript.md.
 await page.goto(`${WEB_URL}/sandboxes`, { waitUntil: "domcontentloaded" });

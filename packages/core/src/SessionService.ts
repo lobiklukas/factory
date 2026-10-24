@@ -229,6 +229,8 @@ type ListRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The session this row was forked from, from the index row (LOB-182). */
+  readonly forkedFrom: string | null;
   readonly status: string;
   readonly createdAt: string;
   readonly lastActivityAt: string;
@@ -1275,6 +1277,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 s.title,
                 s.repo,
                 s.base_ref,
+                s.forked_from,
                 a.status,
                 a.cost_total,
                 to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_activity_at,
@@ -1304,6 +1307,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           for (const row of page) {
             const repo =
               row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+            // Lineage is a display field: a malformed value is a broken index, not a reason to
+            // fail the page, and `rebuildIndexes` refolds it from the fork's document.
+            const forkedFrom =
+              row.forkedFrom !== null &&
+              Schema.is(SessionIdSchema)(row.forkedFrom)
+                ? row.forkedFrom
+                : undefined;
             sessions.push({
               id: yield* toSessionId(row.id),
               title: row.title,
@@ -1315,6 +1325,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(repo === undefined || row.baseRef === null
                 ? {}
                 : { baseRef: row.baseRef }),
+              ...(forkedFrom === undefined ? {} : { forkedFrom }),
             });
           }
           return {

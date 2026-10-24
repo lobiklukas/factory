@@ -111,6 +111,20 @@ export const startSessionAtom = runtime.fn(
     }),
 );
 
+/**
+ * Forks a session at its last entry (LOB-180's RPC, LOB-182's action).
+ *
+ * The fork is a session of its own with the parent's transcript copied in one commit, so the caller
+ * navigates to the returned id rather than mutating the pane it was reading: the parent's log never
+ * gains the fork's turns.
+ */
+export const forkSessionAtom = runtime.fn((sessionId: SessionId) =>
+  Effect.gen(function* () {
+    const rpc = yield* RpcClient;
+    return yield* rpc.client.forkSession({ sessionId });
+  }),
+);
+
 /** Sends a message into a session the pane is already attached to. */
 export const sendMessageAtom = runtime.fn(
   (input: { readonly sessionId: SessionId; readonly content: string }) =>
