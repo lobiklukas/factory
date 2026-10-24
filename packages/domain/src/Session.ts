@@ -75,6 +75,8 @@ export const SessionSummary = Schema.Struct({
   baseRef: Schema.optional(Schema.String),
   /** The URL of the PR opened for this session, once one exists. */
   prUrl: Schema.optional(Schema.String),
+  /** The session this one was forked from, once one was (LOB-180). */
+  forkedFrom: Schema.optional(SessionId),
 });
 export type SessionSummary = typeof SessionSummary.Type;
 
@@ -326,6 +328,24 @@ export const SessionIdInput = Schema.Struct({ sessionId: SessionId });
 export type SessionIdInput = typeof SessionIdInput.Type;
 
 /**
+ * Fork a session at one of its entries (LOB-180, D7).
+ *
+ * `at` is the id of a transcript entry — the `id` a `TranscriptEntry` carries — and the fork keeps
+ * the parent's entries through it. Absent, the fork is taken at the parent's last entry.
+ *
+ * An id that names no entry of *this* session is refused as `invalid_input`: no such history exists
+ * to fork. Entry ids are minted per log, so an id read out of another session is indistinguishable
+ * from this session's entry of the same number when both exist — the fork then takes this session's
+ * entry, which is the only thing that number can mean here. Making an entry id unique across
+ * sessions is a change to every client's view of a transcript, not something a fork can decide.
+ */
+export const ForkSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  at: Schema.optional(Schema.String),
+});
+export type ForkSessionInput = typeof ForkSessionInput.Type;
+
+/**
  * Start a new model context for a session (LOB-181).
  *
  * `handoff` is what the fresh context opens with, as its first user message; absent or empty means
@@ -337,6 +357,29 @@ export const ResetSessionInput = Schema.Struct({
   handoff: Schema.optional(Schema.String),
 });
 export type ResetSessionInput = typeof ResetSessionInput.Type;
+
+/**
+ * Compact a session's model context on demand (B4).
+ *
+ * `instructions` is what the summarizer should focus on, when the caller has a reason to steer it.
+ * The compaction is a task in the log: this call admits it and answers the task's id, and the
+ * summary arrives as a `compaction` entry when the task settles, so a caller watches the
+ * transcript rather than waiting on this call. Nothing is dropped: entries before the summary
+ * stay in the transcript, which is what makes the summary checkable.
+ */
+export const CompactSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  instructions: Schema.optional(Schema.String),
+});
+export type CompactSessionInput = typeof CompactSessionInput.Type;
+
+/** The admitted compaction task, and the session it belongs to. */
+export const CompactSessionResult = Schema.Struct({
+  session: SessionSummary,
+  /** Opaque, like a submission id; the log's own numbering is not the wire contract. */
+  taskId: Schema.String,
+});
+export type CompactSessionResult = typeof CompactSessionResult.Type;
 
 /**
  * A session request that cannot be served. `code` is the part callers branch on.

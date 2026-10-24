@@ -25,7 +25,10 @@ import {
   UnblockTaskInput,
 } from "@repo/domain/Task";
 import {
+  CompactSessionInput,
+  CompactSessionResult,
   CreateSessionInput,
+  ForkSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
@@ -73,11 +76,23 @@ export class SessionRpc extends RpcGroup.make(
     success: SessionSummary,
     error: SessionError,
   }),
+  Rpc.make("forkSession", {
+    payload: ForkSessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
   // A reset is not an interrupt: it starts a new model context (with the handoff note as its first
   // message) and leaves the transcript's past in place, marked by the `reset` entry (LOB-181).
   Rpc.make("resetSession", {
     payload: ResetSessionInput,
     success: SessionSummary,
+    error: SessionError,
+  }),
+  // Compaction is a task in the log, not a request: the call admits it and answers its id, and
+  // the summary arrives as a `compaction` entry when it settles (B4).
+  Rpc.make("compactSession", {
+    payload: CompactSessionInput,
+    success: CompactSessionResult,
     error: SessionError,
   }),
   Rpc.make("listSessions", {

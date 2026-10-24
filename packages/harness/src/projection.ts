@@ -43,6 +43,8 @@ export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
+/** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
+export const FORK_DOC_KIND = "factory.fork";
 export const TITLE_ENTRY_KIND = "factory.title";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
