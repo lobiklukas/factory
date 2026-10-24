@@ -559,6 +559,7 @@ describe("the board's tables and seed", () => {
       const [row] = await Effect.runPromise(
         sql<{ id: string; version: number; name: string; columns: unknown }>`
           SELECT id, version, name, columns FROM board_definitions
+          WHERE id = 'default' AND version = 1
         `,
       );
       expect(row).toBeDefined();
@@ -639,7 +640,7 @@ describe("the board's tables and seed", () => {
   );
 
   it(
-    "leaves one definition row when the migration runs a second time",
+    "leaves one version-1 row when 0007's seed runs a second time",
     { timeout: 30_000 },
     async () => {
       const migration = (await import("./migrations/0007_create_tasks"))
@@ -650,12 +651,76 @@ describe("the board's tables and seed", () => {
         migration.pipe(Effect.provideService(SqlClient, sql)),
       );
 
+      // The claim is 0007's own idempotence, so it is asked about the row 0007 seeds. 0010 adds a
+      // second version *of the same definition* beside it (B2 never edits a version in place), and
+      // a total row count would read that as 0007 seeding twice.
       const rows = await Effect.runPromise(
         sql<{ id: string; version: number }>`
           SELECT id, version FROM board_definitions
+          WHERE id = 'default' AND version = 1
         `,
       );
       expect(rows).toEqual([{ id: "default", version: 1 }]);
+    },
+  );
+
+  /**
+   * 0010: the second version of the default pipeline, which binds the skills 0009 seeds to the
+   * stages that need them (docs/board.md B6, LOB-174).
+   *
+   * Read from the database, like the version-1 case above, because the claim is what a reader finds
+   * after the migration ran. The columns are compared through `BoardDefinition` rather than against
+   * a copied literal, so a column set the contract rejects fails here.
+   */
+  it(
+    "binds the seeded skills to their stages on version 2, and only ever once",
+    { timeout: 30_000 },
+    async () => {
+      const read = (version: number) =>
+        Effect.runPromise(
+          sql<{ id: string; version: number; name: string; columns: unknown }>`
+            SELECT id, version, name, columns FROM board_definitions
+            WHERE id = 'default' AND version = ${version}
+          `,
+        );
+
+      const [row] = await read(2);
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+      const definition = Schema.decodeUnknownSync(BoardDefinition)(row);
+      expect(definition.version).toBe(2);
+      expect(definition.name).toBe("Default pipeline");
+
+      const skills = new Map(
+        definition.columns.map((column) => [column.name, column.skills]),
+      );
+      // The three skills 0009 seeds are the three working stages' rules, so each is bound to its
+      // stage; the resting and terminal columns run nothing and name none.
+      expect(Object.fromEntries(skills)).toEqual({
+        intake: [],
+        specifying: ["specify"],
+        planning: [],
+        building: ["implement"],
+        review: ["review"],
+        done: [],
+        canceled: [],
+      });
+
+      // Version 1 is untouched: a card pinned to it keeps the columns it started under (B2).
+      const [version1] = await read(1);
+      expect(version1).toBeDefined();
+      if (version1 === undefined) return;
+      const before = Schema.decodeUnknownSync(BoardDefinition)(version1);
+      for (const column of before.columns) expect(column.skills).toEqual([]);
+
+      // Idempotent: `(id, version)` is the primary key, so a second pass over a database that
+      // already has the row is a no-op rather than a second copy of the pipeline.
+      const migration = (await import("./migrations/0010_seed_pipeline_skills"))
+        .default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      expect(await read(2)).toHaveLength(1);
     },
   );
 
