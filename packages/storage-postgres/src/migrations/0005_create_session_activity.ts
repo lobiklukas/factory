@@ -11,9 +11,10 @@ import { SqlClient } from "effect/sql/SqlClient";
  * column here is a fold of `commits` (`pi.live`'s run state, `pi.usage`'s totals, `committed_at`'s
  * newest row). Dropping it loses nothing but the timeliness of "last activity".
  *
- * `last_activity_at` is a `TIMESTAMPTZ`, not a millisecond counter, so the keyset cursor can carry
- * the exact value Postgres ordered by. The backfill gives every session that predates this table a
- * row, so the list never silently omits history.
+ * `last_activity_at` is a `TIMESTAMPTZ`, but the keyset cursor is rendered at millisecond
+ * precision (see `packages/core/src/SessionService.ts`), so a page boundary inside a
+ * same-millisecond group can skip rows; LOB-95 owns the code fix. The backfill gives every session
+ * that predates this table a row, so the list never silently omits history.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient;
