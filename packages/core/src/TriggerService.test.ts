@@ -91,14 +91,21 @@ const withRuntime = async <A>(
     readonly registerRepo?: ReadonlyArray<RepoSlug>;
     /** Fail the first `create` this many times, as a session layer under stress would. */
     readonly failCreateTimes?: number;
+    /** Die (a defect, not a typed failure) on the first `create` that many times. */
+    readonly dieCreateTimes?: number;
   } = {},
 ): Promise<A> => {
   const created: Array<Created> = [];
   let failuresLeft = options.failCreateTimes ?? 0;
+  let deathsLeft = options.dieCreateTimes ?? 0;
   const sessions: TriggerSessionsShape = {
     create: (input) =>
       Effect.suspend(
         (): Effect.Effect<{ readonly id: SessionId }, TriggerError> => {
+          if (deathsLeft > 0) {
+            deathsLeft -= 1;
+            return Effect.die(new Error("the session layer died"));
+          }
           if (failuresLeft > 0) {
             failuresLeft -= 1;
             return Effect.fail(
@@ -314,6 +321,26 @@ describe("the trigger seam", () => {
         expect(created).toHaveLength(1);
       },
       { registerRepo: [repo], failCreateTimes: 1 },
+    );
+  }, 60_000);
+
+  it("gives the claim back even when the session layer dies rather than failing", async () => {
+    const requestId = `${runId}-defect`;
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const died = await run(
+          Effect.exit(trigger.deliver(deliver(requestId))),
+        );
+        expect(died._tag).toBe("Failure");
+        expect(created).toHaveLength(0);
+
+        // A defect is not a typed failure: `Effect.tapError` would have skipped the release here.
+        const retried = await run(trigger.deliver(deliver(requestId)));
+        expect(retried.replayed).toBe(false);
+        expect(retried.status).toBe("processed");
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo], dieCreateTimes: 1 },
     );
   }, 60_000);
 

@@ -49,12 +49,24 @@ need a second API instance booted with no secret — so it rests on the code pat
 `Webhook.ts`'s `handle` and on `webhook.sh` setting both.
 
 **A failed delivery gives its claim back.** The claim row starts as `received`; if the session
-cannot be created (or the write-back fails) the row is deleted before the error is re-thrown, so the
-sender's retry runs the work instead of being answered `replayed: true` to work that never started.
-`packages/core/src/TriggerService.test.ts`'s "gives the claim back when the session cannot be
-created" is the case, and a mutation that replaces the delete with a no-op turns it red. Safe
-because `sessions.create` dedupes on `trigger:<requestId>`: a failure _after_ the session was opened
-reuses that session on the retry rather than opening a second one.
+cannot be created (or the write-back fails) the row is deleted before the failure is re-thrown, so
+the sender's retry runs the work instead of being answered `replayed: true` to work that never
+started. The release runs on _any_ unsuccessful exit — a typed `TriggerError`, a defect, or an
+interrupt — because `Effect.exit` sees all three and `Effect.uninterruptible` keeps a cancelled
+request from skipping its own cleanup; `Effect.tapError` alone would miss a defect.
+`packages/core/src/TriggerService.test.ts` has both cases ("gives the claim back when the session
+cannot be created" and "…even when the session layer dies rather than failing"), and reverting the
+release to `Effect.tapError` turns the second one red. Safe because `sessions.create` dedupes on
+`trigger:<requestId>`: a failure _after_ the session was opened reuses that session on the retry
+rather than opening a second one.
+
+**Residual risks, accepted.** (1) A `SIGKILL` between the claim and the outcome leaves the row in
+`received` for good, and every retry then answers `replayed: true, status: "received"`. Reclaiming a
+stale `received` row needs a lease with a timestamp — the same shape as `SessionBus`'s problem
+(D12) — and is not part of this issue. (2) The `503 not-configured` branch of `/webhooks/*` has no
+automated case: `apps/api` has no route-level test harness, and a drive would need a second instance
+booted without a secret. It rests on the code path in `Webhook.ts`'s `handle` and on `webhook.sh`
+setting both secrets; a case for it is a candidate issue, not a gap this PR pretends to have closed.
 
 **Deliberately absent.** Write-back: `TriggerWriteBack` is an injected port with a no-op default,
 because no adapter in part 1 has anywhere to write (the candidate is LOB-190's GitHub issue

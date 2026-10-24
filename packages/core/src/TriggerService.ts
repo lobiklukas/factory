@@ -24,7 +24,7 @@
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
  */
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Exit, Layer } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import type {
@@ -307,23 +307,37 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               } as const;
             });
 
-          return yield* claimedWork.pipe(
+          // Release the claim on *any* unsuccessful exit, not only a typed one: a defect in the
+          // session layer (a driver error, a `die`) and an interrupt both leave the row in
+          // `received`, and both would otherwise turn the sender's retry into a `replayed: true`
+          // answer about work that never happened. `Effect.exit` is what sees all three, and the
+          // release is uninterruptible so a cancelled request cannot skip its own cleanup.
+          const releaseClaim = storage(
+            "release an unclaimed delivery",
+            sql`DELETE FROM webhook_deliveries WHERE request_id = ${requestId}`,
+          ).pipe(
+            // The original failure is what the caller needs; a failed release must not mask it.
+            // The next attempt re-claims the row if this one did land.
             Effect.tapError(() =>
-              storage(
-                "release an unclaimed delivery",
-                sql`DELETE FROM webhook_deliveries WHERE request_id = ${requestId}`,
-              ).pipe(
-                // The original failure is what the caller needs; a failed release must not mask
-                // it. The next attempt re-claims the row if this one did land.
-                Effect.tapError(() =>
-                  Effect.logWarning(
-                    `trigger: could not release delivery ${requestId}`,
-                  ),
-                ),
-                Effect.ignore,
+              Effect.logWarning(
+                `trigger: could not release delivery ${requestId}`,
               ),
             ),
+            Effect.ignore,
           );
+
+          const settled = Effect.exit(claimedWork).pipe(
+            Effect.flatMap((exit) =>
+              Exit.isSuccess(exit)
+                ? Effect.succeed(exit.value)
+                : releaseClaim.pipe(
+                    Effect.andThen(Effect.failCause(exit.cause)),
+                  ),
+            ),
+            Effect.uninterruptible,
+          );
+
+          return yield* settled;
         });
 
       return TriggerService.of({ deliver });
