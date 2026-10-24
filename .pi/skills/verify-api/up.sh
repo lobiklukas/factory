@@ -27,12 +27,28 @@ fi
 source "$ROOT/.pi/skills/lib/postgres.sh"
 ensure_postgres || exit 1
 
+# The session root is a throwaway git repo whose `origin` is a local bare repository, so a
+# scripted git command can never reach a real remote (LOB-94).
+SESSION_ROOT="$RUN_DIR/sessions"
+ORIGIN_DIR="$RUN_DIR/origin.git"
+if [ ! -d "$SESSION_ROOT/.git" ]; then
+  rm -rf "$SESSION_ROOT" "$ORIGIN_DIR"
+  mkdir -p "$SESSION_ROOT"
+  git init -q -b main "$SESSION_ROOT"
+  git -C "$SESSION_ROOT" config user.email verify-api@localhost
+  git -C "$SESSION_ROOT" config user.name "verify-api"
+  git -C "$SESSION_ROOT" commit -q --allow-empty -m "verify-api session root"
+  git init -q -b main --bare "$ORIGIN_DIR"
+  git -C "$SESSION_ROOT" remote add origin "$ORIGIN_DIR"
+  git -C "$SESSION_ROOT" push -q origin main
+fi
+
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
-    SESSION_ROOT="$RUN_DIR/sessions" \
+    SESSION_ROOT="$SESSION_ROOT" \
     SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-2000}" \
     MAX_REQUEST_BODY_BYTES="${MAX_REQUEST_BODY_BYTES:-1048576}" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &

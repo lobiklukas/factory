@@ -48,6 +48,18 @@ else
   fail=1
 fi
 
+SESSION_ROOT="$RUN_DIR/sessions"
+if [ -d "$SESSION_ROOT/.git" ]; then
+  origin="$(git -C "$SESSION_ROOT" remote get-url origin 2>/dev/null || echo "")"
+  case "$origin" in
+    /*|file://*) note "session root origin:" "$origin (local)" ;;
+    "") note "session root origin:" "NONE — a git case could run unbounded"; fail=1 ;;
+    *) note "session root origin:" "$origin — NOT LOCAL"; fail=1 ;;
+  esac
+else
+  note "session root:" "$SESSION_ROOT is not the seeded repo — ./up.sh seeds it"; fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "doctor: OK"
 else
