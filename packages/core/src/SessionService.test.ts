@@ -53,7 +53,10 @@ import type {
   SessionId,
   SessionListEntry,
 } from "@repo/domain/Session";
-import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
+import {
+  RepoSlug as RepoSlugSchema,
+  SessionId as SessionIdSchema,
+} from "@repo/domain/Session";
 import {
   DatabaseConfig,
   DatabaseLive,
@@ -78,7 +81,11 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createModelAccess, readPromptSections } from "@repo/harness";
+import {
+  createModelAccess,
+  readPromptSections,
+  readSessionLog,
+} from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { SkillService, SkillServiceLive } from "./SkillService";
@@ -426,9 +433,12 @@ process.env["DATABASE_URL"] = runDatabaseUrl;
 const runtime = ManagedRuntime.make(
   // `provideMerge` keeps the database in the runtime's context, so a test can run SQL and the
   // rebuild against the same pool the service uses.
-  SessionServiceLive({ model: createModelAccess("faux"), sessionRoot }).pipe(
-    Layer.provideMerge(DatabaseLayer),
-  ),
+  // Two faux models, so a replay onto a *different* model is a difference this suite can make: the
+  // backend publishes one id unless told otherwise (LOB-198).
+  SessionServiceLive({
+    model: createModelAccess("faux", { fauxModels: ["faux-1", "faux-2"] }),
+    sessionRoot,
+  }).pipe(Layer.provideMerge(DatabaseLayer)),
 );
 
 const program = <A, E>(
@@ -1054,6 +1064,182 @@ describe("fork", () => {
     expect(result.row?.forkedFrom).toBeUndefined();
     expect(result.report.sessions).toBeGreaterThan(0);
     expect(result.refolded?.forkedFrom).toBe(result.parent);
+  }, 120_000);
+});
+
+/**
+ * Replaying a recorded session on another model (LOB-198).
+ *
+ * A replay is the same task in a new session, so these claims are one-directional: exactly one new
+ * session exists afterwards, its first user entry is the source's, its model is not — and the source
+ * is the log it was, down to its commit count and head. That last part is what makes "replay a
+ * recorded run" not a rewrite of it, so it is asserted against `commits` rather than against a
+ * projection that could agree with itself.
+ */
+describe("replay", () => {
+  /** One log as the database holds it: how many commits, and the newest sequence number. */
+  const logState = (logId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ commits: number; head: string | null }>`
+        SELECT count(*)::int AS commits, max(seq)::text AS head
+        FROM commits WHERE log_id = ${logId}
+      `;
+      return rows[0] ?? { commits: 0, head: null };
+    });
+
+  /** How many sessions the index holds, which is what a refusal must not add to. */
+  const sessionCount = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{ rows: number }>`
+      SELECT count(*)::int AS rows FROM sessions
+    `;
+    return rows[0]?.rows ?? 0;
+  });
+
+  /** The `SessionError` code a refused call failed with, or `"ok"` when it succeeded. */
+  const refusalCode = (exit: Exit.Exit<unknown, SessionError>): string => {
+    if (exit._tag !== "Failure") return "ok";
+    const failure = Exit.findErrorOption(exit);
+    return failure._tag === "Some" ? failure.value.code : "defect";
+  };
+
+  it("replays the prompt on another model and leaves the source log untouched", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "replaying",
+          repo: factoryRepo,
+        });
+        yield* sessions.send({
+          sessionId: source.id,
+          content: "fix the flaky login test",
+        });
+        yield* waitUntil(
+          sessions.get(source.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the source's turn to settle",
+        );
+        const before = yield* sessions.get(source.id);
+        const sourceLog = yield* logState(source.id);
+        const countBefore = yield* sessionCount;
+
+        const replay = yield* sessions.replay({
+          sessionId: source.id,
+          model: "faux/faux-2",
+        });
+        yield* waitUntil(
+          sessions.get(replay.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the replay's turn to settle",
+        );
+        const replayed = yield* sessions.get(replay.id);
+        const sourceAfter = yield* sessions.get(source.id);
+        const sourceLogAfter = yield* logState(source.id);
+        const countAfter = yield* sessionCount;
+
+        // Release the owners, then read the replay's log the way a rebuild does: the link has to
+        // be in the log, not only in this call's answer (D7).
+        yield* sessions.close;
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.reader(sql, replay.id),
+        );
+        const log = yield* readSessionLog(storage).pipe(
+          Effect.ensuring(Effect.promise(() => storage.dispose())),
+        );
+        const folded = yield* sessions.get(replay.id);
+
+        return {
+          source: source.id,
+          replay,
+          before,
+          replayed,
+          sourceAfter,
+          sourceLog,
+          sourceLogAfter,
+          countBefore,
+          countAfter,
+          log,
+          folded,
+        };
+      }),
+    );
+
+    // One new session, and it is the replay.
+    expect(result.replay.id).not.toBe(result.source);
+    expect(result.countAfter).toBe(result.countBefore + 1);
+    expect(result.replay.mode).toBe("live");
+    // The source's task, run again: its first user entry is the replay's, text for text.
+    const firstUser = (snapshot: {
+      entries: readonly { kind: string; text: string }[];
+    }) => snapshot.entries.find((entry) => entry.kind === "user")?.text;
+    expect(firstUser(result.before)).toBe("fix the flaky login test");
+    expect(firstUser(result.replayed)).toBe(firstUser(result.before));
+    // ... on a different model, which the spend the log records is keyed by.
+    expect(result.before.usage.models.map((model) => model.key)).toEqual([
+      "faux/faux-1",
+    ]);
+    expect(result.replayed.usage.models.map((model) => model.key)).toEqual([
+      "faux/faux-2",
+    ]);
+
+    // The source is unchanged: same entries after as before, same commit count, same head.
+    expect(result.sourceAfter.entries).toEqual(result.before.entries);
+    expect(result.sourceLog.commits).toBeGreaterThan(0);
+    expect(result.sourceLogAfter).toEqual(result.sourceLog);
+
+    // The replay's own log carries the link between both sessions and both models.
+    expect(result.log.replay).toEqual({
+      source: result.source,
+      model: "faux/faux-2",
+      from: "faux/faux-1",
+    });
+    // The repo binding and the title are the replay's own committed facts, so a fold has them.
+    expect(result.log.binding).toEqual({ repo: factoryRepo, baseRef: "main" });
+    expect(
+      result.log.entries.some(
+        (entry) => entry.kind === "title" && entry.text === "replaying",
+      ),
+    ).toBe(true);
+    // And a session nobody owns reads the same transcript.
+    expect(result.folded.session.mode).toBe("historical");
+    expect(result.folded.entries).toEqual(result.replayed.entries);
+  }, 120_000);
+
+  it("refuses an unknown session, a session with no repo, and a model it does not serve", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const scratch = yield* sessions.create({
+          title: "no repo to replay into",
+        });
+        yield* sessions.send({ sessionId: scratch.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(scratch.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the scratch turn to settle",
+        );
+        const countBefore = yield* sessionCount;
+        const noRepo = yield* Effect.exit(
+          sessions.replay({ sessionId: scratch.id }),
+        );
+        const unknown = yield* Effect.exit(
+          sessions.replay({
+            sessionId: SessionIdSchema.make(`ses_${"0".repeat(26)}`),
+          }),
+        );
+        const noModel = yield* Effect.exit(
+          sessions.replay({ sessionId: scratch.id, model: "faux/faux-9" }),
+        );
+        const countAfter = yield* sessionCount;
+        return { noRepo, unknown, noModel, countBefore, countAfter };
+      }),
+    );
+
+    // A refusal is typed, and a refused replay leaves no session behind.
+    expect(refusalCode(result.noRepo)).toBe("invalid_input");
+    expect(refusalCode(result.unknown)).toBe("not_found");
+    expect(refusalCode(result.noModel)).toBe("invalid_input");
+    expect(result.countAfter).toBe(result.countBefore);
   }, 120_000);
 });
 
