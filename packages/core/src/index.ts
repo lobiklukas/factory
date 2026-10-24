@@ -11,3 +11,4 @@ export * from "./SkillService";
 export * from "./TriggerService";
 export * from "./Jira";
 export * from "./GitHub";
+export * from "./Slack";

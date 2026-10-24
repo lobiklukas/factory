@@ -81,6 +81,7 @@ running, and writes its own evidence:
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401 and 413
 ./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
+./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the

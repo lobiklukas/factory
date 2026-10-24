@@ -18,8 +18,8 @@
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own idempotency.
  *
  * The signature scheme is shared (`hmac-sha256` over the raw body, hex, in a configurable header)
- * because that is what Linear already does; an adapter whose provider signs differently (Slack's
- * timestamped signature) brings its own check, which is part 4 of LOB-34's job.
+ * because that is what Linear already does; an adapter whose provider signs differently brings its
+ * own check, which is what Slack's timestamped signature does in `@repo/core/Slack` (LOB-191).
  *
  * **A route with no secret refuses every delivery.** An unset secret used to mean "accept", which
  * was harmless while `/webhooks/linear` recorded everything as `skipped`; now that a delivery can
