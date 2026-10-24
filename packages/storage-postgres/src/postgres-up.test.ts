@@ -768,8 +768,10 @@ describe("the verify-* skills' Postgres precondition", () => {
       expect(pid).not.toBe(process.ppid);
       expect(isAlive(pid ?? 0)).toBe(true);
       expect(await doesAnswer(port)).toBe(true);
-      // Mutation checked: dropping `opensPort` from this case (nothing answers, the status is 1),
-      // and `stopOpenedListener` not killing (the port stays open and the wait below times out).
+      // Mutation checked: making the re-probe in `.pi/skills/lib/postgres.sh` read a greeting
+      // instead of only connecting (`pg_isready`, or any check that waits for Postgres to talk) — the
+      // re-probe would then pass against a listener that only accepts TCP, so the port check would
+      // not catch it.
       await stopOpenedListener(scratch, port);
       expect(await doesAnswer(port)).toBe(false);
       expect(isAlive(pid ?? 0)).toBe(false);
@@ -1322,8 +1324,10 @@ describe("the verify-* skills' Postgres precondition", () => {
     // group (this suite included) and -1 every process the user owns, so only a positive integer is
     // treated as a listener. This case survives those records; a `<= 0` guard that loosened would
     // not be an assertion failure here but a dead runner, which is why the values are exercised.
-    // Mutation checked: dropping the `pid > 0` guard from `recordedListener` — `kill -1` takes the
-    // suite and the shell that started it with it.
+    // Mutation checked: the guard is unobservable in-process — `process.kill(-1, "SIGKILL")` signals
+    // every process the user owns (including this runner), so it cannot be applied here; the cost is
+    // that the `pid > 0` guard in `.pi/skills/lib/postgres.sh`'s `recordedListener` rests on prose,
+    // and a `<= 0` regression (e.g. `kill(0)`) would only surface as a dead runner, not a red test.
     for (const malformed of ["", "0", "-1", "12 34\n", "not-a-pid\n"]) {
       writeFileSync(scratch.listenerPid, malformed);
       await stopOpenedListener(scratch, port);
