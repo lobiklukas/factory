@@ -17,8 +17,9 @@
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
  *
  * What it always answers from the fold: title (`factory.title` entries), repo and base ref
- * (`factory.session`), spend (`pi.usage`), created/last activity (`commits.committed_at`), and
- * status — always `idle`, because a rebuild runs in a process that owns nothing (D8).
+ * (`factory.session`), the PR link (`factory.pr`), spend (`pi.usage`), created/last activity
+ * (`commits.committed_at`), and status — always `idle`, because a rebuild runs in a process that
+ * owns nothing (D8).
  *
  * How it is shaped, because a recovery path is only as good as how long it takes to run: the fold
  * reads every session log in pages (`PostgresStorage.readers`) and writes the index rows in batches,
@@ -56,6 +57,7 @@ type FoldedRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  readonly prUrl: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
   readonly costTotal: number;
@@ -139,6 +141,7 @@ export const rebuildIndexes: Effect.Effect<
       title: title ?? "",
       repo,
       baseRef: repo === null ? null : sessionLog.binding.baseRef,
+      prUrl: sessionLog.pr?.url ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
       costTotal,
@@ -165,18 +168,20 @@ export const rebuildIndexes: Effect.Effect<
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, pr_url, created_at)
       SELECT * FROM unnest(
         ${ids}::text[],
         ${batch.map((row) => row.title)}::text[],
         ${batch.map((row) => row.repo)}::text[],
         ${batch.map((row) => row.baseRef)}::text[],
+        ${batch.map((row) => row.prUrl)}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
       )
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
         base_ref = EXCLUDED.base_ref,
+        pr_url = EXCLUDED.pr_url,
         created_at = EXCLUDED.created_at
     `;
     yield* sql`

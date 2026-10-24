@@ -45,6 +45,9 @@ import type {
 import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { ModelAccess } from "./models";
+// The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
+// the shapes they promise have a single writer and a single reader.
+import { PrDoc } from "./docs";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -54,12 +57,15 @@ import {
 import {
   diffView,
   projectEntry,
+  projectPrDoc,
   projectUsageDoc,
   projectView,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
+  PR_DOC_KIND,
+  PR_OPENED_ENTRY_KIND,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
@@ -332,6 +338,78 @@ export type TaskBinding = {
   readonly column: string;
 };
 
+/** The PR a session opened, as the log records it. */
+export type PullRequestRecord = {
+  readonly url: string;
+  readonly number: number;
+  readonly base: string;
+  readonly head: string;
+  readonly openedAt: string;
+};
+
+/**
+ * The PR a session opened, announced in the transcript so an attached client learns the link
+ * (LOB-177). It carries no model content, so the agent never sees it.
+ */
+export const PrOpenedEntry = defineEntry<{
+  readonly url: string;
+  readonly number: number;
+}>(PR_OPENED_ENTRY_KIND);
+
+/**
+ * Commit the PR a session opened. The log, not the `sessions` row, is what makes the link survive a
+ * dropped index; the caller updates the row as well so a list needs no fold (LOB-177).
+ *
+ * One commit, two shapes of the same fact, because they answer different questions: the `factory.pr`
+ * document is the record a retried step reads before it calls GitHub, and the entry is what an
+ * attached client can see — Pi Durable mounts only its own documents in a conversation view, so a
+ * document alone would open the PR silently for everyone already watching.
+ */
+export const writePullRequestDoc = (
+  conversation: Conversation,
+  pullRequest: PullRequestRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write pull request", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PrDoc, conversation.id).then((doc) => {
+            doc.url = pullRequest.url;
+            doc.number = pullRequest.number;
+            doc.base = pullRequest.base;
+            doc.head = pullRequest.head;
+            doc.openedAt = pullRequest.openedAt;
+          }),
+          tx.appendEntry(PrOpenedEntry, conversation.id, {
+            data: { url: pullRequest.url, number: pullRequest.number },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * The PR this session already opened, read from the committed document — so a step that runs twice
+ * reads the first run's answer instead of asking GitHub again. `undefined` when there is none.
+ */
+export const readPullRequestDoc = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<PullRequestRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const doc = yield* attempt("read pull request", () =>
+      harness.snapshot(PrDoc, conversation.id, BACKGROUND_CONTEXT),
+    );
+    if (doc === undefined || doc.url === "") return undefined;
+    return {
+      url: doc.url,
+      number: doc.number,
+      base: doc.base,
+      head: doc.head,
+      openedAt: doc.openedAt,
+    };
+  });
+
 /** Commit the task binding. */
 export const writeTaskBinding = (
   conversation: Conversation,
@@ -486,6 +564,8 @@ export type SessionLog = {
   readonly usage: SessionUsage;
   /** The repo binding the log records, empty when the session is a scratch one. */
   readonly binding: RepoBinding;
+  /** The PR the log records, when the session opened one. */
+  readonly pr?: PullRequestRecord;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
   /** The job spec committed to the log, when present. */
@@ -518,6 +598,7 @@ export const readSessionLog = (
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
+    const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
     const taskId = bindingString(taskDoc, "taskId");
     const spec = bindingString(specDoc, "spec");
     const criteria = bindingString(criteriaDoc, "criteria");
@@ -528,6 +609,17 @@ export const readSessionLog = (
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
       },
+      ...(prDoc.url === ""
+        ? {}
+        : {
+            pr: {
+              url: prDoc.url,
+              number: prDoc.number,
+              base: prDoc.base,
+              head: prDoc.head,
+              openedAt: prDoc.openedAt,
+            },
+          }),
       ...(spec === "" ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(taskId === ""
@@ -550,6 +642,8 @@ export type SessionRef = {
   readonly createdAt: Timestamp;
   /** Where the session works, already resolved by the control plane (`@repo/domain/Session`). */
   readonly workspace: SessionWorkspace;
+  /** The PR the index remembers, so a read needs no fold to report it (LOB-177). */
+  readonly prUrl?: string;
 };
 
 const snapshotOf = (
@@ -568,6 +662,7 @@ const snapshotOf = (
       ...(ref.workspace.baseRef === undefined
         ? {}
         : { baseRef: ref.workspace.baseRef }),
+      ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
     },
     workspace: ref.workspace,
     entries: projection.entries,
@@ -663,6 +758,7 @@ export const readHistoricalSnapshot = (
         ...(ref.workspace.baseRef === undefined
           ? {}
           : { baseRef: ref.workspace.baseRef }),
+        ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
       },
       workspace: ref.workspace,
       entries: log.entries,

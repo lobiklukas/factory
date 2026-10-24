@@ -14,13 +14,15 @@ import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
-import { projectView } from "./projection";
+import { diffView, projectView } from "./projection";
 import {
   closeHarness,
   isBusy,
   openSession,
+  readPullRequestDoc,
   readSessionLog,
   submitMessage,
+  writePullRequestDoc,
 } from "./session";
 
 const runtime = ManagedRuntime.make(DatabaseLive);
@@ -134,5 +136,79 @@ describe("a session over PostgresStorage", () => {
     expect(second.entries.slice(0, first.entries.length)).toEqual(
       first.entries,
     );
+  }, 120_000);
+});
+
+const prLogId = `harness-pr-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+const openPrStorage = (mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId: prLogId, mode }, context);
+
+describe("the PR a session opened", () => {
+  it("commits one link, emits one prOpened, and folds the link back", async () => {
+    const opened = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() => openPrStorage("owner"));
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const before = yield* Effect.promise(() => root.viewState(context));
+        const beforeValue = before.value;
+        before.dispose();
+        // No PR until the step commits one: the document's initial URL is the empty string.
+        const unpublished = yield* readPullRequestDoc(harness, root);
+
+        const url = "https://github.com/lobiklukas/factory/pull/7";
+        yield* writePullRequestDoc(root, {
+          url,
+          number: 7,
+          base: "main",
+          head: "factory/ses_1",
+          openedAt: "2026-10-24T17:00:00.000Z",
+        });
+
+        const after = yield* Effect.promise(() => root.viewState(context));
+        const afterValue = after.value;
+        after.dispose();
+        const recorded = yield* readPullRequestDoc(harness, root);
+        yield* closeHarness(harness);
+        return {
+          unpublished,
+          recorded,
+          opened: diffView(beforeValue, afterValue),
+          // A second diff of the same revision is nobody's opening: an attached client sees the
+          // event once, not once per read.
+          again: diffView(afterValue, afterValue),
+        };
+      }),
+    );
+
+    expect(opened.unpublished).toBeUndefined();
+    expect(opened.recorded).toEqual({
+      url: "https://github.com/lobiklukas/factory/pull/7",
+      number: 7,
+      base: "main",
+      head: "factory/ses_1",
+      openedAt: "2026-10-24T17:00:00.000Z",
+    });
+    // Exactly one, by count: the emit is a single event, not one per attached reader.
+    expect(opened.opened.filter((event) => event._tag === "prOpened")).toEqual([
+      {
+        _tag: "prOpened",
+        prUrl: "https://github.com/lobiklukas/factory/pull/7",
+      },
+    ]);
+    expect(opened.again.filter((event) => event._tag === "prOpened")).toEqual(
+      [],
+    );
+
+    // The link is in the log, not only in the view: a reader folds it back.
+    const reader = await openPrStorage("reader");
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.pr?.url).toBe("https://github.com/lobiklukas/factory/pull/7");
+    expect(folded.pr?.number).toBe(7);
   }, 120_000);
 });

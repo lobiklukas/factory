@@ -67,14 +67,16 @@ import {
   Random,
   Redacted,
   Ref,
+  Schema,
   Stream,
 } from "effect";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
-import { staticTokenProvider } from "./credentials";
+import { CredentialProvider, staticTokenProvider } from "./credentials";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -811,8 +813,200 @@ describe("repo binding", () => {
   });
 });
 
+/**
+ * The GitHub PR endpoint behind an `HttpClient.make` fake: the same shape `pr.test.ts` uses, so the
+ * whole step is driven with no network and no credential, per the GitHub row in
+ * `docs/testing-third-parties.md`. Every request is recorded, which is how "exactly one POST" is
+ * asserted rather than inferred.
+ */
+const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
+  const requests: Array<{ readonly method: string; readonly url: string }> = [];
+  const Json = Schema.fromJsonString(Schema.Unknown);
+  const layer = Layer.merge(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) =>
+        Effect.gen(function* () {
+          requests.push({ method: request.method, url: url.pathname });
+          // A slow answer is how a case can hold a step inside GitHub's call, which is the window a
+          // second caller would otherwise slip through.
+          if (delayMs > 0) yield* Effect.sleep(delayMs);
+          const text = yield* Schema.encodeEffect(Json)(body).pipe(
+            Effect.orDie,
+          );
+          const response = new Response(text, {
+            status,
+            headers: { "content-type": "application/json" },
+          });
+          return HttpClientResponse.fromWeb(request, response);
+        }).pipe(Effect.orDie),
+      ),
+    ),
+    Layer.succeed(
+      CredentialProvider,
+      staticTokenProvider(Option.some(Redacted.make("tok"))),
+    ),
+  );
+  return { requests, layer };
+};
+
+describe("the PR step", () => {
+  it("opens exactly one PR, records it in the log and the index, and reports it from both reads", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/7";
+    const github = makeGithubFake(201, { number: 7, url });
+
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "open a PR",
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR",
+          head: "factory/ses_1",
+          base: "main",
+        };
+        const opened = yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+        // Reading the session back must not reach GitHub: the link is the log's and the index's.
+        const snapshot = yield* sessions.get(created.id);
+        const list = yield* sessions.list({});
+        // A step that runs twice is the same PR, and there is no second call to make it so.
+        const repeated = yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+
+        // The window a retry has to close: the document committed, the index row lost. A second
+        // call reads the log and writes the row again, without a second GitHub call.
+        const sql = yield* SqlClient;
+        yield* sql`UPDATE sessions SET pr_url = NULL WHERE id = ${created.id}`;
+        const lost = yield* sql<{ prUrl: string | null }>`
+          SELECT pr_url FROM sessions WHERE id = ${created.id}
+        `;
+        yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+        const recovered = yield* sessions.get(created.id);
+
+        return {
+          opened,
+          repeated,
+          lost: lost[0]?.prUrl,
+          recovered: recovered.session.prUrl,
+          summary: snapshot.session,
+          listed: list.sessions.find((row) => row.id === created.id),
+        };
+      }),
+    );
+
+    expect(github.requests).toEqual([
+      { method: "POST", url: "/repos/lobiklukas/factory/pulls" },
+    ]);
+    expect(result.opened).toEqual({ number: 7, url });
+    expect(result.repeated).toEqual({ number: 7, url });
+    expect(result.summary.prUrl).toBe(url);
+    expect(result.listed?.prUrl).toBe(url);
+    // The lost row is restored from the log by a retry, and there is no second PR to show for it.
+    expect(result.lost).toBeNull();
+    expect(result.recovered).toBe(url);
+    // Still one, after three step calls and four reads.
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+
+  it("opens one PR for two overlapping calls, because the step is serialized", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/9";
+    // Slow enough that the second caller is inside the first one's window: without the gate both
+    // read an empty document and both would post.
+    const github = makeGithubFake(201, { number: 9, url }, 100);
+
+    const pair = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          title: "open a PR twice at once",
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR twice at once",
+          head: "factory/ses_3",
+          base: "main",
+        };
+        const opened = yield* Effect.all(
+          [asked, asked].map((input) =>
+            sessions.openPullRequest(input).pipe(Effect.provide(github.layer)),
+          ),
+          { concurrency: "unbounded" },
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return { opened, prUrl: snapshot.session.prUrl };
+      }),
+    );
+
+    expect(github.requests).toHaveLength(1);
+    expect(pair.opened).toEqual([
+      { number: 9, url },
+      { number: 9, url },
+    ]);
+    expect(pair.prUrl).toBe(url);
+  }, 120_000);
+
+  it("restores the link from the log after the index rows are deleted", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/8";
+    const github = makeGithubFake(201, { number: 8, url });
+
+    const rebuilt = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          title: "open a PR and lose the index",
+        });
+        yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: open a PR and lose the index",
+            head: "factory/ses_2",
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+
+        // Only this session's index rows: the log is what a rebuild must answer from.
+        yield* sql`DELETE FROM sessions WHERE id = ${created.id}`;
+        yield* sql`DELETE FROM session_activity WHERE session_id = ${created.id}`;
+        const gone = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE id = ${created.id}
+        `;
+        const report = yield* rebuildIndexes;
+        // A fresh service reads the refolded index, never the owner's memory: this instance is the
+        // same process, so what is proved here is the row, not the fold.
+        const restored = yield* sessions.get(created.id);
+        const list = yield* sessions.list({});
+        return {
+          gone,
+          report,
+          prUrl: restored.session.prUrl,
+          listed: list.sessions.find((row) => row.id === created.id)?.prUrl,
+        };
+      }),
+    );
+
+    expect(rebuilt.gone).toEqual([]);
+    expect(rebuilt.report.sessions).toBeGreaterThan(0);
+    expect(rebuilt.prUrl).toBe(url);
+    expect(rebuilt.listed).toBe(url);
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+});
+
 /** The page size this loop drives the list with, and the page size the old bound assumed. */
 const PAGE_SIZE = 25;
+
 /**
  * Filler rows this test writes itself. More than the old fixed budget of ten pages (`10 × 25`),
  * so the test fails on a database of *any* size unless the loop is bounded by the data it reads
