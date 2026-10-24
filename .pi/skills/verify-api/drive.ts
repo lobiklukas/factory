@@ -12,7 +12,7 @@
 // features/session-stream.md.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SessionRpc } from "@repo/domain/Rpc";
+import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Exit, Fiber, Ref, Stream } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -636,6 +636,95 @@ const program = Effect.gen(function* () {
       ),
     `taskId=${compactAdmitted.taskId} status=${compactAdmitted.session.status} kinds=${afterCompact.entries.map((entry) => entry.kind).join(", ")}`,
   );
+
+  // Feature: approvals (LOB-50). A gated action asks a person first: the request is recorded in the
+  // session's log and listed as pending until a decision settles it. The check runs over the same RPC
+  // client, against a session of its own, and it survives the owner being released (the fold).
+  const approvals = yield* RpcClient.make(ApprovalsRpc);
+  const toApprove = yield* client.createSession({
+    requestId: `verify-api-approval-${Date.now()}`,
+  });
+  const ask = {
+    sessionId: toApprove.id,
+    requestId: `approve-${Date.now()}`,
+    action: "push refs/heads/main",
+    detail: "verify-api probe",
+  };
+  const requested = yield* approvals.requestApproval(ask);
+  const pendingBefore = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "requestApproval is listed as pending",
+    requested.requestId === ask.requestId &&
+      requested.action === ask.action &&
+      pendingBefore.approvals.length === 1 &&
+      pendingBefore.approvals[0]?.requestId === ask.requestId,
+    `pending=${pendingBefore.approvals.map((approval) => approval.requestId).join(", ")}`,
+  );
+
+  // A second identical request is the same request: one pending row, not two.
+  yield* approvals.requestApproval(ask);
+  const pendingAfterRetry = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "a second identical request leaves one pending row",
+    pendingAfterRetry.approvals.length === 1,
+    `pending rows=${pendingAfterRetry.approvals.length}`,
+  );
+
+  // The fold: wait for the owner to be released, then the pending list still answers from the log.
+  yield* Effect.sleep(6_000);
+  const foldedApproval = yield* waitUntil(
+    client
+      .getSession({ sessionId: toApprove.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.session.mode === "historical" ? snapshot : undefined,
+        ),
+      ),
+    "the approval session's owner to be released",
+  );
+  const pendingFolded = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "the pending approval survives the owner being released",
+    foldedApproval.session.mode === "historical" &&
+      pendingFolded.approvals.length === 1,
+    `mode=${foldedApproval.session.mode} pending=${pendingFolded.approvals.length}`,
+  );
+
+  // Decide it. The actor string is what the caller said it was, and it must come back in the
+  // decision and survive in the evidence file.
+  const actor = "verify-api operator";
+  const decision = yield* approvals.decideApproval({
+    sessionId: toApprove.id,
+    requestId: ask.requestId,
+    decision: "approved",
+    actor,
+  });
+  const pendingAfterDecide = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "decideApproval settles the request and the pending list empties",
+    decision.decision === "approved" &&
+      decision.actor === actor &&
+      pendingAfterDecide.approvals.length === 0,
+    `decision=${decision.decision} actor=${decision.actor} pending=${pendingAfterDecide.approvals.length}`,
+  );
+  Object.assign(observed, {
+    approvals: {
+      sessionId: toApprove.id,
+      requested,
+      pendingAfterRetry: pendingAfterRetry.approvals,
+      pendingFolded: pendingFolded.approvals,
+      decision,
+      pendingAfterDecide: pendingAfterDecide.approvals,
+    },
+  });
 
   return { id: created.id };
 }).pipe(Effect.provide(ProtocolLive), Effect.scoped);
