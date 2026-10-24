@@ -9,18 +9,22 @@
  */
 import type {
   ModelUsage,
+  SessionTask,
   SessionUsage,
   TranscriptEntry,
 } from "@repo/domain/Session";
 import { SessionId } from "@repo/domain/Session";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
-import type { CompactionWindow } from "./compaction-view";
+import type { CompactionSettle, CompactionWindow } from "./compaction-view";
 import {
   compactionDelta,
   compactionRow,
   formatSpend,
   formatSpendDelta,
+  requestedCompaction,
+  settleCompaction,
+  settleFor,
   spendDelta,
   spendHeading,
   spendOf,
@@ -325,5 +329,156 @@ describe("spendHeading", () => {
     expect(spendHeading({ tokens: 4_000, cost: undefined })).toBe(
       "4,000 tokens",
     );
+  });
+});
+
+/**
+ * What a press of Compact came to (LOB-224).
+ *
+ * The case the module exists for is the one the RPC cannot answer: a transcript with no cut settles
+ * its compaction task and writes no summary, so "nothing happened" has to be read from the task
+ * list — and a task list that has not moved yet proves nothing, because the call's answer and the
+ * stream are two paths. These cases are that distinction.
+ */
+describe("settleCompaction", () => {
+  const compactionTask = (
+    id: string,
+    over: Partial<SessionTask> = {},
+  ): SessionTask => ({
+    id,
+    kind: "compaction",
+    status: "running",
+    waitingOn: [],
+    conversations: [],
+    ...over,
+  });
+
+  /** The transcript at the press: two turns, no summary. */
+  const atPress = [entry("user"), entry("assistant")];
+  /** What the pane's task list holds before the control plane admits anything. */
+  const beforeAdmission: readonly SessionTask[] = [];
+
+  const requested = (over: Partial<{ tasks: readonly SessionTask[] }> = {}) =>
+    requestedCompaction({
+      sessionId: SESSION,
+      taskId: "7",
+      entriesBefore: atPress.length,
+      tasks: beforeAdmission,
+      ...over,
+    });
+
+  const reduce = (
+    settle: CompactionSettle,
+    tasks: readonly SessionTask[],
+    entries: readonly TranscriptEntry[],
+    sessionId = SESSION,
+  ) => settleCompaction(settle, { sessionId, tasks, entries });
+
+  it("is idle until the operator presses", () => {
+    expect(reduce({ state: "idle" }, [compactionTask("7")], atPress)).toEqual({
+      state: "idle",
+    });
+  });
+
+  it("is pending while its own task is in the live-task list", () => {
+    const live = [compactionTask("7")];
+    const pending = reduce(requested(), live, atPress);
+    expect(pending.state).toBe("requested");
+    // Another projection of the same list: still pending, and the state object is reused so the
+    // pane does not re-render for its own sake.
+    expect(reduce(pending, live, atPress)).toBe(pending);
+  });
+
+  it("does not conclude from the list it was handed at the press", () => {
+    // `compactSession` and the stream are separate paths, so the first list after the press can be
+    // the one from *before* the task was admitted. Absence there says nothing; only a list that has
+    // moved can prove the task settled.
+    const press = requested();
+    expect(reduce(press, beforeAdmission, atPress)).toBe(press);
+  });
+
+  it("settles as nothing when a new projection no longer carries the task", () => {
+    // The short-session case: the task was admitted and settled without writing a summary.
+    const settled = reduce(requested(), [], atPress);
+    expect(settled.state).toBe("settled-nothing");
+    expect(settled).toMatchObject({ entriesBefore: atPress.length });
+  });
+
+  it("settles as compacted when the summary landed", () => {
+    const settled = reduce(
+      requested(),
+      [],
+      [...atPress, entry("compaction", { text: "Summary." })],
+    );
+    expect(settled.state).toBe("settled-compacted");
+  });
+
+  it("never takes a summary that was already on screen for its own", () => {
+    // The press happened after that row, so this press has written nothing yet.
+    const earlier = [entry("user"), entry("compaction"), entry("assistant")];
+    const press = requestedCompaction({
+      sessionId: SESSION,
+      taskId: "7",
+      entriesBefore: earlier.length,
+      tasks: beforeAdmission,
+    });
+    expect(reduce(press, [], earlier).state).toBe("settled-nothing");
+  });
+
+  it("never takes a summary written after the operator's own turn for its own", () => {
+    // A turn sent after the press means the press is in the past: whatever compacts next was caused
+    // by the turn. Same rule `compactionRow` applies to the spend.
+    const settled = reduce(
+      requested(),
+      [],
+      [...atPress, entry("user", { id: "user-2" }), entry("compaction")],
+    );
+    expect(settled.state).toBe("settled-nothing");
+  });
+
+  it("lets a summary that lands after the task left settle the press", () => {
+    // A busy session's summary is placed at its next boundary, so the entry can trail the task. A
+    // verdict that said "nothing to compact" above those rows would be the lie this module exists
+    // to prevent, so the verdict follows the transcript.
+    const nothing = reduce(requested(), [], atPress);
+    const late = reduce(
+      nothing,
+      [],
+      [...atPress, entry("compaction", { text: "Summary." })],
+    );
+    expect(late.state).toBe("settled-compacted");
+  });
+
+  it("keeps a settled verdict settled", () => {
+    const compacted = reduce(
+      requested(),
+      [],
+      [...atPress, entry("compaction")],
+    );
+    const later = [...atPress, entry("compaction"), entry("assistant")];
+    expect(reduce(compacted, [compactionTask("9")], later)).toBe(compacted);
+  });
+
+  it("does not carry one session's press into another", () => {
+    // One pane component serves every session route, and a task id from session A means nothing in
+    // session B's graph.
+    const settled = reduce(requested(), [], atPress, OTHER_SESSION);
+    expect(settled).toEqual({ state: "idle" });
+  });
+});
+
+describe("settleFor", () => {
+  it("reports a press as idle in the session it was not made in", () => {
+    const press = requestedCompaction({
+      sessionId: SESSION,
+      taskId: "7",
+      entriesBefore: 0,
+      tasks: [],
+    });
+    expect(settleFor(press, SESSION)).toBe(press);
+    expect(settleFor(press, OTHER_SESSION)).toEqual({ state: "idle" });
+    expect(settleFor({ state: "idle" }, OTHER_SESSION)).toEqual({
+      state: "idle",
+    });
   });
 });

@@ -3,15 +3,24 @@ import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import { GitForkIcon, Minimize2Icon, SquareIcon, XIcon } from "lucide-react";
+import {
+  GitForkIcon,
+  Loader2Icon,
+  Minimize2Icon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
-import type { CompactionWindow } from "@/lib/compaction-view";
+import type { CompactionSettle, CompactionWindow } from "@/lib/compaction-view";
 import {
   compactionDelta,
   compactionRow,
   formatSpend,
+  requestedCompaction,
+  settleCompaction,
+  settleFor,
   spendOf,
 } from "@/lib/compaction-view";
 import {
@@ -129,6 +138,12 @@ export const SessionPane = ({
   const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  /**
+   * What the last press of Compact has come to (LOB-224): pending, settled with a summary, or
+   * settled with nothing to cut. The state machine is `settleCompaction`'s; the pane only renders
+   * what it says, so "the spinner never stops" is a case a unit test can fail.
+   */
+  const [settle, setSettle] = useState<CompactionSettle>({ state: "idle" });
 
   useEffect(() => {
     attach(sessionId);
@@ -179,6 +194,34 @@ export const SessionPane = ({
       : compactionRow(compactionWindow, sessionId, view.entries);
 
   /**
+   * The press as it applies to this route. One pane component serves every session, and a task id
+   * from another session's graph means nothing here.
+   */
+  const settleNow = settleFor(settle, sessionId);
+
+  /**
+   * Read what the press came to on every stream event and after the call answers (LOB-224).
+   *
+   * `settle` is in the dependencies, not just `view`: a compaction with no cut settles inside the
+   * few milliseconds the `compactSession` call takes, so its task-list events can all have been
+   * folded *before* the answer installs `requested`. Without re-running here, the pane would sit on
+   * the pending line forever — the spinner that never stops, one layer down.
+   *
+   * `settleCompaction` returns the state it was given when nothing changed, so the extra runs stop
+   * as soon as the state does.
+   */
+  useEffect(() => {
+    if (view === null) return;
+    setSettle((previous) =>
+      settleCompaction(previous, {
+        sessionId,
+        tasks: view.tasks,
+        entries: view.entries,
+      }),
+    );
+  }, [sessionId, settle, view]);
+
+  /**
    * Why Compact cannot be pressed right now, or `null` when it can (LOB-223).
    *
    * A disabled button that says nothing is a dead control: the same header either has a run in
@@ -194,6 +237,15 @@ export const SessionPane = ({
       : view.live.busy
         ? "Wait for this run to finish before compacting"
         : null;
+
+  /**
+   * Whether a compaction is under way: the call is in flight, or its task is still live (LOB-224).
+   *
+   * One press at a time. A second admission while the first task runs would compact against a
+   * context the first one is rewriting, and the pending line is already the answer to "is anything
+   * happening".
+   */
+  const compactRunning = compacting || settleNow.state === "requested";
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -231,25 +283,33 @@ export const SessionPane = ({
             </span>
           )}
           {/*
-           * Compact now (LOB-185's RPC, LOB-222's atom, LOB-223's action). The call admits a task
-           * and answers its id; the summary lands in the transcript over the stream, so there is
-           * nothing to await here and nothing to navigate to.
+           * Compact now (LOB-185's RPC, LOB-222's atom, LOB-223's action, LOB-224's settle). The
+           * call admits a task and answers its id; the summary lands in the transcript over the
+           * stream, or the task settles with nothing to cut — the pending line below says which is
+           * happening, so the button itself carries no spinner.
            */}
           <Button
             type="button"
             variant="ghost"
             size="sm"
             aria-label="Compact session"
+            data-compaction-state={
+              settleNow.state === "requested"
+                ? "requested"
+                : settleNow.state === "idle"
+                  ? "idle"
+                  : "settled"
+            }
             title={
-              compacting
+              compactRunning
                 ? "Compacting"
                 : (compactBlocked ?? "Compact this session now")
             }
-            aria-busy={compacting}
+            aria-busy={compactRunning}
             aria-describedby={
               compactBlocked === null ? undefined : "compact-blocked"
             }
-            disabled={compactBlocked !== null || compacting}
+            disabled={compactBlocked !== null || compactRunning}
             onClick={() => {
               if (view === null) return;
               setCompacting(true);
@@ -262,10 +322,24 @@ export const SessionPane = ({
                 after: null,
               });
               void compact({ sessionId })
+                .then(({ taskId }) => {
+                  // The task list as this press saw it, not as it is when the answer arrives: the
+                  // reducer needs the *press-time* projection to tell "the task has not appeared
+                  // yet" from "the task has already settled".
+                  setSettle(
+                    requestedCompaction({
+                      sessionId,
+                      taskId,
+                      entriesBefore: view.entries.length,
+                      tasks: view.tasks,
+                    }),
+                  );
+                })
                 .catch((cause: unknown) => {
-                  // Nothing was admitted, so there is no row to measure; drop the readings too, so
-                  // a later compaction is not charged for this attempt.
+                  // Nothing was admitted, so there is no row to measure and no task to watch; drop
+                  // the readings too, so a later compaction is not charged for this attempt.
                   setCompactionWindow(null);
+                  setSettle({ state: "idle" });
                   toast.error("No compaction was started", {
                     description:
                       cause instanceof Error ? cause.message : String(cause),
@@ -275,11 +349,15 @@ export const SessionPane = ({
             }}
           >
             {compacting ? (
-              <Spinner className="size-3.5 text-muted-foreground" />
+              <Loader2Icon
+                data-slot="spinner"
+                aria-hidden
+                className="size-4 animate-spin"
+              />
             ) : (
               <Minimize2Icon className="size-4" strokeWidth={1.75} />
             )}
-            Compact
+            {compactRunning ? "Compacting" : "Compact"}
           </Button>
           {compactBlocked === null ? null : (
             <span id="compact-blocked" className="sr-only">
@@ -408,6 +486,51 @@ export const SessionPane = ({
                     </EmptyDescription>
                   </Empty>
                 ) : null}
+
+                {/*
+                 * What the last press of Compact came to (LOB-224), in the tail because that is
+                 * where the summary will land: a pending line that is replaced by the row it was
+                 * waiting for, or by the verdict that there is nothing to cut. Both states share a
+                 * reserved height, so the verdict does not reflow the transcript when it replaces
+                 * the spinner.
+                 *
+                 * The region itself is always mounted — `sr-only` while it has nothing to say, so
+                 * it costs no layout and no gap — because a screen reader announces a change
+                 * *inside* the region it already knows, not a region inserted together with its
+                 * text. `data-compaction-status` carries the state, so a drive never has to match
+                 * on copy.
+                 */}
+                <div
+                  role="status"
+                  data-slot="compaction-status"
+                  data-compaction-status={settleNow.state}
+                  className={
+                    settleNow.state === "requested" ||
+                    settleNow.state === "settled-nothing"
+                      ? undefined
+                      : "sr-only"
+                  }
+                >
+                  {settleNow.state === "requested" ? (
+                    <div className="flex min-h-11 items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2Icon
+                        data-slot="spinner"
+                        aria-hidden
+                        className="size-3 animate-spin"
+                      />
+                      Compacting this session…
+                    </div>
+                  ) : null}
+                  {settleNow.state === "settled-nothing" ? (
+                    <div className="flex min-h-11 flex-col justify-center gap-1">
+                      <p className="text-sm">Nothing to compact</p>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        This session is too short to cut. Its recent turns stay
+                        verbatim.
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
               </MessageScrollerContent>
             </MessageScrollerViewport>
             <MessageScrollerButton />
@@ -453,6 +576,14 @@ export const SessionPane = ({
             if (draft.trim().length === 0) return;
             send({ sessionId, content: draft });
             setDraft("");
+            // A verdict describes the transcript at the press. The operator's next turn moves the
+            // transcript on, and a line saying the session is too short to cut would then be a
+            // claim about a log that no longer exists (LOB-224).
+            setSettle((previous) =>
+              previous.state === "settled-nothing"
+                ? { state: "idle" }
+                : previous,
+            );
           }}
         >
           <div className="flex items-end gap-2">
