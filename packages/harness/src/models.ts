@@ -123,11 +123,50 @@ export type ModelAccessOptions = {
    * how a test drives a session past a compaction threshold without a 100k-token transcript.
    */
   readonly contextWindow?: number | undefined;
+  /**
+   * Extra model ids the faux provider publishes, beyond its own default. The first is the one a
+   * session opens on, so passing any changes which model the process serves by default.
+   *
+   * Only the faux backend needs this, and it needs it because one id cannot show a replay onto a
+   * *different* model (LOB-198): the real backends register a whole catalog, so `modelAccessFor`
+   * finds a second model there without an option.
+   */
+  readonly fauxModels?: readonly string[] | undefined;
 };
 
 /** What the provider's catalog says this model's window is, or `0` when it says nothing. */
 const windowOf = (models: Models, provider: string, modelId: string): number =>
   models.getModel(provider, modelId)?.contextWindow ?? 0;
+
+/** How a model is named wherever one names another one: `provider/modelId`. */
+export const modelKey = (access: ModelAccess): string =>
+  `${access.provider}/${access.modelId}`;
+
+/**
+ * The same access, resolved onto another model of the registry it already holds.
+ *
+ * A session is given one `ModelAccess` when it opens, which is what pins it to a model; a replay
+ * (LOB-198) is the one caller that needs a *different* one for a single session. The registry is the
+ * catalog the access was built with, so resolving `provider/modelId` against it is the same lookup
+ * the access itself did at boot — and `undefined`, not a substitute, when the catalog has no such
+ * model: a replay onto a model the process cannot serve is a refusal, not a silent downgrade.
+ */
+export const modelAccessFor = (
+  access: ModelAccess,
+  key: string,
+): ModelAccess | undefined => {
+  const slash = key.indexOf("/");
+  if (slash <= 0 || slash === key.length - 1) return undefined;
+  const provider = key.slice(0, slash);
+  const modelId = key.slice(slash + 1);
+  if (access.models.getModel(provider, modelId) === undefined) return undefined;
+  return {
+    ...access,
+    provider,
+    modelId,
+    contextWindow: windowOf(access.models, provider, modelId),
+  };
+};
 
 export const createModelAccess = (
   backend: ModelBackend,
@@ -137,15 +176,16 @@ export const createModelAccess = (
   const fauxCommand = options.fauxCommand ?? FAUX_COMMAND;
 
   if (backend === "faux") {
-    const faux = fauxProvider(
+    const window =
       options.contextWindow === undefined
         ? {}
-        : {
-            models: [
-              { id: FAUX_MODEL_ID, contextWindow: options.contextWindow },
-            ],
-          },
-    );
+        : { contextWindow: options.contextWindow };
+    const faux = fauxProvider({
+      models: (options.fauxModels?.length
+        ? options.fauxModels
+        : [FAUX_MODEL_ID]
+      ).map((id) => ({ id, ...window })),
+    });
     models.setProvider(faux.provider);
     // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
     const repeat: FauxResponseFactory = (context) => {

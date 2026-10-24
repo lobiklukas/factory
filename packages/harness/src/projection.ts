@@ -45,6 +45,33 @@ export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
 /** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
 export const FORK_DOC_KIND = "factory.fork";
+/**
+ * The link a replay's log records (LOB-198): the session it replays, itself, and both models.
+ *
+ * It lives in the *replay's* log, never the source's: replaying must not change the recorded run it
+ * replays, so the source stays byte-identical and this document is the only place the pair is named.
+ */
+export const REPLAY_DOC_KIND = "factory.replay";
+
+/**
+ * `factory.replay` → the pair of sessions a replay names, and the model it ran on with the one its
+ * source recorded. An empty field is a document that does not say, which every reader copes with:
+ * `model` empty means the log never saw a turn.
+ */
+export const projectReplayDoc = (
+  value: JsonValue | undefined,
+): {
+  readonly source: string;
+  readonly replay: string;
+  readonly model: string;
+  readonly from: string;
+} => ({
+  source: stringAt(value, "source") ?? "",
+  replay: stringAt(value, "replay") ?? "",
+  model: stringAt(value, "model") ?? "",
+  from: stringAt(value, "from") ?? "",
+});
+
 export const TITLE_ENTRY_KIND = "factory.title";
 /**
  * The entry a session's PR is announced with (LOB-177). It carries the link, and it exists because
