@@ -24,7 +24,8 @@ export type PullRequest = typeof PullRequest.Type;
 export type PrBodyInput = {
   readonly sessionId: SessionId;
   readonly prompt: string;
-  readonly model: string;
+  /** The model that did the work. Absent when the session spent nothing on a model. */
+  readonly model?: string;
   readonly spend?: string;
 };
 
@@ -34,7 +35,7 @@ export const buildPrBody = (input: PrBodyInput): string => {
     "## Factory session",
     "",
     `- Session: ${input.sessionId}`,
-    `- Model: ${input.model}`,
+    ...(input.model === undefined ? [] : [`- Model: ${input.model}`]),
     ...(input.spend ? [`- Spend: ${input.spend}`] : []),
     "",
     "## Prompt",
