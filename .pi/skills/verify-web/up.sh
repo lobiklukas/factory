@@ -27,10 +27,16 @@ ensure_postgres || exit 1
 # by CORS. MODEL_BACKEND=faux keeps the dashboard drive offline, deterministic, and
 # free: the session card still runs a real bash tool call, but the model is scripted.
 # The idle timeout is long so the card stays on the live read path for the whole drive.
+#
+# FAUX_COMMAND sleeps on purpose: the live-tasks panel (LOB-184) can only be driven
+# while a task is on screen, and the bash tool's own task lasts exactly as long as the
+# command it runs. `echo faux-ok` still ends the run, so the transcript checks are
+# unaffected.
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
+    FAUX_COMMAND="${FAUX_COMMAND:-sleep 12; echo faux-ok}" \
     SESSION_ROOT="$RUN_DIR/sessions" \
     SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-600000}" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
