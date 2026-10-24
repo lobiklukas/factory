@@ -5,9 +5,10 @@
  * The log is truth; everything here is a write to it or a read of it. Three things sit outside it,
  * all deliberately droppable and all rebuildable from it by `rebuildIndexes` (`./rebuild.ts`):
  *
- * - The `sessions` row: an index of what exists, what it is called, which repo it works on, and
- *   when it was created. The title is also committed into the log (`factory.title`) and the repo
- *   binding as a document (`factory.session`), so the index can be rebuilt.
+ * - The `sessions` row: an index of what exists, what it is called, which repo it works on, when
+ *   it was created, and the PR it opened. The title is also committed into the log
+ *   (`factory.title`), the repo binding as a document (`factory.session`), and the PR as
+ *   `factory.pr`, so the index can be rebuilt.
  * - The `session_activity` row: status, spend, and last activity, written as this process observes
  *   the session's committed changes, so `listSessions` never folds a log (R6).
  * - The `repos` row: where a repo is cloned from and which ref sessions start at.
@@ -35,6 +36,7 @@ import {
   Stream,
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+import type { HttpClient } from "effect/http";
 // oxlint-disable-next-line node-builtin-import
 import { execSync, execFileSync } from "node:child_process"; // eslint-disable-line
 import type {
@@ -109,8 +111,11 @@ import {
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
+import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
 import { mintSessionId } from "./ids";
+import type { PrError, PullRequest } from "./pr";
+import { openPullRequest } from "./prStep";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
 
@@ -191,8 +196,30 @@ export type SessionServiceShape = {
   readonly listApprovals: (
     sessionId: SessionId,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
+  /**
+   * Open the session's PR, or return the one its log already records (LOB-177).
+   *
+   * The forge client and the credential are the *caller's* to provide rather than this layer's:
+   * the control plane's own HTTP layer is not a dependency of every session operation, and a
+   * deployment that never opens a PR should not have to wire one. So the requirements appear on
+   * this method rather than on the service.
+   */
+  readonly openPullRequest: (
+    input: OpenPullRequestArgs,
+  ) => Effect.Effect<
+    PullRequest,
+    SessionError | PrError | CredentialError,
+    CredentialProvider | HttpClient.HttpClient
+  >;
   /** Close every harness this process owns. */
   readonly close: Effect.Effect<void>;
+};
+
+export type OpenPullRequestArgs = {
+  readonly sessionId: SessionId;
+  readonly title: string;
+  readonly head: string;
+  readonly base: string;
 };
 
 export class SessionService extends Context.Service<
@@ -222,6 +249,8 @@ type SessionRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The PR the session opened, whose log is the truth and this row the list's answer (LOB-177). */
+  readonly prUrl: string | null;
   /** The session this one was forked from, from the index row (LOB-180). */
   readonly forkedFrom: string | null;
   readonly createdAt: string;
@@ -239,6 +268,7 @@ type ListRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  readonly prUrl: string | null;
   readonly status: string;
   readonly createdAt: string;
   readonly lastActivityAt: string;
@@ -313,6 +343,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
+      /**
+       * Serializes PR opens. Two overlapping calls for one session would each read an empty
+       * `factory.pr` and each open a PR, so the read-then-create-then-commit sequence has to be
+       * exclusive. One permit for every session rather than one per session: opening a PR is a
+       * rare control-plane step, and a keyed semaphore buys nothing at that rate. Across processes
+       * the log's single owner is what excludes, which is why no lock is stored anywhere.
+       */
+      const prGate = yield* Semaphore.make(1);
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
 
@@ -361,6 +399,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(repo === undefined || row.baseRef === null
               ? {}
               : { baseRef: row.baseRef }),
+            ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             ...(forkedFrom === undefined ? {} : { forkedFrom }),
           };
         });
@@ -378,6 +417,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           title: row.title,
           createdAt: row.createdAt,
           workspace,
+          ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
           ...(forkedFrom !== null && Schema.is(SessionIdSchema)(forkedFrom)
             ? { forkedFrom }
             : {}),
@@ -767,6 +807,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo: binding.repo ?? null,
             baseRef: binding.baseRef ?? null,
+            prUrl: null,
             forkedFrom: null,
             createdAt: "",
           };
@@ -891,6 +932,70 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Open the session's PR, or hand back the one its log already records.
+       *
+       * The owner is what makes the step able to commit the document at all (Pi Durable allows one
+       * owner per log), and the body's session block is filled from what the log says the session
+       * did rather than from the caller: the model that spent the most, and the total.
+       */
+      const openPr = (
+        input: OpenPullRequestArgs,
+      ): Effect.Effect<
+        PullRequest,
+        SessionError | PrError | CredentialError,
+        CredentialProvider | HttpClient.HttpClient
+      > =>
+        prGate.withPermits(1)(
+          Effect.gen(function* () {
+            const row = yield* requireSession(input.sessionId);
+            const repo =
+              row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+            if (repo === undefined) {
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `session ${input.sessionId} is bound to no repo, so it has no PR to open`,
+              });
+            }
+            const owner = yield* acquireOwner(input.sessionId, row);
+            yield* touch(input.sessionId);
+            const snapshot = yield* readLiveSnapshot(
+              owner,
+              refOf(input.sessionId, row, owner.workspace),
+            );
+            const model = snapshot.usage.models.reduce<
+              (typeof snapshot.usage.models)[number] | undefined
+            >(
+              (costliest, candidate) =>
+                costliest === undefined ||
+                candidate.usage.costTotal > costliest.usage.costTotal
+                  ? candidate
+                  : costliest,
+              undefined,
+            );
+            const opened = yield* openPullRequest({
+              harness: owner.harness,
+              conversation: owner.root,
+              sessionId: input.sessionId,
+              repo,
+              title: input.title,
+              head: input.head,
+              base: input.base,
+              // The title is the session's own first line, which is the prompt a PR body carries.
+              prompt: row.title,
+              ...(model === undefined ? {} : { model: model.key }),
+              spend: `$${costOf(snapshot.usage).toFixed(2)}`,
+            }).pipe(
+              // The step writes the index row through `SqlClient`, which this layer already holds:
+              // it is not a requirement of the session service, so it does not leave through this
+              // method's type.
+              Effect.provideService(SqlClient, sql),
+            );
+            yield* touchActivity(input.sessionId);
+            return opened;
+          }),
+        );
+
+      /**
        * Fork a session at one of its entries (LOB-180, D7).
        *
        * A session *is* a log, so the fork is a second log with the parent's entries copied into it
@@ -934,6 +1039,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title: parent.title,
             repo: parent.repo,
             baseRef: parent.baseRef,
+            prUrl: null,
             forkedFrom: input.sessionId,
             createdAt: "",
           };
@@ -1309,6 +1415,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 s.title,
                 s.repo,
                 s.base_ref,
+                s.pr_url,
                 a.status,
                 a.cost_total,
                 to_char(a.last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_activity_at,
@@ -1349,6 +1456,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(repo === undefined || row.baseRef === null
                 ? {}
                 : { baseRef: row.baseRef }),
+              ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             });
           }
           return {
@@ -1383,6 +1491,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
@@ -1396,6 +1505,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
@@ -1424,6 +1534,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
         `;
@@ -1599,6 +1710,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestApproval,
         decideApproval,
         listApprovals,
+        openPullRequest: openPr,
         close: closeAll,
       });
     }),

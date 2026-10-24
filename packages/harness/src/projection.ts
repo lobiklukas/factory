@@ -46,6 +46,12 @@ export const RETRY_DOC_KIND = "factory.retry";
 /** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
 export const FORK_DOC_KIND = "factory.fork";
 export const TITLE_ENTRY_KIND = "factory.title";
+/**
+ * The entry a session's PR is announced with (LOB-177). It carries the link, and it exists because
+ * Pi Durable's conversation view mounts only its own built-in documents: a `PrDoc` commit is not
+ * visible to an attached client, so the record and the announcement are two writes in one commit.
+ */
+export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 
@@ -195,6 +201,27 @@ export const projectLive = (
     }),
   };
 };
+
+/**
+ * The PR `factory.pr` records: the link, its number, and where it came from. An unwritten document
+ * and a document with no URL project the same way, because `initial()` is a document with no URL —
+ * there is no PR until the URL is there, so "is there one" is `url !== ""` rather than a flag.
+ */
+export type PrDocView = {
+  readonly url: string;
+  readonly number: number;
+  readonly base: string;
+  readonly head: string;
+  readonly openedAt: string;
+};
+
+export const projectPrDoc = (value: JsonValue | undefined): PrDocView => ({
+  url: stringAt(value, "url") ?? "",
+  number: numberAt(value, "number"),
+  base: stringAt(value, "base") ?? "",
+  head: stringAt(value, "head") ?? "",
+  openedAt: stringAt(value, "openedAt") ?? "",
+});
 
 const ZERO_USAGE: ModelUsage = {
   input: 0,
@@ -346,6 +373,13 @@ export const diffView = (
     if (sent.has(id)) continue;
     sent.add(id);
     events.push({ _tag: "entry", entry: projectEntry(entry) });
+    // The PR link is announced by the entry committed beside its document, so a client attached
+    // across that commit sees exactly one `prOpened` — a new entry is never re-sent — and one
+    // that attaches afterwards reads the link from the session's summary instead.
+    if (entry.kind === PR_OPENED_ENTRY_KIND) {
+      const prUrl = stringAt(entry.data, "url");
+      if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
+    }
   }
 
   if (previous.docs[LIVE_DOC] !== next.docs[LIVE_DOC]) {

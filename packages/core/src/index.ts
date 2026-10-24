@@ -5,5 +5,6 @@ export * from "./workspace";
 export * from "./credentials";
 export * from "./TaskService";
 export * from "./pr";
+export * from "./prStep";
 
 export * from "./SkillService";
