@@ -65,6 +65,7 @@ import {
   projectEntry,
   projectPrDoc,
   projectPages,
+  projectReplayDoc,
   projectTasks,
   projectUsageDoc,
   projectView,
@@ -81,6 +82,7 @@ import {
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
   FORK_DOC_KIND,
+  REPLAY_DOC_KIND,
   USAGE_DOC,
   type JsonRecord,
 } from "./projection";
@@ -988,6 +990,16 @@ export type SessionLog = {
    * is not a transcript entry a client renders.
    */
   readonly pages: readonly PageLogRecord[];
+  /**
+   * The replay this log is, when it is one (LOB-198): the session it replays and the model it ran on,
+   * with the model its source recorded. It is committed to this log alone, which is why replaying a
+   * session leaves the source's log untouched.
+   */
+  readonly replay?: {
+    readonly source: string;
+    readonly model: string;
+    readonly from: string;
+  };
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -1017,6 +1029,9 @@ export const readSessionLog = (
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
+    const replayDoc = projectReplayDoc(
+      yield* readDocument(storage, REPLAY_DOC_KIND),
+    );
     const taskId = bindingString(taskDoc, "taskId");
     const spec = bindingString(specDoc, "spec");
     const criteria = bindingString(criteriaDoc, "criteria");
@@ -1043,6 +1058,15 @@ export const readSessionLog = (
       ...(spec === "" ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
+      ...(replayDoc.source === ""
+        ? {}
+        : {
+            replay: {
+              source: replayDoc.source,
+              model: replayDoc.model,
+              from: replayDoc.from,
+            },
+          }),
       ...(taskId === ""
         ? {}
         : {

@@ -33,6 +33,7 @@ import {
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReplaySessionInput,
   RepoSummary,
   ResetSessionInput,
   SendMessageInput,
@@ -79,6 +80,13 @@ export class SessionRpc extends RpcGroup.make(
   }),
   Rpc.make("forkSession", {
     payload: ForkSessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  // A replay runs the same task again in a new session, on another model (LOB-198). The source's
+  // log is only read, so the answer is the new session, not a copy of the old one's transcript.
+  Rpc.make("replaySession", {
+    payload: ReplaySessionInput,
     success: SessionSummary,
     error: SessionError,
   }),

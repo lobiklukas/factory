@@ -54,6 +54,7 @@ import type {
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReplaySessionInput,
   RepoSummary,
   ResetSessionInput,
   SendMessageInput,
@@ -95,12 +96,15 @@ import {
   closeHarness,
   compactSession,
   forkSession,
+  modelAccessFor,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readReplaySource,
+  replaySession,
   resetSession,
   snapshotEvent,
   submitMessage,
@@ -162,6 +166,13 @@ export type SessionServiceShape = {
    */
   readonly fork: (
     input: ForkSessionInput,
+  ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Replay a session against another model (LOB-198): the same task in a new session, on the model
+   * the caller names, at the source's repo and base ref. The source log is only ever read.
+   */
+  readonly replay: (
+    input: ReplaySessionInput,
   ) => Effect.Effect<SessionSummary, SessionError>;
   /**
    * Start a new model context, opened with the handoff note (LOB-181). The transcript keeps the
@@ -1125,6 +1136,87 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Replay a session against another model (LOB-198).
+       *
+       * The one thing a replay changes is the model, so that is the one thing this method resolves
+       * beyond the source: `model` names a `provider/modelId` in the catalog this process was built
+       * with, and a name it does not hold is refused rather than quietly served by the default.
+       *
+       * The source is read through a reader and only read, and it is read *first*, so the two
+       * refusals a replay can earn (no prompt to replay, no repo to replay into) leave nothing
+       * behind: no index row, no log. That is why the row is not written before the source is read
+       * as the fork's is — a fork cannot refuse, because any entry id it is given either names a
+       * parent entry or is a mistake, both of which are decided by the copy.
+       */
+      const replay = (
+        input: ReplaySessionInput,
+      ): Effect.Effect<SessionSummary, SessionError> =>
+        Effect.gen(function* () {
+          const source = yield* requireSession(input.sessionId);
+          const target =
+            input.model === undefined
+              ? options.model
+              : modelAccessFor(options.model, input.model);
+          if (target === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `model ${input.model ?? ""} is not one this process serves`,
+            });
+          }
+          const origin = yield* withReader(input.sessionId, readReplaySource);
+          const binding: Binding = {
+            repo: yield* toRepoSlug(origin.binding.repo),
+            ...(origin.binding.baseRef === ""
+              ? {}
+              : { baseRef: origin.binding.baseRef }),
+          };
+          const id = yield* mintSessionId;
+          const inserted = yield* paper(
+            "create session",
+            insertSession(id, source.title, undefined, binding, null),
+          );
+          const row = inserted[0] ?? {
+            id,
+            title: source.title,
+            repo: binding.repo ?? null,
+            baseRef: binding.baseRef ?? null,
+            prUrl: null,
+            forkedFrom: null,
+            createdAt: "",
+          };
+          // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
+          // the title and the binding are written with the lineage, and the source's prompt is what
+          // starts it. A failure after the row is written removes the row again — an index row with
+          // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
+          // fork's does).
+          yield* acquireOwnerWith(
+            id,
+            row,
+            ({ storage, cwd, policy: sessionPolicy, run }) =>
+              replaySession({
+                source: origin,
+                sourceId: input.sessionId,
+                replayId: id,
+                target: storage,
+                model: target,
+                title: source.title,
+                cwd,
+                policy: sessionPolicy,
+                run,
+              }),
+          ).pipe(
+            Effect.tapError(() =>
+              paper(
+                "remove the refused replay's index row",
+                sql`DELETE FROM sessions WHERE id = ${id}`,
+              ).pipe(Effect.ignore),
+            ),
+          );
+          yield* touchActivity(id);
+          return yield* describe(id, row);
+        });
+
+      /**
        * A reset starts a new model context (LOB-181). It is committed to the log, not held in this
        * process, so a released session resets the same way a owned one does — and the entry it
        * appends is what the transcript shows as the boundary. An empty handoff is no handoff: a
@@ -1862,6 +1954,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         interrupt,
         fork,
+        replay,
         reset,
         compact,
         list,
