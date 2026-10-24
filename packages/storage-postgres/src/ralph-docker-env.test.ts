@@ -50,6 +50,10 @@ import { afterAll, describe, expect, it } from "vitest";
  * this argv and this `DOCKER_HOST`, or that it did not run at all. Second, the fake is only
  * authoritative while `docker` resolves to it: the last case holds the file to that, statically and
  * at run time.
+ *
+ * This file is exempt from `postgres-up.test.ts`'s mechanical `Mutation checked:` scan: the notes here
+ * carry the `Mutation:` marker and are read by people, not scanned. Porting the accounting case is
+ * tracked separately (LOB-125); the scan is not widened here.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
