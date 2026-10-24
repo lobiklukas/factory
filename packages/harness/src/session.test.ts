@@ -22,6 +22,7 @@ import {
   forkSession,
   isBusy,
   openSession,
+  readHistoricalSnapshot,
   readLiveSnapshot,
   readPromptSections,
   readPage,
@@ -29,6 +30,8 @@ import {
   readSessionLog,
   resetSession,
   submitMessage,
+  writeApprovalDecided,
+  writeApprovalRequested,
   writePage,
   writePullRequestDoc,
   type SessionRef,
@@ -629,6 +632,110 @@ describe("the PR a session opened", () => {
     await reader.dispose();
     expect(folded.pr?.url).toBe("https://github.com/lobiklukas/factory/pull/7");
     expect(folded.pr?.number).toBe(7);
+  }, 120_000);
+});
+
+const approvalLogId = `harness-approvals-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+const openApprovalStorage = (mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId: approvalLogId, mode }, context);
+
+describe("the approval fold", () => {
+  /**
+   * LOB-147. The service writes one request and one decision per approval; a log can still hold
+   * two requests for one id (a writer killed between its commit and its index write, a retried
+   * session), so the fold — not the writer — is what makes the id the identity. Both the pending
+   * list a snapshot reports and the `session_approvals` rows a rebuild derives come from here.
+   */
+  it("folds one record per request id, and reports only the pending ones", async () => {
+    const folded = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openApprovalStorage("owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        // The same id twice: the first request is the record, the second changes nothing.
+        yield* writeApprovalRequested(root, {
+          requestId: "apr-1",
+          action: "push refs/heads/main",
+          detail: "the first ask",
+          requestedAt: "2026-01-01T00:00:01.000Z",
+        });
+        yield* writeApprovalRequested(root, {
+          requestId: "apr-1",
+          action: "push refs/heads/main",
+          detail: "a retry of the same ask",
+          requestedAt: "2026-01-01T00:00:09.000Z",
+        });
+        // A second request, settled: it is in the log and not in the pending list.
+        yield* writeApprovalRequested(root, {
+          requestId: "apr-2",
+          action: "watch",
+          detail: "",
+          requestedAt: "2026-01-01T00:00:02.000Z",
+        });
+        yield* writeApprovalDecided(root, {
+          requestId: "apr-2",
+          decision: "denied",
+          actor: "lukas@laptop",
+          decidedAt: "2026-01-01T00:00:03.000Z",
+        });
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return approvalLogId;
+      }),
+    );
+
+    const reader = await openApprovalStorage("reader");
+    const log = await runtime.runPromise(readSessionLog(reader));
+    const refForApprovals: SessionRef = {
+      ...ref,
+      id: SessionIdSchema.make(`ses_${"1".repeat(26)}`),
+    };
+    const snapshot = await runtime.runPromise(
+      readHistoricalSnapshot(reader, refForApprovals),
+    );
+    // Folded twice: the same log yields the same records, so the fold is a function, not an
+    // accumulator.
+    const again = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+
+    expect(log.approvals).toEqual([
+      {
+        requestId: "apr-1",
+        action: "push refs/heads/main",
+        detail: "the first ask",
+        requestedAt: "2026-01-01T00:00:01.000Z",
+      },
+      {
+        requestId: "apr-2",
+        action: "watch",
+        detail: "",
+        requestedAt: "2026-01-01T00:00:02.000Z",
+        decision: {
+          decision: "denied",
+          actor: "lukas@laptop",
+          decidedAt: "2026-01-01T00:00:03.000Z",
+        },
+      },
+    ]);
+    expect(again.approvals).toEqual(log.approvals);
+    expect(folded).toBe(approvalLogId);
+    // The snapshot carries the pending one, stamped with the session it belongs to.
+    expect(snapshot.approvals).toEqual([
+      {
+        sessionId: refForApprovals.id,
+        requestId: "apr-1",
+        action: "push refs/heads/main",
+        detail: "the first ask",
+        requestedAt: "2026-01-01T00:00:01.000Z",
+      },
+    ]);
+    expect(snapshot.session.mode).toBe("historical");
   }, 120_000);
 });
 

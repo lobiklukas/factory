@@ -3394,6 +3394,99 @@ describe("approvals", () => {
 });
 
 /**
+ * An approval is durable across release (LOB-147): the request is committed into the log, and both
+ * answers to "what is waiting" are folds of it — the snapshot folds the entries, the list reads the
+ * `session_approvals` row that indexes them, and `rebuildIndexes` re-derives the row from the log.
+ */
+describe("approvals after the owner is released", () => {
+  it("reports the pending approval from the fold, twice, and re-asks for nothing", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "durable approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+          detail: "a person has to answer this",
+        });
+        // The row is written with the request, so the pending list answers before anything folds.
+        const indexed = yield* sessions.listApprovals(created.id);
+
+        // Release the owner: from here the session is read by folding its log (D8).
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        const refolded = yield* sessions.get(created.id);
+        const listed = yield* sessions.listApprovals(created.id);
+        // A repeat after the release reads what the first request left behind — the row and the
+        // entry — rather than asking again.
+        const repeated = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+        });
+        const entries = (yield* sessions.get(created.id)).entries.filter(
+          (entry) => entry.kind === "other",
+        ).length;
+        // Leave no owner running: an owned session rewrites its own activity row on every event.
+        yield* sessions.close;
+        return {
+          request,
+          indexed,
+          folded,
+          refolded,
+          listed,
+          repeated,
+          entries,
+        };
+      }),
+    );
+
+    expect(outcome.indexed.approvals).toEqual([outcome.request]);
+    // The fold, not a remembered set: this snapshot comes from the log alone.
+    expect(outcome.folded.session.mode).toBe("historical");
+    expect(outcome.folded.approvals).toEqual([outcome.request]);
+    // Folding the same log again yields the same list, id by id.
+    expect(outcome.refolded.approvals).toEqual(outcome.folded.approvals);
+    expect(outcome.listed.approvals).toEqual([outcome.request]);
+    expect(outcome.repeated).toEqual(outcome.request);
+    // One request, one entry: the retry was answered by the record, not appended beside it.
+    expect(outcome.entries).toBe(1);
+  }, 120_000);
+
+  it("rebuilds the pending row from the log when the row is lost", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "rebuilt approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-rebuilt",
+          action: "tag v1",
+        });
+        yield* sessions.close;
+        // Lose the derived row, the way a dropped table or a write killed before it committed
+        // loses it. The log still holds the request.
+        yield* sql`DELETE FROM session_approvals WHERE session_id = ${created.id}`;
+        const withoutRow = yield* sessions.listApprovals(created.id);
+        const stillFolded = yield* sessions.get(created.id);
+        const report = yield* rebuildIndexes;
+        const rebuilt = yield* sessions.listApprovals(created.id);
+        return { request, withoutRow, stillFolded, report, rebuilt };
+      }),
+    );
+
+    // The list is an index: with the row gone it answers nothing until a rebuild refolds.
+    expect(outcome.withoutRow.approvals).toEqual([]);
+    // The snapshot never depended on the row — it folds the log.
+    expect(outcome.stillFolded.approvals).toEqual([outcome.request]);
+    expect(outcome.report.sessions).toBeGreaterThan(0);
+    expect(outcome.rebuilt.approvals).toEqual([outcome.request]);
+  }, 120_000);
+});
+
+/**
  * The run's prompt is resolved from its column (docs/board.md B6, LOB-174).
  *
  * The claim is about what the model was *told*, so it is read from the log rather than from the
