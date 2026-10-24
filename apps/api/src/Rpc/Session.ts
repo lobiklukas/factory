@@ -26,6 +26,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       compactSession: (input) => sessions.compact(input),
       listSessions: (input) => sessions.list(input),
       listPages: (input) => sessions.listPages(input),
+      curateSession: (input) => sessions.curate(input),
       registerRepo: (input) => sessions.registerRepo(input),
       watchSession: (input) => sessions.events(input.sessionId),
     });

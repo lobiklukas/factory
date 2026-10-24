@@ -44,3 +44,36 @@ export type ListPagesInput = typeof ListPagesInput.Type;
 
 export const ListPagesOutput = Schema.Struct({ pages: Schema.Array(Page) });
 export type ListPagesOutput = typeof ListPagesOutput.Type;
+
+/**
+ * Curate a completed session's pages (LOB-206, part 3 of LOB-47).
+ *
+ * One bounded model call over the session's transcript and the pages it already holds proposes page
+ * writes; the server commits at most `maxPages` of them, and none of them when the session taught
+ * nothing new. `maxPages` is clamped by the server rather than refused, as a list's page size is.
+ */
+export const CurateSessionInput = Schema.Struct({
+  sessionId: SessionId,
+  /** The most pages one curation writes. The server clamps it. */
+  maxPages: Schema.optional(Schema.Int),
+});
+export type CurateSessionInput = typeof CurateSessionInput.Type;
+
+/**
+ * What one curation did: the pages it wrote, and how many the model proposed before the cap.
+ *
+ * `pages` empty with `proposed` zero is the honest "taught nothing new" answer, and it costs the
+ * same one call as a curation that wrote: the pass is bounded by its call, not by its findings.
+ */
+export const CurateSessionResult = Schema.Struct({
+  /** The pages this pass committed, in the order it committed them (by name when read back). */
+  pages: Schema.Array(Page),
+  /**
+   * What the model proposed: the cap's dropped proposals, the ones the session already held, a
+   * repeat inside the answer itself, and any entry the parse kept but the blank-name filter refused.
+   * It is the model's count, not the server's, so it can exceed `pages.length` and never undercounts
+   * a call.
+   */
+  proposed: Schema.Int,
+});
+export type CurateSessionResult = typeof CurateSessionResult.Type;

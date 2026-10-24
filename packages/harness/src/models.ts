@@ -9,6 +9,7 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
+  type FauxProviderHandle,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -84,6 +85,41 @@ const lastUserText = (messages: readonly Message[]): string => {
 const SUMMARY_PROMPT_PREFIX = "<conversation>";
 
 /**
+ * How a curator prompt opens (LOB-206, `curate.ts`), so the scripted model can tell a curation from
+ * a turn. It lives here, beside the other marker a scripted answer reads, because the faux script is
+ * what has to recognize it: the module that writes the prompt imports this one, never the reverse.
+ */
+export const CURATION_PROMPT_PREFIX = "<curate>";
+
+/**
+ * What the scripted model answers to a curation prompt: one page per tool the rendered transcript
+ * shows a result from, named after it, and an empty array when the session ran no tool at all.
+ *
+ * Derived from the prompt rather than queued, for the reason `fauxAnswer` is: a session that taught
+ * nothing (no tool ran) has to be able to answer "nothing" without a second script, and a curation
+ * that proposes is what the transcript says it learned. `fauxCuration` scripts the answer when a
+ * suite has to make a different one happen — three proposals, or an unreadable body.
+ */
+const derivedCurationAnswer = (prompt: string): AssistantMessage => {
+  const tools = new Set<string>();
+  for (const line of prompt.split("\n")) {
+    const match = /^toolResult (\S+):/.exec(line);
+    if (match?.[1] !== undefined) tools.add(match[1]);
+  }
+  return fauxAssistantMessage(
+    JSON.stringify(
+      [...tools].map((tool) => ({
+        name: `${tool}-ran`,
+        kind: "trap",
+        content: `the session ran ${tool}`,
+        links: [],
+        sources: [],
+      })),
+    ),
+  );
+};
+
+/**
  * The answer a faux session gives, derived from its own transcript rather than from a queue: the
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
  * steps, repeatable for the life of a session, and it exercises the tool path a real turn uses.
@@ -94,6 +130,7 @@ const SUMMARY_PROMPT_PREFIX = "<conversation>";
 export const fauxAnswer = (
   messages: readonly Message[],
   command: string = FAUX_COMMAND,
+  curation?: string,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -101,6 +138,13 @@ export const fauxAnswer = (
     return fauxAssistantMessage(
       "Summary: the session ran its tools and kept working.",
     );
+  }
+  if (lastUserText(messages).trimStart().startsWith(CURATION_PROMPT_PREFIX)) {
+    // A scripted answer is what the model "proposes", verbatim — a suite that has to make the cap
+    // or an unreadable answer happen says so here rather than by editing the prompt.
+    return curation === undefined
+      ? derivedCurationAnswer(lastUserText(messages))
+      : fauxAssistantMessage(curation);
   }
   const output = toolResultText(messages, "bash");
   if (output === undefined) {
@@ -118,6 +162,11 @@ export const fauxAnswer = (
 export type ModelAccessOptions = {
   /** The command the faux script runs, for a run that needs a turn to take a known time. */
   readonly fauxCommand?: string | undefined;
+  /**
+   * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
+   * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
+   */
+  readonly fauxCuration?: string | undefined;
   /**
    * The context window the faux model is published with (pi-ai's default is 128k). Lowering it is
    * how a test drives a session past a compaction threshold without a 100k-token transcript.
@@ -168,40 +217,64 @@ export const modelAccessFor = (
   };
 };
 
-export const createModelAccess = (
-  backend: ModelBackend,
+/** A faux access and the provider that served it, so a caller can ask what it was asked. */
+export type FauxModelAccess = {
+  readonly access: ModelAccess;
+  /**
+   * The scripted provider. Its `state.callCount` is how many requests the access has served, which
+   * is what a test asserts "exactly one call" against (LOB-206) rather than trusting the caller.
+   */
+  readonly faux: FauxProviderHandle;
+};
+
+/**
+ * The faux backend, with its handle returned: `createModelAccess("faux")` is this, minus the handle.
+ *
+ * The handle is the only witness a suite has for how many model calls a step made — a count reported
+ * by the step itself would be the step grading its own work — so it is part of the access's
+ * construction rather than a test-only back door into the closure.
+ */
+export const createFauxModelAccess = (
   options: ModelAccessOptions = {},
-): ModelAccess => {
+): FauxModelAccess => {
   const models = createModels();
   const fauxCommand = options.fauxCommand ?? FAUX_COMMAND;
-
-  if (backend === "faux") {
-    const window =
-      options.contextWindow === undefined
-        ? {}
-        : { contextWindow: options.contextWindow };
-    const faux = fauxProvider({
-      models: (options.fauxModels?.length
-        ? options.fauxModels
-        : [FAUX_MODEL_ID]
-      ).map((id) => ({ id, ...window })),
-    });
-    models.setProvider(faux.provider);
-    // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
-    const repeat: FauxResponseFactory = (context) => {
-      faux.appendResponses([repeat]);
-      return fauxAnswer(context.messages, fauxCommand);
-    };
-    faux.setResponses([repeat]);
-    const modelId = faux.models[0].id;
-    return {
-      backend,
+  const window =
+    options.contextWindow === undefined
+      ? {}
+      : { contextWindow: options.contextWindow };
+  const faux = fauxProvider({
+    models: (options.fauxModels?.length
+      ? options.fauxModels
+      : [FAUX_MODEL_ID]
+    ).map((id) => ({ id, ...window })),
+  });
+  models.setProvider(faux.provider);
+  // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
+  const repeat: FauxResponseFactory = (context) => {
+    faux.appendResponses([repeat]);
+    return fauxAnswer(context.messages, fauxCommand, options.fauxCuration);
+  };
+  faux.setResponses([repeat]);
+  const modelId = faux.models[0].id;
+  return {
+    access: {
+      backend: "faux",
       models,
       provider: "faux",
       modelId,
       contextWindow: windowOf(models, "faux", modelId),
-    };
-  }
+    },
+    faux,
+  };
+};
+
+export const createModelAccess = (
+  backend: ModelBackend,
+  options: ModelAccessOptions = {},
+): ModelAccess => {
+  if (backend === "faux") return createFauxModelAccess(options).access;
+  const models = createModels();
 
   models.setProvider(anthropicProvider());
   return {
