@@ -147,7 +147,18 @@ const unbudgetedIn = (source: string): string[] => {
   );
   return declarations
     .flatMap((start, position) => {
-      const end = declarations[position + 1] ?? lines.length;
+      const nextDecl = declarations[position + 1] ?? lines.length;
+      // Cut the span at the `=>` that opens the case callback, so a `timeout:` that lives
+      // inside the case body (or inside a string literal in it) cannot pass as the declaration's
+      // own budget. Fall back to the next declaration when no arrow is present.
+      let arrowIndex = -1;
+      for (let i = start; i < nextDecl; i++) {
+        if (lines[i]?.includes("=>") === true) {
+          arrowIndex = i;
+          break;
+        }
+      }
+      const end = arrowIndex === -1 ? nextDecl : arrowIndex + 1;
       return declaresABudget(lines.slice(start, end)) ? [] : [start];
     })
     .map(
