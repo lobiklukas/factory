@@ -112,13 +112,21 @@ import {
   writeApprovalRequested,
   writeRepoBinding,
   writeTaskBinding,
+  writePage,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
+import type {
+  ListPagesInput,
+  ListPagesOutput,
+  Page,
+  RecordPageInput,
+} from "@repo/domain/Page";
+import { PageStrings } from "@repo/domain/Page";
 import { mintSessionId } from "./ids";
-import type { PrError, PullRequest } from "./pr";
+import type { OpenedPullRequest, PrError } from "./pr";
 import { openPullRequest } from "./prStep";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
@@ -208,7 +216,25 @@ export type SessionServiceShape = {
     sessionId: SessionId,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
   /**
+   * Record (or replace) one cited knowledge page (LOB-204).
+   *
+   * A page is committed to the log — the `factory.page` document a reader asks for by name, and the
+   * entry a fold and a rebuild can see — and its row is written in the same effect so `listPages`
+   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller, exactly as
+   * the PR step's is `openPullRequest` and no `SessionRpc` member.
+   */
+  readonly recordPage: (
+    input: RecordPageInput,
+  ) => Effect.Effect<Page, SessionError>;
+  /** The pages one session's log holds, by name, read from the derived rows a rebuild refills. */
+  readonly listPages: (
+    input: ListPagesInput,
+  ) => Effect.Effect<ListPagesOutput, SessionError>;
+  /**
    * Open the session's PR, or return the one its log already records (LOB-177).
+   *
+   * The answer carries which path produced it (LOB-212): `opened` for the GitHub call, `already-open`
+   * for a retry that the log answered. Additive on the shape — the link is unchanged.
    *
    * The forge client and the credential are the *caller's* to provide rather than this layer's:
    * the control plane's own HTTP layer is not a dependency of every session operation, and a
@@ -218,7 +244,7 @@ export type SessionServiceShape = {
   readonly openPullRequest: (
     input: OpenPullRequestArgs,
   ) => Effect.Effect<
-    PullRequest,
+    OpenedPullRequest,
     SessionError | PrError | CredentialError,
     CredentialProvider | HttpClient.HttpClient
   >;
@@ -304,12 +330,32 @@ type Binding = {
 };
 
 /**
- * One approval as this process knows it. The log holds the same two facts (the request and the
- * decision entries); this set is what the pending list reads until the snapshot fold does (LOB-147).
+ * One approval as the index knows it: the request, and the decision that settled it. The log holds
+ * the same two facts (`factory.approval.requested` / `factory.approval.decided`); the row is the
+ * fold of those entries, so the pending list answers without folding a log (LOB-147).
  */
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
   readonly decision?: ApprovalDecision;
+};
+
+type ApprovalRow = {
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+  readonly decision: string | null;
+  readonly actor: string | null;
+  readonly decidedAt: string | null;
+};
+
+/** One `session_pages` row as the driver returns it; the two jsonb columns are selected as text. */
+type PageRow = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: string;
+  readonly sources: string;
 };
 
 type LiveOwner = {
@@ -954,7 +1000,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const openPr = (
         input: OpenPullRequestArgs,
       ): Effect.Effect<
-        PullRequest,
+        OpenedPullRequest,
         SessionError | PrError | CredentialError,
         CredentialProvider | HttpClient.HttpClient
       > =>
@@ -1229,10 +1275,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return { session, taskId };
         });
 
-      /** Every approval this process has seen, per session, keyed by request id. */
-      const approvals = yield* Ref.make(
-        HashMap.empty<SessionId, HashMap.HashMap<string, ApprovalRecord>>(),
-      );
       /** Serializes approval writes so a repeated request id cannot commit twice. */
       const approvalGate = yield* Semaphore.make(1);
 
@@ -1248,32 +1290,65 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             )
           : Effect.void;
 
+      /**
+       * The row a session's approvals live in, read back as the contract names it. One request id
+       * is one row, so a repeated request reads the row the first one wrote rather than appending
+       * a second entry: the idempotency is the primary key, not an in-memory set that a restart
+       * would empty (LOB-147).
+       */
+      const approvalRow = (sessionId: SessionId, requestId: string) =>
+        sql<ApprovalRow>`
+          SELECT
+            request_id,
+            action,
+            detail,
+            to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
+            decision,
+            actor,
+            to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+          FROM session_approvals
+          WHERE session_id = ${sessionId} AND request_id = ${requestId}
+        `;
+
+      const toApprovalRecord = (
+        sessionId: SessionId,
+        row: ApprovalRow,
+      ): ApprovalRecord => ({
+        request: {
+          sessionId,
+          requestId: row.requestId,
+          action: row.action,
+          detail: row.detail,
+          requestedAt: row.requestedAt,
+        },
+        ...(row.decision === null ||
+        row.actor === null ||
+        row.decidedAt === null
+          ? {}
+          : {
+              decision: {
+                sessionId,
+                requestId: row.requestId,
+                decision: row.decision === "approved" ? "approved" : "denied",
+                actor: row.actor,
+                decidedAt: row.decidedAt,
+              },
+            }),
+      });
+
       const recordOf = (
         sessionId: SessionId,
         requestId: string,
-      ): Effect.Effect<ApprovalRecord | undefined> =>
-        Effect.map(Ref.get(approvals), (all) =>
-          Option.getOrUndefined(
-            HashMap.get(all, sessionId).pipe(
-              Option.flatMap((byRequest) => HashMap.get(byRequest, requestId)),
-            ),
-          ),
+      ): Effect.Effect<ApprovalRecord | undefined, SessionError> =>
+        Effect.map(
+          paper("read approval", approvalRow(sessionId, requestId)),
+          (rows) => {
+            const row = rows[0];
+            return row === undefined
+              ? undefined
+              : toApprovalRecord(sessionId, row);
+          },
         );
-
-      const putRecord = (
-        sessionId: SessionId,
-        record: ApprovalRecord,
-      ): Effect.Effect<void> =>
-        Ref.update(approvals, (all) => {
-          const byRequest = Option.getOrElse(HashMap.get(all, sessionId), () =>
-            HashMap.empty<string, ApprovalRecord>(),
-          );
-          return HashMap.set(
-            all,
-            sessionId,
-            HashMap.set(byRequest, record.request.requestId, record),
-          );
-        });
 
       const requestApproval = (
         input: RequestApprovalInput,
@@ -1303,7 +1378,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   requestedAt,
                 }),
               );
-              yield* putRecord(input.sessionId, { request });
+              // The row is the index of the entry just committed, not a second record: written
+              // after it, so a crash between the two leaves the log (the truth) without a row a
+              // rebuild cannot recover — never a row that claims a request no log holds. The cost
+              // of that order is the other side of it: a retry after such a crash finds no row and
+              // commits the request again, so the log can hold the same request id twice. That is
+              // why the fold, not the writer, makes the id the identity (`projectApprovals`) — a
+              // duplicate costs one log line, not a second pending approval.
+              yield* paper(
+                "index approval request",
+                sql`
+                  INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at)
+                  VALUES (${input.sessionId}, ${request.requestId}, ${request.action}, ${request.detail}, ${requestedAt}::timestamptz)
+                  ON CONFLICT (session_id, request_id) DO NOTHING
+                `,
+              );
               yield* touchActivity(input.sessionId);
               return request;
             }),
@@ -1361,32 +1450,55 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   decidedAt,
                 }),
               );
-              yield* putRecord(input.sessionId, { ...known, decision });
+              yield* paper(
+                "settle approval",
+                sql`
+                  UPDATE session_approvals
+                  SET decision = ${input.decision},
+                      actor = ${input.actor},
+                      decided_at = ${decidedAt}::timestamptz
+                  WHERE session_id = ${input.sessionId} AND request_id = ${input.requestId}
+                `,
+              );
               yield* touchActivity(input.sessionId);
               return decision;
             }),
           );
         });
 
+      /**
+       * The requests still waiting for a decision, oldest first. One statement over the index and
+       * no fold: the list a dashboard shows is what the row is for, and it survives a restart
+       * because the row was written when the request was committed (LOB-147). `requested_at`,
+       * then `request_id`, is the order the log fold produces too, so a snapshot and this answer
+       * agree once the row is written.
+       */
       const listApprovals = (
         sessionId: SessionId,
       ): Effect.Effect<ListApprovalsOutput, SessionError> =>
         Effect.gen(function* () {
           yield* requireSession(sessionId);
-          const all = yield* Ref.get(approvals);
-          const pending = Option.match(HashMap.get(all, sessionId), {
-            onNone: () => [] as ApprovalRequest[],
-            onSome: (byRequest) =>
-              Array.from(HashMap.values(byRequest))
-                .filter((record) => record.decision === undefined)
-                .map((record) => record.request)
-                .sort((a, b) =>
-                  a.requestedAt === b.requestedAt
-                    ? a.requestId.localeCompare(b.requestId)
-                    : a.requestedAt.localeCompare(b.requestedAt),
-                ),
-          });
-          return { approvals: pending };
+          const rows = yield* paper(
+            "list approvals",
+            sql<ApprovalRow>`
+              SELECT
+                request_id,
+                action,
+                detail,
+                to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
+                decision,
+                actor,
+                to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+              FROM session_approvals
+              WHERE session_id = ${sessionId} AND decision IS NULL
+              ORDER BY requested_at, request_id
+            `,
+          );
+          return {
+            approvals: rows.map(
+              (row) => toApprovalRecord(sessionId, row).request,
+            ),
+          };
         });
 
       const recordActivity = (
@@ -1454,6 +1566,123 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             `,
           );
         }).pipe(Effect.ignore);
+
+      const pageFromRow = (row: PageRow): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          const links = yield* Schema.decodeEffect(PageStrings)(row.links).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable links: ${String(cause)}`,
+                }),
+            ),
+          );
+          const sources = yield* Schema.decodeEffect(PageStrings)(
+            row.sources,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable sources: ${String(cause)}`,
+                }),
+            ),
+          );
+          return {
+            name: row.name,
+            kind: row.kind,
+            content: row.content,
+            links,
+            sources,
+          };
+        });
+
+      /**
+       * Record (or replace) one cited knowledge page (LOB-204).
+       *
+       * The log is the truth and it is committed once: the `factory.page` member and the entry that
+       * announces it are one commit, exactly as the PR step's document and entry are. The row is a
+       * second statement after it — the same shape as that step's index write — so a failure between
+       * the two leaves the log ahead of `session_pages` until a rebuild refills it, which is why the
+       * rebuild fold exists rather than being an optimisation.
+       *
+       * A citation is stored exactly as given, unknown session id included: `sources` is data, not a
+       * foreign key, so a page that names a session nobody can find still reads back.
+       */
+      const recordPage = (
+        input: RecordPageInput,
+      ): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          // Trimmed once, and the trimmed name is the one written: whitespace is not part of an
+          // identity, and a name that differs only in its padding would be a second page.
+          const name = input.name.trim();
+          if (name.length === 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: "a page needs a non-empty name",
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const page: Page = {
+            name,
+            kind: input.kind,
+            content: input.content,
+            links: input.links,
+            sources: input.sources,
+          };
+          yield* paper("record page", writePage(owner.root, page));
+          const links = yield* paper(
+            "encode page links",
+            Schema.encodeEffect(PageStrings)(page.links),
+          );
+          const sources = yield* paper(
+            "encode page sources",
+            Schema.encodeEffect(PageStrings)(page.sources),
+          );
+          yield* paper(
+            "write page row",
+            sql`
+              INSERT INTO session_pages (session_id, name, kind, content, links, sources)
+              VALUES (
+                ${input.sessionId},
+                ${page.name},
+                ${page.kind},
+                ${page.content},
+                ${links}::jsonb,
+                ${sources}::jsonb
+              )
+              ON CONFLICT (session_id, name) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                content = EXCLUDED.content,
+                links = EXCLUDED.links,
+                sources = EXCLUDED.sources
+            `,
+          );
+          yield* touchActivity(input.sessionId);
+          return page;
+        });
+
+      /** The pages one session's log holds, by name — one query, never a fold of the log. */
+      const listPages = (
+        input: ListPagesInput,
+      ): Effect.Effect<ListPagesOutput, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(input.sessionId);
+          const rows = yield* paper(
+            "list pages",
+            sql<PageRow>`
+              SELECT name, kind, content, links::text AS links, sources::text AS sources
+              FROM session_pages
+              WHERE session_id = ${input.sessionId}
+              ORDER BY name
+            `,
+          );
+          const pages: Page[] = [];
+          for (const row of rows) pages.push(yield* pageFromRow(row));
+          return { pages };
+        });
 
       /**
        * One page of the session list, newest activity first.
@@ -1814,6 +2043,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestApproval,
         decideApproval,
         listApprovals,
+        recordPage,
+        listPages,
         openPullRequest: openPr,
         close: closeAll,
       });

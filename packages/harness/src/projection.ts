@@ -32,6 +32,7 @@ import type {
   TranscriptEntry,
   TranscriptEntryKind,
 } from "@repo/domain/Session";
+import type { ApprovalVerdict } from "@repo/domain/Approval";
 
 /** The conversation documents this projection reads, and the entry kind this package writes. */
 export const LIVE_DOC = "pi.live";
@@ -79,8 +80,100 @@ export const TITLE_ENTRY_KIND = "factory.title";
  * visible to an attached client, so the record and the announcement are two writes in one commit.
  */
 export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
+/**
+ * The entry a recorded page is announced with. Distinct from the document kind (`factory.page`), as
+ * `factory.pr` is announced by `factory.pr.opened`: documents and entries are different namespaces,
+ * and one name for both would make a fold over entries unable to say which it was reading.
+ */
+export const PAGE_ENTRY_KIND = "factory.page.written";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
+/**
+ * One approval as a log records it (D11, LOB-147): the request, and the decision that settled it.
+ *
+ * The session id is not here, because a log *is* one session: the caller that needs it has it, and
+ * carrying it would let a fold fabricate an id its log never named.
+ */
+export type ApprovalLogRecord = {
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+  readonly decision?: {
+    readonly decision: ApprovalVerdict;
+    readonly actor: string;
+    readonly decidedAt: string;
+  };
+};
+
+/** The verdict in a decision entry, or `undefined` for anything that is not one. */
+const verdictAt = (
+  value: JsonValue | undefined,
+): ApprovalVerdict | undefined => {
+  const verdict = stringAt(value, "decision");
+  return verdict === "approved" || verdict === "denied" ? verdict : undefined;
+};
+
+/**
+ * `factory.approval.requested` and `factory.approval.decided` → one record per request id.
+ *
+ * Folded rather than accumulated, so two folds of one log agree: a repeated request id (a retried
+ * request whose first commit landed, or a log that recorded the same request twice) is one record,
+ * the first request winning, and a decision settles the request it names. A decision whose request
+ * is not in the log settles nothing, and is dropped rather than invented into a request.
+ *
+ * Order is the pending list's order — `requestedAt`, then `requestId` for two asks in one
+ * millisecond — because both the snapshot fold and the index's list answer from it.
+ */
+export const projectApprovals = (
+  entries: readonly EntryRecord[],
+): readonly ApprovalLogRecord[] => {
+  const records = new Map<string, ApprovalLogRecord>();
+  for (const entry of entries) {
+    const requestId = stringAt(entry.data, "requestId");
+    if (requestId === undefined) continue;
+    if (entry.kind === APPROVAL_REQUESTED_KIND) {
+      if (records.has(requestId)) continue;
+      const action = stringAt(entry.data, "action");
+      const requestedAt = stringAt(entry.data, "requestedAt");
+      if (action === undefined || requestedAt === undefined) continue;
+      records.set(requestId, {
+        requestId,
+        action,
+        detail: stringAt(entry.data, "detail") ?? "",
+        requestedAt,
+      });
+      continue;
+    }
+    if (entry.kind !== APPROVAL_DECIDED_KIND) continue;
+    const record = records.get(requestId);
+    if (record === undefined || record.decision !== undefined) continue;
+    const decision = verdictAt(entry.data);
+    const actor = stringAt(entry.data, "actor");
+    const decidedAt = stringAt(entry.data, "decidedAt");
+    if (
+      decision === undefined ||
+      actor === undefined ||
+      decidedAt === undefined
+    )
+      continue;
+    records.set(requestId, {
+      ...record,
+      decision: { decision, actor, decidedAt },
+    });
+  }
+  return [...records.values()].sort((left, right) =>
+    left.requestedAt === right.requestedAt
+      ? left.requestId.localeCompare(right.requestId)
+      : left.requestedAt.localeCompare(right.requestedAt),
+  );
+};
+
+/** The requests still waiting for a decision, in the same order as the fold. */
+export const pendingApprovals = (
+  records: readonly ApprovalLogRecord[],
+): readonly ApprovalLogRecord[] =>
+  records.filter((record) => record.decision === undefined);
 
 type ContentBlock = TextContent | ThinkingContent | ToolCall | ImageContent;
 
@@ -117,6 +210,15 @@ const arrayAt = (
   const value = asObject(parent)?.[key];
   return Array.isArray(value) ? value : [];
 };
+
+/** A JSON array of strings, with anything else at an element dropped rather than guessed. */
+const stringsAt = (
+  parent: JsonValue | undefined,
+  key: string,
+): readonly string[] =>
+  arrayAt(parent, key).flatMap((value) =>
+    typeof value === "string" ? [value] : [],
+  );
 
 /** Flatten model content blocks to their text. */
 const blocksText = (blocks: readonly ContentBlock[]): string =>
@@ -433,4 +535,45 @@ export const diffView = (
   }
 
   return events;
+};
+
+/**
+ * The cited knowledge pages a log holds (LOB-204), folded from the `factory.page` entries that
+ * announce each one.
+ *
+ * The entries, not the `factory.page` documents, are what a rebuild can see: a fold reads `commits`,
+ * and a document is a separate record. So every page is committed twice in one transaction — the
+ * document for the typed read, the entry for this fold — exactly as the PR step announces itself
+ * (LOB-177).
+ *
+ * A later entry for the same name replaces the earlier one, and the fold is ordered by name, so two
+ * logs that committed the same pages in a different order read back the same way.
+ */
+export type PageLogRecord = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: readonly string[];
+  readonly sources: readonly string[];
+};
+
+export const projectPages = (
+  entries: readonly EntryRecord[],
+): readonly PageLogRecord[] => {
+  const pages = new Map<string, PageLogRecord>();
+  for (const entry of entries) {
+    if (entry.kind !== PAGE_ENTRY_KIND) continue;
+    const name = stringAt(entry.data, "name");
+    if (name === undefined || name === "") continue;
+    pages.set(name, {
+      name,
+      kind: stringAt(entry.data, "kind") ?? "",
+      content: stringAt(entry.data, "content") ?? "",
+      links: stringsAt(entry.data, "links"),
+      sources: stringsAt(entry.data, "sources"),
+    });
+  }
+  return [...pages.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
 };

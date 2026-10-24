@@ -18,6 +18,8 @@
   "exports": {
     "./Api": "./src/Api.ts",
     "./Approval": "./src/Approval.ts",
+    "./Ids": "./src/Ids.ts",
+    "./Page": "./src/Page.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Session": "./src/Session.ts",
     "./Task": "./src/Task.ts",
