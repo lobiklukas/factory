@@ -1012,9 +1012,6 @@ describe("the verify-* skills' Postgres precondition", () => {
     // layer down with the exit status of a `docker compose up`.
     // Mutation checked: dropping `|| true` from the compose line. This is the only case that
     // mutation reddens (dropping it alone left 39 of 40 green) — no other case in this file pins it.
-    // The marker avoids `port:` followed by a digit on purpose: the case further down that guards
-    // this file's own connections reads them out of its own source, and that pattern is one of its
-    // assertions.
     writeFakeDocker(scratch, 1, { opensPort: port });
     try {
       const strict = spawnSync(
@@ -1306,8 +1303,12 @@ describe("the verify-* skills' Postgres precondition", () => {
       //    literal to inherit a real service by accident, and no URL at all. The literal 5442 in the
       //    `pg_port_owner` case feeds `docker ps --filter`, which opens no socket.
       const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      const selfCode = self
+        .split("\n")
+        .filter((line) => !/\s*\/\//.test(line))
+        .join("\n");
       expect(self).not.toMatch(/https?:\/\//);
-      expect(self).not.toMatch(/port:\s*\d/);
+      expect(selfCode).not.toMatch(/port:\s*\d/);
     },
   );
 
