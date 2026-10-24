@@ -8,7 +8,9 @@
  * one adds it.
  *
  * The rows come from `0009_create_skills.ts`, which seeds the three stage skills (`specify`,
- * `implement`, `review`). Postgres only: the tests run against the real schema, not a mock.
+ * `implement`, `review`), and `0015_seed_docs_skill.ts`, which seeds the `docs` prompt a
+ * documentation run holds (LOB-225). Postgres only: the tests run against the real schema, not a
+ * mock.
  *
  * `attachments` is a jsonb column but is read and written as JSON text, encoded and decoded by a
  * Schema codec, so a stored value always round-trips through `readonly string[]` rather than

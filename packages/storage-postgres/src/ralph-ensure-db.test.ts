@@ -231,9 +231,13 @@ const writeFakeDocker = (
 };
 
 /**
- * The environment of a child. The parent's `DOCKER_HOST` is deleted on purpose — this repo's own
- * ralph driver exports one — so a case that wants it unset gets it unset, and only `extra` decides
- * what the case is about. Same `Object.entries` read as `turbo-env.test.ts`: a direct
+ * The environment of a child. Three of the parent's variables are deleted on purpose, because they
+ * are the driver's own knobs and a case that inherits them is not asserting the driver's behaviour:
+ * `DOCKER_HOST` (this repo's ralph driver exports one), and `RALPH_WORKER`/`RALPH_DB` (the loop
+ * derives `RALPH_DB=factory_ralph${_sfx}` from the worker number, so a worker-2 shell makes every
+ * case target `factory_ralph_2` instead of the default the assertions name). `loop.sh` itself starts
+ * each worker with `env -u RALPH_DB RALPH_WORKER="$i"` for the same reason. Only `extra` decides
+ * what a case is about. Same `Object.entries` read as `turbo-env.test.ts`: a direct
  * `process.env.NAME` is configuration, and a test inheriting a shell's value is not configuring.
  *
  * The fake has to exist before a child runs: a case that forgot `writeFakeDocker` would drive the
@@ -262,6 +266,8 @@ const childEnv = (
     FAKE_CALLS: scratch.calls,
   };
   delete env["DOCKER_HOST"];
+  delete env["RALPH_WORKER"];
+  delete env["RALPH_DB"];
   return { ...env, ...extra };
 };
 
