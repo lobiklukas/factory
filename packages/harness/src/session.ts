@@ -58,6 +58,8 @@ import {
   projectView,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
+  SPEC_DOC_KIND,
+  CRITERIA_DOC_KIND,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
@@ -486,6 +488,10 @@ export type SessionLog = {
   readonly binding: RepoBinding;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
+  /** The job spec committed to the log, when present. */
+  readonly spec?: string;
+  /** The acceptance criteria committed to the log, when present. */
+  readonly criteria?: string;
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -510,7 +516,11 @@ export const readSessionLog = (
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
+    const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
+    const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const taskId = bindingString(taskDoc, "taskId");
+    const spec = bindingString(specDoc, "spec");
+    const criteria = bindingString(criteriaDoc, "criteria");
     return {
       entries: records.map(projectEntry),
       usage: projectUsageDoc(usage),
@@ -518,6 +528,8 @@ export const readSessionLog = (
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
       },
+      ...(spec === "" ? {} : { spec }),
+      ...(criteria === "" ? {} : { criteria }),
       ...(taskId === ""
         ? {}
         : {
