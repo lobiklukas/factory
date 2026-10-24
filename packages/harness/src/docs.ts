@@ -7,7 +7,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 
 export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
-export const PR_URL_DOC_KIND = "factory.prUrl";
+export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
 
 export const SpecDoc = defineDoc({
@@ -28,13 +28,13 @@ export const CriteriaDoc = defineDoc({
   initial: () => ({ criteria: "" }),
 });
 
-export const PrUrlDoc = defineDoc({
-  kind: PR_URL_DOC_KIND,
+export const PrDoc = defineDoc({
+  kind: PR_DOC_KIND,
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ prUrl: "" }),
+  initial: () => ({ url: "", number: 0, base: "", head: "", openedAt: "" }),
 });
 
 export const RetryDoc = defineDoc({

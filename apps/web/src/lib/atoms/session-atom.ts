@@ -66,6 +66,8 @@ export const foldSessionEvent = (
       return { ...state, queued: event.queued };
     case "status":
       return { ...state, summary: { ...state.summary, status: event.status } };
+    case "prOpened":
+      return { ...state, summary: { ...state.summary, prUrl: event.prUrl } };
   }
 };
 
