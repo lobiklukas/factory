@@ -192,6 +192,30 @@ describe("verifySlackSignature", () => {
     expect(signed({})).toEqual({ ok: true });
   });
 
+  it("matches the signature Slack's own documentation says it sends, not one this repo computes", () => {
+    // The known-answer vector from Slack's "Verifying requests from Slack" page: a real body, its
+    // timestamp, the documented signing secret and the `v0=` hex Slack reports for them. Without
+    // this, a wrong construction (no `v0:` in the HMAC input, a different separator, base64) would
+    // agree with itself in every other case here.
+    const documentedBody =
+      "token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554%2F96rGlfmibIGlgcZRskXaIFfN&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c";
+    const documentedTimestamp = "1531420618";
+    const documentedSignature =
+      "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503";
+    expect(slackSignature(documentedBody, documentedTimestamp, SECRET)).toBe(
+      documentedSignature,
+    );
+    expect(
+      verifySlackSignature({
+        raw: documentedBody,
+        signature: documentedSignature,
+        timestamp: documentedTimestamp,
+        signingSecret: SECRET,
+        nowSeconds: Number(documentedTimestamp),
+      }),
+    ).toEqual({ ok: true });
+  });
+
   it("accepts a delivery at the edge of the window, and refuses one past it", () => {
     expect(signed({ nowSeconds: now + SLACK_REPLAY_WINDOW_SECONDS })).toEqual({
       ok: true,
@@ -344,6 +368,26 @@ describe("slackRequestId", () => {
       payload({ threadTs: "1699999999.000100", ts: "1700000000.000200" }),
     );
     expect(reply?.requestId).not.toBe(root?.requestId);
+  });
+
+  it("collapses the thread-broadcast twin of a threaded message into one delivery", () => {
+    // Slack sends a threaded reply twice when it is also broadcast to the channel: same `ts`, same
+    // `thread_ts`, two deliveries. One message, one session.
+    const inThread = slackDelivery(
+      payload({ threadTs: "1699999999.000000", ts: "1700000000.000200" }),
+      filter,
+    );
+    const broadcast = slackDelivery(
+      payload({
+        subtype: "thread_broadcast",
+        threadTs: "1699999999.000000",
+        ts: "1700000000.000200",
+        eventId: "Ev0BROADCAST",
+      }),
+      filter,
+    );
+    expect(broadcast?.event.action).toBe("create");
+    expect(broadcast?.requestId).toBe(inThread?.requestId);
   });
 
   it("names a filtered message by its own address, so its skip is one row", () => {

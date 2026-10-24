@@ -112,6 +112,15 @@ const rules: ReadonlyArray<TriggerRule> = [
     baseRef: "main",
     prompt: "Work on {{title}}:\n{{body}}",
   },
+  // Deliberately a rule for the channel the filter refuses. Without it the unwatched message would
+  // be stopped twice over — by the filter and by "no rule matches" — and check 12 could pass by
+  // accident (reviewer P1): with it, the filter is the *only* thing standing between that message
+  // and a session, which is what the check and the mutation are about.
+  {
+    label: UNWATCHED,
+    repo: REPO,
+    prompt: "Work on {{title}}:\n{{body}}",
+  },
 ];
 
 const observed: {

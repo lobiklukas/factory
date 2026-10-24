@@ -281,11 +281,13 @@ export const slackEvent = (
 /**
  * The delivery id for a Slack payload: the message once.
  *
- * Slack sends no delivery id in the body, but it does re-send a delivery it thinks failed — with
- * the same `event.ts` and an `x-slack-retry-num` header — and a message does not change identity
- * when it is re-sent. So the key is the message address: a retry, a redelivery and the thread
- * broadcast twin of a threaded message are all one delivery. Slack's `event_id` is *not* used,
- * because it differs per retry, which is exactly the duplicate this has to collapse.
+ * Slack sends no delivery id in the body; it re-sends a delivery it thinks failed flagged with an
+ * `x-slack-retry-num` header. So the key is the message address, which a re-send cannot change: a
+ * retry and the thread-broadcast twin of a threaded message are the same delivery. Slack's
+ * `event_id` is deliberately *not* the key — it identifies the delivery attempt, not the message,
+ * and the duplicate this must collapse is "the same message delivered twice", whichever attempt
+ * carried it. Whether Slack really re-stamps `event_id` on a retry is not something this repo can
+ * check (see `docs/testing-third-parties.md`); keying on the message makes it not matter.
  */
 export const slackRequestId = (event: TriggerEvent): string =>
   `slack:${event.key}`;

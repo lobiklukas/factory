@@ -61,9 +61,23 @@ non-message event, the `url_verification` handshake), the filter's reasons, the 
 the all-or-none config gate, and the two requests' shape including Slack's trap of answering
 `200 {ok: false}` for a logical refusal.
 
-**Non-vacuity.** Removing the filter's channel check (`if (!filter.channels.includes(channel)) …`) makes
-the unwatched message start a session and check 12 fail; removing the write-back's read-before-reply
-makes the lost-acknowledgement retry post a second reply and check 17 fail (`repliesInThread=2`).
+**Non-vacuity.** Two hand mutations, both recorded beside the evidence
+(`.verify/evidence/lob-191/mutation-*.log`):
+
+- remove the filter's channel check (`if (!filter.channels.includes(channel)) …`) → the unwatched
+  message is **processed** and starts a session, `16/18`: check 12 fails on `status=processed`, and
+  check 14 fails because the session count moved. The drive's rule set deliberately contains a rule for
+  the refused channel, so the filter — not "no rule matches" — is the only thing standing between that
+  message and a session;
+- remove the write-back's read-before-reply (`const already = false`) → the lost-acknowledgement retry
+  posts a second reply, `17/18`, `repliesInThread=2`.
+
+**What the signature check rests on.** `Slack.test.ts` asserts Slack's **documented** vector — the
+`/webhook-collect` example body from Slack's "Verifying requests from Slack" page, its timestamp, the
+page's signing secret and the `v0=` hex the page reports — so a wrong construction (no `v0:` in the HMAC
+input, another separator, base64) fails there rather than agreeing with itself. That is the only place
+the scheme is pinned to Slack's word; the drive's deliveries are signed with `slackSignature` and
+verified by the adapter, which proves the plumbing, not the spelling.
 
 **Nothing is wired into `apps/api` yet.** As with Jira and GitHub, there is no `POST /webhooks/slack`
 route: `Webhook.ts` (the Linear and generic adapters) is unmodified, and `slackConfigFromEnv` is what a
@@ -73,9 +87,18 @@ would use. A route would also have to answer Slack's `url_verification` challeng
 arrives; `slackEvent` returns `undefined` for it rather than pretending it is a message.
 
 **The limits the fake cannot close.** That Slack accepts these `chat.postMessage` parameters, that the
-Events API really re-sends a failed delivery with the same `event.ts` (the key this relies on), and
-that `conversations.replies` pages as read (Slack's default 100-message page, so a longer thread's
-earlier reply could be missed and answered twice). Recorded in `docs/testing-third-parties.md`.
+Events API really re-sends a failed delivery with the same `event.ts` (the key this relies on, and
+whether its `event_id` is re-stamped — the key does not depend on the answer), and that
+`conversations.replies` pages as read (Slack's default 100-message page, so a longer thread's earlier
+reply could be missed and answered twice). Recorded in `docs/testing-third-parties.md`.
+
+**Three things an operator should know.** (1) The stale-delivery refusal is proven at the verifier —
+`verifySlackSignature` returns `outside-window` and the drive makes no delivery from it — so "refused
+before anything starts" is a claim about the check, not about a route; there is no route to place it in
+yet. (2) A **human** reply inside a thread the bot answered also passes the filter and starts its own
+session; that is by design (a person asking a follow-up in the thread is a new message), and the loop
+guard only covers the bot's own posts, which arrive with `bot_id`. (3) A message is deduped by its
+`ts`, so deleting and re-posting a message is a new delegation, while re-sending the same one is not.
 
 **A write-back failure fails the delivery.** A refused reply is a `write-back` `TriggerError`, so the
 seam gives the claim back and the sender's retry runs the work instead of reading `replayed: true`
