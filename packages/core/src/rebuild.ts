@@ -31,6 +31,7 @@
  */
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+import { PageStrings } from "@repo/domain/Page";
 import type { SessionError } from "@repo/domain/Session";
 import {
   SessionError as SessionErrorClass,
@@ -131,6 +132,14 @@ export const rebuildIndexes: Effect.Effect<
     sessionId: string;
     column: string;
   }[] = [];
+  const pages: {
+    sessionId: string;
+    name: string;
+    kind: string;
+    content: string;
+    links: string;
+    sources: string;
+  }[] = [];
   for (const log of sessionLogs) {
     const storage = folds.get(log.logId);
     // `readers` returns a store for every id it was given and this loop walks the same list, so a
@@ -173,6 +182,27 @@ export const rebuildIndexes: Effect.Effect<
         decision: record.decision?.decision ?? null,
         actor: record.decision?.actor ?? null,
         decidedAt: record.decision?.decidedAt ?? null,
+      });
+    }
+    // The pages are the `factory.page` entries, not the documents: a fold reads `commits`, and a
+    // document is a separate record (LOB-204). Each row is written with its citations as JSON text,
+    // so a rebuild reproduces a page that cites a session the index no longer holds.
+    for (const page of sessionLog.pages) {
+      pages.push({
+        sessionId: log.logId,
+        name: page.name,
+        kind: page.kind,
+        content: page.content,
+        links: yield* Schema.encodeEffect(PageStrings)(page.links).pipe(
+          Effect.mapError((cause) =>
+            storageError("encode a page's links", cause),
+          ),
+        ),
+        sources: yield* Schema.encodeEffect(PageStrings)(page.sources).pipe(
+          Effect.mapError((cause) =>
+            storageError("encode a page's sources", cause),
+          ),
+        ),
       });
     }
     if (sessionLog.task !== undefined) {
@@ -307,6 +337,39 @@ export const rebuildIndexes: Effect.Effect<
     `;
   }
   yield* sql`DELETE FROM task_runs WHERE session_id NOT IN (SELECT DISTINCT log_id FROM commits)`;
+
+  // Fold the pages into `session_pages`: the delete is one statement over every session the fold
+  // covers, before the inserts, rather than one per write batch. A session's rows are contiguous in
+  // the fold but not aligned to `WRITE_BATCH_ROWS`, so a per-batch delete would clobber another
+  // batch's rows for the same session — a rebuild losing pages its log still holds. That is the
+  // lesson the approvals fold was reviewed into (LOB-147), applied here from the start.
+  yield* sql`DELETE FROM session_pages`;
+  for (let at = 0; at < pages.length; at += WRITE_BATCH_ROWS) {
+    const batch = pages.slice(at, at + WRITE_BATCH_ROWS);
+    yield* sql`
+      INSERT INTO session_pages (session_id, name, kind, content, links, sources)
+      SELECT
+        session_id,
+        name,
+        kind,
+        content,
+        links::jsonb,
+        sources::jsonb
+      FROM unnest(
+        ${batch.map((page) => page.sessionId)}::text[],
+        ${batch.map((page) => page.name)}::text[],
+        ${batch.map((page) => page.kind)}::text[],
+        ${batch.map((page) => page.content)}::text[],
+        ${batch.map((page) => page.links)}::text[],
+        ${batch.map((page) => page.sources)}::text[]
+      ) AS folded(session_id, name, kind, content, links, sources)
+      ON CONFLICT (session_id, name) DO UPDATE SET
+        kind = EXCLUDED.kind,
+        content = EXCLUDED.content,
+        links = EXCLUDED.links,
+        sources = EXCLUDED.sources
+    `;
+  }
 
   // Index rows that can no longer be true: an id that is not a session's, or a log that is gone.
   const present = yield* sql<{ id: string }>`SELECT id FROM sessions`;

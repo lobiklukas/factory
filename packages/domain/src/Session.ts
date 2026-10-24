@@ -335,6 +335,24 @@ export const SessionIdInput = Schema.Struct({ sessionId: SessionId });
 export type SessionIdInput = typeof SessionIdInput.Type;
 
 /**
+ * Replay a recorded session against another model (LOB-198).
+ *
+ * A replay is the same task in a new session: the source's first user entry becomes this session's,
+ * run on `model` (a `provider/modelId` name) at the source's repo and base ref. The source is only
+ * read, so its log is unchanged; the link between the two is a `factory.replay` document in the
+ * replay's own log.
+ *
+ * `model` absent means the control plane's own model, which is a replay that records the lineage
+ * without changing the model — the same task, the same model, a new log. A name the process's model
+ * catalog does not hold is refused as `invalid_input` rather than substituted.
+ */
+export const ReplaySessionInput = Schema.Struct({
+  sessionId: SessionId,
+  model: Schema.optional(Schema.String),
+});
+export type ReplaySessionInput = typeof ReplaySessionInput.Type;
+
+/**
  * Fork a session at one of its entries (LOB-180, D7).
  *
  * `at` is the id of a transcript entry — the `id` a `TranscriptEntry` carries — and the fork keeps

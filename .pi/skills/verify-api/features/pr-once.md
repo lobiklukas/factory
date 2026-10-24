@@ -26,6 +26,12 @@ fake GitHub (`./github-fake.ts`) whose ledger is a file on disk:
 the fake's ledger — `posts=2` and `pulls=1` after the replay (the killed attempt plus the replay, one
 PR), `pulls=2` after the second session.
 
+Since LOB-212 the drive also asserts the step's `outcome` tag, which is the one field that separates
+the two paths when the link is identical: the replay's call is `opened` (it went to GitHub and
+adopted), its in-process repeat is `already-open` (the log answered it), and the second session's own
+first call is `opened` again, because the guard is that session's own `factory.pr` and not a lock.
+The tags are recorded with the rest of the observations in each phase file.
+
 **Non-vacuity.** A hand mutation run: with `prStep.ts`'s `recorded ?? …` guard removed, the replay's
 repeat posts a second time and the script exits non-zero. Recorded in
 `.verify/evidence/lob-179/mutation.md`; the script itself cannot perform that edit.

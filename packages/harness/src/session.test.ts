@@ -25,12 +25,14 @@ import {
   readHistoricalSnapshot,
   readLiveSnapshot,
   readPromptSections,
+  readPage,
   readPullRequestDoc,
   readSessionLog,
   resetSession,
   submitMessage,
   writeApprovalDecided,
   writeApprovalRequested,
+  writePage,
   writePullRequestDoc,
   type SessionRef,
 } from "./session";
@@ -559,6 +561,7 @@ describe("a run's column decides its prompt", () => {
 });
 
 const prLogId = `harness-pr-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+const pageLogId = `harness-page-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
 
 const openPrStorage = (mode: "owner" | "reader") =>
   PostgresStorage.open(sql, { logId: prLogId, mode }, context);
@@ -733,5 +736,57 @@ describe("the approval fold", () => {
       },
     ]);
     expect(snapshot.session.mode).toBe("historical");
+  }, 120_000);
+});
+
+const openPageStorage = (mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId: pageLogId, mode }, context);
+
+/**
+ * A cited knowledge page (LOB-204): the family document a reader asks for by name, and the entry a
+ * fold can see. Both are one commit, and a reader of the log — not only of the live view — folds the
+ * page back, which is what a rebuild relies on.
+ */
+describe("the cited pages a session recorded", () => {
+  it("commits a page as a document and an entry, and both read back", async () => {
+    const recorded = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() => openPageStorage("owner"));
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const unpublished = yield* readPage(harness, root, "a-trap");
+        yield* writePage(root, {
+          name: "a-trap",
+          kind: "trap",
+          content: "a per-batch delete clobbers another batch",
+          links: ["a-decision"],
+          sources: ["ses_1", "ses_nobody"],
+        });
+        const page = yield* readPage(harness, root, "a-trap");
+        // A page nobody wrote is not a page, even though the family members are seeded on read.
+        const missing = yield* readPage(harness, root, "never-written");
+        yield* closeHarness(harness);
+        const reader = yield* Effect.promise(() => openPageStorage("reader"));
+        const folded = yield* readSessionLog(reader);
+        yield* Effect.promise(() => reader.dispose());
+        return { unpublished, page, missing, folded: folded.pages };
+      }),
+    );
+
+    expect(recorded.unpublished).toBeUndefined();
+    expect(recorded.missing).toBeUndefined();
+    expect(recorded.page).toEqual({
+      name: "a-trap",
+      kind: "trap",
+      content: "a per-batch delete clobbers another batch",
+      links: ["a-decision"],
+      sources: ["ses_1", "ses_nobody"],
+    });
+    // The entry, not the document, is what a fold reads — and it keeps the citation of a session
+    // that does not exist.
+    expect(recorded.folded).toEqual([recorded.page]);
   }, 120_000);
 });
