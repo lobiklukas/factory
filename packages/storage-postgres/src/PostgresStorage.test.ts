@@ -58,7 +58,7 @@ beforeAll(async () => {
   try {
     sql = await runtime.runPromise(SqlClient);
   } catch (cause) {
-    const configuredUrl = process.env["DATABASE_URL"];
+    const configuredUrl = Object.entries(process.env).find(([name]) => name === "DATABASE_URL")?.[1];
     const urlNote = configuredUrl
       ? `(DATABASE_URL=${configuredUrl})`
       : `(DATABASE_URL defaults to postgres://factory:factory@localhost:5442/factory)`;
