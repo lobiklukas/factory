@@ -579,7 +579,9 @@ const callRpcOnce = async (tag, payload) => {
   );
 };
 
-const compactButton = page.getByRole("button", { name: "Compact session" });
+// Targeted by its own attribute, not its accessible name: the name changes with the state
+// (`Compact session` / `Compacting session`, LOB-224), and a locator must survive both.
+const compactButton = page.locator("button[data-compaction-state]");
 const usageChip = page.locator("[data-session-usage]");
 const spendLine = page.locator("[data-compaction-spend]");
 
@@ -677,7 +679,7 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector(
-        "button[aria-label='Compact session']",
+        "button[data-compaction-state]",
       );
       return (
         button !== null &&
@@ -694,7 +696,7 @@ try {
   busyCompact.title = await compactButton.getAttribute("title");
   busyCompact.describedBy = await page.evaluate(() => {
     const button = document.querySelector(
-      "button[aria-label='Compact session']",
+      "button[data-compaction-state]",
     );
     const id = button?.getAttribute("aria-describedby") ?? "";
     return {
@@ -723,7 +725,7 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector(
-        "button[aria-label='Compact session']",
+        "button[data-compaction-state]",
       );
       return button !== null && !button.disabled;
     },
@@ -897,7 +899,7 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector(
-        "button[aria-label='Compact session']",
+        "button[data-compaction-state]",
       );
       return (
         button !== null &&
@@ -964,7 +966,7 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector(
-        "button[aria-label='Compact session']",
+        "button[data-compaction-state]",
       );
       return (
         button !== null &&
@@ -1144,7 +1146,7 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector(
-        "button[aria-label='Compact session']",
+        "button[data-compaction-state]",
       );
       return (
         button !== null &&
@@ -1176,46 +1178,42 @@ await page
   .fill("Keep going while that summarizes.");
 await page.evaluate(() => {
   document.querySelector("textarea")?.form?.requestSubmit();
-  document.querySelector("button[aria-label='Compact session']")?.click();
+  document.querySelector("button[data-compaction-state]")?.click();
 });
-let busyPending = false;
-try {
-  await page.waitForFunction(
-    () => {
-      const element = document.querySelector("[data-compaction-status]");
-      return (
-        document.body.innerText.includes("BUSY") &&
-        element?.getAttribute("data-compaction-status") === "requested" &&
-        !document.body.innerText.includes("Nothing to compact")
-      );
-    },
-    null,
-    { timeout: 30_000, polling: "raf" },
+// The evidence is the observer's samples, not a poll: the pending phase can be shorter than any
+// polling interval, and it is a DOM change either way. This only waits for the run to finish, so
+// nothing is left in flight when the drive moves on.
+const busyDeadline = Date.now() + 90_000;
+let busyNow = true;
+while (Date.now() < busyDeadline) {
+  busyNow = await page.evaluate(() =>
+    document.body.innerText.includes("BUSY"),
   );
-  busyPending = true;
-} catch (error) {
-  observed.busyPendingError = String(error).slice(0, 300);
-  busyPending = false;
+  if (!busyNow) break;
+  await page.waitForTimeout(250);
 }
+const busySettled = !busyNow;
 const busySamples = await readCompactionStatus();
 observed.compactSettle = {
   ...observed.compactSettle,
   busySession: busySamples,
-  busyPending,
+  busySettled,
 };
 assert(
   "a busy session shows the pending state, never the verdict",
-  busyPending &&
+  busySettled &&
     busySamples.some(
       (sample) =>
         sample.state === "requested" &&
         sample.busy === true &&
         sample.verdictVisible === false,
     ) &&
+    // The verdict is held, not discarded: it appears once the run is over, and never before.
     busySamples.every(
       (sample) => !(sample.busy === true && sample.verdictVisible === true),
-    ),
-  `busyPending=${busyPending} states ${JSON.stringify(busySamples)}`,
+    ) &&
+    busySamples.at(-1)?.state !== "requested",
+  `settled=${busySettled} states ${JSON.stringify(busySamples)}`,
 );
 await page.screenshot({
   path: path.join(EVIDENCE_DIR, "compaction-pending-while-busy.png"),

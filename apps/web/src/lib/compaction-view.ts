@@ -263,6 +263,39 @@ export const settleFor = (
     : { state: "idle" };
 
 /**
+ * The index of the first summary at or after `from`, ignoring who wrote what in between.
+ *
+ * This is the *verdict's* scan, not the spend's: "did the compaction I admitted write a summary?"
+ * has one answer even if the operator sent a turn while it was running, and the summary a busy
+ * session places at its next boundary lands after that turn (`settleCompaction`). Hanging a
+ * "nothing to compact" verdict above a row the task did write is the failure this second scan
+ * exists to prevent.
+ */
+const anySummaryFrom = (
+  entries: readonly TranscriptEntry[],
+  from: number,
+): number | undefined => {
+  for (let index = Math.max(0, from); index < entries.length; index += 1) {
+    if (entries[index]?.kind === "compaction") return index;
+  }
+  return undefined;
+};
+
+/**
+ * Whether the pane may show the verdict right now (LOB-224).
+ *
+ * The state machine's answer is not the display's: a compaction admitted into a busy conversation
+ * settles at that run's boundary, so the verdict normally arrives with the run already over — but a
+ * verdict under work still in flight would read as the pane claiming to know an outcome while the
+ * transcript is still being written. So the verdict waits for the session to be idle. It is held,
+ * not discarded: nothing is shown while the run finishes, and the verdict appears when it does.
+ */
+export const verdictVisible = (
+  settle: CompactionSettle,
+  busy: boolean,
+): boolean => settle.state === "settled-nothing" && !busy;
+
+/**
  * Advances what a press has come to, given the session's current task list and transcript.
  *
  * Returns the same object when nothing changed, so the pane can hold this in state and reduce from
@@ -271,12 +304,13 @@ export const settleFor = (
  * - `requested` stays `requested` while the task is live. A projection that does not carry it is
  *   only evidence once it is a **new** projection: the first list after the press may simply be the
  *   one from before the task was admitted.
- * - Once the task has left the list, the transcript decides: a summary this press could have written
- *   means `settled-compacted`, otherwise `settled-nothing`.
+ * - Once the task has left the list, the transcript decides: a summary the compaction wrote means
+ *   `settled-compacted`, otherwise `settled-nothing`. That scan is `anySummaryFrom`, which ignores a
+ *   turn of the operator's in between: the question is what the task wrote, not who else wrote.
  * - `settled-nothing` is not final. A summary that lands after the task left the graph still belongs
  *   to the press (a busy session's summary is placed at its next boundary, so the entry can trail the
  *   task by a turn), and the pane must not keep saying nothing above a row it is charging to the
- *   press. An operator's own turn closes that window — the same rule the spend attribution uses.
+ *   press.
  * - `settled-compacted` is final: a later compaction is a later press. Every settled state drops
  *   back to `idle` when asked about another session, because one pane component serves every route.
  */
@@ -291,7 +325,7 @@ export const settleCompaction = (
   const current = settleFor(settle, input.sessionId);
   if (current.state === "idle" || current.state === "settled-compacted")
     return current;
-  const summary = summaryFrom(input.entries, current.entriesBefore);
+  const summary = anySummaryFrom(input.entries, current.entriesBefore);
   if (current.state === "settled-nothing")
     return summary === undefined
       ? current

@@ -22,6 +22,7 @@ import {
   settleCompaction,
   settleFor,
   spendOf,
+  verdictVisible,
 } from "@/lib/compaction-view";
 import {
   compactSessionAtom,
@@ -247,6 +248,15 @@ export const SessionPane = ({
    */
   const compactRunning = compacting || settleNow.state === "requested";
 
+  /**
+   * Whether the verdict is on screen (LOB-224). The state machine decides what the press came to;
+   * this decides whether it may be said yet, which is not the same thing while a run is in flight.
+   */
+  const showVerdict = verdictVisible(
+    settleNow,
+    view !== null && view.live.busy,
+  );
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-border px-4">
@@ -292,7 +302,9 @@ export const SessionPane = ({
             type="button"
             variant="ghost"
             size="sm"
-            aria-label="Compact session"
+            aria-label={
+              compactRunning ? "Compacting session" : "Compact session"
+            }
             data-compaction-state={
               settleNow.state === "requested"
                 ? "requested"
@@ -497,16 +509,16 @@ export const SessionPane = ({
                  * The region itself is always mounted — `sr-only` while it has nothing to say, so
                  * it costs no layout and no gap — because a screen reader announces a change
                  * *inside* the region it already knows, not a region inserted together with its
-                 * text. `data-compaction-status` carries the state, so a drive never has to match
-                 * on copy.
+                 * text. `data-compaction-status` carries what the press came to, so a drive never
+                 * has to match on copy; whether the verdict is *shown* is `verdictVisible`'s
+                 * question, and that is the difference a busy run makes.
                  */}
                 <div
                   role="status"
                   data-slot="compaction-status"
                   data-compaction-status={settleNow.state}
                   className={
-                    settleNow.state === "requested" ||
-                    settleNow.state === "settled-nothing"
+                    settleNow.state === "requested" || showVerdict
                       ? undefined
                       : "sr-only"
                   }
@@ -521,7 +533,7 @@ export const SessionPane = ({
                       Compacting this session…
                     </div>
                   ) : null}
-                  {settleNow.state === "settled-nothing" ? (
+                  {showVerdict ? (
                     <div className="flex min-h-11 flex-col justify-center gap-1">
                       <p className="text-sm">Nothing to compact</p>
                       <p className="text-xs leading-5 text-muted-foreground">

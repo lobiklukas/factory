@@ -28,6 +28,7 @@ import {
   spendDelta,
   spendHeading,
   spendOf,
+  verdictVisible,
 } from "./compaction-view";
 
 /** The counters a reading carries. `costTotal` defaults to 0, which is faux's case. */
@@ -425,15 +426,17 @@ describe("settleCompaction", () => {
     expect(reduce(press, [], earlier).state).toBe("settled-nothing");
   });
 
-  it("never takes a summary written after the operator's own turn for its own", () => {
-    // A turn sent after the press means the press is in the past: whatever compacts next was caused
-    // by the turn. Same rule `compactionRow` applies to the spend.
+  it("still counts a summary its own task wrote after the operator's turn", () => {
+    // The verdict asks what the task wrote, not who else wrote in between: a busy session's summary
+    // is placed at its next boundary, which is *after* the turn that is running. A verdict hanging
+    // above that row would be the lie this state exists to prevent — the spend line still refuses to
+    // attribute it (`compactionRow` keeps the user-turn rule), and the verdict must not.
     const settled = reduce(
       requested(),
       [],
       [...atPress, entry("user", { id: "user-2" }), entry("compaction")],
     );
-    expect(settled.state).toBe("settled-nothing");
+    expect(settled.state).toBe("settled-compacted");
   });
 
   it("lets a summary that lands after the task left settle the press", () => {
@@ -464,6 +467,41 @@ describe("settleCompaction", () => {
     // session B's graph.
     const settled = reduce(requested(), [], atPress, OTHER_SESSION);
     expect(settled).toEqual({ state: "idle" });
+  });
+});
+
+describe("verdictVisible", () => {
+  const settled = {
+    state: "settled-nothing",
+    sessionId: SESSION,
+    entriesBefore: 2,
+  } as const;
+  const requested = requestedCompaction({
+    sessionId: SESSION,
+    taskId: "7",
+    entriesBefore: 2,
+    tasks: [],
+  });
+
+  it("shows the verdict once the press settled with nothing to cut", () => {
+    expect(verdictVisible(settled, false)).toBe(true);
+  });
+
+  it("holds the verdict back while a run is in flight", () => {
+    // The state is the same; what changes is whether the pane may say it yet. A verdict under work
+    // still in flight reads as an outcome the pane cannot have.
+    expect(verdictVisible(settled, true)).toBe(false);
+  });
+
+  it("has nothing to show for a press still running or one that wrote a summary", () => {
+    expect(verdictVisible(requested, false)).toBe(false);
+    expect(
+      verdictVisible(
+        { state: "settled-compacted", sessionId: SESSION, entriesBefore: 2 },
+        false,
+      ),
+    ).toBe(false);
+    expect(verdictVisible({ state: "idle" }, false)).toBe(false);
   });
 });
 
