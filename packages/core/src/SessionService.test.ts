@@ -88,6 +88,7 @@ import {
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { PullRequest } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
@@ -1561,8 +1562,13 @@ describe("the PR step", () => {
     expect(github.requests).toEqual([
       { method: "POST", url: "/repos/lobiklukas/factory/pulls" },
     ]);
-    expect(result.opened).toEqual({ number: 7, url });
-    expect(result.repeated).toEqual({ number: 7, url });
+    // The first call made the request, so it says so; the retry read the log, so it says that.
+    expect(result.opened).toEqual({ number: 7, url, outcome: "opened" });
+    expect(result.repeated).toEqual({
+      number: 7,
+      url,
+      outcome: "already-open",
+    });
     expect(result.summary.prUrl).toBe(url);
     expect(result.listed?.prUrl).toBe(url);
     // The lost row is restored from the log by a retry, and there is no second PR to show for it.
@@ -1603,11 +1609,48 @@ describe("the PR step", () => {
     );
 
     expect(github.requests).toHaveLength(1);
-    expect(pair.opened).toEqual([
+    // Serialized, so exactly one of the two overlapped calls is the one that opened it.
+    expect(pair.opened.map((answer) => answer.outcome).sort()).toEqual([
+      "already-open",
+      "opened",
+    ]);
+    expect(
+      pair.opened.map(({ number, url: link }) => ({ number, url: link })),
+    ).toEqual([
       { number: 9, url },
       { number: 9, url },
     ]);
     expect(pair.prUrl).toBe(url);
+  }, 120_000);
+
+  it("answers a client that reads only {number, url} exactly as it did before the tag", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/13";
+    const github = makeGithubFake(201, { number: 13, url });
+
+    const answer = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          title: "open a PR for a narrow client",
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR for a narrow client",
+          head: "factory/ses_13",
+          base: "main",
+        };
+        return yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+      }),
+    );
+
+    // The tag is additive: a client holding only `PullRequest` still decodes the answer, and it
+    // holds only the two fields it knows.
+    const narrow = Schema.decodeSync(PullRequest)(answer);
+    expect(narrow).toEqual({ number: 13, url });
+    expect(github.requests).toHaveLength(1);
   }, 120_000);
 
   it("opens one PR per session, not one per branch: the guard is the session's own log", async () => {
@@ -1660,9 +1703,21 @@ describe("the PR step", () => {
     // The ledger, not the answer: a step that reads the log makes no request to make its answer.
     expect(onFirst.requests).toHaveLength(1);
     expect(onSecond.requests).toHaveLength(1);
-    expect(result.openedOne).toEqual({ number: 11, url: firstUrl });
-    expect(result.openedTwo).toEqual({ number: 12, url: secondUrl });
-    expect(result.repeatedOne).toEqual({ number: 11, url: firstUrl });
+    expect(result.openedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "opened",
+    });
+    expect(result.openedTwo).toEqual({
+      number: 12,
+      url: secondUrl,
+      outcome: "opened",
+    });
+    expect(result.repeatedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "already-open",
+    });
     // Each session reports the PR it opened, so neither link was borrowed from the other.
     expect(result.oneUrl).toBe(firstUrl);
     expect(result.twoUrl).toBe(secondUrl);
