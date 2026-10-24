@@ -41,6 +41,59 @@ const makeFakeHttp = (status: number, body: unknown) => {
   return { requests, client };
 };
 
+/**
+ * A fake that answers per request rather than with one canned response, so a case can drive the
+ * duplicate path: the create is refused and the lookup that follows it answers the existing PR.
+ *
+ * `answers` returns the status and body for a request; the record keeps the full URL so a case can
+ * check which API root the client called, not only which path.
+ */
+const makeRoutedFake = (
+  answers: (request: { readonly method: string; readonly path: string }) => {
+    readonly status: number;
+    readonly body: unknown;
+  },
+) => {
+  const requests: Array<{
+    method: string;
+    path: string;
+    href: string;
+    authorization: string | undefined;
+    body: unknown;
+  }> = [];
+  const Json = Schema.fromJsonString(Schema.Unknown);
+  const client = Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request, url) =>
+      Effect.gen(function* () {
+        const reqBody =
+          request.body._tag === "Uint8Array"
+            ? yield* Schema.decodeEffect(Json)(
+                new TextDecoder().decode(request.body.body),
+              )
+            : undefined;
+        const answer = answers({ method: request.method, path: url.pathname });
+        requests.push({
+          method: request.method,
+          path: url.pathname,
+          href: url.href,
+          authorization: request.headers["authorization"],
+          body: reqBody,
+        });
+        const text = yield* Schema.encodeEffect(Json)(answer.body).pipe(
+          Effect.orDie,
+        );
+        const response = new Response(text, {
+          status: answer.status,
+          headers: { "content-type": "application/json" },
+        });
+        return HttpClientResponse.fromWeb(request, response);
+      }).pipe(Effect.orDie),
+    ),
+  );
+  return { requests, client };
+};
+
 describe("buildPrBody", () => {
   it("carries session id, model and spend", () => {
     const body = buildPrBody({
@@ -106,5 +159,116 @@ describe("createPullRequest", () => {
     );
     const result = await Effect.runPromiseExit(program);
     expect(result._tag).toBe("Failure");
+  });
+
+  it("adopts the PR GitHub already opened when it refuses a duplicate", async () => {
+    const existing = {
+      number: 12,
+      url: "https://github.com/o/r/pull/12",
+    };
+    const { requests, client } = makeRoutedFake(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              errors: [
+                { message: "A pull request already exists for o:factory/s-1." },
+              ],
+            },
+          }
+        : { status: 200, body: [existing] },
+    );
+    const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
+    const opened = await Effect.runPromise(
+      createPullRequest({
+        repo: "o/r" as RepoSlug,
+        base: "main",
+        head: "factory/s-1",
+        title: "PR",
+        body: "b",
+        apiUrl: "http://127.0.0.1:9411",
+      }).pipe(
+        Effect.provide(
+          Layer.merge(Layer.succeed(CredentialProvider, provider), client),
+        ),
+      ),
+    );
+    expect(opened).toEqual(existing);
+    // The lookup is what makes the refused create an answer: it asks for this head, on this base.
+    expect(requests.map((request) => request.method)).toEqual(["POST", "GET"]);
+    expect(requests[1]!.path).toBe("/repos/o/r/pulls");
+    expect(requests[1]!.href).toContain("head=o%3Afactory%2Fs-1");
+    expect(requests[1]!.href).toContain("base=main");
+    // And it is the configured root, not api.github.com: the fake never sees github.com.
+    expect(requests[0]!.href.startsWith("http://127.0.0.1:9411/")).toBe(true);
+    // The lookup is authenticated like the create: a private repo refuses the GET otherwise, and
+    // an unauthenticated answer is exactly the case a fake that ignores headers would hide.
+    expect(requests[1]!.authorization).toBe("Bearer tok");
+  });
+
+  it("reports a duplicate that names no existing PR as a typed failure", async () => {
+    const { requests, client } = makeRoutedFake(({ method }) =>
+      method === "POST"
+        ? { status: 422, body: { message: "Validation Failed" } }
+        : { status: 200, body: [] },
+    );
+    const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
+    const result = await Effect.runPromiseExit(
+      createPullRequest({
+        repo: "o/r" as RepoSlug,
+        base: "main",
+        head: "factory/s-1",
+        title: "PR",
+        body: "b",
+        apiUrl: "http://127.0.0.1:9411",
+      }).pipe(
+        Effect.provide(
+          Layer.merge(Layer.succeed(CredentialProvider, provider), client),
+        ),
+      ),
+    );
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") throw new Error("unreachable");
+    const error = result.cause.reasons.flatMap((reason) =>
+      reason._tag === "Fail"
+        ? [reason.error as { operation: string; message: string }]
+        : [],
+    )[0];
+    expect(error?.operation).toBe("createPullRequest");
+    expect(error?.message).toBe("GitHub answered HTTP 422");
+    expect(requests).toHaveLength(2);
+  });
+
+  it("calls GITHUB_API_URL when the caller names no root", async () => {
+    // oxlint-disable-next-line effecttsgo/process-env -- a case points the client at a loopback root.
+    const previous = process.env["GITHUB_API_URL"];
+    // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam under test.
+    process.env["GITHUB_API_URL"] = "http://127.0.0.1:9411";
+    try {
+      const { requests, client } = makeRoutedFake(() => ({
+        status: 201,
+        body: { number: 3, url: "http://127.0.0.1:9411/o/r/pull/3" },
+      }));
+      const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
+      await Effect.runPromise(
+        createPullRequest({
+          repo: "o/r" as RepoSlug,
+          base: "main",
+          head: "factory/s-1",
+          title: "PR",
+          body: "b",
+        }).pipe(
+          Effect.provide(
+            Layer.merge(Layer.succeed(CredentialProvider, provider), client),
+          ),
+        ),
+      );
+      expect(requests[0]!.href.startsWith("http://127.0.0.1:9411/")).toBe(true);
+    } finally {
+      // An empty value is an unset one to the client, so the restore needs no delete.
+      // oxlint-disable-next-line effecttsgo/process-env -- restoring what the case found.
+      process.env["GITHUB_API_URL"] = previous ?? "";
+    }
   });
 });
