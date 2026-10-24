@@ -95,7 +95,6 @@ import {
   submitMessage,
   writeApprovalDecided,
   writeApprovalRequested,
-  writeFork,
   writeRepoBinding,
   writeTaskBinding,
   writeTitle,
@@ -812,9 +811,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             forkedFrom: input.sessionId,
             createdAt: "",
           };
-          /** The entry the copy ended at, as the fork's own entries now hold it. */
-          const takenAt = yield* Ref.make("");
-          const owner = yield* acquireOwnerWith(
+          // The entries, the lineage and the repo binding land in one commit: a fork that exists
+          // at all exists with everything `rebuildIndexes` folds, so there is no window in which a
+          // read shows a fork whose parent the index cannot name. A fork refused after its row was
+          // written (`at` names no entry of the parent, say) removes that row again: an index row
+          // with no log is invisible to the list — which joins the activity index — and would wait
+          // for a rebuild to be swept, so it is not left behind.
+          yield* acquireOwnerWith(
             id,
             row,
             ({ storage, cwd, policy: sessionPolicy }) =>
@@ -825,27 +828,31 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     parent: parentStorage,
                     child: storage,
                     ...(input.at === undefined ? {} : { at: input.at }),
+                    lineage: input.sessionId,
+                    ...(binding.repo === undefined ||
+                    binding.baseRef === undefined
+                      ? {}
+                      : {
+                          binding: {
+                            repo: binding.repo,
+                            baseRef: binding.baseRef,
+                          },
+                        }),
                     model: options.model,
                     cwd,
                     policy: sessionPolicy,
-                  }).pipe(Effect.tap((forked) => Ref.set(takenAt, forked.at))),
+                  }),
                 (parentStorage) =>
                   Effect.promise(() => parentStorage.dispose()),
+              ).pipe(
+                Effect.tapError(() =>
+                  paper(
+                    "remove the refused fork's index row",
+                    sql`DELETE FROM sessions WHERE id = ${id}`,
+                  ).pipe(Effect.ignore),
+                ),
               ),
           );
-          // Both are documents, so the fork's transcript stays exactly the parent's prefix: the
-          // binding because the index row carries it too and a rebuild needs it in the log, the
-          // lineage because it is the only copy of where the fork came from.
-          if (binding.repo !== undefined && binding.baseRef !== undefined) {
-            yield* writeRepoBinding(owner.root, {
-              repo: binding.repo,
-              baseRef: binding.baseRef,
-            });
-          }
-          yield* writeFork(owner.root, {
-            parent: input.sessionId,
-            at: yield* Ref.get(takenAt),
-          });
           yield* touchActivity(id);
           return yield* describe(id, row);
         });

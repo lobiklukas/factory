@@ -109,9 +109,11 @@ export const TaskDoc = defineDoc({
 /**
  * A forked session's lineage, committed to its own log (LOB-180).
  *
- * `parent` is the session it was forked from and `at` the entry the fork was taken at (`""` for a
- * fork of a session with no entries). The `sessions` row carries the same parent as an index, so a
- * summary never folds a log; this document is what a rebuild recovers it from (D7).
+ * `parent` is the session it was forked from. `at` is the fork's *own* copy of the last entry it
+ * took, which is where the fork point sits in this log; entry ids are minted per log, so the
+ * parent's id for that entry would name a different entry here. Nothing reads `at` yet. The
+ * `sessions` row carries the same parent as an index, so a summary never folds a log; this document
+ * is what a rebuild recovers that parent from (D7).
  */
 export const ForkDoc = defineDoc({
   kind: FORK_DOC_KIND,
@@ -375,22 +377,6 @@ export type ForkLineage = {
   readonly at: string;
 };
 
-/** Commit a fork's lineage. Appends to the fork's own log; the index row is the caller's to write. */
-export const writeFork = (
-  conversation: Conversation,
-  lineage: ForkLineage,
-): Effect.Effect<void, SessionError> =>
-  attempt("write fork lineage", () =>
-    conversation.commit(
-      (tx) =>
-        tx.doc(ForkDoc, conversation.id).then((doc) => {
-          doc.parent = lineage.parent;
-          doc.at = lineage.at;
-        }),
-      BACKGROUND_CONTEXT,
-    ),
-  );
-
 /** The message a caller sends a session, in the control plane's terms. */
 export type MessageDraft = {
   readonly content: string;
@@ -566,15 +552,7 @@ export const readForkSource = (
     return records.slice(0, end + 1);
   });
 
-/**
- * Copy a parent's entries into a fork's own log, one commit.
- *
- * Entry ids are minted per log, so every copy gets a new id and every head marker has to be
- * rewritten to the copy of the entry it named. The copy walks oldest first, which is the order a
- * head marker's entry appears in, so the map is always complete by the time a marker needs it: a
- * marker without a copy is a parent log whose entries do not precede their marker, which is a
- * broken log rather than a fork to guess at.
- */
+/** The draft for one copied entry, its head marker rewritten to the copy of the entry it names. */
 const draftOf = (
   entry: EntryRecord,
   copied: ReadonlyMap<EntryId, EntryId>,
@@ -601,32 +579,63 @@ const draftOf = (
   };
 };
 
+/** Where a fork came from, and the repo binding its parent had, in the fork's own commit. */
+type ForkPreamble = {
+  readonly parent: string;
+  readonly binding?: RepoBinding;
+};
+
 /**
- * Copy a parent's entries into a fork's own log, one commit, oldest first.
+ * Copy a parent's entries into a fork's own log, oldest first, in the callers' one commit.
  *
  * Entry ids are minted per log, so every copy gets a new id and every head marker has to be
  * rewritten to the copy of the entry it named. Walking oldest first is what makes that possible:
  * a marker's entry has already been copied by the time the marker is written, and a marker that
  * names something later is a parent log whose entries do not precede their marker — a broken log
  * rather than a fork to guess at, so it fails the commit instead of writing a wrong transcript.
+ *
+ * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
+ * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
+ * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
+ * parent's prefix.
  */
 const copyEntries = (
   tx: Tx,
   conversationId: ConversationId,
   source: readonly EntryRecord[],
-): Promise<void> => {
+  preamble: ForkPreamble,
+): Promise<ForkLineage> => {
   const copied = new Map<EntryId, EntryId>();
-  return source.reduce<Promise<void>>(
-    (previous, entry) =>
-      previous.then(() =>
-        tx
-          .appendEntry(conversationId, draftOf(entry, copied))
-          .then((record) => {
-            copied.set(entry.id, record.id);
+  let at = "";
+  return source
+    .reduce<Promise<void>>(
+      (previous, entry) =>
+        previous.then(() =>
+          tx
+            .appendEntry(conversationId, draftOf(entry, copied))
+            .then((record) => {
+              copied.set(entry.id, record.id);
+              at = String(record.id);
+            }),
+        ),
+      Promise.resolve(),
+    )
+    .then(() =>
+      tx.doc(ForkDoc, conversationId).then((doc) => {
+        doc.parent = preamble.parent;
+        doc.at = at;
+        return doc;
+      }),
+    )
+    .then(() =>
+      preamble.binding === undefined
+        ? undefined
+        : tx.doc(SessionDoc, conversationId).then((doc) => {
+            doc.repo = preamble.binding?.repo ?? "";
+            doc.baseRef = preamble.binding?.baseRef ?? "";
           }),
-      ),
-    Promise.resolve(),
-  );
+    )
+    .then(() => ({ parent: preamble.parent, at }));
 };
 
 /** What a fork needs: the log to copy from, the log to write, and where to run. */
@@ -637,6 +646,10 @@ export type ForkSessionOptions = {
   readonly child: Storage;
   /** The entry to fork at, or absent for the parent's last entry. */
   readonly at?: string;
+  /** The session the fork is taken from, committed into the fork's log as its lineage. */
+  readonly lineage: string;
+  /** The parent's repo binding, committed into the fork's log beside the lineage. */
+  readonly binding?: RepoBinding;
   readonly model: ModelAccess;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
@@ -666,14 +679,19 @@ export const forkSession = (
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
     });
-    yield* attempt("copy the parent's entries", () =>
+    const lineage = yield* attempt("copy the parent's entries", () =>
       opened.root.commit(
-        (tx) => copyEntries(tx, opened.root.id, source),
+        (tx) =>
+          copyEntries(tx, opened.root.id, source, {
+            parent: options.lineage,
+            ...(options.binding === undefined
+              ? {}
+              : { binding: options.binding }),
+          }),
         BACKGROUND_CONTEXT,
       ),
     );
-    const last = source.at(-1);
-    return { ...opened, at: last === undefined ? "" : String(last.id) };
+    return { ...opened, at: lineage.at };
   });
 
 export type SessionLog = {

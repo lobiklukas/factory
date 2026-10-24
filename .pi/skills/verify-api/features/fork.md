@@ -17,7 +17,13 @@ own: `SessionId` is the `log_id`, so two sessions cannot share a log. The copy i
 level up.
 
 The fork works where its parent worked — the same repo and base ref, its own worktree — and it
-carries the parent's `factory.session` binding in its own log so a rebuild keeps that.
+carries the parent's `factory.session` binding in its own log so a rebuild keeps that. The entries,
+the binding and the lineage land in **one commit** on the fork's log, so a fork never exists without
+the documents `rebuildIndexes` folds.
+
+What a fork does **not** copy: the task binding (`factory.task`), the spec and criteria documents,
+and `pi.usage`. A fork of a task-bound session therefore starts unbound, with no spend history —
+neither is transcript, and neither is in this issue's scope.
 
 ## How a user reaches it
 
@@ -49,6 +55,7 @@ The `forkSession` RPC, from the CLI or the dashboard (the dashboard affordance l
 
 - **Lineage in the list.** `SessionListEntry` does not carry `forkedFrom` yet; LOB-182 adds it with
   the dashboard affordance.
+- **A task, spec or spend carried across a fork.** Deliberately not copied (see above).
 - **A fork of a session mid-run.** Every fork here is of a settled or released session; forking a
   session whose run is in flight copies the entries committed so far, and nothing in the drive
   depends on that boundary.

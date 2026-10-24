@@ -850,9 +850,10 @@ describe("fork", () => {
   }, 120_000);
 
   it("refuses an entry id that belongs to another session", async () => {
-    const outcome = await program(
+    const result = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
         const parent = yield* sessions.create({ title: "forking" });
         yield* sessions.send({ sessionId: parent.id, content: "hello" });
         yield* waitUntil(
@@ -861,8 +862,8 @@ describe("fork", () => {
         );
         // Deliberately longer than the parent: entry ids are per-log numbers, so an id from another
         // session that happened to name an entry here would *be* this session's entry, and there is
-        // nothing else it could mean. What a foreign id can be is absent, and that is what this
-        // case drives.
+        // nothing else it could mean (the case below pins that). What a foreign id can be is
+        // absent, and that is what this case drives.
         const elsewhere = yield* sessions.create({ title: "elsewhere" });
         for (const content of ["other", "and another"]) {
           yield* sessions.send({ sessionId: elsewhere.id, content });
@@ -872,14 +873,26 @@ describe("fork", () => {
           );
         }
         const other = yield* sessions.get(elsewhere.id);
+        const own = yield* sessions.get(parent.id);
         const foreign = other.entries.at(-1);
         if (foreign === undefined) throw new Error("unreachable");
-        return yield* Effect.exit(
+        // The premise, checked rather than assumed: this id names no entry of the parent.
+        expect(own.entries.map((entry) => entry.id)).not.toContain(foreign.id);
+        const outcome = yield* Effect.exit(
           sessions.fork({ sessionId: parent.id, at: foreign.id }),
         );
+        // A refused fork leaves no index row behind: the row is written before the log, so the
+        // failure path has to take it back (an orphan row is invisible to the list and would wait
+        // for a rebuild).
+        const strays = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE forked_from = ${parent.id}
+        `;
+        return { outcome, strays };
       }),
     );
 
+    expect(result.strays).toEqual([]);
+    const { outcome } = result;
     expect(Exit.isFailure(outcome)).toBe(true);
     if (Exit.isSuccess(outcome)) throw new Error("unreachable");
     const failure = Exit.findErrorOption(outcome);
@@ -887,6 +900,52 @@ describe("fork", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value._tag).toBe("SessionError");
     expect(failure.value.code).toBe("invalid_input");
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("takes this session's entry when a foreign session used the same number", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "numbers" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        yield* sessions.send({ sessionId: elsewhere.id, content: "other" });
+        yield* waitUntil(
+          sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the other turn to settle",
+        );
+        const own = yield* sessions.get(parent.id);
+        const other = yield* sessions.get(elsewhere.id);
+        // Ids are minted per log, so `1` is an entry of both sessions. Forking this one at that
+        // number means this one's entry: there is no other thing it could name.
+        const shared = other.entries[1];
+        if (shared === undefined) throw new Error("unreachable");
+        expect(own.entries.map((entry) => entry.id)).toContain(shared.id);
+        const fork = yield* sessions.fork({
+          sessionId: parent.id,
+          at: shared.id,
+        });
+        const forked = yield* sessions.get(fork.id);
+        return { own, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.own.entries.slice(0, 2).map((entry) => [entry.kind, entry.text]),
+    );
 
     await program(
       Effect.gen(function* () {
