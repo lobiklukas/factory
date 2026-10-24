@@ -42,6 +42,11 @@ The trigger checks (LOB-188) were run from the `ralph/LOB-188` worktree on 2026-
 `.verify/evidence/lob-188/`. They are a separate drive from `bun drive.ts` — the trigger routes are
 plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run there.
 
+The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` worktree on 2026-10-24
+(faux, Postgres on 5442): **19/19** via `./github-issues.sh`, evidence
+`.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
+and the fake listens on the port the run reserves for this surface.
+
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
 | Create a session        | passing | [create.md](create.md)             |
@@ -59,6 +64,7 @@ plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run t
 | One PR across a kill    | passing | [pr-once.md](pr-once.md)           |
 | Inbound triggers        | passing | [trigger.md](trigger.md)           |
 | Jira adapter            | passing | [jira.md](jira.md)                 |
+| GitHub issues adapter   | passing | [github.md](github.md)             |
 | Approvals               | passing | [approvals.md](approvals.md)       |
 
 ## Deliberately absent

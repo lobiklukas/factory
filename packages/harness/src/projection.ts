@@ -377,16 +377,43 @@ const readModelUsage = (value: JsonValue): ModelUsage => {
 const bucketEntries = (
   bucket: JsonRecord | undefined,
 ): readonly { readonly key: string; readonly usage: ModelUsage }[] =>
-  Object.entries(bucket ?? {}).map(([key, value]) => ({
-    key,
-    usage: readModelUsage(value),
-  }));
+  // Sorted by key so two projections of one ledger compare equal and a client's list does not
+  // reshuffle: `pi.usage`'s buckets are objects, and their key order is not a contract.
+  Object.entries(bucket ?? {})
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, value]) => ({
+      key,
+      usage: readModelUsage(value),
+    }));
 
+/**
+ * `pi.usage` → the session's spend, both buckets (LOB-153).
+ *
+ * A tool's usage has no model identity and is keyed by the tool's name instead; both buckets carry
+ * the same counters. A document that predates `tools` (or a conversation that ran none) reads as
+ * an empty list, so "nothing reported" and "nothing to report" project the same way.
+ */
 export const projectUsageDoc = (
   value: JsonRecord | undefined,
 ): SessionUsage => ({
   models: bucketEntries(objectAt(value, "models")),
+  tools: bucketEntries(objectAt(value, "tools")),
 });
+
+/**
+ * What a session's spend adds up to, in the currency `pi.usage` reports: every model bucket plus
+ * every tool bucket.
+ *
+ * The list surface shows this (`costTotal`) and the rebuild fold writes it (`session_activity`), so
+ * the two have to add the same buckets or a rebuilt index disagrees with the live one for any
+ * session whose spend is not all model spend. Exported rather than inlined in either place for
+ * exactly that reason: one definition, two callers.
+ */
+export const usageCostTotal = (usage: SessionUsage): number =>
+  [...usage.models, ...usage.tools].reduce(
+    (total, bucket) => total + bucket.usage.costTotal,
+    0,
+  );
 
 /**
  * `Harness.taskGraph()` → the live tasks a session reports (LOB-183).

@@ -46,7 +46,7 @@ const view: SessionView = {
   summary,
   entries: [],
   live: { busy: false, tools: [] },
-  usage: { models: [] },
+  usage: { models: [], tools: [] },
   queued: [],
   tasks: [],
 };
@@ -59,7 +59,7 @@ describe("foldSessionEvent and the live-task list", () => {
       workspace: { path: "/tmp/session", commands: {}, commandsSource: "none" },
       entries: [],
       live: { busy: false, tools: [] },
-      usage: { models: [] },
+      usage: { models: [], tools: [] },
       queued: [],
       tasks: [held, waiting],
       approvals: [],
