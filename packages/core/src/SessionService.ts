@@ -54,6 +54,7 @@ import type {
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReplaySessionInput,
   RepoSummary,
   ResetSessionInput,
   SendMessageInput,
@@ -95,12 +96,15 @@ import {
   closeHarness,
   compactSession,
   forkSession,
+  modelAccessFor,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readReplaySource,
+  replaySession,
   resetSession,
   snapshotEvent,
   submitMessage,
@@ -108,11 +112,19 @@ import {
   writeApprovalRequested,
   writeRepoBinding,
   writeTaskBinding,
+  writePage,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
+import type {
+  ListPagesInput,
+  ListPagesOutput,
+  Page,
+  RecordPageInput,
+} from "@repo/domain/Page";
+import { PageStrings } from "@repo/domain/Page";
 import { mintSessionId } from "./ids";
 import type { OpenedPullRequest, PrError } from "./pr";
 import { openPullRequest } from "./prStep";
@@ -156,6 +168,13 @@ export type SessionServiceShape = {
     input: ForkSessionInput,
   ) => Effect.Effect<SessionSummary, SessionError>;
   /**
+   * Replay a session against another model (LOB-198): the same task in a new session, on the model
+   * the caller names, at the source's repo and base ref. The source log is only ever read.
+   */
+  readonly replay: (
+    input: ReplaySessionInput,
+  ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
    * Start a new model context, opened with the handoff note (LOB-181). The transcript keeps the
    * past; the reset entry marks where the old context ended.
    */
@@ -196,6 +215,21 @@ export type SessionServiceShape = {
   readonly listApprovals: (
     sessionId: SessionId,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
+  /**
+   * Record (or replace) one cited knowledge page (LOB-204).
+   *
+   * A page is committed to the log — the `factory.page` document a reader asks for by name, and the
+   * entry a fold and a rebuild can see — and its row is written in the same effect so `listPages`
+   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller, exactly as
+   * the PR step's is `openPullRequest` and no `SessionRpc` member.
+   */
+  readonly recordPage: (
+    input: RecordPageInput,
+  ) => Effect.Effect<Page, SessionError>;
+  /** The pages one session's log holds, by name, read from the derived rows a rebuild refills. */
+  readonly listPages: (
+    input: ListPagesInput,
+  ) => Effect.Effect<ListPagesOutput, SessionError>;
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
    *
@@ -302,6 +336,15 @@ type Binding = {
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
   readonly decision?: ApprovalDecision;
+};
+
+/** One `session_pages` row as the driver returns it; the two jsonb columns are selected as text. */
+type PageRow = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: string;
+  readonly sources: string;
 };
 
 type LiveOwner = {
@@ -1096,6 +1139,87 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Replay a session against another model (LOB-198).
+       *
+       * The one thing a replay changes is the model, so that is the one thing this method resolves
+       * beyond the source: `model` names a `provider/modelId` in the catalog this process was built
+       * with, and a name it does not hold is refused rather than quietly served by the default.
+       *
+       * The source is read through a reader and only read, and it is read *first*, so the two
+       * refusals a replay can earn (no prompt to replay, no repo to replay into) leave nothing
+       * behind: no index row, no log. That is why the row is not written before the source is read
+       * as the fork's is — a fork cannot refuse, because any entry id it is given either names a
+       * parent entry or is a mistake, both of which are decided by the copy.
+       */
+      const replay = (
+        input: ReplaySessionInput,
+      ): Effect.Effect<SessionSummary, SessionError> =>
+        Effect.gen(function* () {
+          const source = yield* requireSession(input.sessionId);
+          const target =
+            input.model === undefined
+              ? options.model
+              : modelAccessFor(options.model, input.model);
+          if (target === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `model ${input.model ?? ""} is not one this process serves`,
+            });
+          }
+          const origin = yield* withReader(input.sessionId, readReplaySource);
+          const binding: Binding = {
+            repo: yield* toRepoSlug(origin.binding.repo),
+            ...(origin.binding.baseRef === ""
+              ? {}
+              : { baseRef: origin.binding.baseRef }),
+          };
+          const id = yield* mintSessionId;
+          const inserted = yield* paper(
+            "create session",
+            insertSession(id, source.title, undefined, binding, null),
+          );
+          const row = inserted[0] ?? {
+            id,
+            title: source.title,
+            repo: binding.repo ?? null,
+            baseRef: binding.baseRef ?? null,
+            prUrl: null,
+            forkedFrom: null,
+            createdAt: "",
+          };
+          // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
+          // the title and the binding are written with the lineage, and the source's prompt is what
+          // starts it. A failure after the row is written removes the row again — an index row with
+          // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
+          // fork's does).
+          yield* acquireOwnerWith(
+            id,
+            row,
+            ({ storage, cwd, policy: sessionPolicy, run }) =>
+              replaySession({
+                source: origin,
+                sourceId: input.sessionId,
+                replayId: id,
+                target: storage,
+                model: target,
+                title: source.title,
+                cwd,
+                policy: sessionPolicy,
+                run,
+              }),
+          ).pipe(
+            Effect.tapError(() =>
+              paper(
+                "remove the refused replay's index row",
+                sql`DELETE FROM sessions WHERE id = ${id}`,
+              ).pipe(Effect.ignore),
+            ),
+          );
+          yield* touchActivity(id);
+          return yield* describe(id, row);
+        });
+
+      /**
        * A reset starts a new model context (LOB-181). It is committed to the log, not held in this
        * process, so a released session resets the same way a owned one does — and the entry it
        * appends is what the transcript shows as the boundary. An empty handoff is no handoff: a
@@ -1365,6 +1489,123 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             `,
           );
         }).pipe(Effect.ignore);
+
+      const pageFromRow = (row: PageRow): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          const links = yield* Schema.decodeEffect(PageStrings)(row.links).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable links: ${String(cause)}`,
+                }),
+            ),
+          );
+          const sources = yield* Schema.decodeEffect(PageStrings)(
+            row.sources,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable sources: ${String(cause)}`,
+                }),
+            ),
+          );
+          return {
+            name: row.name,
+            kind: row.kind,
+            content: row.content,
+            links,
+            sources,
+          };
+        });
+
+      /**
+       * Record (or replace) one cited knowledge page (LOB-204).
+       *
+       * The log is the truth and it is committed once: the `factory.page` member and the entry that
+       * announces it are one commit, exactly as the PR step's document and entry are. The row is a
+       * second statement after it — the same shape as that step's index write — so a failure between
+       * the two leaves the log ahead of `session_pages` until a rebuild refills it, which is why the
+       * rebuild fold exists rather than being an optimisation.
+       *
+       * A citation is stored exactly as given, unknown session id included: `sources` is data, not a
+       * foreign key, so a page that names a session nobody can find still reads back.
+       */
+      const recordPage = (
+        input: RecordPageInput,
+      ): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          // Trimmed once, and the trimmed name is the one written: whitespace is not part of an
+          // identity, and a name that differs only in its padding would be a second page.
+          const name = input.name.trim();
+          if (name.length === 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: "a page needs a non-empty name",
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const page: Page = {
+            name,
+            kind: input.kind,
+            content: input.content,
+            links: input.links,
+            sources: input.sources,
+          };
+          yield* paper("record page", writePage(owner.root, page));
+          const links = yield* paper(
+            "encode page links",
+            Schema.encodeEffect(PageStrings)(page.links),
+          );
+          const sources = yield* paper(
+            "encode page sources",
+            Schema.encodeEffect(PageStrings)(page.sources),
+          );
+          yield* paper(
+            "write page row",
+            sql`
+              INSERT INTO session_pages (session_id, name, kind, content, links, sources)
+              VALUES (
+                ${input.sessionId},
+                ${page.name},
+                ${page.kind},
+                ${page.content},
+                ${links}::jsonb,
+                ${sources}::jsonb
+              )
+              ON CONFLICT (session_id, name) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                content = EXCLUDED.content,
+                links = EXCLUDED.links,
+                sources = EXCLUDED.sources
+            `,
+          );
+          yield* touchActivity(input.sessionId);
+          return page;
+        });
+
+      /** The pages one session's log holds, by name — one query, never a fold of the log. */
+      const listPages = (
+        input: ListPagesInput,
+      ): Effect.Effect<ListPagesOutput, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(input.sessionId);
+          const rows = yield* paper(
+            "list pages",
+            sql<PageRow>`
+              SELECT name, kind, content, links::text AS links, sources::text AS sources
+              FROM session_pages
+              WHERE session_id = ${input.sessionId}
+              ORDER BY name
+            `,
+          );
+          const pages: Page[] = [];
+          for (const row of rows) pages.push(yield* pageFromRow(row));
+          return { pages };
+        });
 
       /**
        * One page of the session list, newest activity first.
@@ -1716,6 +1957,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         interrupt,
         fork,
+        replay,
         reset,
         compact,
         list,
@@ -1724,6 +1966,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestApproval,
         decideApproval,
         listApprovals,
+        recordPage,
+        listPages,
         openPullRequest: openPr,
         close: closeAll,
       });
