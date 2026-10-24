@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import { SquareIcon, XIcon } from "lucide-react";
+import { GitForkIcon, SquareIcon, XIcon } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
 import {
+  forkSessionAtom,
   sendMessageAtom,
   sessionAtom,
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { forgetSession, recordSession } from "@/lib/atoms/session-registry";
+import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -104,9 +108,12 @@ export const SessionPane = ({
 }) => {
   const [result, attach] = useAtom(sessionAtom);
   const send = useAtomSet(sendMessageAtom);
+  const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
   const record = useAtomSet(recordSession);
   const forget = useAtomSet(forgetSession);
+  const navigate = useNavigate();
   const [draft, setDraft] = useState("");
+  const [forking, setForking] = useState(false);
   const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -150,6 +157,48 @@ export const SessionPane = ({
               {queued.length} queued
             </Badge>
           ) : null}
+          {/*
+           * Fork from here (LOB-182). A text button, not an icon-only one: the header has the room,
+           * and "Fork" beside the status chip says what the live session can become without the
+           * reader hovering to find out. It is disabled until the pane has a view, because the fork
+           * names this session and there is nothing to name while the attach is still in flight.
+           */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Fork from here"
+            title="Fork from here"
+            aria-busy={forking}
+            disabled={view === null || forking}
+            onClick={() => {
+              setForking(true);
+              void fork(sessionId)
+                .then((summary) => {
+                  // The child is recorded before navigating: the registry is what the sidebar
+                  // lists, and the pane the route moves to would record it one render later.
+                  record(summary);
+                  void navigate({
+                    to: "/sessions/$sessionId",
+                    params: { sessionId: summary.id },
+                  });
+                })
+                .catch((cause: unknown) => {
+                  toast.error("No fork was created", {
+                    description:
+                      cause instanceof Error ? cause.message : String(cause),
+                  });
+                })
+                .finally(() => setForking(false));
+            }}
+          >
+            {forking ? (
+              <Spinner className="size-3.5 text-muted-foreground" />
+            ) : (
+              <GitForkIcon className="size-4" strokeWidth={1.75} />
+            )}
+            Fork
+          </Button>
           <Button
             type="button"
             variant="ghost"
@@ -161,6 +210,16 @@ export const SessionPane = ({
           </Button>
         </div>
       </header>
+
+      {/*
+       * What the run is doing right now, before what it said (LOB-184). The list is the stream's
+       * projection of Pi Durable's task graph, so a task that settles leaves the strip as it left
+       * the graph — no reload, no history to keep.
+       */}
+      <TaskPanel
+        tasks={view === null ? [] : view.tasks}
+        attaching={attaching}
+      />
 
       {/*
        * The scroller follows the stream: a live run appends while you read, and

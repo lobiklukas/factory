@@ -98,6 +98,102 @@ await page.waitForFunction(
 const sessionPath = new URL(page.url()).pathname;
 observed.sessionPath = sessionPath;
 
+// Feature: the live-tasks panel (LOB-184). Pi Durable's task graph is what the run is doing right
+// now, and `up.sh` scripts a faux command that sleeps, so the bash tool's own task stays on screen
+// long enough to read twice. This block runs before the answer wait on purpose: the task exists only
+// while the tool call is in flight.
+const taskPanel = page.locator("section[aria-label='Live tasks']");
+const taskRows = taskPanel.locator("ul[aria-label='Live task rows'] > li");
+const toolRow = taskRows.filter({ hasText: "pi.tool" }).first();
+const tasksObserved = {};
+let tasksWorked = false;
+try {
+  // A reload would drop this marker, which is how the settle check below stays honest about
+  // "without a reload" rather than inferring it from a screenshot.
+  await page.evaluate(() => {
+    window.__liveTasksNoReload = true;
+  });
+
+  await toolRow.waitFor({ timeout: 20_000 });
+  tasksObserved.row = (await toolRow.innerText()).replaceAll("\n", " ").trim();
+  tasksObserved.count = await taskRows.count();
+
+  // Keyboard: the header's last control tabs into the task list, and the list carries a name.
+  await page.getByRole("button", { name: "Forget this session" }).focus();
+  await page.keyboard.press("Tab");
+  tasksObserved.focus = await page.evaluate(() => ({
+    label: document.activeElement?.getAttribute("aria-label") ?? null,
+    tag: document.activeElement?.tagName ?? null,
+  }));
+
+  // 1280x800: neither the document nor the panel may overflow sideways, and no row may run its
+  // cells into each other (a row whose middle column cannot shrink overlaps instead of scrolling,
+  // so scrollWidth alone cannot see it).
+  await page.setViewportSize({ width: 1280, height: 800 });
+  tasksObserved.overflow = await page.evaluate(() => {
+    const panel = document.querySelector("section[aria-label='Live tasks']");
+    const rows = [
+      ...document.querySelectorAll("ul[aria-label='Live task rows'] > li"),
+    ];
+    const overlapping = rows.filter((row) => {
+      const [badge, middle, age] = [...row.children].map((child) =>
+        child.getBoundingClientRect(),
+      );
+      if (badge === undefined || middle === undefined || age === undefined)
+        return false;
+      return badge.right > middle.left + 0.5 || middle.right > age.left + 0.5;
+    }).length;
+    return {
+      document:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+      panel: panel === null ? -1 : panel.scrollWidth - panel.clientWidth,
+      overlapping,
+    };
+  });
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "live-tasks-1280x800.png"),
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // An age that grows: the row's own clock advances while the task runs.
+  const ageCell = toolRow.locator("[data-task-age]");
+  tasksObserved.ageFirst = Number(await ageCell.getAttribute("data-task-age"));
+  tasksObserved.ageText = (await ageCell.innerText()).trim();
+  await page.waitForTimeout(3_000);
+  tasksObserved.ageSecond = Number(await ageCell.getAttribute("data-task-age"));
+  tasksWorked = true;
+} catch (error) {
+  tasksObserved.error = String(error).slice(0, 300);
+}
+
+assert(
+  "the live task tree shows a running task",
+  tasksWorked && (tasksObserved.row ?? "").toLowerCase().includes("running"),
+  tasksWorked
+    ? `row: ${JSON.stringify(tasksObserved.row)}`
+    : `no pi.tool row within 20s (${tasksObserved.error ?? ""}); panel: ${JSON.stringify((await taskPanel.innerText()).slice(0, 200))}`,
+);
+assert(
+  "the task's age grows",
+  tasksWorked && tasksObserved.ageSecond > tasksObserved.ageFirst,
+  `age ${tasksObserved.ageFirst}s -> ${tasksObserved.ageSecond}s (row said ${JSON.stringify(tasksObserved.ageText)})`,
+);
+assert(
+  "the task list is reachable by keyboard",
+  tasksObserved.focus?.label === "Live task rows",
+  `Tab from the header landed on ${JSON.stringify(tasksObserved.focus)}`,
+);
+assert(
+  "the panel does not overflow at 1280x800",
+  tasksObserved.overflow !== undefined &&
+    tasksObserved.overflow.document <= 0 &&
+    tasksObserved.overflow.panel <= 0 &&
+    tasksObserved.overflow.overlapping === 0,
+  `overflow ${JSON.stringify(tasksObserved.overflow)}`,
+);
+observed.tasks = tasksObserved;
+
 let sessionWorked = false;
 try {
   // Require the end of the story, not the beginning: the answer is rendered only
@@ -128,6 +224,32 @@ assert(
   sessionWorked
     ? `transcript rendered: ${JSON.stringify(paneText.slice(0, 200))}`
     : `no tool result within 40s; pane: ${JSON.stringify(paneText.slice(0, 200))}`,
+);
+
+// A task that settles leaves the panel: the graph no longer carries it, the stream says so, and the
+// strip goes back to its empty state in the same document the run started in.
+await page
+  .waitForFunction(
+    () =>
+      document.querySelectorAll("ul[aria-label='Live task rows'] > li")
+        .length === 0,
+    null,
+    { timeout: 5_000 },
+  )
+  .catch(() => undefined);
+const settledRows = await taskRows.count();
+const settledPanel = (await taskPanel.innerText()).trim();
+const noReload = await page.evaluate(() => window.__liveTasksNoReload === true);
+observed.tasksSettled = { settledRows, settledPanel, noReload };
+assert(
+  "a settled task leaves the panel without a reload",
+  sessionWorked && settledRows === 0 && noReload,
+  `${settledRows} row(s) after the run settled; same document: ${noReload}; panel: ${JSON.stringify(settledPanel.slice(0, 160))}`,
+);
+assert(
+  "an idle session says there are no tasks",
+  settledPanel.includes("No tasks"),
+  `panel: ${JSON.stringify(settledPanel.slice(0, 160))}`,
 );
 
 // The header must label the read path (docs/design.md D8): a fold and a live
@@ -166,6 +288,247 @@ await page.screenshot({
   path: path.join(EVIDENCE_DIR, "dashboard.png"),
   fullPage: true,
 });
+
+// Feature: fork lineage and the fork action (LOB-182). The action has to be reachable with the
+// keyboard alone, so the fork below is taken with Tab and Enter, not a mouse click. See
+// features/fork-lineage.md.
+const parentId = sessionPath.replace("/sessions/", "");
+const focusedName = () =>
+  page.evaluate(() => {
+    const element = document.activeElement;
+    if (!(element instanceof HTMLElement)) return "";
+    return (
+      element.getAttribute("aria-label") ??
+      (element.textContent ?? "").trim().slice(0, 40)
+    );
+  });
+// Start the keyboard walk from the document, so the order recorded below is the tab order a
+// reader gets after a reload rather than whatever the previous check left focused.
+await page.evaluate(() => {
+  if (document.activeElement instanceof HTMLElement)
+    document.activeElement.blur();
+});
+const tabOrder = [];
+for (let step = 0; step < 30; step += 1) {
+  await page.keyboard.press("Tab");
+  const name = await focusedName();
+  tabOrder.push(name);
+  if (
+    tabOrder.includes("Fork from here") &&
+    tabOrder.includes("Forget this session")
+  )
+    break;
+}
+const forkIndex = tabOrder.indexOf("Fork from here");
+const forgetIndex = tabOrder.indexOf("Forget this session");
+observed.tabOrder = tabOrder;
+assert(
+  "the fork action is reachable by keyboard",
+  forkIndex !== -1,
+  `tab order: ${JSON.stringify(tabOrder)}`,
+);
+assert(
+  "the fork action comes before Forget",
+  forgetIndex !== -1 && forkIndex < forgetIndex,
+  `fork at ${forkIndex}, Forget at ${forgetIndex}`,
+);
+// Walk back to the Fork control and activate it with Enter, so the fork below is taken with the
+// keyboard alone rather than by a click the reader could not repeat.
+let onFork = false;
+for (let step = 0; step < 30; step += 1) {
+  if ((await focusedName()) === "Fork from here") {
+    onFork = true;
+    break;
+  }
+  await page.keyboard.press("Shift+Tab");
+}
+assert(
+  "focus returns to the fork action",
+  onFork,
+  `focus is ${await focusedName()}`,
+);
+
+let forkedPath = null;
+try {
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    (previous) => {
+      const match = window.location.pathname.match(/^\/sessions\/(ses_[^/]+)$/);
+      return match !== null && match[1] !== previous;
+    },
+    parentId,
+    { timeout: 30_000 },
+  );
+  forkedPath = new URL(page.url()).pathname;
+} catch {
+  forkedPath = null;
+}
+const childId = forkedPath === null ? "" : forkedPath.replace("/sessions/", "");
+observed.fork = { parentId, forkedPath, childId };
+assert(
+  "the fork action opens the new session",
+  childId !== "" && childId !== parentId,
+  `parent ${parentId}, after Enter ${JSON.stringify(forkedPath ?? page.url())}`,
+);
+
+// Both sessions are listed, and only the child carries the lineage. A row that renders `forked
+// from` for the parent would mean the field is being read off the wrong row.
+let rows = [];
+if (childId !== "") {
+  try {
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll("aside a[href^='/sessions/']").length >= 2,
+      null,
+      { timeout: 15_000 },
+    );
+  } catch {
+    // The assertion below reports the rows it did get.
+  }
+  rows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("aside a[href^='/sessions/']")).map(
+      (anchor) => ({
+        href: anchor.getAttribute("href") ?? "",
+        text: (anchor.textContent ?? "").replace(/\s+/g, " ").trim(),
+      }),
+    ),
+  );
+  observed.sidebarRows = rows;
+  const parentRow = rows.find((row) => row.href === `/sessions/${parentId}`);
+  const childRow = rows.find((row) => row.href === `/sessions/${childId}`);
+  assert(
+    "the sidebar lists both the parent and the fork",
+    parentRow !== undefined && childRow !== undefined,
+    `rows: ${JSON.stringify(rows.map((row) => row.href))}`,
+  );
+  assert(
+    "the fork's row shows its lineage",
+    childRow !== undefined && childRow.text.includes(`forked from ${parentId}`),
+    `child row: ${JSON.stringify(childRow?.text ?? null)}`,
+  );
+  assert(
+    "the parent's row shows no lineage",
+    parentRow !== undefined && !parentRow.text.includes("forked from"),
+    `parent row: ${JSON.stringify(parentRow?.text ?? null)}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "fork-lineage.png"),
+    fullPage: true,
+  });
+
+  // The sidebar reads the browser-local registry (its summaries), so the checks above prove the
+  // summary path only. `SessionListEntry.forkedFrom` is the index fold's half of the contract
+  // (LOB-182): ask the control plane's own list from inside the page, so the assertion covers the
+  // RPC, the schema, and the CORS path the dashboard uses. `_tag: "Request"` + a trailing newline
+  // is the NDJSON envelope `RpcClient.layerProtocolHttp` writes — the same bytes
+  // `apps/web/src/lib/rpc-client.ts` would send for `listSessions`.
+  const listRpc = `drive-list-${Date.now()}`;
+  observed.listSessions = await page.evaluate(
+    async ({ apiUrl, requestId }) => {
+      const response = await fetch(`${apiUrl}/rpc`, {
+        method: "POST",
+        headers: { "content-type": "application/ndjson" },
+        body: `${JSON.stringify({
+          _tag: "Request",
+          id: requestId,
+          tag: "listSessions",
+          payload: { limit: 100 },
+          headers: [],
+        })}\n`,
+      });
+      const text = await response.text();
+      const envelope = text
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .find((message) => message?.requestId === requestId);
+      return {
+        status: response.status,
+        exit: envelope?.exit?._tag ?? null,
+        sessions: envelope?.exit?.value?.sessions ?? null,
+        raw: envelope === undefined ? text.slice(0, 400) : null,
+      };
+    },
+    { apiUrl: API_URL, requestId: listRpc },
+  );
+  const indexSessions = observed.listSessions.sessions ?? [];
+  const indexParent = indexSessions.find((entry) => entry.id === parentId);
+  const indexChild = indexSessions.find((entry) => entry.id === childId);
+  assert(
+    "the list RPC serves the fork's lineage on the child only",
+    indexChild?.forkedFrom === parentId &&
+      indexParent !== undefined &&
+      indexParent.forkedFrom === undefined,
+    `exit ${String(observed.listSessions.exit)}, child forkedFrom ` +
+      `${JSON.stringify(indexChild?.forkedFrom ?? null)}, parent forkedFrom ` +
+      `${JSON.stringify(indexParent?.forkedFrom ?? null)}`,
+  );
+
+  // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
+  // this proves is that the new third line truncates inside the row instead of pushing the document
+  // wider. The header's own clipping at 390 px is pre-existing (the unchanged Forget button is cut
+  // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
+  // `.ralph/polish.md` and the ticket filed for it.
+  await page.setViewportSize({ width: 390, height: 844 });
+  observed.narrowWidth = await page.evaluate((child) => {
+    const fork = Array.from(document.querySelectorAll("header button")).find(
+      (button) => button.getAttribute("aria-label") === "Fork from here",
+    );
+    const box = fork?.getBoundingClientRect();
+    // Readability, not just layout: the lineage line has to sit inside its own row (a `truncate`d
+    // span that broke out of the row would be the same defect as widening the page, one level
+    // down) and still have a box tall enough to be read.
+    const row = document.querySelector(`aside a[href='/sessions/${child}']`);
+    const lineage = Array.from(row?.querySelectorAll("span") ?? []).find(
+      (span) => (span.textContent ?? "").startsWith("forked from "),
+    );
+    const rowBox = row?.getBoundingClientRect();
+    const lineageBox = lineage?.getBoundingClientRect();
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      forkBox:
+        box === undefined
+          ? null
+          : { left: box.left, right: box.right, width: box.width },
+      lineageBox:
+        lineageBox === undefined || rowBox === undefined
+          ? null
+          : {
+              left: lineageBox.left,
+              right: lineageBox.right,
+              width: lineageBox.width,
+              height: lineageBox.height,
+              rowRight: rowBox.right,
+            },
+    };
+  }, childId);
+  assert(
+    "the lineage line does not widen the page at 390px",
+    observed.narrowWidth.scrollWidth <= observed.narrowWidth.clientWidth,
+    `scrollWidth ${observed.narrowWidth.scrollWidth} vs clientWidth ${observed.narrowWidth.clientWidth}`,
+  );
+  const lineageBox = observed.narrowWidth.lineageBox;
+  assert(
+    "the lineage line stays readable inside its row at 390px",
+    lineageBox !== null &&
+      lineageBox.width > 0 &&
+      lineageBox.height > 0 &&
+      lineageBox.right <= lineageBox.rowRight + 1,
+    `lineage ${JSON.stringify(lineageBox)}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "fork-lineage-narrow.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+}
 
 // Feature: the tool-call disclosure. Collapsed by default (a coding run emits
 // dozens), and it opens. See features/transcript.md.
