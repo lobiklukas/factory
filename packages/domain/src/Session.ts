@@ -10,13 +10,13 @@
  * reaching the wire contract and the dashboard.
  */
 import { Schema } from "effect";
+import { ApprovalRequest } from "@repo/domain/Approval";
+import { SessionId, Timestamp } from "@repo/domain/Ids";
 
-/** Ten characters of millisecond timestamp then sixteen of randomness, Crockford base32. */
-export const SessionId = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/)),
-  Schema.brand("SessionId"),
-);
-export type SessionId = typeof SessionId.Type;
+// The two scalars every contract names. They are defined in `Ids` so `Approval` can name a session
+// without importing this module, which imports it back for the snapshot's pending approvals; the
+// re-export keeps `@repo/domain/Session` the place a caller imports them from.
+export { SessionId, Timestamp } from "@repo/domain/Ids";
 
 /** Whether these reads come from a harness running here, or from folding the log (D8). */
 export const SessionMode = Schema.Literals(["live", "historical"]);
@@ -24,10 +24,6 @@ export type SessionMode = typeof SessionMode.Type;
 
 export const SessionStatus = Schema.Literals(["idle", "busy"]);
 export type SessionStatus = typeof SessionStatus.Type;
-
-/** ISO 8601, UTC. */
-export const Timestamp = Schema.String;
-export type Timestamp = typeof Timestamp.Type;
 
 /**
  * A repository the factory knows about, as `owner/name` (D10's branch, D14's credential, and a
@@ -209,6 +205,11 @@ export const SessionSnapshotFields = {
   usage: SessionUsage,
   queued: Schema.Array(QueuedMessage),
   tasks: Schema.Array(SessionTask),
+  /**
+   * The approvals still waiting for a decision, oldest first (LOB-147). Folded from the log, so a
+   * snapshot read after its owner was released still reports them; a settled approval is not here.
+   */
+  approvals: Schema.Array(ApprovalRequest),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
