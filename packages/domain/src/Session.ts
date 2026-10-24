@@ -297,6 +297,12 @@ export const SessionListEntry = Schema.Struct({
   costTotal: Schema.Finite,
   /** The URL of the PR opened for this session, once one exists. */
   prUrl: Schema.optional(Schema.String),
+  /**
+   * The session this one was forked from, once one was (LOB-180/LOB-182). Read from the index row,
+   * which `rebuildIndexes` refolds from the fork's own `factory.fork` document, so the list can show
+   * lineage without folding a log (R6).
+   */
+  forkedFrom: Schema.optional(SessionId),
 });
 export type SessionListEntry = typeof SessionListEntry.Type;
 

@@ -13,6 +13,7 @@ the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required check
 | Routing                 | passing | [routing.md](routing.md)                   |
 | Browser reaches the API | passing | [api-connectivity.md](api-connectivity.md) |
 | Session stream          | passing | [session-stream.md](session-stream.md)     |
+| Fork lineage            | passing | [fork-lineage.md](fork-lineage.md)         |
 | Transcript              | passing | [transcript.md](transcript.md)             |
 | Live tasks              | passing | [live-tasks.md](live-tasks.md)             |
 
