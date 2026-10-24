@@ -9,6 +9,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Message } from "@earendil-works/pi-ai";
+import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -17,12 +19,17 @@ import { createModelAccess } from "./models";
 import { diffView, projectView } from "./projection";
 import {
   closeHarness,
+  forkSession,
   isBusy,
   openSession,
+  readLiveSnapshot,
+  readPromptSections,
   readPullRequestDoc,
   readSessionLog,
+  resetSession,
   submitMessage,
   writePullRequestDoc,
+  type SessionRef,
 } from "./session";
 
 const runtime = ManagedRuntime.make(DatabaseLive);
@@ -31,6 +38,24 @@ const model = createModelAccess("faux");
 
 const workdir = mkdtempSync(join(tmpdir(), "factory-harness-"));
 const logId = `harness-test-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+/** The control plane's view of this log, for the tests that read a snapshot rather than a fold. */
+const ref: SessionRef = {
+  id: SessionIdSchema.make(`ses_${"0".repeat(26)}`),
+  title: "",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  workspace: { path: workdir, commands: {}, commandsSource: "none" },
+};
+
+/** Model messages as text, so a context can be compared to what was written into it. */
+const messageTexts = (messages: readonly Message[]): readonly string[] =>
+  messages.map((message) =>
+    typeof message.content === "string"
+      ? message.content
+      : message.content
+          .flatMap((block) => (block.type === "text" ? [block.text] : []))
+          .join(""),
+  );
 
 let sql: SqlClient;
 
@@ -50,8 +75,8 @@ afterAll(async () => {
   await runtime.dispose();
 });
 
-const openStorage = () =>
-  PostgresStorage.open(sql, { logId, mode: "owner" }, context);
+const openStorage = (id: string = logId) =>
+  PostgresStorage.open(sql, { logId: id, mode: "owner" }, context);
 
 /** One turn through the session, returning the settled transcript. */
 const turn = (
@@ -136,6 +161,397 @@ describe("a session over PostgresStorage", () => {
     expect(second.entries.slice(0, first.entries.length)).toEqual(
       first.entries,
     );
+  }, 120_000);
+
+  /**
+   * LOB-181: a reset is a new model context, not a lost transcript.
+   *
+   * The two halves are the point and they pull in opposite directions: `ContextView.messages` — what
+   * the next provider request carries — must hold the handoff alone, while the transcript must still
+   * hold the turns before it, with the `reset` entry between them. Mutation checked: dropping the
+   * full-log scan in `readConversationEntries` / `readAllEntries` (back to the newest head marker)
+   * leaves the transcript starting at the reset entry, and both transcript assertions go red.
+   */
+  it("a reset starts a fresh context and keeps the past in the transcript", async () => {
+    const handoff = "we were fixing the flaky login test; continue from there";
+    const resetLog = `${logId}-reset`;
+    const storage = await openStorage(resetLog);
+
+    const live = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, {
+          content: "before the reset",
+          requestId: "reset-before",
+        });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const before = yield* readLiveSnapshot(root, ref);
+        expect(before.entries.map((entry) => entry.kind)).toContain("user");
+
+        yield* resetSession(root, handoff);
+
+        // What the model sees: the handoff, and nothing from before it.
+        const opened = yield* Effect.promise(() => root.context(context));
+        expect(messageTexts(opened.messages)).toEqual([handoff]);
+
+        // What a reader sees: the whole transcript, with the reset marked where it happened.
+        const after = yield* readLiveSnapshot(root, ref);
+        const kinds = after.entries.map((entry) => entry.kind);
+        expect(kinds.slice(0, before.entries.length)).toEqual(
+          before.entries.map((entry) => entry.kind),
+        );
+        expect(kinds).toContain("reset");
+        expect(
+          after.entries.find((entry) => entry.kind === "reset")?.text,
+        ).toBe(handoff);
+        expect(after.entries.length).toBe(before.entries.length + 1);
+
+        yield* closeHarness(harness);
+        return after;
+      }),
+    );
+
+    // The fold is the other read path (D8), and it has to agree — including the history.
+    const folded = await runtime.runPromise(
+      readSessionLog(await openStorage(resetLog)),
+    );
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+
+  /**
+   * LOB-181: a reset with no handoff still starts a context (an empty one) and still marks the
+   * boundary, so "reset" and "reset with notes" are one behaviour with one shape.
+   */
+  it("a reset with no handoff leaves an empty context and marks the entry", async () => {
+    const storage = await openStorage(`${logId}-bare-reset`);
+    const { emptyContext, entries } = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, {
+          content: "a turn to forget",
+          requestId: "bare-reset-before",
+        });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+
+        yield* resetSession(root, undefined);
+
+        const opened = yield* Effect.promise(() => root.context(context));
+        const after = yield* readLiveSnapshot(root, ref);
+        yield* closeHarness(harness);
+        return {
+          emptyContext: messageTexts(opened.messages),
+          entries: after.entries,
+        };
+      }),
+    );
+
+    expect(emptyContext).toEqual([]);
+    const resetEntry = entries.find((entry) => entry.kind === "reset");
+    expect(resetEntry?.text).toBe("");
+    // The turn before it is still readable, which is what makes the entry a boundary.
+    expect(entries.some((entry) => entry.text === "a turn to forget")).toBe(
+      true,
+    );
+  }, 120_000);
+});
+
+/**
+ * A window whose derived thresholds a test can actually reach: 8000 tokens leaves 2000 for the
+ * answer, so a context past 6000 blocks and compacts before its next request. The default faux
+ * window (128k) would need a sixty-thousand-token transcript to prove the same thing.
+ */
+const smallWindow = createModelAccess("faux", { contextWindow: 8_000 });
+
+/**
+ * LOB-185: a session compacts on a policy (B4), and the policy is the model's window.
+ *
+ * Mutation checked: opening the session without `compactionPolicyFor` reverts to pi-durable's
+ * pinned defaults, which keep 20k tokens verbatim — more than this whole transcript — so range
+ * selection finds no cut, no summary is committed, and the first case's head assertion goes red
+ * (`expected undefined to be 'pi.compaction'`). The second case is the other half of the same rule:
+ * a session that stays under the threshold must not summarize anything, so a policy that compacts
+ * on every turn fails it.
+ */
+describe("compaction", () => {
+  it("compacts once past the model's threshold and heads the context with the summary", async () => {
+    const compactLog = `${logId}-threshold`;
+    const storage = await openStorage(compactLog);
+
+    const live = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model: smallWindow,
+          cwd: workdir,
+        });
+        const first = yield* submitMessage(root, {
+          content: "the turn before the threshold",
+          requestId: "compact-before",
+        });
+        yield* Effect.promise(() => first.submission.wait(context));
+
+        // One long message crosses the threshold. The *next* request is what compacts: it blocks
+        // on the summarizer, then goes out from the summary.
+        const crossing = yield* submitMessage(root, {
+          content: "x".repeat(40_000),
+          requestId: "compact-crossing",
+        });
+        const settled = yield* Effect.promise(() =>
+          crossing.submission.wait(context),
+        );
+        expect(settled.status).toBe("done");
+
+        // What the model sees: a context that starts at the summary entry.
+        const opened = yield* Effect.promise(() => root.context(context));
+        // What a reader sees: the transcript, summary included.
+        const snapshot = yield* readLiveSnapshot(root, ref);
+        yield* closeHarness(harness);
+        return { head: opened.head?.kind, entries: snapshot.entries };
+      }),
+    );
+
+    expect(live.head).toBe("pi.compaction");
+
+    // A head marker is committed state, so a reopen has to find it again instead of folding a
+    // transcript whose model context starts at the beginning (the point of D8's head marker).
+    const reopenedHead = await runtime.runPromise(
+      Effect.gen(function* () {
+        const reopened = yield* openSession({
+          storage: yield* Effect.promise(() => openStorage(compactLog)),
+          model: smallWindow,
+          cwd: workdir,
+        });
+        const opened = yield* Effect.promise(() =>
+          reopened.root.context(context),
+        );
+        yield* closeHarness(reopened.harness);
+        return opened.head?.kind;
+      }),
+    );
+    expect(reopenedHead).toBe("pi.compaction");
+    const summaries = live.entries.filter(
+      (entry) => entry.kind === "compaction",
+    );
+    // One crossing, one summary: a policy that compacted on every turn would leave more.
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.text).toContain("summary");
+    // The transcript keeps everything the summary stands in for, which is what makes it checkable.
+    expect(
+      live.entries.some(
+        (entry) => entry.text === "the turn before the threshold",
+      ),
+    ).toBe(true);
+
+    // The fold is the other read path (D8) and must not disagree, summary included.
+    const folded = await runtime.runPromise(
+      readSessionLog(await openStorage(compactLog)),
+    );
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+
+  it("commits no compaction entry while the context stays under the threshold", async () => {
+    const storage = await openStorage(`${logId}-under-threshold`);
+    const entries = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage,
+          model: smallWindow,
+          cwd: workdir,
+        });
+        // Two ordinary turns are a thousand tokens: nowhere near the blocking threshold, so
+        // nothing may be summarized away from the model.
+        for (const [index, content] of ["one", "two"].entries()) {
+          const submitted = yield* submitMessage(root, {
+            content,
+            requestId: `under-threshold-${index}`,
+          });
+          const settled = yield* Effect.promise(() =>
+            submitted.submission.wait(context),
+          );
+          expect(settled.status).toBe("done");
+        }
+        const snapshot = yield* readLiveSnapshot(root, ref);
+        yield* closeHarness(harness);
+        return snapshot.entries;
+      }),
+    );
+
+    expect(entries.some((entry) => entry.kind === "compaction")).toBe(false);
+    expect(entries.filter((entry) => entry.kind === "user")).toHaveLength(2);
+  }, 120_000);
+});
+
+/**
+ * A fork copies the parent's entries, so the interesting part is not the entries — it is the head
+ * marker a `reset` writes: entry ids are minted per log, so the copy has to rewrite the marker to
+ * the copy of the entry it names, and a copy that drops it makes the fork's model context reach
+ * back past what the parent's own context carries. This case therefore resets the parent in the
+ * middle, so that the parent's transcript and its *context* differ (LOB-181: a head marker bounds
+ * the context, not the transcript): a fork that copied the entries but not the marker would show
+ * `before the reset` in its context where the parent shows nothing.
+ */
+describe("forking a session", () => {
+  it("copies the parent's transcript through the fork point, head marker included", async () => {
+    const parentLog = `${logId}-fork-parent`;
+    const childLog = `${logId}-fork-child`;
+    const owner = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "owner" }, context);
+    const reader = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "reader" }, context);
+
+    const parentContext = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage: yield* Effect.promise(() => owner(parentLog)),
+          model,
+          cwd: workdir,
+        });
+        const before = yield* submitMessage(root, {
+          content: "before the reset",
+          requestId: "before the reset",
+        });
+        yield* Effect.promise(() => before.submission.wait(context));
+        // A reset starts a new context and carries the handoff as a user message (Pi Durable's
+        // `Conversation.reset`).
+        yield* Effect.promise(() => root.reset("handoff note", context));
+        const after = yield* submitMessage(root, {
+          content: "after the reset",
+          requestId: "after the reset",
+        });
+        yield* Effect.promise(() => after.submission.wait(context));
+        // What the parent's model is sent, which is what the copied head marker has to reproduce.
+        const opened = yield* Effect.promise(() => root.context(context));
+        yield* closeHarness(harness);
+        return messageTexts(opened.messages);
+      }),
+    );
+
+    const parentFold = await runtime.runPromise(
+      Effect.gen(function* () {
+        const opened = yield* Effect.promise(() => reader(parentLog));
+        return yield* readSessionLog(opened);
+      }),
+    );
+    // The premise: the parent's *context* begins at the reset, so the turn before it is still in the
+    // transcript and no longer in what the model is sent.
+    expect(
+      parentFold.entries.filter((entry) => entry.kind === "reset"),
+    ).toHaveLength(1);
+    expect(
+      parentFold.entries.some((entry) => entry.text === "before the reset"),
+    ).toBe(true);
+    expect(parentContext).not.toContain("before the reset");
+    expect(parentContext).toContain("handoff note");
+
+    const forked = await runtime.runPromise(
+      Effect.gen(function* () {
+        const child = yield* Effect.promise(() => owner(childLog));
+        const opened = yield* forkSession({
+          parent: yield* Effect.promise(() => reader(parentLog)),
+          child,
+          lineage: parentLog,
+          model,
+          cwd: workdir,
+        });
+        const view = yield* Effect.promise(() => opened.root.context(context));
+        yield* closeHarness(opened.harness);
+        const reread = yield* Effect.promise(() => reader(childLog));
+        const log = yield* readSessionLog(reread);
+        yield* Effect.promise(() => reread.dispose());
+        return { at: opened.at, log, context: messageTexts(view.messages) };
+      }),
+    );
+
+    // The fork's transcript is the parent's, entry for entry — the prefix the issue asks for.
+    expect(forked.log.entries.map((entry) => entry.text)).toEqual(
+      parentFold.entries.map((entry) => entry.text),
+    );
+    // And its context is the parent's too, which is only true if the head marker was copied and
+    // rewritten to the fork's own entry id.
+    expect(forked.context).toEqual(parentContext);
+    expect(forked.log.forkedFrom).toBe(parentLog);
+    expect(forked.at).not.toBe("");
+  }, 120_000);
+});
+
+/** The body a run is told, with no trailing newline so the rendered tag is exact. */
+const SPECIFY_BODY =
+  "# Specify\n\nClarify the goal, scope, acceptance criteria, and risks.";
+const REVIEW_BODY = "# Review\n\nReport evidenced findings.";
+
+describe("a run's column decides its prompt", () => {
+  it("commits each skill body as one prompt section, in the column's order", async () => {
+    const skillsLogId = `harness-skills-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+    const sections = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, skillsLogId),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+          run: {
+            column: "specifying",
+            skills: [
+              { name: "specify", body: SPECIFY_BODY },
+              { name: "review", body: REVIEW_BODY },
+            ],
+          },
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const prompts = yield* readPromptSections(storage);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return prompts;
+      }),
+    );
+
+    // The sections are Pi Durable's tagged form, which is what the model is actually sent: the
+    // committed `pi.system` entry replays these before the first request of the run.
+    expect(sections["skill_specify"]).toBe(
+      `<skill_specify>\n${SPECIFY_BODY}\n</skill_specify>`,
+    );
+    expect(sections["skill_review"]).toBe(
+      `<skill_review>\n${REVIEW_BODY}\n</skill_review>`,
+    );
+    // Nothing the column did not name is injected, and the order is the column's.
+    expect(Object.keys(sections)).toEqual(["skill_specify", "skill_review"]);
+  }, 120_000);
+
+  it("injects nothing when the run's column names no skills", async () => {
+    const plainLogId = `harness-plain-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+    const sections = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, plainLogId),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const prompts = yield* readPromptSections(storage);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return prompts;
+      }),
+    );
+
+    expect(sections).toEqual({});
   }, 120_000);
 });
 

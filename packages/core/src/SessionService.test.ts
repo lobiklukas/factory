@@ -54,7 +54,11 @@ import type {
   SessionListEntry,
 } from "@repo/domain/Session";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import { DatabaseConfig, DatabaseLive } from "@repo/storage-postgres";
+import {
+  DatabaseConfig,
+  DatabaseLive,
+  PostgresStorage,
+} from "@repo/storage-postgres";
 import {
   Clock,
   ConfigProvider,
@@ -74,9 +78,10 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createModelAccess } from "@repo/harness";
+import { createModelAccess, readPromptSections } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -739,6 +744,399 @@ describe("SessionService", () => {
     );
     expect(titled).toBe("fix the flaky login test");
   });
+});
+
+/**
+ * Forking a session at one of its entries (LOB-180).
+ *
+ * A session is a log (D7), so every claim here is about two logs: the fork keeps the parent's
+ * entries through the fork point and nothing after it, and a message admitted to either one lands
+ * in that one only. The parent is deliberately left owned while the fork is taken — that is the
+ * interesting case, because the fork reads a log another owner is writing.
+ */
+describe("fork", () => {
+  it("forks at the last entry and the two transcripts diverge", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the parent's first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        const forked = yield* sessions.get(fork.id);
+
+        // The fork's own turn: it must not reach the parent's transcript.
+        yield* sessions.send({ sessionId: fork.id, content: "fork only" });
+        yield* waitUntil(
+          sessions.get(fork.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the fork's turn to settle",
+        );
+        const diverged = yield* sessions.get(fork.id);
+        const parentAfter = yield* sessions.get(parent.id);
+
+        return {
+          parent: parent.id,
+          before,
+          fork,
+          forked,
+          diverged,
+          parentAfter,
+        };
+      }),
+    );
+
+    expect(result.fork.id).not.toBe(result.parent);
+    expect(result.fork.forkedFrom).toBe(result.parent);
+    expect(result.fork.mode).toBe("live");
+    expect(result.fork.title).toBe("forking");
+
+    // The fork's transcript starts as the parent's, text for text and kind for kind.
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+    expect(result.forked.session.forkedFrom).toBe(result.parent);
+
+    // Both transcripts grow, and neither carries the other's message.
+    expect(result.diverged.entries.length).toBeGreaterThan(
+      result.forked.entries.length,
+    );
+    expect(
+      result.diverged.entries.some((entry) => entry.text.includes("fork only")),
+    ).toBe(true);
+    expect(
+      result.parentAfter.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("forks at a named entry, so the fork ends where the parent had not", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "at an entry" });
+        yield* sessions.send({ sessionId: parent.id, content: "first" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+        // An entry in the middle of the transcript, not its last one.
+        const at = before.entries[1];
+        if (at === undefined) throw new Error("unreachable");
+        const fork = yield* sessions.fork({ sessionId: parent.id, at: at.id });
+        const forked = yield* sessions.get(fork.id);
+        return { before, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.before.entries
+        .slice(0, 2)
+        .map((entry) => [entry.kind, entry.text]),
+    );
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("refuses an entry id that belongs to another session", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        // Deliberately longer than the parent: entry ids are per-log numbers, so an id from another
+        // session that happened to name an entry here would *be* this session's entry, and there is
+        // nothing else it could mean (the case below pins that). What a foreign id can be is
+        // absent, and that is what this case drives.
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        for (const content of ["other", "and another"]) {
+          yield* sessions.send({ sessionId: elsewhere.id, content });
+          yield* waitUntil(
+            sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+            "the other turn to settle",
+          );
+        }
+        const other = yield* sessions.get(elsewhere.id);
+        const own = yield* sessions.get(parent.id);
+        const foreign = other.entries.at(-1);
+        if (foreign === undefined) throw new Error("unreachable");
+        // The premise, checked rather than assumed: this id names no entry of the parent.
+        expect(own.entries.map((entry) => entry.id)).not.toContain(foreign.id);
+        const outcome = yield* Effect.exit(
+          sessions.fork({ sessionId: parent.id, at: foreign.id }),
+        );
+        // A refused fork leaves no index row behind: the row is written before the log, so the
+        // failure path has to take it back (an orphan row is invisible to the list and would wait
+        // for a rebuild).
+        const strays = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE forked_from = ${parent.id}
+        `;
+        return { outcome, strays };
+      }),
+    );
+
+    expect(result.strays).toEqual([]);
+    const { outcome } = result;
+    expect(Exit.isFailure(outcome)).toBe(true);
+    if (Exit.isSuccess(outcome)) throw new Error("unreachable");
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value._tag).toBe("SessionError");
+    expect(failure.value.code).toBe("invalid_input");
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("takes this session's entry when a foreign session used the same number", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "numbers" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        yield* sessions.send({ sessionId: elsewhere.id, content: "other" });
+        yield* waitUntil(
+          sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the other turn to settle",
+        );
+        const own = yield* sessions.get(parent.id);
+        const other = yield* sessions.get(elsewhere.id);
+        // Ids are minted per log, so `1` is an entry of both sessions. Forking this one at that
+        // number means this one's entry: there is no other thing it could name.
+        const shared = other.entries[1];
+        if (shared === undefined) throw new Error("unreachable");
+        expect(own.entries.map((entry) => entry.id)).toContain(shared.id);
+        const fork = yield* sessions.fork({
+          sessionId: parent.id,
+          at: shared.id,
+        });
+        const forked = yield* sessions.get(fork.id);
+        return { own, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.own.entries.slice(0, 2).map((entry) => [entry.kind, entry.text]),
+    );
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("keeps the lineage in the fork's log, so a rebuild recovers it", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "lineage" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        yield* sessions.close;
+        // The index is a cache: wiping the column must not lose who the fork came from, because
+        // the fork's log carries its own `factory.fork` document (D7).
+        yield* sql`UPDATE sessions SET forked_from = NULL WHERE id = ${fork.id}`;
+        const blanked = yield* sessions.get(fork.id);
+        const report = yield* rebuildIndexes;
+        const refolded = yield* sessions.get(fork.id);
+        return { parent: parent.id, fork: fork.id, blanked, report, refolded };
+      }),
+    );
+
+    expect(result.blanked.session.forkedFrom).toBeUndefined();
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.refolded.session.forkedFrom).toBe(result.parent);
+  }, 120_000);
+});
+
+/**
+ * Reset (LOB-181): a new model context, opened with the handoff note, over the same transcript.
+ *
+ * What the service owes: the entry is in the log (not in this process), the transcript keeps the
+ * turns before it, and a released session folds to the same thing the live read showed. The model
+ * context itself is read at the harness boundary, where a `ContextView` is available
+ * (`packages/harness/src/session.test.ts`); this is the contract the RPC surface serves.
+ */
+describe("reset", () => {
+  it("keeps the transcript, marks the boundary, and folds to the same entries", async () => {
+    const { resetSummary, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "resetting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "the turn the reset ends",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the reset to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const resetSummary = yield* sessions.reset({
+          sessionId: created.id,
+          handoff: "we were fixing the flaky login test",
+        });
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { resetSummary, before, live, folded };
+      }),
+    );
+
+    expect(resetSummary.id).toBe(live.session.id);
+    expect(resetSummary.status).toBe("idle");
+    // The title is untouched: a reset clears the context, not the session.
+    expect(live.session.title).toBe("resetting");
+
+    const resetEntry = live.entries.find((entry) => entry.kind === "reset");
+    expect(resetEntry?.text).toBe("we were fixing the flaky login test");
+    expect(live.entries.length).toBe(before.entries.length + 1);
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, history included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  });
+
+  it("resets to an entry with no text for a missing or blank handoff", async () => {
+    const entries = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "bare reset" });
+        yield* sessions.reset({ sessionId: created.id });
+        // A whitespace-only note is no note: a context that opens with a blank message is worse
+        // than one that opens with nothing, and the service is where that is decided.
+        yield* sessions.reset({ sessionId: created.id, handoff: "   \n " });
+        const snapshot = yield* sessions.get(created.id);
+        yield* sessions.close;
+        return snapshot.entries;
+      }),
+    );
+
+    const resets = entries.filter((entry) => entry.kind === "reset");
+    expect(resets).toHaveLength(2);
+    expect(resets.map((entry) => entry.text)).toEqual(["", ""]);
+  });
+});
+
+/**
+ * B4's manual half (LOB-185): `compact` admits a compaction task, answers its id, and the summary
+ * the task writes is a transcript entry — one the fold agrees with, so a released session shows it
+ * too. The model context itself (that the next request starts at the summary) is the harness's
+ * contract and is read there (`packages/harness/src/session.test.ts`).
+ *
+ * The message is long on purpose: Pi Durable summarizes an *old prefix* and keeps the newest
+ * `keepRecentTokens` verbatim, so a transcript shorter than that tail has nothing to compact and
+ * the task completes without a summary. 90k characters is ~22.5k tokens, past the 20k tail this
+ * window's policy keeps.
+ */
+describe("compact", () => {
+  it("admits a compaction task and lands its summary in the transcript", async () => {
+    const { result, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "compacting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "z".repeat(90_000),
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the compaction to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const result = yield* sessions.compact({
+          sessionId: created.id,
+          instructions: "  focus on the long message  ",
+        });
+        // The task settles in the background, so the entry is what to wait for — not `busy`,
+        // which a compaction never sets (it is not a run).
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map((snapshot) =>
+                snapshot.entries.some((entry) => entry.kind === "compaction"),
+              ),
+            ),
+          "the compaction's summary entry",
+        );
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { result, before, live, folded };
+      }),
+    );
+
+    // The call answers the task's id and the session it belongs to; the work is the task's.
+    expect(result.taskId.length).toBeGreaterThan(0);
+    expect(result.session.id).toBe(live.session.id);
+    // A compaction is not a run: the session is idle before it, while it works, and after it.
+    expect(result.session.status).toBe("idle");
+
+    const summaries = live.entries.filter(
+      (entry) => entry.kind === "compaction",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.text.length).toBeGreaterThan(0);
+    // Nothing is dropped: the turns the summary stands in for are still readable above it.
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, summary included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
 });
 
 describe("repo binding", () => {
@@ -2619,6 +3017,200 @@ describe("approvals", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
   });
+});
+
+/**
+ * The run's prompt is resolved from its column (docs/board.md B6, LOB-174).
+ *
+ * The claim is about what the model was *told*, so it is read from the log rather than from the
+ * extension that built it: `pi.system` entries are the system prompt Pi Durable replays before a
+ * request, and they are committed, so a run that has already answered still says what it was told.
+ *
+ * Each case makes its own board instance over definition version 2
+ * (`0010_seed_pipeline_skills.ts`), the version that binds the seeded skills to their stages, and
+ * its own card. Sessions here are scratch ones (no repo), because the column is the only thing
+ * under test — a repo would add a clone that says nothing about the prompt.
+ */
+describe("a run's prompt comes from its column", () => {
+  /** A board instance over the definition version that binds skills to the stages (0010). */
+  const newBoard = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const id = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (
+        ${id},
+        ${`factory-test/${randomBytes(3).toString("hex")}`},
+        'default',
+        2
+      )
+    `;
+    return id;
+  });
+
+  /**
+   * A card in `column` on `boardId`, pinned to the definition version it started under. The id's
+   * shape is the domain's, not the table's.
+   */
+  const newCard = (boardId: string, column: string, version = 2) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const id = `tsk_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
+        VALUES (${id}, ${boardId}, ${`a card in ${column}`}, ${column}, ${version}, 1)
+      `;
+      return id;
+    });
+
+  /** Start a run on a card and let it settle, so the log holds the prompt it ran under. */
+  const startRun = (
+    cardId: string,
+    column: string,
+  ): Effect.Effect<SessionId, SessionError, SessionService> =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const created = yield* sessions.create({
+        taskId: cardId,
+        taskColumn: column,
+      });
+      yield* sessions.send({
+        sessionId: created.id,
+        content: `begin in ${column}`,
+      });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        `the ${column} run to settle`,
+      );
+      return created.id;
+    });
+
+  /** The prompt sections the run's own log leaves in effect. */
+  const promptSections = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readPromptSections(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
+
+  /** Edit the `specify` skill's body through the service that owns it, returning what it was. */
+  const editSpecifyBody = (body: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const skills = yield* SkillService;
+        const before = yield* skills.get("specify");
+        yield* skills.upsert({ ...before, body });
+        return before;
+      }).pipe(Effect.provide(SkillServiceLive)),
+    );
+
+  it("tells a specifying run the specify skill, and a building run nothing of it", async () => {
+    const prompts = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const specCard = yield* newCard(boardId, "specifying");
+        const buildCard = yield* newCard(boardId, "building");
+        return {
+          specifying: yield* promptSections(
+            yield* startRun(specCard, "specifying"),
+          ),
+          building: yield* promptSections(
+            yield* startRun(buildCard, "building"),
+          ),
+        };
+      }),
+    );
+
+    // 0009's seeded body, which is what "the run receives the specify skill text" means.
+    expect(prompts.specifying["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(prompts.building["skill_specify"]).toBeUndefined();
+    // The building run is not prompt-less: it carries its own column's skill, so the absence above
+    // is the column's doing rather than a session that was told nothing at all.
+    expect(prompts.building["skill_implement"]).toContain("smallest change");
+  }, 120_000);
+
+  it("changes the next run's prompt when a seeded body is edited", async () => {
+    const marker = `# Specify\n\nAsk about ${randomBytes(4).toString("hex")} before writing code.`;
+
+    const before = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+
+    const seeded = await editSpecifyBody(marker);
+    const after = await program(
+      Effect.gen(function* () {
+        // A new card and a new run: what a run is told is resolved when its session opens, so the
+        // next run is where an edited body shows up.
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+    // Put the seed back, so a later case reads what 0009 wrote rather than this one's text.
+    await editSpecifyBody(seeded.body);
+
+    expect(before["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(before["skill_specify"]).not.toContain(marker);
+    expect(after["skill_specify"]).toContain(marker);
+  }, 120_000);
+
+  it("refuses to open a run whose column names a skill the factory does not hold", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        // A definition of its own, so the seeded pipeline is left exactly as 0010 wrote it.
+        const definitionId = `dangling${randomBytes(3).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns)
+          VALUES (
+            ${definitionId}, 1, 'Dangling pipeline',
+            ${JSON.stringify([
+              { name: "intake", kind: "resting", skills: [], requires: [] },
+              {
+                name: "specifying",
+                kind: "working",
+                role: "specifier",
+                skills: ["explain"],
+                requires: [],
+              },
+            ])}::jsonb
+          )
+        `;
+        const boardId = `brd_${randomBytes(13).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_instances (id, repo, definition_id, definition_version)
+          VALUES (${boardId}, ${`factory-test/${randomBytes(3).toString("hex")}`}, ${definitionId}, 1)
+        `;
+        const cardId = yield* newCard(boardId, "specifying", 1);
+        const sessions = yield* SessionService;
+        return yield* Effect.exit(
+          sessions.create({ taskId: cardId, taskColumn: "specifying" }),
+        );
+      }),
+    );
+
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value.code).toBe("invalid_input");
+    expect(failure.value.message).toContain('skill "explain"');
+  }, 120_000);
 });
 
 describe("request limits", () => {

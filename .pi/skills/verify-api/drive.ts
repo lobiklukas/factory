@@ -381,6 +381,89 @@ const program = Effect.gen(function* () {
     `${historicalEvents.length} event(s): ${historicalEvents.map((event) => event._tag).join(", ")}`,
   );
 
+  // Feature: fork (LOB-180). A session is one log (D7), so a fork is a second log holding the
+  // parent's entries through the fork point. Its transcript must start as the parent's and then
+  // diverge: a message admitted to the fork must not reach the parent, or the "try a different
+  // approach" action would rewrite the history it was meant to leave alone.
+  const forked = yield* client.forkSession({ sessionId: created.id });
+  assert(
+    "forkSession",
+    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(forked.id) &&
+      forked.id !== created.id &&
+      forked.forkedFrom === created.id,
+    `id=${forked.id} parent=${created.id} forkedFrom=${forked.forkedFrom}`,
+  );
+  const forkPrefix = yield* client.getSession({ sessionId: forked.id });
+  assert(
+    "the fork's transcript is the parent's prefix, text for text",
+    JSON.stringify(forkPrefix.entries.map(textOf)) ===
+      JSON.stringify(folded.entries.map(textOf)),
+    `${forkPrefix.entries.length} fork entries, parent had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork's summary names the session it came from",
+    forkPrefix.session.forkedFrom === created.id,
+    `forkedFrom=${forkPrefix.session.forkedFrom}`,
+  );
+
+  const FORKED_PROMPT = `${PROMPT} fork`;
+  yield* client.sendMessage({ sessionId: forked.id, content: FORKED_PROMPT });
+  const forkSettled = yield* waitUntil(
+    client
+      .getSession({ sessionId: forked.id })
+      .pipe(
+        Effect.map((snapshot) => (snapshot.live.busy ? undefined : snapshot)),
+      ),
+    "the fork's run to settle",
+  );
+  const parentAfter = yield* client.getSession({ sessionId: created.id });
+  assert(
+    "a message sent to the fork does not appear in the parent",
+    parentAfter.entries.every((entry) => !entry.text.includes(FORKED_PROMPT)) &&
+      JSON.stringify(parentAfter.entries.map(textOf)) ===
+        JSON.stringify(folded.entries.map(textOf)),
+    `parent has ${parentAfter.entries.length} entries, folded read had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork keeps its prefix and answers on its own",
+    forkSettled.entries.length > forkPrefix.entries.length &&
+      forkSettled.entries
+        .slice(0, forkPrefix.entries.length)
+        .every(
+          (entry, index) => entry.text === forkPrefix.entries[index]?.text,
+        ) &&
+      forkSettled.entries.some(
+        (entry) => entry.text === `faux-ok (re: ${FORKED_PROMPT})`,
+      ),
+    `${forkSettled.entries.length} entries, last=${JSON.stringify(forkSettled.entries.at(-1)?.text)}`,
+  );
+  // Feature: the fork point is an entry of *this* session. The fork has grown past the parent's
+  // last entry, so its newest entry id names no entry of the parent: asking the parent to fork there
+  // must be a typed `invalid_input`, not a crash and not a fork of a history it never had. (Entry
+  // ids are per-log numbers, so an id that exists in both logs *is* this session's entry; what a
+  // foreign id can be is absent.)
+  const foreignEntry = forkSettled.entries.at(-1)?.id ?? "0";
+  const foreign = yield* Effect.exit(
+    client.forkSession({ sessionId: created.id, at: foreignEntry }),
+  );
+  const foreignFailure = Exit.findErrorOption(foreign);
+  assert(
+    "forking at another session's entry is refused as invalid_input",
+    Exit.isFailure(foreign) &&
+      foreignFailure._tag === "Some" &&
+      foreignFailure.value._tag === "SessionError" &&
+      foreignFailure.value.code === "invalid_input",
+    `at=${foreignEntry} ${JSON.stringify(foreignFailure)}`,
+  );
+
+  observed.fork = {
+    id: forked.id,
+    forkedFrom: forked.forkedFrom,
+    prefixEntries: forkPrefix.entries.length,
+    divergedEntries: forkSettled.entries.length,
+    foreignRefusal: foreignEntry,
+  };
+
   // Feature: request limits. An oversized message is refused with a typed error rather than
   // crashing the server or being silently truncated.
   const oversized = yield* Effect.exit(
@@ -420,6 +503,128 @@ const program = Effect.gen(function* () {
     "interruptSession leaves the session idle",
     interrupted.status === "idle",
     `mode=${interrupted.mode} status=${interrupted.status}`,
+  );
+
+  // Feature: reset (LOB-181). A reset starts a new model context whose first message is the handoff
+  // note. The transcript keeps what came before it and marks the boundary with the `reset` entry,
+  // so the old turns are still readable above the new context rather than truncated by it.
+  const toReset = yield* client.createSession({
+    requestId: `verify-api-reset-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toReset.id,
+    content: "reset probe: before",
+  });
+  // Wait for the answer itself, not for `busy` to be false: a read taken before the run starts would
+  // see `idle`, the wait would pass at once, and the reset could land before the turn it is meant to
+  // end — which would make the "one entry longer" assertion below meaningless.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toReset.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some(
+            (entry) => entry.kind === "assistant" && entry.text.length > 0,
+          ),
+        ),
+      ),
+    "the pre-reset turn to settle",
+  );
+  const beforeReset = yield* client.getSession({ sessionId: toReset.id });
+  const handoff = "reset probe: carry on from here";
+  const resetSummary = yield* client.resetSession({
+    sessionId: toReset.id,
+    handoff,
+  });
+  const afterReset = yield* client.getSession({ sessionId: toReset.id });
+  const resetKinds = afterReset.entries.map((entry) => entry.kind);
+  const resetEntry = afterReset.entries.find((entry) => entry.kind === "reset");
+  assert(
+    "resetSession answers with the session",
+    resetSummary.id === toReset.id && resetSummary.status === "idle",
+    `id=${resetSummary.id} mode=${resetSummary.mode} status=${resetSummary.status}`,
+  );
+  assert(
+    "a reset keeps the transcript and marks where it happened",
+    resetEntry?.text === handoff &&
+      afterReset.entries.length === beforeReset.entries.length + 1 &&
+      JSON.stringify(beforeReset.entries.map((entry) => entry.id)) ===
+        JSON.stringify(
+          afterReset.entries
+            .slice(0, beforeReset.entries.length)
+            .map((entry) => entry.id),
+        ),
+    `kinds=${resetKinds.join(", ")} reset=${JSON.stringify(resetEntry?.text ?? null)}`,
+  );
+  // A second reset with no handoff leaves an empty context and still marks the boundary, so
+  // "reset" and "reset with notes" are one shape rather than two.
+  yield* client.resetSession({ sessionId: toReset.id });
+  const bareReset = yield* client.getSession({ sessionId: toReset.id });
+  const bareEntries = bareReset.entries.filter(
+    (entry) => entry.kind === "reset",
+  );
+  assert(
+    "a reset with no handoff still marks the entry",
+    bareEntries.length === 2 && bareEntries.at(-1)?.text === "",
+    `reset entries=${bareEntries.length} last=${JSON.stringify(bareEntries.at(-1)?.text ?? null)}`,
+  );
+
+  // Feature: compaction (LOB-185). `compactSession` admits a compaction task in the log and
+  // answers its id; the summary it writes is a `compaction` entry, and everything it stands in for
+  // is still in the transcript. The message before it is long on purpose: Pi Durable summarizes an
+  // old prefix and keeps the newest `keepRecentTokens` (20k on this window's policy) verbatim, so a
+  // shorter transcript has nothing to compact and the task completes without a summary.
+  const toCompact = yield* client.createSession({
+    requestId: `verify-api-compact-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toCompact.id,
+    content: "y".repeat(90_000),
+  });
+  // Wait for the answer, not for `busy` to clear: a compaction admitted before the run has written
+  // its entries would have nothing to summarize.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map(
+          (state) =>
+            !state.live.busy &&
+            state.entries.some((entry) => entry.kind === "assistant"),
+        ),
+      ),
+    "the turn before the compaction to settle",
+  );
+  const compactAdmitted = yield* client.compactSession({
+    sessionId: toCompact.id,
+    instructions: "the long probe message",
+  });
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some((entry) => entry.kind === "compaction"),
+        ),
+      ),
+    "the compaction's summary entry",
+  );
+  const afterCompact = yield* client.getSession({ sessionId: toCompact.id });
+  const summary = afterCompact.entries.find(
+    (entry) => entry.kind === "compaction",
+  );
+  assert(
+    "compactSession answers a task id and its summary lands in the transcript",
+    compactAdmitted.taskId.length > 0 &&
+      compactAdmitted.session.id === toCompact.id &&
+      compactAdmitted.session.status === "idle" &&
+      summary !== undefined &&
+      summary.text.length > 0 &&
+      // Nothing is dropped: what the summary stands in for is still readable.
+      afterCompact.entries.some(
+        (entry) => entry.kind === "user" && entry.text.startsWith("y"),
+      ),
+    `taskId=${compactAdmitted.taskId} status=${compactAdmitted.session.status} kinds=${afterCompact.entries.map((entry) => entry.kind).join(", ")}`,
   );
 
   return { id: created.id };

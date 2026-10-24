@@ -25,13 +25,24 @@ created empty for the run (two sessions, which is the case the paging check used
 **29/29** against the shared `factory_ralph` (2 883 rows in `session_activity`), evidence
 `.verify/evidence/lob-140/`.
 
+The reset checks (LOB-181) were run from the `ralph/LOB-181` worktree on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442): **32/32**, evidence `.verify/evidence/lob-181/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the reset path.
+
+The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 2026-10-24 (API on
+`:9400`, faux, Postgres on 5442): **33/33**, evidence `.verify/evidence/lob-185/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the compaction path.
+
 | Feature                 | Status  | File                               |
 | ----------------------- | ------- | ---------------------------------- |
 | Create a session        | passing | [create.md](create.md)             |
 | Repo binding            | passing | [repo-binding.md](repo-binding.md) |
 | Session list            | passing | [session-list.md](session-list.md) |
 | Watch a live session    | passing | [live-stream.md](live-stream.md)   |
+| Reset a session         | passing | [reset.md](reset.md)               |
+| Compact on demand       | passing | [compact.md](compact.md)           |
 | Fold a released session | passing | [fold.md](fold.md)                 |
+| Fork a session          | passing | [fork.md](fork.md)                 |
 | Request limits          | passing | [limits.md](limits.md)             |
 | Probes and readiness    | passing | [probes.md](probes.md)             |
 | Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |

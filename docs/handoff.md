@@ -317,7 +317,8 @@ How a session works now, so the next agent does not have to re-derive it:
 - **Live vs historical is decided by the registry, not by a flag.** Owned here → the stream attaches
   to `viewState()` and reports `mode: "live"`; not owned → a reader-mode storage folds the log and
   reports `mode: "historical"`, and the stream sends one `snapshot` and ends. Both paths project the
-  same _active_ transcript (newest head marker onward), so they agree entry for entry — asserted in
+  same transcript, read from the start of the log (a head marker — `pi.reset`, `pi.compaction` —
+  bounds the _model's_ context, not the transcript), so they agree entry for entry — asserted in
   both the core suite and the API drive.
 - **The projection diffs whole views.** Entries only append, so an `entry` event is never an update;
   documents (`pi.live`, `pi.usage`) are compared by reference, because Chord publishes immutable

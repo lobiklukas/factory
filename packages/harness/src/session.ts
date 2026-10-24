@@ -11,13 +11,17 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
   Conversation,
+  ConversationId,
   ConversationView,
   Cursor,
+  EntryDraft,
   EntryId,
   EntryRecord,
   Harness,
+  Page,
   Storage,
   Submission,
+  Tx,
 } from "@earendil-works/pi-durable";
 import {
   ConversationBusy,
@@ -44,7 +48,8 @@ import type {
 } from "@repo/domain/Session";
 import type { ApprovalVerdict } from "@repo/domain/Approval";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
-import type { ModelAccess } from "./models";
+import { skillsExtension, type RunProfile } from "./loader";
+import { compactionPolicyFor, type ModelAccess } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
 import { PrDoc } from "./docs";
@@ -69,6 +74,7 @@ import {
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
+  FORK_DOC_KIND,
   USAGE_DOC,
   type JsonRecord,
 } from "./projection";
@@ -106,6 +112,24 @@ export const TaskDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({}),
+});
+
+/**
+ * A forked session's lineage, committed to its own log (LOB-180).
+ *
+ * `parent` is the session it was forked from. `at` is the fork's *own* copy of the last entry it
+ * took, which is where the fork point sits in this log; entry ids are minted per log, so the
+ * parent's id for that entry would name a different entry here. Nothing reads `at` yet. The
+ * `sessions` row carries the same parent as an index, so a summary never folds a log; this document
+ * is what a rebuild recovers that parent from (D7).
+ */
+export const ForkDoc = defineDoc({
+  kind: FORK_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ parent: "", at: "" }),
 });
 
 /** The repo a session is bound to, as the log records it. */
@@ -165,6 +189,12 @@ export type OpenSessionOptions = {
    * can reach by forgetting an argument.
    */
   readonly policy?: SessionPolicy;
+  /**
+   * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
+   * by the control plane from the card's pinned board definition. Absent: no card, or a column that
+   * names no skills, so nothing is injected.
+   */
+  readonly run?: RunProfile;
 };
 
 export type OpenSession = {
@@ -198,6 +228,10 @@ export const openSession = (
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
+    // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
+    // the whole code extension — tools and sections — renders after the run's own instructions.
+    const skills = options.run?.skills ?? [];
+    if (skills.length > 0) registry.install(skillsExtension(skills));
     registry.install(CodingTools);
     // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
     // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
@@ -219,7 +253,13 @@ export const openSession = (
               cwd: target.cwd ?? options.cwd,
               shellEnv: sessionShellEnv(),
             }),
-          settings: { progress: SESSION_PROGRESS },
+          settings: {
+            progress: SESSION_PROGRESS,
+            // Long sessions compact (B4). The thresholds follow the model's context window
+            // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
+            // never, and a large one keeps pi-durable's pinned defaults.
+            compaction: compactionPolicyFor(options.model.contextWindow),
+          },
         },
         BACKGROUND_CONTEXT,
       ),
@@ -426,6 +466,13 @@ export const writeTaskBinding = (
     ),
   );
 
+/** Where a fork came from, as the fork's own log records it. */
+export type ForkLineage = {
+  readonly parent: string;
+  /** The entry the fork was taken at, or `""` when the parent had no entries. */
+  readonly at: string;
+};
+
 /** The message a caller sends a session, in the control plane's terms. */
 export type MessageDraft = {
   readonly content: string;
@@ -486,8 +533,38 @@ export const interrupt = (
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
 
+/**
+ * Start a new model context (LOB-181). Pi Durable appends a `pi.reset` entry that heads the next
+ * context, carrying `handoff` as its user message when given; the entries before it stay in the
+ * log, so the transcript keeps the past and marks where the reset happened.
+ */
+export const resetSession = (
+  conversation: Conversation,
+  handoff: string | undefined,
+): Effect.Effect<void, SessionError> =>
+  attempt("reset session", () =>
+    conversation.reset(handoff, BACKGROUND_CONTEXT),
+  );
+
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
+
+/**
+ * Compact the session on demand (B4): Pi Durable admits a compaction task that summarizes an old
+ * prefix of the model context and places the summary as the new head marker, so the transcript
+ * keeps every entry and the model's next request starts from the summary.
+ *
+ * The task id is the wire form of Pi Durable's branded id, like a submission's. Nothing to compact
+ * — a context shorter than the policy keeps verbatim — completes the task without a summary, which
+ * is the package's rule (range selection finds no cut), not a failure here.
+ */
+export const compactSession = (
+  conversation: Conversation,
+  instructions: string | undefined,
+): Effect.Effect<string, SessionError> =>
+  attempt("compact session", () =>
+    conversation.compact(instructions, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(String));
 
 /**
  * Whether a run is in flight. Read from the committed `pi.live` document, so it is what the log
@@ -526,8 +603,61 @@ const readDocument = (
 const ENTRY_PAGE = 500;
 
 /**
- * The active transcript: the newest head marker, then the entries from its head. That is the same
- * slice `viewState()` shows, so a fold and a live attach describe the same session.
+ * The transcript: every entry the conversation ever committed, oldest first.
+ *
+ * It is read from the start of the log rather than from the newest head marker, because a head
+ * marker (`pi.reset`, `pi.compaction`) says where the *model's* context begins, not where the
+ * transcript does. A reset keeps the past and marks where it happened (LOB-181), and a fold that
+ * started at the head would also drop the `factory.title` entry a rebuild reads the title from.
+ * Both read paths use this, so a fold and a live attach still describe the same session.
+ */
+const scanEntries = (
+  scan: (
+    cursor: Cursor | undefined,
+  ) => Effect.Effect<Page<EntryRecord, Cursor>, SessionError>,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
+    const records: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* scan(cursor);
+      records.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    // Storage scans newest first.
+    return records.reverse();
+  });
+
+const readAllEntries = (
+  storage: Storage,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      storage.scanEntries(
+        { conversationId: ROOT_CONVERSATION_ID },
+        ENTRY_PAGE,
+        cursor,
+        BACKGROUND_CONTEXT,
+      ),
+    ),
+  );
+
+/** The same transcript for a session this process owns, read through its conversation. */
+const readConversationEntries = (
+  conversation: Conversation,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      conversation.entries({}, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
+    ),
+  );
+
+/**
+ * The *active window*: the newest head marker, then the entries from its head. That is what Pi
+ * Durable folds into a request, so it is the right slice for a question about the model's current
+ * context — the prompt sections a run has in effect — and the wrong one for the transcript, which
+ * is `readAllEntries`, because a `pi.reset` would truncate it.
  */
 const readActiveEntries = (
   storage: Storage,
@@ -540,23 +670,218 @@ const readActiveEntries = (
         BACKGROUND_CONTEXT,
       ),
     );
-    const query =
-      marker === undefined
-        ? { conversationId: ROOT_CONVERSATION_ID }
-        : { conversationId: ROOT_CONVERSATION_ID, minEntryId: marker.head };
+    return yield* scanEntries((cursor) =>
+      attempt("scan entries", () =>
+        storage.scanEntries(
+          marker === undefined
+            ? { conversationId: ROOT_CONVERSATION_ID }
+            : {
+                conversationId: ROOT_CONVERSATION_ID,
+                minEntryId: marker.head,
+              },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      ),
+    );
+  });
 
+/**
+ * The entries a fork of this log keeps: its whole transcript, oldest first, through `at`.
+ *
+ * The transcript is read from the beginning rather than from the newest head marker, because the
+ * copy that follows reassigns entry ids and every head marker names an id: reading from the start
+ * keeps every marker inside the copy, so a fork of a session that was reset keeps the same active
+ * context it had. `at` absent means "the last entry", which is the fork `verify-api` drives; an id
+ * that is not an entry of this log is refused as `invalid_input`, not silently rounded to the end.
+ */
+export const readForkSource = (
+  storage: Storage,
+  at: string | undefined,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
     const records: EntryRecord[] = [];
     let cursor: Cursor | undefined;
     for (;;) {
       const page = yield* attempt("scan entries", () =>
-        storage.scanEntries(query, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
+        storage.scanEntries(
+          { conversationId: ROOT_CONVERSATION_ID },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
       );
       records.push(...page.items);
       cursor = page.next;
       if (cursor === undefined) break;
     }
-    // Storage scans newest first.
-    return records.reverse();
+    // Storage scans newest first; a transcript reads oldest first.
+    records.reverse();
+    if (at === undefined) return records;
+    const end = records.findIndex((entry) => String(entry.id) === at);
+    if (end === -1) {
+      return yield* new SessionErrorClass({
+        code: "invalid_input",
+        message: `entry ${at} is not in this session`,
+      });
+    }
+    return records.slice(0, end + 1);
+  });
+
+/** The draft for one copied entry, its head marker rewritten to the copy of the entry it names. */
+const draftOf = (
+  entry: EntryRecord,
+  copied: ReadonlyMap<EntryId, EntryId>,
+): EntryDraft => {
+  // `"self"` is how the draft API says "the entry being written", which is what a reset's head
+  // marker is in the parent.
+  const head =
+    entry.head === undefined
+      ? undefined
+      : entry.head === entry.id
+        ? ("self" as const)
+        : copied.get(entry.head);
+  if (entry.head !== undefined && head === undefined) {
+    throw new Error(
+      `entry ${entry.id} starts its context at ${entry.head}, which is not an earlier entry`,
+    );
+  }
+  return {
+    kind: entry.kind,
+    ...(entry.model === undefined ? {} : { model: entry.model }),
+    ...(entry.data === undefined ? {} : { data: entry.data }),
+    ...(entry.edits === undefined ? {} : { edits: entry.edits }),
+    ...(head === undefined ? {} : { head }),
+  };
+};
+
+/** Where a fork came from, and the repo binding its parent had, in the fork's own commit. */
+type ForkPreamble = {
+  readonly parent: string;
+  readonly binding?: RepoBinding;
+};
+
+/**
+ * Copy a parent's entries into a fork's own log, oldest first, in the callers' one commit.
+ *
+ * Entry ids are minted per log, so every copy gets a new id and every head marker has to be
+ * rewritten to the copy of the entry it named. Walking oldest first is what makes that possible:
+ * a marker's entry has already been copied by the time the marker is written, and a marker that
+ * names something later is a parent log whose entries do not precede their marker — a broken log
+ * rather than a fork to guess at, so it fails the commit instead of writing a wrong transcript.
+ *
+ * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
+ * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
+ * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
+ * parent's prefix.
+ */
+const copyEntries = (
+  tx: Tx,
+  conversationId: ConversationId,
+  source: readonly EntryRecord[],
+  preamble: ForkPreamble,
+): Promise<ForkLineage> => {
+  const copied = new Map<EntryId, EntryId>();
+  let at = "";
+  return source
+    .reduce<Promise<void>>(
+      (previous, entry) =>
+        previous.then(() =>
+          tx
+            .appendEntry(conversationId, draftOf(entry, copied))
+            .then((record) => {
+              copied.set(entry.id, record.id);
+              at = String(record.id);
+            }),
+        ),
+      Promise.resolve(),
+    )
+    .then(() =>
+      tx.doc(ForkDoc, conversationId).then((doc) => {
+        doc.parent = preamble.parent;
+        doc.at = at;
+        return doc;
+      }),
+    )
+    .then(() =>
+      preamble.binding === undefined
+        ? undefined
+        : tx.doc(SessionDoc, conversationId).then((doc) => {
+            doc.repo = preamble.binding?.repo ?? "";
+            doc.baseRef = preamble.binding?.baseRef ?? "";
+          }),
+    )
+    .then(() => ({ parent: preamble.parent, at }));
+};
+
+/** What a fork needs: the log to copy from, the log to write, and where to run. */
+export type ForkSessionOptions = {
+  /** The parent's log, opened in reader mode: a fork never takes ownership of the parent. */
+  readonly parent: Storage;
+  /** The fork's own log, opened in owner mode. */
+  readonly child: Storage;
+  /** The entry to fork at, or absent for the parent's last entry. */
+  readonly at?: string;
+  /** The session the fork is taken from, committed into the fork's log as its lineage. */
+  readonly lineage: string;
+  /** The parent's repo binding, committed into the fork's log beside the lineage. */
+  readonly binding?: RepoBinding;
+  readonly model: ModelAccess;
+  readonly cwd: string;
+  readonly policy?: SessionPolicy;
+  /**
+   * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
+   * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
+   * does, rather than through a second, special-cased open path.
+   */
+  readonly run?: RunProfile;
+};
+
+export type ForkedSession = OpenSession & {
+  /** The entry the fork was taken at, `""` when the parent had no entries. */
+  readonly at: string;
+};
+
+/**
+ * Open a new session whose transcript is another session's prefix (LOB-180, D7).
+ *
+ * A session *is* a log (D7), so a fork is another log with the parent's entries copied in: Pi
+ * Durable's own `Conversation.fork` forks a conversation *inside* one storage, which would make
+ * the fork unreadable as a session of its own. The copy is one commit on the new log, so a fork
+ * either has the whole prefix or does not exist.
+ */
+export const forkSession = (
+  options: ForkSessionOptions,
+): Effect.Effect<ForkedSession, SessionError> =>
+  Effect.gen(function* () {
+    const source = yield* readForkSource(options.parent, options.at);
+    const opened = yield* openSession({
+      storage: options.child,
+      model: options.model,
+      cwd: options.cwd,
+      ...(options.policy === undefined ? {} : { policy: options.policy }),
+      ...(options.run === undefined ? {} : { run: options.run }),
+    });
+    const lineage = yield* attempt(
+      "copy the parent's entries",
+      () =>
+        opened.root.commit(
+          (tx) =>
+            copyEntries(tx, opened.root.id, source, {
+              parent: options.lineage,
+              ...(options.binding === undefined
+                ? {}
+                : { binding: options.binding }),
+            }),
+          BACKGROUND_CONTEXT,
+        ),
+      // A copy that fails leaves no fork, and an open harness on a child log nobody can read is a
+      // lease the caller never releases: close it here, where the failure is.
+    ).pipe(
+      Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),
+    );
+    return { ...opened, at: lineage.at };
   });
 
 export type SessionLog = {
@@ -572,6 +897,8 @@ export type SessionLog = {
   readonly spec?: string;
   /** The acceptance criteria committed to the log, when present. */
   readonly criteria?: string;
+  /** The session this log was forked from, when it was forked (LOB-180). */
+  readonly forkedFrom?: string;
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -592,16 +919,18 @@ export const readSessionLog = (
   storage: Storage,
 ): Effect.Effect<SessionLog, SessionError> =>
   Effect.gen(function* () {
-    const records = yield* readActiveEntries(storage);
+    const records = yield* readAllEntries(storage);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
+    const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
     const taskId = bindingString(taskDoc, "taskId");
     const spec = bindingString(specDoc, "spec");
     const criteria = bindingString(criteriaDoc, "criteria");
+    const forkedFrom = bindingString(forkDoc, "parent");
     return {
       entries: records.map(projectEntry),
       usage: projectUsageDoc(usage),
@@ -622,6 +951,7 @@ export const readSessionLog = (
           }),
       ...(spec === "" ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
+      ...(forkedFrom === "" ? {} : { forkedFrom }),
       ...(taskId === ""
         ? {}
         : {
@@ -631,6 +961,38 @@ export const readSessionLog = (
             },
           }),
     };
+  });
+
+/** The Pi Durable entry kind that carries system prompt sections. */
+const PROMPT_ENTRY_KIND = "pi.system";
+
+export type PromptSections = Readonly<Record<string, string>>;
+
+/**
+ * The prompt sections a session's log leaves in effect, folded the way Pi Durable folds them: a
+ * later `pi.system` entry replaces a section by name, and a `null` removes it.
+ *
+ * This is what the run was actually told, read from the log rather than from the extension that
+ * built it, so a caller can show or measure the injected text (B6's "its size measurable") and a
+ * test can assert on the prompt without intercepting a model request.
+ */
+export const readPromptSections = (
+  storage: Storage,
+): Effect.Effect<PromptSections, SessionError> =>
+  Effect.gen(function* () {
+    const records = yield* readActiveEntries(storage);
+    const shown: Record<string, string> = {};
+    for (const record of records) {
+      if (record.kind !== PROMPT_ENTRY_KIND) continue;
+      for (const message of record.model ?? []) {
+        if (message.role !== "system") continue;
+        for (const [key, value] of Object.entries(message.sections ?? {})) {
+          if (value === null) delete shown[key];
+          else shown[key] = value;
+        }
+      }
+    }
+    return shown;
   });
 
 export type { Conversation, ConversationView, Harness, Storage };
@@ -644,13 +1006,16 @@ export type SessionRef = {
   readonly workspace: SessionWorkspace;
   /** The PR the index remembers, so a read needs no fold to report it (LOB-177). */
   readonly prUrl?: string;
+  /** The session this one was forked from, when the index row says so (LOB-180). */
+  readonly forkedFrom?: SessionId;
 };
 
 const snapshotOf = (
   view: ConversationView,
   ref: SessionRef,
+  entries: readonly EntryRecord[],
 ): SessionSnapshot => {
-  const projection = projectView(view);
+  const projection = projectView(view, entries);
   return {
     session: {
       id: ref.id,
@@ -663,6 +1028,7 @@ const snapshotOf = (
         ? {}
         : { baseRef: ref.workspace.baseRef }),
       ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
+      ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
     },
     workspace: ref.workspace,
     entries: projection.entries,
@@ -686,9 +1052,13 @@ export const readLiveSnapshot = (
     const state = yield* attempt("read conversation view", () =>
       conversation.viewState(BACKGROUND_CONTEXT),
     );
-    const snapshot = snapshotOf(state.value, ref);
-    state.dispose();
-    return snapshot;
+    // The view holds the active window only; the transcript is the whole log. The scan is fallible,
+    // so the handle is released whether it answers or not — a leaked mount keeps this session's
+    // projections alive in the process for as long as the API runs.
+    return yield* Effect.gen(function* () {
+      const entries = yield* readConversationEntries(conversation);
+      return snapshotOf(state.value, ref, entries);
+    }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
 /**
@@ -712,6 +1082,8 @@ export const liveSessionEvents = (
       let previous = state.value;
       let unsubscribe: (() => void) | undefined;
 
+      // Registered before the fallible scan below, so a failed read releases the mount instead of
+      // leaving this session's projections running in the process.
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           unsubscribe?.();
@@ -719,15 +1091,25 @@ export const liveSessionEvents = (
         }),
       );
 
+      // The transcript the snapshot below carries is the whole log, while the view the diffs come
+      // from holds the active window: a `pi.reset` truncates the view. Entry ids already sent are
+      // tracked here so an entry committed between the view read and the scan reaches the client
+      // exactly once, whether it arrives in the snapshot or as an event.
+      const entries = yield* readConversationEntries(conversation);
+      const sent = new Set(entries.map((entry) => String(entry.id)));
+
       unsubscribe = state.subscribe((next) => {
-        const events = diffView(previous, next);
+        const events = diffView(previous, next, sent);
         previous = next;
         for (const event of events) Queue.offerUnsafe(queue, event);
       });
 
       // Offer the snapshot before subscribing has a chance to enqueue anything, so a client never
       // sees an event for a session it has not been told about.
-      yield* Queue.offer(queue, snapshotEvent(snapshotOf(state.value, ref)));
+      yield* Queue.offer(
+        queue,
+        snapshotEvent(snapshotOf(state.value, ref, entries)),
+      );
       return Stream.fromQueue(queue);
     }),
   );
@@ -759,6 +1141,7 @@ export const readHistoricalSnapshot = (
           ? {}
           : { baseRef: ref.workspace.baseRef }),
         ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
+        ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
       },
       workspace: ref.workspace,
       entries: log.entries,

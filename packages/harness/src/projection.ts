@@ -38,6 +38,8 @@ export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
+/** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
+export const FORK_DOC_KIND = "factory.fork";
 export const TITLE_ENTRY_KIND = "factory.title";
 /**
  * The entry a session's PR is announced with (LOB-177). It carries the link, and it exists because
@@ -282,10 +284,15 @@ export const projectInbox = (
 };
 
 /** A live conversation view → a snapshot. */
-export const projectView = (view: ConversationView): SessionProjection => {
+export const projectView = (
+  view: ConversationView,
+  /** The transcript to project. Defaults to the view's active window; the read paths pass the
+   * whole log, so a `pi.reset` is a marker in the transcript rather than a truncation of it. */
+  entries: readonly EntryRecord[] = view.entries,
+): SessionProjection => {
   const live = projectLive(view.docs);
   return {
-    entries: view.entries.map(projectEntry),
+    entries: entries.map(projectEntry),
     live,
     usage: projectUsageDoc(view.docs[USAGE_DOC]),
     status: live.busy ? "busy" : "idle",
@@ -303,20 +310,26 @@ export const projectView = (view: ConversationView): SessionProjection => {
 export const diffView = (
   previous: ConversationView,
   next: ConversationView,
+  /** Entry ids the receiver already has. Defaults to what `previous` holds, which is right for a
+   * diff against a view; an attach seeds it with the snapshot it sent. Ids are added as they are
+   * reported, so an entry is never sent twice. */
+  sent: Set<string> = new Set(
+    previous.entries.map((entry) => String(entry.id)),
+  ),
 ): readonly SessionEvent[] => {
   const events: SessionEvent[] = [];
 
-  const known = new Set(previous.entries.map((entry) => String(entry.id)));
   for (const entry of next.entries) {
-    if (!known.has(String(entry.id))) {
-      events.push({ _tag: "entry", entry: projectEntry(entry) });
-      // The PR link is announced by the entry committed beside its document, so a client attached
-      // across that commit sees exactly one `prOpened` — a new entry is never re-sent — and one
-      // that attaches afterwards reads the link from the session's summary instead.
-      if (entry.kind === PR_OPENED_ENTRY_KIND) {
-        const prUrl = stringAt(entry.data, "url");
-        if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
-      }
+    const id = String(entry.id);
+    if (sent.has(id)) continue;
+    sent.add(id);
+    events.push({ _tag: "entry", entry: projectEntry(entry) });
+    // The PR link is announced by the entry committed beside its document, so a client attached
+    // across that commit sees exactly one `prOpened` — a new entry is never re-sent — and one
+    // that attaches afterwards reads the link from the session's summary instead.
+    if (entry.kind === PR_OPENED_ENTRY_KIND) {
+      const prUrl = stringAt(entry.data, "url");
+      if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
     }
   }
 
