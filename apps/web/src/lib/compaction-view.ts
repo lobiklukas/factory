@@ -1,4 +1,8 @@
-import type { SessionUsage } from "@repo/domain/Session";
+import type {
+  SessionId,
+  SessionUsage,
+  TranscriptEntry,
+} from "@repo/domain/Session";
 
 /**
  * What a compaction cost, computed here rather than in the pane so it can be tested without a
@@ -84,6 +88,21 @@ const formatCost = (cost: number): string => {
 };
 
 /**
+ * One line for a reading of a session's own spend: `46,120 tokens`, or with cost when it was
+ * measured.
+ *
+ * A cumulative reading follows the same rule as a delta: `costTotal === 0` is a provider that
+ * reported no cost, not a free run, so it prints no dollar figure. This is what the pane header
+ * shows, and the delta beside a compaction sits next to it.
+ */
+export const formatSpend = (spend: UsageSpend): string => {
+  const tokens = `${tokenFormat.format(spend.tokens)} tokens`;
+  return spend.costTotal === 0
+    ? tokens
+    : `${tokens} · ${formatCost(spend.costTotal)}`;
+};
+
+/**
  * One line for the pane: `40,120 tokens · $0.0384`, or `40,120 tokens` when no cost was reported.
  *
  * The token count always appears, even at zero: "0 tokens" says the action was taken and measured
@@ -95,3 +114,74 @@ export const formatSpendDelta = (delta: SpendDelta): string => {
     ? tokens
     : `${tokens} · ${formatCost(delta.cost)}`;
 };
+
+/**
+ * The readings a compaction is measured against, and which session they belong to (LOB-223).
+ *
+ * `before` and `entriesBefore` are taken when the operator presses the button. `entriesBefore` is
+ * the transcript's length at that moment, because the summary arrives later as a *new* entry over
+ * the same stream — a compaction entry already on screen is an older one, and hanging this press's
+ * spend on it would attribute the wrong action.
+ *
+ * `after` is the reading taken once the summarizer's own spend has landed, and it is captured to be
+ * frozen: the pane re-renders on every stream event, so a live reading would keep growing with every
+ * later turn and turn "what this compaction cost" into "what the session has spent since".
+ *
+ * `sessionId` is here because one pane component serves every session route: moving from one
+ * session to another keeps this state, and a reading from session A must never be subtracted from
+ * session B's usage.
+ */
+export type CompactionWindow = {
+  readonly sessionId: SessionId;
+  readonly before: SessionUsage;
+  readonly entriesBefore: number;
+  readonly after: SessionUsage | null;
+};
+
+/**
+ * The index of the summary row this press produced, or `undefined` while there is none.
+ *
+ * Only the *first* compaction row at or after the press belongs to it. A later row is a later
+ * compaction — automatic, or another press — and its spend is not this one's.
+ *
+ * A turn of the operator's own ends the search: it means the press is in the past and whatever
+ * compacts from there on was caused by something else. Without that, a press that wrote no summary
+ * at all (a transcript with no cut) would stay open and charge the next compaction — the harness's
+ * own threshold policy, say — with a spend that also includes the turn sent in between.
+ */
+export const compactionRow = (
+  window: CompactionWindow | null,
+  sessionId: SessionId,
+  entries: readonly TranscriptEntry[],
+): number | undefined => {
+  if (window === null || window.sessionId !== sessionId) return undefined;
+  for (let index = window.entriesBefore; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry?.kind === "user") return undefined;
+    if (entry?.kind === "compaction") return index;
+  }
+  return undefined;
+};
+
+/**
+ * What the compaction in this window cost.
+ *
+ * Until `after` is captured the delta is read live, so the row fills in as the stream delivers the
+ * summarizer's spend; after that it is a fixed number, which is the point of capturing it.
+ */
+export const compactionDelta = (
+  window: CompactionWindow,
+  usage: SessionUsage,
+): SpendDelta => spendDelta(window.before, window.after ?? usage);
+
+/**
+ * The spend line under a summary: a measured delta, or the reason there is no number yet.
+ *
+ * A delta of zero tokens with no cost means nothing has been measured *yet* rather than that the
+ * compaction was free, and the pane says so instead of printing `0 tokens` beside a summary that
+ * plainly used the model.
+ */
+export const spendHeading = (delta: SpendDelta): string =>
+  delta.tokens === 0 && delta.cost === undefined
+    ? "Measuring spend…"
+    : formatSpendDelta(delta);

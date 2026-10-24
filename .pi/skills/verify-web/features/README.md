@@ -7,15 +7,16 @@ Status reflects the last verified run (2026-10-06, `chrome`, headless, API `:940
 the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required checks passed, from the
 `ralph/LOB-57` worktree with the human's `factory-postgres-1` holding 5442).
 
-| Feature                 | Status  | File                                       |
-| ----------------------- | ------- | ------------------------------------------ |
-| Dashboard shell renders | passing | [dashboard-shell.md](dashboard-shell.md)   |
-| Routing                 | passing | [routing.md](routing.md)                   |
-| Browser reaches the API | passing | [api-connectivity.md](api-connectivity.md) |
-| Session stream          | passing | [session-stream.md](session-stream.md)     |
-| Fork lineage            | passing | [fork-lineage.md](fork-lineage.md)         |
-| Transcript              | passing | [transcript.md](transcript.md)             |
-| Live tasks              | passing | [live-tasks.md](live-tasks.md)             |
+| Feature                  | Status  | File                                       |
+| ------------------------ | ------- | ------------------------------------------ |
+| Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)   |
+| Routing                  | passing | [routing.md](routing.md)                   |
+| Browser reaches the API  | passing | [api-connectivity.md](api-connectivity.md) |
+| Session stream           | passing | [session-stream.md](session-stream.md)     |
+| Fork lineage             | passing | [fork-lineage.md](fork-lineage.md)         |
+| Transcript               | passing | [transcript.md](transcript.md)             |
+| Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
+| Compaction from the pane | passing | [compaction.md](compaction.md)             |
 
 ## Known gaps
 
@@ -35,6 +36,10 @@ the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required check
 - The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
   either way, so the day a fold is driven the check is the header string.
+- **A compaction's spend is a delta between two readings of the session's usage**, not a number the
+  server attributed to the action. It is bound to the first summary after the press and frozen once
+  measured, so a compaction this pane did not press — the harness's own threshold policy, or a second
+  summary the same press did not write — shows no spend. See [compaction.md](compaction.md).
 - **The transcript's follow-the-stream behaviour is not driven.** The faux run finishes too fast to
   observe it; it is checked by hand (see `transcript.md`).
 - The browser path needs Postgres on host port 5442; sessions are logs, and the log is Postgres.

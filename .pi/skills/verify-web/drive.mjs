@@ -530,6 +530,320 @@ if (childId !== "") {
   await page.setViewportSize({ width: 1440, height: 900 });
 }
 
+// Feature: compact now from the pane (LOB-223). A compaction is a task in the session's log, so its
+// summary arrives as a transcript entry — and the operator has to see it with what it cost. Part 1
+// (LOB-222) added the spend arithmetic and the atom; what this block proves is the button, the row
+// that renders the summary, and the header reading before and after it. See features/compaction.md.
+//
+// The session is created through the control plane's own RPC rather than the sidebar's New session
+// button (whose first message is fixed) because the message has to be ~90k characters *first*: Pi
+// Durable summarizes an old prefix and keeps the newest `keepRecentTokens` verbatim, so a short
+// session has no cut and the task would settle without writing a summary. The compaction itself is
+// pressed on the real button.
+const longMessage = "y".repeat(90_000);
+const callRpcOnce = async (tag, payload) => {
+  const requestId = `drive-${tag}-${Date.now()}`;
+  return page.evaluate(
+    async ({ apiUrl, requestId, tag, payload }) => {
+      const response = await fetch(`${apiUrl}/rpc`, {
+        method: "POST",
+        headers: { "content-type": "application/ndjson" },
+        body: `${JSON.stringify({
+          _tag: "Request",
+          id: requestId,
+          tag,
+          payload,
+          headers: [],
+        })}\n`,
+      });
+      const text = await response.text();
+      const envelope = text
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .find((message) => message?.requestId === requestId);
+      return {
+        status: response.status,
+        exit: envelope?.exit?._tag ?? null,
+        value: envelope?.exit?.value ?? null,
+        raw: envelope === undefined ? text.slice(0, 400) : null,
+      };
+    },
+    { apiUrl: API_URL, requestId, tag, payload },
+  );
+};
+
+const compactButton = page.getByRole("button", { name: "Compact session" });
+const usageChip = page.locator("[data-session-usage]");
+const spendLine = page.locator("[data-compaction-spend]");
+const SUMMARY = "Summary: the session ran its tools and kept working.";
+const tokenCount = (text) => {
+  const match = /([\d,]+) tokens/.exec(text);
+  return match === null ? null : Number(match[1].replaceAll(",", ""));
+};
+
+const longCreated = await callRpcOnce("createSession", {});
+const longSessionId = longCreated.value?.id ?? "";
+if (longSessionId !== "") {
+  const sent = await callRpcOnce("sendMessage", {
+    sessionId: longSessionId,
+    content: longMessage,
+  });
+  observed.compactionSession = {
+    created: longCreated.exit,
+    sent: sent.exit,
+    sessionId: longSessionId,
+  };
+  assert(
+    "the long session was created with a 90k-character first message",
+    longSessionId.startsWith("ses_") && sent.exit === "Success",
+    `create ${String(longCreated.exit)}, send ${String(sent.exit)} (${sent.raw ?? ""})`,
+  );
+  await page.goto(`${WEB_URL}/sessions/${longSessionId}`, {
+    waitUntil: "domcontentloaded",
+  });
+} else {
+  assert(
+    "the long session was created with a 90k-character first message",
+    false,
+    `createSession answered ${JSON.stringify(longCreated).slice(0, 300)}`,
+  );
+}
+
+// A busy session cannot be compacted on demand: the run is using the same context. The state has to
+// say why, in the DOM, or a disabled button is a dead control. The faux script's command sleeps, so
+// the run stays busy long enough to read the reason twice.
+const busyCompact = {};
+try {
+  // Wait for the *busy* reason rather than for "disabled": the pane is disabled while it attaches
+  // too, and attaching is not the state this check is about.
+  await page.waitForFunction(
+    () => {
+      const button = document.querySelector(
+        "button[aria-label='Compact session']",
+      );
+      return (
+        button !== null &&
+        button.disabled &&
+        (button.getAttribute("title") ?? "").includes(
+          "Wait for this run to finish",
+        )
+      );
+    },
+    null,
+    { timeout: 20_000 },
+  );
+  busyCompact.disabled = await compactButton.isDisabled();
+  busyCompact.title = await compactButton.getAttribute("title");
+  busyCompact.describedBy = await page.evaluate(() => {
+    const button = document.querySelector(
+      "button[aria-label='Compact session']",
+    );
+    const id = button?.getAttribute("aria-describedby") ?? "";
+    return {
+      id,
+      text: id === "" ? "" : (document.getElementById(id)?.textContent ?? ""),
+    };
+  });
+} catch (error) {
+  busyCompact.error = String(error).slice(0, 300);
+}
+observed.compactBusy = busyCompact;
+assert(
+  "Compact is disabled while the session is busy, with the reason in the DOM",
+  busyCompact.disabled === true &&
+    (busyCompact.title ?? "").includes("Wait for this run to finish") &&
+    (busyCompact.describedBy?.text ?? "").includes(
+      "Wait for this run to finish",
+    ),
+  `disabled=${String(busyCompact.disabled)} title=${JSON.stringify(busyCompact.title ?? null)} describedby=${JSON.stringify(busyCompact.describedBy ?? null)}`,
+);
+
+// The run has to settle before the compaction: a summary admitted while the turn was still writing
+// its entries would have nothing to cut.
+let longSessionIdle = false;
+try {
+  await page.waitForFunction(
+    () => {
+      const button = document.querySelector(
+        "button[aria-label='Compact session']",
+      );
+      return button !== null && !button.disabled;
+    },
+    null,
+    { timeout: 90_000 },
+  );
+  await page.waitForFunction(
+    () => document.body.innerText.includes("IDLE"),
+    null,
+    { timeout: 30_000 },
+  );
+  longSessionIdle = true;
+} catch {
+  longSessionIdle = false;
+}
+
+const usageBefore = tokenCount(await usageChip.innerText().catch(() => ""));
+observed.compactSpend = { idle: longSessionIdle, usageBefore };
+assert(
+  "the pane header reads the session's own usage before the compaction",
+  longSessionIdle &&
+    usageBefore !== null &&
+    usageBefore > 0 &&
+    !(await usageChip.innerText()).includes("$"),
+  `header said ${JSON.stringify(observed.compactSpend.usageBefore)}, text ${JSON.stringify(await usageChip.innerText().catch(() => ""))}`,
+);
+
+let compacted = false;
+try {
+  await compactButton.click();
+  await page.waitForFunction(
+    (summary) => document.body.innerText.includes(summary),
+    SUMMARY,
+    { timeout: 90_000 },
+  );
+  compacted = true;
+} catch (error) {
+  observed.compactError = String(error).slice(0, 300);
+  compacted = false;
+}
+
+// The spend line under the summary is measured from two readings of the same session, so it can
+// arrive one stream event after the entry: wait for a number rather than reading once.
+let spendText = "";
+try {
+  await page.waitForFunction(
+    () => {
+      const line = document.querySelector("[data-compaction-spend]");
+      return line !== null && /[\d,]+ tokens/.test(line.textContent ?? "");
+    },
+    null,
+    { timeout: 30_000 },
+  );
+  spendText = (await spendLine.first().innerText()).trim();
+} catch {
+  spendText = (
+    await spendLine
+      .first()
+      .innerText()
+      .catch(() => "")
+  ).trim();
+}
+const usageAfterText = await usageChip.innerText().catch(() => "");
+const usageAfter = tokenCount(usageAfterText);
+observed.compactSpend = {
+  ...observed.compactSpend,
+  usageAfterText,
+  usageAfter,
+  spendText,
+  compacted,
+  transcript: (await page.locator("main, body").first().innerText()).slice(
+    0,
+    400,
+  ),
+};
+assert(
+  "the compaction's summary lands in the transcript with its spend",
+  compacted &&
+    // A number, not just the word: a delta of zero would mean the summarizer's own spend was never
+    // measured, which is the one thing this line exists to show.
+    /[1-9][\d,]* tokens/.test(spendText) &&
+    // Faux reports no cost, so there is no dollar figure to invent (LOB-222's rule).
+    !spendText.includes("$"),
+  `summary on screen=${compacted}, spend line ${JSON.stringify(spendText)}`,
+);
+assert(
+  "the header shows a non-zero token count after the compaction too",
+  usageAfter !== null && usageAfter > 0 && usageAfter >= (usageBefore ?? 0),
+  `header ${JSON.stringify(usageBefore)} tokens before, ${JSON.stringify(usageAfter)} after (${JSON.stringify(usageAfterText)})`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "compaction.png"),
+  fullPage: true,
+});
+
+// A refused call must say so and leave the button usable. The refusal is injected at the network
+// layer — the dashboard's own `compactSession` request gets a 500 — because there is no way to make
+// the control plane refuse one for a session this pane is allowed to compact, and a swallowed error
+// with a dead button is exactly the failure worth catching.
+const failureToast = page.locator("[data-sonner-toast]", {
+  hasText: "No compaction was started",
+});
+// The client posts to `/rpc/` (Effect's Http protocol normalizes the trailing slash), so the route
+// matches on the path rather than on a glob that would miss it.
+const RPC_PATH = /\/rpc\/?$/;
+await page.route(RPC_PATH, async (route) => {
+  const body = route.request().postData() ?? "";
+  if (body.includes('"compactSession"')) {
+    return route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: "drive: injected compaction failure",
+    });
+  }
+  return route.continue();
+});
+let failedCompact = {};
+try {
+  await compactButton.click();
+  await failureToast.first().waitFor({ timeout: 20_000 });
+  failedCompact = {
+    toast: (await failureToast.first().innerText()).replaceAll("\n", " "),
+    disabled: await compactButton.isDisabled(),
+    ariaBusy: await compactButton.getAttribute("aria-busy"),
+    title: await compactButton.getAttribute("title"),
+  };
+} catch (error) {
+  failedCompact = { error: String(error).slice(0, 300) };
+}
+await page.unroute(RPC_PATH);
+observed.compactFailure = failedCompact;
+assert(
+  "a failed compaction shows a toast and leaves the button usable",
+  (failedCompact.toast ?? "").includes("No compaction was started") &&
+    failedCompact.disabled === false &&
+    failedCompact.ariaBusy === "false",
+  `toast=${JSON.stringify(failedCompact.toast ?? null)} disabled=${String(failedCompact.disabled)} aria-busy=${JSON.stringify(failedCompact.ariaBusy ?? null)} error=${failedCompact.error ?? "none"}`,
+);
+
+// Usable means it can be pressed again: the next attempt is admitted, and the button comes back
+// rather than staying busy or eating the click.
+let retried = false;
+try {
+  await failureToast.first().waitFor({ state: "hidden", timeout: 20_000 });
+  await compactButton.click();
+  await page.waitForFunction(
+    () => {
+      const button = document.querySelector(
+        "button[aria-label='Compact session']",
+      );
+      return (
+        button !== null &&
+        !button.disabled &&
+        button.getAttribute("aria-busy") === "false"
+      );
+    },
+    null,
+    { timeout: 30_000 },
+  );
+  retried = (await failureToast.first().count()) === 0;
+} catch (error) {
+  observed.compactRetryError = String(error).slice(0, 300);
+  retried = false;
+}
+observed.compactRetry = { retried };
+assert(
+  "the button can be pressed again after a failure",
+  retried,
+  `retried=${retried}${observed.compactRetryError === undefined ? "" : ` (${observed.compactRetryError})`}`,
+);
+
 // Feature: the tool-call disclosure. Collapsed by default (a coding run emits
 // dozens), and it opens. See features/transcript.md.
 await page.goto(`${WEB_URL}/sandboxes`, { waitUntil: "domcontentloaded" });

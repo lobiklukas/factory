@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { TranscriptEntry } from "@repo/domain/Session";
 import { ChevronRightIcon, TerminalIcon } from "lucide-react";
 import { cn } from "cn";
+import type { SpendDelta } from "@/lib/compaction-view";
+import { spendHeading } from "@/lib/compaction-view";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import {
   Collapsible,
@@ -28,8 +30,15 @@ import { Message, MessageContent } from "@/components/ui/message";
  */
 export const TranscriptRow = ({
   entry,
+  spend,
 }: {
   readonly entry: TranscriptEntry;
+  /**
+   * What the compaction this pane asked for spent, when this row is the summary it wrote
+   * (LOB-223). The pane computes it and passes it in: the row reads no atoms, so it stays a
+   * function of its props and the arithmetic lives in a module a test can call.
+   */
+  readonly spend?: SpendDelta | undefined;
 }) => {
   const [open, setOpen] = useState(false);
 
@@ -47,11 +56,45 @@ export const TranscriptRow = ({
     );
   }
 
-  if (
-    entry.kind === "system" ||
-    entry.kind === "reset" ||
-    entry.kind === "compaction"
-  ) {
+  if (entry.kind === "compaction") {
+    // The summary is what the model now sees in place of the turns above it, so it is the one
+    // marker that has to carry text: a bare `compaction` label hid the answer the operator
+    // compacted a session to read (LOB-223). The separator stays, because the rows above and
+    // below it are still the log they always were — nothing was dropped.
+    return (
+      <div className="animate-in fade-in flex flex-col gap-2">
+        <Marker
+          variant="separator"
+          className="gap-3 py-1 font-mono text-[10px] tracking-wide uppercase"
+        >
+          <MarkerContent>compaction</MarkerContent>
+        </Marker>
+        <Message>
+          <MessageContent>
+            {entry.text.length > 0 ? (
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                {entry.text}
+              </p>
+            ) : (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Compacted. The log kept no summary text for this cut.
+              </p>
+            )}
+            {spend === undefined ? null : (
+              <p
+                data-compaction-spend
+                className="mt-1 font-mono text-[11px] text-muted-foreground tabular-nums"
+              >
+                {spendHeading(spend)} to compact
+              </p>
+            )}
+          </MessageContent>
+        </Message>
+      </div>
+    );
+  }
+
+  if (entry.kind === "system" || entry.kind === "reset") {
     return (
       <Marker
         variant="separator"

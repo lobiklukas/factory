@@ -26,13 +26,14 @@ import { RepoSlug, SessionId } from "@repo/domain/Session";
 /**
  * Where a delivery came from. `generic` is the plain inbound webhook: the caller names the label
  * its payload carries and the seam does the rest. `jira` is the Jira Cloud issue webhook (LOB-189),
- * `github` GitHub's issues webhook (LOB-190).
+ * `github` GitHub's issues webhook (LOB-190), `slack` a Slack Events API message (LOB-191).
  */
 export const TriggerSource = Schema.Literals([
   "linear",
   "generic",
   "jira",
   "github",
+  "slack",
 ]);
 export type TriggerSource = typeof TriggerSource.Type;
 
