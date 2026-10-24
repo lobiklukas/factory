@@ -4,14 +4,16 @@ An autonomous backlog loop for this repo: a **fresh `pi -p` session per iteratio
 iteration**, **one PR per issue**, merged by GitHub when CI is green. State lives outside the model: Linear is the
 queue, git holds the work, `.ralph/` holds logs and notes.
 
-Every agent runs on `anthropic/claude-haiku-5-5` (`RALPH_MODEL`), thinking `medium` (`RALPH_THINKING`).
+The worker runs on `opencode-go/deepseek-v4.1-flash` (`RALPH_MODEL`), thinking `medium` (`RALPH_THINKING`); the
+`ralph-*` subagents run on `anthropic/claude-haiku-5-5` (their `model:` front matter).
 
 ## How an issue flows
 
 1. The worker (`work.prompt.md`) takes the first pickable item: a ralph PR with a red `gate` or a conflict, then a
    red main, then an interrupted issue, then the highest-priority **Todo** issue in Factory MVP whose blockers are
    Done. Issues labelled `needs-human`, `needs-spec`, `too-big` or `split-parent` are skipped.
-2. It implements with tests, runs the gate once, gets **one** `combined` review, and opens a PR (not a draft).
+2. It implements with tests, launches **one** `combined` review async and runs the gate while it works, and opens a PR
+   (not a draft). A session still without a green gate after 45 minutes skips the issue as `too-big`.
 3. After the session the driver **arms GitHub auto-merge** (`gh pr merge --auto --squash`) on every open ralph
    PR, and runs `gh pr update-branch` on one that is behind main.
 4. GitHub squash-merges once the required `gate` check passes. Linear's GitHub integration moves the issue to Done.
@@ -73,8 +75,9 @@ JSON
 ## Model fallback and limits
 
 On a provider error (429, overload, quota, outage) the driver retries the iteration on each model in
-`RALPH_FALLBACK_MODELS` (default `opencode-go/beam-free`; empty disables). When every model refuses, it
-waits `RALPH_PROVIDER_BACKOFF` (10 min) without counting a failure, up to `RALPH_PROVIDER_BACKOFFS` (36) times.
+`RALPH_FALLBACK_MODELS` (default `anthropic/claude-haiku-5-5`, a different provider from the worker; empty disables).
+When every model refuses, it waits `RALPH_PROVIDER_BACKOFF` (2 min) without counting a failure, up to
+`RALPH_PROVIDER_BACKOFFS` (180) times.
 An iteration is killed after `RALPH_TIMEOUT` (1 h) or after `RALPH_STALL` (20 min) with no session write.
 
 ## Parallel workers
