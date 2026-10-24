@@ -19,6 +19,7 @@ import {
   closeHarness,
   isBusy,
   openSession,
+  readPromptSections,
   readSessionLog,
   submitMessage,
 } from "./session";
@@ -134,5 +135,78 @@ describe("a session over PostgresStorage", () => {
     expect(second.entries.slice(0, first.entries.length)).toEqual(
       first.entries,
     );
+  }, 120_000);
+});
+
+/** The body a run is told, with no trailing newline so the rendered tag is exact. */
+const SPECIFY_BODY =
+  "# Specify\n\nClarify the goal, scope, acceptance criteria, and risks.";
+const REVIEW_BODY = "# Review\n\nReport evidenced findings.";
+
+describe("a run's column decides its prompt", () => {
+  it("commits each skill body as one prompt section, in the column's order", async () => {
+    const skillsLogId = `harness-skills-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+    const sections = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, skillsLogId),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+          run: {
+            column: "specifying",
+            skills: [
+              { name: "specify", body: SPECIFY_BODY },
+              { name: "review", body: REVIEW_BODY },
+            ],
+          },
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const prompts = yield* readPromptSections(storage);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return prompts;
+      }),
+    );
+
+    // The sections are Pi Durable's tagged form, which is what the model is actually sent: the
+    // committed `pi.system` entry replays these before the first request of the run.
+    expect(sections["skill_specify"]).toBe(
+      `<skill_specify>\n${SPECIFY_BODY}\n</skill_specify>`,
+    );
+    expect(sections["skill_review"]).toBe(
+      `<skill_review>\n${REVIEW_BODY}\n</skill_review>`,
+    );
+    // Nothing the column did not name is injected, and the order is the column's.
+    expect(Object.keys(sections)).toEqual(["skill_specify", "skill_review"]);
+  }, 120_000);
+
+  it("injects nothing when the run's column names no skills", async () => {
+    const plainLogId = `harness-plain-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+
+    const sections = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, plainLogId),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const prompts = yield* readPromptSections(storage);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return prompts;
+      }),
+    );
+
+    expect(sections).toEqual({});
   }, 120_000);
 });
