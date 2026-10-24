@@ -51,6 +51,28 @@ export type CreatePullRequestInput = {
   readonly head: string;
   readonly title: string;
   readonly body: string;
+  /**
+   * The API root to call. Absent means the deployment's `GITHUB_API_URL`, which is the key the App
+   * token flow already reads (LOB-51), so one variable points both GitHub clients at the same
+   * forge — and a loopback fake can answer for the PR client without a key (LOB-179).
+   */
+  readonly apiUrl?: string;
+};
+
+/** GitHub's own API root: what an unconfigured deployment calls. */
+const DEFAULT_API_URL = "https://api.github.com";
+
+/**
+ * Where this client sends its requests: `GITHUB_API_URL` when set, `https://api.github.com` when
+ * not. Read per call rather than at module load so a test or a verify script can point the same
+ * process at a loopback endpoint, and an empty value is an unset one (as `GITHUB_TOKEN` is).
+ */
+const configuredApiUrl = (): string => {
+  // oxlint-disable-next-line effecttsgo/process-env -- the deployment seam; a `Config` here would add a requirement to every caller of the step.
+  const configured = process.env["GITHUB_API_URL"];
+  return configured === undefined || configured === ""
+    ? DEFAULT_API_URL
+    : configured;
 };
 
 export const createPullRequest = (
@@ -66,8 +88,9 @@ export const createPullRequest = (
     const token = yield* provider.tokenFor(input.repo);
     const [owner, repo] = input.repo.split("/");
     const ref = `${input.repo}:${input.head}->${input.base}`;
+    const apiUrl = input.apiUrl ?? configuredApiUrl();
     const request = yield* HttpClientRequest.post(
-      `https://api.github.com/repos/${owner}/${repo}/pulls`,
+      `${apiUrl}/repos/${owner}/${repo}/pulls`,
       {
         headers: {
           authorization: `Bearer ${Redacted.value(token)}`,
@@ -92,7 +115,32 @@ export const createPullRequest = (
       ),
     );
     const response = yield* http.execute(request).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.mapError(
+        () =>
+          new PrError({
+            operation: "createPullRequest",
+            ref,
+            message: "GitHub could not be reached",
+          }),
+      ),
+    );
+    // A duplicate is not a failure to report: GitHub refuses a second PR for one head and base, so
+    // the answer to "open this PR" is the PR that already exists. Adopting it is what closes the
+    // window a kill between the call and its acknowledgement opens — the first attempt's commit
+    // never landed, so nothing local remembers the PR, and the retry finds it here (LOB-179).
+    if (response.status === 422) {
+      const existing = yield* findPullRequest({
+        http,
+        apiUrl,
+        repo: input.repo,
+        head: input.head,
+        base: input.base,
+        ref,
+        authorization: `Bearer ${Redacted.value(token)}`,
+      });
+      if (existing !== undefined) return existing;
+    }
+    return yield* HttpClientResponse.filterStatusOk(response).pipe(
       Effect.flatMap(HttpClientResponse.schemaBodyJson(PullRequest)),
       Effect.mapError((error) => {
         const status =
@@ -110,7 +158,57 @@ export const createPullRequest = (
         });
       }),
     );
-    return response;
+  });
+
+/**
+ * The PR that already exists for one head and base, if GitHub has one.
+ *
+ * GitHub keys a PR by its head branch as the *repo's owner* spells it (`owner:branch`), which is
+ * why the query names the owner rather than the bare branch. An empty list is no answer, not a
+ * failure: the caller reports the status GitHub gave when the create was refused.
+ */
+const findPullRequest = (input: {
+  readonly http: HttpClient.HttpClient;
+  readonly apiUrl: string;
+  readonly repo: RepoSlug;
+  readonly head: string;
+  readonly base: string;
+  readonly ref: string;
+  /** The same bearer the create sent: the lookup reads a repo the token already reaches. */
+  readonly authorization: string;
+}): Effect.Effect<PullRequest | undefined, PrError> =>
+  Effect.gen(function* () {
+    const [owner, repo] = input.repo.split("/");
+    const query = new URLSearchParams({
+      head: `${owner}:${input.head}`,
+      base: input.base,
+      state: "open",
+    });
+    const request = HttpClientRequest.get(
+      `${input.apiUrl}/repos/${owner}/${repo}/pulls?${query.toString()}`,
+      {
+        headers: {
+          authorization: input.authorization,
+          accept: "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28",
+        },
+      },
+    );
+    return yield* input.http.execute(request).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap(
+        HttpClientResponse.schemaBodyJson(Schema.Array(PullRequest)),
+      ),
+      Effect.map((found) => found[0]),
+      Effect.mapError(
+        () =>
+          new PrError({
+            operation: "findPullRequest",
+            ref: input.ref,
+            message: "the existing pull request could not be read",
+          }),
+      ),
+    );
   });
 
 export const PrClientLive = FetchHttpClient.layer;
