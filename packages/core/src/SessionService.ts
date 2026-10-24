@@ -330,12 +330,23 @@ type Binding = {
 };
 
 /**
- * One approval as this process knows it. The log holds the same two facts (the request and the
- * decision entries); this set is what the pending list reads until the snapshot fold does (LOB-147).
+ * One approval as the index knows it: the request, and the decision that settled it. The log holds
+ * the same two facts (`factory.approval.requested` / `factory.approval.decided`); the row is the
+ * fold of those entries, so the pending list answers without folding a log (LOB-147).
  */
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
   readonly decision?: ApprovalDecision;
+};
+
+type ApprovalRow = {
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+  readonly decision: string | null;
+  readonly actor: string | null;
+  readonly decidedAt: string | null;
 };
 
 /** One `session_pages` row as the driver returns it; the two jsonb columns are selected as text. */
@@ -1264,10 +1275,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return { session, taskId };
         });
 
-      /** Every approval this process has seen, per session, keyed by request id. */
-      const approvals = yield* Ref.make(
-        HashMap.empty<SessionId, HashMap.HashMap<string, ApprovalRecord>>(),
-      );
       /** Serializes approval writes so a repeated request id cannot commit twice. */
       const approvalGate = yield* Semaphore.make(1);
 
@@ -1283,32 +1290,65 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             )
           : Effect.void;
 
+      /**
+       * The row a session's approvals live in, read back as the contract names it. One request id
+       * is one row, so a repeated request reads the row the first one wrote rather than appending
+       * a second entry: the idempotency is the primary key, not an in-memory set that a restart
+       * would empty (LOB-147).
+       */
+      const approvalRow = (sessionId: SessionId, requestId: string) =>
+        sql<ApprovalRow>`
+          SELECT
+            request_id,
+            action,
+            detail,
+            to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
+            decision,
+            actor,
+            to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+          FROM session_approvals
+          WHERE session_id = ${sessionId} AND request_id = ${requestId}
+        `;
+
+      const toApprovalRecord = (
+        sessionId: SessionId,
+        row: ApprovalRow,
+      ): ApprovalRecord => ({
+        request: {
+          sessionId,
+          requestId: row.requestId,
+          action: row.action,
+          detail: row.detail,
+          requestedAt: row.requestedAt,
+        },
+        ...(row.decision === null ||
+        row.actor === null ||
+        row.decidedAt === null
+          ? {}
+          : {
+              decision: {
+                sessionId,
+                requestId: row.requestId,
+                decision: row.decision === "approved" ? "approved" : "denied",
+                actor: row.actor,
+                decidedAt: row.decidedAt,
+              },
+            }),
+      });
+
       const recordOf = (
         sessionId: SessionId,
         requestId: string,
-      ): Effect.Effect<ApprovalRecord | undefined> =>
-        Effect.map(Ref.get(approvals), (all) =>
-          Option.getOrUndefined(
-            HashMap.get(all, sessionId).pipe(
-              Option.flatMap((byRequest) => HashMap.get(byRequest, requestId)),
-            ),
-          ),
+      ): Effect.Effect<ApprovalRecord | undefined, SessionError> =>
+        Effect.map(
+          paper("read approval", approvalRow(sessionId, requestId)),
+          (rows) => {
+            const row = rows[0];
+            return row === undefined
+              ? undefined
+              : toApprovalRecord(sessionId, row);
+          },
         );
-
-      const putRecord = (
-        sessionId: SessionId,
-        record: ApprovalRecord,
-      ): Effect.Effect<void> =>
-        Ref.update(approvals, (all) => {
-          const byRequest = Option.getOrElse(HashMap.get(all, sessionId), () =>
-            HashMap.empty<string, ApprovalRecord>(),
-          );
-          return HashMap.set(
-            all,
-            sessionId,
-            HashMap.set(byRequest, record.request.requestId, record),
-          );
-        });
 
       const requestApproval = (
         input: RequestApprovalInput,
@@ -1338,7 +1378,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   requestedAt,
                 }),
               );
-              yield* putRecord(input.sessionId, { request });
+              // The row is the index of the entry just committed, not a second record: written
+              // after it, so a crash between the two leaves the log (the truth) without a row a
+              // rebuild cannot recover — never a row that claims a request no log holds. The cost
+              // of that order is the other side of it: a retry after such a crash finds no row and
+              // commits the request again, so the log can hold the same request id twice. That is
+              // why the fold, not the writer, makes the id the identity (`projectApprovals`) — a
+              // duplicate costs one log line, not a second pending approval.
+              yield* paper(
+                "index approval request",
+                sql`
+                  INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at)
+                  VALUES (${input.sessionId}, ${request.requestId}, ${request.action}, ${request.detail}, ${requestedAt}::timestamptz)
+                  ON CONFLICT (session_id, request_id) DO NOTHING
+                `,
+              );
               yield* touchActivity(input.sessionId);
               return request;
             }),
@@ -1396,32 +1450,55 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   decidedAt,
                 }),
               );
-              yield* putRecord(input.sessionId, { ...known, decision });
+              yield* paper(
+                "settle approval",
+                sql`
+                  UPDATE session_approvals
+                  SET decision = ${input.decision},
+                      actor = ${input.actor},
+                      decided_at = ${decidedAt}::timestamptz
+                  WHERE session_id = ${input.sessionId} AND request_id = ${input.requestId}
+                `,
+              );
               yield* touchActivity(input.sessionId);
               return decision;
             }),
           );
         });
 
+      /**
+       * The requests still waiting for a decision, oldest first. One statement over the index and
+       * no fold: the list a dashboard shows is what the row is for, and it survives a restart
+       * because the row was written when the request was committed (LOB-147). `requested_at`,
+       * then `request_id`, is the order the log fold produces too, so a snapshot and this answer
+       * agree once the row is written.
+       */
       const listApprovals = (
         sessionId: SessionId,
       ): Effect.Effect<ListApprovalsOutput, SessionError> =>
         Effect.gen(function* () {
           yield* requireSession(sessionId);
-          const all = yield* Ref.get(approvals);
-          const pending = Option.match(HashMap.get(all, sessionId), {
-            onNone: () => [] as ApprovalRequest[],
-            onSome: (byRequest) =>
-              Array.from(HashMap.values(byRequest))
-                .filter((record) => record.decision === undefined)
-                .map((record) => record.request)
-                .sort((a, b) =>
-                  a.requestedAt === b.requestedAt
-                    ? a.requestId.localeCompare(b.requestId)
-                    : a.requestedAt.localeCompare(b.requestedAt),
-                ),
-          });
-          return { approvals: pending };
+          const rows = yield* paper(
+            "list approvals",
+            sql<ApprovalRow>`
+              SELECT
+                request_id,
+                action,
+                detail,
+                to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
+                decision,
+                actor,
+                to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+              FROM session_approvals
+              WHERE session_id = ${sessionId} AND decision IS NULL
+              ORDER BY requested_at, request_id
+            `,
+          );
+          return {
+            approvals: rows.map(
+              (row) => toApprovalRecord(sessionId, row).request,
+            ),
+          };
         });
 
       const recordActivity = (
