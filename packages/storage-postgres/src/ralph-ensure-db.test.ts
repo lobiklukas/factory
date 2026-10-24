@@ -220,7 +220,7 @@ const writeFakeDocker = (
       'case "$*" in',
       "  info) exit 0 ;;",
       "  ps*) printf '%s\\n' \"${FAKE_OWNER-}\" ;;",
-      "  *psql*) printf '%s\\n' \"${FAKE_PSQL_OUT-}\" ;;",
+      '  *psql*) if [ "${FAKE_PSQL_EXIT:-0}" != "0" ]; then exit "${FAKE_PSQL_EXIT}"; fi; printf \'%s\\n\' "${FAKE_PSQL_OUT-}" ;;',
       ...upBranch,
       "  *) exit 0 ;;",
       "esac",
@@ -272,31 +272,31 @@ interface BashRun {
 }
 
 /**
- * Run `ensure_db` in a subshell and hand back everything it did. The subshell is the point:
- * `ensure_db` ends in `die`, which is `exit 1`, and a case that expected that as a plain statement
- * would take the whole child with it before it could print the status.
+ * Run `ensure_db` as a plain statement in the child and read `spawnSync`'s exit status.
+ *
+ * The `( ... ) || rc=$?` form is wrong: bash suppresses `errexit` in a subshell that is the left
+ * operand of `||`, so the driver's own `set -euo pipefail` never applies and a more forgiving
+ * harness reports green for a path where the real loop stops. A plain statement inherits errexit.
+ * `ensure_db` ends in `die` (`exit 1`), which is exactly the status we read back.
  */
 const ensureDb = (
   scratch: Scratch,
   extra: Record<string, string> = {},
 ): BashRun => {
-  const run = spawnSync(
-    "bash",
-    [
-      "-c",
-      'source "$LOOP"; rc=0; ( ensure_db ) || rc=$?; printf "rc=%s\\n" "$rc"',
-    ],
-    {
-      cwd: scratch.root,
-      encoding: "utf8",
-      env: childEnv(scratch, extra),
-      timeout: 30_000,
-    },
-  );
+  // Run `ensure_db` as a plain statement, not as the left operand of `||`. In
+  // `bash -c '...; ( ensure_db ) || rc=$?'` errexit is suppressed inside the
+  // subshell (it is the condition of an `||`), so the driver's own `set -euo
+  // pipefail` never applies and a more forgiving harness could report green for a
+  // path where the real loop would stop. A plain statement inherits errexit.
+  const run = spawnSync("bash", ["-c", 'source "$LOOP"; ensure_db'], {
+    cwd: scratch.root,
+    encoding: "utf8",
+    env: childEnv(scratch, extra),
+    timeout: 30_000,
+  });
   const stdout = run.stdout ?? "";
-  const rc = /^rc=(-?\d+)\s*$/.exec(stdout.trim());
   return {
-    status: rc ? Number(rc[1]) : -1,
+    status: run.status ?? -1,
     stdout,
     stderr: run.stderr ?? "",
   };
@@ -535,6 +535,32 @@ describe("the ralph driver's ensure_db", () => {
         "exec factory-postgres-1 psql -U factory -d factory -tAc select 1 from pg_database where datname='ralph_lob108_probe'",
         "exec factory-postgres-1 createdb -U factory ralph_lob108_probe",
       ]);
+    },
+  );
+
+  it(
+    "does not treat a failed existence query as an absent database",
+    { timeout: 30_000 },
+    async () => {
+      // A psql that fails must not be read as "the database is not there": `ensure_db` must stop
+      // rather than go on to `createdb`. Mutation: append `|| true` to the existence assignment
+      // (MC2) — the driver then runs `createdb` and exits 0.
+      const scratch = mkScratch();
+      const port = await closedPort();
+      await databaseIsUp(port);
+      writeFakeDocker(scratch);
+
+      const run = ensureDb(scratch, {
+        PG_PORT: String(port),
+        FAKE_OWNER: "factory-postgres-1",
+        FAKE_PSQL_EXIT: "1",
+        RALPH_DB: "ralph_lob124_probe",
+      });
+
+      expect(run.status, run.stderr).not.toBe(0);
+      expect(driverCalls(scratch).map((call) => call.argv)).not.toContain(
+        "exec factory-postgres-1 createdb -U factory ralph_lob124_probe",
+      );
     },
   );
 
