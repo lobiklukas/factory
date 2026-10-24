@@ -153,7 +153,6 @@ export const SessionUsage = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({ key: Schema.String, usage: ModelUsage }),
   ),
-  tools: Schema.Array(Schema.Struct({ key: Schema.String, usage: ModelUsage })),
 });
 export type SessionUsage = typeof SessionUsage.Type;
 
