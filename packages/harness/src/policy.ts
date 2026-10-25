@@ -31,6 +31,9 @@
  *   job (LOB-51/LOB-54). A remote written out as a URL in the command *is* checked.
  * - The commands that write files are a table, not a proof: `sed -i`, `tar -C`, `unzip -d`, and a
  *   program that writes a file itself are not in it.
+ * - A docs run's write allowlist (`DOCS_WRITE_ALLOWLIST`, LOB-195) narrows the same decision, so it
+ *   stops what the same textual read stops: a `write` or `edit` of a code file, not a redirect or
+ *   `sed -i` that writes one.
  */
 import type { ToolCall } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
@@ -1036,6 +1039,90 @@ export const decideToolCall = (
   }
   return ALLOW;
 };
+
+// ---------------------------------------------------------------------------------------------
+// The docs rule (LOB-195)
+// ---------------------------------------------------------------------------------------------
+
+/** The factory skill (seeded by `0015_seed_docs_skill.ts`, LOB-225) that makes a run a docs run. */
+export const DOCS_SKILL = "docs";
+
+/**
+ * What a run holding the `docs` skill may write (LOB-195): everything under `docs/`, and any
+ * markdown file at the repository root.
+ *
+ * An entry ending in `/**` is a subtree of the worktree, a `*.<ext>` entry is a file at the
+ * worktree root, and anything else is that exact worktree-relative path. Declared as a list so that
+ * widening a docs run's reach is an edit here rather than a change to the check, and so the refusal
+ * can print it — the sentence that lets the model write in the right place on its next try.
+ */
+export const DOCS_WRITE_ALLOWLIST: readonly string[] = ["docs/**", "*.md"];
+
+/** Whether a normalized worktree-relative path falls inside one allowlist entry. */
+const inAllowlist = (entry: string, path: string): boolean => {
+  if (entry.endsWith("/**")) {
+    const root = entry.slice(0, -3);
+    return path === root || path.startsWith(`${root}/`);
+  }
+  if (entry.startsWith("*."))
+    return !path.includes("/") && path.endsWith(entry.slice(1));
+  return path === entry;
+};
+
+/** `target`, which must be `root` or inside it, as a path relative to it. */
+const relativeTo = (root: string, target: string): string =>
+  root === "/" ? target.slice(1) : target.slice(root.length + 1);
+
+/**
+ * The docs rule: inside the worktree, a documentation run writes documentation only (LOB-195).
+ *
+ * Two things are deliberate. It reads only the `write` and `edit` tools' `path` argument, so a
+ * `bash` redirect or a `sed -i` is not covered: the rule is textual, exactly like the write table
+ * it sits beside, and claims nothing more. It also resolves that path lexically, as the worktree
+ * rule does, so a symlink under `docs/` pointing into the code is not caught — and it judges only
+ * paths D11's worktree rule has already allowed, because a write that escapes the worktree is that
+ * rule's refusal, not this one, which is why `docsPolicy` composes them in that order.
+ */
+const decideDocsWrite = (
+  rules: AutonomyRules,
+  call: ToolCall,
+): PolicyDecision => {
+  if (!WRITE_TOOLS.has(call.name)) return ALLOW;
+  const path = stringField(call.arguments, "path");
+  if (path === undefined) return ALLOW;
+  const resolved = resolvePath(rules.worktree, path);
+  // Outside the worktree is not this rule's to refuse: the worktree rule owns that sentence.
+  if (!within(rules.worktree, resolved)) return ALLOW;
+  if (
+    DOCS_WRITE_ALLOWLIST.some((entry) =>
+      inAllowlist(entry, relativeTo(rules.worktree, resolved)),
+    )
+  )
+    return ALLOW;
+  return block(
+    `${call.name} writing ${path} is refused by the docs rule: this run holds the ${DOCS_SKILL} skill, so it may write documentation only (${DOCS_WRITE_ALLOWLIST.join(", ")}). Write that documentation instead.`,
+  );
+};
+
+/**
+ * Compose the docs rule into a session's policy: a run whose column holds the `docs` skill may
+ * write documentation and nothing else (LOB-195).
+ *
+ * Composed, not substituted. The wrapped policy decides first, so every D11 refusal keeps its own
+ * wording and a write that escapes the worktree is still refused as that; the docs rule is then
+ * consulted for a call the wrapped policy allowed, and its refusal names itself and the allowlist.
+ * `rules` is the wrapped policy's, unchanged: the narrowing lives in `decide`, and a policy that
+ * reported rules it does not decide by would be a lie a reader has to check against `decide`.
+ */
+export const docsPolicy = (policy: SessionPolicy): SessionPolicy => ({
+  rules: policy.rules,
+  decide: (call) =>
+    Effect.flatMap(policy.decide(call), (decision) =>
+      decision._tag === "block"
+        ? Effect.succeed(decision)
+        : Effect.sync(() => decideDocsWrite(policy.rules, call)),
+    ),
+});
 
 // ---------------------------------------------------------------------------------------------
 // The seam
