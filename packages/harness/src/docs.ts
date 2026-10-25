@@ -10,6 +10,7 @@ export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
 export const PAGE_DOC_KIND = "factory.page";
+export const PAGE_PROMPT_DOC_KIND = "factory.pages.prompt";
 export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 
@@ -70,6 +71,36 @@ export const PageDoc = defineDocFamily({
     content: "",
     links: [] as string[],
     sources: [] as string[],
+  }),
+});
+
+/**
+ * What the session's `pages` section came to when the session opened (LOB-205, part 2 of LOB-47).
+ *
+ * The section itself is prompt text (`./pages`), and prompt text is not a fact anyone can audit: it
+ * is rendered, sent, and gone. This document is the record beside it — how many pages the session
+ * held, which of them the budget carried, which it left out, and what the rendered section cost — so
+ * "what did this run receive" is a read rather than a reconstruction. Every open rewrites it, a
+ * session that has pages no longer included included as `held` with nothing carried, so the latest
+ * answer is never a stale one.
+ *
+ * `included` and `dropped` are the names, not the bodies: a page's content is already in this log
+ * (`PageDoc`), and copying it here would be a second copy a rebuild could leave disagreeing with
+ * the first. `cap` is the sentinel: it is the budget the record was assembled under, so a seed
+ * (`0`) says the session has never been opened with this harness.
+ */
+export const PagePromptDoc = defineDoc({
+  kind: PAGE_PROMPT_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    cap: 0,
+    tokens: 0,
+    held: 0,
+    included: [] as string[],
+    dropped: [] as string[],
   }),
 });
 

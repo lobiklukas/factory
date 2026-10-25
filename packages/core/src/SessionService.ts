@@ -646,6 +646,66 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * One `session_pages` row as the domain's page, or a storage error naming the page whose JSON
+       * text does not decode. Shared by the page reads so a row is decoded one way.
+       */
+      const pageFromRow = (row: PageRow): Effect.Effect<Page, SessionError> =>
+        Effect.gen(function* () {
+          const links = yield* Schema.decodeEffect(PageStrings)(row.links).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable links: ${String(cause)}`,
+                }),
+            ),
+          );
+          const sources = yield* Schema.decodeEffect(PageStrings)(
+            row.sources,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `page ${row.name} has unreadable sources: ${String(cause)}`,
+                }),
+            ),
+          );
+          return {
+            name: row.name,
+            kind: row.kind,
+            content: row.content,
+            links,
+            sources,
+          };
+        });
+
+      /**
+       * The pages one session holds, from the derived rows rather than a fold of its log (LOB-204).
+       *
+       * This is the read the prompt's `pages` section is assembled from (LOB-205): it runs on every
+       * owner acquisition, so a page curated since the session last ran reaches its next run, the
+       * same freshness the column's skill bodies have.
+       */
+      const pagesFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<readonly Page[], SessionError> =>
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read pages",
+            sql<PageRow>`
+              SELECT name, kind, content, links::text AS links, sources::text AS sources
+              FROM session_pages
+              WHERE session_id = ${sessionId}
+              ORDER BY name
+            `,
+          );
+          const pages: Page[] = [];
+          for (const row of rows) pages.push(yield* pageFromRow(row));
+          return pages;
+        });
+
+      /**
        * What the run's column gives its prompt: the skill records the column names, resolved in the
        * column's order (`@repo/harness`'s `loadRun`). A column that names no skills costs no query.
        */
@@ -791,6 +851,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly cwd: string;
         readonly policy: SessionPolicy;
         readonly run: RunProfile;
+        /** The cited pages the session's prompt carries (LOB-205), read at every acquisition. */
+        readonly pages: readonly Page[];
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -831,11 +893,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // two runs of one session reaches the next run too. Pinning a body to the run that
             // started under it is B6's "per-run version pinning", which is wave 2.
             const run = yield* runProfileFor(id);
+            // The knowledge the prompt carries is read the same way, and for the same reason: a page
+            // curated since this session last ran reaches its next run, and a page deleted from
+            // `session_pages` stops being told. A session with none passes none, so its prompt has no
+            // `pages` section and its log records no page prompt (LOB-205).
+            const pages = yield* pagesFor(id);
             const opened = yield* open({
               storage,
               cwd: workspace.path,
               policy: policy.forWorktree(workspace.path, id),
               run,
+              pages,
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -870,11 +938,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquireOwnerWith(
           id,
           row,
-          ({ storage, cwd, policy: sessionPolicy, run }) =>
+          ({ storage, cwd, policy: sessionPolicy, run, pages }) =>
             openSession({
               storage,
               model: options.model,
               cwd,
+              pages,
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -1181,7 +1250,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run }) =>
+            ({ storage, cwd, policy: sessionPolicy, run, pages }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
                 (parentStorage) =>
@@ -1191,6 +1260,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     ...(input.at === undefined ? {} : { at: input.at }),
                     lineage: input.sessionId,
                     run,
+                    pages,
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
                       ? {}
@@ -1675,37 +1745,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         }).pipe(Effect.ignore);
 
-      const pageFromRow = (row: PageRow): Effect.Effect<Page, SessionError> =>
-        Effect.gen(function* () {
-          const links = yield* Schema.decodeEffect(PageStrings)(row.links).pipe(
-            Effect.mapError(
-              (cause) =>
-                new SessionErrorClass({
-                  code: "storage",
-                  message: `page ${row.name} has unreadable links: ${String(cause)}`,
-                }),
-            ),
-          );
-          const sources = yield* Schema.decodeEffect(PageStrings)(
-            row.sources,
-          ).pipe(
-            Effect.mapError(
-              (cause) =>
-                new SessionErrorClass({
-                  code: "storage",
-                  message: `page ${row.name} has unreadable sources: ${String(cause)}`,
-                }),
-            ),
-          );
-          return {
-            name: row.name,
-            kind: row.kind,
-            content: row.content,
-            links,
-            sources,
-          };
-        });
-
       /**
        * Record (or replace) one cited knowledge page (LOB-204).
        *
@@ -1778,18 +1817,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<ListPagesOutput, SessionError> =>
         Effect.gen(function* () {
           yield* requireSession(input.sessionId);
-          const rows = yield* paper(
-            "list pages",
-            sql<PageRow>`
-              SELECT name, kind, content, links::text AS links, sources::text AS sources
-              FROM session_pages
-              WHERE session_id = ${input.sessionId}
-              ORDER BY name
-            `,
-          );
-          const pages: Page[] = [];
-          for (const row of rows) pages.push(yield* pageFromRow(row));
-          return { pages };
+          return { pages: [...(yield* pagesFor(input.sessionId))] };
         });
 
       /**

@@ -3682,6 +3682,104 @@ describe("cited pages", () => {
 });
 
 /**
+ * The pages a session carries reach its prompt (LOB-205, part 2 of LOB-47).
+ *
+ * The service reads `session_pages` on every owner acquisition and hands the pages to
+ * `openSession`, so a session opened *after* its pages were recorded is told them. The proof is the
+ * committed `pi.system` entry — the prompt Pi Durable replays before a request — rather than the
+ * extension that built it: it is what the model was sent, and it survives the run that sent it.
+ *
+ * The owner is released between recording and sending (`sessions.close`) because a live owner is not
+ * reopened: the read happens at open, which is exactly the freshness rule being tested — a page
+ * curated since the session last ran reaches its next run.
+ */
+describe("the cited pages a session carries", () => {
+  /** The prompt sections a session's own log leaves in effect, read the way a client would. */
+  const promptSections = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readPromptSections(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
+
+  it("tells the next run the pages the session holds, and says nothing about pages it lacks", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const source = yield* sessions.create({
+          title: "the session that taught this",
+        });
+        const told = yield* sessions.create({ title: "a session with pages" });
+        const bare = yield* sessions.create({ title: "a session with none" });
+        yield* sessions.recordPage({
+          sessionId: told.id,
+          name: "a-the-log-is-the-truth",
+          kind: "decision",
+          content: "the log is the truth; the rows are a cache",
+          links: ["b-batch-the-fold"],
+          sources: [source.id],
+        });
+        yield* sessions.recordPage({
+          sessionId: told.id,
+          name: "b-batch-the-fold",
+          kind: "trap",
+          content: "a per-batch delete clobbers another batch's rows",
+          links: [],
+          sources: [source.id],
+        });
+        // Release every owner, so the next send opens a harness rather than reusing the one that was
+        // open when the pages were written.
+        yield* sessions.close;
+        yield* sessions.send({ sessionId: told.id, content: "begin" });
+        yield* sessions.send({ sessionId: bare.id, content: "begin" });
+        yield* waitUntil(
+          sessions
+            .get(told.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the paged run to settle",
+        );
+        yield* waitUntil(
+          sessions
+            .get(bare.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the bare run to settle",
+        );
+        return {
+          source: source.id,
+          told: yield* promptSections(told.id),
+          bare: yield* promptSections(bare.id),
+        };
+      }),
+    );
+
+    // The section is in the prompt the model was sent, with both pages and their citation — the
+    // exact text, because "the prompt shows the pages it received" is what the run was told.
+    expect(outcome.told["pages"]).toBe(
+      [
+        "<pages>",
+        "## a-the-log-is-the-truth (decision)",
+        "the log is the truth; the rows are a cache",
+        "links: b-batch-the-fold",
+        `sources: ${outcome.source}`,
+        "",
+        "## b-batch-the-fold (trap)",
+        "a per-batch delete clobbers another batch's rows",
+        `sources: ${outcome.source}`,
+        "</pages>",
+      ].join("\n"),
+    );
+    // A session with no pages is told nothing about pages: no section, not an empty one.
+    expect(outcome.bare["pages"]).toBeUndefined();
+  }, 120_000);
+});
+
+/**
  * The bounded curator pass (LOB-206, part 3 of LOB-47).
  *
  * The pass is one call over a finished session, and what it may write is bounded by `maxPages`. The
