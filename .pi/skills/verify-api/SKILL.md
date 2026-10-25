@@ -14,28 +14,29 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 
 ## What it proves
 
-| Feature                        | Check in the driver                                                                              | Why it matters                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
-| Create a session (D7)          | `createSession`, and a retried `requestId`                                                       | one log per session; retries must not leak logs    |
-| Repo binding (A1)              | `registerRepo`, then `repo`/`baseRef`/`workspace`                                                | a session names the repo it works on               |
-| Session list (A2)              | `listSessions` sees the new session, paged                                                       | the list is a server read, not a client guess      |
-| Send a message                 | `sendMessage` → `placement: run`, title set                                                      | a message admits durably and names the session     |
-| Watch a live session (D8)      | snapshot first, then entries, then run state                                                     | the UI's live path, including `busy → idle`        |
-| Read the transcript            | `getSession` → the `bash` tool result                                                            | the run really happened, usage is attributed       |
-| Fold a released session (D8)   | the same session reads `historical`, same entries                                                | a paused session is served by folding the log      |
-| Fork a session (LOB-180)       | `forkSession` → the parent's prefix, then a fork-only message                                    | a fork is its own log, not a rewrite of the parent |
-| A fold's stream ends           | exactly one `snapshot` event                                                                     | complete is distinguishable from dropped           |
-| Request limits (LOB-21)        | an oversized message → `invalid_input`                                                           | a refusal is typed, not a truncation or a crash    |
-| Transport cap (LOB-21)         | a 2 MiB body → 413, and `/livez` still answers                                                   | the configured cap, not Bun's 128 MiB default      |
-| Probes (LOB-21)                | `/livez` 200; `/readyz` 200 naming every check                                                   | liveness is cheap; readiness is a live answer      |
-| Degraded readiness (LOB-21)    | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid         | an outage is not a crash loop                      |
-| SIGTERM mid-run (LOB-21)       | the owners are released, and the interrupted session folds and continues                         | a killed run is resumable, not lost                |
-| One PR across a kill (LOB-179) | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one PR entry       | a lost acknowledgement is not a second PR          |
-| Typed errors over the wire     | unknown id → `SessionError{code: "not_found"}`                                                   | callers can branch on `code`, not on text          |
-| Interrupt wakes, then stops    | `interruptSession` → idle                                                                        | steering wakes a session before acting on it       |
-| Reset a session (LOB-181)      | `resetSession` with and without a handoff: the past, then the `reset` entry                      | a new context is a marker, not a truncation        |
-| Compact on demand (LOB-185)    | `compactSession` → a task id, then the summary entry, nothing dropped from the transcript        | long sessions summarize on demand, not by luck     |
-| Approvals (LOB-50)             | `requestApproval` → pending, a retry is one row, survives the fold → `decideApproval` empties it | a gated action waits for a person, durably         |
+| Feature                        | Check in the driver                                                                                  | Why it matters                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Create a session (D7)          | `createSession`, and a retried `requestId`                                                           | one log per session; retries must not leak logs      |
+| Repo binding (A1)              | `registerRepo`, then `repo`/`baseRef`/`workspace`                                                    | a session names the repo it works on                 |
+| Session list (A2)              | `listSessions` sees the new session, paged                                                           | the list is a server read, not a client guess        |
+| Send a message                 | `sendMessage` → `placement: run`, title set                                                          | a message admits durably and names the session       |
+| Watch a live session (D8)      | snapshot first, then entries, then run state                                                         | the UI's live path, including `busy → idle`          |
+| Read the transcript            | `getSession` → the `bash` tool result                                                                | the run really happened, usage is attributed         |
+| Fold a released session (D8)   | the same session reads `historical`, same entries                                                    | a paused session is served by folding the log        |
+| Fork a session (LOB-180)       | `forkSession` → the parent's prefix, then a fork-only message                                        | a fork is its own log, not a rewrite of the parent   |
+| A fold's stream ends           | exactly one `snapshot` event                                                                         | complete is distinguishable from dropped             |
+| Request limits (LOB-21)        | an oversized message → `invalid_input`                                                               | a refusal is typed, not a truncation or a crash      |
+| Transport cap (LOB-21)         | a 2 MiB body → 413, and `/livez` still answers                                                       | the configured cap, not Bun's 128 MiB default        |
+| Probes (LOB-21)                | `/livez` 200; `/readyz` 200 naming every check                                                       | liveness is cheap; readiness is a live answer        |
+| Degraded readiness (LOB-21)    | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid             | an outage is not a crash loop                        |
+| SIGTERM mid-run (LOB-21)       | the owners are released, and the interrupted session folds and continues                             | a killed run is resumable, not lost                  |
+| One PR across a kill (LOB-179) | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one PR entry           | a lost acknowledgement is not a second PR            |
+| Typed errors over the wire     | unknown id → `SessionError{code: "not_found"}`                                                       | callers can branch on `code`, not on text            |
+| Interrupt wakes, then stops    | `interruptSession` → idle                                                                            | steering wakes a session before acting on it         |
+| Reset a session (LOB-181)      | `resetSession` with and without a handoff: the past, then the `reset` entry                          | a new context is a marker, not a truncation          |
+| Compact on demand (LOB-185)    | `compactSession` → a task id, then the summary entry, nothing dropped from the transcript            | long sessions summarize on demand, not by luck       |
+| Approvals (LOB-50)             | `requestApproval` → pending, a retry is one row, survives the fold → `decideApproval` empties it     | a gated action waits for a person, durably           |
+| A mission (LOB-230)            | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded | a mission's phase is the session's state, not a call |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -81,6 +82,7 @@ running, and writes its own evidence:
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401 and 413
 ./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
+./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the

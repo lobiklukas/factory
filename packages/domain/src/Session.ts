@@ -12,6 +12,7 @@
 import { Schema } from "effect";
 import { ApprovalRequest } from "@repo/domain/Approval";
 import { SessionId, Timestamp } from "@repo/domain/Ids";
+import { MissionSnapshot } from "@repo/domain/Mission";
 
 // The two scalars every contract names. They are defined in `Ids` so `Approval` can name a session
 // without importing this module, which imports it back for the snapshot's pending approvals; the
@@ -221,6 +222,15 @@ export const SessionSnapshotFields = {
    * snapshot read after its owner was released still reports them; a settled approval is not here.
    */
   approvals: Schema.Array(ApprovalRequest),
+  /**
+   * The mission this session is running, if it ever started one (LOB-230).
+   *
+   * Absent means no mission, not an empty phase: a mission that has entered no phase is absent too,
+   * because a phase the client cannot read is not a phase it was told about. `taskId` names the
+   * mission, and `entered` is every phase it passed through, in order — a mission that settled still
+   * reports the phase it reached, because the document it commits outlives the task.
+   */
+  mission: Schema.optional(MissionSnapshot),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);

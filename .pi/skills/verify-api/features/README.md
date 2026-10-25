@@ -42,6 +42,12 @@ The trigger checks (LOB-188) were run from the `ralph/LOB-188` worktree on 2026-
 `.verify/evidence/lob-188/`. They are a separate drive from `bun drive.ts` — the trigger routes are
 plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run there.
 
+The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
+(`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
+`./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver
+builds the seam, the session layer and the adapter in-process, as `./jira.sh` and
+`./github-issues.sh` do — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
+
 The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` worktree on 2026-10-24
 (faux, Postgres on 5442): **19/19** via `./github-issues.sh`, evidence
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
@@ -51,6 +57,12 @@ The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026
 `:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
 `./degraded.sh` were not re-run there; neither touches the curation path.
+
+The mission checks (LOB-230) were run from the `ralph/LOB-230` worktree on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph`): `bun drive.ts` with the mission block added,
+evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.sh` were not re-run
+there; neither touches the mission path. See `mission.md`, which names what the case does not prove
+(resume across a kill — LOB-231).
 
 | Feature                  | Status  | File                               |
 | ------------------------ | ------- | ---------------------------------- |
@@ -70,8 +82,10 @@ the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./si
 | Inbound triggers         | passing | [trigger.md](trigger.md)           |
 | Jira adapter             | passing | [jira.md](jira.md)                 |
 | GitHub issues adapter    | passing | [github.md](github.md)             |
+| Slack adapter            | passing | [slack.md](slack.md)               |
 | Approvals                | passing | [approvals.md](approvals.md)       |
 | Curate a session's pages | passing | [curate.md](curate.md)             |
+| A mission                | passing | [mission.md](mission.md)           |
 
 ## Deliberately absent
 

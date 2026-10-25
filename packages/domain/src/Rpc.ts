@@ -30,6 +30,7 @@ import {
   ListPagesInput,
   ListPagesOutput,
 } from "@repo/domain/Page";
+import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import {
   CompactSessionInput,
   CompactSessionResult,
@@ -131,6 +132,15 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("registerRepo", {
     payload: RegisterRepoInput,
     success: RepoSummary,
+    error: SessionError,
+  }),
+  // A mission is a session's, not a client's: starting one answers its id, and the phase it
+  // reached is read off `getSession`'s snapshot rather than off a second call (LOB-230). The
+  // surface decision — this group, not a `MissionRpc` of its own — is recorded in
+  // `@repo/domain/Mission`.
+  Rpc.make("startMission", {
+    payload: StartMissionInput,
+    success: StartMissionResult,
     error: SessionError,
   }),
   Rpc.make("watchSession", {
