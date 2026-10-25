@@ -76,6 +76,10 @@ import {
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
 import type {
+  StartMissionInput,
+  StartMissionResult,
+} from "@repo/domain/Mission";
+import type {
   Conversation,
   Harness,
   ModelAccess,
@@ -87,8 +91,13 @@ import type {
 import {
   EMPTY_RUN_PROFILE,
   loadRun,
+  MissionTask,
   Policy,
   PolicyLive,
+  // `startMission` is the harness's: it creates the task and commits the documents. The service
+  // method below resolves the workspace and the owner first, so the two names mark which layer
+  // owns which half.
+  startMission as beginMission,
   type AutonomyConfig,
   type SessionPolicy,
 } from "@repo/harness";
@@ -197,6 +206,13 @@ export type SessionServiceShape = {
   readonly compact: (
     input: CompactSessionInput,
   ) => Effect.Effect<CompactSessionResult, SessionError>;
+  /**
+   * Start a mission: one feature taken through plan, implement and verify as one durable task
+   * (LOB-230). The answer is the mission's id; the phase it reaches is read off `get`'s snapshot.
+   */
+  readonly startMission: (
+    input: StartMissionInput,
+  ) => Effect.Effect<StartMissionResult, SessionError>;
   /** What exists, newest activity first, from the activity index — never a fold (R6). */
   readonly list: (
     input: ListSessionsInput,
@@ -859,6 +875,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               storage,
               model: options.model,
               cwd,
+              // A mission is a durable task, so the kind has to be installed in the registry this
+              // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
+              tasks: [MissionTask],
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
               policy: sessionPolicy,
@@ -1324,6 +1343,44 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* touchActivity(input.sessionId);
           const session = yield* describe(input.sessionId, row);
           return { session, taskId };
+        });
+
+      /**
+       * Start a mission: one feature taken through plan, implement and verify as one durable task
+       * (LOB-230, part 2 of LOB-192).
+       *
+       * The call admits the task and answers its id; the phase it reaches is read off the session's
+       * snapshot, where the mission's committed document reports it. The workspace is resolved here
+       * rather than sent by the client, so a mission can only run where its session runs — the same
+       * rule verify follows when it runs the repo's own command.
+       *
+       * An empty feature is refused rather than started: a mission's feature is the one thing its
+       * phases and its result are about, and a blank one would settle a result nobody can read.
+       */
+      const startMission = (
+        input: StartMissionInput,
+      ): Effect.Effect<StartMissionResult, SessionError> =>
+        Effect.gen(function* () {
+          const feature = input.feature.trim();
+          if (feature === "") {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: "a mission needs a non-empty feature",
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          const workspace = yield* workspaceFor(row);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const taskId = yield* beginMission(owner, {
+            feature,
+            workspace: {
+              path: workspace.path,
+              commands: workspace.commands,
+              commandsSource: workspace.commandsSource,
+            },
+          });
+          yield* touchActivity(input.sessionId);
+          return { sessionId: input.sessionId, taskId };
         });
 
       /** Serializes approval writes so a repeated request id cannot commit twice. */
@@ -2171,6 +2228,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         replay,
         reset,
         compact,
+        startMission,
         list,
         registerRepo,
         events,

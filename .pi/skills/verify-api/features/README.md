@@ -58,6 +58,12 @@ The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
 `./degraded.sh` were not re-run there; neither touches the curation path.
 
+The mission checks (LOB-230) were run from the `ralph/LOB-230` worktree on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph`): `bun drive.ts` with the mission block added,
+evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.sh` were not re-run
+there; neither touches the mission path. See `mission.md`, which names what the case does not prove
+(resume across a kill — LOB-231).
+
 | Feature                  | Status  | File                               |
 | ------------------------ | ------- | ---------------------------------- |
 | Create a session         | passing | [create.md](create.md)             |
@@ -79,6 +85,7 @@ the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./si
 | Slack adapter            | passing | [slack.md](slack.md)               |
 | Approvals                | passing | [approvals.md](approvals.md)       |
 | Curate a session's pages | passing | [curate.md](curate.md)             |
+| A mission                | passing | [mission.md](mission.md)           |
 
 ## Deliberately absent
 
