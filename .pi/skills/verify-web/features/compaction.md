@@ -65,13 +65,22 @@ Two wrinkles are the whole reason this is not a boolean:
    changes.
 2. **A summary can trail its task.** A busy session's summary is placed at its next boundary, so a
    verdict that said "nothing" above rows that are about to be summarized would be the lie this
-   state exists to prevent. `settled-nothing` is therefore not final: a summary that arrives later,
-   before a turn of the operator's own, settles the press as `settled-compacted`. The scan for that
-   summary is the same one the spend line uses (`compactionRow`), so the pane can never show the
-   verdict above a row it charged to the press.
+   state exists to prevent. `settled-nothing` is therefore not final: a summary that arrives later
+   settles the press as `settled-compacted`. The verdict's scan is deliberately _not_ the spend's:
+   the verdict asks what the task wrote and ignores a turn of the operator's in between
+   (`anySummaryFrom`), while the spend line keeps refusing to attribute a row that follows an
+   operator turn (`compactionRow`). Both still read the same row list, so the verdict can never point
+   at a row the spend disagrees about.
 
 The verdict describes the transcript at the press, so the operator's next turn clears it. A press of
 Compact while a compaction is under way is disabled: one admission at a time.
+
+**What the state is and what the pane says are two questions.** `settleCompaction` decides; the
+pane asks `verdictVisible(settle, busy)` whether it may speak yet. A verdict is held — not shown, not
+discarded — while the session is busy, because an outcome announced under work still in flight reads
+as knowledge the pane cannot have; it appears when the run ends. The unit tests cover the pair
+(`settleCompaction`, `verdictVisible`); the drive covers the combination, a busy session whose status
+region stays `requested` with no verdict on screen.
 
 ## Driving it with drive.mjs
 
@@ -87,7 +96,7 @@ compacting` is both its `title` and its `aria-describedby` text;
 3. pressing Compact puts `Summary: the session ran its tools and kept working.` on screen, the row's
    `[data-compaction-spend]` line reads `N tokens to compact`, and the header reading is still
    non-zero — measured 92,050 → 114,925 tokens on the recorded run;
-4. the pane's compaction status went `null → requested → null` (`MutationObserver` on
+4. the pane's compaction status went `idle → requested → settled-compacted` (`MutationObserver` on
    `[data-compaction-status]`, sampled per DOM change rather than polled), and it never said
    `settled-nothing` while the task was live;
 5. a `compactSession` that the network layer answers with 500 shows the failure toast and leaves the
@@ -96,11 +105,14 @@ compacting` is both its `title` and its `aria-describedby` text;
 6. a **second, short session** is created through the RPC and opened: pressing Compact there ends in
    `[data-compaction-status="settled-nothing"]` reading `Nothing to compact` and `too short to cut`,
    with no spinner left in the status box, the button re-enabled with `aria-busy="false"`, and the
-   recorded sequence `null → requested → settled-nothing` — the pending state is committed to the DOM
+   recorded sequence `idle → requested → settled-nothing` — the pending state is committed to the DOM
    before the verdict, and the verdict text is never on screen while the state is `requested`;
-7. the pending box and the verdict box are the same height (44 px on the recorded run), so the verdict
-   does not reflow the transcript;
-8. the operator's next turn clears the verdict, and the pane does not overflow horizontally at 390 px.
+7. the pending box and the verdict box are the same height (64 px on the recorded run: `min-h-16`),
+   so the verdict does not reflow the transcript;
+8. a **third, long session** is pressed and sent a turn in the same script task, and the recorded
+   sequence is `idle → idle(busy) → requested(busy) → settled-compacted`: a session busy with its own
+   run shows the pending state and never a verdict (the verdict is held, not shown, while `busy`);
+9. the operator's next turn clears the verdict, and the pane does not overflow horizontally at 390 px.
 
 Evidence: `.verify/evidence/<id>/verify-web/` — `compaction.png`,
 `compaction-nothing-to-compact.png`, `compaction-nothing-to-compact-narrow.png` plus `observed.json`'s
@@ -130,17 +142,27 @@ alone when a reading reports no cost, and the drive asserts the absence of`$` ra
 - **"A busy session" here is a session busy _compacting_ or _running_.** Compact is disabled while
   the run is busy (`Wait for this run to finish before compacting`, asserted since LOB-223), so a
   run-busy session cannot start a press; the drive therefore presses on an idle session and sends a
-  turn immediately, which is the one way both are true at once. What is proven is that the verdict
-  never appears under work still in flight — not that a run-busy session can be compacted at all,
-  which it cannot.
+  turn in the same script task, which is the one way both are true at once. **The click must come
+  first**: `requestSubmit` dispatches a submit event, React flushes that event's state before the next
+  dispatch, and a click after the send lands on a `disabled` button and does nothing — measured, and
+  the reason an earlier draft of this drive recorded no press at all. What is proven is that the
+  verdict never appears under work still in flight; not that a run-busy session can be compacted at
+  all, which it cannot. And the busy session is a long one, so it settles `settled-compacted`: the
+  held-verdict path (`verdictVisible` with `busy`) is otherwise covered by unit tests only.
 - **The identity of the task projection is the detection, and it has one residual hazard.** A
   projection that predates the admission but arrives _after_ the call answers would end the wait
   early, and the pane would show the verdict for the seconds a long summary takes (the entry then
-  refines it to `settled-compacted`). No run of the drive has produced that ordering: the stream
-  compares projections (`sameTasks`) and drops the ones that say nothing new, and the admission
-  revision is always published. There is no clock in the reducer to bound it, though — a future
-  change could replace the identity comparison with "the task was seen at least once", at the cost of
-  hanging whenever the whole task life fits between two folded events.
+  refines it to `settled-compacted`). The concrete trigger is a re-attach: `session-atom.ts` replaces
+  `tasks` on every `snapshot` event, which is what a re-attach delivers. No run of the drive has
+  produced that ordering: the stream compares projections (`sameTasks`) and drops the ones that say
+  nothing new, and the admission revision is always published. There is no clock in the reducer to
+  bound it, though — a future change could replace the identity comparison with "the task was seen at
+  least once", at the cost of hanging whenever the whole task life fits between two folded events.
+- **The reserved height is a desktop-and-tablet guarantee.** At 390px the dashboard's three-column
+  shell leaves the pane a ~60px transcript column, so the verdict's copy stacks nearly a word per line
+  and the tail grows no matter what this box reserves. The drive still asserts no horizontal overflow
+  there, and records the measured height rather than asserting it (`observed.shortNarrow`). The
+  squeeze is the shell's and predates this control.
 - The drive's console-error list carries one expected entry: the injected 500
   (`Failed to load resource: … 500`). It is the scenario, not a defect.
 - Nothing here is a compaction _policy_: automatic compaction at a threshold is the harness's

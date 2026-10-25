@@ -502,9 +502,12 @@ export const SessionPane = ({
                 {/*
                  * What the last press of Compact came to (LOB-224), in the tail because that is
                  * where the summary will land: a pending line that is replaced by the row it was
-                 * waiting for, or by the verdict that there is nothing to cut. Both states share a
-                 * reserved height, so the verdict does not reflow the transcript when it replaces
-                 * the spinner.
+                 * waiting for, or by the verdict that there is nothing to cut. Both states reserve the
+                 * same height (`min-h-16`: the verdict's heading plus two lines of its copy, which is
+                 * what it needs while the transcript column can hold a sentence), so the verdict
+                 * replaces the spinner without moving the transcript. At a phone width the shell
+                 * leaves the pane a ~60px column and everything there wraps: that squeeze is the
+                 * dashboard's, not this box's, and no reservation here could absorb it.
                  *
                  * The region itself is always mounted — `sr-only` while it has nothing to say, so
                  * it costs no layout and no gap — because a screen reader announces a change
@@ -524,7 +527,7 @@ export const SessionPane = ({
                   }
                 >
                   {settleNow.state === "requested" ? (
-                    <div className="flex min-h-11 items-center gap-2 text-xs text-muted-foreground">
+                    <div className="flex min-h-16 items-center gap-2 text-xs text-muted-foreground">
                       <Loader2Icon
                         data-slot="spinner"
                         aria-hidden
@@ -534,7 +537,7 @@ export const SessionPane = ({
                     </div>
                   ) : null}
                   {showVerdict ? (
-                    <div className="flex min-h-11 flex-col justify-center gap-1">
+                    <div className="flex min-h-16 flex-col justify-center gap-1">
                       <p className="text-sm">Nothing to compact</p>
                       <p className="text-xs leading-5 text-muted-foreground">
                         This session is too short to cut. Its recent turns stay
