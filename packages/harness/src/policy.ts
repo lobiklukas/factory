@@ -49,7 +49,14 @@ export const POLICY_EXTENSION = "policy";
  */
 export type PolicyDecision =
   | { readonly _tag: "allow" }
-  | { readonly _tag: "block"; readonly reason: string };
+  | { readonly _tag: "block"; readonly reason: string }
+  /** A gated call: nothing is wrong with it, and a person has to say yes before it runs (LOB-52). */
+  | {
+      readonly _tag: "ask";
+      readonly requestId: string;
+      readonly action: string;
+      readonly detail: string;
+    };
 
 const ALLOW: PolicyDecision = { _tag: "allow" };
 const block = (reason: string): PolicyDecision => ({ _tag: "block", reason });
@@ -66,12 +73,20 @@ export type AutonomyConfig = {
   readonly pushRefPrefixes: readonly string[];
   /** Hosts the agent may reach over the network. Every other host is refused. */
   readonly allowedHosts: readonly string[];
+  /**
+   * Command prefixes that run only once a person approved them (D15, LOB-52). A command that starts
+   * with one of these is neither refused nor run: the session asks, and the call is blocked until a
+   * decision arrives. Empty by default — a gate is a deployment's choice, and an ungated
+   * deployment is the boundary D11 already draws.
+   */
+  readonly approvalRequired?: readonly string[];
 };
 
 /** D11's boundary as configuration. */
 export const DEFAULT_AUTONOMY: AutonomyConfig = {
   pushRefPrefixes: ["refs/heads/factory/"],
   allowedHosts: ["github.com", "api.github.com", "codeload.github.com"],
+  approvalRequired: [],
 };
 
 /** The configuration resolved for one session: the same rules, with the worktree they apply to. */
@@ -86,6 +101,8 @@ export type AutonomyRules = {
   readonly sessionId?: string;
   readonly pushRefPrefixes: readonly string[];
   readonly allowedHosts: readonly string[];
+  /** Command prefixes that need a person's approval before they run (LOB-52), normalized. */
+  readonly approvalRequired: readonly string[];
 };
 
 /** The namespace D11 gives sessions for their own branches. */
@@ -101,6 +118,7 @@ export const autonomyRules = (
   ...(sessionId === undefined ? {} : { sessionId }),
   pushRefPrefixes: config.pushRefPrefixes,
   allowedHosts: config.allowedHosts.map((host) => host.toLowerCase()),
+  approvalRequired: (config.approvalRequired ?? []).map(normalizeCommand),
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1025,6 +1043,16 @@ export const decideToolCall = (
   rules: AutonomyRules,
   call: ToolCall,
 ): PolicyDecision => {
+  const refusal = decideRefusal(rules, call);
+  // A refusal outranks a gate: asking a person about a call D11 refuses would offer them the power
+  // to widen D11 per call, which is the opposite of what D11 is for.
+  return refusal._tag === "allow" ? decideGate(rules, call) : refusal;
+};
+
+const decideRefusal = (
+  rules: AutonomyRules,
+  call: ToolCall,
+): PolicyDecision => {
   const args = call.arguments;
   if (WRITE_TOOLS.has(call.name)) {
     const path = stringField(args, "path");
@@ -1038,6 +1066,69 @@ export const decideToolCall = (
     return decideBash(rules, command);
   }
   return ALLOW;
+};
+
+// ---------------------------------------------------------------------------------------------
+// The gate (D15, LOB-52)
+// ---------------------------------------------------------------------------------------------
+
+/** A command as the gate compares it: trimmed, with runs of whitespace read as one space. */
+const normalizeCommand = (command: string): string =>
+  command.trim().replace(/\s+/g, " ");
+
+/** Whether `command` is `gate` itself or starts with it as a whole phrase (not as a prefix of a word). */
+const gates = (command: string, gate: string): boolean =>
+  gate.length > 0 && (command === gate || command.startsWith(`${gate} `));
+
+/**
+ * Keys of an argument object in a fixed order, so the same call always hashes the same.
+ *
+ * A request id has to survive the retry, the resume and the restart that made LOB-52 worth doing:
+ * the same gated call must name the same request each time it is attempted, or every attempt would
+ * be a new ask. Sorted keys and no incidental whitespace is what makes that true.
+ */
+const canonical = (value: unknown): string => {
+  if (value === null || typeof value !== "object")
+    return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(
+    ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+  );
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+};
+
+/** FNV-1a over the canonical arguments: short, stable, and dependency-free. */
+const digest = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+};
+
+/**
+ * The id of the ask for this call. Derived from the call and nothing else, so a retried, resumed or
+ * restarted attempt asks the same question and any answer to it settles every attempt.
+ */
+export const approvalRequestId = (call: ToolCall): string =>
+  `ask-${call.name}-${digest(canonical(call.arguments))}`;
+
+/** A gated command asks; everything else is allowed, because the refusal already ran. */
+const decideGate = (rules: AutonomyRules, call: ToolCall): PolicyDecision => {
+  if (rules.approvalRequired.length === 0) return ALLOW;
+  if (call.name !== "bash") return ALLOW;
+  const command = stringField(call.arguments, "command");
+  if (command === undefined) return ALLOW;
+  const normalized = normalizeCommand(command);
+  const gate = rules.approvalRequired.find((entry) => gates(normalized, entry));
+  if (gate === undefined) return ALLOW;
+  return {
+    _tag: "ask",
+    requestId: approvalRequestId(call),
+    action: gate,
+    detail: normalized,
+  };
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1118,9 +1209,9 @@ export const docsPolicy = (policy: SessionPolicy): SessionPolicy => ({
   rules: policy.rules,
   decide: (call) =>
     Effect.flatMap(policy.decide(call), (decision) =>
-      decision._tag === "block"
-        ? Effect.succeed(decision)
-        : Effect.sync(() => decideDocsWrite(policy.rules, call)),
+      decision._tag === "allow"
+        ? Effect.sync(() => decideDocsWrite(policy.rules, call))
+        : Effect.succeed(decision),
     ),
 });
 
@@ -1178,23 +1269,89 @@ export const PolicyLive = (
       autonomyPolicy(config, worktree, sessionId),
   });
 
+/** What a gated call asks a person: the request id that identifies it, and what it would run. */
+export type ApprovalAsk = {
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+};
+
+/**
+ * How a session records the ask. A function rather than a service, because the recorder lives in the
+ * control plane (`packages/core`) and this module must not depend on it; the control plane closes
+ * over its own approvals service and hands the session this.
+ *
+ * Absent: a session that gates nothing, or a caller that has no approval channel — in which case a
+ * gated call is blocked with a sentence saying so rather than run ungated.
+ *
+ * The error channel is `never` because the hook cannot act on a failure: an ask that could not be
+ * recorded never happened, and the call stays blocked and retryable.
+ */
+export type ApprovalAsker = (ask: ApprovalAsk) => Effect.Effect<void, never>;
+
+/** The memo a session keeps per ask: its presence is what "already asked" means. */
+const approvalMemoKey = (requestId: string): string =>
+  `factory.approval:${requestId}`;
+
+const approvalAsk = (decision: ApprovalAsk): ApprovalAsk => ({
+  requestId: decision.requestId,
+  action: decision.action,
+  detail: decision.detail,
+});
+
+const askedSentence = (ask: ApprovalAsk): string =>
+  `\`${ask.action}\` is gated: a person has been asked to approve it (request ${ask.requestId}). Do not retry it yet — do something that does not need it, and the approval will settle the request.`;
+
+const pendingSentence = (ask: ApprovalAsk): string =>
+  `\`${ask.action}\` is still waiting for a person's approval (request ${ask.requestId}); it was asked once and is not asked again. Do something that does not need it.`;
+
+const ungatedSentence = (ask: ApprovalAsk): string =>
+  `\`${ask.action}\` is gated and this session has no approval channel, so it did not run (request ${ask.requestId}). Ask a human to approve it from the control plane.`;
+
 /**
  * The one place this module touches Pi Durable: a `ToolTask` hook beside `CodingTools`.
  *
  * `beforeTool` is the decision, and its refusal becomes Pi Durable's `blocked` result — a message
- * the model reads and can correct from. `afterTool` changes nothing today, and is registered
- * because it is the seam the approval outcome and the egress audit write through (D15, LOB-52);
- * returning the result untouched is also the invariant that keeps the policy from altering what a
- * tool reported.
+ * the model reads and can correct from. A gated call is a third outcome (LOB-52): the request is
+ * recorded through `ask`, memoized with `api.memo` so no retry, resume or restart asks twice, and
+ * the call is blocked while the answer is pending — the tool never runs, so a run waiting on a
+ * person is not busy. `afterTool` changes nothing today, and is registered because it is the seam
+ * the egress audit writes through; returning the result untouched is also the invariant that keeps
+ * the policy from altering what a tool reported.
  */
-export const policyExtension = (policy: SessionPolicy): Extension =>
+export const policyExtension = (
+  policy: SessionPolicy,
+  ask?: ApprovalAsker,
+): Extension =>
   defineExtension({
     name: POLICY_EXTENSION,
     hooks: [
       hook(ToolTask, {
-        beforeTool: (call) =>
-          Effect.runPromise(policy.decide(call)).then((decision) =>
-            decision._tag === "block" ? { block: decision.reason } : undefined,
+        beforeTool: (call, api, context) =>
+          Effect.runPromise(
+            Effect.gen(function* () {
+              const decision = yield* policy.decide(call);
+              if (decision._tag === "block") return { block: decision.reason };
+              if (decision._tag === "allow") return undefined;
+              const key = approvalMemoKey(decision.requestId);
+              // The memo is what makes the ask once-per-call rather than once-per-attempt. Read
+              // first: a call that was already asked about is not asked again, and the log holds
+              // one request for it.
+              const already = yield* Effect.promise(() =>
+                api.memo<ApprovalAsk>(key, context),
+              );
+              if (already !== undefined)
+                return { block: pendingSentence(decision) };
+              if (ask === undefined)
+                return { block: ungatedSentence(decision) };
+              // Ask, then memoize: an ask that fails must stay retryable, and a duplicate it might
+              // leave behind is one log line the approval fold already deduplicates by request id.
+              yield* ask(decision);
+              yield* Effect.promise(() =>
+                api.memo<ApprovalAsk>(key, approvalAsk(decision), context),
+              );
+              return { block: askedSentence(decision) };
+            }),
           ),
         afterTool: (_call, result) => result,
       }),

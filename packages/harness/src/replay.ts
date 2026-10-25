@@ -21,7 +21,7 @@ import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { RunProfile } from "./loader";
 import type { ModelAccess } from "./models";
 import { modelKey } from "./models";
-import type { SessionPolicy } from "./policy";
+import type { ApprovalAsker, SessionPolicy } from "./policy";
 import { REPLAY_DOC_KIND } from "./projection";
 import {
   attempt,
@@ -144,6 +144,8 @@ export type ReplaySessionOptions = {
   readonly title?: string;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
+  /** How the replay's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.ask`. */
+  readonly ask?: ApprovalAsker;
   readonly run?: RunProfile;
 };
 
@@ -171,6 +173,7 @@ export const replaySession = (
       model: options.model,
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
+      ...(options.ask === undefined ? {} : { ask: options.ask }),
       ...(options.run === undefined ? {} : { run: options.run }),
     });
     // A failure that leaves the harness open would leave a lease nobody releases: close it where the

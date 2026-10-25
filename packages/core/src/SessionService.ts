@@ -99,6 +99,7 @@ import {
   // owns which half.
   startMission as beginMission,
   type AutonomyConfig,
+  type ApprovalAsker,
   type SessionPolicy,
 } from "@repo/harness";
 import {
@@ -962,6 +963,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               model: options.model,
               cwd,
               pages,
+              // A gated call (D15, LOB-52) records its ask through this session's approvals
+              // service, so the request lands in the same log and index the pending list reads.
+              ask: askerFor(id),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -1289,6 +1293,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     lineage: input.sessionId,
                     run,
                     pages,
+                    ask: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
                       ? {}
@@ -1386,6 +1391,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 cwd,
                 policy: sessionPolicy,
                 run,
+                ask: askerFor(id),
               }),
           ).pipe(
             Effect.tapError(() =>
@@ -1605,6 +1611,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }),
           );
         });
+
+      /**
+       * A session's approval channel (D15, LOB-52): a gated tool call asks through the same approvals
+       * service the RPC group uses, so the request is one row and one log entry whether a person
+       * asked it from the CLI or the agent hit a gate.
+       */
+      const askerFor =
+        (sessionId: SessionId): ApprovalAsker =>
+        (ask) =>
+          Effect.asVoid(
+            requestApproval({
+              sessionId,
+              requestId: ask.requestId,
+              action: ask.action,
+              detail: ask.detail,
+            }),
+            // The hook has nowhere to put an error: a recording that fails is an ask that never
+            // happened, so the gated call stays blocked and the next attempt asks again.
+          ).pipe(Effect.orDie);
 
       const decideApproval = (
         input: DecideApprovalInput,
