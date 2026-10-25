@@ -83,3 +83,21 @@ same way, but git rejects that refspec itself, so nothing is lost there.
 
 And nothing here proves the push that _is_ allowed will be _authorized_: that is the credential's
 scope (D14) and the GitHub rulesets (D15, LOB-30).
+
+<a id="the-docs-rule"></a>
+
+**The docs rule.** A run whose column holds the `docs` skill (LOB-225 seeds the record) writes
+documentation and nothing else (LOB-195, `docsPolicy` in `packages/harness/src/policy.ts`):
+`docs/**` and root-level `*.md` are allowed, everything else inside the worktree is refused with a
+sentence that names the docs rule and prints the allowlist. It is composed into the policy where
+`openSession` installs the hooks, so the column's skills select it and no caller sets a flag. A write
+that escapes the worktree is still the worktree rule's refusal, which names the worktree as before.
+
+No case in `refusals.sh` drives it yet: that needs a docs run to exist end to end, which is the last
+part of LOB-195. Until then the proof is `packages/harness/src/policy.test.ts` (the composed decision,
+including the rows where the autonomy policy's own wording survives), `policy.hook.test.ts` (the
+selection, driven through `openSession` in a real harness: `docs/design.md` written, a source file
+refused, an escape still refused as an escape, and the same source file written by a column without
+the skill) and one `policy.seam.test.ts` row for the hook carrying the composed refusal. Like the write
+table it sits beside, it reads the `write`/`edit` path argument only: a `bash` redirect or a `sed -i`
+writes a code file unrefused.

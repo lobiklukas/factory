@@ -67,6 +67,8 @@ import {
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
+  DOCS_SKILL,
+  docsPolicy,
   policyExtension,
   type SessionPolicy,
 } from "./policy";
@@ -269,9 +271,16 @@ export const openSession = (
     // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
     // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
     // task result the model reads, not an exception somewhere in the call path.
+    const policy =
+      options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd);
+    // A column that holds the `docs` skill makes this a documentation run, which may write
+    // documentation and nothing else (LOB-195). Composed here, where a policy becomes hooks, so a
+    // session cannot be opened with the skill and without the rule.
     registry.install(
       policyExtension(
-        options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd),
+        skills.some((skill) => skill.name === DOCS_SKILL)
+          ? docsPolicy(policy)
+          : policy,
       ),
     );
 
