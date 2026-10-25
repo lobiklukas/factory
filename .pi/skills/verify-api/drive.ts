@@ -733,6 +733,102 @@ const program = Effect.gen(function* () {
     },
   });
 
+  // Feature: a mission (LOB-230). `startMission` admits one durable task and answers its id; the
+  // phase it reaches is read off the session's snapshot, which is the surface the contract chose
+  // over a `MissionRpc` of its own. Driven on a session of its own, so nothing here depends on the
+  // transcript the rest of this driver sends.
+  //
+  // A scratch session declares no `.factory/config`, so the mission's verify phase reports that the
+  // repo declares no verify command and the mission settles `failed` there. That is the honest end
+  // for this run: what the wire is being asked to prove is the id and the phase, not that this
+  // driver's directory can verify itself.
+  const missionSession = yield* client.createSession({
+    requestId: `verify-api-mission-${Date.now()}`,
+  });
+  const beforeMission = yield* client.getSession({
+    sessionId: missionSession.id,
+  });
+  assert(
+    "a session that never ran a mission reports none, not an empty phase",
+    beforeMission.mission === undefined,
+    `mission=${JSON.stringify(beforeMission.mission ?? null)}`,
+  );
+  const started = yield* client.startMission({
+    sessionId: missionSession.id,
+    feature: "verify-api mission probe",
+  });
+  assert(
+    "startMission answers the mission's id",
+    started.sessionId === missionSession.id &&
+      typeof started.taskId === "string" &&
+      started.taskId.length > 0,
+    `sessionId=${started.sessionId} taskId=${started.taskId}`,
+  );
+  const atVerify = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.mission?.phase === "verify" ? snapshot : undefined,
+        ),
+      ),
+    "the mission to reach verify",
+  );
+  assert(
+    "the phase the mission reached is readable through the snapshot",
+    atVerify.mission?.taskId === started.taskId &&
+      atVerify.mission.phase === "verify" &&
+      atVerify.mission.entered.join(",") === "plan,implement,verify",
+    `mission=${JSON.stringify(atVerify.mission ?? null)}`,
+  );
+  // The mission is a live task while it runs and gone from the list once it settles; either way the
+  // record is the log's, which is what makes the phase readable afterwards.
+  const settledMission = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.some((task) => task.kind === "factory.mission")
+            ? undefined
+            : snapshot,
+        ),
+      ),
+    "the mission to settle",
+  );
+  assert(
+    "a settled mission still reports the phase it reached",
+    settledMission.mission?.phase === "verify",
+    `mission=${JSON.stringify(settledMission.mission ?? null)} tasks=${settledMission.tasks.map((task) => task.kind).join(", ") || "none"}`,
+  );
+
+  // The fold: the mission's record is a document, so a released owner still reports it.
+  yield* Effect.sleep(6_000);
+  const foldedMission = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.session.mode === "historical" ? snapshot : undefined,
+        ),
+      ),
+    "the mission session's owner to be released",
+  );
+  assert(
+    "the fold reports the mission the live read reported",
+    foldedMission.mission?.taskId === started.taskId &&
+      foldedMission.mission.phase === settledMission.mission?.phase,
+    `mode=${foldedMission.session.mode} mission=${JSON.stringify(foldedMission.mission ?? null)}`,
+  );
+  Object.assign(observed, {
+    mission: {
+      sessionId: missionSession.id,
+      started,
+      live: settledMission.mission ?? null,
+      folded: foldedMission.mission ?? null,
+      tasksAtVerify: atVerify.tasks.map((task) => task.kind),
+    },
+  });
+
   // Feature: curate a finished session's pages (LOB-206). One bounded model call over the transcript
   // and the pages the session already holds proposes page writes; the server commits at most
   // `maxPages` of them, cites the curated session, and commits nothing when it taught nothing new.

@@ -10,6 +10,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
+  AnyTask,
   Conversation,
   ConversationId,
   ConversationView,
@@ -27,6 +28,7 @@ import {
   ConversationBusy,
   defineDoc,
   defineEntry,
+  defineExtension,
   Harness as HarnessRuntime,
   LiveDoc,
   ROOT_CONVERSATION_ID,
@@ -48,12 +50,20 @@ import type {
   TranscriptEntry,
 } from "@repo/domain/Session";
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
+import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
-import { PageDoc, PrDoc } from "./docs";
+import {
+  MISSION_BINDING_DOC_KIND,
+  MISSION_DOC_KIND,
+  MissionBindingDoc,
+  MissionDoc,
+  PageDoc,
+  PrDoc,
+} from "./docs";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -206,6 +216,13 @@ export type OpenSessionOptions = {
    * names no skills, so nothing is injected.
    */
   readonly run?: RunProfile;
+  /**
+   * Durable tasks this session may start (LOB-230). Pi Durable resolves a task by kind against the
+   * registry, and a kind nobody installed settles `orphaned` — so a caller that starts one
+   * (`startMission`) has to install it here. Absent: a session that starts no tasks of its own,
+   * which is every caller but the control plane.
+   */
+  readonly tasks?: readonly AnyTask[];
 };
 
 export type OpenSession = {
@@ -244,6 +261,11 @@ export const openSession = (
     const skills = options.run?.skills ?? [];
     if (skills.length > 0) registry.install(skillsExtension(skills));
     registry.install(CodingTools);
+    // The tasks the control plane starts on a session's behalf, installed like any other extension:
+    // that is what makes the kind resolvable when a caller creates the task.
+    const tasks = options.tasks ?? [];
+    if (tasks.length > 0)
+      registry.install(defineExtension({ name: "factory.tasks", tasks }));
     // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
     // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
     // task result the model reads, not an exception somewhere in the call path.
@@ -671,11 +693,14 @@ export const isBusy = (
 const readDocument = (
   storage: Storage,
   kind: string,
+  /** One family member by key; absent reads the singleton of that kind. */
+  key?: string,
 ): Effect.Effect<JsonRecord | undefined, SessionError> =>
   Effect.gen(function* () {
     const address = {
       kind,
       scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID },
+      ...(key === undefined ? {} : { key }),
     } as const;
     const record = yield* attempt(`find ${kind}`, () =>
       storage.findDocument(address, "current", BACKGROUND_CONTEXT),
@@ -1163,6 +1188,7 @@ const snapshotOf = (
   tasks: readonly SessionTask[],
   ref: SessionRef,
   entries: readonly EntryRecord[],
+  mission: MissionSnapshot | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
   return {
@@ -1188,6 +1214,9 @@ const snapshotOf = (
     // Folded from the whole log, not from the view: an approval is not a turn, and the view holds
     // the active window only — a request older than a compaction still has to be answered.
     approvals: pendingOf(ref.id, projectApprovals(entries)),
+    // Absent rather than an empty phase when the session never started a mission, and present with
+    // the phase it reached even after the mission settled: the record outlives the task (LOB-230).
+    ...(mission === undefined ? {} : { mission }),
   };
 };
 
@@ -1195,6 +1224,43 @@ const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
   _tag: "snapshot",
   ...snapshot,
 });
+
+/**
+ * The mission a session is running, read off the two documents a start commits (LOB-230): the
+ * binding names the mission's task id, and the mission's own document names the phase it reached.
+ *
+ * `undefined` is "no mission": either the session never started one, or the mission's document still
+ * holds its seed because no phase has committed yet. The snapshot reports that as an absent field
+ * rather than as an empty phase — the two are different facts, and a client handed an empty phase
+ * would have to guess which one it got.
+ */
+const readMissionSnapshot = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<MissionSnapshot | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const binding = yield* attempt("read mission binding", () =>
+      harness.snapshot(MissionBindingDoc, conversation.id, BACKGROUND_CONTEXT),
+    );
+    const taskId = binding?.taskId ?? "";
+    if (taskId === "") return undefined;
+    const doc = yield* attempt("read mission", () =>
+      harness.snapshot(MissionDoc, conversation.id, taskId, BACKGROUND_CONTEXT),
+    );
+    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+  });
+
+/** `readMissionSnapshot` for a session nobody owns: the same two documents, folded from its log. */
+const readFoldedMission = (
+  storage: Storage,
+): Effect.Effect<MissionSnapshot | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const binding = yield* readDocument(storage, MISSION_BINDING_DOC_KIND);
+    const taskId = bindingString(binding, "taskId");
+    if (taskId === "") return undefined;
+    const doc = yield* readDocument(storage, MISSION_DOC_KIND, taskId);
+    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+  });
 
 /** A live session's current state, read without subscribing to anything. */
 export const readLiveSnapshot = (
@@ -1219,7 +1285,8 @@ export const readLiveSnapshot = (
         Effect.sync(() => graph.dispose()),
       );
       const entries = yield* readConversationEntries(session.root);
-      return snapshotOf(state.value, tasks, ref, entries);
+      const mission = yield* readMissionSnapshot(session.harness, session.root);
+      return snapshotOf(state.value, tasks, ref, entries, mission);
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
@@ -1283,10 +1350,15 @@ export const liveSessionEvents = (
       });
 
       // Offer the snapshot before subscribing has a chance to enqueue anything, so a client never
-      // sees an event for a session it has not been told about.
+      // sees an event for a session it has not been told about. The mission is read once, with the
+      // snapshot: a phase change is a document commit, and the stream reports entries and tasks, so
+      // a subscriber that needs the new phase re-reads the snapshot rather than being told twice.
+      const mission = yield* readMissionSnapshot(session.harness, session.root);
       yield* Queue.offer(
         queue,
-        snapshotEvent(snapshotOf(state.value, previousTasks, ref, entries)),
+        snapshotEvent(
+          snapshotOf(state.value, previousTasks, ref, entries, mission),
+        ),
       );
       return Stream.fromQueue(queue);
     }),
@@ -1304,6 +1376,7 @@ export const readHistoricalSnapshot = (
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
+    const mission = yield* readFoldedMission(storage);
     return {
       session: {
         id: ref.id,
@@ -1328,6 +1401,9 @@ export const readHistoricalSnapshot = (
       queued: [],
       // Nobody owns this log, so nothing runs in it: a sandbox that ran it is paused or gone (D8).
       tasks: [],
+      // The mission is document state, not live state: a released session still reports the phase
+      // its mission reached, which is what part 3 reads to resume it (LOB-230).
+      ...(mission === undefined ? {} : { mission }),
       // The point of the fold (LOB-147): a request committed before the owner was released is still
       // waiting here, so a restarted control plane asks a person for the same answer, not again.
       approvals: pendingOf(ref.id, log.approvals),

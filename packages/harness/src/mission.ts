@@ -28,13 +28,22 @@ import type {
 } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
 import { Effect } from "effect";
+import {
+  MISSION_PHASES,
+  isMissionPhase,
+  type MissionPhase,
+} from "@repo/domain/Mission";
 import type { SessionError, SessionWorkspace } from "@repo/domain/Session";
-import { MissionDoc } from "./docs";
-import { attempt, type Harness } from "./session";
+import { MissionBindingDoc, MissionDoc } from "./docs";
+import { attempt, type Harness, type LiveSession } from "./session";
 
-/** The phases a mission passes through, in the order it passes through them. */
-export const MISSION_PHASES = ["plan", "implement", "verify"] as const;
-export type MissionPhase = (typeof MISSION_PHASES)[number];
+/**
+ * The phases a mission passes through, in the order it passes through them.
+ *
+ * The list itself lives in `@repo/domain/Mission`, because the wire has to accept exactly the
+ * phases the task can enter; this re-export keeps `@repo/harness` the place a caller names them.
+ */
+export { MISSION_PHASES, type MissionPhase };
 
 /**
  * The definition version, recorded in every document the mission commits and pinned by the task
@@ -314,9 +323,6 @@ export type MissionRecord = {
   readonly entered: readonly MissionPhase[];
 };
 
-const isMissionPhase = (value: string): value is MissionPhase =>
-  (MISSION_PHASES as readonly string[]).includes(value);
-
 /**
  * Read the mission back from the log — the answer a reopen needs, so a fresh process resumes the
  * phase the mission reached rather than the phase a caller remembers.
@@ -347,4 +353,58 @@ export const readMission = (
       definitionVersion: doc.definitionVersion,
       entered: doc.entered.filter(isMissionPhase),
     };
+  });
+
+/**
+ * Start one mission in a session's conversation (LOB-230), and answer the id it was given.
+ *
+ * The commit is the whole of creation: the task, the mission's own document, and the binding that
+ * names this mission as the session's current one are written together, so there is no moment at
+ * which a mission exists but cannot be read, or is bound but does not exist. The document says
+ * `plan` from the start because that *is* the phase the new task is in — `MissionTask.initial` is
+ * the same checkpoint — so a client that reads the snapshot between the start and the first phase
+ * run is told the truth rather than nothing. `enterPhase` is the only writer afterwards, and it
+ * appends nothing when the phase it enters is the one already recorded.
+ *
+ * Scheduling is not a side effect of a commit: Pi Durable enables it with `Harness.resume()`, which
+ * only the calls that ask for progress enable themselves. A mission created by a caller that just
+ * commits would sit `pending` forever, so the start enables it here, once.
+ *
+ * The workspace the mission runs verify in is the input's, resolved by the control plane from the
+ * session (`SessionService.startMission`): a task owns its conversation and nothing else, so it
+ * cannot go and look up a checkout.
+ */
+export const startMission = (
+  session: LiveSession,
+  input: MissionInput,
+): Effect.Effect<string, SessionError> =>
+  Effect.gen(function* () {
+    const taskId = yield* attempt("start mission", () =>
+      session.root.commit(
+        (tx) =>
+          tx
+            .createTask(MissionTask, input, {
+              ownership: { kind: "conversation" },
+            })
+            .then((id) => {
+              const key = missionKey(id);
+              // Both documents are written in the same commit as the task, so there is no moment
+              // at which a mission exists but cannot be read, or is bound but does not exist.
+              return Promise.all([
+                tx.doc(MissionDoc, session.root.id, key, key),
+                tx.doc(MissionBindingDoc, session.root.id),
+              ]).then(([mission, binding]) => {
+                mission.mission = key;
+                mission.phase = MISSION_PHASES[0];
+                mission.definitionVersion = MISSION_VERSION;
+                mission.entered = [MISSION_PHASES[0]];
+                binding.taskId = key;
+                return id;
+              });
+            }),
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    session.harness.resume();
+    return missionKey(taskId);
   });
