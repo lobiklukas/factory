@@ -128,7 +128,7 @@ export const SessionDoc = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ repo: "", baseRef: "" }),
+  initial: () => ({ repo: "", baseRef: "", branch: "" }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -163,6 +163,15 @@ export const ForkDoc = defineDoc({
 export type RepoBinding = {
   readonly repo: string;
   readonly baseRef: string;
+  /**
+   * The branch the session's worktree is cut on, when a caller named one (LOB-197). Absent means
+   * the default `factory/<session-id>` (D10), so a session that never named a branch records
+   * nothing here rather than recording the default twice — the id derives it.
+   *
+   * A fork and a replay do not inherit it: two sessions on one branch would commit over each other,
+   * so the parent's binding is copied without this field.
+   */
+  readonly branch?: string;
 };
 
 /** Storage is remote here, so partial answers commit less often than the 100 ms default. */
@@ -499,6 +508,9 @@ export const writeRepoBinding = (
         tx.doc(SessionDoc, conversation.id).then((doc) => {
           doc.repo = binding.repo;
           doc.baseRef = binding.baseRef;
+          // Written on every binding commit, empty included: a document that kept an earlier
+          // session's branch after a rebind would name a branch the worktree is not on.
+          doc.branch = binding.branch ?? "";
         }),
       BACKGROUND_CONTEXT,
     ),
@@ -1225,6 +1237,9 @@ export const readSessionLog = (
       binding: {
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
+        ...(bindingString(binding, "branch") === ""
+          ? {}
+          : { branch: bindingString(binding, "branch") }),
       },
       ...(prDoc.url === ""
         ? {}

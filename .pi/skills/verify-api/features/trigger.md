@@ -4,9 +4,12 @@
 inside: `POST /webhooks/generic` and `POST /webhooks/linear` → `apps/api/src/Api/Webhook.ts` →
 `packages/core/src/TriggerService.ts` → `packages/core/src/SessionService.ts`. The seam's five
 steps are authenticate (`hmac-sha256`, header name from config), dedupe (`webhook_deliveries`,
-`request_id` primary key), filter (only `action: "create"` starts work), map (`TRIGGER_RULES`:
-label → repo, base ref, prompt template), create (a session, with the rendered prompt as its first
-message).
+`request_id` primary key), filter (`create` always starts work; a lifecycle action — a `push` or a
+`schedule`, LOB-197 — only when a rule that claims the event sets `startsWorkFor`, so a caller that
+types its own `action` cannot name a push no push produced), map (`TRIGGER_RULES`: label → repo, base
+ref, prompt template), create (a session, with the rendered prompt as its first message). An
+adapter's session port also sees the delivery id, which is what lets
+[docs-trigger.md](docs-trigger.md) cut `factory/doc-<delivery id>`.
 
 **How a user reaches it.** A sender posts a signed JSON body. The generic adapter wants
 `{requestId, label, action?, title?, body?}` (or `requestId` in the body and a

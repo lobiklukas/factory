@@ -59,6 +59,12 @@ The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026
 process — the driver builds the service in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh`
 were not part of it.
 
+The docs-trigger checks (LOB-197) were run from the `ralph/LOB-197` worktree on 2026-10-25
+(`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9400`):
+`./docs-trigger.sh` **17/17** (14 driver checks, 3 shell checks), evidence
+`.verify/evidence/lob-197/`. Like `./docs-run.sh` it starts no API process. See `docs-trigger.md`,
+which names the one caller it does not add.
+
 The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
 `:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
@@ -93,6 +99,7 @@ there; neither touches the mission path. See `mission.md`, which names what the 
 | Curate a session's pages | passing | [curate.md](curate.md)             |
 | A mission                | passing | [mission.md](mission.md)           |
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
+| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
 
 ## Deliberately absent
 

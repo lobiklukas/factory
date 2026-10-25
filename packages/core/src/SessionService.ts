@@ -332,6 +332,8 @@ type SessionRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The branch the worktree is cut on, when a caller named one (LOB-197). */
+  readonly branch: string | null;
   /** The PR the session opened, whose log is the truth and this row the list's answer (LOB-177). */
   readonly prUrl: string | null;
   /** The session this one was forked from, from the index row (LOB-180). */
@@ -372,6 +374,8 @@ type ListRow = {
 type Binding = {
   readonly repo?: RepoSlug;
   readonly baseRef?: string;
+  /** A caller-named branch (LOB-197); absent means `factory/<session-id>`. */
+  readonly branch?: string;
   readonly localPath?: string;
 };
 
@@ -765,6 +769,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               sessionId: row.id,
               repo,
               baseRef: row.baseRef ?? undefined,
+              ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
             },
             { fs, path },
@@ -810,6 +815,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return {
             repo,
             baseRef: input.baseRef ?? registered?.defaultBaseRef ?? "main",
+            // The branch is part of the binding, not of the create call: every later read of this
+            // session's workspace has to answer the branch it is really on (LOB-197).
+            ...(input.branch === undefined ? {} : { branch: input.branch }),
             ...(registered?.localPath == null
               ? {}
               : { localPath: registered.localPath }),
@@ -1015,6 +1023,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo: binding.repo ?? null,
             baseRef: binding.baseRef ?? null,
+            branch: binding.branch ?? null,
             prUrl: null,
             forkedFrom: null,
             createdAt: "",
@@ -1047,6 +1056,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* writeRepoBinding(owner.root, {
               repo: binding.repo,
               baseRef: binding.baseRef,
+              ...(binding.branch === undefined
+                ? {}
+                : { branch: binding.branch }),
             });
           }
           if (input.taskId !== undefined && column !== undefined) {
@@ -1252,6 +1264,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title: parent.title,
             repo: parent.repo,
             baseRef: parent.baseRef,
+            branch: null,
             prUrl: null,
             forkedFrom: input.sessionId,
             createdAt: "",
@@ -1349,6 +1362,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title: source.title,
             repo: binding.repo ?? null,
             baseRef: binding.baseRef ?? null,
+            branch: null,
             prUrl: null,
             forkedFrom: null,
             createdAt: "",
@@ -2057,6 +2071,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            branch,
             pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
@@ -2071,6 +2086,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            branch,
             pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
@@ -2086,13 +2102,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         forkedFrom: string | null,
       ) =>
         sql<SessionRow>`
-          INSERT INTO sessions (id, title, request_id, repo, base_ref, forked_from)
+          INSERT INTO sessions (id, title, request_id, repo, base_ref, branch, forked_from)
           VALUES (
             ${id},
             ${title},
             ${requestId ?? null},
             ${binding.repo ?? null},
             ${binding.baseRef ?? null},
+            ${binding.branch ?? null},
             ${forkedFrom}
           )
           RETURNING
@@ -2100,6 +2117,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             title,
             repo,
             base_ref,
+            branch,
             pr_url,
             forked_from,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at

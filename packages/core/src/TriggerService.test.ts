@@ -313,6 +313,24 @@ describe("the trigger seam", () => {
     );
   }, 60_000);
 
+  it("refuses a lifecycle action no rule asked for, so a caller cannot name a push", async () => {
+    // `create` always starts work; `push` and `schedule` only when a rule claiming the event asks
+    // for them (LOB-197). The generic webhook's `action` is whatever its caller typed, so this is
+    // the case that keeps widening the filter for the docs trigger from widening it for everyone.
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const outcome = await run(
+          trigger.deliver(deliver(`${runId}-push`, { action: "push" })),
+        );
+
+        expect(outcome.status).toBe("skipped");
+        expect(outcome.reason).toContain('action "push"');
+        expect(created).toHaveLength(0);
+      },
+      { registerRepo: [repo] },
+    );
+  }, 60_000);
+
   it("refuses a delivery no rule matches, naming the labels", async () => {
     await withRuntime(
       async ({ run, trigger, created }) => {
