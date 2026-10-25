@@ -103,6 +103,9 @@ fresh
 run_cmd ls "$FACTORY board ls --board $BOARD_ID --api $API_URL" || true
 capture ls.txt
 OBSERVED_LANES="$(grep -E '^[a-z]+  (resting|working|terminal)  [0-9]+$' "$EVIDENCE_DIR/ls.txt" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//')"
+check "the seed created the card at revision 1 in intake" \
+  "$([ "$REVISION" = "1" ] && grep -q '^intake  resting  1$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
+  "revision=$REVISION, lane=intake"
 check "board ls exits 0" "$([ "$(exit_code ls)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code ls)"
 check "ls prints every lane in definition order" \
   "$([ "$OBSERVED_LANES" = "$LANES" ] && echo 0 || echo 1)" \

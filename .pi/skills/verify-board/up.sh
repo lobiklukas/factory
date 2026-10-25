@@ -11,6 +11,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
+# Reserved for the board UI child (LOB-75/LOB-76); recorded so a later skill knows the habit.
+WEB_PORT="${WEB_PORT:-3400}"
 RUN_DIR="$ROOT/.verify/run"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL
@@ -52,6 +54,7 @@ fi
     SESSION_ROOT="$SESSION_ROOT" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
+echo "$WEB_PORT" > "$RUN_DIR/web-port"
 
 # Ready means `/readyz` says so, not that the port answers: the server binds before its migrations
 # are applied (LOB-21), so `/` is true a moment before a card can be read.

@@ -10,6 +10,10 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
+# The port comes from the same URL `up.sh` hands the API, so the check cannot disagree with the
+# instance it is checking; 5442 is only the fallback.
+DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
+PG_PORT="${PG_PORT:-$(printf '%s' "$DATABASE_URL" | sed -n 's#.*@[^:/]*:\([0-9][0-9]*\)/.*#\1#p')}"
 PG_PORT="${PG_PORT:-5442}"
 RUN_DIR="$ROOT/.verify/run"
 

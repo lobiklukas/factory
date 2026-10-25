@@ -1,9 +1,9 @@
 import { Console, Effect, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
-import { SessionError } from "@repo/domain/Session";
+import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import type { Task } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
-import { reportFailure } from "../errors";
+import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
 
 /**
@@ -21,39 +21,18 @@ import { BoardClient } from "../rpc";
  * cannot tell a refused move from a successful one is worse than no command.
  */
 
-/** The service's tag as the snake_case word a script branches on, matching `SessionError.code`. */
-const refusalCode = (tag: string): string =>
-  tag.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
-
-const hasMessage = (error: unknown): error is { message: string } =>
-  typeof error === "object" &&
-  error !== null &&
-  "message" in error &&
-  typeof (error as { message: unknown }).message === "string";
-
 /**
- * Report a board failure the way the rest of the CLI does: `error: <code>: <message>` on stderr and
- * a non-zero exit. A `SessionError` keeps its code; a typed task refusal becomes the snake_case form
- * of its tag; anything else is `error`.
+ * Decode an id flag against the domain's own schema instead of casting it.
+ *
+ * A branded id is a promise that the server is never handed something that cannot be one:
+ * `brd_…`/`tsk_…`, with the right length and alphabet. `as never` would make a typo a server-side
+ * decode failure reported as a storage fault; decoding here answers `invalid_input` and sends
+ * nothing.
  */
-const reportBoardFailures = <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A | void, never, R> =>
-  effect.pipe(
-    Effect.catch((error) =>
-      Schema.is(SessionError)(error)
-        ? reportFailure(error.code, error.message)
-        : typeof error === "object" &&
-            error !== null &&
-            "_tag" in error &&
-            hasMessage(error)
-          ? reportFailure(
-              refusalCode(String((error as { _tag: unknown })._tag)),
-              error.message,
-            )
-          : reportFailure("error", String(error)),
-    ),
-  );
+const decodeId = <A>(
+  schema: Schema.Codec<A, string>,
+  raw: string,
+): A | undefined => Option.getOrUndefined(Schema.decodeOption(schema)(raw));
 
 const apiFlag = Flag.String("api").pipe(
   Flag.withDescription("Control plane base URL"),
@@ -91,9 +70,16 @@ const lsCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
+      const boardId = decodeId(BoardInstanceId, board);
+      if (boardId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--board "${board}" is not a board id (brd_…)`,
+        );
+      }
       const { client } = yield* BoardClient;
-      const view = yield* client.getBoard({ boardId: board as never });
-      const cards = yield* client.listTasks({ boardId: board as never });
+      const view = yield* client.getBoard({ boardId });
+      const cards = yield* client.listTasks({ boardId });
 
       yield* Console.log(
         `${view.definition.name}  ${view.instance.repo}  v${view.definition.version}`,
@@ -109,9 +95,7 @@ const lsCommand = Command.make(
       }
     });
 
-    yield* reportBoardFailures(
-      Effect.provide(program, BoardClient.layer(apiUrl)),
-    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription("List a board's columns and the cards in each lane"),
@@ -134,8 +118,15 @@ const showCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
       const { client } = yield* BoardClient;
-      const card = yield* client.getTask({ taskId: task as never });
+      const card = yield* client.getTask({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
       yield* Console.log(`board     ${card.boardId}`);
@@ -153,9 +144,7 @@ const showCommand = Command.make(
       yield* Console.log(`title     ${card.title}`);
     });
 
-    yield* reportBoardFailures(
-      Effect.provide(program, BoardClient.layer(apiUrl)),
-    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(Command.withDescription("Show one card"));
 
@@ -184,9 +173,16 @@ const moveCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
       const { client } = yield* BoardClient;
       const moved = yield* client.moveTask({
-        taskId: task as never,
+        taskId,
         expectedRevision: expectRevision,
         to,
         actor,
@@ -196,9 +192,7 @@ const moveCommand = Command.make(
       );
     });
 
-    yield* reportBoardFailures(
-      Effect.provide(program, BoardClient.layer(apiUrl)),
-    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription("Move a card along a declared transition"),
@@ -235,8 +229,15 @@ const startCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
       const { client } = yield* BoardClient;
-      const card = yield* client.getTask({ taskId: task as never });
+      const card = yield* client.getTask({ taskId });
       const taskColumn = Option.isSome(column) ? column.value : card.column;
       const session = yield* client.createSession({
         title: card.title,
@@ -248,9 +249,7 @@ const startCommand = Command.make(
       yield* Console.log(`task    ${card.id} in ${taskColumn}`);
     });
 
-    yield* reportBoardFailures(
-      Effect.provide(program, BoardClient.layer(apiUrl)),
-    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription("Start a run against a card"),

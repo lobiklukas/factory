@@ -4,7 +4,7 @@ One file per user-facing feature of the board's CLI surface. Each answers: what 
 reaches it, how the skill drives it, and what observable end state proves it works.
 
 Status reflects the last verified run: **2026-10-25**, `ralph/LOB-61`, API on `:9400`,
-`MODEL_BACKEND=faux`, `./drive.sh` in tmux — **14/14** required checks passed. Evidence:
+`MODEL_BACKEND=faux`, `./drive.sh` in tmux — **15/15** required checks passed. Evidence:
 `.verify/evidence/latest/board/` (`observed.json` beside the raw panes).
 
 | Feature               | Status  | File                 |

@@ -7,8 +7,8 @@ description: Drive and prove the factory board from the CLI (`factory board ls|s
 
 Proves the board's CLI surface the way a person uses it: a real terminal, a real control plane, a
 real Postgres, and the text and exit codes read back. Board state lives in rows, so nothing here is
-mocked — the drive creates a card through `TaskService`, then moves it with the command a human
-would type.
+mocked — the skill's `seed.ts` creates a card through `TaskService`, and the drive then moves it
+with the command a human would type.
 
 This is the skill every later board issue extends; LOB-49's children **must not** create a second
 one. The API behind it is proven by `.pi/skills/verify-api` (`features/board.md`), the sessions CLI by
