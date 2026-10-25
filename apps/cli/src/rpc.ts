@@ -1,4 +1,4 @@
-import { SessionRpc } from "@repo/domain/Rpc";
+import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Context, Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
@@ -35,3 +35,27 @@ export class SessionClient extends Context.Service<SessionClient>()(
 
 /** The RPC client itself, as `rpc.client` in the dashboard, for a command to hold onto. */
 export type SessionRpcClient = SessionClient["Service"]["client"];
+
+/**
+ * The whole API's client: sessions, approvals and the board's `TasksRpc` group (LOB-61).
+ *
+ * `factory board start` needs both halves of the surface — it reads a card and then opens the run
+ * against it — so the board commands hold one client over `RpcApi` rather than two layers. The
+ * session commands keep `SessionClient`, because a command that cannot reach the board should not
+ * fail to compile with it.
+ */
+export class BoardClient extends Context.Service<BoardClient>()("BoardClient", {
+  make: Effect.gen(function* () {
+    return {
+      client: yield* EffectRpcClient.make(RpcApi),
+    } as const;
+  }),
+}) {
+  static layer = (apiUrl: string) =>
+    Layer.effect(BoardClient)(BoardClient.make).pipe(
+      Layer.provide(protocolLive(apiUrl)),
+    );
+}
+
+/** The merged client, for a board command to hold onto. */
+export type BoardRpcClient = BoardClient["Service"]["client"];

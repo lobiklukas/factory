@@ -1,6 +1,7 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 import { Command } from "effect/cli";
+import { boardCommand } from "./commands/board";
 import { lsCommand } from "./commands/ls";
 import { runCommand } from "./commands/run";
 import { watchCommand } from "./commands/watch";
@@ -11,7 +12,7 @@ const root = Command.make("factory").pipe(
   Command.withDescription(
     "Delegate a task to the factory and follow the session",
   ),
-  Command.withSubcommands([runCommand, watchCommand, lsCommand]),
+  Command.withSubcommands([runCommand, watchCommand, lsCommand, boardCommand]),
 );
 
 // NOTE: Modules append additional runtime layers through Layer.mergeAll.

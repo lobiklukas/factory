@@ -118,6 +118,23 @@ export const BoardInstance = Schema.Struct({
 });
 export type BoardInstance = typeof BoardInstance.Type;
 
+/**
+ * One board as a client reads it: the instance and the exact definition version it binds (B2).
+ *
+ * Both halves are needed and neither can be derived from the other: the instance says which repo and
+ * which version, the definition says what that version's columns are and in what order. That pairing
+ * is why this is one read rather than two calls — a client that fetched them separately could print
+ * one version's lanes with another version's cards. `factory board ls` (LOB-61) is the first reader.
+ */
+export const BoardView = Schema.Struct({
+  instance: BoardInstance,
+  definition: BoardDefinition,
+});
+export type BoardView = typeof BoardView.Type;
+
+export const GetBoardInput = Schema.Struct({ boardId: BoardInstanceId });
+export type GetBoardInput = typeof GetBoardInput.Type;
+
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);
 export type TaskPriority = typeof TaskPriority.Type;
