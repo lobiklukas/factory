@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
+import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   createRegistry,
   defineExtension,
@@ -20,6 +21,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import type { Page as CitedPage } from "@repo/domain/Page";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, ManagedRuntime, Random } from "effect";
@@ -28,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
 import { autonomyPolicy, DEFAULT_AUTONOMY, policyExtension } from "./policy";
 import { diffView, projectView, usageCostTotal } from "./projection";
+import { PAGES_TOKEN_CAP } from "./pages";
 import {
   attempt,
   closeHarness,
@@ -36,6 +39,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readPagePrompt,
   readPromptSections,
   readPage,
   readPullRequestDoc,
@@ -570,6 +574,211 @@ describe("a run's column decides its prompt", () => {
     );
 
     expect(sections).toEqual({});
+  }, 120_000);
+});
+
+/**
+ * A log per case: the page-prompt record is session state, so two cases sharing one log would read
+ * each other's record — and a case that asks "no record" would find its neighbour's.
+ */
+const openPagesStorage = (logId: string, mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId, mode }, context);
+
+/**
+ * The knowledge a session carries reaches its prompt (LOB-205, part 2 of LOB-47).
+ *
+ * The control plane reads a session's pages and hands them to `openSession`; this suite is what
+ * proves the hand-off becomes the prompt and the record, and that a session with no pages gets
+ * neither. The cap's arithmetic is `pages.test.ts`'s; here it is the committed `pi.system` entry and
+ * the page-prompt document that are read, because those are the two things a person can check after
+ * a run.
+ */
+describe("the pages a session carries", () => {
+  /** A page as the domain holds it: content, its citations, and the links it points at. */
+  const page = (name: string, content: string): CitedPage => ({
+    name,
+    kind: "trap",
+    content,
+    links: [],
+    sources: ["ses_0000000000aaaaaa"],
+  });
+
+  it("commits the section it was given, exactly, and records what it cost", async () => {
+    const logId = `harness-pages-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openPagesStorage(logId, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+          pages: [
+            page("a-the-log-is-the-truth", "the log is the truth"),
+            page("b-batch-the-fold", "a batch delete clobbers a sibling"),
+          ],
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const sections = yield* readPromptSections(storage);
+        const record = yield* readPagePrompt(harness, root);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return { sections, record };
+      }),
+    );
+
+    // The exact text the model was sent, from the log rather than from the extension that built it:
+    // the two pages, their kinds, and their citation.
+    expect(outcome.sections["pages"]).toBe(
+      [
+        "<pages>",
+        "## a-the-log-is-the-truth (trap)",
+        "the log is the truth",
+        "sources: ses_0000000000aaaaaa",
+        "",
+        "## b-batch-the-fold (trap)",
+        "a batch delete clobbers a sibling",
+        "sources: ses_0000000000aaaaaa",
+        "</pages>",
+      ].join("\n"),
+    );
+    // And what it came to: the budget, the cost, the pages carried, and none dropped.
+    expect(outcome.record).toEqual({
+      cap: PAGES_TOKEN_CAP,
+      tokens: estimateTextTokens(outcome.sections["pages"] ?? ""),
+      held: 2,
+      included: ["a-the-log-is-the-truth", "b-batch-the-fold"],
+      dropped: [],
+    });
+  }, 120_000);
+
+  it("keeps the section inside the budget and records the pages it dropped", async () => {
+    const bulky = (tag: string): string => `${tag} `.repeat(300).trim();
+    const logId = `harness-pages-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openPagesStorage(logId, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+          pages: [
+            page("a-old-note", bulky("old")),
+            page("b-new-note", bulky("new")),
+          ],
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const sections = yield* readPromptSections(storage);
+        const record = yield* readPagePrompt(harness, root);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return { sections, record };
+      }),
+    );
+
+    const section = outcome.sections["pages"] ?? "";
+    // Inside the budget it was assembled under, and the page it could not hold is named rather than
+    // silently missing: the record is the answer to "what did this run not receive".
+    expect(estimateTextTokens(section)).toBeLessThanOrEqual(PAGES_TOKEN_CAP);
+    expect(outcome.record?.held).toBe(2);
+    expect(outcome.record?.included).toEqual(["a-old-note"]);
+    expect(outcome.record?.dropped).toEqual(["b-new-note"]);
+    expect(outcome.record?.tokens).toBe(estimateTextTokens(section));
+    expect(section).not.toContain("b-new-note");
+  }, 120_000);
+
+  it("renders no pages section, and writes no record, when the session has no pages", async () => {
+    const logId = `harness-pages-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openPagesStorage(logId, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const sections = yield* readPromptSections(storage);
+        const record = yield* readPagePrompt(harness, root);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return { sections, record };
+      }),
+    );
+
+    // No `pages` section at all — not an empty one — and a record that says the session held none,
+    // rather than a missing record a later reader would have to interpret.
+    expect(outcome.sections["pages"]).toBeUndefined();
+    expect(Object.keys(outcome.sections)).toEqual([]);
+    expect(outcome.record).toEqual({
+      cap: PAGES_TOKEN_CAP,
+      tokens: 0,
+      held: 0,
+      included: [],
+      dropped: [],
+    });
+  }, 120_000);
+
+  it("records the absence when a session that was told pages no longer holds any", async () => {
+    const logId = `harness-pages-${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const toldStorage = yield* Effect.promise(() =>
+          openPagesStorage(logId, "owner"),
+        );
+        const told = yield* openSession({
+          storage: toldStorage,
+          model,
+          cwd: workdir,
+          pages: [page("a-note", "a note the session was told")],
+        });
+        const submitted = yield* submitMessage(told.root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const first = yield* readPagePrompt(told.harness, told.root);
+        yield* closeHarness(told.harness);
+        yield* Effect.promise(() => toldStorage.dispose());
+        // The pages are gone (a page deleted from the projection, say), so the next open holds none.
+        const bareStorage = yield* Effect.promise(() =>
+          openPagesStorage(logId, "owner"),
+        );
+        const bare = yield* openSession({
+          storage: bareStorage,
+          model,
+          cwd: workdir,
+        });
+        const second = yield* readPagePrompt(bare.harness, bare.root);
+        const submittedBare = yield* submitMessage(bare.root, {
+          content: "begin",
+        });
+        yield* Effect.promise(() => submittedBare.submission.wait(context));
+        const sectionsAfter = yield* readPromptSections(bareStorage);
+        yield* closeHarness(bare.harness);
+        yield* Effect.promise(() => bareStorage.dispose());
+        return { first, second, sectionsAfter };
+      }),
+    );
+
+    expect(outcome.first?.included).toEqual(["a-note"]);
+    // And the section is gone with the pages: the next open's request carries none, so a session
+    // cannot keep reading knowledge its projection no longer holds.
+    expect(outcome.sectionsAfter["pages"]).toBeUndefined();
+    // The record is the latest answer, not the last one that had something to say: a stale record
+    // claiming pages the open did not send would be worse than no record.
+    expect(outcome.second).toEqual({
+      cap: PAGES_TOKEN_CAP,
+      tokens: 0,
+      held: 0,
+      included: [],
+      dropped: [],
+    });
   }, 120_000);
 });
 

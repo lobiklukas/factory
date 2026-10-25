@@ -51,6 +51,7 @@ import type {
 } from "@repo/domain/Session";
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
+import type { Page as CitedPage } from "@repo/domain/Page";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
@@ -62,8 +63,10 @@ import {
   MissionBindingDoc,
   MissionDoc,
   PageDoc,
+  PagePromptDoc,
   PrDoc,
 } from "./docs";
+import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -223,6 +226,15 @@ export type OpenSessionOptions = {
    * which is every caller but the control plane.
    */
   readonly tasks?: readonly AnyTask[];
+  /**
+   * The cited pages the session's prompt carries (LOB-205), read by the control plane at open.
+   *
+   * Absent: no pages, so no `pages` section. The module that assembles them (`./pages`) owns the
+   * budget and the drop order; this option is the pages themselves, because only the control plane
+   * can read them — they live in the session's log and its derived rows, not in a document family
+   * that a prompt section could enumerate.
+   */
+  readonly pages?: readonly CitedPage[];
 };
 
 export type OpenSession = {
@@ -260,6 +272,13 @@ export const openSession = (
     // the whole code extension — tools and sections — renders after the run's own instructions.
     const skills = options.run?.skills ?? [];
     if (skills.length > 0) registry.install(skillsExtension(skills));
+    // The knowledge the session carries, one section beside the skills, installed before the tools
+    // for the same reason they are. It is assembled and measured here, once, so what the run was
+    // told and what it cost are the same value — the record written below is that value, not a
+    // second measurement of the same text.
+    const pages = options.pages ?? [];
+    const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
+    if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
     registry.install(CodingTools);
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
@@ -310,9 +329,78 @@ export const openSession = (
       }),
     );
 
+    // What the section came to, committed beside it: a page the budget dropped is a fact about this
+    // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
+    // Written on every open, an empty page set included, so a session that was told pages once and
+    // holds none now records the absence instead of leaving the last answer standing.
+    yield* writePagePrompt(root, {
+      cap: PAGES_TOKEN_CAP,
+      tokens: pagesPrompt.tokens,
+      held: pages.length,
+      included: pagesPrompt.included,
+      dropped: pagesPrompt.dropped,
+    });
+
     return { harness, root };
   });
 
+/** What the `pages` section came to when a session opened, as the log records it (LOB-205). */
+export type PagePromptRecord = {
+  /** The budget the section was assembled under, in tokens. */
+  readonly cap: number;
+  /** What the rendered section cost, tag included. */
+  readonly tokens: number;
+  /** How many pages the session held when it opened: `0` is a session with no pages at all. */
+  readonly held: number;
+  /** The pages it carried, in the order it carried them. */
+  readonly included: readonly string[];
+  /** The pages the budget left out, in the order they were ranked. */
+  readonly dropped: readonly string[];
+};
+
+/**
+ * Commit what the session's `pages` section came to.
+ *
+ * A document rather than an entry: this is state — the latest answer for this session's prompt — and
+ * not an event in the transcript, so an attached client has nothing to render and the model has
+ * nothing to read.
+ */
+export const writePagePrompt = (
+  conversation: Conversation,
+  record: PagePromptRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write page prompt", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(PagePromptDoc, conversation.id).then((doc) => {
+          doc.cap = record.cap;
+          doc.tokens = record.tokens;
+          doc.held = record.held;
+          doc.included = [...record.included];
+          doc.dropped = [...record.dropped];
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * What this session's last open was told, or `undefined` when it has never been opened.
+ *
+ * The record is written on every open, so "no pages" is a record saying `held: 0` rather than a
+ * missing one; `undefined` is the document's seed, which only a session this harness never opened
+ * can have.
+ */
+export const readPagePrompt = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<PagePromptRecord | undefined, SessionError> =>
+  attempt("read page prompt", () =>
+    harness.snapshot(PagePromptDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(
+    Effect.map((record) =>
+      record === undefined || record.cap === 0 ? undefined : record,
+    ),
+  );
 /**
  * An approval request, committed to the log the moment the session asks (D11). Like the title it
  * carries no model content, so the agent never sees it.
@@ -949,6 +1037,15 @@ export type ForkSessionOptions = {
    * does, rather than through a second, special-cased open path.
    */
   readonly run?: RunProfile;
+  /**
+   * The cited pages the session's prompt carries (LOB-205), read by the control plane at open.
+   *
+   * Absent: no pages, so no `pages` section. The module that assembles them (`./pages`) owns the
+   * budget and the drop order; this option is the pages themselves, because only the control plane
+   * can read them (they live in the session's log and its derived rows, not in a document family a
+   * prompt section could enumerate).
+   */
+  readonly pages?: readonly CitedPage[];
 };
 
 export type ForkedSession = OpenSession & {
@@ -975,6 +1072,7 @@ export const forkSession = (
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
       ...(options.run === undefined ? {} : { run: options.run }),
+      ...(options.pages === undefined ? {} : { pages: options.pages }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",
