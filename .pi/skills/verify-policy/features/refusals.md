@@ -93,11 +93,22 @@ sentence that names the docs rule and prints the allowlist. It is composed into 
 `openSession` installs the hooks, so the column's skills select it and no caller sets a flag. A write
 that escapes the worktree is still the worktree rule's refusal, which names the worktree as before.
 
-No case in `refusals.sh` drives it yet: that needs a docs run to exist end to end, which is the last
-part of LOB-195. Until then the proof is `packages/harness/src/policy.test.ts` (the composed decision,
-including the rows where the autonomy policy's own wording survives), `policy.hook.test.ts` (the
-selection, driven through `openSession` in a real harness: `docs/design.md` written, a source file
-refused, an escape still refused as an escape, and the same source file written by a column without
-the skill) and one `policy.seam.test.ts` row for the hook carrying the composed refusal. Like the write
-table it sits beside, it reads the `write`/`edit` path argument only: a `bash` redirect or a `sed -i`
-writes a code file unrefused.
+A docs run exists end to end since LOB-228, and `verify-api`'s `./docs-run.sh` drives this refusal
+through it: a session whose card sits in a column naming `docs` writes three markdown files, then
+calls `write` for `code.ts` at the worktree root and is refused in the transcript, with the file
+absent from disk. That is the only case here that drives the docs rule, and it is in the other skill
+because it needs the board, the column, the run and the PR step around it — the shape is
+`verify-api/features/docs-run.md`, with the mutation recorded there (dropping the composition makes
+the write land). `./refusals.sh` boots one API per case with a fixed `FAUX_COMMAND`, and the faux
+script calls `bash`; a docs refusal needs the `write` tool, so it does not fit that script's shape.
+The decision itself is `packages/harness/src/policy.test.ts` (the composed decision, including the
+rows where the autonomy policy's own wording survives), `policy.hook.test.ts` (the selection, driven
+through `openSession` in a real harness: `docs/design.md` written, a source file refused, an escape
+still refused as an escape, and the same source file written by a column without the skill) and one
+`policy.seam.test.ts` row for the hook carrying the composed refusal.
+
+**What the docs row does not prove.** Like the write table it sits beside, the rule reads the
+`write`/`edit` path argument only: a `bash` redirect (`printf > code.ts`), a `sed -i`, or a program
+that writes its own file lands inside a docs run unrefused. The docs-run drive writes its three
+markdown files with `bash` for exactly that reason — the rule is not the thing that stops a shell
+write, and a case that pretended otherwise would be proof the code does not have.

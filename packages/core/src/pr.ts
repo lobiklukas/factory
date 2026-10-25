@@ -116,10 +116,29 @@ export type PrBodyInput = {
   /** The model that did the work. Absent when the session spent nothing on a model. */
   readonly model?: string;
   readonly spend?: string;
+  /**
+   * The branches' changed files, **as git's `--numstat` spells them** (LOB-228).
+   *
+   * That spelling is not always a bare path: a rename arrives as `docs/{old.md => new.md}` and a
+   * path with a special character arrives quoted, because the list is git's own path column rather
+   * than a parsed one. It is the list a reviewer gets before opening the diff, which is what it is
+   * for — a caller that needs a path to fetch must ask git itself.
+   *
+   * Absent means "nothing was measured": a session whose directory is not a checkout of its own
+   * (`prStep.ts`'s `diffSize` answers `none`) has no diff to list, and an empty list is the same
+   * fact from a branch that changes nothing. Both leave the section out rather than printing a
+   * heading over no rows.
+   *
+   * It exists because the `docs` skill's body tells a run to "list what changed … so the pull
+   * request body can carry it" (0015's seed) and nothing did: the body named the session, the model
+   * and the spend, and a reader had to open the diff to learn what the run touched.
+   */
+  readonly changed?: readonly string[];
 };
 
-/** The body a factory PR carries: session id, prompt, model and spend. */
+/** The body a factory PR carries: session id, model, spend, the changed files, and the prompt. */
 export const buildPrBody = (input: PrBodyInput): string => {
+  const changed = input.changed ?? [];
   const lines = [
     "## Factory session",
     "",
@@ -127,6 +146,9 @@ export const buildPrBody = (input: PrBodyInput): string => {
     ...(input.model === undefined ? [] : [`- Model: ${input.model}`]),
     ...(input.spend ? [`- Spend: ${input.spend}`] : []),
     "",
+    ...(changed.length === 0
+      ? []
+      : ["## Changed files", "", ...changed.map((path) => `- ${path}`), ""]),
     "## Prompt",
     "",
     input.prompt,

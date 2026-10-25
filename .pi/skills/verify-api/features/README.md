@@ -53,6 +53,12 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
 and the fake listens on the port the run reserves for this surface.
 
+The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
+(`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
+`./docs-run.sh` **13/13**, evidence `.verify/evidence/lob-228/`. Like `./pr-once.sh` it starts no API
+process — the driver builds the service in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh`
+were not part of it.
+
 The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
 `:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
@@ -86,6 +92,7 @@ there; neither touches the mission path. See `mission.md`, which names what the 
 | Approvals                | passing | [approvals.md](approvals.md)       |
 | Curate a session's pages | passing | [curate.md](curate.md)             |
 | A mission                | passing | [mission.md](mission.md)           |
+| A docs run               | passing | [docs-run.md](docs-run.md)         |
 
 ## Deliberately absent
 
