@@ -40,6 +40,11 @@ the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required check
   server attributed to the action. It is bound to the first summary after the press and frozen once
   measured, so a compaction this pane did not press — the harness's own threshold policy, or a second
   summary the same press did not write — shows no spend. See [compaction.md](compaction.md).
+- **"Nothing to compact" is read from the live-task list, not answered by the RPC.**
+  `compactSession` cannot say that nothing happened, so the pane watches the task it admitted leave
+  the session's task projection and only then reads the transcript; a verdict stays until the next
+  press or the operator's next turn. A press can only be made on an idle session, so the pending
+  state it proves is a live compaction task, not a live run. See [compaction.md](compaction.md).
 - **The transcript's follow-the-stream behaviour is not driven.** The faux run finishes too fast to
   observe it; it is checked by hand (see `transcript.md`).
 - The browser path needs Postgres on host port 5442; sessions are logs, and the log is Postgres.

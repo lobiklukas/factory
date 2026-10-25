@@ -579,9 +579,62 @@ const callRpcOnce = async (tag, payload) => {
   );
 };
 
-const compactButton = page.getByRole("button", { name: "Compact session" });
+// Targeted by its own attribute, not its accessible name: the name changes with the state
+// (`Compact session` / `Compacting session`, LOB-224), and a locator must survive both.
+const compactButton = page.locator("button[data-compaction-state]");
 const usageChip = page.locator("[data-session-usage]");
 const spendLine = page.locator("[data-compaction-spend]");
+
+/**
+ * Record every render of the pane's compaction status until asked to stop (LOB-224).
+ *
+ * A compaction task can settle in a few hundred milliseconds, and a poll would miss the pending
+ * state it is there to prove. The observer sees each mount, so the sequence it records is evidence
+ * that the pending state really replaced, and was replaced by, the verdict — and each sample keeps
+ * whether the "Nothing to compact" text was on screen at that moment and how tall the status box
+ * was, which is what the premature-verdict and layout checks need.
+ */
+const watchCompactionStatus = () =>
+  page.evaluate(() => {
+    window.__compactionSamples = [];
+    const snap = () => {
+      const element = document.querySelector("[data-compaction-status]");
+      const sample = {
+        state: element?.getAttribute("data-compaction-status") ?? null,
+        verdictVisible: document.body.innerText.includes("Nothing to compact"),
+        // Whether a run is in flight: the header chip is the pane's own word for it.
+        busy: document.body.innerText.includes("BUSY"),
+        height:
+          element === null
+            ? null
+            : Math.round(element.getBoundingClientRect().height),
+      };
+      const last = window.__compactionSamples.at(-1);
+      if (
+        last === undefined ||
+        last.state !== sample.state ||
+        last.verdictVisible !== sample.verdictVisible ||
+        last.busy !== sample.busy ||
+        last.height !== sample.height
+      )
+        window.__compactionSamples.push(sample);
+    };
+    window.__compactionObserver = new MutationObserver(snap);
+    window.__compactionObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+    snap();
+  });
+
+/** Stop recording and return the samples, in order. */
+const readCompactionStatus = () =>
+  page.evaluate(() => {
+    window.__compactionObserver?.disconnect();
+    return window.__compactionSamples ?? [];
+  });
 const SUMMARY = "Summary: the session ran its tools and kept working.";
 const tokenCount = (text) => {
   const match = /([\d,]+) tokens/.exec(text);
@@ -625,9 +678,7 @@ try {
   // too, and attaching is not the state this check is about.
   await page.waitForFunction(
     () => {
-      const button = document.querySelector(
-        "button[aria-label='Compact session']",
-      );
+      const button = document.querySelector("button[data-compaction-state]");
       return (
         button !== null &&
         button.disabled &&
@@ -642,9 +693,7 @@ try {
   busyCompact.disabled = await compactButton.isDisabled();
   busyCompact.title = await compactButton.getAttribute("title");
   busyCompact.describedBy = await page.evaluate(() => {
-    const button = document.querySelector(
-      "button[aria-label='Compact session']",
-    );
+    const button = document.querySelector("button[data-compaction-state]");
     const id = button?.getAttribute("aria-describedby") ?? "";
     return {
       id,
@@ -671,9 +720,7 @@ let longSessionIdle = false;
 try {
   await page.waitForFunction(
     () => {
-      const button = document.querySelector(
-        "button[aria-label='Compact session']",
-      );
+      const button = document.querySelector("button[data-compaction-state]");
       return button !== null && !button.disabled;
     },
     null,
@@ -701,6 +748,7 @@ assert(
 );
 
 let compacted = false;
+await watchCompactionStatus();
 try {
   await compactButton.click();
   await page.waitForFunction(
@@ -763,6 +811,30 @@ assert(
   usageAfter !== null && usageAfter > 0 && usageAfter >= (usageBefore ?? 0),
   `header ${JSON.stringify(usageBefore)} tokens before, ${JSON.stringify(usageAfter)} after (${JSON.stringify(usageAfterText)})`,
 );
+
+// The pending state, then the verdict it settles into (LOB-224). A summary landed, so the press is
+// `settled-compacted`: the status box is gone and its own row is the answer. The pending state is
+// recorded rather than awaited, because a compaction with a cut settles as soon as the model
+// answers its summary — but it must have been on screen, and it must never have said "nothing to
+// compact" while the task was live.
+const longStates = await readCompactionStatus();
+const longState = await page
+  .locator("[data-compaction-status]")
+  .first()
+  .getAttribute("data-compaction-status");
+observed.compactSettle = { longSession: longStates, longState };
+assert(
+  "a compaction that writes a summary shows the pending state first, and never a verdict",
+  longStates.some((sample) => sample.state === "requested") &&
+    longStates.every(
+      (sample) =>
+        sample.state !== "settled-nothing" &&
+        !(sample.state === "requested" && sample.verdictVisible),
+    ) &&
+    // The row that landed is the answer, so the status box has nothing left to say.
+    longState === "settled-compacted",
+  `states ${JSON.stringify(longStates)} final ${JSON.stringify(longState)}`,
+);
 await page.screenshot({
   path: path.join(EVIDENCE_DIR, "compaction.png"),
   fullPage: true,
@@ -820,9 +892,7 @@ try {
   await compactButton.click();
   await page.waitForFunction(
     () => {
-      const button = document.querySelector(
-        "button[aria-label='Compact session']",
-      );
+      const button = document.querySelector("button[data-compaction-state]");
       return (
         button !== null &&
         !button.disabled &&
@@ -843,6 +913,344 @@ assert(
   retried,
   `retried=${retried}${observed.compactRetryError === undefined ? "" : ` (${observed.compactRetryError})`}`,
 );
+
+// Feature: a short session's Compact ends in a verdict, not a spinner that never stops (LOB-224).
+//
+// "Nothing to compact" is the one outcome `compactSession` cannot answer: pi-durable keeps the
+// newest `keepRecentTokens` verbatim, so a transcript with no cut settles the task and writes no
+// `compaction` entry at all. The pane therefore watches the session's live-task list for the task
+// it admitted, and only then reads the transcript. This block proves both halves on a second,
+// short session: the pending state appears and says nothing has been decided, then the verdict —
+// with no spinner left behind — and the operator's next turn clears it. See
+// features/compaction.md.
+const shortCreated = await callRpcOnce("createSession", {});
+const shortSessionId = shortCreated.value?.id ?? "";
+if (shortSessionId !== "") {
+  const sent = await callRpcOnce("sendMessage", {
+    sessionId: shortSessionId,
+    content:
+      "Keep this turn short: run the command and tell me what it printed.",
+  });
+  observed.shortSession = {
+    created: shortCreated.exit,
+    sent: sent.exit,
+    sessionId: shortSessionId,
+  };
+  assert(
+    "a second, short session was created",
+    shortSessionId.startsWith("ses_") && sent.exit === "Success",
+    `create ${String(shortCreated.exit)}, send ${String(sent.exit)} (${shortCreated.raw ?? ""})`,
+  );
+  await page.goto(`${WEB_URL}/sessions/${shortSessionId}`, {
+    waitUntil: "domcontentloaded",
+  });
+} else {
+  assert(
+    "a second, short session was created",
+    false,
+    `createSession answered ${JSON.stringify(shortCreated).slice(0, 300)}`,
+  );
+}
+
+// The run has to be over before the button is pressable at all (`view.live.busy`).
+let shortIdle = false;
+try {
+  await page.waitForFunction(
+    () => {
+      const button = document.querySelector("button[data-compaction-state]");
+      return (
+        button !== null &&
+        !button.disabled &&
+        document.body.innerText.includes("IDLE")
+      );
+    },
+    null,
+    { timeout: 90_000 },
+  );
+  shortIdle = true;
+} catch {
+  shortIdle = false;
+}
+assert(
+  "the short session settles so Compact can be pressed",
+  shortIdle,
+  `idle=${shortIdle}`,
+);
+
+let shortSettled = false;
+await watchCompactionStatus();
+try {
+  await compactButton.click();
+  await page
+    .locator("[data-compaction-status='settled-nothing']")
+    .first()
+    .waitFor({ timeout: 30_000 });
+  shortSettled = true;
+} catch (error) {
+  observed.shortSettleError = String(error).slice(0, 300);
+  shortSettled = false;
+}
+
+const shortStatus = page.locator("[data-compaction-status='settled-nothing']");
+const shortStatusText = shortSettled
+  ? (await shortStatus.first().innerText()).replaceAll("\n", " ").trim()
+  : "";
+const shortSamples = await readCompactionStatus();
+const shortButton = {
+  disabled: await compactButton.isDisabled(),
+  ariaBusy: await compactButton.getAttribute("aria-busy"),
+  state: await compactButton.getAttribute("data-compaction-state"),
+};
+const shortSpinners = await page
+  .locator("[data-slot='compaction-status'] [data-slot='spinner']")
+  .count();
+// The button's own spinner covers the call, not the task: once the verdict is in, it must be gone
+// too, or a second "still working" signal would survive the answer.
+const shortButtonSpinners = await compactButton
+  .locator("[data-slot='spinner']")
+  .count();
+observed.compactSettle = {
+  ...observed.compactSettle,
+  shortSession: shortSamples,
+  shortStatusText,
+  shortButton,
+  shortSpinners,
+  shortButtonSpinners,
+};
+assert(
+  "compacting a short session ends in a visible verdict, not a spinner",
+  shortSettled &&
+    shortStatusText.includes("Nothing to compact") &&
+    shortStatusText.includes("too short to cut") &&
+    shortSpinners === 0 &&
+    shortButtonSpinners === 0 &&
+    shortButton.disabled === false &&
+    shortButton.ariaBusy === "false" &&
+    shortButton.state === "settled",
+  `settled=${shortSettled} text=${JSON.stringify(shortStatusText)} spinners=${shortSpinners}/${shortButtonSpinners} button=${JSON.stringify(shortButton)}`,
+);
+assert(
+  "the pending state was on screen first, and never beside a verdict",
+  shortSamples.some((sample) => sample.state === "requested") &&
+    shortSamples.every(
+      (sample) => !(sample.state === "requested" && sample.verdictVisible),
+    ) &&
+    shortSamples.at(-1)?.state === "settled-nothing",
+  `states ${JSON.stringify(shortSamples)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "compaction-nothing-to-compact.png"),
+  fullPage: true,
+});
+
+// The two states share one reserved box, so the verdict replaces the spinner without moving the
+// rows above it. The samples carry each state's height as it was rendered.
+const pendingHeight = shortSamples.find(
+  (sample) => sample.state === "requested",
+)?.height;
+const verdictHeight = shortSamples.find(
+  (sample) => sample.state === "settled-nothing",
+)?.height;
+assert(
+  "the pending state and the verdict occupy the same height",
+  typeof pendingHeight === "number" && pendingHeight === verdictHeight,
+  `pending ${JSON.stringify(pendingHeight)}px, verdict ${JSON.stringify(verdictHeight)}px`,
+);
+
+// No horizontal overflow with the verdict on screen at a phone width. The *height* is deliberately
+// not asserted here: at 390px the dashboard's own three-column shell leaves the transcript a ~60px
+// column (measured, see `compaction-nothing-to-compact-narrow.png`), so the verdict's copy stacks one
+// word per line and no reserved height on this box could keep the tail from growing. That squeeze is
+// the shell's, not this control's; the reservation is proven above, at the drive's own widths.
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(300);
+const narrow = await page.evaluate(() => {
+  const element = document.querySelector("[data-compaction-status]");
+  return {
+    height:
+      element === null
+        ? null
+        : Math.round(element.getBoundingClientRect().height),
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  };
+});
+observed.shortNarrow = narrow;
+assert(
+  "the pane does not overflow horizontally at 390px",
+  narrow.scrollWidth <= narrow.clientWidth + 1,
+  JSON.stringify(narrow),
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "compaction-nothing-to-compact-narrow.png"),
+  fullPage: true,
+});
+await page.setViewportSize({ width: 1440, height: 900 });
+
+// A verdict describes the transcript at the press; the operator's next turn makes it stale, so the
+// line goes rather than sitting above a log it no longer describes.
+await page.locator("textarea").first().fill("One more turn.");
+await page.locator("textarea").first().press("Enter");
+let verdictCleared = false;
+try {
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector("[data-compaction-status]")
+        ?.getAttribute("data-compaction-status") === "idle",
+    null,
+    { timeout: 15_000 },
+  );
+  verdictCleared = true;
+} catch {
+  verdictCleared = false;
+}
+observed.verdictCleared = verdictCleared;
+assert(
+  "the operator's next turn clears the verdict",
+  verdictCleared,
+  `cleared=${verdictCleared}`,
+);
+
+// The third acceptance criterion (LOB-224): a busy session still shows the pending state, not the
+// verdict. A press can only be admitted on an idle session — Compact is disabled while a run is in
+// flight (`view.live.busy`) — but the session can start a turn *while its compaction task is still
+// summarizing*, and then both are true at once. What must not happen is the verdict appearing under
+// work that is still going on, so the observer samples the pane while the run is busier than the
+// compaction: the recorded sample has to say `requested` with `busy: true` and no verdict text.
+const busyCreated = await callRpcOnce("createSession", {});
+const busySessionId = busyCreated.value?.id ?? "";
+if (busySessionId !== "") {
+  const sent = await callRpcOnce("sendMessage", {
+    sessionId: busySessionId,
+    content: longMessage,
+  });
+  observed.busySession = { sent: sent.exit, sessionId: busySessionId };
+  assert(
+    "a third, long session was created for the busy case",
+    busySessionId.startsWith("ses_") && sent.exit === "Success",
+    `send ${String(sent.exit)}`,
+  );
+  await page.goto(`${WEB_URL}/sessions/${busySessionId}`, {
+    waitUntil: "domcontentloaded",
+  });
+} else {
+  assert(
+    "a third, long session was created for the busy case",
+    false,
+    `createSession answered ${JSON.stringify(busyCreated).slice(0, 300)}`,
+  );
+}
+
+let busyIdle = false;
+try {
+  await page.waitForFunction(
+    () => {
+      const button = document.querySelector("button[data-compaction-state]");
+      return (
+        button !== null &&
+        !button.disabled &&
+        document.body.innerText.includes("IDLE")
+      );
+    },
+    null,
+    { timeout: 90_000 },
+  );
+  busyIdle = true;
+} catch {
+  busyIdle = false;
+}
+assert(
+  "the third session settles so Compact can be pressed",
+  busyIdle,
+  `idle=${busyIdle}`,
+);
+
+await watchCompactionStatus();
+// Press Compact, then send a turn, both in the *same* task so the run starts while the compaction is
+// being admitted — the one way a session can be busy and pending a compaction the pane admitted,
+// since Compact is disabled while a run is in flight.
+//
+// The click comes first for a reason: `requestSubmit` dispatches a submit event, React flushes that
+// event's state before the next dispatch, and the button is `disabled` by then, so a click after the
+// send is a no-op on a disabled element and the drive records no press at all. Measured, not assumed.
+await page
+  .locator("textarea")
+  .first()
+  .fill("Keep going while that summarizes.");
+await page.evaluate(() => {
+  document.querySelector("button[data-compaction-state]")?.click();
+  document.querySelector("textarea")?.form?.requestSubmit();
+});
+/**
+ * Wait for a predicate in the page, bounded, reporting whether it held.
+ *
+ * The busy case is a race in both directions: the run appears a beat after the send, and the
+ * compaction settles a beat after the press. Waiting in one direction only is how the first version
+ * of this check read "BUSY is false" before the run had started, stopped observing, and asserted on
+ * a single idle sample.
+ */
+const waitInPage = async (predicate, timeout) => {
+  try {
+    await page.waitForFunction(predicate, null, { timeout, polling: "raf" });
+    return true;
+  } catch {
+    return false;
+  }
+};
+const compactionState = () =>
+  page.evaluate(() =>
+    document
+      .querySelector("[data-compaction-status]")
+      ?.getAttribute("data-compaction-status"),
+  );
+const busyStarted = await waitInPage(
+  () => document.body.innerText.includes("BUSY"),
+  30_000,
+);
+const busySettled = await waitInPage(
+  () => !document.body.innerText.includes("BUSY"),
+  90_000,
+);
+// The summariser can outlive the run, so the last sample can still be `requested` when the run ends.
+// That is the check's own subject, not a failure: wait for the press to settle before reading.
+const busyCompactionSettled = await waitInPage(
+  () =>
+    document
+      .querySelector("[data-compaction-status]")
+      ?.getAttribute("data-compaction-status") !== "requested",
+  30_000,
+);
+const busySamples = await readCompactionStatus();
+observed.compactSettle = {
+  ...observed.compactSettle,
+  busySession: busySamples,
+  busyStarted,
+  busySettled,
+  busyCompactionSettled,
+  busyFinalState: await compactionState(),
+};
+assert(
+  "a busy session shows the pending state, never the verdict",
+  busyStarted &&
+    busySettled &&
+    busyCompactionSettled &&
+    busySamples.some(
+      (sample) =>
+        sample.state === "requested" &&
+        sample.busy === true &&
+        sample.verdictVisible === false,
+    ) &&
+    // The verdict is held, not discarded: it appears once the run is over, and never before.
+    busySamples.every(
+      (sample) => !(sample.busy === true && sample.verdictVisible === true),
+    ),
+  `started=${busyStarted} settled=${busySettled} compactionSettled=${busyCompactionSettled} states ${JSON.stringify(busySamples)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "compaction-pending-while-busy.png"),
+  fullPage: true,
+});
 
 // Feature: the tool-call disclosure. Collapsed by default (a coding run emits
 // dozens), and it opens. See features/transcript.md.
