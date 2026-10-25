@@ -40,3 +40,17 @@ repeat posts a second time and the script exits non-zero. Recorded in
 `GET /pulls?head=owner:branch&base=` is the spelling it accepts, or that the kill lands inside the
 call on a slow machine (the fake holds the request open, so it always does here). The request shapes
 are asserted in `packages/core/src/pr.test.ts`; the loopback endpoint is only as right as that.
+
+**The diff cap is not this drive's to prove (LOB-227).** Since LOB-227 the step measures the branch
+against its base in the session's own worktree and answers `{outcome: "over-cap", limit, cap,
+measured}` — no GitHub call, no `factory.pr`, no `pr_url` — when the diff is over the configured
+limit. This drive's sessions are bound to a bare slug, so their working directory is a plain
+directory rather than a checkout and there is no diff to measure: every answer here is `opened` or
+`already-open`, which is why the cap cannot be driven from this script without giving it a real
+git worktree. It is covered by `packages/core/src/SessionService.test.ts` ("the diff cap", a real
+`git worktree add` and real commits: inside the cap opens one PR; 51 files and 2001 lines are
+refused separately on the file and line limits with an empty fake-GitHub ledger; a widened
+`prCap` accepts the same diff; a checkout whose base cannot be read is a typed `diffSize` failure
+instead of an unmeasured PR) and by `packages/core/src/pr.test.ts` (`parseDiffSize`, and
+`diffCapRefusal` against a throwaway checkout, including the case where a plain directory sits
+_inside_ a checkout and must measure nothing).

@@ -51,6 +51,65 @@ export const OpenedPullRequest = Schema.Struct({
 });
 export type OpenedPullRequest = typeof OpenedPullRequest.Type;
 
+/**
+ * How large a session's diff may be before the PR step opens nothing (LOB-227).
+ *
+ * Two numbers rather than one, because they bound different costs: the line count is what a
+ * reviewer reads, and the file count is what a repository pays for (CI, CODEOWNERS, every touched
+ * surface). Either one exceeded is enough to refuse; the outcome says which. Both are
+ * configuration — a deployment passes its own to `SessionServiceLive` — and `DEFAULT_DIFF_CAP` is
+ * what an unconfigured one enforces. There is no third dimension (bytes, hunks): a diff that is
+ * small in both is one a person can read, and a cap that guessed at the rest would refuse diffs
+ * nobody objects to.
+ */
+export const DiffCap = Schema.Struct({
+  maxFiles: Schema.Finite,
+  maxLines: Schema.Finite,
+});
+export type DiffCap = typeof DiffCap.Type;
+
+/**
+ * The cap an unconfigured deployment enforces.
+ *
+ * Sized from what a session already opens here rather than from a vendor's limit: the largest PR
+ * this repo has merged is a few hundred lines, and the loop's own "one sitting" bound is about 800
+ * changed lines — so two thousand lines and fifty files accept every ordinary change with room, and
+ * only a runaway run hits it. Being a default rather than a constant in the check is the point: a
+ * deployment that wants a different bound passes one.
+ */
+export const DEFAULT_DIFF_CAP: DiffCap = { maxFiles: 50, maxLines: 2_000 };
+
+/** Which of the cap's two dimensions an over-cap diff broke. */
+export const DiffCapLimit = Schema.Literals(["files", "lines"]);
+export type DiffCapLimit = typeof DiffCapLimit.Type;
+
+/**
+ * The answer for a diff the cap refused (LOB-227): no PR, no `factory.pr` document, and the numbers
+ * that refused it — which limit, what that limit allows, and what the branch measured.
+ *
+ * A value rather than a `PrError`, because nothing failed: the step ran, measured, and decided. A
+ * caller that retries an error would retry this one too, and the same branch would measure the same;
+ * a caller that reads an outcome can instead report the cap and leave the session's PR absent.
+ *
+ * It carries no `number` and no `url` — there is no PR — which is why the step's answer is a union
+ * of two shapes rather than one shape with absent fields: a decoded `{outcome: "over-cap", url}`
+ * cannot exist, so no reader has to decide what a missing link on an over-cap answer would mean.
+ */
+export const OverCapPullRequest = Schema.Struct({
+  outcome: Schema.Literal("over-cap"),
+  limit: DiffCapLimit,
+  cap: Schema.Finite,
+  measured: Schema.Finite,
+});
+export type OverCapPullRequest = typeof OverCapPullRequest.Type;
+
+/** What the PR step answers: the link and the path that produced it, or the cap that refused it. */
+export const PullRequestStep = Schema.Union([
+  OpenedPullRequest,
+  OverCapPullRequest,
+]);
+export type PullRequestStep = typeof PullRequestStep.Type;
+
 export type PrBodyInput = {
   readonly sessionId: SessionId;
   readonly prompt: string;

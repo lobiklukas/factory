@@ -99,6 +99,11 @@ killed. That the checks are not vacuous is a hand mutation run recorded in
 `.verify/evidence/lob-179/`: with the recorded-document read removed from `prStep.ts`, the replay's
 repeat posts again and the script exits non-zero. See `features/pr-once.md`.
 
+The diff cap (LOB-227) is deliberately not driven here: this script's sessions are bound to a bare
+slug, so they have no checkout whose branch could be measured, and the drive would have to cut a
+git worktree to exercise the cap at all. It is proved in `packages/core`'s suite instead, and
+`features/pr-once.md` records why and where.
+
 `degraded.sh` stops the container that publishes 5442 — by the name `docker ps --filter publish=5442`
 reports, because the compose project owning the port is not necessarily the one this directory would
 name (LOB-57) — and **always** starts it again (a trap, so a failure half way through cannot leave

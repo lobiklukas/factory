@@ -93,7 +93,8 @@ import {
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
-import { PullRequest } from "./pr";
+import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
+import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
@@ -1520,6 +1521,20 @@ const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
   return { requests, layer };
 };
 
+/**
+ * An answer that opened or replayed a PR, or a failure naming the cap that refused it.
+ *
+ * The step's answer is a union since LOB-227, so a case that expects a link has to say what it
+ * expects when there is none: throwing here is what makes a cap refusal in an ordinary PR case read
+ * as the refusal it is rather than as a missing field.
+ */
+const opened = (answer: PullRequestStep): OpenedPullRequest => {
+  if (answer.outcome === "over-cap") {
+    throw new Error(`the step refused the diff: ${JSON.stringify(answer)}`);
+  }
+  return answer;
+};
+
 describe("the PR step", () => {
   it("opens exactly one PR, records it in the log and the index, and reports it from both reads", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/7";
@@ -1536,7 +1551,8 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR",
-          head: "factory/ses_1",
+          // The session's own branch, because the cap measures the branch the PR names (LOB-227).
+          head: `factory/${created.id}`,
           base: "main",
         };
         const opened = yield* sessions
@@ -1608,7 +1624,7 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR twice at once",
-          head: "factory/ses_3",
+          head: `factory/${created.id}`,
           base: "main",
         };
         const opened = yield* Effect.all(
@@ -1629,7 +1645,10 @@ describe("the PR step", () => {
       "opened",
     ]);
     expect(
-      pair.opened.map(({ number, url: link }) => ({ number, url: link })),
+      pair.opened.map((answer) => {
+        const { number, url: link } = opened(answer);
+        return { number, url: link };
+      }),
     ).toEqual([
       { number: 9, url },
       { number: 9, url },
@@ -1651,7 +1670,7 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR for a narrow client",
-          head: "factory/ses_13",
+          head: `factory/${created.id}`,
           base: "main",
         };
         return yield* sessions
@@ -1662,7 +1681,7 @@ describe("the PR step", () => {
 
     // The tag is additive: a client holding only `PullRequest` still decodes the answer, and it
     // holds only the two fields it knows.
-    const narrow = Schema.decodeSync(PullRequest)(answer);
+    const narrow = Schema.decodeSync(PullRequest)(opened(answer));
     expect(narrow).toEqual({ number: 13, url });
     expect(github.requests).toHaveLength(1);
   }, 120_000);
@@ -1686,7 +1705,14 @@ describe("the PR step", () => {
         });
         // The same head and base for both. A guard keyed by the branch would answer the second
         // session with the first one's PR and leave it with no link of its own; the guard is the
-        // session's `factory.pr`, so each session opens its PR.
+        // session's `factory.pr`, so each session opens its PR. The shared head has to be a real
+        // ref since LOB-227 — the cap measures `main...head` in the session's worktree, and a
+        // branch that is not there is a measurement failure rather than an empty diff — so it is
+        // cut at `main` here: no diff, and the point of the case is the guard, not the cap.
+        execSync("git branch factory/ses_shared main", {
+          cwd: (yield* sessions.get(one.id)).workspace.path,
+          stdio: "ignore",
+        });
         const asked = {
           title: "factory: one branch, two sessions",
           head: "factory/ses_shared",
@@ -1753,7 +1779,7 @@ describe("the PR step", () => {
           .openPullRequest({
             sessionId: created.id,
             title: "factory: open a PR and lose the index",
-            head: "factory/ses_2",
+            head: `factory/${created.id}`,
             base: "main",
           })
           .pipe(Effect.provide(github.layer));
@@ -1783,6 +1809,308 @@ describe("the PR step", () => {
     expect(rebuilt.prUrl).toBe(url);
     expect(rebuilt.listed).toBe(url);
     expect(github.requests).toHaveLength(1);
+  }, 120_000);
+});
+
+/**
+ * The cap on a session's diff (LOB-227), driven through the step that would open the PR.
+ *
+ * Every case here goes through a real worktree and a real branch: the session is bound to
+ * `repoRoot`, so opening it cuts `factory/<id>` off `main`, this file commits a change on that
+ * branch, and the step measures it with `git diff --numstat` exactly as it would in a deployment.
+ * A fake git would prove the arithmetic and nothing else — that the diff the step reads is the
+ * branch's, that the base is the one the PR names, and that an uncommitted change is not counted
+ * are all facts of the real command.
+ *
+ * "Records no document" is asserted twice per refusal, because either half alone is weak: the
+ * transcript holds no `prOpened`, and the widened-cap case opens the same session afterwards and is
+ * answered `opened` rather than `already-open` — which it could not be if a `factory.pr` document
+ * had been committed by the refusal.
+ */
+describe("the diff cap", () => {
+  /** The `prOpened` entries a folded transcript holds: the PR entry carries no model content. */
+  const prEntries = (
+    entries: ReadonlyArray<{
+      readonly kind: string;
+      readonly text: string;
+    }>,
+  ): number =>
+    entries.filter((entry) => entry.kind === "other" && entry.text === "")
+      .length;
+
+  /**
+   * Commit `files` files of `lines` lines each on the session's branch, in its own worktree.
+   *
+   * The commit is what the cap measures: the step reads the *branch's* diff, so a change left
+   * uncommitted in the worktree is not part of what a PR would carry and is not counted here
+   * either. `git add -A` inside the worktree only ever stages what this case just wrote — the
+   * worktree is a fresh checkout of `main`.
+   */
+  const commitDiff = (input: {
+    readonly worktree: string;
+    readonly files: number;
+    readonly lines: number;
+  }): void => {
+    for (let file = 0; file < input.files; file += 1) {
+      writeFileSync(
+        join(input.worktree, `change-${file}.txt`),
+        "x\n".repeat(input.lines),
+      );
+    }
+    execSync("git add -A", { cwd: input.worktree, stdio: "ignore" });
+    execSync(
+      `git commit -m ${JSON.stringify(`change ${input.files}x${input.lines}`)}`,
+      { cwd: input.worktree, stdio: "ignore" },
+    );
+  };
+
+  /**
+   * A session bound to `repoRoot` with a committed diff, and the answer the step gave for it.
+   *
+   * The session's own worktree is what the diff is committed into, read from the snapshot as a
+   * client would read it, and the same snapshot is read back afterwards for what the step left
+   * behind.
+   */
+  const drive = (input: {
+    readonly title: string;
+    readonly files: number;
+    readonly lines: number;
+  }) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* sessions.registerRepo({
+        repo: factoryRepo,
+        url: "https://github.com/lobiklukas/factory.git",
+        localPath: repoRoot,
+      });
+      const created = yield* sessions.create({
+        repo: factoryRepo,
+        baseRef: "main",
+        title: input.title,
+      });
+      const before = yield* sessions.get(created.id);
+      commitDiff({
+        worktree: before.workspace.path,
+        files: input.files,
+        lines: input.lines,
+      });
+      const answer = yield* sessions.openPullRequest({
+        sessionId: created.id,
+        title: `factory: ${input.title}`,
+        head: `factory/${created.id}`,
+        base: "main",
+      });
+      const after = yield* sessions.get(created.id);
+      return {
+        sessionId: created.id,
+        worktree: before.workspace.path,
+        answer,
+        prUrl: after.session.prUrl,
+        prEntries: prEntries(after.entries),
+      };
+    });
+
+  it("opens the one PR when the branch's diff is inside the cap", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/31";
+    const github = makeGithubFake(201, { number: 31, url });
+    const result = await program(
+      drive({ title: "a small diff", files: 2, lines: 10 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    // A diff that is really there, and really measured: two files, twenty lines.
+    expect(
+      execSync("git diff --numstat main...HEAD", {
+        cwd: result.worktree,
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n"),
+    ).toEqual(["10\t0\tchange-0.txt", "10\t0\tchange-1.txt"]);
+    expect(result.answer).toEqual({ number: 31, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
+    expect(result.prUrl).toBe(url);
+    expect(result.prEntries).toBe(1);
+  }, 120_000);
+
+  it("refuses a diff with too many files, under the line cap", async () => {
+    const github = makeGithubFake(201, {
+      number: 32,
+      url: "https://github.com/lobiklukas/factory/pull/32",
+    });
+    // 51 files of one line each: over `maxFiles`, far under `maxLines`. The dimensions are
+    // enforced separately, so this must refuse on the file count and say so.
+    const result = await program(
+      drive({ title: "a wide diff", files: 51, lines: 1 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    expect(result.answer).toEqual({
+      outcome: "over-cap",
+      limit: "files",
+      cap: DEFAULT_DIFF_CAP.maxFiles,
+      measured: 51,
+    });
+    // Nothing was asked of GitHub, nothing was committed, and the index still says no PR.
+    expect(github.requests).toEqual([]);
+    expect(result.prUrl).toBeUndefined();
+    expect(result.prEntries).toBe(0);
+  }, 120_000);
+
+  it("refuses a diff with too many lines, under the file cap", async () => {
+    const github = makeGithubFake(201, {
+      number: 33,
+      url: "https://github.com/lobiklukas/factory/pull/33",
+    });
+    // One file, 2001 lines: over `maxLines`, far under `maxFiles`.
+    const result = await program(
+      drive({ title: "a deep diff", files: 1, lines: 2_001 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    expect(result.answer).toEqual({
+      outcome: "over-cap",
+      limit: "lines",
+      cap: DEFAULT_DIFF_CAP.maxLines,
+      measured: 2_001,
+    });
+    expect(github.requests).toEqual([]);
+    expect(result.prUrl).toBeUndefined();
+    expect(result.prEntries).toBe(0);
+  }, 120_000);
+
+  it("accepts the same diff when the configured cap is widened", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/34";
+    const github = makeGithubFake(201, { number: 34, url });
+    // The limits are configuration, not constants in the check: this diff is the one the case above
+    // refuses, and a deployment that allows more files opens it.
+    const wide = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+        prCap: { maxFiles: 60, maxLines: DEFAULT_DIFF_CAP.maxLines },
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      const result = await wide.runPromise(
+        drive({ title: "a wide diff, allowed", files: 51, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      expect(result.answer).toEqual({ number: 34, url, outcome: "opened" });
+      expect(github.requests).toHaveLength(1);
+      expect(result.prUrl).toBe(url);
+    } finally {
+      await wide.dispose();
+    }
+  }, 120_000);
+
+  it("does not re-measure a branch whose PR the log already records", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/35";
+    const github = makeGithubFake(201, { number: 35, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "a small diff, then a large one",
+        });
+        const openedOnce = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: openedOnce.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: a small diff, then a large one",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const first = yield* sessions.openPullRequest(asked);
+        // The branch then grows past the cap. The PR exists, so the step's answer is the one its
+        // log records — the cap bounds what the step would open, not what it already opened.
+        commitDiff({
+          worktree: openedOnce.workspace.path,
+          files: 1,
+          lines: DEFAULT_DIFF_CAP.maxLines + 1,
+        });
+        const repeated = yield* sessions.openPullRequest(asked);
+        return { first, repeated };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(opened(result.first)).toEqual({
+      number: 35,
+      url,
+      outcome: "opened",
+    });
+    expect(opened(result.repeated)).toEqual({
+      number: 35,
+      url,
+      outcome: "already-open",
+    });
+    // One POST for both: the retry was answered by the log, whatever the branch has become.
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+
+  it("fails, naming the range, rather than opening a PR it could not measure", async () => {
+    const github = makeGithubFake(201, {
+      number: 36,
+      url: "https://github.com/lobiklukas/factory/pull/36",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "a branch whose base does not exist",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: snapshot.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        const exit = yield* Effect.exit(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: a branch whose base does not exist",
+            head: `factory/${created.id}`,
+            base: "no-such-base",
+          }),
+        );
+        return { exit, head: `factory/${created.id}` };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    // A checkout whose base cannot be read is not a diff that fits: the cap does not disappear
+    // because the measurement broke, and no PR is opened on an unmeasured branch.
+    expect(result.exit._tag).toBe("Failure");
+    if (result.exit._tag !== "Failure") throw new Error("unreachable");
+    const error = result.exit.cause.reasons.flatMap((reason) =>
+      reason._tag === "Fail"
+        ? [reason.error as { operation: string; ref: string }]
+        : [],
+    )[0];
+    expect(error?.operation).toBe("diffSize");
+    expect(error?.ref).toBe(`no-such-base...${result.head}`);
+    expect(github.requests).toEqual([]);
   }, 120_000);
 });
 

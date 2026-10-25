@@ -260,6 +260,8 @@ describe("the dev tasks' environment", () => {
     "FAUX_COMMAND",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
+    "PR_CAP_MAX_FILES",
+    "PR_CAP_MAX_LINES",
     "DATABASE_MAX_CONNECTIONS",
     "MOTEL_URL",
     "OTEL_SERVICE_NAME",
