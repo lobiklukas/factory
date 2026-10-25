@@ -103,10 +103,30 @@ export const OverCapPullRequest = Schema.Struct({
 });
 export type OverCapPullRequest = typeof OverCapPullRequest.Type;
 
-/** What the PR step answers: the link and the path that produced it, or the cap that refused it. */
+/**
+ * The answer for a branch with nothing to publish (LOB-196): no PR, no `factory.pr` document, no
+ * `pr_url` row — the run measured the branch against its base and found it even.
+ *
+ * GitHub refuses to open a PR for a head with no commits ahead of its base, so before this the
+ * ordinary result of a docs run over docs that need no edit was a typed 422 failure. It is a value
+ * for the same reason an over-cap answer is: nothing failed, the step ran, measured and decided, and
+ * a caller that retries an error would ask GitHub again for the same empty branch.
+ *
+ * Nothing is recorded about it, deliberately. A recorded answer would be sticky — the next run that
+ * *does* change a file would read it and open nothing — so the transcript entry is the run's own
+ * record and the next call measures the branch afresh.
+ */
+export const NoChangePullRequest = Schema.Struct({
+  outcome: Schema.Literal("no-change"),
+});
+export type NoChangePullRequest = typeof NoChangePullRequest.Type;
+
+/** What the PR step answers: the link and the path that produced it, the cap that refused it, or
+ * the empty branch that had nothing to open. */
 export const PullRequestStep = Schema.Union([
   OpenedPullRequest,
   OverCapPullRequest,
+  NoChangePullRequest,
 ]);
 export type PullRequestStep = typeof PullRequestStep.Type;
 

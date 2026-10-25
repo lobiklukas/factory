@@ -41,6 +41,12 @@
  * there is no second place where a PR could be opened without one. The same measurement is what the
  * body lists under `## Changed files` (LOB-228): one `git diff --numstat` answers both questions,
  * so the paths a reviewer reads and the size the cap refused can never be two different diffs.
+ *
+ * That one measurement answers the smaller question first: a branch with no file changed against its
+ * base has nothing to publish (LOB-196), so the step announces that in the transcript and answers
+ * `{outcome: "no-change"}` without reaching GitHub. Nothing is written but that entry — no
+ * document, no row — so the answer describes this call's branch rather than a state a later run
+ * would have to escape.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -56,6 +62,7 @@ import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { Conversation, Harness } from "@repo/harness";
 import {
   readPullRequestDoc,
+  writeNoDocumentationChange,
   writePullRequestDoc,
   type PullRequestRecord,
 } from "@repo/harness";
@@ -125,6 +132,17 @@ export const openPullRequest = (
     const refused = Option.flatMap(measured, (size) =>
       capRefusal(size, input.cap ?? DEFAULT_DIFF_CAP),
     );
+    // A branch even with its base has nothing to publish (LOB-196). GitHub refuses a PR for a head
+    // with no commits ahead of its base, so the answer is a value and one transcript line rather
+    // than a 422 the caller has to interpret — and the ordinary docs run over docs that need no
+    // edit is exactly this branch. Nothing is recorded about the answer: the measurement is taken
+    // afresh on every call, so a run that *does* change a file afterwards opens its PR rather than
+    // reading a sticky "nothing to do". `none` (a directory that is not its own checkout) is not
+    // this case: nothing was measured, so nothing can be said to be empty.
+    if (Option.isSome(measured) && measured.value.files === 0) {
+      yield* writeNoDocumentationChange(input.conversation, input.base);
+      return { outcome: "no-change" };
+    }
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR.
     if (Option.isSome(refused)) return refused.value;

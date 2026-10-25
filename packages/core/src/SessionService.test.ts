@@ -1541,18 +1541,45 @@ const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
 };
 
 /**
- * An answer that opened or replayed a PR, or a failure naming the cap that refused it.
+ * An answer that opened or replayed a PR, or a failure naming the answer that opened none.
  *
- * The step's answer is a union since LOB-227, so a case that expects a link has to say what it
- * expects when there is none: throwing here is what makes a cap refusal in an ordinary PR case read
- * as the refusal it is rather than as a missing field.
+ * The step's answer is a union since LOB-227 (and gained its third member in LOB-196), so a case that
+ * expects a link has to say what it expects when there is none: narrowing on the two outcomes that
+ * carry one is what makes a refusal in an ordinary PR case read as the refusal it is rather than as a
+ * missing field, and a fourth outcome would fail to compile here instead of passing silently.
  */
 const opened = (answer: PullRequestStep): OpenedPullRequest => {
-  if (answer.outcome === "over-cap") {
-    throw new Error(`the step refused the diff: ${JSON.stringify(answer)}`);
+  if (answer.outcome === "opened" || answer.outcome === "already-open") {
+    return answer;
   }
-  return answer;
+  throw new Error(`the step opened no PR: ${JSON.stringify(answer)}`);
 };
+
+/**
+ * A session bound to `repoRoot` with one file committed on its own branch.
+ *
+ * Since LOB-196 a PR needs a diff: a branch even with its base answers `no-change` and never reaches
+ * GitHub, so a case about the *call* has to start from work a PR could carry. Registration is
+ * explicit here rather than inherited from whichever case ran first, so these cases do not depend on
+ * their order in the file.
+ */
+const sessionWithDiff = (title: string) =>
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* sessions.registerRepo({
+      repo: factoryRepo,
+      url: "https://github.com/lobiklukas/factory.git",
+      localPath: repoRoot,
+    });
+    const created = yield* sessions.create({
+      repo: factoryRepo,
+      baseRef: "main",
+      title,
+    });
+    const snapshot = yield* sessions.get(created.id);
+    commitDiff({ worktree: snapshot.workspace.path, files: 1, lines: 1 });
+    return { created, worktree: snapshot.workspace.path };
+  });
 
 describe("the PR step", () => {
   it("opens exactly one PR, records it in the log and the index, and reports it from both reads", async () => {
@@ -1562,11 +1589,7 @@ describe("the PR step", () => {
     const result = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
-        const created = yield* sessions.create({
-          repo: factoryRepo,
-          baseRef: "main",
-          title: "open a PR",
-        });
+        const { created } = yield* sessionWithDiff("open a PR");
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR",
@@ -1640,10 +1663,7 @@ describe("the PR step", () => {
     const pair = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
-        const created = yield* sessions.create({
-          repo: factoryRepo,
-          title: "open a PR twice at once",
-        });
+        const { created } = yield* sessionWithDiff("open a PR twice at once");
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR twice at once",
@@ -1686,10 +1706,9 @@ describe("the PR step", () => {
     const answer = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
-        const created = yield* sessions.create({
-          repo: factoryRepo,
-          title: "open a PR for a narrow client",
-        });
+        const { created } = yield* sessionWithDiff(
+          "open a PR for a narrow client",
+        );
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR for a narrow client",
@@ -1718,27 +1737,21 @@ describe("the PR step", () => {
     const result = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
-        const one = yield* sessions.create({
-          repo: factoryRepo,
-          title: "one session on the branch",
-        });
-        const two = yield* sessions.create({
-          repo: factoryRepo,
-          title: "a second session on the same branch",
-        });
+        const one = (yield* sessionWithDiff("one session on the branch"))
+          .created;
+        const two = (yield* sessionWithDiff(
+          "a second session on the same branch",
+        )).created;
         // The same head and base for both. A guard keyed by the branch would answer the second
         // session with the first one's PR and leave it with no link of its own; the guard is the
         // session's `factory.pr`, so each session opens its PR. The shared head has to be a real
         // ref since LOB-227 — the cap measures `main...head` in the session's worktree, and a
-        // branch that is not there is a measurement failure rather than an empty diff — so it is
-        // cut at `main` here: no diff, and the point of the case is the guard, not the cap.
-        execSync("git branch factory/ses_shared main", {
-          cwd: (yield* sessions.get(one.id)).workspace.path,
-          stdio: "ignore",
-        });
+        // branch that is not there is a measurement failure rather than an empty diff — and it has
+        // to carry a diff since LOB-196, so it is the first session's own branch: a ref belongs to
+        // the repository, so the second session's worktree measures the same committed file.
         const asked = {
           title: "factory: one branch, two sessions",
-          head: "factory/ses_shared",
+          head: `factory/${one.id}`,
           base: "main",
         };
         const openedOne = yield* sessions
@@ -1794,10 +1807,9 @@ describe("the PR step", () => {
       Effect.gen(function* () {
         const sql = yield* SqlClient;
         const sessions = yield* SessionService;
-        const created = yield* sessions.create({
-          repo: factoryRepo,
-          title: "open a PR and lose the index",
-        });
+        const { created } = yield* sessionWithDiff(
+          "open a PR and lose the index",
+        );
         yield* sessions
           .openPullRequest({
             sessionId: created.id,
@@ -1835,6 +1847,96 @@ describe("the PR step", () => {
   }, 120_000);
 });
 
+/*
+ * The fixtures the diff cases share: what the branch carries, and the session that carries it.
+ * They live here rather than inside one `describe` because "the diff cap" and "an empty diff" are
+ * two questions about the same measurement.
+ */
+
+/** The `prOpened` entries a folded transcript holds: the PR entry carries no model content. */
+const prEntries = (
+  entries: ReadonlyArray<{
+    readonly kind: string;
+    readonly text: string;
+  }>,
+): number =>
+  entries.filter((entry) => entry.kind === "other" && entry.text === "").length;
+
+/**
+ * Commit `files` files of `lines` lines each on the session's branch, in its own worktree.
+ *
+ * The commit is what the step measures: it reads the *branch's* diff, so a change left uncommitted
+ * in the worktree is not part of what a PR would carry and is not counted here either. `git add -A`
+ * inside the worktree only ever stages what this case just wrote — the worktree is a fresh checkout
+ * of `main`. Zero files commits nothing at all, which is how the empty-diff cases below start a run
+ * from an unchanged checkout.
+ */
+const commitDiff = (input: {
+  readonly worktree: string;
+  readonly files: number;
+  readonly lines: number;
+}): void => {
+  if (input.files === 0) return;
+  for (let file = 0; file < input.files; file += 1) {
+    writeFileSync(
+      join(input.worktree, `change-${file}.txt`),
+      "x\n".repeat(input.lines),
+    );
+  }
+  execSync("git add -A", { cwd: input.worktree, stdio: "ignore" });
+  execSync(
+    `git commit -m ${JSON.stringify(`change ${input.files}x${input.lines}`)}`,
+    { cwd: input.worktree, stdio: "ignore" },
+  );
+};
+
+/**
+ * A session bound to `repoRoot` with a committed diff, and the answer the step gave for it.
+ *
+ * The session's own worktree is what the diff is committed into, read from the snapshot as a
+ * client would read it, and the same snapshot is read back afterwards for what the step left
+ * behind.
+ */
+const drive = (input: {
+  readonly title: string;
+  readonly files: number;
+  readonly lines: number;
+}) =>
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* sessions.registerRepo({
+      repo: factoryRepo,
+      url: "https://github.com/lobiklukas/factory.git",
+      localPath: repoRoot,
+    });
+    const created = yield* sessions.create({
+      repo: factoryRepo,
+      baseRef: "main",
+      title: input.title,
+    });
+    const before = yield* sessions.get(created.id);
+    commitDiff({
+      worktree: before.workspace.path,
+      files: input.files,
+      lines: input.lines,
+    });
+    const answer = yield* sessions.openPullRequest({
+      sessionId: created.id,
+      title: `factory: ${input.title}`,
+      head: `factory/${created.id}`,
+      base: "main",
+    });
+    const after = yield* sessions.get(created.id);
+    return {
+      sessionId: created.id,
+      worktree: before.workspace.path,
+      answer,
+      prUrl: after.session.prUrl,
+      prEntries: prEntries(after.entries),
+      entries: after.entries,
+    };
+  });
+
 /**
  * The cap on a session's diff (LOB-227), driven through the step that would open the PR.
  *
@@ -1850,89 +1952,8 @@ describe("the PR step", () => {
  * answered `opened` rather than `already-open` — which it could not be if a `factory.pr` document
  * had been committed by the refusal.
  */
+
 describe("the diff cap", () => {
-  /** The `prOpened` entries a folded transcript holds: the PR entry carries no model content. */
-  const prEntries = (
-    entries: ReadonlyArray<{
-      readonly kind: string;
-      readonly text: string;
-    }>,
-  ): number =>
-    entries.filter((entry) => entry.kind === "other" && entry.text === "")
-      .length;
-
-  /**
-   * Commit `files` files of `lines` lines each on the session's branch, in its own worktree.
-   *
-   * The commit is what the cap measures: the step reads the *branch's* diff, so a change left
-   * uncommitted in the worktree is not part of what a PR would carry and is not counted here
-   * either. `git add -A` inside the worktree only ever stages what this case just wrote — the
-   * worktree is a fresh checkout of `main`.
-   */
-  const commitDiff = (input: {
-    readonly worktree: string;
-    readonly files: number;
-    readonly lines: number;
-  }): void => {
-    for (let file = 0; file < input.files; file += 1) {
-      writeFileSync(
-        join(input.worktree, `change-${file}.txt`),
-        "x\n".repeat(input.lines),
-      );
-    }
-    execSync("git add -A", { cwd: input.worktree, stdio: "ignore" });
-    execSync(
-      `git commit -m ${JSON.stringify(`change ${input.files}x${input.lines}`)}`,
-      { cwd: input.worktree, stdio: "ignore" },
-    );
-  };
-
-  /**
-   * A session bound to `repoRoot` with a committed diff, and the answer the step gave for it.
-   *
-   * The session's own worktree is what the diff is committed into, read from the snapshot as a
-   * client would read it, and the same snapshot is read back afterwards for what the step left
-   * behind.
-   */
-  const drive = (input: {
-    readonly title: string;
-    readonly files: number;
-    readonly lines: number;
-  }) =>
-    Effect.gen(function* () {
-      const sessions = yield* SessionService;
-      yield* sessions.registerRepo({
-        repo: factoryRepo,
-        url: "https://github.com/lobiklukas/factory.git",
-        localPath: repoRoot,
-      });
-      const created = yield* sessions.create({
-        repo: factoryRepo,
-        baseRef: "main",
-        title: input.title,
-      });
-      const before = yield* sessions.get(created.id);
-      commitDiff({
-        worktree: before.workspace.path,
-        files: input.files,
-        lines: input.lines,
-      });
-      const answer = yield* sessions.openPullRequest({
-        sessionId: created.id,
-        title: `factory: ${input.title}`,
-        head: `factory/${created.id}`,
-        base: "main",
-      });
-      const after = yield* sessions.get(created.id);
-      return {
-        sessionId: created.id,
-        worktree: before.workspace.path,
-        answer,
-        prUrl: after.session.prUrl,
-        prEntries: prEntries(after.entries),
-      };
-    });
-
   it("opens the one PR when the branch's diff is inside the cap", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/31";
     const github = makeGithubFake(201, { number: 31, url });
@@ -2140,6 +2161,133 @@ describe("the diff cap", () => {
     expect(error?.operation).toBe("diffSize");
     expect(error?.ref).toBe(`no-such-base...${result.head}`);
     expect(github.requests).toEqual([]);
+  }, 120_000);
+});
+
+/**
+ * A branch with nothing to publish (LOB-196): the ordinary result of a docs run over docs that need
+ * no edit, and the run that used to reach GitHub with an empty branch and fail on its 422.
+ *
+ * Both cases drive a real worktree and a real `git diff --numstat`, because "nothing changed" is a
+ * fact about a branch: a fake that answered zero would prove only that the step can read a number it
+ * was handed.
+ */
+describe("an empty diff", () => {
+  it("answers no-change for two runs on an unchanged checkout, announcing each in the transcript", async () => {
+    const github = makeGithubFake(201, {
+      number: 40,
+      url: "https://github.com/lobiklukas/factory/pull/40",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        // Two runs over one unchanged checkout, each its own session — which is what a docs run is.
+        const first = yield* drive({
+          title: "docs that need no edit",
+          files: 0,
+          lines: 0,
+        });
+        const second = yield* drive({
+          title: "docs that still need no edit",
+          files: 0,
+          lines: 0,
+        });
+        return { first, second };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    // The ledger, not an inferred count: a no-op run is not an empty-diff *attempt*, it is no
+    // request at all, twice over.
+    expect(github.requests).toEqual([]);
+    // A value rather than a failure — the run settles — and the state it settles in names no PR.
+    expect(result.first.answer).toEqual({ outcome: "no-change" });
+    expect(result.second.answer).toEqual({ outcome: "no-change" });
+    expect(result.first.prUrl).toBeUndefined();
+    expect(result.first.prEntries).toBe(0);
+    // What a person watching the run reads: one line saying nothing needed documenting, and the base
+    // it was measured against. Without it a no-op run is silence.
+    const said = result.second.entries.filter((entry) =>
+      entry.text.includes("no documentation change"),
+    );
+    expect(said).toHaveLength(1);
+    expect(said[0]?.text).toContain("main");
+  }, 120_000);
+
+  it("opens the PR when a run does change a file, because the guard records nothing", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/41";
+    const github = makeGithubFake(201, { number: 41, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "docs, then an edit",
+        });
+        const before = yield* sessions.get(created.id);
+        const asked = {
+          sessionId: created.id,
+          title: "factory: docs, then an edit",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const empty = yield* sessions.openPullRequest(asked);
+        // The next run edits a page on the same branch: a recorded "nothing to do" would answer
+        // this one too, so what makes the guard safe is that it left nothing behind to read.
+        commitDiff({ worktree: before.workspace.path, files: 1, lines: 3 });
+        const changed = yield* sessions.openPullRequest(asked);
+        const after = yield* sessions.get(created.id);
+        return {
+          empty,
+          changed,
+          prUrl: after.session.prUrl,
+          prEntries: prEntries(after.entries),
+        };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(result.empty).toEqual({ outcome: "no-change" });
+    expect(result.changed).toEqual({ number: 41, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
+    expect(result.prUrl).toBe(url);
+    expect(result.prEntries).toBe(1);
+  }, 120_000);
+
+  it("still opens the PR for a directory that is not its own checkout, where nothing was measured", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/42";
+    const github = makeGithubFake(201, { number: 42, url });
+    // A slug no case registered: the session's working directory is a plain directory, so the step
+    // has no branch to read. "Nothing to publish" is a measurement, and a step that could not
+    // measure must not read the absence as an empty diff — that is `diffCapRefusal`'s rule too.
+    const unmeasured = RepoSlugSchema.make("lobiklukas/unregistered");
+
+    const answer = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: unmeasured,
+          baseRef: "main",
+          title: "a session with no worktree",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        const step = yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: a session with no worktree",
+            head: `factory/${created.id}`,
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+        return { step, worktree: snapshot.workspace.path };
+      }),
+    );
+
+    expect(answer.step).toEqual({ number: 42, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
   }, 120_000);
 });
 
