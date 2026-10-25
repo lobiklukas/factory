@@ -1551,7 +1551,8 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR",
-          head: "factory/ses_1",
+          // The session's own branch, because the cap measures the branch the PR names (LOB-227).
+          head: `factory/${created.id}`,
           base: "main",
         };
         const opened = yield* sessions
@@ -1623,7 +1624,7 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR twice at once",
-          head: "factory/ses_3",
+          head: `factory/${created.id}`,
           base: "main",
         };
         const opened = yield* Effect.all(
@@ -1669,7 +1670,7 @@ describe("the PR step", () => {
         const asked = {
           sessionId: created.id,
           title: "factory: open a PR for a narrow client",
-          head: "factory/ses_13",
+          head: `factory/${created.id}`,
           base: "main",
         };
         return yield* sessions
@@ -1704,7 +1705,14 @@ describe("the PR step", () => {
         });
         // The same head and base for both. A guard keyed by the branch would answer the second
         // session with the first one's PR and leave it with no link of its own; the guard is the
-        // session's `factory.pr`, so each session opens its PR.
+        // session's `factory.pr`, so each session opens its PR. The shared head has to be a real
+        // ref since LOB-227 — the cap measures `main...head` in the session's worktree, and a
+        // branch that is not there is a measurement failure rather than an empty diff — so it is
+        // cut at `main` here: no diff, and the point of the case is the guard, not the cap.
+        execSync("git branch factory/ses_shared main", {
+          cwd: (yield* sessions.get(one.id)).workspace.path,
+          stdio: "ignore",
+        });
         const asked = {
           title: "factory: one branch, two sessions",
           head: "factory/ses_shared",
@@ -1771,7 +1779,7 @@ describe("the PR step", () => {
           .openPullRequest({
             sessionId: created.id,
             title: "factory: open a PR and lose the index",
-            head: "factory/ses_2",
+            head: `factory/${created.id}`,
             base: "main",
           })
           .pipe(Effect.provide(github.layer));
@@ -2079,7 +2087,7 @@ describe("the diff cap", () => {
           files: 1,
           lines: 1,
         });
-        return yield* Effect.exit(
+        const exit = yield* Effect.exit(
           sessions.openPullRequest({
             sessionId: created.id,
             title: "factory: a branch whose base does not exist",
@@ -2087,20 +2095,21 @@ describe("the diff cap", () => {
             base: "no-such-base",
           }),
         );
+        return { exit, head: `factory/${created.id}` };
       }).pipe(Effect.provide(github.layer)),
     );
 
     // A checkout whose base cannot be read is not a diff that fits: the cap does not disappear
     // because the measurement broke, and no PR is opened on an unmeasured branch.
-    expect(result._tag).toBe("Failure");
-    if (result._tag !== "Failure") throw new Error("unreachable");
-    const error = result.cause.reasons.flatMap((reason) =>
+    expect(result.exit._tag).toBe("Failure");
+    if (result.exit._tag !== "Failure") throw new Error("unreachable");
+    const error = result.exit.cause.reasons.flatMap((reason) =>
       reason._tag === "Fail"
         ? [reason.error as { operation: string; ref: string }]
         : [],
     )[0];
     expect(error?.operation).toBe("diffSize");
-    expect(error?.ref).toBe("no-such-base...HEAD");
+    expect(error?.ref).toBe(`no-such-base...${result.head}`);
     expect(github.requests).toEqual([]);
   }, 120_000);
 });

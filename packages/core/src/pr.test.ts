@@ -353,6 +353,7 @@ describe("diffCapRefusal", () => {
       diffCapRefusal({
         worktree,
         base: "main",
+        head: "factory/change",
         cap: { maxFiles: 2, maxLines: 100 },
       }),
     );
@@ -372,6 +373,7 @@ describe("diffCapRefusal", () => {
       diffCapRefusal({
         worktree,
         base: "main",
+        head: "factory/change",
         cap: { maxFiles: 10, maxLines: 4 },
       }),
     );
@@ -392,6 +394,7 @@ describe("diffCapRefusal", () => {
         diffCapRefusal({
           worktree,
           base: "main",
+          head: "factory/change",
           cap: { maxFiles: 2, maxLines: 5 },
         }),
       ),
@@ -411,6 +414,7 @@ describe("diffCapRefusal", () => {
         diffCapRefusal({
           worktree,
           base: "main",
+          head: "factory/change",
           cap: { maxFiles: 10, maxLines: 10 },
         }),
       ),
@@ -432,7 +436,55 @@ describe("diffCapRefusal", () => {
         diffCapRefusal({
           worktree: plain,
           base: "main",
+          head: "factory/change",
           cap: { maxFiles: 1, maxLines: 1 },
+        }),
+      ),
+    ).toEqual(Option.none());
+  });
+
+  it("measures the named head, not the worktree's own HEAD", async () => {
+    // The step publishes `head`, so that is the branch the cap has to bound. Here the worktree sits
+    // on its small branch while `factory/big` carries the wide change: measuring `HEAD` would pass
+    // a diff nobody publishes.
+    const worktree = checkout({ "small.txt": "1\n" });
+    execSync("git switch -c factory/big main", {
+      cwd: worktree,
+      stdio: "ignore",
+    });
+    for (let file = 0; file < 5; file += 1) {
+      writeFileSync(join(worktree, `big-${file}.txt`), "1\n");
+    }
+    execSync("git add -A && git commit -m big", {
+      cwd: worktree,
+      stdio: "ignore",
+    });
+    execSync("git switch factory/change", { cwd: worktree, stdio: "ignore" });
+    expect(
+      await Effect.runPromise(
+        diffCapRefusal({
+          worktree,
+          base: "main",
+          head: "factory/big",
+          cap: { maxFiles: 2, maxLines: 100 },
+        }),
+      ),
+    ).toEqual(
+      Option.some({
+        outcome: "over-cap",
+        limit: "files",
+        cap: 2,
+        measured: 5,
+      }),
+    );
+    // The worktree's own branch is still inside the cap: the refusal is about the named head.
+    expect(
+      await Effect.runPromise(
+        diffCapRefusal({
+          worktree,
+          base: "main",
+          head: "factory/change",
+          cap: { maxFiles: 2, maxLines: 100 },
         }),
       ),
     ).toEqual(Option.none());
@@ -446,6 +498,7 @@ describe("diffCapRefusal", () => {
       diffCapRefusal({
         worktree,
         base: "no-such-base",
+        head: "factory/change",
         cap: { maxFiles: 10, maxLines: 10 },
       }),
     );
@@ -457,6 +510,6 @@ describe("diffCapRefusal", () => {
         : [],
     )[0];
     expect(error?.operation).toBe("diffSize");
-    expect(error?.ref).toBe("no-such-base...HEAD");
+    expect(error?.ref).toBe("no-such-base...factory/change");
   });
 });

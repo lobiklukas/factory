@@ -115,6 +115,7 @@ export const openPullRequest = (
         ? yield* diffCapRefusal({
             worktree: input.worktree,
             base: input.base,
+            head: input.head,
             cap: input.cap ?? DEFAULT_DIFF_CAP,
           })
         : Option.none<OverCapPullRequest>();
@@ -213,19 +214,27 @@ export const parseDiffSize = (numstat: string): DiffSize => {
  *   checkout — so a bare `git diff` there walks up to the enclosing repository and measures *its*
  *   branch. That is the wrong diff in both directions: a clean control-plane tree reads as an empty
  *   session diff, and a dirty one refuses a PR for changes the session never made.
- * - **a `PrError`: this directory is a checkout root and the measurement failed** (no such base
- *   ref, git gone). That is not a diff that fits, so it does not open a PR: a bound that a broken
- *   checkout slips past is not a bound, and the failure names the range it could not read rather
- *   than pretending the diff was measured.
+ * - **a `PrError`: this directory is a checkout root and the measurement failed** (no such base or
+ *   head ref, git gone). That is not a diff that fits, so it does not open a PR: a bound that a
+ *   broken checkout slips past is not a bound, and the failure names the range it could not read
+ *   rather than pretending the diff was measured.
  *
- * `base...HEAD` (three-dot) is the diff a PR shows: from the merge base to the branch tip. Two-dot
+ * `base...head` (three-dot) is the diff a PR shows: from the merge base to the branch tip. Two-dot
  * would blame the branch for everything `base` gained since they forked. Uncommitted work is not in
  * it either, deliberately — a change that is not committed is not in the PR, so it is not what this
  * cap refuses.
+ *
+ * It measures the branch the PR *names* (`head`), not the worktree's own `HEAD`. They are the same
+ * branch in every ordinary call — the session's `factory/<id>` is what the worktree was cut at — but
+ * the step publishes `head`, so that is the diff to bound: a worktree holding a small branch while
+ * the caller asks for a PR from a large one would otherwise pass a cap over a diff nobody publishes,
+ * and the reverse would refuse one that is small. A `head` the worktree cannot resolve is the
+ * `PrError` above, which is the honest answer to "measure a branch that is not here".
  */
 export const diffSize = (input: {
   readonly worktree: string;
   readonly base: string;
+  readonly head: string;
 }): Effect.Effect<Option.Option<DiffSize>, PrError> => {
   if (!existsSync(join(input.worktree, ".git")))
     return Effect.succeed(Option.none());
@@ -234,20 +243,24 @@ export const diffSize = (input: {
       Effect.try({
         try: () =>
           parseDiffSize(
-            execFileSync("git", ["diff", "--numstat", `${input.base}...HEAD`], {
-              cwd: input.worktree,
-              encoding: "utf8",
-              // stderr is swallowed: the failure is the typed error below, not a log line every
-              // session that opens a PR would print.
-              stdio: ["ignore", "pipe", "ignore"],
-            }),
+            execFileSync(
+              "git",
+              ["diff", "--numstat", `${input.base}...${input.head}`],
+              {
+                cwd: input.worktree,
+                encoding: "utf8",
+                // stderr is swallowed: the failure is the typed error below, not a log line every
+                // session that opens a PR would print.
+                stdio: ["ignore", "pipe", "ignore"],
+              },
+            ),
           ),
         catch: () => undefined,
       }),
       () =>
         new PrError({
           operation: "diffSize",
-          ref: `${input.base}...HEAD`,
+          ref: `${input.base}...${input.head}`,
           message: "the branch's diff could not be measured",
         }),
     ),
@@ -265,6 +278,7 @@ export const diffSize = (input: {
 export const diffCapRefusal = (input: {
   readonly worktree: string;
   readonly base: string;
+  readonly head: string;
   readonly cap: DiffCap;
 }): Effect.Effect<Option.Option<OverCapPullRequest>, PrError> =>
   Effect.map(diffSize(input), (size) => {
