@@ -32,6 +32,7 @@ import { SqlError } from "effect/sql/SqlError";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseConfig, DatabaseLive } from "./index";
 import { PostgresStorage, READER_PAGE_ROWS } from "./PostgresStorage";
+import { Skill } from "@repo/domain/Skill";
 import { BoardDefinition } from "@repo/domain/Task";
 
 /**
@@ -979,6 +980,145 @@ describe("the board's tables and seed", () => {
         await scratch.dispose();
         await Effect.runPromise(
           sql`DROP DATABASE IF EXISTS ${sql(scratchName)} WITH (FORCE)`,
+        );
+      }
+    },
+  );
+});
+
+/**
+ * The `docs` skill 0015 seeds (LOB-225, part 1 of LOB-195), and the scope that part states: no
+ * existing skill row is rewritten and no board definition is touched.
+ *
+ * Read from the configured database, not a scratch one, because the claim is about what a reader
+ * finds after a real migrate — `DatabaseLive` in this file's runtime is what applies 0015. The rows
+ * are decoded through `Skill` rather than compared field by field against a hand-written copy, so a
+ * seeded document the contract rejects fails here instead of at the loader that would inject it.
+ *
+ * Mutation checked: deleting the INSERT from `0015_seed_docs_skill.ts` fails the first case (no
+ * `docs` row to decode) and the second (the snapshot loses the only row 0015 adds); dropping the
+ * `ON CONFLICT (name) DO NOTHING` fails neither, because the migration is not re-run through the
+ * migrator — the second case runs the export directly and asserts the table does not move.
+ */
+describe("the skills table and its seeds", () => {
+  const AttachmentsJson = Schema.fromJsonString(Schema.Array(Schema.String));
+
+  /** One `skills` row as the driver returns it; `attachments` is selected as text. */
+  type SkillRow = {
+    readonly name: string;
+    readonly version: string;
+    readonly description: string;
+    readonly body: string;
+    readonly attachments: string;
+  };
+
+  /** Every skill row, as a comparable snapshot; `attachments` is selected as text. */
+  const skills = () =>
+    Effect.runPromise(
+      sql<SkillRow>`
+        SELECT name, version, description, body, attachments::text AS attachments
+        FROM skills ORDER BY name
+      `,
+    );
+
+  /** Every board definition version, as a comparable snapshot. 0015 must not move any of them. */
+  const definitions = () =>
+    Effect.runPromise(
+      sql<{ id: string; version: number; name: string; columns: string }>`
+        SELECT id, version, name, columns::text AS columns
+        FROM board_definitions ORDER BY id, version
+      `,
+    );
+
+  const decode = (row: SkillRow) =>
+    Schema.decodeSync(Skill)({
+      ...row,
+      attachments: Schema.decodeSync(AttachmentsJson)(row.attachments),
+    });
+
+  it(
+    "seeds the docs skill with a name, version, description and body",
+    { timeout: 30_000 },
+    async () => {
+      const [row] = (await skills()).filter((skill) => skill.name === "docs");
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+
+      const docs = decode(row);
+      expect(docs.name).toBe("docs");
+      expect(docs.version).toBe("1");
+      expect(docs.description.length).toBeGreaterThan(0);
+      expect(docs.body.length).toBeGreaterThan(0);
+      // The body has to say *what* a docs run does, or the row is the wrong prompt: it edits
+      // documentation, and it carries no attachments.
+      expect(docs.body.toLowerCase()).toContain("documentation");
+      expect(docs.attachments).toEqual([]);
+    },
+  );
+
+  it(
+    "adds the docs row once, and rewrites no other skill row or board definition",
+    { timeout: 30_000 },
+    async () => {
+      // A row 0015 does not name, written with plain SQL: `ON CONFLICT (name) DO NOTHING` names one
+      // name, so this row must come out of a second pass byte-identical or the seed is not the
+      // single-row insert it claims to be. Minted per run and dropped in the `finally`, as the
+      // board cases above mint their ids, because a fixed name would collide with a second run of
+      // this file against one database.
+      const neighbourName = `test-docs-neighbour-${randomBytes(6).toString("hex")}`;
+      await Effect.runPromise(
+        sql`
+          INSERT INTO skills (name, version, description, body, attachments)
+          VALUES (${neighbourName}, '7', 'a neighbour', '# Neighbour\n', '[]'::jsonb)
+        `,
+      );
+
+      try {
+        const skillsBefore = await skills();
+        const definitionsBefore = await definitions();
+
+        // Run directly, not through `MigratedLive`: the migrator records what it has applied, so a
+        // second trip through the layer would skip 0015 and prove nothing about the seed.
+        const migration = (await import("./migrations/0015_seed_docs_skill"))
+          .default;
+        await Effect.runPromise(
+          migration.pipe(Effect.provideService(SqlClient, sql)),
+        );
+
+        const skillsAfter = await skills();
+        // One `docs` row before and after: the primary key did its job rather than a second copy of
+        // the skill landing beside the first.
+        expect(
+          skillsAfter.filter((skill) => skill.name === "docs"),
+        ).toHaveLength(1);
+        // Nothing moved, including the row 0015 does not name and the three stage skills 0009
+        // seeded.
+        expect(skillsAfter).toEqual(skillsBefore);
+        expect(await definitions()).toEqual(definitionsBefore);
+      } finally {
+        await Effect.runPromise(
+          sql`DELETE FROM skills WHERE name = ${neighbourName}`,
+        );
+      }
+    },
+  );
+
+  it(
+    "leaves the three stage skills 0009 seeded exactly as they were",
+    { timeout: 30_000 },
+    async () => {
+      const byName = new Map(
+        (await skills()).map((row) => [row.name, decode(row)]),
+      );
+      for (const name of ["specify", "implement", "review"]) {
+        const seeded = byName.get(name);
+        expect(seeded).toBeDefined();
+        if (seeded === undefined) continue;
+        // 0009 wrote `version: "1"` and a body headed by the stage's own name; 0015 adds a row and
+        // must not have rewritten one of these.
+        expect(seeded.version).toBe("1");
+        expect(seeded.body).toContain(
+          name.charAt(0).toUpperCase() + name.slice(1),
         );
       }
     },
