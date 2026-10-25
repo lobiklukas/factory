@@ -11,7 +11,9 @@ import {
   AlreadyBlocked,
   BlockTaskInput,
   BoardNotFound,
+  BoardView,
   CreateTaskInput,
+  GetBoardInput,
   GetTaskInput,
   HumanGateRequired,
   ListTasksInput,
@@ -185,6 +187,14 @@ const TaskErrorSchema = Schema.Union([
 ]);
 
 export class TasksRpc extends RpcGroup.make(
+  // The board itself: the instance and the definition version it binds, which is the read a client
+  // needs before it can print lanes in definition order (LOB-61). Cards are a separate call, so a
+  // client that only wants the columns does not fold every card to learn them.
+  Rpc.make("getBoard", {
+    payload: GetBoardInput,
+    success: BoardView,
+    error: TaskErrorSchema,
+  }),
   Rpc.make("createTask", {
     payload: CreateTaskInput,
     success: Task,

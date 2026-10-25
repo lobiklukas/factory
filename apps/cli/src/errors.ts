@@ -18,9 +18,24 @@ export const reportFailure = (
     return yield* Effect.sync(() => process.exit(1));
   });
 
+/** The service's tag as the snake_case word a script branches on, matching `SessionError.code`. */
+const refusalCode = (tag: string): string =>
+  tag.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+
+const hasMessage = (error: unknown): error is { message: string } =>
+  typeof error === "object" &&
+  error !== null &&
+  "message" in error &&
+  typeof (error as { message: unknown }).message === "string";
+
 /**
- * The shared failure handler for every subcommand: keep a `SessionError`'s code, report everything
- * else as `error`, and always exit non-zero.
+ * The shared failure handler for every subcommand: keep a `SessionError`'s code, report a typed
+ * refusal (a `_tag`-carrying error with a `message`, which is every one of the board's refusals) as
+ * the snake_case form of its tag, report everything else as `error`, and always exit non-zero.
+ *
+ * The refusal branch is what lets `factory board move` print the service's own words: the board's
+ * errors are typed values that name what failed (docs/board.md B5), so a script can branch on
+ * `stale_revision` rather than parse prose.
  */
 export const reportFailures = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
@@ -29,6 +44,14 @@ export const reportFailures = <A, E, R>(
     Effect.catch((error) =>
       Schema.is(SessionError)(error)
         ? reportFailure(error.code, error.message)
-        : reportFailure("error", String(error)),
+        : typeof error === "object" &&
+            error !== null &&
+            "_tag" in error &&
+            hasMessage(error)
+          ? reportFailure(
+              refusalCode(String((error as { _tag: unknown })._tag)),
+              error.message,
+            )
+          : reportFailure("error", String(error)),
     ),
   );

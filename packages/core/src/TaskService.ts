@@ -23,7 +23,14 @@
 import { Context, DateTime, Effect, Layer, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
-import { BoardInstanceId, Task, TaskEvent, TaskId } from "@repo/domain/Task";
+import {
+  BoardColumn,
+  BoardInstanceId,
+  BoardView,
+  Task,
+  TaskEvent,
+  TaskId,
+} from "@repo/domain/Task";
 import type {
   Actor,
   BlockReason as BlockReasonType,
@@ -156,6 +163,8 @@ export type ListTasksInput = {
 };
 
 export type TaskServiceShape = {
+  /** The board and the definition version it binds (B2), in one read: lanes and cards agree. */
+  readonly getBoard: (boardId: string) => Effect.Effect<BoardView, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   readonly get: (taskId: string) => Effect.Effect<Task, TaskError>;
   readonly list: (
@@ -216,6 +225,7 @@ export const TaskServiceLive = Layer.effect(
     const sql = yield* SqlClient;
 
     const decodeTask = Schema.decodeUnknownEffect(Task);
+    const decodeBoard = Schema.decodeUnknownEffect(BoardView);
     const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(TaskEvent));
 
     const toTask = (row: TaskRow): Effect.Effect<Task, TaskStorageError> =>
@@ -308,6 +318,79 @@ export const TaskServiceLive = Layer.effect(
         Effect.catchTag("SqlError", (cause) =>
           Effect.fail(new TaskStorageError({ message: String(cause) })),
         ),
+      );
+
+    /**
+     * The board and the definition version it binds (B2), in one statement so the two halves cannot
+     * disagree: a board instance names `(definition_id, definition_version)` and the join is on the
+     * pair, so `default` v2 never answers for a card pinned to v1.
+     *
+     * A missing instance is `BoardNotFound`; a missing definition row is impossible while 0007's
+     * foreign key holds, so it is reported as the storage fault it would be rather than as a truth
+     * about the caller's argument.
+     */
+    const getBoard = (boardId: string): Effect.Effect<BoardView, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const rows = yield* sql<{
+            repo: string;
+            definitionId: string;
+            definitionVersion: number;
+            createdAt: Date | string;
+            name: string;
+            columns: string;
+          }>`
+            SELECT bi.repo,
+                   bi.definition_id AS "definitionId",
+                   bi.definition_version AS "definitionVersion",
+                   bi.created_at AS "createdAt",
+                   bd.name,
+                   bd.columns::text AS columns
+            FROM board_instances bi
+            JOIN board_definitions bd
+              ON bd.id = bi.definition_id AND bd.version = bi.definition_version
+            WHERE bi.id = ${boardId}
+          `;
+          const row = rows[0];
+          if (row === undefined) {
+            return yield* new BoardNotFound({
+              boardId,
+              message: `no board ${boardId}`,
+            });
+          }
+          const columns = yield* Schema.decodeEffect(
+            Schema.fromJsonString(Schema.Array(BoardColumn)),
+          )(row.columns).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `board ${boardId} holds an invalid column set: ${String(cause)}`,
+                }),
+            ),
+          );
+          return yield* decodeBoard({
+            instance: {
+              id: boardId,
+              repo: row.repo,
+              definitionId: row.definitionId,
+              definitionVersion: row.definitionVersion,
+              createdAt: iso(row.createdAt),
+            },
+            definition: {
+              id: row.definitionId,
+              version: row.definitionVersion,
+              name: row.name,
+              columns,
+            },
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `board ${boardId} does not decode: ${String(cause)}`,
+                }),
+            ),
+          );
+        }),
       );
 
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
@@ -513,6 +596,7 @@ export const TaskServiceLive = Layer.effect(
       );
 
     return {
+      getBoard,
       create,
       get,
       list,

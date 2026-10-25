@@ -298,6 +298,32 @@ describe("TaskService", () => {
     }
   });
 
+  it("reads a board as its instance plus the definition version it binds", async () => {
+    const boardId = await newBoard();
+    const board = await withService((s) => s.getBoard(boardId));
+
+    expect(board.instance.id).toBe(boardId);
+    expect(board.instance.definitionId).toBe("default");
+    expect(board.instance.definitionVersion).toBe(1);
+    // The seeded pipeline in definition order: lanes are printed from this array, so the order is
+    // part of the contract rather than an accident of the JSON.
+    expect(board.definition.columns.map((column) => column.name)).toEqual([
+      "intake",
+      "specifying",
+      "planning",
+      "building",
+      "review",
+      "done",
+      "canceled",
+    ]);
+    expect(board.definition.columns[0]?.kind).toBe("resting");
+  });
+
+  it("refuses to read a board that does not exist, naming the id", async () => {
+    const err = await refusal((s) => s.getBoard(`brd_${hex(13)}`));
+    expect(err._tag).toBe("BoardNotFound");
+  });
+
   it("lists urgent cards first, then FIFO, and filters by column", async () => {
     const boardId = await newBoard();
     const a = await withService((s) =>
