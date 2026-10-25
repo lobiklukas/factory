@@ -1,5 +1,6 @@
 import type {
   SessionId,
+  SessionTask,
   SessionUsage,
   TranscriptEntry,
 } from "@repo/domain/Session";
@@ -139,29 +140,46 @@ export type CompactionWindow = {
 };
 
 /**
- * The index of the summary row this press produced, or `undefined` while there is none.
+ * The index of the first summary a press could have written, or `undefined` when there is none yet.
  *
  * Only the *first* compaction row at or after the press belongs to it. A later row is a later
- * compaction — automatic, or another press — and its spend is not this one's.
+ * compaction — automatic, or another press — and it is not this one's answer.
  *
  * A turn of the operator's own ends the search: it means the press is in the past and whatever
  * compacts from there on was caused by something else. Without that, a press that wrote no summary
- * at all (a transcript with no cut) would stay open and charge the next compaction — the harness's
- * own threshold policy, say — with a spend that also includes the turn sent in between.
+ * at all (a transcript with no cut) would stay open and claim the next compaction — the harness's
+ * own threshold policy, say — as its answer.
+ *
+ * Both the spend attribution (`compactionRow`) and the settle verdict (`settleCompaction`) scan
+ * through here, so the pane can never show "nothing to compact" above a row it has just charged
+ * this press for.
  */
-export const compactionRow = (
-  window: CompactionWindow | null,
-  sessionId: SessionId,
+const summaryFrom = (
   entries: readonly TranscriptEntry[],
+  from: number,
 ): number | undefined => {
-  if (window === null || window.sessionId !== sessionId) return undefined;
-  for (let index = window.entriesBefore; index < entries.length; index += 1) {
+  for (let index = Math.max(0, from); index < entries.length; index += 1) {
     const entry = entries[index];
     if (entry?.kind === "user") return undefined;
     if (entry?.kind === "compaction") return index;
   }
   return undefined;
 };
+
+/**
+ * The index of the summary row this press produced, or `undefined` while there is none.
+ *
+ * `undefined` means "no row of this press's", not "the press failed": a transcript with no cut
+ * writes no summary at all, which is `settleCompaction`'s question to answer.
+ */
+export const compactionRow = (
+  window: CompactionWindow | null,
+  sessionId: SessionId,
+  entries: readonly TranscriptEntry[],
+): number | undefined =>
+  window === null || window.sessionId !== sessionId
+    ? undefined
+    : summaryFrom(entries, window.entriesBefore);
 
 /**
  * What the compaction in this window cost.
@@ -185,3 +203,151 @@ export const spendHeading = (delta: SpendDelta): string =>
   delta.tokens === 0 && delta.cost === undefined
     ? "Measuring spend…"
     : formatSpendDelta(delta);
+
+/**
+ * What a press of Compact has come to, as the pane shows it (LOB-224).
+ *
+ * The RPC answers with a task id and nothing else — pi-durable keeps the newest `keepRecentTokens`
+ * verbatim, so a transcript with no cut settles the task and writes **no** `compaction` entry, and
+ * a pane that waited for an entry would spin forever. So the outcome is read from two things the
+ * stream does deliver: the session's live-task list (`SessionTask`, where a settled task is absent
+ * rather than carried with a terminal status — `packages/domain/src/Session.ts:152`) and the
+ * transcript.
+ *
+ * `tasks` in `requested` is the task projection the pane last decided against, and its **identity**
+ * is the load-bearing part: the answer to `compactSession` and the stream are two paths, so the
+ * first list the pane holds after the press can still predate the task's admission. A list that
+ * has not moved proves nothing; a *newer* list without the task does.
+ */
+export type CompactionSettle =
+  | { readonly state: "idle" }
+  | {
+      readonly state: "requested";
+      readonly sessionId: SessionId;
+      readonly taskId: string;
+      /** Where the transcript ended at the press: the summary, if any, is at or after it. */
+      readonly entriesBefore: number;
+      readonly tasks: readonly SessionTask[];
+    }
+  | {
+      readonly state: "settled-compacted";
+      readonly sessionId: SessionId;
+      readonly entriesBefore: number;
+    }
+  | {
+      readonly state: "settled-nothing";
+      readonly sessionId: SessionId;
+      readonly entriesBefore: number;
+    };
+
+/**
+ * A press whose task id the control plane has answered, and the list the pane held when it did.
+ *
+ * `entriesBefore` is read at the press, not here: the summary the task writes arrives later, and an
+ * entry that was already on screen is an older compaction's.
+ */
+export const requestedCompaction = (input: {
+  readonly sessionId: SessionId;
+  readonly taskId: string;
+  readonly entriesBefore: number;
+  readonly tasks: readonly SessionTask[];
+}): CompactionSettle => ({ state: "requested", ...input });
+
+/** The settle state as it applies to one session: a press belongs to the session it was made in. */
+export const settleFor = (
+  settle: CompactionSettle,
+  sessionId: SessionId,
+): CompactionSettle =>
+  settle.state === "idle" || settle.sessionId === sessionId
+    ? settle
+    : { state: "idle" };
+
+/**
+ * The index of the first summary at or after `from`, ignoring who wrote what in between.
+ *
+ * This is the *verdict's* scan, not the spend's: "did the compaction I admitted write a summary?"
+ * has one answer even if the operator sent a turn while it was running, and the summary a busy
+ * session places at its next boundary lands after that turn (`settleCompaction`). Hanging a
+ * "nothing to compact" verdict above a row the task did write is the failure this second scan
+ * exists to prevent.
+ */
+const anySummaryFrom = (
+  entries: readonly TranscriptEntry[],
+  from: number,
+): number | undefined => {
+  for (let index = Math.max(0, from); index < entries.length; index += 1) {
+    if (entries[index]?.kind === "compaction") return index;
+  }
+  return undefined;
+};
+
+/**
+ * Whether the pane may show the verdict right now (LOB-224).
+ *
+ * The state machine's answer is not the display's: a compaction admitted into a busy conversation
+ * settles at that run's boundary, so the verdict normally arrives with the run already over — but a
+ * verdict under work still in flight would read as the pane claiming to know an outcome while the
+ * transcript is still being written. So the verdict waits for the session to be idle. It is held,
+ * not discarded: nothing is shown while the run finishes, and the verdict appears when it does.
+ */
+export const verdictVisible = (
+  settle: CompactionSettle,
+  busy: boolean,
+): boolean => settle.state === "settled-nothing" && !busy;
+
+/**
+ * Advances what a press has come to, given the session's current task list and transcript.
+ *
+ * Returns the same object when nothing changed, so the pane can hold this in state and reduce from
+ * every stream event without re-rendering for its own sake.
+ *
+ * - `requested` stays `requested` while the task is live. A projection that does not carry it is
+ *   only evidence once it is a **new** projection: the first list after the press may simply be the
+ *   one from before the task was admitted.
+ * - Once the task has left the list, the transcript decides: a summary the compaction wrote means
+ *   `settled-compacted`, otherwise `settled-nothing`. That scan is `anySummaryFrom`, which ignores a
+ *   turn of the operator's in between: the question is what the task wrote, not who else wrote.
+ * - `settled-nothing` is not final. A summary that lands after the task left the graph still belongs
+ *   to the press (a busy session's summary is placed at its next boundary, so the entry can trail the
+ *   task by a turn), and the pane must not keep saying nothing above a row it is charging to the
+ *   press.
+ * - `settled-compacted` is final: a later compaction is a later press. Every settled state drops
+ *   back to `idle` when asked about another session, because one pane component serves every route.
+ */
+export const settleCompaction = (
+  settle: CompactionSettle,
+  input: {
+    readonly sessionId: SessionId;
+    readonly tasks: readonly SessionTask[];
+    readonly entries: readonly TranscriptEntry[];
+  },
+): CompactionSettle => {
+  const current = settleFor(settle, input.sessionId);
+  if (current.state === "idle" || current.state === "settled-compacted")
+    return current;
+  const summary = anySummaryFrom(input.entries, current.entriesBefore);
+  if (current.state === "settled-nothing")
+    return summary === undefined
+      ? current
+      : {
+          state: "settled-compacted",
+          sessionId: current.sessionId,
+          entriesBefore: current.entriesBefore,
+        };
+  if (input.tasks.some((task) => task.id === current.taskId))
+    return input.tasks === current.tasks
+      ? current
+      : { ...current, tasks: input.tasks };
+  if (input.tasks === current.tasks) return current;
+  return summary === undefined
+    ? {
+        state: "settled-nothing",
+        sessionId: current.sessionId,
+        entriesBefore: current.entriesBefore,
+      }
+    : {
+        state: "settled-compacted",
+        sessionId: current.sessionId,
+        entriesBefore: current.entriesBefore,
+      };
+};
