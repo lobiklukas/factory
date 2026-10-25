@@ -144,7 +144,8 @@ import type {
 } from "@repo/domain/Page";
 import { PageStrings } from "@repo/domain/Page";
 import { mintSessionId } from "./ids";
-import type { OpenedPullRequest, PrError } from "./pr";
+import type { DiffCap, PrError, PullRequestStep } from "./pr";
+import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
@@ -272,6 +273,10 @@ export type SessionServiceShape = {
    * The answer carries which path produced it (LOB-212): `opened` for the GitHub call, `already-open`
    * for a retry that the log answered. Additive on the shape — the link is unchanged.
    *
+   * A diff over the configured cap answers `over-cap` instead (LOB-227): no PR is opened, nothing is
+   * committed, and the answer names which limit refused the branch and both numbers. The cap applies
+   * to the branch the step would publish, so a retry of an already-recorded PR is never re-measured.
+   *
    * The forge client and the credential are the *caller's* to provide rather than this layer's:
    * the control plane's own HTTP layer is not a dependency of every session operation, and a
    * deployment that never opens a PR should not have to wire one. So the requirements appear on
@@ -280,7 +285,7 @@ export type SessionServiceShape = {
   readonly openPullRequest: (
     input: OpenPullRequestArgs,
   ) => Effect.Effect<
-    OpenedPullRequest,
+    PullRequestStep,
     SessionError | PrError | CredentialError,
     CredentialProvider | HttpClient.HttpClient
   >;
@@ -315,6 +320,11 @@ export type SessionServiceOptions = {
    * an unpoliced session is not reachable by omitting an argument.
    */
   readonly autonomy?: AutonomyConfig;
+  /**
+   * How large a session's diff may be before the PR step opens nothing (LOB-227). Absent:
+   * `DEFAULT_DIFF_CAP`, so a deployment that never configures this still has a bound.
+   */
+  readonly prCap?: DiffCap;
 };
 
 type SessionRow = {
@@ -1134,12 +1144,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        *
        * The owner is what makes the step able to commit the document at all (Pi Durable allows one
        * owner per log), and the body's session block is filled from what the log says the session
-       * did rather than from the caller: the model that spent the most, and the total.
+       * did rather than from the caller: the model that spent the most, and the total. The owner's
+       * workspace is what the step measures the branch in, and the configured cap is passed with it
+       * (LOB-227).
        */
       const openPr = (
         input: OpenPullRequestArgs,
       ): Effect.Effect<
-        OpenedPullRequest,
+        PullRequestStep,
         SessionError | PrError | CredentialError,
         CredentialProvider | HttpClient.HttpClient
       > =>
@@ -1178,6 +1190,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               title: input.title,
               head: input.head,
               base: input.base,
+              // The branch is measured where it was cut: the session's own working directory.
+              worktree: owner.workspace.path,
+              cap: options.prCap ?? DEFAULT_DIFF_CAP,
               // The title is the session's own first line, which is the prompt a PR body carries.
               prompt: row.title,
               ...(model === undefined ? {} : { model: model.key }),

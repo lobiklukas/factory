@@ -1,9 +1,14 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { SessionId, RepoSlug } from "@repo/domain/Session";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { buildPrBody, createPullRequest } from "./pr";
+import { diffCapRefusal, parseDiffSize } from "./prStep";
 
 const makeFakeHttp = (status: number, body: unknown) => {
   const requests: Array<{
@@ -270,5 +275,188 @@ describe("createPullRequest", () => {
       // oxlint-disable-next-line effecttsgo/process-env -- restoring what the case found.
       process.env["GITHUB_API_URL"] = previous ?? "";
     }
+  });
+});
+
+/**
+ * The measurement the cap is made of, away from the service.
+ *
+ * Everything here is a reading of `git diff --numstat`'s own output, so the rows are the command's
+ * real shapes rather than invented ones: an ordinary text change, a binary file (which git spells
+ * with two `-`), a deletion, and a rename (whose path column carries `old => new`).
+ */
+describe("parseDiffSize", () => {
+  it("sums the added and deleted lines and counts the files", () => {
+    expect(
+      parseDiffSize("3\t1\tsrc/a.ts\n10\t0\tsrc/b.ts\n0\t4\tsrc/gone.ts\n"),
+    ).toEqual({ files: 3, lines: 18 });
+  });
+
+  it("counts a binary file as a file and no lines", () => {
+    // git reports both counts as `-` for a binary change; `Number("-")` is `NaN`, so this is the
+    // row that turns a missing `|| 0` into `NaN` files and lines.
+    expect(parseDiffSize("-\t-\tassets/logo.png\n")).toEqual({
+      files: 1,
+      lines: 0,
+    });
+  });
+
+  it("is zero for a diff with no rows", () => {
+    expect(parseDiffSize("")).toEqual({ files: 0, lines: 0 });
+    // A trailing newline is not a row: `git diff` always ends its output with one.
+    expect(parseDiffSize("\n")).toEqual({ files: 0, lines: 0 });
+  });
+
+  it("still counts a file whose path column carries a rename", () => {
+    expect(parseDiffSize("1\t1\tdocs/{old.md => new.md}\n")).toEqual({
+      files: 1,
+      lines: 2,
+    });
+  });
+});
+
+describe("diffCapRefusal", () => {
+  /** A throwaway checkout: the measurement is git's, so the case needs a real one. */
+  const checkout = (files: Record<string, string>): string => {
+    const directory = mkdtempSync(join(tmpdir(), "factory-cap-"));
+    execSync("git init -b main", { cwd: directory, stdio: "ignore" });
+    execSync("git config user.email t@t.com", {
+      cwd: directory,
+      stdio: "ignore",
+    });
+    execSync("git config user.name t", { cwd: directory, stdio: "ignore" });
+    execSync("git commit --allow-empty -m init", {
+      cwd: directory,
+      stdio: "ignore",
+    });
+    // On a branch cut from `main`, as the session's own worktree is: a change committed straight
+    // onto `main` would measure nothing against it.
+    execSync("git switch -c factory/change main", {
+      cwd: directory,
+      stdio: "ignore",
+    });
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(directory, name), content);
+    }
+    execSync("git add -A", { cwd: directory, stdio: "ignore" });
+    execSync("git commit -m change", { cwd: directory, stdio: "ignore" });
+    return directory;
+  };
+
+  it("refuses on the file count first, naming the limit and the size", async () => {
+    const worktree = checkout({
+      "a.txt": "1\n",
+      "b.txt": "1\n",
+      "c.txt": "1\n",
+    });
+    const answer = await Effect.runPromise(
+      diffCapRefusal({
+        worktree,
+        base: "main",
+        cap: { maxFiles: 2, maxLines: 100 },
+      }),
+    );
+    expect(answer).toEqual(
+      Option.some({
+        outcome: "over-cap",
+        limit: "files",
+        cap: 2,
+        measured: 3,
+      }),
+    );
+  });
+
+  it("refuses on the line count when only lines are over, naming that limit", async () => {
+    const worktree = checkout({ "a.txt": "x\n".repeat(5) });
+    const answer = await Effect.runPromise(
+      diffCapRefusal({
+        worktree,
+        base: "main",
+        cap: { maxFiles: 10, maxLines: 4 },
+      }),
+    );
+    expect(answer).toEqual(
+      Option.some({
+        outcome: "over-cap",
+        limit: "lines",
+        cap: 4,
+        measured: 5,
+      }),
+    );
+  });
+
+  it("allows a diff exactly at both limits", async () => {
+    const worktree = checkout({ "a.txt": "x\n".repeat(4), "b.txt": "1\n" });
+    expect(
+      await Effect.runPromise(
+        diffCapRefusal({
+          worktree,
+          base: "main",
+          cap: { maxFiles: 2, maxLines: 5 },
+        }),
+      ),
+    ).toEqual(Option.none());
+  });
+
+  it("measures the branch against its base, not the working tree", async () => {
+    const worktree = checkout({ "a.txt": "x\n".repeat(1) });
+    // Staged *and* unstaged work is not in the branch, so it is not in what a PR would carry. The
+    // file is staged on purpose: an untracked one is invisible to `git diff` in either form, so a
+    // case that left it untracked would pass against a two-dot measurement that counted the index.
+    writeFileSync(join(worktree, "staged.txt"), "x\n".repeat(50));
+    execSync("git add staged.txt", { cwd: worktree, stdio: "ignore" });
+    writeFileSync(join(worktree, "unstaged.txt"), "x\n".repeat(50));
+    expect(
+      await Effect.runPromise(
+        diffCapRefusal({
+          worktree,
+          base: "main",
+          cap: { maxFiles: 10, maxLines: 10 },
+        }),
+      ),
+    ).toEqual(Option.none());
+  });
+
+  it("refuses nothing for a directory that is not its own checkout", async () => {
+    // The deployment this repo runs today: a session against a bare slug has a plain directory,
+    // and a diff that cannot be measured is not one that is over the cap. The directory is placed
+    // *inside* a checkout on a branch with a large diff on purpose, because that is where
+    // `SESSION_ROOT` puts it (`.factory/sessions` is inside the control plane's own tree): a bare
+    // `git diff` there measures the enclosing repository's branch, so this is the case that says
+    // the cap does not do that.
+    const enclosing = checkout({ "big.txt": "x\n".repeat(500) });
+    const plain = join(enclosing, "sessions", "ses_1");
+    mkdirSync(plain, { recursive: true });
+    expect(
+      await Effect.runPromise(
+        diffCapRefusal({
+          worktree: plain,
+          base: "main",
+          cap: { maxFiles: 1, maxLines: 1 },
+        }),
+      ),
+    ).toEqual(Option.none());
+  });
+
+  it("fails, naming the range, when a checkout's base cannot be read", async () => {
+    // A checkout root whose base does not exist is not a diff that fits: the cap does not quietly
+    // disappear because the measurement broke.
+    const worktree = checkout({ "a.txt": "1\n" });
+    const result = await Effect.runPromiseExit(
+      diffCapRefusal({
+        worktree,
+        base: "no-such-base",
+        cap: { maxFiles: 10, maxLines: 10 },
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") throw new Error("unreachable");
+    const error = result.cause.reasons.flatMap((reason) =>
+      reason._tag === "Fail"
+        ? [reason.error as { operation: string; ref: string }]
+        : [],
+    )[0];
+    expect(error?.operation).toBe("diffSize");
+    expect(error?.ref).toBe("no-such-base...HEAD");
   });
 });

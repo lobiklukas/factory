@@ -2,6 +2,7 @@ import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import {
   CredentialProvider,
   CredentialProviderLive,
+  DEFAULT_DIFF_CAP,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
@@ -44,6 +45,23 @@ export const ServerConfig = Config.all({
   /** Bounds one request; Bun's own default is 128 MiB (LOB-21). */
   maxRequestBodySize: Config.Number("MAX_REQUEST_BODY_BYTES").pipe(
     Config.withDefault(DEFAULT_MAX_REQUEST_BODY_BYTES),
+  ),
+});
+
+/**
+ * How large a session's diff may be before the PR step opens nothing (LOB-227).
+ *
+ * Two keys with the control plane's own defaults, so an unconfigured deployment still has a bound
+ * and one that wants a different one can set it without a rebuild. Read here rather than in
+ * `@repo/core` because that is where every other deployment setting is read; the step itself takes
+ * the resolved values.
+ */
+const PrCapConfig = Config.all({
+  maxFiles: Config.Int("PR_CAP_MAX_FILES").pipe(
+    Config.withDefault(DEFAULT_DIFF_CAP.maxFiles),
+  ),
+  maxLines: Config.Int("PR_CAP_MAX_LINES").pipe(
+    Config.withDefault(DEFAULT_DIFF_CAP.maxLines),
   ),
 });
 
@@ -175,6 +193,7 @@ const ServerLayers = Layer.mergeAll(
 const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const model = yield* ModelConfig;
+  const prCap = yield* PrCapConfig;
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -194,6 +213,7 @@ const HttpLive = Effect.gen(function* () {
     model: createModelAccess(backend, { fauxCommand: model.fauxCommand }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
+    prCap,
   });
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
@@ -220,6 +240,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - request body cap ${config.maxRequestBodySize} bytes`,
+  );
+  yield* Effect.logInfo(
+    `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
   );
 
   const CorsRouters = AllRouters.pipe(

@@ -32,10 +32,23 @@
  * It is a function rather than a method so it can run against the session log it was handed: the
  * caller owns the `Conversation` (Pi Durable allows one owner per log, D8), and the index write is
  * here beside it so a caller cannot commit the document and forget the row the list reads.
+ *
+ * The step is also where a session's diff is capped (LOB-227). It measures the branch against its
+ * base in the session's own worktree *before* anything is written, and a diff over the cap answers
+ * `{outcome: "over-cap"}` with the numbers and opens nothing: no GitHub call, no `factory.pr`
+ * document, no `pr_url` row. Measuring here rather than in the caller is deliberate — the cap is a
+ * property of the diff this step would publish, so a caller that skips the step skips the cap, and
+ * there is no second place where a PR could be opened without one.
  */
-import { DateTime, Effect } from "effect";
+import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- the measurement is the local git CLI, the same one `workspace.ts` cuts the worktree with.
+import { execFileSync } from "node:child_process";
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- the checkout root is a filesystem fact, not a URL.
+import { existsSync } from "node:fs";
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- as above: `.git` is joined onto a directory this module was handed.
+import { join } from "node:path";
 import type { RepoSlug, SessionError, SessionId } from "@repo/domain/Session";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { Conversation, Harness } from "@repo/harness";
@@ -45,8 +58,13 @@ import {
   type PullRequestRecord,
 } from "@repo/harness";
 import type { CredentialError, CredentialProvider } from "./credentials";
-import type { OpenedPullRequest, PrError } from "./pr";
-import { buildPrBody, createPullRequest } from "./pr";
+import type { DiffCap, OverCapPullRequest, PullRequestStep } from "./pr";
+import {
+  buildPrBody,
+  createPullRequest,
+  DEFAULT_DIFF_CAP,
+  PrError,
+} from "./pr";
 
 export type OpenPullRequestInput = {
   /** The runtime that owns the session's log: it reads the recorded link and commits a new one. */
@@ -58,6 +76,10 @@ export type OpenPullRequestInput = {
   readonly title: string;
   readonly head: string;
   readonly base: string;
+  /** The session's working directory: where the branch's diff is measured against `base`. */
+  readonly worktree: string;
+  /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
+  readonly cap?: DiffCap;
   /** What the session was asked to do, and the model and spend behind it, for the body. */
   readonly prompt: string;
   readonly model?: string;
@@ -65,7 +87,8 @@ export type OpenPullRequestInput = {
 };
 
 /**
- * The PR for a session in the log: the one already recorded, or one GitHub just opened.
+ * The PR for a session in the log: the one already recorded, one GitHub just opened, or the cap
+ * that refused to open either.
  *
  * `prUrl` on the `sessions` row is written in the same effect, so `getSession` and `listSessions`
  * report the link from the index the rebuild refills from this same document.
@@ -73,7 +96,7 @@ export type OpenPullRequestInput = {
 export const openPullRequest = (
   input: OpenPullRequestInput,
 ): Effect.Effect<
-  OpenedPullRequest,
+  PullRequestStep,
   PrError | CredentialError | SessionError,
   CredentialProvider | HttpClient.HttpClient | SqlClient
 > =>
@@ -85,6 +108,19 @@ export const openPullRequest = (
     // Read before the call, so the tag names the path this invocation took rather than what the
     // document ends the turn holding: a first open that lost its index row is still "opened".
     const outcome = recorded === undefined ? "opened" : "already-open";
+    // Measured only when a PR would actually be opened: a recorded PR is the answer whatever the
+    // branch has grown to since, and re-measuring it would turn a retry into a refusal.
+    const refused =
+      recorded === undefined
+        ? yield* diffCapRefusal({
+            worktree: input.worktree,
+            base: input.base,
+            cap: input.cap ?? DEFAULT_DIFF_CAP,
+          })
+        : Option.none<OverCapPullRequest>();
+    // Nothing is written on this path — no document, no row — so a session refused here has the
+    // same index and log it had before the step, and reads as a session with no PR.
+    if (Option.isSome(refused)) return refused.value;
     const pr = recorded ?? (yield* open(input));
 
     const sql = yield* SqlClient;
@@ -135,4 +171,119 @@ const open = (
     };
     yield* writePullRequestDoc(input.conversation, record);
     return record;
+  });
+
+/** How much a session's branch changes, as the PR step measures it. */
+export type DiffSize = {
+  readonly files: number;
+  readonly lines: number;
+};
+
+/**
+ * `git diff --numstat`'s rows, summed: `<added>\t<deleted>\t<path>`, one per file.
+ *
+ * A binary file spells both counts `-` rather than a number, and `Number("-")` is `NaN`, so the
+ * `|| 0` below is not defensive padding: it is what makes a binary file count as one changed file
+ * with no lines, which is the only honest reading of git's own output. Anything else in a row after
+ * the third tab (a rename's `old => new` path, a path with tabs quoted) is the path and is ignored.
+ */
+export const parseDiffSize = (numstat: string): DiffSize => {
+  let files = 0;
+  let lines = 0;
+  for (const row of numstat.split("\n")) {
+    if (row.trim() === "") continue;
+    const [added, deleted] = row.split("\t");
+    files += 1;
+    lines += (Number(added) || 0) + (Number(deleted) || 0);
+  }
+  return { files, lines };
+};
+
+/**
+ * The branch's diff against its base, measured in the session's own worktree.
+ *
+ * Two answers, and the difference between them is the whole boundary of the cap:
+ *
+ * - **`none`: this directory is not a checkout root of its own.** M6 cuts a worktree only for a
+ *   registered repo, so a session against a bare slug has a plain directory (`workspace.ts`), and
+ *   the PR step is driven today against exactly that. There is no branch to measure and nothing a
+ *   cap could refuse, so the cap does not apply. The check is the `.git` entry *in this directory*
+ *   rather than a `git` command that succeeds: a plain session directory is created under
+ *   `SESSION_ROOT`, which by default is `.factory/sessions` — inside the control plane's own
+ *   checkout — so a bare `git diff` there walks up to the enclosing repository and measures *its*
+ *   branch. That is the wrong diff in both directions: a clean control-plane tree reads as an empty
+ *   session diff, and a dirty one refuses a PR for changes the session never made.
+ * - **a `PrError`: this directory is a checkout root and the measurement failed** (no such base
+ *   ref, git gone). That is not a diff that fits, so it does not open a PR: a bound that a broken
+ *   checkout slips past is not a bound, and the failure names the range it could not read rather
+ *   than pretending the diff was measured.
+ *
+ * `base...HEAD` (three-dot) is the diff a PR shows: from the merge base to the branch tip. Two-dot
+ * would blame the branch for everything `base` gained since they forked. Uncommitted work is not in
+ * it either, deliberately — a change that is not committed is not in the PR, so it is not what this
+ * cap refuses.
+ */
+export const diffSize = (input: {
+  readonly worktree: string;
+  readonly base: string;
+}): Effect.Effect<Option.Option<DiffSize>, PrError> => {
+  if (!existsSync(join(input.worktree, ".git")))
+    return Effect.succeed(Option.none());
+  return Effect.map(
+    Effect.mapError(
+      Effect.try({
+        try: () =>
+          parseDiffSize(
+            execFileSync("git", ["diff", "--numstat", `${input.base}...HEAD`], {
+              cwd: input.worktree,
+              encoding: "utf8",
+              // stderr is swallowed: the failure is the typed error below, not a log line every
+              // session that opens a PR would print.
+              stdio: ["ignore", "pipe", "ignore"],
+            }),
+          ),
+        catch: () => undefined,
+      }),
+      () =>
+        new PrError({
+          operation: "diffSize",
+          ref: `${input.base}...HEAD`,
+          message: "the branch's diff could not be measured",
+        }),
+    ),
+    Option.some,
+  );
+};
+
+/**
+ * The typed refusal for an over-cap diff, or `none` when the diff fits or there is none to measure.
+ *
+ * The two dimensions are checked in a fixed order (files first) only so that a diff over both
+ * answers one thing rather than two; each is compared on its own, so a wide-but-shallow diff and a
+ * narrow-but-deep one are both refused.
+ */
+export const diffCapRefusal = (input: {
+  readonly worktree: string;
+  readonly base: string;
+  readonly cap: DiffCap;
+}): Effect.Effect<Option.Option<OverCapPullRequest>, PrError> =>
+  Effect.map(diffSize(input), (size) => {
+    if (Option.isNone(size)) return Option.none();
+    if (size.value.files > input.cap.maxFiles) {
+      return Option.some({
+        outcome: "over-cap",
+        limit: "files",
+        cap: input.cap.maxFiles,
+        measured: size.value.files,
+      });
+    }
+    if (size.value.lines > input.cap.maxLines) {
+      return Option.some({
+        outcome: "over-cap",
+        limit: "lines",
+        cap: input.cap.maxLines,
+        measured: size.value.lines,
+      });
+    }
+    return Option.none();
   });
