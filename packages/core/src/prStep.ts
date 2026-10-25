@@ -38,7 +38,9 @@
  * `{outcome: "over-cap"}` with the numbers and opens nothing: no GitHub call, no `factory.pr`
  * document, no `pr_url` row. Measuring here rather than in the caller is deliberate — the cap is a
  * property of the diff this step would publish, so a caller that skips the step skips the cap, and
- * there is no second place where a PR could be opened without one.
+ * there is no second place where a PR could be opened without one. The same measurement is what the
+ * body lists under `## Changed files` (LOB-228): one `git diff --numstat` answers both questions,
+ * so the paths a reviewer reads and the size the cap refused can never be two different diffs.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -109,20 +111,29 @@ export const openPullRequest = (
     // document ends the turn holding: a first open that lost its index row is still "opened".
     const outcome = recorded === undefined ? "opened" : "already-open";
     // Measured only when a PR would actually be opened: a recorded PR is the answer whatever the
-    // branch has grown to since, and re-measuring it would turn a retry into a refusal.
-    const refused =
+    // branch has grown to since, and re-measuring it would turn a retry into a refusal. The same
+    // measurement is what the body lists, so the cap and the changed-path list can never disagree
+    // about what this PR carries.
+    const measured =
       recorded === undefined
-        ? yield* diffCapRefusal({
+        ? yield* diffSize({
             worktree: input.worktree,
             base: input.base,
             head: input.head,
-            cap: input.cap ?? DEFAULT_DIFF_CAP,
           })
-        : Option.none<OverCapPullRequest>();
+        : Option.none<DiffSize>();
+    const refused = Option.flatMap(measured, (size) =>
+      capRefusal(size, input.cap ?? DEFAULT_DIFF_CAP),
+    );
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR.
     if (Option.isSome(refused)) return refused.value;
-    const pr = recorded ?? (yield* open(input));
+    const pr =
+      recorded ??
+      (yield* open(
+        input,
+        Option.match(measured, { onNone: () => [], onSome: (s) => s.paths }),
+      ));
 
     const sql = yield* SqlClient;
     yield* sql`
@@ -143,6 +154,8 @@ export const openPullRequest = (
 /** The one call to GitHub, its record, and the event an attached client sees. */
 const open = (
   input: OpenPullRequestInput,
+  /** The branch's changed paths, as the step measured them; listed in the body (LOB-228). */
+  changed: readonly string[],
 ): Effect.Effect<
   PullRequestRecord,
   PrError | CredentialError | SessionError,
@@ -159,6 +172,7 @@ const open = (
         prompt: input.prompt,
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.spend === undefined ? {} : { spend: input.spend }),
+        ...(changed.length === 0 ? {} : { changed }),
       }),
     });
 
@@ -178,6 +192,12 @@ const open = (
 export type DiffSize = {
   readonly files: number;
   readonly lines: number;
+  /**
+   * The changed paths, in git's own order, so the PR body can list what the run touched
+   * (LOB-228). A rename arrives as git spells it (`docs/{old.md => new.md}`): the measurement is
+   * not a diff parser, it is the file list a reviewer gets before opening the diff.
+   */
+  readonly paths: readonly string[];
 };
 
 /**
@@ -186,18 +206,22 @@ export type DiffSize = {
  * A binary file spells both counts `-` rather than a number, and `Number("-")` is `NaN`, so the
  * `|| 0` below is not defensive padding: it is what makes a binary file count as one changed file
  * with no lines, which is the only honest reading of git's own output. Anything else in a row after
- * the third tab (a rename's `old => new` path, a path with tabs quoted) is the path and is ignored.
+ * the third tab (a path with a tab in it) is part of the path.
  */
 export const parseDiffSize = (numstat: string): DiffSize => {
   let files = 0;
   let lines = 0;
+  const paths: string[] = [];
   for (const row of numstat.split("\n")) {
     if (row.trim() === "") continue;
-    const [added, deleted] = row.split("\t");
+    const [added, deleted, ...rest] = row.split("\t");
     files += 1;
     lines += (Number(added) || 0) + (Number(deleted) || 0);
+    // A row with no third column carries no path to list; it still counts as a file, because the
+    // cap is about what git reported, not about how well this parser read it.
+    if (rest.length > 0) paths.push(rest.join("\t"));
   }
-  return { files, lines };
+  return { files, lines, paths };
 };
 
 /**
@@ -275,29 +299,35 @@ export const diffSize = (input: {
  * answers one thing rather than two; each is compared on its own, so a wide-but-shallow diff and a
  * narrow-but-deep one are both refused.
  */
+const capRefusal = (
+  size: DiffSize,
+  cap: DiffCap,
+): Option.Option<OverCapPullRequest> => {
+  if (size.files > cap.maxFiles) {
+    return Option.some({
+      outcome: "over-cap",
+      limit: "files",
+      cap: cap.maxFiles,
+      measured: size.files,
+    });
+  }
+  if (size.lines > cap.maxLines) {
+    return Option.some({
+      outcome: "over-cap",
+      limit: "lines",
+      cap: cap.maxLines,
+      measured: size.lines,
+    });
+  }
+  return Option.none();
+};
+
 export const diffCapRefusal = (input: {
   readonly worktree: string;
   readonly base: string;
   readonly head: string;
   readonly cap: DiffCap;
 }): Effect.Effect<Option.Option<OverCapPullRequest>, PrError> =>
-  Effect.map(diffSize(input), (size) => {
-    if (Option.isNone(size)) return Option.none();
-    if (size.value.files > input.cap.maxFiles) {
-      return Option.some({
-        outcome: "over-cap",
-        limit: "files",
-        cap: input.cap.maxFiles,
-        measured: size.value.files,
-      });
-    }
-    if (size.value.lines > input.cap.maxLines) {
-      return Option.some({
-        outcome: "over-cap",
-        limit: "lines",
-        cap: input.cap.maxLines,
-        measured: size.value.lines,
-      });
-    }
-    return Option.none();
-  });
+  Effect.map(diffSize(input), (size) =>
+    Option.flatMap(size, (measured) => capRefusal(measured, input.cap)),
+  );

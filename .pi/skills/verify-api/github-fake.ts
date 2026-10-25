@@ -8,7 +8,9 @@
 // The ledger is a **file**, not memory, and that is the whole point: the process being proved is
 // killed between its request and its acknowledgement, so the record of what the client asked for
 // has to outlive that process. It holds every request the client made (so "no second call" is a
-// countable fact) and the pull requests that exist (so "exactly one PR" is too).
+// countable fact) and the pull requests that exist (so "exactly one PR" is too). Since LOB-228 a
+// request also keeps **the body it sent**, because "the PR body lists the three changed paths" is a
+// claim about the request, and a ledger that only counted methods could not see it.
 //
 //   GITHUB_FAKE_PORT       port to listen on (default 9411)
 //   GITHUB_FAKE_LEDGER     ledger file path, required
@@ -20,6 +22,8 @@ type Ledger = {
   readonly requests: ReadonlyArray<{
     readonly method: string;
     readonly path: string;
+    /** The JSON body the client sent, for a request that carried one. */
+    readonly body?: unknown;
   }>;
   readonly pulls: ReadonlyArray<{
     readonly number: number;
@@ -82,17 +86,31 @@ const server = Bun.serve({
       return new Response("no such route", { status: 404 });
     }
     const [, owner = "", repo = ""] = route;
+    // Parsed before anything is written: the ledger records the request as it arrived, body and all.
+    const parsed =
+      request.method === "POST"
+        ? await request.json().catch(() => undefined)
+        : undefined;
     const ledger = read();
     write({
       ...ledger,
       requests: [
         ...ledger.requests,
-        { method: request.method, path: url.pathname },
+        {
+          method: request.method,
+          path: url.pathname,
+          ...(parsed === undefined ? {} : { body: parsed }),
+        },
       ],
     });
+    // A create whose body is not JSON is refused rather than answered with an empty head and base:
+    // a fake that invented a PR for a request it could not read would hide a broken client.
+    if (request.method === "POST" && parsed === undefined) {
+      return json(400, { message: "the request body is not JSON" });
+    }
 
     if (request.method === "POST") {
-      const body = (await request.json()) as { head?: string; base?: string };
+      const body = parsed as { head?: string; base?: string };
       const head = body.head ?? "";
       const base = body.base ?? "";
       const recorded = read().pulls.find(

@@ -112,6 +112,37 @@ describe("buildPrBody", () => {
     expect(body).toContain("$0.01");
     expect(body).toContain("do thing");
   });
+
+  it("lists the changed paths under their own heading", () => {
+    const body = buildPrBody({
+      sessionId: "s-1" as SessionId,
+      prompt: "update the docs",
+      changed: ["docs/design.md", "README.md"],
+    });
+    expect(body).toContain("## Changed files");
+    expect(body).toContain("- docs/design.md");
+    expect(body).toContain("- README.md");
+    // The prompt is still the body's last section: a reader scans a list, then the task.
+    expect(body.indexOf("## Changed files")).toBeLessThan(
+      body.indexOf("## Prompt"),
+    );
+    expect(body.trimEnd().endsWith("update the docs")).toBe(true);
+  });
+
+  it("leaves the section out when nothing was measured", () => {
+    // A plain session directory has no branch, so the `none` measurement and an empty list are the
+    // same fact: a heading over no rows would be a lie about what the PR carries.
+    expect(
+      buildPrBody({ sessionId: "s-1" as SessionId, prompt: "p" }),
+    ).not.toContain("## Changed files");
+    expect(
+      buildPrBody({
+        sessionId: "s-1" as SessionId,
+        prompt: "p",
+        changed: [],
+      }),
+    ).not.toContain("## Changed files");
+  });
 });
 
 describe("createPullRequest", () => {
@@ -289,7 +320,12 @@ describe("parseDiffSize", () => {
   it("sums the added and deleted lines and counts the files", () => {
     expect(
       parseDiffSize("3\t1\tsrc/a.ts\n10\t0\tsrc/b.ts\n0\t4\tsrc/gone.ts\n"),
-    ).toEqual({ files: 3, lines: 18 });
+    ).toEqual({
+      files: 3,
+      lines: 18,
+      // The paths are the same read: what the cap measured is what the body lists (LOB-228).
+      paths: ["src/a.ts", "src/b.ts", "src/gone.ts"],
+    });
   });
 
   it("counts a binary file as a file and no lines", () => {
@@ -298,19 +334,22 @@ describe("parseDiffSize", () => {
     expect(parseDiffSize("-\t-\tassets/logo.png\n")).toEqual({
       files: 1,
       lines: 0,
+      paths: ["assets/logo.png"],
     });
   });
 
   it("is zero for a diff with no rows", () => {
-    expect(parseDiffSize("")).toEqual({ files: 0, lines: 0 });
+    expect(parseDiffSize("")).toEqual({ files: 0, lines: 0, paths: [] });
     // A trailing newline is not a row: `git diff` always ends its output with one.
-    expect(parseDiffSize("\n")).toEqual({ files: 0, lines: 0 });
+    expect(parseDiffSize("\n")).toEqual({ files: 0, lines: 0, paths: [] });
   });
 
   it("still counts a file whose path column carries a rename", () => {
     expect(parseDiffSize("1\t1\tdocs/{old.md => new.md}\n")).toEqual({
       files: 1,
       lines: 2,
+      // A rename arrives as git spells it: the list is what a reviewer sees before opening the diff.
+      paths: ["docs/{old.md => new.md}"],
     });
   });
 });

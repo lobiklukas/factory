@@ -1491,14 +1491,33 @@ describe("repo binding", () => {
  * asserted rather than inferred.
  */
 const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
-  const requests: Array<{ readonly method: string; readonly url: string }> = [];
+  /**
+   * What GitHub was asked. The request body is kept because the PR body is one of the things a case
+   * asserts (LOB-228 lists the branch's changed paths); a client that sent the right count and the
+   * wrong body would pass a case that only counted.
+   */
+  const requests: Array<{
+    readonly method: string;
+    readonly url: string;
+    readonly body: unknown;
+  }> = [];
   const Json = Schema.fromJsonString(Schema.Unknown);
   const layer = Layer.merge(
     Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request, url) =>
         Effect.gen(function* () {
-          requests.push({ method: request.method, url: url.pathname });
+          const sent =
+            request.body._tag === "Uint8Array"
+              ? yield* Schema.decodeEffect(Json)(
+                  new TextDecoder().decode(request.body.body),
+                )
+              : undefined;
+          requests.push({
+            method: request.method,
+            url: url.pathname,
+            body: sent,
+          });
           // A slow answer is how a case can hold a step inside GitHub's call, which is the window a
           // second caller would otherwise slip through.
           if (delayMs > 0) yield* Effect.sleep(delayMs);
@@ -1590,7 +1609,11 @@ describe("the PR step", () => {
     );
 
     expect(github.requests).toEqual([
-      { method: "POST", url: "/repos/lobiklukas/factory/pulls" },
+      {
+        method: "POST",
+        url: "/repos/lobiklukas/factory/pulls",
+        body: expect.anything(),
+      },
     ]);
     // The first call made the request, so it says so; the retry read the log, so it says that.
     expect(result.opened).toEqual({ number: 7, url, outcome: "opened" });
@@ -1932,6 +1955,12 @@ describe("the diff cap", () => {
     expect(github.requests).toHaveLength(1);
     expect(result.prUrl).toBe(url);
     expect(result.prEntries).toBe(1);
+    // The body lists the paths the same measurement counted (LOB-228): the reviewer reads what the
+    // cap refused on, rather than opening the diff to find out.
+    const sent = github.requests[0]?.body as { readonly body: string };
+    expect(sent.body).toContain("## Changed files");
+    expect(sent.body).toContain("- change-0.txt");
+    expect(sent.body).toContain("- change-1.txt");
   }, 120_000);
 
   it("refuses a diff with too many files, under the line cap", async () => {
