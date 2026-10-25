@@ -11,6 +11,7 @@ export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
 export const PAGE_DOC_KIND = "factory.page";
 export const MISSION_DOC_KIND = "factory.mission";
+export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 
 export const SpecDoc = defineDoc({
   kind: SPEC_DOC_KIND,
@@ -109,4 +110,35 @@ export const MissionDoc = defineDocFamily({
     definitionVersion: 0,
     entered: [] as string[],
   }),
+});
+
+/**
+ * The mission this session is running (LOB-230), keyed by nothing: one conversation has one current
+ * mission, and starting another rebinds this document rather than appending a second one.
+ *
+ * The phase is not stored here. It is the mission's own document (`MissionDoc`) that records it, and
+ * this document only names *which* mission to read, so the phase has one source of truth: a phase
+ * written here as well would be a second copy that a failed commit could leave disagreeing with the
+ * checkpoint the mission actually resumed from.
+ *
+ * A document rather than a field on the session's binding (`factory.session`), because a mission is
+ * started after the session is and a rebind is its own commit: rewriting the repo binding every time
+ * a mission starts would make a session's repo look like it changed.
+ *
+ * `taskId` empty is "this session never started a mission", which is what the seed says and what the
+ * snapshot reports as no mission at all.
+ *
+ * `fork` says what a fork would take of it, and the answer for this control plane is nothing: a fork
+ * is a new log whose *entries* are copied (`copyEntries` in `session.ts`), and the only documents it
+ * writes are its own lineage and repo binding. So a forked session reports no mission, which is what
+ * it should report — its task list is empty and nothing in it ever ran — and it does not need this
+ * declaration to be `"initial"` to say so. It is `"current"`, matching the mission's own document.
+ */
+export const MissionBindingDoc = defineDoc({
+  kind: MISSION_BINDING_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ taskId: "" }),
 });

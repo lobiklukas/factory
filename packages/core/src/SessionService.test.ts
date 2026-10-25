@@ -4913,3 +4913,155 @@ describe("a session holds no credential", () => {
     }
   });
 });
+
+/**
+ * A mission over the service (LOB-230): start one, and read the phase it reached off the session's
+ * snapshot rather than off a second call.
+ *
+ * The phases run as one durable task (`packages/harness/src/mission.ts`), so this is the case the
+ * harness suite cannot make: the task is admitted by a service call, and the answer is read back
+ * through the same `getSession` a client uses. A scratch session declares no `.factory/config`, so
+ * the mission reaches `verify` and fails there for the honest reason — the repo declares no verify
+ * command — which is a settled mission whose phase is still readable.
+ */
+describe("a mission on a session", () => {
+  it("reports no mission for a session that never started one", async () => {
+    const snapshots = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "no mission" });
+        const live = yield* sessions.get(created.id);
+        // The fold is a different read path and must not disagree about there being no mission.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { live, folded };
+      }),
+    );
+
+    // Absent, not an empty phase: "no mission" and "a mission with no phase yet" are different
+    // facts, and a client handed `phase: ""` would have to guess which one it got.
+    expect(snapshots.live.mission).toBeUndefined();
+    expect(snapshots.folded.mission).toBeUndefined();
+    expect(snapshots.folded.session.mode).toBe("historical");
+  }, 120_000);
+
+  it("starts one, answers its id, and reports the phase it reached", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a mission" });
+        const started = yield* sessions.startMission({
+          sessionId: created.id,
+          feature: "a mission over the service",
+        });
+        // The phase the mission is in, as it commits phases: `plan` first, and `verify` once the
+        // phases have run. Read through the snapshot, which is the surface the contract names.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map((snapshot) => snapshot.mission?.phase === "verify"),
+            ),
+          "the mission to reach verify",
+        );
+        const snapshot = yield* sessions.get(created.id);
+        // The mission settles there: a scratch session declares no verify command, so the phase
+        // that runs is the one that reports it. The task is gone from the live list, the record is
+        // not — that is what makes the phase readable after the work has stopped.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (state) =>
+                  !state.tasks.some((task) => task.kind === "factory.mission"),
+              ),
+            ),
+          "the mission to settle",
+        );
+        const settled = yield* sessions.get(created.id);
+        // Release the owner: the mission's record is a document, so the fold reports it too.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { started, snapshot, settled, folded };
+      }),
+    );
+
+    // The id the call answered is the mission's, and it is the one the snapshot names.
+    expect(outcome.started.sessionId).toBe(outcome.snapshot.session.id);
+    expect(outcome.started.taskId).toEqual(expect.any(String));
+    expect(outcome.snapshot.mission).toEqual({
+      taskId: outcome.started.taskId,
+      phase: "verify",
+      entered: ["plan", "implement", "verify"],
+    });
+    // A settled mission still reports the phase it reached, and the transcript says nothing about
+    // it: a mission is not a turn (the phases that do work are LOB-231's).
+    expect(outcome.settled.mission).toEqual(outcome.snapshot.mission);
+    expect(outcome.settled.tasks.map((task) => task.kind)).not.toContain(
+      "factory.mission",
+    );
+    expect(outcome.settled.entries.some((entry) => entry.kind === "user")).toBe(
+      false,
+    );
+    // D8: the live read and the fold must not disagree about the mission either.
+    expect(outcome.folded.session.mode).toBe("historical");
+    expect(outcome.folded.mission).toEqual(outcome.snapshot.mission);
+  }, 120_000);
+
+  it("reports no mission on a fork of a session that ran one", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "forked mission" });
+        yield* sessions.startMission({
+          sessionId: created.id,
+          feature: "a mission the fork must not inherit",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.mission !== undefined)),
+          "the parent to record its mission",
+        );
+        const parent = yield* sessions.get(created.id);
+        const fork = yield* sessions.fork({
+          sessionId: created.id,
+          at: parent.entries[parent.entries.length - 1]?.id,
+        });
+        const forked = yield* sessions.get(fork.id);
+        return { parent, forked };
+      }),
+    );
+
+    // The parent has a mission; the fork has none. A fork is a new log whose entries are copied and
+    // whose mission documents are not (`copyEntries`), so this also pins that: a fork that grew a
+    // mission out of its parent's log would report a phase nothing in this log ever ran.
+    expect(outcome.parent.mission?.taskId).toEqual(expect.any(String));
+    expect(outcome.forked.mission).toBeUndefined();
+  }, 120_000);
+
+  it("refuses a mission with no feature, and answers no id for it", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "blank mission" });
+        const refused = yield* Effect.result(
+          sessions.startMission({ sessionId: created.id, feature: "   " }),
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return { refused, snapshot };
+      }),
+    );
+
+    // A blank feature is refused before a task is created: a mission whose phases and result are
+    // about nothing is worse than a typed error.
+    expect(outcome.refused._tag).toBe("Failure");
+    expect(
+      outcome.refused._tag === "Failure"
+        ? outcome.refused.failure.message
+        : undefined,
+    ).toContain("feature");
+    expect(outcome.snapshot.mission).toBeUndefined();
+  }, 120_000);
+});
