@@ -16,8 +16,8 @@
  *   an already-registered slug keeps what it has.
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
  *
- * What it always answers from the fold: title (`factory.title` entries), repo and base ref
- * (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
+ * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
+ * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
  * (`factory.pr`), the approvals a session asked for and the decisions that settled them
  * (`factory.approval.requested` / `.decided` → `session_approvals`), spend (`pi.usage`),
  * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
@@ -72,6 +72,8 @@ type FoldedRow = {
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The branch a caller named, when it named one (LOB-197). */
+  readonly branch: string | null;
   readonly forkedFrom: string | null;
   readonly prUrl: string | null;
   readonly createdAt: string;
@@ -166,6 +168,7 @@ export const rebuildIndexes: Effect.Effect<
       title: title ?? "",
       repo,
       baseRef: repo === null ? null : sessionLog.binding.baseRef,
+      branch: sessionLog.binding.branch ?? null,
       forkedFrom: sessionLog.forkedFrom ?? null,
       prUrl: sessionLog.pr?.url ?? null,
       createdAt: log.createdAt,
@@ -233,12 +236,13 @@ export const rebuildIndexes: Effect.Effect<
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, forked_from, pr_url, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
       SELECT
         id,
         title,
         NULLIF(repo, ''),
         NULLIF(base_ref, ''),
+        NULLIF(branch, ''),
         NULLIF(forked_from, ''),
         NULLIF(pr_url, ''),
         created_at
@@ -247,14 +251,16 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.title)}::text[],
         ${batch.map((row) => row.repo ?? "")}::text[],
         ${batch.map((row) => row.baseRef ?? "")}::text[],
+        ${batch.map((row) => row.branch ?? "")}::text[],
         ${batch.map((row) => row.forkedFrom ?? "")}::text[],
         ${batch.map((row) => row.prUrl ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      ) AS folded(id, title, repo, base_ref, forked_from, pr_url, created_at)
+      ) AS folded(id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
         base_ref = EXCLUDED.base_ref,
+        branch = EXCLUDED.branch,
         forked_from = EXCLUDED.forked_from,
         pr_url = EXCLUDED.pr_url,
         created_at = EXCLUDED.created_at

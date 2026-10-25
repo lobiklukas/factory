@@ -61,6 +61,12 @@ export type WorkspaceInput = {
   readonly sessionId: string;
   readonly repo?: RepoSlug | undefined;
   readonly baseRef?: string | undefined;
+  /**
+   * The branch to cut the worktree on, when the caller named one (LOB-197). Absent means
+   * `factory/<session-id>`, which is D10's default and derives from the id alone; a docs run names
+   * `factory/doc-<id>` so the branch says what produced it.
+   */
+  readonly branch?: string | undefined;
   /** A checkout to read `.factory/config` from, when the session's own directory has none. */
   readonly localPath?: string | undefined;
 };
@@ -110,7 +116,9 @@ export const resolveWorkspace = (
       input.repo,
     );
     const branch =
-      input.repo === undefined ? undefined : `factory/${input.sessionId}`;
+      input.repo === undefined
+        ? undefined
+        : (input.branch ?? `factory/${input.sessionId}`);
     // M6: cut a linked worktree at the base ref off the registered repo's local_path.
     if (input.repo !== undefined && input.localPath !== undefined) {
       const isGit = yield* Effect.try({

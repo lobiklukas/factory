@@ -38,6 +38,22 @@ export const RepoSlug = Schema.String.pipe(
 export type RepoSlug = typeof RepoSlug.Type;
 
 /**
+ * A branch a session's worktree may be cut on (D10, LOB-197).
+ *
+ * The default is `factory/<session-id>`, minted by the server and safe by construction. A caller
+ * that names its own branch is naming a *git* branch, and the workspace passes it to `git worktree
+ * add` — so the shape is checked here rather than trusted: no space, no `~^:?*[\\`, no `..`, no
+ * leading `-` or `/`, and no shell metacharacter (`$`, backtick, quote, `;`), which a shell-quoted
+ * `execSync` would otherwise expand. A branch a docs run names is `factory/doc-<id>`.
+ */
+export const BranchName = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/)),
+  Schema.check(Schema.isMaxLength(200)),
+  Schema.brand("BranchName"),
+);
+export type BranchName = typeof BranchName.Type;
+
+/**
  * The commands a repo declares for itself, from `.factory/config` in the checkout
  * (docs/features.md §3 A1). Every field is optional: a repo with no config still opens a session,
  * it just cannot say how to build or test itself.
@@ -287,6 +303,11 @@ export const CreateSessionInput = Schema.Struct({
   repo: Schema.optional(RepoSlug),
   /** The ref the session starts from. Defaults to the repo registry's default base ref. */
   baseRef: Schema.optional(Schema.String),
+  /**
+   * The branch the session's worktree is cut on. Absent means `factory/<session-id>` (D10); a docs
+   * trigger names `factory/doc-<id>` so the branch says what produced it.
+   */
+  branch: Schema.optional(BranchName),
   /** The task this session runs against. Absent means a scratch session. */
   taskId: Schema.optional(Schema.String),
   /** The column the run was started from. Defaults to "building". */

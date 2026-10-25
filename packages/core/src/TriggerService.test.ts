@@ -69,6 +69,14 @@ const rules: ReadonlyArray<TriggerRule> = [
   },
   { label: "factory-elsewhere", repo: otherRepo, prompt: "{{key}}" },
   { label: "factory-unregistered", repo: unregisteredRepo, prompt: "{{key}}" },
+  // A rule that admits the two lifecycle actions (LOB-197). It is *last*, so an event carrying both
+  // `factory` and `docs` routes to the `factory` rule — which is the case below.
+  {
+    label: "factory-docs",
+    repo: otherRepo,
+    prompt: "{{key}}",
+    startsWorkFor: ["push", "schedule"],
+  },
 ];
 
 const event = (over: Partial<TriggerEvent> = {}): TriggerEvent => ({
@@ -310,6 +318,59 @@ describe("the trigger seam", () => {
         expect(created).toHaveLength(0);
       },
       { registerRepo: [repo] },
+    );
+  }, 60_000);
+
+  it("refuses a lifecycle action no rule asked for, so a caller cannot name a push", async () => {
+    // `create` always starts work; `push` and `schedule` only when a rule claiming the event asks
+    // for them (LOB-197). The generic webhook's `action` is whatever its caller typed, so this is
+    // the case that keeps widening the filter for the docs trigger from widening it for everyone.
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const outcome = await run(
+          trigger.deliver(deliver(`${runId}-push`, { action: "push" })),
+        );
+
+        expect(outcome.status).toBe("skipped");
+        expect(outcome.reason).toContain('action "push"');
+        expect(created).toHaveLength(0);
+      },
+      { registerRepo: [repo] },
+    );
+  }, 60_000);
+
+  it("admits a lifecycle action only through the rule the mapping routes to", async () => {
+    // The filter and the router must pick the same rule: `factory-docs` asks for `push`, but an
+    // event labelled `["factory", "factory-docs"]` routes to `factory` (it is first), so a push
+    // there would land on the wrong rule's repo and prompt. Same event with only the docs label is
+    // the delivery the docs trigger means.
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const both = await run(
+          trigger.deliver(
+            deliver(`${runId}-two-labels`, {
+              action: "push",
+              labels: ["factory", "factory-docs"],
+            }),
+          ),
+        );
+        expect(both.status).toBe("skipped");
+        expect(both.reason).toContain('action "push"');
+        expect(created).toHaveLength(0);
+
+        const docsOnly = await run(
+          trigger.deliver(
+            deliver(`${runId}-docs-label`, {
+              action: "push",
+              labels: ["factory-docs"],
+            }),
+          ),
+        );
+        expect(docsOnly.status).toBe("processed");
+        expect(created).toHaveLength(1);
+        expect(created[0]?.repo).toBe(otherRepo);
+      },
+      { registerRepo: [repo, otherRepo] },
     );
   }, 60_000);
 

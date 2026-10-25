@@ -70,6 +70,23 @@ export const TriggerRule = Schema.Struct({
   repo: RepoSlug,
   baseRef: Schema.optional(Schema.String),
   prompt: Schema.String,
+  /**
+   * Actions beyond `create` that start work *when this rule claims the event* (LOB-197).
+   *
+   * The seam's filter refuses an action no rule asked for, so widening it is a decision an operator
+   * makes per rule rather than one every adapter inherits: a docs rule admits `push` and `schedule`
+   * because a repository's own lifecycle is what starts a docs run, and a rule for a tracker admits
+   * nothing extra. The rule the filter consults is the one the mapping picks, so a rule that only
+   * *also* claims a label cannot admit an action that lands on another rule's repo.
+   *
+   * What this does not do is authenticate the action. The generic webhook's `action` is whatever its
+   * caller typed, so a signed caller that names a `docs` label can say `push`; it could already
+   * start the same session by saying `create`, so the capability is unchanged, but the recorded
+   * `reason` would name a push no push produced. Pinning the generic adapter's action is a change to
+   * that adapter's contract (its `filtered` skip reason is what `webhook.sh` asserts), so it is
+   * filed rather than smuggled in: LOB-235.
+   */
+  startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
 });
 export type TriggerRule = typeof TriggerRule.Type;
 
@@ -193,7 +210,37 @@ export const resolveMapping = (
 };
 
 /**
- * The only action that starts work. A Linear `update` delivery, or a `remove`, is a real event
- * about an issue that already has its session; opening a second one is the bug this guards.
+ * The action the adapters that report an *issue* or *message* arriving normalize to. A Linear
+ * `update` delivery, or a `remove`, is a real event about an issue that already has its session;
+ * opening a second one is the bug this guards.
  */
 export const TRIGGER_ACTION = "create";
+
+/**
+ * The action every adapter starts work with, and the two a repository's own lifecycle adds — a push
+ * on the default branch and a schedule tick (LOB-197). Both are work that starts without a person,
+ * so they go through the seam's dedupe and refusals like any other delivery; an adapter names its own
+ * action rather than pretending a push is a create, and the recorded reason says which action
+ * arrived.
+ *
+ * `create` is unconditional; `push` and `schedule` are not. A rule has to ask for one
+ * (`TriggerRule.startsWorkFor`), so an adapter whose `action` comes from its caller — the generic
+ * webhook — cannot name a push no push produced.
+ */
+export const LIFECYCLE_ACTIONS: ReadonlyArray<string> = ["push", "schedule"];
+
+/** Every action the seam can be configured to start work with. */
+export const TRIGGER_ACTIONS: ReadonlyArray<string> = [
+  TRIGGER_ACTION,
+  ...LIFECYCLE_ACTIONS,
+];
+
+/**
+ * Whether this event starts work: `create` always, and a lifecycle action only when a rule that
+ * claims the event asked for it. The seam's filter is this function over its own rule set.
+ */
+export const startsWork = (
+  action: string,
+  claimed: ReadonlyArray<ReadonlyArray<string>> = [],
+): boolean =>
+  action === TRIGGER_ACTION || claimed.some((asked) => asked.includes(action));

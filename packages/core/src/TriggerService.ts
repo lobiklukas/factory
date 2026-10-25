@@ -34,7 +34,8 @@ import type {
 } from "@repo/domain/Session";
 import {
   resolveMapping,
-  TRIGGER_ACTION,
+  startsWork,
+  TRIGGER_ACTIONS,
   TriggerError,
   type TriggerDelivery,
   type TriggerEvent,
@@ -60,11 +61,20 @@ export class TriggerService extends Context.Service<
   TriggerServiceShape
 >()("@repo/core/TriggerService") {}
 
-/** What the seam needs of the session layer, and nothing more. */
+/**
+ * What the seam needs of the session layer, and nothing more.
+ *
+ * `deliveryId` is the source's own idempotency key, un-namespaced, because it is the one thing an
+ * adapter may want to name something after: the docs trigger cuts its session's branch as
+ * `factory/doc-<deliveryId>` (LOB-197), so the branch says which delivery produced the run. It is
+ * passed rather than derived from `requestId`: the seam's `trigger:` prefix is the seam's own
+ * business, and a caller that stripped it would break the day the prefix changed.
+ */
 export type TriggerSessionsShape = {
   readonly create: (input: {
     readonly title: string;
     readonly requestId: string;
+    readonly deliveryId: string;
     readonly repo: RepoSlug;
     readonly baseRef: string | undefined;
   }) => Effect.Effect<{ readonly id: SessionId }, TriggerError>;
@@ -241,10 +251,27 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // session the failed attempt made instead of opening a second one.
           const claimedWork: Effect.Effect<TriggerOutcome, TriggerError> =
             Effect.gen(function* () {
-              if (event.action !== TRIGGER_ACTION) {
+              // The filter. `create` always starts work; a lifecycle action (`push`, `schedule`)
+              // only when the rule that would *route* this event asked for it, so widening what the
+              // docs trigger needs did not widen what every adapter accepts (LOB-197).
+              //
+              // The rule is the one `resolveMapping` would pick — the first that claims one of the
+              // labels — not "any claiming rule": an event labelled `["ticket", "docs"]` routes to
+              // the `ticket` rule, so the `docs` rule's `startsWorkFor` must not admit an action
+              // that lands on the ticket rule's repo and prompt.
+              const routing = options.rules.find((rule) =>
+                event.labels.includes(rule.label),
+              );
+              const asked =
+                routing?.startsWorkFor === undefined
+                  ? []
+                  : [routing.startsWorkFor];
+              if (!startsWork(event.action, asked)) {
                 return yield* skip(
                   requestId,
-                  `action "${event.action}" is not "${TRIGGER_ACTION}"`,
+                  `action "${event.action}" is not ${TRIGGER_ACTIONS.map(
+                    (action) => `"${action}"`,
+                  ).join(", ")}`,
                 );
               }
 
@@ -276,6 +303,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
               const session = yield* sessions.create({
                 title: event.title,
+                deliveryId: requestId,
                 // Namespaced, because `sessions.request_id` dedupes client retries too: a delivery
                 // id that happened to equal a caller's request id would hand that caller this
                 // session.
