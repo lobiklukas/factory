@@ -252,11 +252,20 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           const claimedWork: Effect.Effect<TriggerOutcome, TriggerError> =
             Effect.gen(function* () {
               // The filter. `create` always starts work; a lifecycle action (`push`, `schedule`)
-              // only when a rule that claims this event asked for it, so widening what the docs
-              // trigger needs did not widen what every adapter accepts (LOB-197).
-              const asked = options.rules
-                .filter((rule) => event.labels.includes(rule.label))
-                .map((rule) => rule.startsWorkFor ?? []);
+              // only when the rule that would *route* this event asked for it, so widening what the
+              // docs trigger needs did not widen what every adapter accepts (LOB-197).
+              //
+              // The rule is the one `resolveMapping` would pick — the first that claims one of the
+              // labels — not "any claiming rule": an event labelled `["ticket", "docs"]` routes to
+              // the `ticket` rule, so the `docs` rule's `startsWorkFor` must not admit an action
+              // that lands on the ticket rule's repo and prompt.
+              const routing = options.rules.find((rule) =>
+                event.labels.includes(rule.label),
+              );
+              const asked =
+                routing?.startsWorkFor === undefined
+                  ? []
+                  : [routing.startsWorkFor];
               if (!startsWork(event.action, asked)) {
                 return yield* skip(
                   requestId,

@@ -76,8 +76,15 @@ export const TriggerRule = Schema.Struct({
    * The seam's filter refuses an action no rule asked for, so widening it is a decision an operator
    * makes per rule rather than one every adapter inherits: a docs rule admits `push` and `schedule`
    * because a repository's own lifecycle is what starts a docs run, and a rule for a tracker admits
-   * nothing extra. Without this the generic webhook — whose `action` is whatever its caller typed —
-   * could name a `push` no push produced.
+   * nothing extra. The rule the filter consults is the one the mapping picks, so a rule that only
+   * *also* claims a label cannot admit an action that lands on another rule's repo.
+   *
+   * What this does not do is authenticate the action. The generic webhook's `action` is whatever its
+   * caller typed, so a signed caller that names a `docs` label can say `push`; it could already
+   * start the same session by saying `create`, so the capability is unchanged, but the recorded
+   * `reason` would name a push no push produced. Pinning the generic adapter's action is a change to
+   * that adapter's contract (its `filtered` skip reason is what `webhook.sh` asserts), so it is
+   * filed rather than smuggled in: LOB-235.
    */
   startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
 });

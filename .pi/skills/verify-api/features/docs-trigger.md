@@ -34,15 +34,17 @@ rows cannot answer "how many docs runs did this prove?":
 3. **ledger** — every request GitHub received, read from the fake: one `POST` for the PR and nothing
    else, no request that writes a ref, a file or a merge, and no PR whose head is `main`.
 
-**What proves it works.** `.verify/evidence/lob-197/api/`: `docs-trigger.json` (the driver's own
+**What proves it works.** Evidence is local, not tracked (`.verify/` is gitignored, as for every
+drive in this skill). `.verify/evidence/lob-197/api/`: `docs-trigger.json` (the driver's own
 14 checks and what each phase saw), `docs-trigger-process.json` (the script's 3 shell checks),
 `docs-trigger-ledger.json` (every request and the one PR), `docs-trigger-fake.log`.
 
-**Non-vacuity.** Two hand mutation runs, recorded in the same directory. `mutation-no-branch.log`:
-dropping `branch` from `DocsSessionsFromSessionService` (so the port calls `sessions.create` with no
-branch) makes the run open on `factory/<session-id>` and then fail the PR step, because the head the
-driver asked for is a branch no worktree is on — seven checks fail, the branch pair first. `mutation-
-no-repeat.log`: `docsSchedule` returning its first `tick` instead of repeating it on
+**Non-vacuity.** Two hand mutation runs, each in its own directory beside the green one (its
+`run.log`, and the `api/docs-trigger-process.json` that run wrote). `mutation-no-branch/`: dropping
+`branch` from `DocsSessionsFromSessionService` (so the port calls `sessions.create` with no branch)
+makes the run open on `factory/<session-id>` and then fail the PR step, because the head the driver
+asked for is a branch no worktree is on — eight checks fail, the branch pair first.
+`mutation-no-repeat/`: `docsSchedule` returning its first `tick` instead of repeating it on
 `Schedule.spaced(everyMs)` leaves one session where the interval should start several, and "the
 schedule fires once per interval, on a shortened clock" fails with `1 tick(s) in 1200ms`.
 
