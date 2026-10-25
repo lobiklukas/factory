@@ -52,6 +52,7 @@ import { createModelAccess } from "./models";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
+  docsPolicy,
   POLICY_EXTENSION,
   policyExtension,
 } from "./policy";
@@ -87,6 +88,13 @@ const bash = (command: string): ToolCall => ({
   id: "call-1",
   name: "bash",
   arguments: { command } as JsonObject,
+});
+
+const write = (path: string): ToolCall => ({
+  type: "toolCall",
+  id: "call-2",
+  name: "write",
+  arguments: { path, content: "x" } as JsonObject,
 });
 
 /** The text of the last tool result, which is what the model reads. */
@@ -195,6 +203,21 @@ describe("the beforeTool handler is the decision", () => {
   it("returns the refusal for a call the policy blocks", async () => {
     const decision = await seam.beforeTool?.(bash("git push origin main"));
     expect(decision?.block).toContain("pushing refs/heads/main is refused");
+  });
+
+  it("carries a composed docs rule into the same hook", async () => {
+    // The composition only reaches the model if the hook answers with the docs rule's decision: the
+    // whole reason `docsPolicy` wraps `decide` rather than the extension.
+    const composed = (policyExtension(docsPolicy(policy)).hooks?.[0]
+      ?.handlers ?? {}) as Seam;
+
+    const refusal = await composed.beforeTool?.(
+      write("packages/core/src/x.ts"),
+    );
+    expect(refusal?.block).toContain("is refused by the docs rule");
+    expect(
+      await composed.beforeTool?.(write("docs/design.md")),
+    ).toBeUndefined();
   });
 });
 
