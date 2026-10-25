@@ -86,6 +86,16 @@ export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
  * and one name for both would make a fold over entries unable to say which it was reading.
  */
 export const PAGE_ENTRY_KIND = "factory.page.written";
+/**
+ * The entry an unchanged branch is announced with (LOB-196): the PR step measured the branch
+ * against its base, found nothing to publish, and opened nothing.
+ *
+ * An entry rather than a document, for the reason `factory.pr.opened` is one: a no-change answer
+ * leaves the session's state untouched — no PR, no document, no row — so what a person watching the
+ * run has to read it from is the transcript. Without it a no-op run is silence, which is
+ * indistinguishable from a run that never reached the PR step at all.
+ */
+export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 /**
@@ -275,11 +285,14 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title entry carries no model content, so its text comes from its data.
+  // The title and the no-change entries carry no model content, so their text comes from their
+  // data — which is what makes a no-op PR step a readable line rather than an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
-      : messageText(message);
+      : entry.kind === NO_CHANGE_ENTRY_KIND
+        ? (stringAt(asObject(entry.data), "text") ?? "")
+        : messageText(message);
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),

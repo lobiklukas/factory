@@ -93,6 +93,7 @@ import {
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
   PR_OPENED_ENTRY_KIND,
+  NO_CHANGE_ENTRY_KIND,
   PAGE_ENTRY_KIND,
   type PageLogRecord,
   TITLE_ENTRY_KIND,
@@ -579,6 +580,46 @@ export const readPullRequestDoc = (
       openedAt: doc.openedAt,
     };
   });
+
+/**
+ * A run that found nothing to publish, announced in the transcript (LOB-196).
+ *
+ * It carries no model content, so the agent never sees it — which is the point: the step's answer
+ * is a fact about the branch, not a turn. It is an entry rather than a document because a no-change
+ * answer leaves no state behind (no `factory.pr`, no `pr_url` row), so the log's transcript is the
+ * only place a person can see that the run ran and published nothing.
+ *
+ * The sentence names documentation because an unchanged branch is the *docs* run's ordinary result
+ * (LOB-37: docs that need no edit). The guard itself is about the diff, not about the skill: any
+ * run whose branch is even with its base has no PR to open, and GitHub would refuse one anyway.
+ */
+export const NoDocumentationChangeEntry = defineEntry<{
+  readonly text: string;
+}>(NO_CHANGE_ENTRY_KIND);
+
+/** The line this entry carries: what a no-op run says it did. */
+export const noDocumentationChange = (base: string): string =>
+  `no documentation change: the branch has nothing to publish against ${base}`;
+
+/**
+ * Announce that the run published nothing. Nothing else is written: there is no PR to record, so a
+ * retry of this step re-measures the branch rather than reading this entry.
+ */
+export const writeNoDocumentationChange = (
+  conversation: Conversation,
+  base: string,
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write no documentation change", () =>
+    conversation
+      .commit(
+        (tx) =>
+          tx.appendEntry(NoDocumentationChangeEntry, conversation.id, {
+            data: { text: noDocumentationChange(base) },
+          }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
 
 /**
  * A cited knowledge page, announced in the transcript (LOB-204).

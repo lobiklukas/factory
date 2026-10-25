@@ -54,3 +54,14 @@ refused separately on the file and line limits with an empty fake-GitHub ledger;
 instead of an unmeasured PR) and by `packages/core/src/pr.test.ts` (`parseDiffSize`, and
 `diffCapRefusal` against a throwaway checkout, including the case where a plain directory sits
 _inside_ a checkout and must measure nothing).
+
+**An unchanged branch opens nothing (LOB-196).** The same measurement answers the smaller question
+first: a branch with no file changed against its base answers `{outcome: "no-change"}`, appends one
+`factory.pr.no-change` entry to the transcript (`no documentation change: the branch has nothing to
+publish against <base>`) and reaches GitHub not at all — no request, no `factory.pr`, no `pr_url`.
+That is the ordinary result of a docs run over docs that need no edit, which before this was a typed
+422 from GitHub, i.e. a failed run. Nothing is recorded about the answer, so a later run that does
+change a file opens its PR rather than reading a sticky "nothing to do". It is covered by
+`packages/core/src/SessionService.test.ts` ("an empty diff": two runs on one unchanged checkout both
+answer `no-change` with an empty fake-GitHub ledger and one transcript line each, and a file committed
+afterwards opens the PR), and dropping the guard turns both cases red.
