@@ -29,7 +29,7 @@ const GROUPS: ReadonlyArray<{
   readonly kind: AttentionKind;
   readonly title: string;
 }> = [
-  { kind: "approval", title: "Approve or deny a run's request" },
+  { kind: "approval", title: "Approve or deny a request" },
   { kind: "question", title: "Answer a run's question" },
   { kind: "gate", title: "Make a person's move" },
 ];

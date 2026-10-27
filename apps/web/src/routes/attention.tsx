@@ -138,7 +138,7 @@ function AttentionRoute() {
             title="Nothing needs a person"
             detail={
               board === undefined
-                ? "No card on any board waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
+                ? "No card or session waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
                 : "No card on this board waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
             }
             visible

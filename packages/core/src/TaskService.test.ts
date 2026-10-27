@@ -1536,6 +1536,46 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     expect(rows(onBoard ?? [])).toEqual([["approval", "card approval"]]);
   });
 
+  it("orders approvals by the request time the database keeps, below the millisecond (LOB-271)", async () => {
+    const boardId = await newBoard();
+    const card = await cardIn(boardId, "micro order", ["specifying"]);
+    const ids = [newSession(), newSession()].sort();
+    const low = `${ids[0]}`;
+    const high = `${ids[1]}`;
+    const scratch = newSession();
+    // The older request belongs to the session id that sorts last, 400 microseconds apart: a re-sort
+    // on the millisecond `requestedAt` and the session id would put the other one first.
+    const [everywhere] = await attentionWith(
+      {
+        runs: [low, high].map((sessionId) => ({
+          taskId: card.id,
+          column: "specifying" as const,
+          status: "idle" as const,
+          ago: 5,
+          sessionId,
+        })),
+        scratch: [{ sessionId: scratch }],
+        approvals: [
+          { sessionId: high, requestId: "a", action: "one", ago: 10.0008 },
+          { sessionId: low, requestId: "a", action: "two", ago: 10.0004 },
+          { sessionId: scratch, requestId: "a", action: "three", ago: 10.0006 },
+        ],
+      },
+      [undefined],
+    );
+    const mine = new Set([low, high, scratch]);
+    expect(
+      (everywhere ?? [])
+        .filter(
+          (item) =>
+            item.reason._tag === "approval" && mine.has(item.reason.sessionId),
+        )
+        .map((item) =>
+          item.reason._tag === "approval" ? item.reason.sessionId : undefined,
+        ),
+    ).toEqual([high, scratch, low]);
+  });
+
   it("drops a question once a person answers it, and refuses a board that does not exist", async () => {
     const boardId = await newBoard();
     const task = await cardIn(boardId, "answer me", ["specifying"]);

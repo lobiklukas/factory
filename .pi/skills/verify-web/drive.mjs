@@ -3072,9 +3072,10 @@ const scratchCreated = await rpcFromDrive("createSession", {
 const scratchId =
   typeof scratchCreated.value?.id === "string" ? scratchCreated.value.id : "";
 const SCRATCH_ACTION = "git push origin scratch";
+const scratchRequestId = `verify-web-scratch-${Date.now()}`;
 const scratchAsked = await rpcFromDrive("requestApproval", {
   sessionId: scratchId,
-  requestId: `verify-web-scratch-${Date.now()}`,
+  requestId: scratchRequestId,
   action: SCRATCH_ACTION,
   detail: "no card owns this session",
 });
@@ -3122,7 +3123,7 @@ attentionObserved.scratch = {
   server: (scratchTruth.value ?? []).length,
 };
 assert(
-  "a gated scratch session is one row on the every-board view, linking to the session",
+  "a card-less session with a pending approval is one row on the every-board view, linking to the session",
   scratchCreated.exit === "Success" &&
     scratchAsked.exit === "Success" &&
     scratchShown &&
@@ -3184,6 +3185,22 @@ assert(
   "the scratch row's link opens the session",
   scratchLinkOpened,
   `at ${new URL(page.url()).pathname}`,
+);
+// Decide it, so a rerun against the same instance starts from the same every-board state.
+const scratchDecided = await rpcFromDrive("decideApproval", {
+  sessionId: scratchId,
+  requestId: scratchRequestId,
+  decision: "denied",
+  actor: "verify-web",
+});
+const afterDecide = await rpcFromDrive("listAttention", {});
+assert(
+  "the scratch approval is decided and leaves the every-board view",
+  scratchDecided.exit === "Success" &&
+    (afterDecide.value ?? []).every(
+      (item) => item.reason.sessionId !== scratchId,
+    ),
+  `decide ${scratchDecided.exit}; rows ${(afterDecide.value ?? []).length}`,
 );
 
 // A board the server does not hold is named as missing, not shown as "nothing needs a person".

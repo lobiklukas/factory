@@ -11,7 +11,7 @@ The rows are `listAttention` (`TasksRpc`), one server read over the indexes — 
 approval is walked from the browser. `TaskService.attention` decides; the page only words it
 (`apps/web/src/lib/attention-view.ts`).
 
-- **Approve or deny a run's request** — a `session_approvals` row with no decision, on a session
+- **Approve or deny a request** — a `session_approvals` row with no decision, on a session
   `task_runs` names as a run of the card. Any column, any block. The row's link opens the card with
   `?run=<the session that asked>`, so the pane's Approvals tab holds the request.
   `li[data-attention-reason=approval]`, text `A run asks to <action>[: <detail>]`.
@@ -47,8 +47,9 @@ without a reload.
 
 Click the bell (**Needs a person**) in the rail, or **Needs a person** in a board's header. The
 bell carries a count badge (`[data-attention-badge]`) of everything the every-board view lists, a
-scratch session's approval included — the number of rows on `/attention`, from the same atom, so
-it is never a second answer. It is absent when nothing waits.
+scratch session's approval included — the number of rows on the every-board `/attention`, from the same atom, so it is never a second
+answer there. On a board's view (`?board=`) the badge is still the every-board count while the rows
+are that board's, and the page polls both reads. It is absent when nothing waits.
 
 ## Driving it with drive.mjs
 

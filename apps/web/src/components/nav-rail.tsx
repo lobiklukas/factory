@@ -91,6 +91,7 @@ export const NavRail = () => {
                   data-attention-badge={waiting}
                   className="absolute top-0 right-0 grid min-w-3.5 place-items-center bg-destructive px-0.5 font-mono text-[9px] leading-3.5 text-white"
                 >
+                  <span className="sr-only"> </span>
                   {waiting}
                   <span className="sr-only"> waiting on a person</span>
                 </span>

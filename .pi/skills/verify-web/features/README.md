@@ -48,7 +48,8 @@ under Known gaps.
   gated run that parks and resumes is driven by `verify-cli/approve.sh`.
 - **The rail's attention badge polls on every page.** The bell shows the length of
   `listAttention` (LOB-271), read through the same atom `/attention` uses, so it adds one 2 s poll
-  to every page and none on `/attention`. `drive.mjs` counts `listAttention` among the reads for
+  to every page and none on the every-board `/attention`. A board's view (`?board=`) polls both, and
+  the badge there is still the every-board count, not that board's. `drive.mjs` counts `listAttention` among the reads for
   that reason. A push would replace the poll.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the

@@ -447,21 +447,31 @@ const iso = (value: Date | string): string =>
   DateTime.formatIso(DateTime.makeUnsafe(value));
 
 /**
- * The attention view's approval order: oldest request first, then session, then request id — the
- * order `session_approvals` rows are read in, so a card's and a card-less session's approvals merge
- * into one list. Anything else sorts equal, and the sort is stable.
+ * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
+ * then session, then request id) into one, without reordering either. `key` is the request time at
+ * microsecond precision, as the database orders it: the `requestedAt` an item carries is cut to
+ * milliseconds, so comparing that would reorder rows the database keeps apart. A tie takes the left
+ * list's row first, and the two lists never share a session.
  */
-const byRequest = (left: AttentionItem, right: AttentionItem): number => {
-  if (left.reason._tag !== "approval" || right.reason._tag !== "approval") {
-    return 0;
+const mergeByRequest = <A>(
+  left: ReadonlyArray<readonly [key: string, item: A]>,
+  right: ReadonlyArray<readonly [key: string, item: A]>,
+): Array<A> => {
+  const merged: Array<A> = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    const l = left[i];
+    const r = right[j];
+    if (l !== undefined && (r === undefined || l[0] <= r[0])) {
+      merged.push(l[1]);
+      i += 1;
+    } else if (r !== undefined) {
+      merged.push(r[1]);
+      j += 1;
+    }
   }
-  const a = left.reason;
-  const b = right.reason;
-  return (
-    a.requestedAt.localeCompare(b.requestedAt) ||
-    a.sessionId.localeCompare(b.sessionId) ||
-    a.requestId.localeCompare(b.requestId)
-  );
+  return merged;
 };
 
 export const TaskServiceLive = Layer.effect(
@@ -1629,11 +1639,13 @@ export const TaskServiceLive = Layer.effect(
               readonly action: string;
               readonly detail: string;
               readonly requestedAt: Date | string;
+              readonly requestedKey: string;
             }
           >`
             SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
                    sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
-                   sa.requested_at
+                   sa.requested_at,
+                   to_char(sa.requested_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') AS requested_key
             FROM session_approvals sa
             JOIN task_runs tr ON tr.session_id = sa.session_id
             JOIN tasks t ON t.id = tr.task_id
@@ -1654,11 +1666,14 @@ export const TaskServiceLive = Layer.effect(
                   readonly action: string;
                   readonly detail: string;
                   readonly requestedAt: Date | string;
+                  readonly requestedKey: string;
                   readonly sessionTitle: string;
                   readonly sessionRepo: string | null;
                 }>`
                   SELECT sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
-                         sa.requested_at, s.title AS session_title, s.repo AS session_repo
+                         sa.requested_at,
+                         to_char(sa.requested_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') AS requested_key,
+                         s.title AS session_title, s.repo AS session_repo
                   FROM session_approvals sa
                   JOIN sessions s ON s.id = sa.session_id
                   WHERE sa.decision IS NULL
@@ -1735,7 +1750,7 @@ export const TaskServiceLive = Layer.effect(
               action: row.action,
               detail: row.detail,
               requestedAt: iso(row.requestedAt),
-            }),
+            }).pipe(Effect.map((item) => [row.requestedKey, item] as const)),
           );
           const sessionApprovalItems = yield* Effect.forEach(
             sessionApprovals,
@@ -1747,7 +1762,7 @@ export const TaskServiceLive = Layer.effect(
                 action: row.action,
                 detail: row.detail,
                 requestedAt: iso(row.requestedAt),
-              }),
+              }).pipe(Effect.map((item) => [row.requestedKey, item] as const)),
           );
           const questionItems = yield* Effect.forEach(questions, (row) =>
             toAttention(row, {
@@ -1768,7 +1783,7 @@ export const TaskServiceLive = Layer.effect(
             });
           });
           return [
-            ...[...approvalItems, ...sessionApprovalItems].sort(byRequest),
+            ...mergeByRequest(approvalItems, sessionApprovalItems),
             ...questionItems,
             ...gateItems,
           ];
