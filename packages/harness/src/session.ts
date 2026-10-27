@@ -63,6 +63,10 @@ import {
 } from "@repo/domain/Mission";
 import type { Page as CitedPage } from "@repo/domain/Page";
 import {
+  projectProposedIssues,
+  type ProposedIssues,
+} from "@repo/domain/Decomposition";
+import {
   PrEvidence as PrEvidenceSchema,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
@@ -87,6 +91,8 @@ import {
   PageDoc,
   PagePromptDoc,
   PrDoc,
+  PROPOSED_ISSUES_DOC_KIND,
+  ProposedIssuesDoc,
   SpecDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
@@ -1971,6 +1977,7 @@ const snapshotOf = (
   budgetDoc: JsonValue | undefined,
   /** The session's spend: every conversation's (`readSessionUsage`), not the view's root alone. */
   usage: SessionUsage,
+  proposedIssues: ProposedIssues | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
   const budget = projectBudgetDoc(budgetDoc, usage);
@@ -2002,8 +2009,23 @@ const snapshotOf = (
     ...(mission === undefined ? {} : { mission }),
     // Absent for a session with no cap (LOB-163); a stop the cap made is `budget.stopped`.
     ...(budget === undefined ? {} : { budget }),
+    // Absent for a session that never decomposed its spec (LOB-201).
+    ...(proposedIssues === undefined ? {} : { proposedIssues }),
   };
 };
+
+/**
+ * The proposed issues of a session this process owns (LOB-201), read through the validator the
+ * writer applied (`projectProposedIssues`), so the seed and any value a writer that bypassed it
+ * could have left read as none. The fold reads the same document from the log the same way.
+ */
+export const readProposedIssues = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<ProposedIssues | undefined, SessionError> =>
+  attempt("read proposed issues", () =>
+    harness.snapshot(ProposedIssuesDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectProposedIssues));
 
 /**
  * The budget document of a session this process owns (LOB-163), as JSON for `projectBudgetDoc` —
@@ -2113,6 +2135,7 @@ export const readLiveSnapshot = (
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
       const usage = yield* readSessionUsage(session.harness);
+      const proposed = yield* readProposedIssues(session.harness, session.root);
       return snapshotOf(
         state.value,
         tasks,
@@ -2121,6 +2144,7 @@ export const readLiveSnapshot = (
         mission,
         budget,
         usage,
+        proposed,
       );
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
@@ -2216,6 +2240,7 @@ export const liveSessionEvents = (
       // a subscriber that needs the new phase re-reads the snapshot rather than being told twice.
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
+      const proposed = yield* readProposedIssues(session.harness, session.root);
       yield* Queue.offer(
         queue,
         snapshotEvent(
@@ -2227,6 +2252,7 @@ export const liveSessionEvents = (
             mission,
             budget,
             reported,
+            proposed,
           ),
         ),
       );
@@ -2247,6 +2273,9 @@ export const readHistoricalSnapshot = (
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
     const mission = yield* readFoldedMission(storage);
+    const proposedIssues = projectProposedIssues(
+      yield* readDocument(storage, PROPOSED_ISSUES_DOC_KIND),
+    );
     const budget = projectBudgetDoc(
       yield* readDocument(storage, BUDGET_DOC_KIND),
       log.usage,
@@ -2283,6 +2312,8 @@ export const readHistoricalSnapshot = (
       approvals: pendingOf(ref.id, log.approvals),
       // The cap and its last stop are document state (LOB-163): a released session reports both.
       ...(budget === undefined ? {} : { budget }),
+      // Proposals are document state too (LOB-201): a released session still reports them.
+      ...(proposedIssues === undefined ? {} : { proposedIssues }),
     };
   });
 

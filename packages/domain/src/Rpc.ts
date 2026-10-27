@@ -52,6 +52,11 @@ import {
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import {
+  ProposalsRefused,
+  ProposeDecompositionInput,
+  ProposeDecompositionResult,
+} from "@repo/domain/Decomposition";
+import {
   CredentialError,
   OpenPullRequestPayload,
   PrError,
@@ -172,6 +177,15 @@ export class SessionRpc extends RpcGroup.make(
     payload: CurateSessionInput,
     success: CurateSessionResult,
     error: SessionError,
+  }),
+  // One decomposition of the session's spec into proposed child issues (LOB-201): the answer is the
+  // set it committed, which `getSession` reads back as `proposedIssues`. It creates nothing in any
+  // tracker and starts no session; a set the validator refuses crosses the wire as
+  // `ProposalsRefused`, naming every fault, and nothing is stored.
+  Rpc.make("proposeDecomposition", {
+    payload: ProposeDecompositionInput,
+    success: ProposeDecompositionResult,
+    error: Schema.Union([SessionError, ProposalsRefused]),
   }),
   Rpc.make("registerRepo", {
     payload: RegisterRepoInput,

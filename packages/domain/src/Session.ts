@@ -12,6 +12,7 @@
 import { Schema } from "effect";
 import { ApprovalRequest } from "@repo/domain/Approval";
 import { SessionId, Timestamp } from "@repo/domain/Ids";
+import { ProposedIssues } from "@repo/domain/Decomposition";
 import { MissionSnapshot } from "@repo/domain/Mission";
 
 // The two scalars every contract names. They are defined in `Ids` so `Approval` can name a session
@@ -435,6 +436,13 @@ export const SessionSnapshotFields = {
    * the transcript carries the same stop as a `budget` entry.
    */
   budget: Schema.optional(SessionBudget),
+  /**
+   * The child issues the session's newest decomposition proposed from its spec (LOB-201), as the
+   * `factory.proposedIssues` document holds them. Absent when the session never decomposed: a
+   * proposal set is never empty (`decodeProposedIssues`), so absent and "proposed nothing" cannot be
+   * confused. A proposal is not an issue — nothing exists in any tracker until it is approved.
+   */
+  proposedIssues: Schema.optional(ProposedIssues),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
