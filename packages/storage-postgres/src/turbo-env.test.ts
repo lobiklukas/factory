@@ -427,12 +427,43 @@ const sourceFiles = (directory: string): readonly string[] =>
     )
     .map((path) => `${REPO_ROOT}${directory}/${path}`);
 
-/** Where `apps/api` reads configuration: its own sources and the packages it boots. */
-const API_SOURCE_DIRECTORIES = [
-  "apps/api/src",
-  "packages/core/src",
-  "packages/storage-postgres/src",
-] as const;
+/** The workspace packages a package's `dependencies` name, as directories relative to the repo root. */
+const workspaceDependencies = (directory: string): readonly string[] => {
+  const manifest = JSON.parse(
+    readFileSync(`${REPO_ROOT}${directory}/package.json`, "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  return Object.entries(manifest.dependencies ?? {})
+    .filter(([, range]) => range.startsWith("workspace:"))
+    .map(([name]) => `packages/${name.replace("@repo/", "")}`);
+};
+
+/**
+ * Where `apps/api` reads configuration: its own sources and every workspace package it boots,
+ * followed transitively through `dependencies`, so a new package is scanned without editing this list.
+ */
+const apiSourceDirectories = (): readonly string[] => {
+  const seen = new Set<string>(["apps/api"]);
+  const pending = ["apps/api"];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    for (const dependency of workspaceDependencies(next)) {
+      if (!seen.has(dependency)) {
+        seen.add(dependency);
+        pending.push(dependency);
+      }
+    }
+  }
+  return [...seen].map((directory) => `${directory}/src`);
+};
+const API_SOURCE_DIRECTORIES = apiSourceDirectories();
+
+/** The reads whose name is not in `known`, each with the file that reads it. */
+const undeclaredReads = (
+  reads: ReadonlyMap<string, string>,
+  known: ReadonlySet<string>,
+): readonly string[] =>
+  [...reads]
+    .filter(([name]) => !known.has(name))
+    .map(([name, file]) => `${name} (read in ${file.slice(REPO_ROOT.length)})`);
 
 describe("the API's environment reads (LOB-257)", () => {
   const readsOf = (directories: readonly string[]) =>
@@ -472,6 +503,16 @@ describe("the API's environment reads (LOB-257)", () => {
     ]);
   });
 
+  it("scans every workspace package the API boots, harness included", () => {
+    expect([...API_SOURCE_DIRECTORIES].sort()).toEqual([
+      "apps/api/src",
+      "packages/core/src",
+      "packages/domain/src",
+      "packages/harness/src",
+      "packages/storage-postgres/src",
+    ]);
+  });
+
   it("reads the real sources: the trigger, Linear, Sentry and model variables are all seen", () => {
     // A scanner that silently matched nothing would make the guard below pass for any change.
     const names = [...readsOf(API_SOURCE_DIRECTORIES).keys()];
@@ -486,6 +527,7 @@ describe("the API's environment reads (LOB-257)", () => {
       "GITHUB_REVIEWER_TOKEN",
       "DATABASE_URL",
       "DATABASE_MAX_CONNECTIONS",
+      "ANTHROPIC_API_KEY",
     ]) {
       expect(names).toContain(name);
     }
@@ -501,20 +543,18 @@ describe("the API's environment reads (LOB-257)", () => {
       ...declared(dryRun, DEV_TASK),
       ...(taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? []),
     ]);
-    const undeclared = [...readsOf(API_SOURCE_DIRECTORIES)]
-      .filter(([name]) => !known.has(name))
-      .map(
-        ([name, file]) => `${name} (read in ${file.slice(REPO_ROOT.length)})`,
-      );
-    expect(undeclared).toEqual([]);
+    expect(undeclaredReads(readsOf(API_SOURCE_DIRECTORIES), known)).toEqual([]);
   }, 90_000);
 
   it("fails on a read nobody declared: the same comparison, against a temporary read", () => {
-    const known = new Set(["PORT"]);
-    const undeclared = environmentReads(
-      `const a = process.env["PORT"]; const b = process.env["BRAND_NEW_SETTING"];`,
-    ).filter((name) => !known.has(name));
-    expect(undeclared).toEqual(["BRAND_NEW_SETTING"]);
+    const reads = new Map(
+      environmentReads(
+        `const a = process.env["PORT"]; const b = process.env["BRAND_NEW_SETTING"];`,
+      ).map((name) => [name, `${REPO_ROOT}fixture.ts`] as const),
+    );
+    expect(undeclaredReads(reads, new Set(["PORT"]))).toEqual([
+      "BRAND_NEW_SETTING (read in fixture.ts)",
+    ]);
   });
 
   it("lists the trigger, Linear and Sentry variables under @repo/api#dev", () => {
