@@ -64,9 +64,13 @@ check's spend line. `spend.mjs` requires:
    both add up to the report's totals.
 6. **The dashboard's session.** The button's session moved `scratch × dashboard` by exactly one
    session and by its own spend. `scratch` is marked absent, and `dashboard` is a named actor.
-7. **The header** shows the report's total and count.
-8. **Polling.** With the page left open, a run by a new pair appears without a reload.
-9. **No console errors.**
+7. **Runs started from a card.** `seed-spend.ts` makes a board and two cards in `specifying` on a
+   repo of the run's own (`verify-spend-<tag>/board`). `factory board start` on one card puts exactly
+   one session under `…/board × cli`, and the card pane's **Start run** on the other puts exactly one
+   under `…/board × dashboard`. Neither run is sent a message, so only the count is required.
+8. **The header** shows the report's total and count.
+9. **Polling.** With the page left open, a run by a new pair appears without a reload.
+10. **No console errors.**
 
 Evidence: `.verify/evidence/latest/spend/` holds `spend.png`, `spend-polled.png`, `observed.json`
 (every check, the seeded sessions and their spend, the report, the page's rows), `api.log` and

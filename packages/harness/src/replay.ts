@@ -24,6 +24,7 @@ import { modelKey } from "./models";
 import type { ApprovalAsker, SessionPolicy } from "./policy";
 import { REPLAY_DOC_KIND } from "./projection";
 import {
+  ActorDoc,
   attempt,
   closeHarness,
   openSession,
@@ -149,6 +150,11 @@ export type ReplaySessionOptions = {
   readonly model: ModelAccess;
   /** The replay's title, committed to its log so a rebuild does not lose it. Empty: untitled. */
   readonly title?: string;
+  /**
+   * Who the replay's spend is attributed to (LOB-162): the source's actor, committed with the
+   * lineage so a replay never exists with an indexed actor its log does not record.
+   */
+  readonly actor?: string;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
   /** How the replay's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
@@ -172,7 +178,7 @@ export type ReplayedSession = OpenSession & {
 /**
  * Open a replay: the replay's own session, its link to the source, then the source's prompt.
  *
- * The link, the title and the repo binding are one commit, in the shape a fork copies its entries
+ * The link, the title, the repo binding, the cap and the actor are one commit, in the shape a fork copies its entries
  * in: a replay that exists at all exists with everything `rebuildIndexes` folds, so no window
  * leaves a log whose origin, title or binding a rebuild would have to guess. The prompt is the
  * second commit, because the model call it starts is the point of the exercise and nothing after it
@@ -228,7 +234,15 @@ export const replaySession = (
         );
         const cap =
           budget === undefined ? [] : [setBudget(tx, opened.root.id, budget)];
-        return Promise.all([doc, binding, ...title, ...cap]);
+        const actor =
+          options.actor === undefined
+            ? []
+            : [
+                tx.doc(ActorDoc, opened.root.id).then((document) => {
+                  document.actor = options.actor ?? "";
+                }),
+              ];
+        return Promise.all([doc, binding, ...title, ...cap, ...actor]);
       }, BACKGROUND_CONTEXT),
     ).pipe(
       Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),

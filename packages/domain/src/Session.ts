@@ -44,11 +44,12 @@ export type RepoSlug = typeof RepoSlug.Type;
  * This is a string the caller declares, as an approval decision's and a board move's actor already
  * are. LOB-20's credential changes where the value comes from; it does not change this shape, the
  * `sessions.actor` column, or the `factory.actor` document that records it. The checks keep a name
- * readable in the spend pane: nothing blank, no surrounding whitespace (two spellings of one actor
- * would be two rows), at most 200 characters.
+ * readable in the spend pane: nothing blank, no surrounding whitespace and no control character
+ * anywhere — an embedded newline or NUL renders as nothing, so two spellings of one actor would look
+ * like one name in two rows — and at most 200 characters.
  */
 export const SessionActor = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^\S(?:[\s\S]*\S)?$/)),
+  Schema.check(Schema.isPattern(/^[^\s\p{Cc}](?:[^\p{Cc}]*[^\s\p{Cc}])?$/u)),
   Schema.check(Schema.isMaxLength(200)),
 );
 export type SessionActor = typeof SessionActor.Type;

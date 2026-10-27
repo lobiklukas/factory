@@ -1604,7 +1604,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // written (`at` names no entry of the parent, say) removes that row again: an index row
           // with no log is invisible to the list — which joins the activity index — and would wait
           // for a rebuild to be swept, so it is not left behind.
-          const owner = yield* acquireOwnerWith(
+          yield* acquireOwnerWith(
             id,
             row,
             ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
@@ -1629,6 +1629,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                             baseRef: binding.baseRef,
                           },
                         }),
+                    // A fork continues its parent's work, so its spend is the parent's actor's
+                    // (LOB-162), committed with the lineage.
+                    ...(parent.actor === null ? {} : { actor: parent.actor }),
                     model: options.model,
                     cwd,
                     policy: sessionPolicy,
@@ -1649,10 +1652,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
               ),
           );
-          // A fork continues its parent's work, so its spend is the parent's actor's (LOB-162).
-          if (parent.actor !== null) {
-            yield* writeActor(owner.root, parent.actor);
-          }
           yield* touchActivity(id);
           return yield* describe(id, row);
         });
@@ -1720,7 +1719,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // starts it. A failure after the row is written removes the row again — an index row with
           // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
           // fork's does).
-          const owner = yield* acquireOwnerWith(
+          yield* acquireOwnerWith(
             id,
             row,
             ({ storage, cwd, policy: sessionPolicy, run, verify }) =>
@@ -1731,6 +1730,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 target: storage,
                 model: target,
                 title: source.title,
+                // A replay is its source's task run again, so its spend is the source's actor's
+                // (LOB-162), committed with the lineage.
+                ...(source.actor === null ? {} : { actor: source.actor }),
                 cwd,
                 policy: sessionPolicy,
                 run,
@@ -1750,10 +1752,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ).pipe(Effect.ignore),
             ),
           );
-          // A replay is its source's task run again, so its spend is the source's actor's (LOB-162).
-          if (source.actor !== null) {
-            yield* writeActor(owner.root, source.actor);
-          }
           yield* touchActivity(id);
           return yield* describe(id, row);
         });

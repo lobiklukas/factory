@@ -45,6 +45,10 @@ describe("a create's actor (LOB-162)", () => {
     ["only whitespace", "   "],
     ["a leading space", " cli"],
     ["a trailing newline", "cli\n"],
+    ["an embedded newline", "a\nb"],
+    ["an embedded tab", "a\tb"],
+    ["an embedded NUL", "a\u0000b"],
+    ["a lone control character", "\u0007"],
     ["a name over 200 characters", "x".repeat(201)],
     ["a number", 7],
   ])("refuses %s", (_label, actor) => {

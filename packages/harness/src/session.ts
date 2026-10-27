@@ -1361,6 +1361,8 @@ type ForkPreamble = {
   readonly binding?: RepoBinding;
   /** The cap the fork inherits (LOB-163), in the same commit, so no run starts under it uncapped. */
   readonly budget?: BudgetSeed;
+  /** The parent's actor (LOB-162), in the same commit, so a rebuilt fork keeps its attribution. */
+  readonly actor?: string;
 };
 
 /**
@@ -1372,8 +1374,8 @@ type ForkPreamble = {
  * names something later is a parent log whose entries do not precede their marker — a broken log
  * rather than a fork to guess at, so it fails the commit instead of writing a wrong transcript.
  *
- * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
- * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
+ * The lineage, the repo binding, the cap and the actor are documents in the same commit, so a fork
+ * that exists at all exists with all of them: there is no window in which a fork is readable but `rebuildIndexes` would fold
  * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
  * parent's prefix.
  */
@@ -1418,6 +1420,13 @@ const copyEntries = (
         ? undefined
         : setBudget(tx, conversationId, preamble.budget),
     )
+    .then(() =>
+      preamble.actor === undefined
+        ? undefined
+        : tx.doc(ActorDoc, conversationId).then((doc) => {
+            doc.actor = preamble.actor ?? "";
+          }),
+    )
     .then(() => ({ parent: preamble.parent, at }));
 };
 
@@ -1433,6 +1442,11 @@ export type ForkSessionOptions = {
   readonly lineage: string;
   /** The parent's repo binding, committed into the fork's log beside the lineage. */
   readonly binding?: RepoBinding;
+  /**
+   * Who the fork's spend is attributed to (LOB-162): the parent's actor, committed beside the
+   * lineage so a fork never exists with an indexed actor its log does not record.
+   */
+  readonly actor?: string;
   readonly model: ModelAccess;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
@@ -1509,6 +1523,7 @@ export const forkSession = (
                 ? {}
                 : { binding: options.binding }),
               ...(budget === undefined ? {} : { budget }),
+              ...(options.actor === undefined ? {} : { actor: options.actor }),
             }),
           BACKGROUND_CONTEXT,
         ),

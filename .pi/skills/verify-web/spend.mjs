@@ -9,6 +9,9 @@
 //             its own (`person:amy-<tag>`, `person:bob-<tag>`), through `createSession({ actor })`;
 //             one `factory run --repo` from the real CLI (its default actor, `cli`); and one session
 //             from the dashboard's own **New session** button (actor `dashboard`, no repo)
+//   card      a board of its own on `verify-spend-<tag>/board` (`seed-spend.ts`); `factory board
+//             start` on one card puts one session under (board, cli), and the card pane's **Start
+//             run** on the other puts one under (board, dashboard)
 //   page      the rail's **Spend** opens `/spend`; its repo × actor table is `listSpend`'s rows, in
 //             order, with the same counts and costs; the pairs this run made carry exactly the
 //             sessions it put there, at the sum of `listSessions`' `costTotal` for those sessions
@@ -39,6 +42,7 @@ const ROOT = path.resolve(
 const TAG = randomBytes(4).toString("hex");
 const WEB = `verify-spend-${TAG}/web`;
 const API = `verify-spend-${TAG}/api`;
+const BOARD = `verify-spend-${TAG}/board`;
 const AMY = `person:amy-${TAG}`;
 const BOB = `person:bob-${TAG}`;
 
@@ -210,6 +214,89 @@ try {
     id: dashboardId,
     spent: await settled(dashboardId),
   };
+
+  // --- runs started from a card: `factory board start` is the CLI's, Start run the dashboard's ---
+  // The board is on a repo of this run's own, so each pair holds exactly the one run started here.
+  const seeded = spawnSync(
+    "bun",
+    [path.join(ROOT, ".pi/skills/verify-web/seed-spend.ts")],
+    {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: { ...process.env, REPO: BOARD },
+    },
+  );
+  const board = JSON.parse(
+    (seeded.stdout ?? "").trim().split("\n").at(-1) || "null",
+  );
+  observed.board = {
+    seed: board,
+    status: seeded.status,
+    stderr: (seeded.stderr ?? "").slice(0, 2000),
+  };
+  if (seeded.status !== 0 || board === null) {
+    throw new Error(`seed-spend failed: ${seeded.stderr ?? ""}`);
+  }
+  const boardStart = spawnSync(
+    "bun",
+    [
+      "run",
+      path.join(ROOT, "apps/cli/src/index.ts"),
+      "board",
+      "start",
+      "--task",
+      board.cli,
+      "--api",
+      API_URL,
+    ],
+    { encoding: "utf8", timeout: 120_000 },
+  );
+  const boardStartId = /^session (ses_\S+)$/m.exec(
+    boardStart.stdout ?? "",
+  )?.[1];
+  observed.board.cli = {
+    status: boardStart.status,
+    session: boardStartId ?? null,
+    stdout: (boardStart.stdout ?? "").slice(0, 2000),
+    stderr: (boardStart.stderr ?? "").slice(0, 2000),
+  };
+  assert(
+    "factory board start opens a run on the card and exits cleanly",
+    boardStart.status === 0 && boardStartId !== undefined,
+    `exit=${boardStart.status} session=${boardStartId ?? "none"}`,
+  );
+  await page.goto(
+    `${WEB_URL}/boards/${board.boardId}?card=${board.dashboard}`,
+    {
+      waitUntil: "domcontentloaded",
+    },
+  );
+  const startRun = page.locator(
+    `[data-card-pane='${board.dashboard}'] [data-start-run]`,
+  );
+  await startRun.waitFor({ timeout: 20_000 });
+  await startRun.click();
+  await page.waitForFunction(
+    () =>
+      /^ses_/.test(new URL(window.location.href).searchParams.get("run") ?? ""),
+    null,
+    { timeout: 20_000 },
+  );
+  const cardRunId = new URL(page.url()).searchParams.get("run");
+  observed.board.dashboard = { session: cardRunId };
+  const afterBoard = await rpc("listSpend", {});
+  const boardCli = pairOf(afterBoard, BOARD, "cli");
+  const boardDashboard = pairOf(afterBoard, BOARD, "dashboard");
+  assert(
+    "a run from factory board start is counted under the card's repo × cli",
+    boardCli?.sessions === 1,
+    `${BOARD} × cli ${JSON.stringify(boardCli ?? null)} (session ${boardStartId ?? "none"})`,
+  );
+  assert(
+    "a run from the card pane's Start run is counted under the card's repo × dashboard",
+    boardDashboard?.sessions === 1 && cardRunId !== null,
+    `${BOARD} × dashboard ${JSON.stringify(boardDashboard ?? null)} (session ${cardRunId ?? "none"})`,
+  );
 
   // --- the page: reached the way an operator reaches it ------------------------------------------
   await page
