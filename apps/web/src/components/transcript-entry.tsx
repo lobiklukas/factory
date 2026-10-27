@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type { TranscriptEntry } from "@repo/domain/Session";
-import { ChevronRightIcon, CircleStopIcon, TerminalIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  CircleStopIcon,
+  GitPullRequestIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { cn } from "cn";
 import type { SpendDelta } from "@/lib/compaction-view";
 import { spendHeading } from "@/lib/compaction-view";
@@ -112,6 +117,20 @@ export const TranscriptRow = ({
       <Marker variant="border" className="text-destructive" role="status">
         <MarkerIcon>
           <CircleStopIcon strokeWidth={1.75} />
+        </MarkerIcon>
+        <MarkerContent>{entry.text}</MarkerContent>
+      </Marker>
+    );
+  }
+
+  // A line a fork inherited (LOB-211) is history the control plane kept, not the
+  // agent speaking: a muted marker naming whose PR it was, so the fork's
+  // transcript never reads as if this session opened it.
+  if (entry.kind === "inherited") {
+    return (
+      <Marker variant="border" className="text-muted-foreground">
+        <MarkerIcon>
+          <GitPullRequestIcon strokeWidth={1.75} />
         </MarkerIcon>
         <MarkerContent>{entry.text}</MarkerContent>
       </Marker>
