@@ -7,13 +7,16 @@
  * `session.test.ts`'s "compaction" block, and the RPC path is `.pi/skills/verify-api`.
  */
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import { Effect, Exit } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   compactionPolicyFor,
   createModelAccess,
   fauxAnswer,
   isFauxTurnStep,
+  parseFauxModelScripts,
 } from "./models";
+import { VERIFY_TOOL } from "./verify";
 
 /** pi-durable's pinned defaults, which a large window must keep to the token. */
 const PINNED = {
@@ -185,4 +188,89 @@ describe("the sleeping faux script", () => {
     expect(isFauxTurnStep([user("  <conversation>x")])).toBe(false);
     expect(isFauxTurnStep([user("fix the bug")])).toBe(true);
   }, 10_000);
+});
+
+/**
+ * A script per faux model (LOB-86): the builder role's model writes and verifies, every other model
+ * keeps the process's script. `.pi/skills/verify-board/drive.sh`'s build phase is the end-to-end
+ * proof; these cases pin which model gets which step.
+ */
+describe("a faux model's own script", () => {
+  const access = createModelAccess("faux", {
+    fauxCommand: "sleep 8; echo faux-ok",
+    fauxModels: ["faux-1", "builder"],
+    fauxModelScripts: new Map([
+      ["builder", { command: "git commit -am build", verify: true }],
+    ]),
+  });
+  const turn = (modelId: string, messages: Message[]) => {
+    const model = access.models.getModel("faux", modelId);
+    if (model === undefined) throw new Error(`faux does not serve ${modelId}`);
+    return access.models.completeSimple(model, { messages });
+  };
+  const toolCall = (message: AssistantMessage) =>
+    message.content.flatMap((part) =>
+      part.type === "toolCall"
+        ? [{ name: part.name, arguments: part.arguments }]
+        : [],
+    );
+  const user: Message = { role: "user", content: "go", timestamp: 0 };
+  const bashResult: Message = {
+    role: "toolResult",
+    toolCallId: "call_1",
+    toolName: "bash",
+    content: [{ type: "text", text: "built" }],
+    isError: false,
+    timestamp: 0,
+  };
+
+  it("runs the model's command under that model, and the process's under any other", async () => {
+    expect(toolCall(await turn("builder", [user]))).toEqual([
+      { name: "bash", arguments: { command: "git commit -am build" } },
+    ]);
+    expect(toolCall(await turn("faux-1", [user]))).toEqual([
+      { name: "bash", arguments: { command: "sleep 8; echo faux-ok" } },
+    ]);
+  });
+
+  it("verifies after the bash turn only where the model's script says so", async () => {
+    expect(toolCall(await turn("builder", [user, bashResult]))).toEqual([
+      { name: VERIFY_TOOL, arguments: {} },
+    ]);
+    const plain = await turn("faux-1", [user, bashResult]);
+    expect(toolCall(plain)).toEqual([]);
+    expect(plain.content).toEqual([{ type: "text", text: "built (re: go)" }]);
+  });
+});
+
+describe("parseFauxModelScripts", () => {
+  const parse = (text: string) =>
+    Effect.runSyncExit(parseFauxModelScripts(text, ["faux-1", "builder"]));
+
+  it("reads a model's command and verify flag, and blank as no table", () => {
+    const parsed = parse(
+      '{"builder": {"command": "bash build.sh", "verify": true}}',
+    );
+    expect(Exit.isSuccess(parsed) && [...parsed.value]).toEqual([
+      ["builder", { command: "bash build.sh", verify: true }],
+    ]);
+    const blank = parse("  ");
+    expect(Exit.isSuccess(blank) && blank.value.size).toBe(0);
+  });
+
+  it("refuses a model the faux backend does not publish, naming it", () => {
+    const parsed = parse('{"bulider": {"verify": true}}');
+    expect(Exit.isFailure(parsed)).toBe(true);
+    expect(JSON.stringify(parsed)).toContain(
+      "faux model script for bulider, which the faux backend does not publish",
+    );
+  });
+
+  it("refuses a table that is not one", () => {
+    for (const text of ['["builder"]', '{"builder": {"verify": "yes"}}', "{"]) {
+      const parsed = parse(text);
+      expect(Exit.isFailure(parsed)).toBe(true);
+      expect(JSON.stringify(parsed)).toContain("faux model scripts are not a");
+    }
+  });
 });

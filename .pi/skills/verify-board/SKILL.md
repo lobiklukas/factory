@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run, through `factory board create|ls|show|move|comment|start` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|ls|show|move|comment|start` and `factory pr` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -33,17 +33,20 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim           | only a person crosses plan approval, and the refusal names the gate  |
 | the refusals wrote nothing       | `board show` after them: the last accepted column and revision                        | a refused move is not a half-applied one                             |
 | the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                 | the browser shows what the CLI left, and offers a person the gate    |
+| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal  | the PR and its evidence are real, and only a person reaches `done`   |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt           | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through | a refusal names the requirement; evidence is a condition of the move |
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh` and `board-create.sh` each exit
-non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s (its specify phase) and
-`web.mjs`'s exit codes into its own.
+non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s (its specify phase), `web.mjs`'s and
+`build.ts`'s (its build phase) exit codes into its own.
 
 ## Launch
 
 ```sh
-./up.sh          # api on :9400, web on :3400, faux model (sleeps, then asks), one board seeded
+./up.sh          # api on :9400, web on :3400, GitHub fake on :9403, faux model (sleeps, then asks;
+                 # the builder role's writes and verifies), one board seeded over a fixture checkout
+BOARD_GITHUB=off ./up.sh   # no forge and no credential: the drive's PR phase must fail, naming why
 ./doctor.sh      # read-only; fails loudly when Postgres on 5442 is down
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
 ```
@@ -55,8 +58,12 @@ directory it runs in and a ralph worktree asking for 5442 a second time fights t
 applied (LOB-21), so `/` answers a moment before a card can be read.
 
 `seed.ts` makes the board through `TaskService.createBoard` (LOB-208) — the writer `factory board
-create` reaches — over the seeded `default` definition, pinned to version 1 (`SEED_CARD=0`, so no
-card). It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
+create` reaches — over the seeded `default` definition at its newest version
+(`SEED_DEFINITION_VERSION=newest`, so `review` declares `verified`; `SEED_CARD=0`, so no card), over a
+repository it registers through the API's `registerRepo` with `.verify/run/board-repo` as its checkout
+(`SEED_REPO_ROOT`): a fixture with a passing `verify-web` skill, so a run on the board is a git
+worktree with a branch the PR step can publish. `create.ts` names that repository on the card, as a
+trigger's card does. It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
 and `drive.sh` read. The drive's card is its own, created by `create.ts` over the API at the start of
 every drive, so the drive can run twice against one instance — even after a drive that failed
 part-way, because the checks find the drive's card by id in its lane rather than as the lane's only
@@ -71,6 +78,15 @@ exported one is ignored, because the probes need its sleep (the busy control) an
 read was not refused). The 8 s leaves the busy probe, which starts after `board start` returns, the
 tmux round-trip and a cold `bun`, several seconds of margin under load. A run on an answered card
 never asks.
+
+The build phase (LOB-86) needs a run of another kind on the same instance: under faux a model is its
+script, so `ROLE_MODELS=builder=faux/builder` gives the `building` column's role its own model, and
+`FAUX_MODEL_SCRIPTS`' `builder` row makes that model write `apps/web/src/card.ts`, commit it on the
+run's branch and call `verify`. Both are fixed, like `FAUX_COMMAND`. The PR goes to the loopback GitHub
+fake (`.pi/skills/verify-api/github-fake.ts`) on `GITHUB_PORT` (9403), its ledger in
+`.verify/run/github-ledger.json`; the API is started with `GITHUB_API_URL` at it, a fake `GITHUB_TOKEN`,
+and every GitHub variable of the caller's shell unset. `BOARD_GITHUB=off` starts no fake and gives no
+token (and a closed loopback port as the forge): the case in which the drive must fail.
 
 The dashboard (`apps/web`'s `bun run dev`, pid in `.verify/run/web.pid`) points at this API, whose
 `ALLOWED_ORIGINS` names the web origin. `up.sh` waits for both. Override the ports with `API_PORT` and
@@ -116,7 +132,7 @@ restart between ask and answer must lose neither. Its two non-CLI facts (is the 
 was the next run's recorded prompt) are probed by `ask.ts`. See `features/ask.md`.
 
 Environment: `API_URL` (default `http://localhost:9400`), `WEB_URL` (default the recorded web port),
-`EVIDENCE_DIR`.
+`EVIDENCE_DIR`. `up.sh` also takes `GITHUB_PORT` and `BOARD_GITHUB` (`fake` | `off`).
 
 The phases, in order: **create** (`create.ts`, over RPC) → `ls` → `show` → a declared move to
 `specifying` → the **stale** refusal (the revision the card had before that move) → the **undeclared**
@@ -127,7 +143,13 @@ recorded prompt quotes the answer verbatim (`ask.ts`; see `features/specify.md`)
 `planning` at the revision `show` printed → the
 **human-gate** refusal (`planning → building` with `--actor <that ses_…>`) → `show` again (the
 refusals wrote nothing) → **web** (`web.mjs` in headless Chrome: the card's lane, the pane's revision,
-`building` offered and marked `plan approval`).
+`building` offered and marked `plan approval`) → **build** (LOB-86; see `features/build.md`): a
+person's `planning → building`, `board start` in `building`, the run's `verify` record (`build.ts`), a
+non-empty `git diff main...factory/<run>`, `factory pr <run>` and its link checked against the fake's
+ledger and body (`build.ts`), `factory ls` showing it → **review**: the run's own `building → review`,
+a person's verdict as a note → **merge**: the run's `review → done` refused at the merge gate, the
+person's move to `done`. With no PR path the drive prints `drive: the PR path is missing — <reason>`
+and exits non-zero; it never makes up a link.
 
 It runs `factory` in a **private tmux server** (`.verify/run/board-tmux.sock`), so it cannot touch a
 tmux session you are using. Each command is typed into the pane and followed by a sentinel the shell
@@ -142,14 +164,18 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `create.json` — the created card, its `getTask` read-back, and the create phase's checks
 - `ls.txt`, `show.txt`, `move.txt`, `move-stale.txt`, `move-undeclared.txt`, `start.txt`,
   `show-asked.txt`, `comment.txt`, `show-answered.txt`, `start-next.txt`, `move-planning.txt`,
-  `move-gate.txt`, `show-after.txt` — raw panes, one per phase
+  `move-gate.txt`, `show-after.txt`, `move-building.txt`, `start-build.txt`, `pr.txt`, `ls-pr.txt`,
+  `move-review.txt`, `verdict.txt`, `show-verdict.txt`, `move-merge-run.txt`, `move-merge.txt`,
+  `show-done.txt` — raw panes, one per phase
+- `build-built.json`, `build-pr.json`, `pr-body.md`, `build-diff.txt` — the build phase's probes, the
+  PR body as the fake received it, and git's diff of the run's branch
 - `specify-busy.json`, `specify-parked.json`, `specify-told.json` — the specify phase's probes:
   their checks and facts, the next run's recorded `task_thread` section among them
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
 - `observed.json` — every check with its detail, the board id, the card id and both session ids.
-  `drive.sh` deletes `create.json`, `specify-*.json`, `web.json`, `web-board.png` and
-  `observed.json` before it starts,
+  `drive.sh` deletes `create.json`, `specify-*.json`, `build-*.json`, `pr-body.md`, `web.json`,
+  `web-board.png` and `observed.json` before it starts,
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
@@ -195,9 +221,12 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
   number it got back.
 - **The actor decides the gates.** `--actor` defaults to `cli`, a person. A session id is a run, and
   a run cannot cross `planning → building` or `review → done` (B5) — that is a different refusal
-  (`human_gate_required`), not a bug. The drive proves it with the run's own id and does not cross
-  the gate as a person afterwards: that half is `packages/core`'s `TaskService` case, and stopping
-  in `planning` leaves the dashboard phase a card whose next move is the gate the run was refused.
+  (`human_gate_required`), not a bug. The drive proves both with a run's own id: the plan approval
+  before the dashboard phase (so the browser reads a card whose next move is the gate the run was
+  refused), and the merge in the build phase, where the person's move then reaches `done`.
+- **The board is one per repository.** Every drive against one `./up.sh` instance opens its PR on the
+  same repository, so `build.ts` finds this drive's request and PR in the ledger by the run's branch
+  (`factory/<run>`), not by being the only one.
 - **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; the drive
   and `ask.sh` pass one so the run takes a turn.
 - **The faux asks only once per card.** `FAUX_ASK` makes the script call `ask` when the run was

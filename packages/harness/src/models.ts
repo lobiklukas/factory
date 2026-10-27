@@ -28,7 +28,7 @@ import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 
@@ -307,7 +307,76 @@ export type ModelAccessOptions = {
    * real provider's cost does. Absent or `0`: free, as before.
    */
   readonly fauxCost?: number | undefined;
+  /**
+   * A script per published faux model id, overriding `fauxCommand` and `fauxVerify` for a request
+   * made under that model (LOB-86). Under the faux backend a model *is* its script, so a role that
+   * runs another model (`ROLE_MODELS`, LOB-207) is how one process plays two kinds of run: a
+   * read-only specifier whose command only sleeps and prints, and a builder whose command writes
+   * and commits a change and then verifies it. A model with no entry runs the process's script.
+   */
+  readonly fauxModelScripts?: FauxModelScripts | undefined;
 };
+
+/** What one faux model's script does differently from the process's (`fauxModelScripts`). */
+export type FauxScript = {
+  /** The command its first turn calls `bash` with, instead of `fauxCommand`. */
+  readonly command?: string | undefined;
+  /** Whether it calls `verify` after its `bash` turn, instead of `fauxVerify`. */
+  readonly verify?: boolean | undefined;
+};
+
+/** Faux model id → its script. */
+export type FauxModelScripts = ReadonlyMap<string, FauxScript>;
+
+/** `FAUX_MODEL_SCRIPTS` is not a script table, or names a model the faux backend does not publish. */
+export class InvalidFauxModelScripts extends Schema.TaggedError<InvalidFauxModelScripts>()(
+  "InvalidFauxModelScripts",
+  { message: Schema.String },
+) {}
+
+/** The table as a deployment writes it: a JSON object of model id → `{command?, verify?}`. */
+const FauxModelScriptsJson = Schema.fromJsonString(
+  Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      command: Schema.optional(Schema.NonEmptyString),
+      verify: Schema.optional(Schema.Boolean),
+    }),
+  ),
+);
+
+/**
+ * Read the faux script table (`FAUX_MODEL_SCRIPTS`) against the model ids the faux backend
+ * publishes. Blank is an empty table. Anything that does not decode, or a row for a model nobody
+ * can run, fails the boot rather than being ignored: a script keyed by a typo would leave the run
+ * it was meant for on the process's script, and the verification that relied on it would prove
+ * the wrong run.
+ */
+export const parseFauxModelScripts = (
+  text: string,
+  published: readonly string[],
+): Effect.Effect<FauxModelScripts, InvalidFauxModelScripts> =>
+  Effect.gen(function* () {
+    if (text.trim().length === 0) return new Map();
+    const table = yield* Schema.decodeEffect(FauxModelScriptsJson)(text).pipe(
+      Effect.mapError(
+        (cause) =>
+          new InvalidFauxModelScripts({
+            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?}} object: ${cause.message}`,
+          }),
+      ),
+    );
+    const scripts = new Map<string, FauxScript>();
+    for (const [model, script] of Object.entries(table)) {
+      if (!published.includes(model)) {
+        return yield* new InvalidFauxModelScripts({
+          message: `faux model script for ${model}, which the faux backend does not publish (it publishes ${published.join(", ")})`,
+        });
+      }
+      scripts.set(model, script);
+    }
+    return scripts;
+  });
 
 /** An answer with `amount` added to what it cost, as a provider reports its own price. */
 const charge = (
@@ -435,14 +504,22 @@ export const createFauxModelAccess = (
   const sleepMs = options.fauxSleepMs ?? 0;
   // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
   // It re-queues before it sleeps: a request that arrives during the nap still finds a step.
-  const repeat: FauxResponseFactory = (context, streamOptions) => {
+  // A request carries the model it was made under, so a model's own script is looked up per
+  // request rather than per process (`fauxModelScripts`).
+  const repeat: FauxResponseFactory = (
+    context,
+    streamOptions,
+    _state,
+    model,
+  ) => {
     faux.appendResponses([repeat]);
+    const script = options.fauxModelScripts?.get(model.id);
     const answer = () =>
       fauxAnswer(
         context.messages,
-        fauxCommand,
+        script?.command ?? fauxCommand,
         options.fauxCuration,
-        options.fauxVerify ?? false,
+        script?.verify ?? options.fauxVerify ?? false,
         options.fauxAsk,
         options.fauxEveryTurn ?? false,
       );

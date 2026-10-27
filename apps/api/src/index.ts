@@ -14,6 +14,7 @@ import {
   FAUX_COMMAND,
   FAUX_MODEL_ID,
   modelKey,
+  parseFauxModelScripts,
   parseRoleModels,
   resolveRoleModels,
   type ModelBackend,
@@ -148,6 +149,16 @@ const ModelConfig = Config.all({
    * arrive while it is in flight (`.pi/skills/verify-cli/steer.sh`). `0`: the script answers at once.
    */
   fauxSleepMs: Config.Int("FAUX_SLEEP_MS").pipe(Config.withDefault(0)),
+  /**
+   * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
+   * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
+   * change while every other run keeps `FAUX_COMMAND` — what `.pi/skills/verify-board/drive.sh`
+   * needs to take one card from a read-only specify run to a PR. A row for a model the faux backend
+   * does not publish fails the boot (`parseFauxModelScripts`). Empty: every model runs one script.
+   */
+  fauxModelScripts: Config.String("FAUX_MODEL_SCRIPTS").pipe(
+    Config.withDefault(""),
+  ),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -331,6 +342,19 @@ const HttpLive = Effect.gen(function* () {
   }
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).
+  // The default first, so a run with no role row still talks to it (LOB-207).
+  const fauxModels = [
+    ...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)]),
+  ];
+  const fauxModelScripts = yield* parseFauxModelScripts(
+    model.fauxModelScripts,
+    fauxModels,
+  );
+  if (backend === "faux" && fauxModelScripts.size > 0) {
+    yield* Effect.logInfo(
+      `faux model scripts: ${[...fauxModelScripts.keys()].join(", ")} (FAUX_MODEL_SCRIPTS)`,
+    );
+  }
   const modelAccess = createModelAccess(backend, {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
@@ -338,8 +362,8 @@ const HttpLive = Effect.gen(function* () {
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
-    // The default first, so a run with no role row still talks to it (LOB-207).
-    fauxModels: [...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)])],
+    fauxModels,
+    fauxModelScripts,
   });
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
   yield* Effect.logInfo(

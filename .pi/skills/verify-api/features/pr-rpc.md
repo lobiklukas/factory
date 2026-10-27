@@ -18,8 +18,10 @@ The failures cross the wire typed: `SessionError` (no such session, a session bo
 live in `@repo/domain/PullRequest`, and `@repo/core` re-exports them, so the step and its clients
 decode one set of classes.
 
-**How a user reaches it.** Through any RPC client — the CLI and the dashboard build the same one. No
-CLI command or dashboard button calls it yet; this drive is its client.
+**How a user reaches it.** Through any RPC client — the CLI and the dashboard build the same one.
+`factory pr <session-id>` (LOB-86) is the CLI's caller, proven in a terminal by
+`.pi/skills/verify-board/drive.sh`'s build phase; no dashboard button calls it yet. This drive is a
+client of its own.
 
 **How the skill drives it.** `./pr-rpc.sh` starts its own loopback GitHub fake (`./github-fake.ts`,
 ledger on disk) and its own API with `GITHUB_API_URL` pointing at it and a `GITHUB_TOKEN` the fake

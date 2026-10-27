@@ -3,7 +3,11 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: **2026-10-27**, `agent/LOB-85`, `MODEL_BACKEND=faux` —
+Status reflects the last verified runs: **2026-10-27**, `agent/LOB-86`, `MODEL_BACKEND=faux` —
+`./drive.sh` with its build, PR, review and merge phases, API on `:9500`, web on `:3500`, the GitHub
+fake on `:9503`, **42/42** required drive checks passed, with `build.ts`'s **3/3** (`build-built.json`)
+and **8/8** (`build-pr.json`) folded in, twice against one `./up.sh` instance, and exit 1 naming
+`credential_error` under `BOARD_GITHUB=off` ([build.md](build.md)). Before it, `agent/LOB-85` —
 `./drive.sh` in tmux, API on `:9500`, web on `:3500`, **30/30** required drive checks passed
 (`observed.json` beside the raw panes), with `create.ts`'s **2/2** (`create.json`), the specify
 phase's probes' **11/11** (`specify-busy.json`, `specify-parked.json`, `specify-told.json`) and
@@ -24,6 +28,7 @@ passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `as
 | `factory board start`           | passing | [start.md](start.md)         |
 | the board read back in the web  | passing | [dashboard.md](dashboard.md) |
 | specify, ask, answer (the card) | passing | [specify.md](specify.md)     |
+| build, PR + evidence, merge     | passing | [build.md](build.md)         |
 | the ask on the task             | passing | [ask.md](ask.md)             |
 | `requires[]` on exit            | passing | [requires.md](requires.md)   |
 

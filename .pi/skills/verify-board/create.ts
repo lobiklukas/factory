@@ -41,9 +41,13 @@ const create = Effect.gen(function* () {
   // Decoded, not cast: a board id that cannot be one is this script's bug, not a server refusal.
   const boardId = yield* Schema.decodeEffect(BoardInstanceId)(BOARD_ID);
   const client = yield* RpcClient.make(RpcApi);
+  // The card names the board's repository, as a trigger's card does (the label → repo mapping):
+  // every run on it is bound to that repo, which is what gives the build run a branch to publish.
+  const board = yield* client.getBoard({ boardId });
   const created = yield* client.createTask({
     boardId,
     title: TITLE,
+    repo: board.instance.repo,
     actor: "verify-board",
   });
   const read = yield* client.getTask({ taskId: created.id });
@@ -59,10 +63,11 @@ const create = Effect.gen(function* () {
     "getTask reads back the card createTask returned",
     read.id === created.id &&
       read.title === TITLE &&
+      read.repo === board.instance.repo &&
       read.column === created.column &&
       read.revision === created.revision &&
       read.boardId === boardId,
-    `${read.id} "${read.title}" ${read.column} r${read.revision} on ${read.boardId}`,
+    `${read.id} "${read.title}" ${read.column} r${read.revision} on ${read.boardId} (${read.repo ?? "no repo"})`,
   );
   return created;
 });
@@ -76,6 +81,7 @@ const line = await Effect.runPromise(
         revision: task.revision,
         column: task.column,
         title: task.title,
+        repo: task.repo ?? "",
       }),
     ),
     Effect.catch((error) =>

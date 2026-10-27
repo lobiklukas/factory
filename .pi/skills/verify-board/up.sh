@@ -20,14 +20,36 @@
 # skill must not silently change the instance. The sleep is 8 s, not ask.sh's 4 s, because the busy
 # probe here starts after `board start` returns, a tmux round-trip and a cold `bun` start — about
 # 1 s on an idle machine, and more under a parallel gate.
+#
+# The build phase (LOB-86) needs a second kind of run on the same instance: one in `building` that
+# writes a change, commits it and verifies it. Under faux a model *is* its script, so the builder
+# role runs its own model (`ROLE_MODELS=builder=faux/builder`, LOB-207) whose script is
+# `FAUX_MODEL_SCRIPTS`'s `builder` row; every other run keeps FAUX_COMMAND. Both are fixed for the
+# reason FAUX_COMMAND is. The card's repository is registered over a fixture checkout
+# (.verify/run/board-repo) carrying a passing `verify-web` skill, so a run is a git worktree of it
+# with a branch the PR step can measure and publish.
+#
+# The PR goes to a loopback GitHub fake (`.pi/skills/verify-api/github-fake.ts`, LOB-179) on
+# GITHUB_PORT (9403 by default), its ledger on disk in .verify/run/github-ledger.json — the oracle
+# the drive reads the PR's link and body back from. The API gets `GITHUB_API_URL` pointing at it and
+# a `GITHUB_TOKEN` the fake never reads. `BOARD_GITHUB=off` starts no fake and hands the API no
+# credential (and a closed loopback port as its forge, so nothing can reach a real one): the "PR
+# path is missing" case, under which `drive.sh` must fail naming the reason, not invent a link.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
 WEB_PORT="${WEB_PORT:-3400}"
 RUN_DIR="$ROOT/.verify/run"
+GITHUB_PORT="${GITHUB_PORT:-9403}"
+BOARD_GITHUB="${BOARD_GITHUB:-fake}"
 FAUX_COMMAND="sleep 8; echo faux-ok"
 FAUX_ASK="${FAUX_ASK:-Which Postgres major does this card target?}"
+# The builder's change: one file in the web surface, committed on the run's own branch, so the
+# branch differs from `main` and the fixture's verify-web skill is the one `verify` runs.
+BUILD_CHANGE="mkdir -p apps/web/src && echo 'export const card = 1;' > apps/web/src/card.ts && git add apps/web/src/card.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m 'build the card' && echo built"
+ROLE_MODELS="builder=faux/builder"
+FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: true } }))')"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL
 
@@ -41,9 +63,15 @@ fi
 # Both ports must be free before anything starts: Vite runs with strictPort, so on a held WEB_PORT
 # ours exits while the holder keeps answering 200, and the readiness loop below would call a
 # stranger's dashboard ready.
-for port in "$API_PORT" "$WEB_PORT"; do
+case "$BOARD_GITHUB" in
+  fake | off) ;;
+  *) echo "BOARD_GITHUB must be fake or off, not $BOARD_GITHUB" >&2; exit 1 ;;
+esac
+PORTS=("$API_PORT" "$WEB_PORT")
+[ "$BOARD_GITHUB" = "fake" ] && PORTS+=("$GITHUB_PORT")
+for port in "${PORTS[@]}"; do
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "port $port is already held: $(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" pid "$2}') — pick another API_PORT/WEB_PORT" >&2
+    echo "port $port is already held: $(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" pid "$2}') — pick another API_PORT/WEB_PORT/GITHUB_PORT" >&2
     exit 1
   fi
 done
@@ -70,13 +98,62 @@ if [ ! -d "$SESSION_ROOT/.git" ]; then
   git -C "$SESSION_ROOT" push -q origin main
 fi
 
+# The fixture checkout the card's repository is registered over: `main` carries a verify-web skill
+# that passes, so the build run's `verify` call has a driver to run for the surface it changed. No
+# remote: nothing a run does in its worktree can reach one.
+BOARD_REPO="$RUN_DIR/board-repo"
+if [ ! -d "$BOARD_REPO/.git" ]; then
+  rm -rf "$BOARD_REPO"
+  mkdir -p "$BOARD_REPO/.pi/skills/verify-web"
+  git -C "$BOARD_REPO" init -q -b main
+  git -C "$BOARD_REPO" config user.email verify-board@localhost
+  git -C "$BOARD_REPO" config user.name "verify-board"
+  printf '# verify-board fixture\n' > "$BOARD_REPO/README.md"
+  printf 'echo "verify-web fixture: 2/2 checks passed (surface=$FACTORY_VERIFY_SURFACE)"\n' \
+    > "$BOARD_REPO/.pi/skills/verify-web/drive.sh"
+  git -C "$BOARD_REPO" add -A
+  git -C "$BOARD_REPO" commit -q -m "verify-board fixture"
+fi
+
+# The forge: the loopback fake, or — with BOARD_GITHUB=off — nothing at all.
+LEDGER="$RUN_DIR/github-ledger.json"
+rm -f "$LEDGER"
+if [ "$BOARD_GITHUB" = "fake" ]; then
+  ( exec env GITHUB_FAKE_PORT="$GITHUB_PORT" GITHUB_FAKE_LEDGER="$LEDGER" \
+      bun "$ROOT/.pi/skills/verify-api/github-fake.ts" ) > "$RUN_DIR/github.log" 2>&1 &
+  echo $! > "$RUN_DIR/github.pid"
+  # The listener and a live process, not the ledger: the fake writes the empty ledger before it
+  # binds, so a held port would leave a ledger and a dead fake.
+  for _ in $(seq 1 60); do
+    grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null &&
+      kill -0 "$(cat "$RUN_DIR/github.pid")" 2>/dev/null && break
+    sleep 0.1
+  done
+  if ! grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null; then
+    echo "the fake GitHub did not start on $GITHUB_PORT — see $RUN_DIR/github.log" >&2
+    exit 1
+  fi
+  GITHUB_ENV=(GITHUB_API_URL="http://127.0.0.1:$GITHUB_PORT" GITHUB_TOKEN="verify-board-fake-token")
+else
+  # Port 9 (discard) on loopback: nothing listens, so even a step that got past the missing
+  # credential could not reach a real forge.
+  GITHUB_ENV=(GITHUB_API_URL="http://127.0.0.1:9")
+fi
+echo "$BOARD_GITHUB" > "$RUN_DIR/github-mode"
+
+# `env -u` for every GitHub credential the shell may carry: the instance's forge is the one chosen
+# above, never one a developer's environment selects (the App flow, or a real token).
 ( cd "$ROOT/apps/api" && exec env \
+    -u GITHUB_TOKEN -u GITHUB_APP_ID -u GITHUB_APP_PRIVATE_KEY -u GITHUB_APP_INSTALLATION_ID \
     PORT="$API_PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT,http://localhost:$WEB_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
     FAUX_COMMAND="$FAUX_COMMAND" \
     FAUX_ASK="$FAUX_ASK" \
+    ROLE_MODELS="$ROLE_MODELS" \
+    FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \
+    "${GITHUB_ENV[@]}" \
     SESSION_ROOT="$SESSION_ROOT" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
@@ -111,13 +188,21 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-# One board, through the service rather than SQL string-building. The drive creates its own card
-# through the API (create.ts), so the seed makes none.
-if ! SEED_CARD=0 bun run "$ROOT/.pi/skills/verify-board/seed.ts" > "$RUN_DIR/board.json"; then
+# One board, through the service rather than SQL string-building, on the newest pipeline and over
+# the fixture checkout. The drive creates its own card through the API (create.ts), so the seed
+# makes none.
+if ! SEED_CARD=0 SEED_DEFINITION_VERSION=newest SEED_REPO_ROOT="$BOARD_REPO" \
+    API_URL="http://localhost:$API_PORT" \
+    bun run "$ROOT/.pi/skills/verify-board/seed.ts" > "$RUN_DIR/board.json"; then
   echo "seed failed — see $RUN_DIR/board.json" >&2
   exit 1
 fi
 
 echo "api  http://localhost:$API_PORT  (pid $(cat "$RUN_DIR/api.pid"))"
 echo "web  http://localhost:$WEB_PORT  (pid $(cat "$RUN_DIR/web.pid"))"
+if [ "$BOARD_GITHUB" = "fake" ]; then
+  echo "github fake  http://127.0.0.1:$GITHUB_PORT  (pid $(cat "$RUN_DIR/github.pid"), ledger $LEDGER)"
+else
+  echo "github  off (BOARD_GITHUB=off): no forge, no credential — the drive's PR phase must fail"
+fi
 echo "board $(cat "$RUN_DIR/board.json")"

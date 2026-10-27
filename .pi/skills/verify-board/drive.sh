@@ -17,6 +17,16 @@
 # the answer verbatim. The two facts no command prints (is the run busy, what was it told) are
 # `ask.ts`'s probes, as in ask.sh; everything a person reads is read back from the pane.
 #
+# After the dashboard reads the card back in `planning`, the drive takes it the rest of the way
+# (LOB-86, docs/board.md B4, B5, B8): a person approves the plan (`planning → building`), a run in
+# `building` makes a change, commits it and verifies it, `factory pr` opens its PR on the loopback
+# GitHub fake, and the drive asserts a non-empty diff, a link the forge answered, and a body whose
+# evidence section names the verify skill and its exit code. The run moves its card to `review`, a
+# person records the verdict on the card, the run's own `review → done` is refused at the merge gate,
+# and the person's merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
+# BOARD_GITHUB=off) `factory pr` fails, the drive prints that reason and exits non-zero, and the
+# phases after it run on with the link empty rather than one the drive made up.
+#
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
 # .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
 # the drive can run twice against one instance — after a failed drive too: the checks find this
@@ -35,6 +45,11 @@ TERM_SESSION="verify-board"
 FACTORY="bun run $ROOT/apps/cli/src/index.ts"
 SKILL="$ROOT/.pi/skills/verify-board"
 PROBE="$SKILL/ask.ts"
+BUILD_PROBE="$SKILL/build.ts"
+LEDGER="$RUN_DIR/github-ledger.json"
+BOARD_REPO="$RUN_DIR/board-repo"
+# The one path the builder's faux script writes (./up.sh's BUILD_CHANGE).
+BUILD_CHANGED="apps/web/src/card.ts"
 
 mkdir -p "$EVIDENCE_DIR"
 
@@ -45,6 +60,7 @@ fi
 
 json() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$2"; }
 BOARD_ID="$(json boardId "$RUN_DIR/board.json")"
+BOARD_REPO_SLUG="$(json repo "$RUN_DIR/board.json")"
 # The default pipeline of the seeded definition (0007_create_tasks.ts), in declaration order.
 LANES="intake specifying planning building review done canceled"
 # The question ./up.sh's faux script asks (FAUX_ASK), and the answer the drive types. The answer is
@@ -65,7 +81,10 @@ check() { # name, pass-condition (0 = pass), detail
   local ok=false
   [ "$2" = "0" ] && ok=true
   [ "$ok" = "true" ] || failed=1
-  rows+=("\"$1\": {\"passed\": $ok, \"detail\": \"$3\"}")
+  # A detail can quote a server's refusal (the PR phase's reason), so it is escaped for the JSON.
+  local detail="${3//\\/\\\\}"
+  detail="${detail//\"/\\\"}"
+  rows+=("\"$1\": {\"passed\": $ok, \"detail\": \"$detail\"}")
   if [ "$ok" = "true" ]; then
     printf 'PASS  %-46s %s\n' "$1" "$3"
   else
@@ -128,7 +147,8 @@ fi
 # beside this run's failing `observed.json`.
 rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
-  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json
+  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
+  "$EVIDENCE_DIR/pr-body.md"
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -331,6 +351,115 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
   "$([ "$WEB_RC" = "0" ] && echo 0 || echo 1)" \
   "exit=$WEB_RC, see web.json"
 
+# --- build: a person approves the plan, and a run in `building` makes the change (LOB-86) ---------
+fresh
+run_cmd building "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor person:verify-board --api $API_URL" || true
+capture move-building.txt
+BUILDING_REVISION="$(sed -n "s/^moved $TASK_ID to building (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-building.txt")"
+check "a person approves the plan: planning → building" \
+  "$([ "$(exit_code building)" = "0" ] && [ -n "$BUILDING_REVISION" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code building), revision=${BUILDING_REVISION:-none}"
+
+fresh
+run_cmd build "$FACTORY board start --task $TASK_ID --prompt 'build this card' --api $API_URL" || true
+capture start-build.txt
+BUILD_SESSION_ID="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/start-build.txt" | head -1)"
+check "board start opens the build run in building" \
+  "$([ "$(exit_code build)" = "0" ] && [ -n "$BUILD_SESSION_ID" ] && grep -q "task    $TASK_ID in building" "$EVIDENCE_DIR/start-build.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code build), session=${BUILD_SESSION_ID:-none}"
+
+build_probe() { # mode, extra env...
+  local mode="$1"
+  shift
+  env MODE="$mode" API_URL="$API_URL" SESSION_ID="${BUILD_SESSION_ID:-}" CHANGED="$BUILD_CHANGED" \
+    EVIDENCE_DIR="$EVIDENCE_DIR" "$@" bun "$BUILD_PROBE" > "$RUN_DIR/build-$mode.log" 2>&1
+  local rc=$?
+  cat "$RUN_DIR/build-$mode.log"
+  return "$rc"
+}
+build_probe built
+check "the build run committed a change and verified it (build.ts)" "$?" "see build-built.json"
+
+# The diff, from git itself rather than from anything the factory reports: the run's branch against
+# the `main` it was cut from, in the fixture checkout the worktree is linked into.
+DIFF="$(git -C "$BOARD_REPO" diff --numstat "main...factory/${BUILD_SESSION_ID:-none}" 2>&1)"
+printf '%s\n' "$DIFF" > "$EVIDENCE_DIR/build-diff.txt"
+check "the build run's branch has a non-empty diff against main" \
+  "$(printf '%s\n' "$DIFF" | grep -qE "^[0-9]+[[:space:]]+[0-9]+[[:space:]]+$BUILD_CHANGED$" && echo 0 || echo 1)" \
+  "$(printf '%s' "$DIFF" | head -1 | tr '\t' ' ')"
+
+# --- pr: the run's PR, opened from the terminal; the link is read, never assumed -------------------
+fresh
+run_cmd pr "$FACTORY pr ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
+capture pr.txt
+PR_URL="$(sed -n 's/^pr       \(https:\/\/[^ ]*\)$/\1/p' "$EVIDENCE_DIR/pr.txt" | head -1)"
+PR_REASON="$(grep -m1 '^error: ' "$EVIDENCE_DIR/pr.txt" | cut -c1-200)"
+check "factory pr opens the build run's PR and prints its link" \
+  "$([ "$(exit_code pr)" = "0" ] && [ -n "$PR_URL" ] && echo 0 || echo 1)" \
+  "${PR_URL:-no PR (exit=$(exit_code pr)): ${PR_REASON:-no link and no reason printed}}"
+if [ -z "$PR_URL" ]; then
+  # The phase does not stop or substitute a link: every check below that needs one fails on its own.
+  echo "drive: the PR path is missing — ${PR_REASON:-factory pr printed no link}" >&2
+fi
+build_probe pr PR_URL="$PR_URL" LEDGER="$LEDGER" REPO="$BOARD_REPO_SLUG"
+check "the forge holds that PR, with the diff and the evidence in its body (build.ts)" "$?" \
+  "see build-pr.json and pr-body.md"
+
+fresh
+run_cmd ls-pr "$FACTORY ls --api $API_URL" || true
+capture ls-pr.txt
+check "factory ls shows the build run's PR link" \
+  "$([ -n "$PR_URL" ] && [ -n "$BUILD_SESSION_ID" ] && grep "^$BUILD_SESSION_ID  " "$EVIDENCE_DIR/ls-pr.txt" | grep -qF "  $PR_URL  " && echo 0 || echo 1)" \
+  "row for ${BUILD_SESSION_ID:-none}"
+
+# --- review: the run moves its card on, and a person records the verdict --------------------------
+# `building → review` crosses no gate, so the run that built the change may make it (B5); the drive
+# makes it with that run's id to show the difference from the merge, below.
+fresh
+run_cmd review "$FACTORY board move --task $TASK_ID --to review --expect-revision ${BUILDING_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
+capture move-review.txt
+REVIEW_REVISION="$(sed -n "s/^moved $TASK_ID to review (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-review.txt")"
+check "the build run moves its card on to review (no gate on that move)" \
+  "$([ "$(exit_code review)" = "0" ] && [ -n "$REVIEW_REVISION" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code review), revision=${REVIEW_REVISION:-none}"
+
+VERDICT="verdict: approve ${PR_URL:-(no PR)} — verify-web exit 0"
+fresh
+run_cmd verdict "$FACTORY board comment --task $TASK_ID --expect-revision ${REVIEW_REVISION:-0} --body '$VERDICT' --actor person:reviewer --api $API_URL" || true
+capture verdict.txt
+VERDICT_EXIT="$(exit_code verdict)"
+VERDICT_REVISION="$(sed -n "s/^commented on $TASK_ID (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/verdict.txt")"
+fresh
+run_cmd verdict-show "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-verdict.txt
+# A comment is stamped with the revision it was written against; the card moves one past it.
+check "a person's verdict is recorded on the card's thread" \
+  "$([ "$VERDICT_EXIT" = "0" ] && [ -n "$VERDICT_REVISION" ] && grep -qF "  [note] person:reviewer (revision $REVIEW_REVISION)" "$EVIDENCE_DIR/show-verdict.txt" && grep -qxF "    $VERDICT" "$EVIDENCE_DIR/show-verdict.txt" && echo 0 || echo 1)" \
+  "exit=${VERDICT_EXIT:-none}, revision=${VERDICT_REVISION:-none}"
+
+# --- merge: the run is refused at the merge gate; the person's move reaches done -------------------
+fresh
+run_cmd merge-run "$FACTORY board move --task $TASK_ID --to done --expect-revision ${VERDICT_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
+capture move-merge-run.txt
+MERGE_MESSAGE="human_gate_required: the move review → done crosses the merge gate, which only a person can make"
+check "the run's review → done is refused at the merge gate" \
+  "$([ -n "$BUILD_SESSION_ID" ] && [ "$(exit_code merge-run)" != "0" ] && [ -n "$(exit_code merge-run)" ] && grep -qF "$MERGE_MESSAGE" "$EVIDENCE_DIR/move-merge-run.txt" && echo 0 || echo 1)" \
+  "actor=${BUILD_SESSION_ID:-none}, exit=$(exit_code merge-run), message verbatim"
+
+fresh
+run_cmd merge "$FACTORY board move --task $TASK_ID --to done --expect-revision ${VERDICT_REVISION:-0} --actor person:reviewer --api $API_URL" || true
+capture move-merge.txt
+check "a person's review → done goes through, at the revision the refusal left" \
+  "$([ "$(exit_code merge)" = "0" ] && [ -n "$VERDICT_REVISION" ] && grep -qx "moved $TASK_ID to done (revision $((VERDICT_REVISION + 1)))" "$EVIDENCE_DIR/move-merge.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code merge)"
+
+fresh
+run_cmd done "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-done.txt
+check "the card is done" \
+  "$([ "$(exit_code done)" = "0" ] && grep -qx "column    done" "$EVIDENCE_DIR/show-done.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^column' "$EVIDENCE_DIR/show-done.txt" 2>/dev/null)"
+
 # --- evidence --------------------------------------------------------------------------------------
 {
   printf '{\n'
@@ -340,6 +469,8 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
   printf '  "taskId": "%s",\n' "$TASK_ID"
   printf '  "sessionId": "%s",\n' "${SESSION_ID:-}"
   printf '  "nextSessionId": "%s",\n' "${NEXT_SESSION_ID:-}"
+  printf '  "buildSessionId": "%s",\n' "${BUILD_SESSION_ID:-}"
+  printf '  "prUrl": "%s",\n' "${PR_URL:-}"
   printf '  "checks": {\n'
   write_checks
   printf '  }\n}\n'
