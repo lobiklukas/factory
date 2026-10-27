@@ -239,8 +239,9 @@ const program = Effect.gen(function* () {
   );
 
   // --- rebuild: the rows are a cache of the log ------------------------------------------------------------
-  // The session's rows only: a rebuild is global (it refolds every log), but what this proves is that
-  // *these* rows come back, and deleting anyone else's would be a change this drive has no claim on.
+  // The session's rows only, because what this proves is that *these* rows come back. The rebuild
+  // itself is not scoped: it rewrites every session's index rows in the database. That is safe only
+  // because pages.sh points this driver at a database it minted for the run and drops afterwards.
   yield* sql`DELETE FROM session_pages WHERE session_id = ${sessionId}`;
   const blanked = yield* client.listPages({ sessionId });
   observed.pages["blanked"] = blanked.pages;

@@ -25,9 +25,13 @@ path, run in-process against the database, which is how the driver runs it.
 ## What proves it
 
 `./pages.sh` — its own API on `PAGES_PORT` (9422 when unset), its faux model priced at a flat
-`FAUX_COST=0.01` a call, and `DATABASE_URL` required, because the driver deletes rows and runs a
-rebuild. It runs `pages.ts`, a client of `SessionRpc` exactly as the CLI and the dashboard are, that
-also holds a SQL connection to the same database:
+`FAUX_COST=0.01` a call, and its own database. `DATABASE_URL` is required but names only the server:
+`rebuildIndexes` is database-wide (it deletes every `session_pages` row, marks every
+`session_activity` row idle and removes sessions with no commit), so the script mints
+`factory_verify_pages_<random>` on that server, runs the API and the driver against it, and drops it
+on exit. The database `DATABASE_URL` names is never written. It runs `pages.ts`, a client of
+`SessionRpc` exactly as the CLI and the dashboard are, that also holds a SQL connection to the
+drive's database:
 
 1. A session sends a message and settles; it lists no pages, and `listPages` on an unknown id is
    `not_found` over the wire.

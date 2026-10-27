@@ -11,9 +11,16 @@
 #   DATABASE_URL=… ./pages.sh
 #   DATABASE_URL=… PAGES_PORT=9570 ./pages.sh     # another port
 #
-# Env: DATABASE_URL (required — the driver deletes this run's page rows and runs `rebuildIndexes`,
-# which refolds every log in that database, so it must name the run's own), PAGES_PORT (9422 when
-# unset), EVIDENCE_DIR.
+# Env: DATABASE_URL (required — it names the *server*, not the database the drive writes),
+# PAGES_PORT (9422 when unset), EVIDENCE_DIR.
+#
+# The drive never writes the database DATABASE_URL names. `rebuildIndexes` is database-wide — it
+# deletes every `session_pages` row, writes `idle` into every `session_activity` row and removes
+# sessions with no commit — so run against a shared database (the human's `factory`, a loop's
+# `factory_ralph`) it would rewrite the indexes of every live API on it. So this script mints a
+# throwaway database on the same server (`factory_verify_pages_<random>`), points the API and the
+# driver at it, and drops it on exit, after the API is stopped. A run killed with SIGKILL never
+# reaches its drop; such a database holds only this drive's rows and is safe to drop by hand.
 #
 # Evidence: .verify/evidence/latest/api/pages.json (every check the driver made, each curation's
 # answer, the pages at each step, the spend and the log's page-entry count), pages-process.json (this
@@ -29,9 +36,11 @@ LOG="$RUN_DIR/api.log"
 # A cent a request: the unit the driver counts calls in.
 COST="0.01"
 if [ -z "${DATABASE_URL:-}" ]; then
-  echo "pages.sh needs DATABASE_URL naming this run's own database" >&2
+  echo "pages.sh needs DATABASE_URL naming the Postgres server to mint its database on" >&2
   exit 1
 fi
+SERVER_URL="$DATABASE_URL"
+SCRATCH_DB="factory_verify_pages_$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 
@@ -75,10 +84,37 @@ stop_api() {
   rm -f "$pidfile"
 }
 
-trap 'stop_api' EXIT
+# `CREATE`/`DROP DATABASE` over the configured server's connection; the name is an identifier this
+# script minted from hex, so quoting it is the whole of the escaping it needs.
+scratch_sql() { # statement
+  bun -e '
+    const sql = new Bun.SQL(process.argv[1]);
+    try { await sql.unsafe(process.argv[2]); } finally { await sql.close(); }
+  ' "$SERVER_URL" "$1"
+}
+SCRATCH_CREATED=0
+drop_scratch() {
+  [ "$SCRATCH_CREATED" = "1" ] || return 0
+  scratch_sql "DROP DATABASE IF EXISTS \"$SCRATCH_DB\" WITH (FORCE)" >/dev/null 2>&1 ||
+    echo "pages.sh: could not drop $SCRATCH_DB — drop it by hand" >&2
+}
+
+trap 'stop_api; drop_scratch' EXIT
 
 source "$ROOT/.pi/skills/lib/postgres.sh"
 ensure_postgres || exit 1
+
+scratch_sql "CREATE DATABASE \"$SCRATCH_DB\"" || { echo "pages.sh: could not create $SCRATCH_DB" >&2; exit 1; }
+SCRATCH_CREATED=1
+DATABASE_URL="$(bun -e '
+  const url = new URL(process.argv[1]);
+  url.pathname = "/" + process.argv[2];
+  console.log(url.toString());
+' "$SERVER_URL" "$SCRATCH_DB")"
+export DATABASE_URL
+echo "pages: drive database $SCRATCH_DB (dropped on exit)"
+# This script's own: a fresh database has no record of the sessions an earlier run left on disk.
+rm -rf "$RUN_DIR/sessions"
 
 # A long idle timeout: the drive's reads must all be served by the owner the curations used, so a
 # release in the middle cannot be what makes a read pass or fail.
@@ -133,6 +169,7 @@ cp "$LOG" "$EVIDENCE_DIR/pages-api.log"
   printf '{\n'
   printf '  "apiUrl": "%s",\n' "$API_URL"
   printf '  "fauxCost": %s,\n' "$COST"
+  printf '  "database": "%s",\n' "$SCRATCH_DB"
   printf '  "sessionId": "%s",\n' "$SESSION"
   printf '  "pageRows": %s,\n' "${ROWS:--1}"
   printf '  "checks": {\n'
