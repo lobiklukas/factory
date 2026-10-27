@@ -42,7 +42,8 @@ into `review` with `factory board move`, and then:
    back out of the run's log: one report, `web:VerifyRan:0`.
 3. **Api, unverified.** A second run changes `apps/api/…`, which has no skill (`api:VerifyNoEvidence`).
    The move is refused again, naming `verified`, the run and `api` — the passing `web` evidence from
-   the first run is a different surface and does not count.
+   the first run is a different surface and does not count — and the remedy (declare
+   `commands.verify`, or add a `verify-<surface>` driver).
 4. **Api, passing.** A third run changes `apps/api/…` and adds a passing `verify-api` skill
    (`api:VerifyRan:0`); the same move goes through, exit 0.
 
@@ -62,4 +63,6 @@ The other keys of the default pipeline (`spec_doc`, `plan_doc`, `run_completed`,
 `pr_link`, `review_verdict`) are not checked: nothing records their evidence yet, and
 `requirements.ts` says so. The human gates (`human_move`, `human_merge`) are B5's actor check, proven
 in `packages/core`'s `TaskService` cases. A change made _after_ the latest `verify` call is not seen;
-that is LOB-79's coverage check, on the PR.
+that is LOB-79's coverage check, on the PR. Ordering calls across interleaved runs by when they were
+recorded, and refusing on a newest call that left no record, are pinned in `requirements.test.ts`,
+not driven here.

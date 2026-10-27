@@ -27,8 +27,11 @@
  * against what, is `./requirements`; `verified` reads the `verify` records in the logs of the card's
  * runs. The logs are read *before* the card is locked, not inside the transaction: a log fold is
  * unbounded work on other connections, and holding the row lock (and a pool connection) across it
- * would let a long log stall every other move of the card. The transaction then refuses the move as
- * stale if the card left the column the evidence was judged for while the logs were read.
+ * would let a long log stall every other move of the card. The evidence is judged only for the
+ * revision the caller expected — a card read at any other revision is refused as `StaleRevision`
+ * before its logs are read — and the transaction's own revision check then proves the card did not
+ * change while they were (every write to a card bumps its revision). A `verify` call a run records
+ * in that window is concurrent with the move, which is ordered before it (`./requirements`).
  *
  * **The thread is `task_events`, not a table of its own (LOB-73).** A comment is a `commented` event:
  * B3 makes a card rows plus an append-only history, and a comment is exactly that — input a person
@@ -65,7 +68,7 @@ import type {
   TaskPriority as TaskPriorityType,
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
-import { readVerifyRecords } from "@repo/harness";
+import { readVerifyCalls } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import { mintTaskId } from "./ids";
 import {
@@ -292,9 +295,11 @@ const TASK_COLUMNS = [
   "updated_at",
 ].join(", ");
 
-/** What `move` judged about the card's exit before locking it: the column, and the first unmet requirement. */
+/**
+ * What `move` judged about the card's exit before locking it, at the caller's expected revision: the
+ * first unmet requirement, if any.
+ */
 type ExitJudgement = {
-  readonly from: string | undefined;
   readonly unmet: RequirementUnmet | undefined;
 };
 
@@ -606,8 +611,12 @@ export const TaskServiceLive = Layer.effect(
      */
     const pinnedColumn = (taskId: string) =>
       Effect.gen(function* () {
-        const rows = yield* sql<{ column: string; columns: string }>`
-          SELECT t."column", bd.columns::text AS columns
+        const rows = yield* sql<{
+          column: string;
+          revision: number;
+          columns: string;
+        }>`
+          SELECT t."column", t.revision, bd.columns::text AS columns
           FROM tasks t
           JOIN board_instances bi ON bi.id = t.board_id
           JOIN board_definitions bd
@@ -626,6 +635,7 @@ export const TaskServiceLive = Layer.effect(
         );
         return {
           name: row.column,
+          revision: row.revision,
           declared: columns.find((candidate) => candidate.name === row.column),
         };
       });
@@ -654,9 +664,9 @@ export const TaskServiceLive = Layer.effect(
           (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
             const storage = logs.get(sessionId);
             return storage === undefined
-              ? Effect.succeed({ sessionId, records: [] })
-              : readVerifyRecords(storage).pipe(
-                  Effect.map((records) => ({ sessionId, records })),
+              ? Effect.succeed({ sessionId, calls: [] })
+              : readVerifyCalls(storage).pipe(
+                  Effect.map((calls) => ({ sessionId, calls })),
                   Effect.mapError(
                     (cause) =>
                       new TaskStorageError({
@@ -670,26 +680,34 @@ export const TaskServiceLive = Layer.effect(
 
     /**
      * The first exit requirement leaving the card's current column for `to` does not meet, judged
-     * before the card is locked (module doc). `from` is the column it was judged for, which the
-     * transaction holds the locked card to; it is absent for a card the read did not find, which the
-     * transaction then refuses as `TaskNotFound`.
+     * before the card is locked (module doc) and only at the revision the caller expected: a card at
+     * another revision is refused as `StaleRevision` here, before its logs are read, so the
+     * transaction's revision check is what holds the judgement to the card it locks. A card the read
+     * does not find is left to the transaction, which refuses it as `TaskNotFound`.
      */
     const judgeExit = (
       input: MoveTaskInput,
     ): Effect.Effect<ExitJudgement, TaskError | SqlError> =>
       Effect.gen(function* () {
         const pinned = yield* pinnedColumn(input.taskId);
-        if (pinned === undefined) return { from: undefined, unmet: undefined };
+        if (pinned === undefined) return { unmet: undefined };
+        if (pinned.revision !== input.expectedRevision) {
+          return yield* new StaleRevision({
+            taskId: input.taskId,
+            expected: input.expectedRevision,
+            actual: pinned.revision,
+            message: `task ${input.taskId} is at revision ${pinned.revision}, not ${input.expectedRevision}: someone moved it first`,
+          });
+        }
         const column = pinned.declared;
         const requirements = exitRequirements(column, input.to);
         if (column === undefined || requirements.length === 0)
-          return { from: pinned.name, unmet: undefined };
+          return { unmet: undefined };
         const runs = yield* runEvidence(input.taskId);
         for (const requirement of requirements) {
           const verdict = requirementVerdict(requirement, runs);
           if (!verdict.met) {
             return {
-              from: column.name,
               unmet: new RequirementUnmet({
                 taskId: input.taskId,
                 column: column.name,
@@ -700,7 +718,7 @@ export const TaskServiceLive = Layer.effect(
             };
           }
         }
-        return { from: column.name, unmet: undefined };
+        return { unmet: undefined };
       });
 
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
@@ -738,14 +756,6 @@ export const TaskServiceLive = Layer.effect(
                 to: input.to,
                 actor: input.actor,
                 message: `the move ${from} → ${input.to} crosses the ${gate} gate, which only a person can make`,
-              });
-            }
-            if (exit.from !== undefined && exit.from !== from) {
-              return yield* new StaleRevision({
-                taskId: input.taskId,
-                expected: input.expectedRevision,
-                actual: row.revision,
-                message: `task ${input.taskId} moved to "${from}" while the evidence for leaving "${exit.from}" was read`,
               });
             }
             if (exit.unmet !== undefined) return yield* exit.unmet;

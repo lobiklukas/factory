@@ -12,6 +12,7 @@ import {
   CHECKED_REQUIREMENTS,
   exitRequirements,
   requirementVerdict,
+  VERIFIABLE_REMEDY,
   verifiedVerdict,
   type RunEvidence,
 } from "./requirements";
@@ -50,9 +51,25 @@ const report = (changed: string[], results: VerifyResult[]): VerifyRecord => ({
   results,
 });
 
-const run = (sessionId: string, ...records: VerifyRecord[]): RunEvidence => ({
+/** The harness clock the hand-built calls are written at: each call one tick after the last. */
+let clock = 0;
+
+/** A run whose calls were written in the order given, each after every call built before it. */
+const run = (
+  sessionId: string,
+  ...records: (VerifyRecord | undefined)[]
+): RunEvidence => ({
   sessionId,
-  records,
+  calls: records.map((record) => ({ record, at: (clock += 1) })),
+});
+
+/** A run whose calls were written at the given times. */
+const timed = (
+  sessionId: string,
+  ...calls: [at: number, record: VerifyRecord | undefined][]
+): RunEvidence => ({
+  sessionId,
+  calls: calls.map(([at, record]) => ({ record, at })),
 });
 
 const reason = (runs: RunEvidence[]): string => {
@@ -143,7 +160,7 @@ describe("the verified requirement", () => {
         run("ses_b", report(["apps/api/src/x.ts"], [noApiSkill])),
       ]),
     ).toBe(
-      "run ses_b's latest verify call over the change: api: no verification (no verify-api skill)",
+      `run ses_b's latest verify call over the change: api: no verification (no verify-api skill) (${VERIFIABLE_REMEDY})`,
     );
     // And the other way round: a newer passing call supersedes an older failing one.
     expect(
@@ -204,8 +221,55 @@ describe("the verified requirement", () => {
         ),
       ]),
     ).toBe(
-      "run ses_a's latest verify call over the change: .: no verification (no declared verify command)",
+      `run ses_a's latest verify call over the change: .: no verification (no declared verify command) (${VERIFIABLE_REMEDY})`,
     );
+  });
+
+  it("orders calls across runs by when they were written, not by which run started last", () => {
+    // Run A started first and verified `api`; run B started later and verified `web`. A person then
+    // resumed A, which changed `api` again and failed. The newest verification of the card failed.
+    const a = timed(
+      "ses_a",
+      [10, report(["apps/api/src/x.ts"], [ran("api", 0)])],
+      [30, report(["apps/api/src/x.ts"], [ran("api", 1)])],
+    );
+    const b = timed("ses_b", [
+      20,
+      report(["apps/web/page.tsx"], [ran("web", 0)]),
+    ]);
+    expect(reason([a, b])).toBe(
+      "run ses_a's latest verify call over the change: api: exit 1 (bash drive.sh in .pi/skills/verify-api)",
+    );
+    // Without the resumed call, B's pass is the newest and the card may leave.
+    expect(
+      verifiedVerdict([
+        timed("ses_a", [10, report(["apps/api/src/x.ts"], [ran("api", 1)])]),
+        b,
+      ]),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet when the newest call left no record, rather than falling back to an older pass", () => {
+    // The run verified `api`, changed more code, and its next call was blocked or crashed.
+    expect(
+      reason([
+        run("ses_a", report(["apps/api/src/x.ts"], [ran("api", 0)]), undefined),
+      ]),
+    ).toBe(
+      "run ses_a's latest verify call left no record (it was blocked or crashed), so what it verified is unknown: verify the change again",
+    );
+    // A recordless call older than a measured one is superseded by it, like any older call.
+    expect(
+      verifiedVerdict([
+        run("ses_a", undefined, report(["apps/api/src/x.ts"], [ran("api", 0)])),
+      ]),
+    ).toEqual({ met: true });
+  });
+
+  it("names the remedy only when a surface had no verification at all", () => {
+    expect(
+      reason([run("ses_a", report(["apps/api/src/x.ts"], [ran("api", 3)]))]),
+    ).not.toContain(VERIFIABLE_REMEDY);
   });
 
   it("refuses when any result of the call failed, even one the changed list does not name", () => {

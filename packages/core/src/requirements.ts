@@ -16,9 +16,15 @@
  * pipeline off rather than gate it. A key gains a checker when its evidence is recorded.
  *
  * **What `verified` means.** The card's change is the newest `verify` call, over all of the card's
- * runs, that measured a change: a call that found no changed path (a reviewer's run in a fresh
- * worktree) or could not measure one (`VerifyUnmeasured`) says nothing about the change, so it
- * neither satisfies the requirement nor wipes out the call before it. That call's changed paths name
+ * runs, that measured a change. "Newest" is by when the call's result was written (the tool
+ * result's timestamp), not by which run started last: a person can resume an older run with a
+ * `send`, and its later call is the newer verification. A call that found no changed path (a
+ * reviewer's run in a fresh worktree) or could not measure one (`VerifyUnmeasured`) says nothing
+ * about the change, so it neither satisfies the requirement nor wipes out the call before it. A call
+ * that left no record (blocked, or crashed) is different: it may have been over a newer change, and
+ * what it found is unknown, so when it is newer than every measured call the requirement is unmet
+ * and the refusal says so — the same rule LOB-79's PR evidence follows, rather than quietly
+ * falling back to an older pass. That call's changed paths name
  * the surfaces the change touched (`surfaceOf`; `REPO_SURFACE` for a path in no package), and the
  * requirement is met when every one of them has a `VerifyRan` that exited 0 — the surface's own, or
  * the repo's declared command, which runs once for `REPO_SURFACE` and covers every surface — and no
@@ -29,7 +35,17 @@
  * change is what the card carries now, and a requirement that remembered every surface ever touched
  * would hold a card forever over a change a later run abandoned. What it cannot see is a change made
  * *after* the newest call (LOB-79's coverage check is the PR's view of that); the gate reads what was
- * verified, not what the branch holds at the moment of the move.
+ * verified, not what the branch holds at the moment of the move. Likewise a call a run records while
+ * the move is in flight (`TaskService` reads the logs before it locks the card) is concurrent with
+ * the move, and the move is ordered before it.
+ *
+ * **Every touched surface must be verifiable.** A surface with no `verify-<surface>` skill, and a
+ * path outside every package (`REPO_SURFACE`), record `VerifyNoEvidence`, which never passes. So a
+ * repository whose board gates on `verified` must either declare its verify command
+ * (`commands.verify` in `.factory/config`, which runs once and covers every surface) or carry a
+ * skill for every surface its changes touch; otherwise such a card can only leave `review` for
+ * `canceled`. That is deliberate — "nothing could check this" is not a pass — and the refusal names
+ * the remedy (`VERIFIABLE_REMEDY`) whenever a missing verification is the reason.
  */
 import type { BoardColumn, ColumnRequirement } from "@repo/domain/Task";
 import { VERIFIED_REQUIREMENT } from "@repo/domain/Task";
@@ -37,7 +53,7 @@ import {
   REPO_SURFACE,
   surfaceOf,
   surfacesOf,
-  type VerifyRecord,
+  type TimedVerifyCall,
   type VerifyReport,
   type VerifyResult,
 } from "@repo/harness";
@@ -47,11 +63,21 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   VERIFIED_REQUIREMENT,
 ]);
 
-/** One run of the card and the `verify` records its log holds, oldest first. */
+/**
+ * One run of the card and the `verify` calls its log holds, oldest first — a call that left no
+ * record included, as `undefined` (`readVerifyCalls`).
+ */
 export type RunEvidence = {
   readonly sessionId: string;
-  readonly records: readonly VerifyRecord[];
+  readonly calls: readonly TimedVerifyCall[];
 };
+
+/**
+ * What a refusal adds when the reason is a surface nothing could verify (module doc): the two ways
+ * a repository makes every surface verifiable.
+ */
+export const VERIFIABLE_REMEDY =
+  'a board that gates on "verified" needs every surface a change touches to be verifiable: declare the repo\'s verify command (commands.verify in .factory/config) or add a .pi/skills/verify-<surface>/ driver';
 
 /** A requirement's verdict: met, or not met and why, in words a refusal can carry verbatim. */
 export type RequirementVerdict =
@@ -107,17 +133,31 @@ const touched = (report: VerifyReport): readonly string[] => [
     : []),
 ];
 
-/** The card's change: the newest call, over every run, that measured at least one changed path. */
+/**
+ * The card's change: the newest call, over every run and by when it was written, that measured at
+ * least one changed path — or the newest call that left no record, when that is newer (module doc).
+ */
 const latestChange = (
   runs: readonly RunEvidence[],
 ):
-  | { readonly sessionId: string; readonly report: VerifyReport }
-  | undefined => {
-  for (const run of [...runs].reverse()) {
-    for (const record of [...run.records].reverse()) {
-      if (record._tag === "VerifyReport" && record.changedCount > 0)
-        return { sessionId: run.sessionId, report: record };
+  | {
+      readonly _tag: "change";
+      readonly sessionId: string;
+      readonly report: VerifyReport;
     }
+  | { readonly _tag: "unrecorded"; readonly sessionId: string }
+  | undefined => {
+  // A stable sort: calls written in the same millisecond keep run order, then call order.
+  const calls = runs
+    .flatMap((run) =>
+      run.calls.map((call) => ({ sessionId: run.sessionId, call })),
+    )
+    .sort((a, b) => a.call.at - b.call.at);
+  for (const { sessionId, call } of calls.reverse()) {
+    const record = call.record;
+    if (record === undefined) return { _tag: "unrecorded", sessionId };
+    if (record._tag === "VerifyReport" && record.changedCount > 0)
+      return { _tag: "change", sessionId, report: record };
   }
   return undefined;
 };
@@ -127,8 +167,13 @@ export const verifiedVerdict = (
   runs: readonly RunEvidence[],
 ): RequirementVerdict => {
   const change = latestChange(runs);
+  if (change?._tag === "unrecorded")
+    return {
+      met: false,
+      reason: `run ${change.sessionId}'s latest verify call left no record (it was blocked or crashed), so what it verified is unknown: verify the change again`,
+    };
   if (change === undefined) {
-    const calls = runs.reduce((count, run) => count + run.records.length, 0);
+    const calls = runs.reduce((count, run) => count + run.calls.length, 0);
     return {
       met: false,
       reason:
@@ -158,9 +203,12 @@ export const verifiedVerdict = (
         `${surface}: no passing verification of it${verified.length === 0 ? "" : ` (the passing ones cover ${verified.join(", ")})`}`,
     ),
   ];
+  const unverifiable = failed.some(
+    (result) => result._tag === "VerifyNoEvidence",
+  );
   return {
     met: false,
-    reason: `run ${sessionId}'s latest verify call over the change: ${problems.join("; ")}`,
+    reason: `run ${sessionId}'s latest verify call over the change: ${problems.join("; ")}${unverifiable ? ` (${VERIFIABLE_REMEDY})` : ""}`,
   };
 };
 

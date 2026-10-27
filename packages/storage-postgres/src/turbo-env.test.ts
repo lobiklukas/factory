@@ -261,6 +261,7 @@ describe("the dev tasks' environment", () => {
     "FAUX_EVERY_TURN",
     "APPROVAL_REQUIRED",
     "FAUX_ASK",
+    "FAUX_VERIFY",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
     "PR_CAP_MAX_FILES",

@@ -913,6 +913,57 @@ describe("TaskService — exit requirements", () => {
     expect(canceled.column).toBe("canceled");
   });
 
+  it("checks the human gate before the requirements: a run's review → done is HumanGateRequired", async () => {
+    // The order is declared transition, then human gate, then requirements. Run on a version 3 card
+    // with no evidence, the move fails both checks; the gate has to be the one it names.
+    const task = await inReview(3);
+    const err = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: RUN,
+      }),
+    );
+    expect(err._tag).toBe("HumanGateRequired");
+    // And the declared transition before both: review declares no move into intake.
+    const undeclared = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "intake",
+        actor: RUN,
+      }),
+    );
+    expect(undeclared._tag).toBe("UndeclaredTransition");
+  });
+
+  it("judges the evidence only at the expected revision: a stale move is StaleRevision, not RequirementUnmet", async () => {
+    // A move read at an old revision is refused as stale before any evidence is read, so a
+    // judgement can only ever describe the card the transaction then locks at that revision.
+    const task = await inReview(3);
+    for (const expectedRevision of [task.revision - 1, task.revision + 1]) {
+      const err = await refusal((s) =>
+        s.move({ taskId: task.id, expectedRevision, to: "done", actor: LUKAS }),
+      );
+      expect(err).toMatchObject({
+        _tag: "StaleRevision",
+        expected: expectedRevision,
+        actual: task.revision,
+      });
+    }
+    // At the revision the card is at, the same move is judged, and refused on the requirement.
+    const unmet = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(unmet._tag).toBe("RequirementUnmet");
+  });
+
   it("lets the same exit through once a run of the card verified the surface it changed", async () => {
     const task = await inReview(3);
     const repoRoot = fixtureRepo({ ".pi/skills/verify-api/drive.sh": PASSING });

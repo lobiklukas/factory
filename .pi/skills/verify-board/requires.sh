@@ -206,6 +206,9 @@ check "evidence from a different surface (web) does not satisfy verified" \
 check "and the refusal names the surface the change touched, from the latest run" \
   "$(grep -qF "run $API_SESSION's latest verify call over the change: api: no verification (" "$EVIDENCE_DIR/requires-refused-surface.txt" && ! grep -qF "$WEB_SESSION" "$EVIDENCE_DIR/requires-refused-surface.txt" && echo 0 || echo 1)" \
   "names api in ${API_SESSION:-?}"
+check "and the refusal names the remedy for a surface nothing can verify" \
+  "$(grep -qF 'declare the repo'"'"'s verify command (commands.verify in .factory/config) or add a .pi/skills/verify-<surface>/ driver' "$EVIDENCE_DIR/requires-refused-surface.txt" && echo 0 || echo 1)" \
+  "names commands.verify and verify-<surface>"
 
 # --- 4. api verified: the same move goes through -----------------------------------------------------
 next_change 'mkdir -p apps/api/src .pi/skills/verify-api && echo "export const feature = 2;" > apps/api/src/feature.ts && printf "echo \"verify-api fixture: 3/3 checks passed\"\n" > .pi/skills/verify-api/drive.sh && echo changed api with its skill'
