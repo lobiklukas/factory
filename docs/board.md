@@ -76,8 +76,27 @@ rule into the session's `ToolTask` hook from the run's column and role, and `wri
 command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
 and the column. The allowlist reads the command's text, so it stops the accident rather than a
 determined agent (D15). Keyed by role rather than by skill or column name, so a renamed column keeps the rule and an
-edited skill body cannot drop it. The model half of the role, and any other role's tool policy, is
-LOB-207.
+edited skill body cannot drop it.
+
+Built (LOB-207): the role resolves to both halves in one function, `resolveRole` in
+`packages/harness/src/loader.ts`, and `openSession` takes the run's model, its withheld tools and its
+read-only stage from that one answer. **The model** is the deployment's role table, `ROLE_MODELS`
+(`specifier=anthropic/claude-haiku-4-5,reviewer=…`), resolved against the process's model catalog at
+boot: a malformed row or a model the process cannot serve fails the boot, and a role with no row (or
+a session with no card) runs the deployment's model. It is deployment config rather than a column of
+the board definition because a model id is a fact about a deployment and a board is not. The model is
+pinned into the run's root conversation when its session first opens, so an edit reaches the next run:
+a reopened run keeps talking to the model its root was created with, and its compaction thresholds
+follow that model's window, not today's row. One gap is the faux backend's: its catalog is only
+`faux-1` and the `faux/*` ids the current `ROLE_MODELS` names, so dropping a row while a run is open on
+it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
+so it is not affected). Under faux, keep a row until the runs on it are done.
+**The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
+`edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
+`tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for
+`write` and `edit` on a root whose tool list still offers them: one pinned before the filter existed (a
+run in flight across the deploy that brought it), or one configured since. `READ_ONLY_ROLES` stays
+the one table of which roles read only.
 
 ## B7 — Asking a human happens on the task, never in the transcript
 

@@ -46,6 +46,23 @@ straight into a second refusal. A call the stage allows goes on to the session's
 D11 refusal (egress, a push to `main`, …) and every approval gate still holds; a gated call the stage
 refuses is never asked about.
 
+## The role's model and tools (LOB-207)
+
+The role is resolved once, by `resolveRole` in `packages/harness/src/loader.ts`, into the run's
+model, the tools it is **not offered**, and the stage above. A read-only role is never given `write`,
+`edit` or `verify`: they are filtered out of the run's tool list at `openSession`
+(`AgentChange.tools: { remove }`), so a model that calls one anyway gets Pi Durable's
+`Tool write is not available`. The refusal table above still holds behind the filter, and it is
+still what a `bash` write meets. The model is the deployment's `ROLE_MODELS` row for the role, or the
+deployment's own model when the role has no row.
+
+`refusals.sh` boots the `stage` case with `ROLE_MODELS=specifier=faux/faux-spec`, and `stage.ts`
+also asserts that the specifying run's requests all went to `faux/faux-spec` and the building run's
+to `faux/faux-1` (each run's billed usage, through `getSession`). It also asserts that the specifying
+run was offered `read`, `bash` and `ask` and none of `write`, `edit` or `verify`, and that the
+building run was offered all three (`readOfferedTools`, read from the system messages in the run's
+log). Observed 2026-10-27, API on `:9530`–`:9538`: **9/9 cases, 70 checks**, `stage` 19 of them.
+
 ## How it is proven
 
 ```sh
@@ -90,5 +107,4 @@ and `building`, reading the refusal out of the Postgres log.
   `git` subcommand not in the read table is refused even when it is harmless (`git ls-remote`).
 - **The spec artifact or the parked run.** What a specifying run produces and how it ends are LOB-72
   and LOB-73; this is only what it may not do.
-- **Other roles.** Only `specifier` is read-only. The rest of B6's role → model and tool-policy
-  mapping is LOB-207.
+- **Other roles' tools.** Only `specifier` is read-only; every other role is offered every tool.

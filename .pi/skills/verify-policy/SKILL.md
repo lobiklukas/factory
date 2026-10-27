@@ -1,6 +1,6 @@
 ---
 name: verify-policy
-description: Drive and prove the session policy — D11's autonomy boundary in `packages/harness/src/policy.ts`, installed as a `ToolTask` hook, and the read-only specifying stage (LOB-74). Use when asked to verify, test, or show evidence that a force-push, a ref deletion, a push to main, a tag push, a remote change, a write outside the worktree, egress to a non-allowlisted host, or a specifying run's write is refused, or after changing `packages/harness`, `packages/core`'s session owner, or `apps/api`.
+description: Drive and prove the session policy — D11's autonomy boundary in `packages/harness/src/policy.ts`, installed as a `ToolTask` hook, and the read-only specifying stage with its role's model and tools (LOB-74, LOB-207). Use when asked to verify, test, or show evidence that a force-push, a ref deletion, a push to main, a tag push, a remote change, a write outside the worktree, egress to a non-allowlisted host, or a specifying run's write is refused, or after changing `packages/harness`, `packages/core`'s session owner, or `apps/api`.
 ---
 
 # Verify the session policy
@@ -28,7 +28,7 @@ policy to `openSession` would still pass every unit test and fail here.
 | The read-only specifying stage   | `echo stage > stage-probe.txt` in two runs         | `refusal-stage.json`, **and the file in each worktree**  |
 
 Every check is required: `drive.ts` exits non-zero when one fails, and `refusals.sh` fails if any
-case does. A full run is **9/9 cases and 65 checks** (`refusals.json` → `passed: true`).
+case does. A full run is **9/9 cases and 70 checks** (`refusals.json` → `passed: true`).
 
 The `stage` case (LOB-74) is a different drive, `stage.ts`: it seeds one board over the default
 pipeline with a card in `specifying` and a card in `building`, starts a run on each through
@@ -39,6 +39,11 @@ own worktree. The specifying run must be refused in the stage's words (`read-onl
 both is what makes the rule stage-scoped rather than global: a policy that refused the write in both
 fails the building half, and one that refused it in neither fails the specifying half. See
 `features/stage.md`.
+
+The same case proves the role half of B6 (LOB-207): `refusals.sh` boots it with
+`ROLE_MODELS=specifier=faux/faux-spec`, and `stage.ts` asserts that the specifying run talked to
+`faux/faux-spec` and the building run to the deployment's `faux/faux-1`, and that the specifying run
+was offered no `write`, `edit` or `verify` while the building run was offered all three.
 
 Three things each case asserts beyond "the transcript says refused":
 
