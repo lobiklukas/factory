@@ -47,6 +47,11 @@ export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
+/**
+ * Who a session's spend is attributed to (LOB-162): the actor `createSession` was given, or the one
+ * a fork or a replay took from its source. The `sessions.actor` column is its index.
+ */
+export const ACTOR_DOC_KIND = "factory.actor";
 /** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
 export const FORK_DOC_KIND = "factory.fork";
 /**

@@ -10,6 +10,7 @@ import { Duration, Effect } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
+import { DASHBOARD_ACTOR } from "../approvals-view";
 import { SESSIONS_KEY } from "./session-list";
 
 /** The reactivity key a move invalidates: every board read re-runs once a move lands. */
@@ -121,6 +122,8 @@ export const startRunAtom = runtime.fn(
         title: task.title,
         taskId: task.id,
         taskColumn: task.column,
+        // The run's spend is the dashboard's, as `factory board start`'s is `cli`'s (LOB-162).
+        actor: DASHBOARD_ACTOR,
         ...(task.repo === undefined ? {} : { repo: task.repo }),
       });
     }),

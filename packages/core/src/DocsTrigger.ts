@@ -45,7 +45,7 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { SessionService } from "./SessionService";
-import { TriggerSessions } from "./TriggerService";
+import { TriggerSessions, triggerActorOf } from "./TriggerService";
 
 /** The label a docs rule claims, and the only label a docs delivery carries. */
 export const DOCS_TRIGGER_LABEL = "docs";
@@ -316,6 +316,7 @@ export const DocsSessionsFromSessionService = Layer.effect(
             repo: input.repo,
             branch: branch.value,
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+            actor: triggerActorOf(input.source),
           })
           .pipe(
             Effect.map((summary) => ({ id: summary.id })),

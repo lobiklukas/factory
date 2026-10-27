@@ -37,6 +37,7 @@ import {
   TriggerService,
   TriggerServiceLive,
   TriggerSessions,
+  triggerActorOf,
   type TriggerServiceShape,
   type TriggerSessionsShape,
 } from "./TriggerService";
@@ -46,6 +47,8 @@ const runId = randomBytes(6).toString("hex");
 /** One fake session, as the seam sees it: an id and the message that was sent to it. */
 type Created = {
   readonly id: SessionId;
+  /** The delivery's source, which the session port turns into the session's actor (LOB-162). */
+  readonly source: string;
   readonly title: string;
   readonly repo: RepoSlug;
   readonly baseRef: string | undefined;
@@ -143,6 +146,7 @@ const withRuntime = async <A>(
               `ses_${String(created.length + 1).padStart(26, "0")}` as SessionId;
             created.push({
               id,
+              source: input.source,
               title: input.title,
               repo: input.repo,
               baseRef: input.baseRef,
@@ -481,8 +485,15 @@ describe("the trigger seam", () => {
         );
         expect(created[0]?.repo).toBe(repo);
         expect(created[0]?.baseRef).toBe("main");
+        // The port is told where the delivery came from, so the session's spend is the source's.
+        expect(created[0]?.source).toBe("generic");
       },
       { registerRepo: [repo] },
     );
   }, 60_000);
+
+  it("attributes a trigger's session to `trigger:<source>`, never to a bare name", () => {
+    expect(triggerActorOf("linear")).toBe("trigger:linear");
+    expect(triggerActorOf("github")).toBe("trigger:github");
+  });
 });

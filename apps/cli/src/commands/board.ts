@@ -2,6 +2,7 @@ import { Console, Effect, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
 import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import type { Task, TaskComment } from "@repo/domain/Task";
+import { SessionActor } from "@repo/domain/Session";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
@@ -44,6 +45,13 @@ const actorFlag = Flag.String("actor").pipe(
   Flag.withDescription(
     "Who makes the move; a session id is a run, anything else is a person",
   ),
+  Flag.withDefault("cli"),
+);
+
+/** Who a run started from the terminal is attributed to (LOB-162): `cli`, as a move's actor is. */
+const runActorFlag = Flag.String("actor").pipe(
+  Flag.withDescription("Who the run's spend is attributed to"),
+  Flag.withSchema(SessionActor),
   Flag.withDefault("cli"),
 );
 
@@ -312,9 +320,10 @@ const startCommand = Command.make(
       ),
       Flag.optional,
     ),
+    actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, api }) {
+  Effect.fnUntraced(function* ({ task, column, prompt, actor, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -332,6 +341,7 @@ const startCommand = Command.make(
         title: card.title,
         taskId: card.id,
         taskColumn,
+        actor,
         ...(card.repo === undefined ? {} : { repo: card.repo }),
       });
       yield* Console.log(`session ${session.id}`);

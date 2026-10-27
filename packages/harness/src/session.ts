@@ -122,6 +122,7 @@ import {
   sameTasks,
   usageCostTotal,
   SESSION_DOC_KIND,
+  ACTOR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
@@ -165,6 +166,21 @@ export const SessionDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ repo: "", baseRef: "", branch: "" }),
+});
+
+/**
+ * Who the session's spend is attributed to (LOB-162), committed to the log so the index's
+ * `sessions.actor` is derivable from it (D7). A document of its own rather than a field of the repo
+ * binding: a scratch session writes no binding, and it still has an actor. Written once, at create
+ * (or at a fork or a replay, with the source's actor); a session nobody was attributed has none.
+ */
+export const ActorDoc = defineDoc({
+  kind: ACTOR_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ actor: "" }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -620,6 +636,21 @@ export const writeRepoBinding = (
           // Written on every binding commit, empty included: a document that kept an earlier
           // session's branch after a rebind would name a branch the worktree is not on.
           doc.branch = binding.branch ?? "";
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/** Commit the session's actor (LOB-162). The `sessions` row is the caller's to update. */
+export const writeActor = (
+  conversation: Conversation,
+  actor: string,
+): Effect.Effect<void, SessionError> =>
+  attempt("write actor", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(ActorDoc, conversation.id).then((doc) => {
+          doc.actor = actor;
         }),
       BACKGROUND_CONTEXT,
     ),
@@ -1510,6 +1541,8 @@ export type SessionLog = {
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
+  /** Who the session's spend is attributed to (LOB-162), when anyone was. */
+  readonly actor?: string;
   /**
    * Every approval the log records, requested order (LOB-147). Pending ones are what a snapshot
    * reports; the settled ones are here because the index rows a rebuild derives cover both.
@@ -1578,6 +1611,10 @@ export const readSessionLog = (
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
+    const actor = bindingString(
+      yield* readDocument(storage, ACTOR_DOC_KIND),
+      "actor",
+    );
     const replayDoc = projectReplayDoc(
       yield* readDocument(storage, REPLAY_DOC_KIND),
     );
@@ -1614,6 +1651,7 @@ export const readSessionLog = (
       ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
+      ...(actor === "" ? {} : { actor }),
       ...(replayDoc.source === ""
         ? {}
         : {

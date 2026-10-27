@@ -75,11 +75,14 @@ import type {
   SessionSummary,
   SessionUsage,
   SessionWorkspace,
+  SpendReport,
+  SpendRow,
   WithdrawMessageInput,
   WithdrawMessageResult,
 } from "@repo/domain/Session";
 import {
   RepoSlug,
+  SessionActor,
   SessionError as SessionErrorClass,
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
@@ -142,6 +145,7 @@ import {
   writeApprovalDecided,
   writeApprovalRequested,
   writeApprovalUsed,
+  writeActor,
   writeBudget,
   writeCurationUsage,
   writeRepoBinding,
@@ -269,6 +273,11 @@ export type SessionServiceShape = {
   readonly list: (
     input: ListSessionsInput,
   ) => Effect.Effect<ListSessionsOutput, SessionError>;
+  /**
+   * Spend keyed by repo and actor (LOB-162): the list's `costTotal` summed per (repo, actor) pair,
+   * from the same index, in one grouped read — never a fold (R6).
+   */
+  readonly spend: Effect.Effect<SpendReport, SessionError>;
   /** Register or update a repo a session can bind to (docs/features.md §3 A1). */
   readonly registerRepo: (
     input: RegisterRepoInput,
@@ -411,6 +420,8 @@ type SessionRow = {
   readonly prUrl: string | null;
   /** The session this one was forked from, from the index row (LOB-180). */
   readonly forkedFrom: string | null;
+  /** Who the session's spend is attributed to, when anyone was (LOB-162). */
+  readonly actor: string | null;
   readonly createdAt: string;
 };
 type RepoRow = {
@@ -440,6 +451,14 @@ type ListRow = {
    * and the page ends early.
    */
   readonly lastActivityExact: string;
+  readonly costTotal: number;
+};
+
+/** One (repo, actor) group of the spend read (LOB-162). */
+type SpendGroupRow = {
+  readonly repo: string | null;
+  readonly actor: string | null;
+  readonly sessions: number;
   readonly costTotal: number;
 };
 
@@ -1212,7 +1231,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
           const inserted = yield* paper(
             "create session",
-            insertSession(id, title, input.requestId, binding, null),
+            insertSession(
+              id,
+              title,
+              input.requestId,
+              binding,
+              null,
+              input.actor ?? null,
+            ),
           );
           const row = inserted[0] ?? {
             id,
@@ -1222,6 +1248,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch: binding.branch ?? null,
             prUrl: null,
             forkedFrom: null,
+            actor: input.actor ?? null,
             createdAt: "",
           };
           // The index row is written before the log because it carries the request-id dedupe key.
@@ -1256,6 +1283,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ? {}
                 : { branch: binding.branch }),
             });
+          }
+          if (input.actor !== undefined) {
+            // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
+            // this session is.
+            yield* writeActor(owner.root, input.actor);
           }
           if (input.taskId !== undefined && column !== undefined) {
             yield* writeTaskBinding(owner.root, {
@@ -1552,6 +1584,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               undefined,
               binding,
               input.sessionId,
+              parent.actor,
             ),
           );
           const row = inserted[0] ?? {
@@ -1562,6 +1595,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch: null,
             prUrl: null,
             forkedFrom: input.sessionId,
+            actor: parent.actor,
             createdAt: "",
           };
           // The entries, the lineage and the repo binding land in one commit: a fork that exists
@@ -1570,7 +1604,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // written (`at` names no entry of the parent, say) removes that row again: an index row
           // with no log is invisible to the list — which joins the activity index — and would wait
           // for a rebuild to be swept, so it is not left behind.
-          yield* acquireOwnerWith(
+          const owner = yield* acquireOwnerWith(
             id,
             row,
             ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
@@ -1615,6 +1649,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
               ),
           );
+          // A fork continues its parent's work, so its spend is the parent's actor's (LOB-162).
+          if (parent.actor !== null) {
+            yield* writeActor(owner.root, parent.actor);
+          }
           yield* touchActivity(id);
           return yield* describe(id, row);
         });
@@ -1657,7 +1695,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const id = yield* mintSessionId;
           const inserted = yield* paper(
             "create session",
-            insertSession(id, source.title, undefined, binding, null),
+            insertSession(
+              id,
+              source.title,
+              undefined,
+              binding,
+              null,
+              source.actor,
+            ),
           );
           const row = inserted[0] ?? {
             id,
@@ -1667,6 +1712,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch: null,
             prUrl: null,
             forkedFrom: null,
+            actor: source.actor,
             createdAt: "",
           };
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
@@ -1674,7 +1720,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // starts it. A failure after the row is written removes the row again — an index row with
           // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
           // fork's does).
-          yield* acquireOwnerWith(
+          const owner = yield* acquireOwnerWith(
             id,
             row,
             ({ storage, cwd, policy: sessionPolicy, run, verify }) =>
@@ -1704,6 +1750,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ).pipe(Effect.ignore),
             ),
           );
+          // A replay is its source's task run again, so its spend is the source's actor's (LOB-162).
+          if (source.actor !== null) {
+            yield* writeActor(owner.root, source.actor);
+          }
           yield* touchActivity(id);
           return yield* describe(id, row);
         });
@@ -2590,6 +2640,63 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
         });
 
+      /**
+       * Spend keyed by repo and actor (LOB-162). The same join `list` reads, grouped: a session is
+       * counted here exactly when the list would show it, and its cost is the list's `costTotal`,
+       * so the pane's sums are the list's numbers added up. A fork's `cost_total` is its own spend
+       * (what it inherited for its cap is the budget's `carried`, not `pi.usage`), so a parent and
+       * its fork are never counted twice.
+       *
+       * The order is the report's contract: costliest first, then by repo and actor, an absent one
+       * last — so two reads of the same index answer the same rows in the same order.
+       */
+      const spend: Effect.Effect<SpendReport, SessionError> = Effect.gen(
+        function* () {
+          const groups = yield* paper(
+            "read spend",
+            sql<SpendGroupRow>`
+              SELECT
+                s.repo,
+                s.actor,
+                count(*)::int AS sessions,
+                COALESCE(sum(a.cost_total), 0)::double precision AS cost_total
+              FROM session_activity a
+              JOIN sessions s ON s.id = a.session_id
+              GROUP BY s.repo, s.actor
+              ORDER BY cost_total DESC, s.repo ASC NULLS LAST, s.actor ASC NULLS LAST
+            `,
+          );
+          const rows: SpendRow[] = [];
+          for (const group of groups) {
+            const repo =
+              group.repo === null ? undefined : yield* toRepoSlug(group.repo);
+            const actor =
+              group.actor === null
+                ? Option.none()
+                : Schema.decodeOption(SessionActor)(group.actor);
+            if (group.actor !== null && Option.isNone(actor)) {
+              // Folding a malformed actor into "unattributed" would move its spend to a row it is
+              // not; the index is broken, and `rebuildIndexes` refolds it from the log.
+              return yield* new SessionErrorClass({
+                code: "storage",
+                message: `the sessions table holds an invalid actor: "${group.actor}"`,
+              });
+            }
+            rows.push({
+              ...(repo === undefined ? {} : { repo }),
+              ...(Option.isSome(actor) ? { actor: actor.value } : {}),
+              sessions: group.sessions,
+              costTotal: group.costTotal,
+            });
+          }
+          return {
+            rows,
+            sessions: rows.reduce((total, row) => total + row.sessions, 0),
+            costTotal: rows.reduce((total, row) => total + row.costTotal, 0),
+          };
+        },
+      );
+
       const parseCursor = (
         raw: string,
       ): Effect.Effect<
@@ -2619,6 +2726,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch,
             pr_url,
             forked_from,
+            actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
           WHERE id = ${sessionId}
@@ -2634,6 +2742,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch,
             pr_url,
             forked_from,
+            actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
           FROM sessions
           WHERE request_id = ${requestId}
@@ -2645,9 +2754,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestId: string | undefined,
         binding: Binding,
         forkedFrom: string | null,
+        actor: string | null,
       ) =>
         sql<SessionRow>`
-          INSERT INTO sessions (id, title, request_id, repo, base_ref, branch, forked_from)
+          INSERT INTO sessions (id, title, request_id, repo, base_ref, branch, forked_from, actor)
           VALUES (
             ${id},
             ${title},
@@ -2655,7 +2765,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ${binding.repo ?? null},
             ${binding.baseRef ?? null},
             ${binding.branch ?? null},
-            ${forkedFrom}
+            ${forkedFrom},
+            ${actor}
           )
           RETURNING
             id,
@@ -2665,6 +2776,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch,
             pr_url,
             forked_from,
+            actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
         `;
 
@@ -2837,6 +2949,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         compact,
         startMission,
         list,
+        spend,
         registerRepo,
         events,
         requestApproval,

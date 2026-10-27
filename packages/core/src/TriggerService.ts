@@ -41,6 +41,7 @@ import {
   type TriggerEvent,
   type TriggerOutcome,
   type TriggerRule,
+  type TriggerSource,
 } from "@repo/domain/Trigger";
 import { SessionService } from "./SessionService";
 
@@ -72,6 +73,8 @@ export class TriggerService extends Context.Service<
  */
 export type TriggerSessionsShape = {
   readonly create: (input: {
+    /** Where the delivery came from: the session's actor is `trigger:<source>` (LOB-162). */
+    readonly source: TriggerSource;
     readonly title: string;
     readonly requestId: string;
     readonly deliveryId: string;
@@ -100,6 +103,14 @@ export class TriggerSessions extends Context.Service<
  */
 export const sessionRequestIdOf = (deliveryId: string): string =>
   `trigger:${deliveryId}`;
+
+/**
+ * The actor a trigger-started session's spend is attributed to (LOB-162): the source that started
+ * it, namespaced so it can never read as a person's name. The person behind the issue or message is
+ * the source's to know, not a verified identity; LOB-20 is where that lands.
+ */
+export const triggerActorOf = (source: TriggerSource): string =>
+  `trigger:${source}`;
 
 /** The delivery a session was created for, or `undefined` for a session no trigger opened. */
 export const deliveryIdOfSession = (
@@ -147,6 +158,7 @@ export const TriggerSessionsFromSessionService = Layer.effect(
             requestId: input.requestId,
             repo: input.repo,
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+            actor: triggerActorOf(input.source),
           } satisfies CreateSessionInput)
           .pipe(
             Effect.map((summary) => ({ id: summary.id })),
@@ -342,6 +354,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               }
 
               const session = yield* sessions.create({
+                source: event.source,
                 title: event.title,
                 deliveryId: requestId,
                 // Namespaced (`sessionRequestIdOf`): `sessions.request_id` dedupes client retries

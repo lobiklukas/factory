@@ -1,4 +1,4 @@
-import { RepoSlug, SessionBudgetCap } from "@repo/domain/Session";
+import { RepoSlug, SessionActor, SessionBudgetCap } from "@repo/domain/Session";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
@@ -11,7 +11,8 @@ import { followSession, formatDollars } from "../transcript";
  * run settles.
  *
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
- * the ref it starts from. The workspace line is the server's own answer for where the work will
+ * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
+ * `factory approve` decides as `cli`). The workspace line is the server's own answer for where the work will
  * live, so the run proves the read path as well as the write.
  */
 export const runCommand = Command.make(
@@ -36,18 +37,28 @@ export const runCommand = Command.make(
       Flag.withSchema(SessionBudgetCap),
       Flag.optional,
     ),
+    actor: Flag.String("actor").pipe(
+      Flag.withDescription("Who the session's spend is attributed to"),
+      Flag.withSchema(SessionActor),
+      Flag.withDefault("cli"),
+    ),
     api: Flag.String("api").pipe(
       Flag.withDescription("Control plane base URL"),
       Flag.optional,
     ),
   },
-  Effect.fnUntraced(function* ({ task, repo, baseRef, budget, api }) {
+  Effect.fnUntraced(function* ({ task, repo, baseRef, budget, actor, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
 
-      const input: { repo?: RepoSlug; baseRef?: string; budget?: number } = {};
+      const input: {
+        repo?: RepoSlug;
+        baseRef?: string;
+        budget?: number;
+        actor: string;
+      } = { actor };
       if (Option.isSome(repo)) input.repo = repo.value;
       if (Option.isSome(baseRef)) input.baseRef = baseRef.value;
       if (Option.isSome(budget)) input.budget = budget.value;

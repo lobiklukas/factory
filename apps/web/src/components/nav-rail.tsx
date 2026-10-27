@@ -1,5 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { BellIcon, KanbanSquareIcon, TerminalIcon } from "lucide-react";
+import {
+  BellIcon,
+  CoinsIcon,
+  KanbanSquareIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { cn } from "cn";
 import { FactoryMark } from "@/components/factory-mark";
 import {
@@ -25,6 +30,8 @@ const SECTIONS = [
   // What needs a person, across every board (LOB-77): the question the board exists to answer.
   { to: "/attention", label: "Needs a person", icon: BellIcon },
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
+  // What the sessions cost, per repo and per actor (LOB-162): R4's attribution, across every run.
+  { to: "/spend", label: "Spend", icon: CoinsIcon },
 ] as const;
 
 export const NavRail = () => {

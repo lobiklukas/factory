@@ -349,6 +349,18 @@ describe("a docs delivery through the seam", () => {
     );
   }, 60_000);
 
+  it("attributes the docs session's spend to the trigger that started it (LOB-162)", async () => {
+    await run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ actor: string | null }>`
+          SELECT actor FROM sessions WHERE repo = ${repo}
+        `;
+        expect(rows.map((row) => row.actor)).toEqual(["trigger:github"]);
+      }),
+    );
+  }, 60_000);
+
   it("starts one session per schedule interval, and one for a redelivered tick", async () => {
     const before = await sessionCount();
     const at = 1_700_000_000_000;

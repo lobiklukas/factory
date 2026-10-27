@@ -29,6 +29,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       // off `getSession`'s snapshot rather than off a second call.
       startMission: (input) => sessions.startMission(input),
       listSessions: (input) => sessions.list(input),
+      listSpend: () => sessions.spend,
       listPages: (input) => sessions.listPages(input),
       curateSession: (input) => sessions.curate(input),
       registerRepo: (input) => sessions.registerRepo(input),
