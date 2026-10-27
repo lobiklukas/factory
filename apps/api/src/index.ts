@@ -73,6 +73,13 @@ const PrCapConfig = Config.all({
  * — matched against each simple command a `bash` call runs. Empty by default: a gate is a
  * deployment's choice, and an ungated deployment is the boundary D11 already draws. Every other
  * autonomy rule keeps D11's defaults.
+ *
+ * A gate's first word is a command name (`/usr/bin/npm` gates as `npm`), and flags may sit between
+ * its words (`npm --registry x publish`, `terraform -chdir=infra apply`); `sudo`, `env`, `timeout`,
+ * `xargs`, compound keywords and `sh -c '…'` are read through. A gate is a prompt, not a boundary
+ * (D15): it does not see a command spelled through a variable, an alias, `eval`, a script that runs
+ * it, or another interpreter. One approval covers one run of the call it names; the next identical
+ * call asks again. A denial stands for that exact call for the rest of the session.
  */
 const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
   Config.withDefault(""),

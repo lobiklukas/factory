@@ -2,16 +2,23 @@
 //
 //   MODE=arm     create a session and send it a task whose faux tool call is the gated command. The
 //                run must park: one approval pending, the session idle long before the command's
-//                sleep could have finished, the call blocked rather than run, and the ask committed
-//                to the log once — through `api.memo` as well as the request entry. Writes the
-//                session and request ids to APPROVAL_STATE for ./approval-restart.sh, which kills
-//                the API.
+//                sleep could have finished, the call blocked rather than run, and the request
+//                committed to the log once (a pending answer is not memoized). Writes the session and
+//                request ids to APPROVAL_STATE for ./approval-restart.sh, which kills the API.
 //   MODE=verify  read the session the killed API left behind, from a fresh process: the approval is
-//                still pending and the log holds one request. A new turn retries the same call and
-//                records no second request. Then a person approves it, and the same call runs.
+//                still pending and the log holds one request. A new turn retries the same call,
+//                records no second request, and is told it was not asked for again. Then a person
+//                approves it, and the same call runs — once: the approval is spent, and the turn
+//                after that asks a person again under a new request id.
 //
 // "One request" is counted in the log itself (`commits`), not in the pending list: the fold and the
 // index both key a request by its id, so a duplicate request entry would be invisible to them.
+//
+// What this proves is the recorder's half: the request id is the call's identity across a killed
+// process (the database answers a retry from the row it holds), and an approval covers one run.
+// The kill lands after the tool task settled, so no recovery here reruns a task mid-ask; that the
+// `api.memo` of a rerun task keeps it from spending a second approval is proven by
+// packages/harness/src/policy.approval.test.ts, which loses the commit inside that window.
 //
 // Env: API_URL, MODE, APPROVAL_STATE, EVIDENCE_DIR, FAUX_COMMAND, DATABASE_URL.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -105,6 +112,7 @@ const commitsHolding = (sessionId: SessionId, needle: string) =>
   });
 
 const REQUEST_KIND = "factory.approval.requested";
+const USED_KIND = "factory.approval.used";
 const memoKey = (requestId: string) => `factory.approval:${requestId}`;
 
 /** Poll a session until `done`, for longer than `waitUntil`'s budget: an approved run sleeps. */
@@ -210,8 +218,8 @@ const arm = Effect.gen(function* () {
     `commits holding ${REQUEST_KIND}: ${requests}`,
   );
   assert(
-    "the ask is committed through api.memo",
-    memos === 1,
+    "a pending answer is not memoized: the recorder's row is what a retry reads",
+    memos === 0,
     `commits holding ${memoKey(requestId)}: ${memos}`,
   );
 
@@ -284,6 +292,7 @@ const verify = Effect.gen(function* () {
     "the retried call is blocked and records no second request",
     retry?.isError === true &&
       !retry.text.includes(RAN) &&
+      retry.text.includes("is not asked for again") &&
       afterRetry === 1 &&
       pendingAfterRetry.approvals.length === 1 &&
       pendingAfterRetry.approvals[0]?.requestId === requestId,
@@ -337,6 +346,44 @@ const verify = Effect.gen(function* () {
       decision.actor === ACTOR &&
       afterApproval === 1,
     `pending=${pendingAfterApproval.approvals.length} actor=${decision.actor} requestCommits=${afterApproval}`,
+  );
+  const used = yield* commitsHolding(sessionId, USED_KIND);
+  const memos = yield* commitsHolding(sessionId, memoKey(requestId));
+  observed.log["usedCommits"] = used;
+  observed.log["memoCommitsAfterApproval"] = memos;
+  // `>= 1`, not `=== 1`: a task row is rewritten whole, so the commit that records the run's
+  // intent carries the memo the commit before it wrote.
+  assert(
+    "the approval was spent on that run, and the run memoized its answer",
+    used === 1 && memos >= 1,
+    `commits holding ${USED_KIND}: ${used}; holding ${memoKey(requestId)}: ${memos}`,
+  );
+
+  // 4. The agent runs the same call again: a new run needs a new yes, asked under a new id.
+  yield* client.sendMessage({ sessionId, content: "run it again" });
+  const again = yield* settle(
+    client.getSession({ sessionId }),
+    (snapshot) => !snapshot.live.busy && toolResults(snapshot).length >= 4,
+    "the repeated turn to settle",
+    20_000,
+  );
+  observed.transcript = transcriptOf(again);
+  const repeated = toolResults(again)[3];
+  const pendingAgain = yield* approvals.listApprovals({ sessionId });
+  const afterRepeat = yield* commitsHolding(sessionId, REQUEST_KIND);
+  observed.log["requestCommitsAfterRepeat"] = afterRepeat;
+  observed.approvals["afterRepeat"] = pendingAgain.approvals;
+  const second = `${requestId}-2`;
+  assert(
+    "the same call after the approved run asks again, under a new request id",
+    repeated?.isError === true &&
+      !repeated.text.includes(RAN) &&
+      repeated.text.includes("one has been asked for") &&
+      repeated.text.includes(second) &&
+      pendingAgain.approvals.length === 1 &&
+      pendingAgain.approvals[0]?.requestId === second &&
+      afterRepeat === 2,
+    `toolResult=${JSON.stringify(repeated?.text)} pending=${pendingAgain.approvals.map((approval) => approval.requestId).join(", ")} requestCommits=${afterRepeat}`,
   );
   return sessionId;
 });

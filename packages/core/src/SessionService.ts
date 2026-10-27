@@ -128,6 +128,7 @@ import {
   usageCostTotal,
   writeApprovalDecided,
   writeApprovalRequested,
+  writeApprovalUsed,
   writeCurationUsage,
   writeRepoBinding,
   writeTaskBinding,
@@ -390,6 +391,8 @@ type Binding = {
 type ApprovalRecord = {
   readonly request: ApprovalRequest;
   readonly decision?: ApprovalDecision;
+  /** Whether a gated call already ran on this approval (LOB-52): an approval covers one run. */
+  readonly used: boolean;
 };
 
 type ApprovalRow = {
@@ -400,6 +403,7 @@ type ApprovalRow = {
   readonly decision: string | null;
   readonly actor: string | null;
   readonly decidedAt: string | null;
+  readonly usedAt: string | null;
 };
 
 /** One `session_pages` row as the driver returns it; the two jsonb columns are selected as text. */
@@ -1532,7 +1536,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
             decision,
             actor,
-            to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+            to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at,
+            to_char(used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS used_at
           FROM session_approvals
           WHERE session_id = ${sessionId} AND request_id = ${requestId}
         `;
@@ -1548,6 +1553,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           detail: row.detail,
           requestedAt: row.requestedAt,
         },
+        used: row.usedAt !== null,
         ...(row.decision === null ||
         row.actor === null ||
         row.decidedAt === null
@@ -1577,96 +1583,195 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           },
         );
 
+      /**
+       * Record a request under `approvalGate`, which the caller holds. A request id already recorded
+       * records nothing and answers the record it has, decision and all, so a caller that raced a
+       * decision reads that decision rather than a stale "pending".
+       */
+      const recordRequestLocked = (
+        input: RequestApprovalInput,
+        row: SessionRow,
+      ): Effect.Effect<
+        { readonly record: ApprovalRecord; readonly fresh: boolean },
+        SessionError
+      > =>
+        Effect.gen(function* () {
+          const known = yield* recordOf(input.sessionId, input.requestId);
+          if (known !== undefined) return { record: known, fresh: false };
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const requestedAt = DateTime.formatIso(yield* DateTime.now);
+          const request: ApprovalRequest = {
+            sessionId: input.sessionId,
+            requestId: input.requestId,
+            action: input.action,
+            detail: input.detail ?? "",
+            requestedAt,
+          };
+          yield* paper(
+            "record approval request",
+            writeApprovalRequested(owner.root, {
+              requestId: request.requestId,
+              action: request.action,
+              detail: request.detail,
+              requestedAt,
+            }),
+          );
+          // The row is the index of the entry just committed, not a second record: written
+          // after it, so a crash between the two leaves the log (the truth) without a row a
+          // rebuild cannot recover — never a row that claims a request no log holds. The cost
+          // of that order is the other side of it: a retry after such a crash finds no row and
+          // commits the request again, so the log can hold the same request id twice. That is
+          // why the fold, not the writer, makes the id the identity (`projectApprovals`) — a
+          // duplicate costs one log line, not a second pending approval.
+          yield* paper(
+            "index approval request",
+            sql`
+              INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at)
+              VALUES (${input.sessionId}, ${request.requestId}, ${request.action}, ${request.detail}, ${requestedAt}::timestamptz)
+              ON CONFLICT (session_id, request_id) DO NOTHING
+            `,
+          );
+          yield* touchActivity(input.sessionId);
+          return { record: { request, used: false }, fresh: true };
+        });
+
       const requestApproval = (
         input: RequestApprovalInput,
       ): Effect.Effect<ApprovalRequest, SessionError> =>
         Effect.gen(function* () {
           yield* requireRequestId(input.requestId);
           const row = yield* requireSession(input.sessionId);
-          return yield* approvalGate.withPermits(1)(
-            Effect.gen(function* () {
-              const known = yield* recordOf(input.sessionId, input.requestId);
-              if (known !== undefined) return known.request;
-              const owner = yield* acquireOwner(input.sessionId, row);
-              const requestedAt = DateTime.formatIso(yield* DateTime.now);
-              const request: ApprovalRequest = {
-                sessionId: input.sessionId,
-                requestId: input.requestId,
-                action: input.action,
-                detail: input.detail ?? "",
-                requestedAt,
-              };
-              yield* paper(
-                "record approval request",
-                writeApprovalRequested(owner.root, {
-                  requestId: request.requestId,
-                  action: request.action,
-                  detail: request.detail,
-                  requestedAt,
-                }),
-              );
-              // The row is the index of the entry just committed, not a second record: written
-              // after it, so a crash between the two leaves the log (the truth) without a row a
-              // rebuild cannot recover — never a row that claims a request no log holds. The cost
-              // of that order is the other side of it: a retry after such a crash finds no row and
-              // commits the request again, so the log can hold the same request id twice. That is
-              // why the fold, not the writer, makes the id the identity (`projectApprovals`) — a
-              // duplicate costs one log line, not a second pending approval.
-              yield* paper(
-                "index approval request",
-                sql`
-                  INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at)
-                  VALUES (${input.sessionId}, ${request.requestId}, ${request.action}, ${request.detail}, ${requestedAt}::timestamptz)
-                  ON CONFLICT (session_id, request_id) DO NOTHING
-                `,
-              );
-              yield* touchActivity(input.sessionId);
-              return request;
-            }),
+          const recorded = yield* approvalGate.withPermits(1)(
+            recordRequestLocked(input, row),
+          );
+          return recorded.record.request;
+        });
+
+      /**
+       * Spend an approval (LOB-52): a gated call is about to run on it. The log entry first, then
+       * the index, the order `recordRequestLocked` keeps and for the same reason — a crash between
+       * the two leaves the use in the log, which a rebuild folds into the row.
+       */
+      const markUsedLocked = (
+        sessionId: SessionId,
+        requestId: string,
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const owner = yield* acquireOwner(sessionId, row);
+          const usedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* paper(
+            "record approval use",
+            writeApprovalUsed(owner.root, { requestId, usedAt }),
+          );
+          yield* paper(
+            "spend approval",
+            sql`
+              UPDATE session_approvals
+              SET used_at = ${usedAt}::timestamptz
+              WHERE session_id = ${sessionId} AND request_id = ${requestId}
+                AND decision = 'approved' AND used_at IS NULL
+            `,
           );
         });
+
+      /**
+       * The request id of the `use`-th run of one gated call: the call's own id for the first, and
+       * `<id>-<use>` after it, so every run that needs a person is a request of its own in the log
+       * and the pending list.
+       */
+      const useRequestId = (requestId: string, use: number): string =>
+        use === 1 ? requestId : `${requestId}-${use}`;
+
+      /**
+       * The session's runtime services, captured once, so an ask that runs inside a Pi Durable hook
+       * — a bare `Effect.runPromise` with none of its own — still exports its span and logs to the
+       * tracer and logger the API was built with (motel).
+       */
+      const askServices = yield* Effect.context<never>();
 
       /**
        * A session's approval channel (D15, LOB-52): a gated tool call asks through the same approvals
        * service the RPC group uses, so the request is one row and one log entry whether a caller
        * asked over RPC or the agent hit a gate.
        *
-       * The answer is where the request stands. A request already decided is answered from its
-       * decision and records nothing, so the agent retrying an approved call runs it and retrying a
-       * denied one is refused; one still pending is answered `pending` by `requestApproval`'s own
-       * idempotence (the row is keyed by the request id), so a re-ask records no second request.
+       * An approval covers one run of the call. The asker walks the call's requests in order — its
+       * own id, then `<id>-2`, `<id>-3`, … — and answers from the first that is not spent: one still
+       * pending answers `pending` and records nothing; a denied one answers `denied` (a denial
+       * stands for that exact call); an approved, unused one is spent here and answers `approved`;
+       * and when every request is spent, the next one is recorded and answers a fresh `pending`. So
+       * the agent retrying an approved call runs it once, and the run after that asks a person again.
+       *
+       * The whole walk holds `approvalGate`, the permit `decideApproval` takes, so a decision cannot
+       * land between the read and the record, and two attempts cannot spend one approval.
        */
       const askerFor =
         (sessionId: SessionId): ApprovalAsker =>
         (ask) =>
           Effect.gen(function* () {
-            const known = yield* recordOf(sessionId, ask.requestId);
-            if (known?.decision !== undefined) {
-              return {
-                _tag: known.decision.decision,
-                actor: known.decision.actor,
-              } satisfies ApprovalAnswer;
-            }
-            yield* requestApproval({
-              sessionId,
-              requestId: ask.requestId,
-              action: ask.action,
-              detail: ask.detail,
-            });
-            return { _tag: "pending" } satisfies ApprovalAnswer;
+            const row = yield* requireSession(sessionId);
+            return yield* approvalGate.withPermits(1)(
+              Effect.gen(function* () {
+                for (let use = 1; ; use += 1) {
+                  const requestId = useRequestId(ask.requestId, use);
+                  const { record, fresh } = yield* recordRequestLocked(
+                    {
+                      sessionId,
+                      requestId,
+                      action: ask.action,
+                      detail: ask.detail,
+                    },
+                    row,
+                  );
+                  const decision = record.decision;
+                  if (decision === undefined) {
+                    return {
+                      _tag: "pending",
+                      requestId,
+                      fresh,
+                    } satisfies ApprovalAnswer;
+                  }
+                  if (decision.decision === "denied") {
+                    return {
+                      _tag: "denied",
+                      requestId,
+                      actor: decision.actor,
+                    } satisfies ApprovalAnswer;
+                  }
+                  if (!record.used) {
+                    yield* markUsedLocked(sessionId, requestId, row);
+                    yield* Effect.logInfo(
+                      `approval ${requestId} spent on a gated call`,
+                    );
+                    return {
+                      _tag: "approved",
+                      requestId,
+                      actor: decision.actor,
+                    } satisfies ApprovalAnswer;
+                  }
+                }
+              }),
+            );
           }).pipe(
             Effect.withSpan("SessionService.askApproval", {
               attributes: { sessionId, requestId: ask.requestId },
             }),
             // The hook has nowhere to put an error: an ask that could not be recorded never
             // happened, so the gated call stays blocked, nothing is memoized, and the next
-            // attempt asks again.
+            // attempt asks again. Logged, so the failure is in motel and not only in the
+            // sentence the model reads.
             Effect.catch((error) =>
-              Effect.succeed({
-                _tag: "unrecorded",
-                reason: error.message,
-              } satisfies ApprovalAnswer),
+              Effect.as(
+                Effect.logWarning(
+                  `approval ask ${ask.requestId} could not be recorded: ${error.message}`,
+                ),
+                {
+                  _tag: "unrecorded",
+                  reason: error.message,
+                } satisfies ApprovalAnswer,
+              ),
             ),
+            Effect.provideContext(askServices),
           );
 
       const decideApproval = (
@@ -1758,7 +1863,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
                 decision,
                 actor,
-                to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at
+                to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at,
+                to_char(used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS used_at
               FROM session_approvals
               WHERE session_id = ${sessionId} AND decision IS NULL
               ORDER BY requested_at, request_id

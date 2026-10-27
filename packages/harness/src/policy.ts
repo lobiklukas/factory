@@ -80,6 +80,11 @@ export type AutonomyConfig = {
    * whose simple commands starts with one of these is neither refused nor run: the session asks, and
    * the call is blocked until a person approves it. Empty by default — a gate is a deployment's
    * choice, and an ungated deployment is the boundary D11 already draws.
+   *
+   * One approval covers one run of the call it names: the same call after that run asks again. A
+   * denial stands for that exact call for the rest of the session. The match reads the command's
+   * text (see `gateOf` for what it reads through and what it cannot see), so a gate stops the
+   * accident; it is not a boundary (D15).
    */
   readonly approvalRequired?: readonly string[];
 };
@@ -121,7 +126,7 @@ export const autonomyRules = (
   pushRefPrefixes: config.pushRefPrefixes,
   allowedHosts: config.allowedHosts.map((host) => host.toLowerCase()),
   approvalRequired: (config.approvalRequired ?? [])
-    .map(normalizeCommand)
+    .map(normalizeGate)
     .filter((gate) => gate.length > 0),
 });
 
@@ -1080,25 +1085,156 @@ const decideRefusal = (
 const normalizeCommand = (command: string): string =>
   command.trim().replace(/\s+/g, " ");
 
-/** Whether `words` is `gate` itself or starts with it as whole words (`npm publish` is not `npm publishing`). */
-const gates = (words: string, gate: string): boolean =>
-  gate.length > 0 && (words === gate || words.startsWith(`${gate} `));
+/**
+ * A configured gate in the form it is matched in: normalized, with its command word read as a
+ * command is — `/usr/bin/npm publish` gates what `npm publish` gates.
+ */
+const normalizeGate = (gate: string): string => {
+  const [first = "", ...rest] = normalizeCommand(gate).split(" ");
+  return [baseName(first), ...rest].join(" ").trim();
+};
 
 /**
- * The gate a command hits, if any: the first configured prefix that one of its simple commands
- * starts with.
- *
- * Read per simple command, with assignments and wrappers dropped, by the same reading the refusals
- * use — so `cd pkg && npm publish` and `sudo npm publish` are the `npm publish` they run, and
- * `echo npm publish` is an `echo`. The text-reading caveats in this module's docstring apply here
- * too: a gate is a prompt for a person, not a boundary.
+ * Words that open or close a compound command rather than name one: `then npm publish` and
+ * `{ npm publish; }` run `npm publish`.
  */
-const gateOf = (rules: AutonomyRules, command: string): string | undefined => {
+const SHELL_KEYWORDS = new Set([
+  "{",
+  "}",
+  "!",
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "do",
+  "done",
+  "while",
+  "until",
+]);
+
+/** Shells whose `-c` argument is a command line of its own: `bash -c 'npm publish'` runs it. */
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+
+/** `xargs` flags that take a separate value, so the command it runs is read past them. */
+const XARGS_VALUE_FLAGS = new Set([
+  "-I",
+  "-n",
+  "-P",
+  "-L",
+  "-d",
+  "-a",
+  "-E",
+  "-s",
+]);
+/** `timeout` flags that take a separate value. */
+const TIMEOUT_VALUE_FLAGS = new Set(["-s", "-k", "--signal", "--kill-after"]);
+
+/** `argv` past its leading flags, and past each flag's value when `valued` says it takes one. */
+const pastFlags = (
+  argv: readonly string[],
+  valued: ReadonlySet<string>,
+): readonly string[] => {
+  let index = 0;
+  while ((argv[index] ?? "").startsWith("-")) {
+    index += valued.has(argv[index] ?? "") ? 2 : 1;
+  }
+  return argv.slice(index);
+};
+
+/**
+ * The words of the command a segment really runs, for the gate: assignments, wrappers and compound
+ * keywords dropped, and `timeout` and `xargs` read through to the command they start — so
+ * `timeout 60 npm publish` and `xargs npm publish` are the `npm publish` they run. Bounded, because
+ * every pass drops at least one word.
+ */
+const gateWords = (argv: readonly string[]): readonly string[] => {
+  let words = argv;
+  for (let pass = 0; pass < argv.length; pass += 1) {
+    while (SHELL_KEYWORDS.has(words[0] ?? "")) words = words.slice(1);
+    words = commandWords(words);
+    const head = baseName(words[0] ?? "");
+    if (head === "timeout") {
+      // `timeout [flags] DURATION command…`
+      words = pastFlags(words.slice(1), TIMEOUT_VALUE_FLAGS).slice(1);
+    } else if (head === "xargs") {
+      words = pastFlags(words.slice(1), XARGS_VALUE_FLAGS);
+    } else {
+      return words;
+    }
+  }
+  return words;
+};
+
+/** `bash -c 'npm publish'`'s command line, or `undefined` for anything that is not a shell's `-c`. */
+const shellScriptOf = (words: readonly string[]): string | undefined => {
+  if (!SHELLS.has(baseName(words[0] ?? ""))) return undefined;
+  const flag = words.findIndex(
+    (word, index) => index > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word),
+  );
+  return flag === -1 ? undefined : words[flag + 1];
+};
+
+/**
+ * Whether `words` runs `gate`: the same command word, then each of the gate's further words in order,
+ * with only flags between them — `terraform -chdir=infra apply` and `npm --registry x publish` run
+ * `terraform apply` and `npm publish`. A flag may take the word after it as its value (`--registry
+ * x`), which is skipped as long as it is not the gate's next word. Any other word in between ends the
+ * match: `npm run publish` is not `npm publish`, and `npm publishing` is not either.
+ */
+const runsGate = (words: readonly string[], gate: string): boolean => {
+  const [command, ...rest] = gate.split(" ");
+  if (command === undefined || command.length === 0) return false;
+  if (baseName(words[0] ?? "") !== command) return false;
+  let index = 1;
+  for (const expected of rest) {
+    for (;;) {
+      const word = words[index];
+      if (word === undefined) return false;
+      if (word === expected) break;
+      if (!word.startsWith("-")) return false;
+      index += 1;
+      const value = words[index];
+      if (
+        !word.includes("=") &&
+        value !== undefined &&
+        value !== expected &&
+        !value.startsWith("-")
+      )
+        index += 1;
+    }
+    index += 1;
+  }
+  return true;
+};
+
+/**
+ * The gate a command hits, if any: the first configured gate that one of its simple commands runs.
+ *
+ * Read per simple command, with assignments, wrappers and compound keywords dropped, by the same
+ * reading the refusals use — so `cd pkg && npm publish`, `sudo npm publish`, `timeout 60 npm
+ * publish` and `if …; then npm publish; fi` are the `npm publish` they run, `bash -c 'npm publish'`
+ * is read into, and `echo npm publish` is an `echo`.
+ *
+ * What it cannot see, the text-reading caveats in this module's docstring name: a command spelled
+ * through a variable (`$NPM publish`), an alias or function, `eval`, a script or Makefile that runs
+ * it, or another interpreter (`node -e`). A gate is a prompt that stops the accident, not a boundary
+ * (D15); a deployment that needs the boundary puts it outside the agent.
+ */
+const gateOf = (
+  rules: AutonomyRules,
+  command: string,
+  depth = 0,
+): string | undefined => {
   for (const segment of segmentsOf(tokenize(command))) {
-    const words = commandWords(segment.argv);
+    const words = gateWords(segment.argv);
     if (words.length === 0) continue;
-    const phrase = [baseName(words[0] ?? ""), ...words.slice(1)].join(" ");
-    const gate = rules.approvalRequired.find((entry) => gates(phrase, entry));
+    const script = shellScriptOf(words);
+    if (script !== undefined && depth < 3) {
+      const inner = gateOf(rules, script, depth + 1);
+      if (inner !== undefined) return inner;
+    }
+    const gate = rules.approvalRequired.find((entry) => runsGate(words, entry));
     if (gate !== undefined) return gate;
   }
   return undefined;
@@ -1288,7 +1424,13 @@ export const PolicyLive = (
       autonomyPolicy(config, worktree, sessionId),
   });
 
-/** What a gated call asks a person: the request id that identifies it, and what it would run. */
+/**
+ * What a gated call asks a person: the call's identity, and what it would run.
+ *
+ * `requestId` names the call, not one ask of it: the same call is the same id on every attempt. An
+ * approval covers one run (see `ApprovalAsker`), so the recorder may record a later run of the same
+ * call under a request id of its own; the answer says which id it recorded.
+ */
 export type ApprovalAsk = {
   readonly requestId: string;
   readonly action: string;
@@ -1296,14 +1438,31 @@ export type ApprovalAsk = {
 };
 
 /**
- * Where an ask stands, as the recorder answers it: still waiting, or settled by a named person.
- * `unrecorded` is the recorder saying it could not record the ask, which is not an answer — the call
- * stays blocked, nothing is memoized, and the next attempt asks again.
+ * Where an ask stands, as the recorder answers it, under the request id it recorded the ask as.
+ *
+ * - `pending`: waiting for a person. `fresh` is whether this ask recorded the request; a retry of a
+ *   call already waiting records nothing and is told so.
+ * - `approved`: a person said yes, and this answer spent the approval — the call runs once on it.
+ * - `denied`: a person said no. A denial stands for that exact call for the rest of the session.
+ * - `unrecorded`: the recorder could not record the ask, which is not an answer — the call stays
+ *   blocked, nothing is memoized, and the next attempt asks again.
  */
 export type ApprovalAnswer =
-  | { readonly _tag: "pending" }
-  | { readonly _tag: "approved"; readonly actor: string }
-  | { readonly _tag: "denied"; readonly actor: string }
+  | {
+      readonly _tag: "pending";
+      readonly requestId: string;
+      readonly fresh: boolean;
+    }
+  | {
+      readonly _tag: "approved";
+      readonly requestId: string;
+      readonly actor: string;
+    }
+  | {
+      readonly _tag: "denied";
+      readonly requestId: string;
+      readonly actor: string;
+    }
   | { readonly _tag: "unrecorded"; readonly reason: string };
 
 /**
@@ -1313,7 +1472,12 @@ export type ApprovalAnswer =
  *
  * It answers with where the request stands, because the same call asked again — the agent retrying
  * once a person decided — has to run if they said yes and be refused if they said no, rather than
- * ask a second time. Recording an ask whose id is already recorded must record nothing.
+ * ask a second time. Recording an ask whose id is already recorded and still pending must record
+ * nothing.
+ *
+ * An approval is good for one run (D15): the recorder that answers `approved` marks the approval
+ * used in the same step, so the next identical call — a later turn, possibly after the agent changed
+ * what the command acts on — asks a person again rather than running on the old yes.
  *
  * Absent: a caller that has no approval channel, in which case a gated call is blocked with a
  * sentence saying so rather than run ungated.
@@ -1321,72 +1485,66 @@ export type ApprovalAnswer =
 export type ApprovalAsker = (ask: ApprovalAsk) => Effect.Effect<ApprovalAnswer>;
 
 /**
- * What a tool task remembers about its ask, in `api.memo` (D15): the question and the answer it got.
- * The memo is the asking task's, so it lives exactly as long as the call can still run — Pi Durable
- * drops a task's memos when it settles — and survives what that call survives: a recovery that
- * reruns the task's first phase after a crash or a restart reads it back instead of asking again.
+ * What a tool task remembers about its ask, in `api.memo` (D15): the question and the settled
+ * answer it got. The memo is the asking task's, so it lives exactly as long as the call can still
+ * run — Pi Durable drops a task's memos when it settles — and survives what that call survives.
+ *
+ * Only a settled answer is memoized. An approval is spent when it is answered, so a recovery that
+ * reruns the task's first phase after a crash or a restart has to read its `approved` back rather
+ * than ask: asked again, the recorder would find the approval used and ask a person afresh. A
+ * `pending` answer is not memoized, because asking again costs nothing (the recorder answers from
+ * the request it holds) and is how an approval given while the process was down takes effect.
  */
 type ApprovalMemo = {
   readonly requestId: string;
   readonly action: string;
   readonly detail: string;
-  readonly answer: "pending" | "approved" | "denied";
-  readonly actor: string | null;
+  readonly answer: "approved" | "denied";
+  readonly actor: string;
 };
 
 /** The memo name for one ask. Exported so a test can read the memo the hook wrote. */
 export const approvalMemoKey = (requestId: string): string =>
   `factory.approval:${requestId}`;
 
-const memoOf = (
-  ask: ApprovalAsk,
-  answer: Exclude<ApprovalAnswer, { readonly _tag: "unrecorded" }>,
-): ApprovalMemo => ({
-  requestId: ask.requestId,
-  action: ask.action,
-  detail: ask.detail,
-  answer: answer._tag,
-  actor: answer._tag === "pending" ? null : answer.actor,
-});
+/** An ask as one recorded request: the action and detail it asked about, under the recorded id. */
+type Asked = {
+  readonly requestId: string;
+  readonly action: string;
+};
 
-const askedSentence = (ask: ApprovalAsk): string =>
+const askedSentence = (ask: Asked): string =>
   `\`${ask.action}\` needs a person's approval, and one has been asked for (request ${ask.requestId}). It did not run. Do not retry it until you are told it was approved; carry on with work that does not need it, or end your turn and say what is waiting.`;
 
-const pendingSentence = (ask: ApprovalAsk): string =>
+const pendingSentence = (ask: Asked): string =>
   `\`${ask.action}\` is still waiting for a person's approval (request ${ask.requestId}); it was asked for once and is not asked for again. It did not run. Carry on with work that does not need it, or end your turn and say what is waiting.`;
 
-const deniedSentence = (ask: ApprovalAsk, actor: string): string =>
+const deniedSentence = (ask: Asked, actor: string): string =>
   `\`${ask.action}\` was denied by ${actor} (request ${ask.requestId}), so it did not run. Do not retry it; find a way that does not need it, or say why it is needed.`;
 
-const unrecordedSentence = (ask: ApprovalAsk, reason: string): string =>
+const unrecordedSentence = (ask: Asked, reason: string): string =>
   `\`${ask.action}\` needs a person's approval, and the request could not be recorded (${reason}), so it did not run. Try it again later.`;
 
-const ungatedSentence = (ask: ApprovalAsk): string =>
+const ungatedSentence = (ask: Asked): string =>
   `\`${ask.action}\` needs a person's approval and this session has no approval channel, so it did not run (request ${ask.requestId}). Ask a human to run it.`;
 
-/** What the hook returns for an answer: an approved call runs, everything else is blocked. */
+/** What the hook returns for a settled answer: an approved call runs, a denied one is blocked. */
 const outcomeOf = (
   memo: ApprovalMemo,
-  recovered: boolean,
-): { readonly block: string } | undefined => {
-  switch (memo.answer) {
-    case "approved":
-      return undefined;
-    case "denied":
-      return { block: deniedSentence(memo, memo.actor ?? "a person") };
-    case "pending":
-      return { block: recovered ? pendingSentence(memo) : askedSentence(memo) };
-  }
-};
+): { readonly block: string } | undefined =>
+  memo.answer === "approved"
+    ? undefined
+    : { block: deniedSentence(memo, memo.actor) };
 
 /**
  * A gated call's ask, once per tool task (D15, LOB-52).
  *
- * Read the memo first: a task that already asked — this is a recovery rerunning its first phase —
- * reuses the answer it got and does not ask again. Otherwise ask, then memoize the answer. Ask
- * before memoizing, because an ask that could not be recorded must stay retryable; a crash between
- * the two re-asks once, which the recorder answers from the request it already holds (it is keyed
- * by the request id) instead of recording a second one.
+ * Read the memo first: a task that already got a settled answer — this is a recovery rerunning its
+ * first phase — reuses it and does not ask again, which is what keeps a crash mid-run from spending
+ * a second approval. Otherwise ask. A pending answer blocks the call and is not memoized; a settled
+ * one is memoized, then acted on. Ask before memoizing, because an ask that could not be recorded
+ * must stay retryable; a crash between an `approved` answer and its memo leaves a spent approval and
+ * no memo, so the rerun asks a person again — it fails closed, never into a second unasked run.
  */
 const askOnce = (
   decision: ApprovalAsk,
@@ -1399,20 +1557,42 @@ const askOnce = (
     const remembered = yield* Effect.promise(() =>
       api.memo<ApprovalMemo>(key, context),
     );
-    if (remembered !== undefined) return outcomeOf(remembered, true);
+    if (remembered !== undefined) return outcomeOf(remembered);
     if (ask === undefined) return { block: ungatedSentence(decision) };
     const answer = yield* ask({
       requestId: decision.requestId,
       action: decision.action,
       detail: decision.detail,
     });
-    if (answer._tag === "unrecorded")
-      return { block: unrecordedSentence(decision, answer.reason) };
-    // First writer wins: if a concurrent attempt memoized first, its answer is the one this task got.
-    const memo = yield* Effect.promise(() =>
-      api.memo<ApprovalMemo>(key, memoOf(decision, answer), context),
-    );
-    return outcomeOf(memo, false);
+    switch (answer._tag) {
+      case "unrecorded":
+        return { block: unrecordedSentence(decision, answer.reason) };
+      case "pending": {
+        const asked = { requestId: answer.requestId, action: decision.action };
+        return {
+          block: answer.fresh ? askedSentence(asked) : pendingSentence(asked),
+        };
+      }
+      case "approved":
+      case "denied": {
+        // First writer wins: if a concurrent attempt memoized first, its answer is the one this
+        // task got.
+        const memo = yield* Effect.promise(() =>
+          api.memo<ApprovalMemo>(
+            key,
+            {
+              requestId: answer.requestId,
+              action: decision.action,
+              detail: decision.detail,
+              answer: answer._tag,
+              actor: answer.actor,
+            },
+            context,
+          ),
+        );
+        return outcomeOf(memo);
+      }
+    }
   });
 
 /**
@@ -1420,10 +1600,11 @@ const askOnce = (
  *
  * `beforeTool` is the decision, and its refusal becomes Pi Durable's `blocked` result — a message
  * the model reads and can correct from. A gated call is a third outcome (LOB-52): the request is
- * recorded through `ask` and memoized with `api.memo` (`askOnce`), and the call is blocked while the
- * answer is pending. The tool never runs and the hook does not wait, so a run waiting on a person
- * ends its turn and is not busy: the session parks idle with the approval pending in its log. Once a
- * person approves, the same call — the same request id — runs. `afterTool` changes nothing today,
+ * recorded through `ask` (`askOnce`), and the call is blocked while the answer is pending. The tool
+ * never runs and the hook does not wait, so a run waiting on a person ends its turn and is not busy:
+ * the session parks idle with the approval pending in its log. Once a person approves, the next
+ * attempt at the same call runs — once; the settled answer is memoized with `api.memo` so a
+ * recovered rerun of that task does not ask again. `afterTool` changes nothing today,
  * and is registered because it is the seam the egress audit writes through; returning the result
  * untouched is also the invariant that keeps the policy from altering what a tool reported.
  */

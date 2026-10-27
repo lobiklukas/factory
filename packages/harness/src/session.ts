@@ -102,6 +102,7 @@ import {
   type PageLogRecord,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
+  APPROVAL_USED_KIND,
   APPROVAL_REQUESTED_KIND,
   FORK_DOC_KIND,
   REPLAY_DOC_KIND,
@@ -494,6 +495,26 @@ export const writeApprovalDecided = (
     conversation
       .commit(
         (tx) => tx.appendEntry(ApprovalDecidedEntry, conversation.id, { data }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
+
+/** An approval spent: a gated call ran on it (LOB-52). Committed before the call runs. */
+export const ApprovalUsedEntry = defineEntry<{
+  readonly requestId: string;
+  readonly usedAt: string;
+}>(APPROVAL_USED_KIND);
+
+/** Commit an approval's use. Appends to the log; the index is the caller's to update. */
+export const writeApprovalUsed = (
+  conversation: Conversation,
+  data: { readonly requestId: string; readonly usedAt: string },
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write approval use", () =>
+    conversation
+      .commit(
+        (tx) => tx.appendEntry(ApprovalUsedEntry, conversation.id, { data }),
         BACKGROUND_CONTEXT,
       )
       .then((entry) => entry.id),

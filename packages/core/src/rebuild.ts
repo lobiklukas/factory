@@ -19,7 +19,7 @@
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
  * (`factory.pr`), the approvals a session asked for and the decisions that settled them
- * (`factory.approval.requested` / `.decided` → `session_approvals`), spend (`pi.usage`),
+ * (`factory.approval.requested` / `.decided` / `.used` → `session_approvals`), spend (`pi.usage`),
  * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
  * in a process that owns nothing (D8).
  *
@@ -65,6 +65,8 @@ type FoldedApproval = {
   readonly decision: string | null;
   readonly actor: string | null;
   readonly decidedAt: string | null;
+  /** When a gated call spent the approval (LOB-52); `null` while it is unused. */
+  readonly usedAt: string | null;
 };
 
 type FoldedRow = {
@@ -185,6 +187,7 @@ export const rebuildIndexes: Effect.Effect<
         decision: record.decision?.decision ?? null,
         actor: record.decision?.actor ?? null,
         decidedAt: record.decision?.decidedAt ?? null,
+        usedAt: record.usedAt ?? null,
       });
     }
     // The pages are the `factory.page` entries, not the documents: a fold reads `commits`, and a
@@ -311,7 +314,7 @@ export const rebuildIndexes: Effect.Effect<
   for (let at = 0; at < approvals.length; at += WRITE_BATCH_ROWS) {
     const batch = approvals.slice(at, at + WRITE_BATCH_ROWS);
     yield* sql`
-      INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at, decision, actor, decided_at)
+      INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at, decision, actor, decided_at, used_at)
       SELECT
         session_id,
         request_id,
@@ -320,7 +323,8 @@ export const rebuildIndexes: Effect.Effect<
         requested_at,
         NULLIF(decision, ''),
         NULLIF(actor, ''),
-        NULLIF(decided_at, '')::timestamptz
+        NULLIF(decided_at, '')::timestamptz,
+        NULLIF(used_at, '')::timestamptz
       FROM unnest(
         ${batch.map((row) => row.sessionId)}::text[],
         ${batch.map((row) => row.requestId)}::text[],
@@ -329,8 +333,9 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.requestedAt)}::text[]::timestamptz[],
         ${batch.map((row) => row.decision ?? "")}::text[],
         ${batch.map((row) => row.actor ?? "")}::text[],
-        ${batch.map((row) => row.decidedAt ?? "")}::text[]
-      ) AS folded(session_id, request_id, action, detail, requested_at, decision, actor, decided_at)
+        ${batch.map((row) => row.decidedAt ?? "")}::text[],
+        ${batch.map((row) => row.usedAt ?? "")}::text[]
+      ) AS folded(session_id, request_id, action, detail, requested_at, decision, actor, decided_at, used_at)
     `;
   }
 

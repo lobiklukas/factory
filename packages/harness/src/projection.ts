@@ -99,6 +99,11 @@ export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 /**
+ * The entry that spends an approval (LOB-52): a gated call ran on it. An approval covers one run of
+ * the call it names, so once it is used the same call asks again under a new request id.
+ */
+export const APPROVAL_USED_KIND = "factory.approval.used";
+/**
  * One approval as a log records it (D11, LOB-147): the request, and the decision that settled it.
  *
  * The session id is not here, because a log *is* one session: the caller that needs it has it, and
@@ -114,6 +119,8 @@ export type ApprovalLogRecord = {
     readonly actor: string;
     readonly decidedAt: string;
   };
+  /** When a gated call ran on this approval (LOB-52); absent while it is unused or not approved. */
+  readonly usedAt?: string;
 };
 
 /** The verdict in a decision entry, or `undefined` for anything that is not one. */
@@ -125,7 +132,7 @@ const verdictAt = (
 };
 
 /**
- * `factory.approval.requested` and `factory.approval.decided` → one record per request id.
+ * `factory.approval.requested`, `.decided` and `.used` → one record per request id.
  *
  * Folded rather than accumulated, so two folds of one log agree: a repeated request id (a retried
  * request whose first commit landed, or a log that recorded the same request twice) is one record,
@@ -153,6 +160,20 @@ export const projectApprovals = (
         detail: stringAt(entry.data, "detail") ?? "",
         requestedAt,
       });
+      continue;
+    }
+    if (entry.kind === APPROVAL_USED_KIND) {
+      // Only an approval can be used, and only once: a use that names a request still pending, or
+      // denied, spends nothing.
+      const record = records.get(requestId);
+      const usedAt = stringAt(entry.data, "usedAt");
+      if (
+        record?.decision?.decision !== "approved" ||
+        record.usedAt !== undefined ||
+        usedAt === undefined
+      )
+        continue;
+      records.set(requestId, { ...record, usedAt });
       continue;
     }
     if (entry.kind !== APPROVAL_DECIDED_KIND) continue;

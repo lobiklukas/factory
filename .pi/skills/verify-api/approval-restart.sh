@@ -2,7 +2,7 @@
 # Prove an approval survives the process that asked for it (LOB-52, D15): a gated call parks the run
 # on an approval, the API is killed, and a fresh process folds the session with the approval still
 # pending and no second request in the log — then the agent's retry re-asks nothing, and once a
-# person approves, the same call runs.
+# person approves, the same call runs once; the run after it asks again under a new request id.
 #
 # This script owns its own API instance — its own port, session root, log and pid file — because the
 # point of the test is to kill it. It does not touch the instance ./up.sh started, and it leaves

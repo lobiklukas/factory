@@ -5447,7 +5447,9 @@ describe("the autonomy configuration reaches the session's policy", () => {
  * an RPC `requestApproval` writes, so the pending list and the snapshot both carry it; the turn ends
  * rather than waiting on a person; a second turn that retries the same call records no second
  * request — in the index *or* in the log, which is counted as committed rows because the fold would
- * hide a duplicate; and once a person approves, the same call runs.
+ * hide a duplicate — and is told so; once a person approves, the same call runs, once: the approval
+ * is spent (in the log and the row, and a rebuild keeps it spent), and the turn after that asks a
+ * person again under a new request id.
  */
 describe("a gated call asks through the approvals service", () => {
   const gateRoot = mkdtempSync(join(tmpdir(), "factory-core-gate-"));
@@ -5470,15 +5472,28 @@ describe("a gated call asks through the approvals service", () => {
     await runtime.dispose();
   });
 
-  /** How many commits in a session's log hold an approval request: the log, not its fold. */
-  const requestCommits = (sessionId: string) =>
+  /** How many commits in a session's log hold `kind`: the log, not its fold. */
+  const commitsOf = (sessionId: string, kind: string) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient;
       const rows = yield* sql<{ count: number }>`
         SELECT count(*)::int AS count FROM commits
-        WHERE log_id = ${sessionId} AND writes::text LIKE '%factory.approval.requested%'
+        WHERE log_id = ${sessionId} AND strpos(writes::text, ${kind}) > 0
       `;
       return rows[0]?.count ?? 0;
+    });
+  const requestCommits = (sessionId: string) =>
+    commitsOf(sessionId, "factory.approval.requested");
+
+  /** Whether the index row says the approval was spent. */
+  const usedInIndex = (sessionId: string, requestId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ used: boolean }>`
+        SELECT used_at IS NOT NULL AS used FROM session_approvals
+        WHERE session_id = ${sessionId} AND request_id = ${requestId}
+      `;
+      return rows[0]?.used ?? false;
     });
 
   const turn = (sessionId: SessionId) =>
@@ -5515,16 +5530,36 @@ describe("a gated call asks through the approvals service", () => {
         });
         const third = yield* turn(created.id);
         const pendingThird = yield* sessions.listApprovals(created.id);
+        const commitsThird = yield* requestCommits(created.id);
+        const usedCommits = yield* commitsOf(
+          created.id,
+          "factory.approval.used",
+        );
+        const usedThird = yield* usedInIndex(created.id, requestId);
+        // Lose the row and refold it: the use is in the log, so the rebuilt row is still spent.
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM session_approvals WHERE session_id = ${created.id}`;
+        yield* rebuildIndexes;
+        const usedRebuilt = yield* usedInIndex(created.id, requestId);
+        const fourth = yield* turn(created.id);
+        const pendingFourth = yield* sessions.listApprovals(created.id);
         return {
           first,
           second,
           third,
+          fourth,
+          requestId,
           pendingFirst,
           pendingSecond,
           pendingThird,
+          pendingFourth,
           commitsFirst,
           commitsSecond,
-          commitsThird: yield* requestCommits(created.id),
+          commitsThird,
+          commitsFourth: yield* requestCommits(created.id),
+          usedCommits,
+          usedThird,
+          usedRebuilt,
         };
       }),
     );
@@ -5556,6 +5591,9 @@ describe("a gated call asks through the approvals service", () => {
     expect(outcome.commitsSecond).toBe(1);
     expect(results(outcome.second)).toHaveLength(2);
     expect(results(outcome.second)[1]?.isError).toBe(true);
+    expect(results(outcome.second)[1]?.text).toContain(
+      "is not asked for again",
+    );
 
     // Approved: the same call runs, and asks nothing new.
     expect(outcome.pendingThird.approvals).toEqual([]);
@@ -5563,6 +5601,62 @@ describe("a gated call asks through the approvals service", () => {
     const ran = results(outcome.third)[2];
     expect(ran?.isError).toBe(false);
     expect(ran?.text).toContain("gated-ran");
+    // Spent: once in the log, in the row, and still after the row was refolded from the log.
+    expect(outcome.usedCommits).toBe(1);
+    expect(outcome.usedThird).toBe(true);
+    expect(outcome.usedRebuilt).toBe(true);
+
+    // The same call again is a new run, and a new run needs a new yes: asked under a new id.
+    expect(outcome.pendingFourth.approvals).toHaveLength(1);
+    expect(outcome.pendingFourth.approvals[0]).toMatchObject({
+      requestId: `${outcome.requestId}-2`,
+      action: "sleep",
+      detail: command,
+    });
+    expect(outcome.commitsFourth).toBe(2);
+    const askedAgain = results(outcome.fourth)[3];
+    expect(askedAgain?.isError).toBe(true);
+    expect(askedAgain?.text).toContain("one has been asked for");
+    expect(askedAgain?.text).toContain(`${outcome.requestId}-2`);
+    expect(askedAgain?.text).not.toContain("gated-ran");
+  });
+
+  it("refuses the same call for the rest of the session once it is denied, asking nothing new", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "gated, denied" });
+        yield* turn(created.id);
+        const pending = yield* sessions.listApprovals(created.id);
+        yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: pending.approvals[0]?.requestId ?? "",
+          decision: "denied",
+          actor: "ops@example",
+        });
+        const denied = yield* turn(created.id);
+        const again = yield* turn(created.id);
+        return {
+          denied,
+          again,
+          pendingAfter: yield* sessions.listApprovals(created.id),
+          commits: yield* requestCommits(created.id),
+        };
+      }),
+    );
+
+    const results = (snapshot: SessionSnapshot) =>
+      snapshot.entries.filter((entry) => entry.kind === "toolResult");
+    for (const result of [
+      results(outcome.denied)[1],
+      results(outcome.again)[2],
+    ]) {
+      expect(result?.isError).toBe(true);
+      expect(result?.text).toContain("was denied by ops@example");
+      expect(result?.text).not.toContain("gated-ran");
+    }
+    expect(outcome.pendingAfter.approvals).toEqual([]);
+    expect(outcome.commits).toBe(1);
   });
 });
 
