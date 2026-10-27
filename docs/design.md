@@ -432,7 +432,10 @@ and resume, warm pools) we would otherwise own.
 
 **R6 — The fold is on the critical read path.** D8 means a paused session's history is served by
 folding the log. Bounded by compaction, cacheable, but it needs a benchmark before it becomes
-the default path for a large session.
+the default path for a large session. The open half is bounded (LOB-186): an open restores the
+log's checkpoint and folds only the commits after it, with the full fold as the fallback — on a
+10 250-commit log, 46 ms and 250 commits read against 167 ms and 10 250. What stays O(log) is the
+fold's size in memory and the bytes of the checkpoint itself.
 
 ---
 

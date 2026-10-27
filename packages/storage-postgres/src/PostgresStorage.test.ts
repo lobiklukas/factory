@@ -7,10 +7,27 @@ import {
   type Storage,
   type StorageWrite,
 } from "@earendil-works/pi-durable";
+import type {
+  ConversationId,
+  ConversationQuery,
+  DocumentAddress,
+  DocumentId,
+  DocumentPoint,
+  DocumentQuery,
+  EntryQuery,
+  Id,
+  SubmissionId,
+  SubmissionQuery,
+  TaskId,
+  TaskQuery,
+} from "@earendil-works/pi-durable";
 import {
   createExpectAssertions,
   createStorageConformance,
   registerStorageConformance,
+  seedStorageBenchmark,
+  STORAGE_READ_BENCHMARKS,
+  TIMING_SCALE,
 } from "@earendil-works/pi-durable/testing";
 import { randomBytes } from "node:crypto";
 import { BunServices } from "@effect/platform-bun";
@@ -31,7 +48,18 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { SqlError } from "effect/sql/SqlError";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DatabaseConfig, DatabaseLive } from "./index";
-import { PostgresStorage, READER_PAGE_ROWS } from "./PostgresStorage";
+import {
+  CHECKPOINT_SHAPE,
+  compressFold,
+  encodeFold,
+  foldShape,
+  restoreFold,
+} from "./Checkpoint";
+import {
+  CHECKPOINT_EVERY,
+  PostgresStorage,
+  READER_PAGE_ROWS,
+} from "./PostgresStorage";
 import { Skill } from "@repo/domain/Skill";
 import { BoardDefinition } from "@repo/domain/Task";
 
@@ -109,6 +137,179 @@ registerStorageConformance(
       { logId: nextLogId() },
       context,
     );
+    try {
+      await use(storage);
+    } finally {
+      await storage.close(context);
+    }
+  },
+);
+
+/**
+ * Every read answered by a fold restored from a checkpoint (LOB-186).
+ *
+ * The owner writes a checkpoint after every commit, and each read opens a fresh reader, which must
+ * restore that checkpoint and fold nothing after it — so the 23 cases' reads are all answered by a
+ * restored `MemoryStorage`, and the suite is the oracle for the restore as it is for the fold. A
+ * reader that had to fold a commit throws instead of answering, because answering would prove the
+ * fold again rather than the checkpoint.
+ */
+class ReadsFromCheckpoint implements Storage {
+  private closed = false;
+
+  private constructor(
+    private readonly owner: PostgresStorage,
+    private readonly logId: string,
+  ) {}
+
+  static async open(logId: string): Promise<ReadsFromCheckpoint> {
+    const owner = await PostgresStorage.open(
+      sql,
+      { logId, checkpointEvery: 1 },
+      context,
+    );
+    return new ReadsFromCheckpoint(owner, logId);
+  }
+
+  private async read<A>(use: (storage: Storage) => Promise<A>): Promise<A> {
+    // Each read opens its own reader, so the owner's closed flag is the wrapper's to keep.
+    if (this.closed) throw new Error("ReadsFromCheckpoint is closed");
+    const reader = await PostgresStorage.open(
+      sql,
+      { logId: this.logId, mode: "reader" },
+      context,
+    );
+    try {
+      if (reader.opened.commitsRead !== 0) {
+        throw new Error(
+          `the reader folded ${reader.opened.commitsRead} commits past checkpoint ${String(reader.opened.checkpoint)}`,
+        );
+      }
+      return await use(reader);
+    } finally {
+      await reader.close(context);
+    }
+  }
+
+  commit(writes: readonly StorageWrite[], at: typeof context) {
+    return this.owner.commit(writes, at);
+  }
+  mintId<I extends Id<string>>(): Promise<I> {
+    return this.owner.mintId<I>();
+  }
+  conversation(id: ConversationId, at: typeof context) {
+    return this.read((storage) => storage.conversation(id, at));
+  }
+  scanConversations(
+    query: ConversationQuery,
+    limit: number,
+    cursor: Cursor | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.scanConversations(query, limit, cursor, at),
+    );
+  }
+  entry(id: EntryId, at: typeof context): ReturnType<Storage["entry"]>;
+  entry(
+    conversationId: ConversationId,
+    id: EntryId,
+    at: typeof context,
+  ): ReturnType<Storage["entry"]>;
+  entry(
+    first: EntryId | ConversationId,
+    second: EntryId | typeof context,
+    third?: typeof context,
+  ): ReturnType<Storage["entry"]> {
+    return this.read((storage) =>
+      third === undefined
+        ? storage.entry(first as EntryId, second as typeof context)
+        : storage.entry(first as ConversationId, second as EntryId, third),
+    );
+  }
+  findLatestHeadMarker(
+    conversationId: ConversationId,
+    atOrBeforeEntryId: EntryId | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.findLatestHeadMarker(conversationId, atOrBeforeEntryId, at),
+    );
+  }
+  scanEntries(
+    query: EntryQuery,
+    limit: number,
+    cursor: Cursor | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.scanEntries(query, limit, cursor, at),
+    );
+  }
+  task(id: TaskId, at: typeof context) {
+    return this.read((storage) => storage.task(id, at));
+  }
+  scanTasks(
+    query: TaskQuery,
+    limit: number,
+    cursor: Cursor | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) => storage.scanTasks(query, limit, cursor, at));
+  }
+  submission(id: SubmissionId, at: typeof context) {
+    return this.read((storage) => storage.submission(id, at));
+  }
+  scanSubmissions(
+    query: SubmissionQuery,
+    limit: number,
+    cursor: Cursor | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.scanSubmissions(query, limit, cursor, at),
+    );
+  }
+  submissionByRequest(
+    conversationId: ConversationId,
+    requestId: string,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.submissionByRequest(conversationId, requestId, at),
+    );
+  }
+  findDocument(
+    address: DocumentAddress,
+    point: DocumentPoint,
+    at: typeof context,
+  ) {
+    return this.read((storage) => storage.findDocument(address, point, at));
+  }
+  document(id: DocumentId, point: DocumentPoint, at: typeof context) {
+    return this.read((storage) => storage.document(id, point, at));
+  }
+  scanDocuments(
+    query: DocumentQuery,
+    limit: number,
+    cursor: Cursor | undefined,
+    at: typeof context,
+  ) {
+    return this.read((storage) =>
+      storage.scanDocuments(query, limit, cursor, at),
+    );
+  }
+  close(at: typeof context) {
+    this.closed = true;
+    return this.owner.close(at);
+  }
+}
+
+registerStorageConformance(
+  { describe, expect, it },
+  "PostgresStorage (every read restored from a checkpoint)",
+  async (use) => {
+    const storage = await ReadsFromCheckpoint.open(nextLogId());
     try {
       await use(storage);
     } finally {
@@ -275,6 +476,461 @@ describe("PostgresStorage log semantics", () => {
       Effect.runPromise(sql`DELETE FROM commits WHERE log_id = ${logId}`),
     ).rejects.toThrow();
   });
+});
+
+/**
+ * Opening a log from its checkpoint (LOB-186).
+ *
+ * Every case reads the open's own report (`opened`) for what it read, never the wall clock, and
+ * compares the fold it restored with the full fold of the same log (`encodedFold`) rather than with
+ * a hand-written expectation: the claim is that the checkpoint changed the cost and not the answer.
+ */
+describe("PostgresStorage checkpoints", () => {
+  const root = {
+    type: "conversation",
+    value: { id: ROOT_CONVERSATION_ID },
+  } as const;
+  const entryWrite = (id: EntryId, text: string): StorageWrite => ({
+    type: "entry",
+    value: {
+      id,
+      conversationId: ROOT_CONVERSATION_ID,
+      kind: "user",
+      data: { text },
+    },
+  });
+
+  /** A log of a root and `entries` one-entry commits, its owner checkpointing every `every`. */
+  const seedLog = async (
+    entries: number,
+    every: number,
+    text: (at: number) => string = (at) => `message ${at}`,
+  ) => {
+    const logId = nextLogId();
+    const owner = await PostgresStorage.open(
+      sql,
+      { logId, checkpointEvery: every },
+      context,
+    );
+    await owner.commit([root], context);
+    for (let at = 0; at < entries; at += 1) {
+      await owner.commit(
+        [entryWrite(await owner.mintId<EntryId>(), text(at))],
+        context,
+      );
+    }
+    const fold = owner.encodedFold();
+    await owner.close(context);
+    return { logId, fold };
+  };
+
+  type CheckpointRow = {
+    readonly seq: number;
+    readonly shape: string;
+    readonly commitHash: string;
+  };
+  const checkpointOf = async (
+    logId: string,
+  ): Promise<CheckpointRow | undefined> => {
+    const rows = await Effect.runPromise(
+      sql<CheckpointRow>`
+        SELECT seq::int AS seq, shape, commit_hash AS "commitHash"
+        FROM log_checkpoints WHERE log_id = ${logId}
+      `,
+    );
+    return rows[0];
+  };
+  const deleteCheckpoint = (logId: string) =>
+    Effect.runPromise(sql`DELETE FROM log_checkpoints WHERE log_id = ${logId}`);
+
+  const openReader = (logId: string) =>
+    PostgresStorage.open(sql, { logId, mode: "reader" }, context);
+
+  /** Every user message the log holds, oldest first, read through the public `Storage` reads. */
+  const texts = async (storage: Storage) => {
+    const items: unknown[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = await storage.scanEntries(
+        { conversationId: ROOT_CONVERSATION_ID },
+        500,
+        cursor,
+        context,
+      );
+      items.push(...page.items.map((entry) => entry.data));
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    return items.reverse();
+  };
+
+  it(
+    "opens from its checkpoint and reads only the commits after it",
+    { timeout: 30_000 },
+    async () => {
+      // 26 commits, checkpointed after 10 and 20: an open restores 20 and reads 6.
+      const { logId, fold } = await seedLog(25, 10);
+      expect((await checkpointOf(logId))?.seq).toBe(20);
+
+      const reader = await openReader(logId);
+      expect(reader.opened).toEqual({ checkpoint: 20, commitsRead: 6 });
+      expect(reader.encodedFold()).toBe(fold);
+      expect(await texts(reader)).toEqual(
+        Array.from({ length: 25 }, (_, at) => ({ text: `message ${at}` })),
+      );
+      await reader.close(context);
+
+      // An owner opened the same way continues the log where the fold would.
+      const owner = await PostgresStorage.open(
+        sql,
+        { logId, checkpointEvery: 10 },
+        context,
+      );
+      expect(owner.opened).toEqual({ checkpoint: 20, commitsRead: 6 });
+      const id = await owner.mintId<EntryId>();
+      expect(id).toBe(27);
+      expect(await owner.commit([entryWrite(id, "after")], context)).toBe(27);
+      await owner.close(context);
+    },
+  );
+
+  it(
+    "opens through the full fold, with an identical snapshot, once the checkpoint row is deleted",
+    { timeout: 30_000 },
+    async () => {
+      // Pi Durable's own benchmark seed: entries with a head, tasks in every status, a family of
+      // documents, delta replay tails, a rewindable history and an eight-deep fork chain — plus
+      // submissions with request ids, the one doubly-keyed index the seed does not reach.
+      const logId = nextLogId();
+      const owner = await PostgresStorage.open(
+        sql,
+        { logId, checkpointEvery: 100 },
+        context,
+      );
+      const dataset = await seedStorageBenchmark(owner, TIMING_SCALE);
+      const submissionIds = [
+        await owner.mintId<SubmissionId>(),
+        await owner.mintId<SubmissionId>(),
+      ];
+      await owner.commit(
+        submissionIds.map((id, at) => ({
+          type: "submission",
+          value: {
+            id,
+            conversationId: ROOT_CONVERSATION_ID,
+            requestId: `request-${at}`,
+            type: "input",
+            status: "queued",
+          },
+        })),
+        context,
+      );
+      // A minted id that is never committed: neither open may remember it.
+      await owner.mintId();
+      const live = owner.encodedFold();
+      await owner.close(context);
+
+      const checkpoint = await checkpointOf(logId);
+      expect(checkpoint?.shape).toBe(CHECKPOINT_SHAPE);
+      const fromCheckpoint = await openReader(logId);
+      const { commitsRead, checkpoint: restoredAt } = fromCheckpoint.opened;
+      expect(restoredAt).toBe(checkpoint?.seq);
+      expect(commitsRead).toBeLessThan(100);
+
+      await deleteCheckpoint(logId);
+      const fromFold = await openReader(logId);
+      expect(fromFold.opened).toEqual({
+        checkpoint: undefined,
+        commitsRead: (restoredAt ?? 0) + commitsRead,
+      });
+
+      const encoded = fromFold.encodedFold();
+      expect(encoded).toBeDefined();
+      expect(fromCheckpoint.encodedFold()).toBe(encoded);
+      // The live owner's fold, too: what a checkpoint is taken from is what a fold rebuilds.
+      expect(live).toBe(encoded);
+      for (const benchmark of STORAGE_READ_BENCHMARKS) {
+        const expected = benchmark.expected(dataset);
+        expect(
+          [
+            await benchmark.run(fromCheckpoint, dataset),
+            await benchmark.run(fromFold, dataset),
+          ],
+          benchmark.name,
+        ).toEqual([expected, expected]);
+      }
+      await fromCheckpoint.close(context);
+      await fromFold.close(context);
+
+      // Two owners, one through the fold and one through the checkpoint the first wrote on open,
+      // mint the same next id and would commit the same next seq.
+      const throughFold = await PostgresStorage.open(sql, { logId }, context);
+      expect(throughFold.opened.checkpoint).toBeUndefined();
+      expect((await checkpointOf(logId))?.seq).toBe(
+        (restoredAt ?? 0) + commitsRead,
+      );
+      const throughCheckpoint = await PostgresStorage.open(
+        sql,
+        { logId },
+        context,
+      );
+      expect(throughCheckpoint.opened.commitsRead).toBe(0);
+      const next = await throughCheckpoint.mintId<EntryId>();
+      expect(next).toBe(await throughFold.mintId());
+      const head = (restoredAt ?? 0) + commitsRead;
+      expect(
+        await throughCheckpoint.commit([entryWrite(next, "after")], context),
+      ).toBe(head + 1);
+      await throughFold.close(context);
+      await throughCheckpoint.close(context);
+    },
+  );
+
+  describe("a stale checkpoint is ignored, not served", () => {
+    /** Open `logId` as a reader and assert it folded all `commits` and reads back `expected`. */
+    const expectFullFold = async (
+      logId: string,
+      commits: number,
+      fold: string | undefined,
+    ) => {
+      const reader = await openReader(logId);
+      expect(reader.opened).toEqual({
+        checkpoint: undefined,
+        commitsRead: commits,
+      });
+      expect(reader.encodedFold()).toBe(fold);
+      await reader.close(context);
+    };
+
+    /** Put `from`'s checkpoint row on `to`, as if `to`'s log had been rewritten under it. */
+    const moveCheckpoint = (from: string, to: string) =>
+      Effect.runPromise(sql`
+        INSERT INTO log_checkpoints (log_id, seq, shape, commit_hash, fold)
+        SELECT ${to}, seq, shape, commit_hash, fold FROM log_checkpoints WHERE log_id = ${from}
+        ON CONFLICT (log_id) DO UPDATE SET
+          seq = EXCLUDED.seq,
+          shape = EXCLUDED.shape,
+          commit_hash = EXCLUDED.commit_hash,
+          fold = EXCLUDED.fold
+      `);
+
+    it(
+      "of another shape, as after a Pi Durable bump",
+      { timeout: 30_000 },
+      async () => {
+        const { logId, fold } = await seedLog(12, 5);
+        await Effect.runPromise(sql`
+          UPDATE log_checkpoints SET shape = 'memory-fold/0 pi-durable@0.0.0'
+          WHERE log_id = ${logId}
+        `);
+        await expectFullFold(logId, 13, fold);
+      },
+    );
+
+    it(
+      "taken after a commit the log does not hold",
+      { timeout: 30_000 },
+      async () => {
+        // A checkpoint at seq 21 on a log whose head is 6: the log was truncated and reused.
+        const longer = await seedLog(20, 5, (at) => `longer ${at}`);
+        const shorter = await seedLog(5, 100);
+        expect(await checkpointOf(shorter.logId)).toBeUndefined();
+        await moveCheckpoint(longer.logId, shorter.logId);
+        expect((await checkpointOf(shorter.logId))?.seq).toBe(20);
+        await expectFullFold(shorter.logId, 6, shorter.fold);
+      },
+    );
+
+    it(
+      "taken after a different commit at the same seq",
+      { timeout: 30_000 },
+      async () => {
+        // Same length, same ids, different text: only the commit hash tells the two apart.
+        const theirs = await seedLog(10, 5, (at) => `theirs ${at}`);
+        const ours = await seedLog(10, 5, (at) => `ours ${at}`);
+        await moveCheckpoint(theirs.logId, ours.logId);
+        const reader = await openReader(ours.logId);
+        expect(reader.opened).toEqual({
+          checkpoint: undefined,
+          commitsRead: 11,
+        });
+        expect(await texts(reader)).toEqual(
+          Array.from({ length: 10 }, (_, at) => ({ text: `ours ${at}` })),
+        );
+        expect(reader.encodedFold()).toBe(ours.fold);
+        await reader.close(context);
+      },
+    );
+
+    it("whose fold does not decode", { timeout: 30_000 }, async () => {
+      // Bytes that are not gzip, and gzip of JSON that is not a fold: neither is served.
+      const { logId, fold } = await seedLog(12, 5);
+      for (const bytes of [
+        Uint8Array.from([1, 2, 3]),
+        compressFold('{"recordTypes": "not a map"}'),
+      ]) {
+        await Effect.runPromise(sql`
+          UPDATE log_checkpoints SET fold = ${bytes} WHERE log_id = ${logId}
+        `);
+        await expectFullFold(logId, 13, fold);
+      }
+    });
+  });
+
+  it(
+    "writes one every interval, and only from an owner",
+    { timeout: 30_000 },
+    async () => {
+      // A log written with checkpoints off has none; a reader folding it writes none either.
+      const { logId } = await seedLog(12, Number.POSITIVE_INFINITY);
+      expect(await checkpointOf(logId)).toBeUndefined();
+      const reader = await PostgresStorage.open(
+        sql,
+        { logId, mode: "reader", checkpointEvery: 1 },
+        context,
+      );
+      expect(reader.opened.commitsRead).toBe(13);
+      await reader.close(context);
+      expect(await checkpointOf(logId)).toBeUndefined();
+
+      // An owner that folded a tail at least an interval long checkpoints at open, then every
+      // interval after that and not between.
+      const owner = await PostgresStorage.open(
+        sql,
+        { logId, checkpointEvery: 4 },
+        context,
+      );
+      expect((await checkpointOf(logId))?.seq).toBe(13);
+      for (let at = 0; at < 3; at += 1) {
+        await owner.commit(
+          [entryWrite(await owner.mintId<EntryId>(), `more ${at}`)],
+          context,
+        );
+      }
+      expect((await checkpointOf(logId))?.seq).toBe(13);
+      await owner.commit(
+        [entryWrite(await owner.mintId<EntryId>(), "fourth")],
+        context,
+      );
+      expect((await checkpointOf(logId))?.seq).toBe(17);
+      await owner.close(context);
+      expect(CHECKPOINT_EVERY).toBeGreaterThan(0);
+    },
+  );
+
+  it(
+    "commits on when a checkpoint write fails, and waits an interval before the next",
+    { timeout: 30_000 },
+    async () => {
+      // A trigger that rejects this one log's checkpoint rows, so no other log in the shared
+      // database is touched. The log id is this file's own `[a-z0-9-]` shape, safe to inline.
+      const logId = nextLogId();
+      const name = `reject_checkpoint_${logId.replaceAll("-", "_")}`;
+      await Effect.runPromise(
+        sql.unsafe(`
+          CREATE FUNCTION ${name}() RETURNS trigger AS $$
+          BEGIN RAISE EXCEPTION 'checkpoint rejected for the test'; END;
+          $$ LANGUAGE plpgsql
+        `),
+      );
+      await Effect.runPromise(
+        sql.unsafe(`
+          CREATE TRIGGER ${name} BEFORE INSERT OR UPDATE ON log_checkpoints
+          FOR EACH ROW WHEN (NEW.log_id = '${logId}') EXECUTE FUNCTION ${name}()
+        `),
+      );
+      try {
+        const owner = await PostgresStorage.open(
+          sql,
+          { logId, checkpointEvery: 3 },
+          context,
+        );
+        await owner.commit([root], context);
+        const seqs: number[] = [];
+        for (let at = 0; at < 4; at += 1) {
+          seqs.push(
+            await owner.commit(
+              [entryWrite(await owner.mintId<EntryId>(), `kept ${at}`)],
+              context,
+            ),
+          );
+        }
+        // Commit 3's checkpoint was rejected; 4 and 5 are inside the restarted interval.
+        expect(seqs).toEqual([2, 3, 4, 5]);
+        expect(await checkpointOf(logId)).toBeUndefined();
+        await owner.close(context);
+
+        await Effect.runPromise(
+          sql.unsafe(`DROP TRIGGER ${name} ON log_checkpoints`),
+        );
+        const reader = await openReader(logId);
+        expect(reader.opened).toEqual({
+          checkpoint: undefined,
+          commitsRead: 5,
+        });
+        expect(await texts(reader)).toEqual(
+          Array.from({ length: 4 }, (_, at) => ({ text: `kept ${at}` })),
+        );
+        await reader.close(context);
+      } finally {
+        await Effect.runPromise(
+          sql.unsafe(`DROP TRIGGER IF EXISTS ${name} ON log_checkpoints`),
+        );
+        await Effect.runPromise(
+          sql.unsafe(`DROP FUNCTION IF EXISTS ${name}()`),
+        );
+      }
+    },
+  );
+
+  it(
+    "round-trips U+0000 and lone surrogates through the checkpoint",
+    { timeout: 30_000 },
+    async () => {
+      const text = "a\u0000b\ud800c";
+      const { logId } = await seedLog(1, 1, () => text);
+      const reader = await openReader(logId);
+      expect(reader.opened).toEqual({ checkpoint: 2, commitsRead: 0 });
+      expect(await texts(reader)).toEqual([{ text }]);
+      await reader.close(context);
+    },
+  );
+
+  it(
+    "knows the installed MemoryStorage, and restores nothing that is not a fold it wrote",
+    { timeout: 30_000 },
+    () => {
+      // `false` would turn checkpoints off silently; this is where a Pi Durable bump that changed
+      // the store's fields surfaces.
+      expect(foldShape()).toBe(true);
+      expect(CHECKPOINT_SHAPE).toMatch(
+        /^memory-fold\/1 pi-durable@\d+\.\d+\.\d+/,
+      );
+      const encoded = encodeFold(new MemoryStorage());
+      if (encoded === undefined)
+        throw new Error("the empty fold did not encode");
+      const fields = (): Record<string, unknown> => ({
+        ...JSON.parse(encoded),
+      });
+      const restored = restoreFold(encoded, 3);
+      expect(restored).toBeInstanceOf(MemoryStorage);
+      expect(restored === undefined ? undefined : encodeFold(restored)).toBe(
+        encoded,
+      );
+      for (const bad of [
+        "not json",
+        "[]",
+        "{}",
+        JSON.stringify({ ...fields(), extra: [] }),
+        JSON.stringify({ ...fields(), taskIds: {} }),
+        JSON.stringify({ ...fields(), recordTypes: [["x", "entry"]] }),
+        JSON.stringify({ ...fields(), entries: [[1]] }),
+      ]) {
+        expect(restoreFold(bad, 1), bad).toBeUndefined();
+      }
+      expect(restoreFold(encoded, 0)).toBeUndefined();
+    },
+  );
 });
 
 /**
