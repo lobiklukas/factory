@@ -12,6 +12,7 @@ import type {
 import { Effect, Stream } from "effect";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
+import { SESSIONS_KEY } from "./session-list";
 
 /**
  * One session as the transcript pane needs it.
@@ -83,9 +84,8 @@ export const foldSessionEvent = (
  *
  * The read is explicit and the watch follows it, rather than relying on the
  * watch's own snapshot as the seed: an attach then races nothing, because
- * whatever the stream omits the read already carried. The sidebar registry is
- * written by the pane, not here — writing one atom from another needs an
- * `AtomRegistry` in context, and the pane is already where the summary lands.
+ * whatever the stream omits the read already carried. The sidebar is the
+ * server's list (`sessionListAtom`), so nothing here writes to it.
  */
 export const sessionAtom = runtime.fn((sessionId: SessionId) =>
   Stream.unwrap(
@@ -99,7 +99,10 @@ export const sessionAtom = runtime.fn((sessionId: SessionId) =>
   ),
 );
 
-/** Creates a session and drives it with the first message, in one round trip. */
+/**
+ * Creates a session and drives it with the first message, in one round trip. `SESSIONS_KEY` makes
+ * the sidebar re-read the server's list once the session exists.
+ */
 export const startSessionAtom = runtime.fn(
   (input: { readonly content: string; readonly title?: string | undefined }) =>
     Effect.gen(function* () {
@@ -116,6 +119,7 @@ export const startSessionAtom = runtime.fn(
       });
       return session;
     }),
+  { reactivityKeys: [SESSIONS_KEY] },
 );
 
 /**
@@ -123,13 +127,15 @@ export const startSessionAtom = runtime.fn(
  *
  * The fork is a session of its own with the parent's transcript copied in one commit, so the caller
  * navigates to the returned id rather than mutating the pane it was reading: the parent's log never
- * gains the fork's turns.
+ * gains the fork's turns. `SESSIONS_KEY` puts the child in the sidebar's list once it exists.
  */
-export const forkSessionAtom = runtime.fn((sessionId: SessionId) =>
-  Effect.gen(function* () {
-    const rpc = yield* RpcClient;
-    return yield* rpc.client.forkSession({ sessionId });
-  }),
+export const forkSessionAtom = runtime.fn(
+  (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.forkSession({ sessionId });
+    }),
+  { reactivityKeys: [SESSIONS_KEY] },
 );
 
 /**

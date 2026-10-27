@@ -6,8 +6,8 @@
 //   WEB_URL       default http://localhost:3100
 //   API_URL       default http://localhost:9100
 //   EVIDENCE_DIR  default .verify/evidence/latest
-//   DATABASE_URL  the API's database, inherited: the PR-link check seeds a session through it
-//                 (LOB-65, `.pi/skills/lib/seed-pr.ts`)
+//   DATABASE_URL  the API's database, inherited: the board block seeds its own board into it, and
+//                 the PR-link check seeds a session through it (LOB-65, `.pi/skills/lib/seed-pr.ts`)
 //
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
@@ -20,6 +20,46 @@ import { chromium } from "@playwright/test";
 const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3100";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9100";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
+const ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../..",
+);
+
+/**
+ * One RPC call from the drive process itself, not the page (LOB-75): the board checks need the
+ * server's own answer as their oracle, and a call made here can never be mistaken for one the
+ * dashboard sent. Same NDJSON envelope as the in-page calls below.
+ */
+const rpcFromDrive = async (tag, payload) => {
+  const requestId = `drive-node-${tag}-${Date.now()}`;
+  try {
+    const response = await fetch(`${API_URL}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/ndjson" },
+      body: `${JSON.stringify({ _tag: "Request", id: requestId, tag, payload, headers: [] })}\n`,
+    });
+    const text = await response.text();
+    const envelope = text
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .find((message) => message?.requestId === requestId);
+    return {
+      status: response.status,
+      exit: envelope?.exit?._tag ?? null,
+      value: envelope?.exit?.value ?? null,
+      raw: envelope === undefined ? text.slice(0, 400) : null,
+    };
+  } catch (error) {
+    return { status: 0, exit: null, value: null, raw: String(error) };
+  }
+};
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
@@ -57,13 +97,35 @@ assert(
   `after goto ${WEB_URL} the path is ${JSON.stringify(redirected)}`,
 );
 
-// The sidebar's honest empty state, before any session exists in this browser.
+// The sidebar is the server's list (LOB-75 deleted the browser-local registry): once it has
+// loaded, its rows are `listSessions`' first page in the server's order, or its empty state when the
+// server has none. A fresh browser has no storage, so a row here can only have come from the API.
+await page
+  .waitForFunction(
+    () =>
+      document.querySelectorAll("aside a[href^='/sessions/']").length > 0 ||
+      document.querySelector("aside")?.innerText.includes("No sessions on") ===
+        true,
+    null,
+    { timeout: 15_000 },
+  )
+  .catch(() => undefined);
+const sidebarRows = await page.evaluate(() =>
+  Array.from(document.querySelectorAll("aside a[href^='/sessions/']")).map(
+    (anchor) => (anchor.getAttribute("href") ?? "").replace("/sessions/", ""),
+  ),
+);
+const serverList = await rpcFromDrive("listSessions", { limit: 50 });
+const serverIds = (serverList.value?.sessions ?? []).map((entry) => entry.id);
 const emptyState = (await page.locator("aside").first().innerText()).trim();
-observed.emptyState = emptyState;
+observed.sidebarBefore = { sidebarRows, serverIds, emptyState };
 assert(
-  "sidebar says what is missing",
-  emptyState.includes("No sessions in this browser yet"),
-  `aside: ${JSON.stringify(emptyState.slice(0, 120))}`,
+  "the sidebar is the server's session list",
+  serverList.exit === "Success" &&
+    JSON.stringify(sidebarRows) === JSON.stringify(serverIds) &&
+    (serverIds.length > 0 ||
+      emptyState.includes("No sessions on this control plane yet")),
+  `sidebar ${sidebarRows.length} row(s), listSessions ${serverIds.length} (${String(serverList.exit)}); first ${JSON.stringify(sidebarRows[0] ?? null)} vs ${JSON.stringify(serverIds[0] ?? null)}`,
 );
 
 // Feature: the dashboard can reach the API from the browser origin. This runs the
@@ -122,8 +184,9 @@ try {
   tasksObserved.row = (await toolRow.innerText()).replaceAll("\n", " ").trim();
   tasksObserved.count = await taskRows.count();
 
-  // Keyboard: the header's last control tabs into the task list, and the list carries a name.
-  await page.getByRole("button", { name: "Forget this session" }).focus();
+  // Keyboard: the header's last control tabs into the task list, and the list carries a name. Fork
+  // is the last control since LOB-75 removed Forget, which only ever edited a browser-local list.
+  await page.getByRole("button", { name: "Fork from here" }).focus();
   await page.keyboard.press("Tab");
   tasksObserved.focus = await page.evaluate(() => ({
     label: document.activeElement?.getAttribute("aria-label") ?? null,
@@ -281,8 +344,8 @@ assert(
   `${noPrAnchors} PR anchor(s) in the pane`,
 );
 
-// The created session is in the sidebar: the registry records what the stream
-// reported, so the list is not a separate fiction.
+// The created session is in the sidebar: the create invalidates the server's list
+// (`SESSIONS_KEY`), so the row is the API's, not something this browser recorded.
 await page.waitForFunction(
   () => document.querySelectorAll("aside a[href^='/sessions/']").length > 0,
   null,
@@ -320,29 +383,33 @@ await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement)
     document.activeElement.blur();
 });
+// The sidebar is the server's session list (LOB-75), so every session on the database sits in the
+// tab order before the pane: the walk's budget grows with the links the sidebar renders, or a
+// database that has seen a few drive runs pushes the fork action past a fixed cap.
+const sidebarLinks = await page.locator("a[href^='/sessions/']").count();
 const tabOrder = [];
-for (let step = 0; step < 30; step += 1) {
+for (let step = 0; step < 30 + sidebarLinks; step += 1) {
   await page.keyboard.press("Tab");
   const name = await focusedName();
   tabOrder.push(name);
-  if (
-    tabOrder.includes("Fork from here") &&
-    tabOrder.includes("Forget this session")
-  )
-    break;
+  if (tabOrder.includes("Fork from here")) break;
 }
 const forkIndex = tabOrder.indexOf("Fork from here");
-const forgetIndex = tabOrder.indexOf("Forget this session");
 observed.tabOrder = tabOrder;
 assert(
   "the fork action is reachable by keyboard",
   forkIndex !== -1,
   `tab order: ${JSON.stringify(tabOrder)}`,
 );
+// Forget only ever dropped a row from the browser-local registry; with the list on the server it
+// would be a control that does nothing a reload does not undo (LOB-75).
+const forgetControls = await page
+  .getByRole("button", { name: "Forget this session" })
+  .count();
 assert(
-  "the fork action comes before Forget",
-  forgetIndex !== -1 && forkIndex < forgetIndex,
-  `fork at ${forkIndex}, Forget at ${forgetIndex}`,
+  "no Forget control remains",
+  forgetControls === 0,
+  `${forgetControls} Forget control(s) in the pane`,
 );
 // Walk back to the Fork control and activate it with Enter, so the fork below is taken with the
 // keyboard alone rather than by a click the reader could not repeat.
@@ -428,9 +495,9 @@ if (childId !== "") {
     fullPage: true,
   });
 
-  // The sidebar reads the browser-local registry (its summaries), so the checks above prove the
-  // summary path only. `SessionListEntry.forkedFrom` is the index fold's half of the contract
-  // (LOB-182): ask the control plane's own list from inside the page, so the assertion covers the
+  // The sidebar reads `listSessions` (LOB-75), so the rows above already are the index's. This asks
+  // the same list from inside the page, so `SessionListEntry.forkedFrom` — the index fold's half of
+  // the contract (LOB-182) — is asserted on the wire too, and the assertion covers the
   // RPC, the schema, and the CORS path the dashboard uses. `_tag: "Request"` + a trailing newline
   // is the NDJSON envelope `RpcClient.layerProtocolHttp` writes — the same bytes
   // `apps/web/src/lib/rpc-client.ts` would send for `listSessions`.
@@ -484,7 +551,7 @@ if (childId !== "") {
 
   // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
   // this proves is that the new third line truncates inside the row instead of pushing the document
-  // wider. The header's own clipping at 390 px is pre-existing (the unchanged Forget button is cut
+  // wider. The header's own clipping at 390 px is pre-existing (the header's last button is cut
   // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
   // `.ralph/polish.md` and the ticket filed for it.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1304,6 +1371,8 @@ await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
 // Back to the session for the transcript screenshot, with a tool result expanded.
 await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
 const sessionLink = page.locator("aside a[href^='/sessions/']").first();
+// The list is a server read now (LOB-75), so it arrives a beat after the route does.
+await sessionLink.waitFor({ timeout: 10_000 }).catch(() => undefined);
 if ((await sessionLink.count()) > 0) {
   await sessionLink.click();
   await page.waitForTimeout(1_500);
@@ -1313,6 +1382,301 @@ if ((await sessionLink.count()) > 0) {
   await page.screenshot({ path: path.join(EVIDENCE_DIR, "transcript.png") });
 }
 
+// Feature: the board's lanes (LOB-75). See features/board.md.
+//
+// Lanes come from the definition, cards from the server, and the browser holds nothing between
+// them. Each run seeds its **own** board and one card in `intake` through the real `TaskService`
+// (`.pi/skills/verify-board/seed.ts`), so the drive can be rerun against the same `./up.sh`
+// instance: the move below changes only this run's card. The oracle for the lane order is
+// `getBoard` asked from this process, so a definition that reorders its columns changes the
+// expectation rather than breaking the check. **The dashboard performs no move here**: the board UI
+// is read-only in LOB-75, every request the board pages send is recorded and asserted to be a read,
+// and the one move this block needs is made the way a person makes it outside the browser —
+// `factory board move` against the API — before the reload that has to show it.
+//
+// The seed is evaluated from `apps/api` rather than run by path: bun's isolated linker (bun.lock
+// `configVersion: 1`) links `@repo/core` and `@repo/storage-postgres` only into the workspaces that
+// depend on them, and a file under `.pi/` resolves bare imports from its own directory upwards,
+// where the root `node_modules` holds neither. The seed has no relative imports, so its text runs
+// as-is. It writes to this process's `DATABASE_URL`, which must be the one the API was started
+// with; a mismatch is caught below, because the API then does not hold the board.
+const boardObserved = {};
+let boardSeed = null;
+const seed = spawnSync(
+  "bun",
+  [
+    "-e",
+    await readFile(path.join(ROOT, ".pi/skills/verify-board/seed.ts"), "utf8"),
+  ],
+  { cwd: path.join(ROOT, "apps/api"), encoding: "utf8", timeout: 60_000 },
+);
+boardObserved.seed = {
+  status: seed.status,
+  stdout: (seed.stdout ?? "").trim().slice(0, 300),
+  stderr: (seed.stderr ?? "").trim().slice(0, 300),
+};
+try {
+  boardSeed = JSON.parse(boardObserved.seed.stdout);
+} catch (error) {
+  boardObserved.seedError = String(error).slice(0, 200);
+}
+const boardId = typeof boardSeed?.boardId === "string" ? boardSeed.boardId : "";
+const cardId = typeof boardSeed?.taskId === "string" ? boardSeed.taskId : "";
+const truth = await rpcFromDrive("getBoard", { boardId });
+assert(
+  "a board and a card were seeded",
+  seed.status === 0 &&
+    boardId.startsWith("brd_") &&
+    cardId.startsWith("tsk_") &&
+    boardSeed?.revision === 1 &&
+    truth.exit === "Success",
+  seed.status !== 0 || boardSeed === null
+    ? `seed exit ${String(seed.status)}: ${boardObserved.seed.stderr || boardObserved.seed.stdout || boardObserved.seedError}`
+    : truth.exit === "Success"
+      ? JSON.stringify(boardSeed)
+      : `seeded ${boardId}, but the API's getBoard says ${String(truth.exit)} — is DATABASE_URL the one ./up.sh started the API with?`,
+);
+
+const definitionOrder = (truth.value?.definition?.columns ?? []).map(
+  (column) => column.name,
+);
+boardObserved.definitionOrder = definitionOrder;
+
+// Every RPC tag the board pages send, read off the requests themselves. Reads only: a write here
+// would be a move (or a create) this child's UI must not be able to make. `listSessions` is the
+// sidebar of the sessions page the walk starts from.
+const BOARD_READS = new Set([
+  "listBoards",
+  "getBoard",
+  "listTasks",
+  "listSessions",
+]);
+const boardRpcTags = [];
+const recordRpcTags = (request) => {
+  if (!/\/rpc\/?$/.test(request.url()) || request.method() !== "POST") return;
+  for (const line of (request.postData() ?? "").split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (message?._tag === "Request") boardRpcTags.push(message.tag);
+    } catch {
+      // Not an envelope line.
+    }
+  }
+};
+page.on("request", recordRpcTags);
+
+/** The lanes as the page renders them, left to right, and where the seeded card sits. */
+const readLanes = (target) =>
+  target.evaluate((id) => {
+    const lanes = Array.from(document.querySelectorAll("section[data-lane]"));
+    const cards = Array.from(
+      document.querySelectorAll(`li[data-card='${id}']`),
+    );
+    return {
+      lanes: lanes.map((lane) => lane.getAttribute("data-lane")),
+      cardLanes: cards.map(
+        (card) =>
+          card.closest("section[data-lane]")?.getAttribute("data-lane") ?? null,
+      ),
+      cardText: cards.map((card) =>
+        (card.textContent ?? "").replace(/\s+/g, " ").trim(),
+      ),
+      controls: document.querySelectorAll(
+        "[aria-label='Lanes'] button, [aria-label='Lanes'] [role='button'], [aria-label='Lanes'] [draggable='true']",
+      ).length,
+    };
+  }, cardId);
+
+/** Every storage key the page holds; the theme toggle's own preference is the only one allowed. */
+const readStorage = (target) =>
+  target.evaluate(() => ({
+    local: Object.keys(localStorage),
+    session: Object.keys(sessionStorage),
+  }));
+const ALLOWED_STORAGE = new Set(["factory.theme"]);
+const storageIsClean = (storage) =>
+  storage.session.length === 0 &&
+  storage.local.every((key) => ALLOWED_STORAGE.has(key));
+
+const waitForLanes = (target) =>
+  target
+    .waitForFunction(
+      (id) => document.querySelector(`li[data-card='${id}']`) !== null,
+      cardId,
+      { timeout: 20_000 },
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+
+// The rail's Boards section, then the board's own link: the route a person takes.
+await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+let boardLinkWorked = false;
+try {
+  await page.getByRole("link", { name: "Boards" }).first().click();
+  await page.waitForFunction(
+    () => window.location.pathname === "/boards",
+    null,
+    {
+      timeout: 10_000,
+    },
+  );
+  const boardLink = page.locator(`a[href='/boards/${boardId}']`);
+  await boardLink.waitFor({ timeout: 15_000 });
+  boardObserved.boardsList = (
+    await page.locator("ul[aria-label='Boards']").innerText()
+  ).slice(0, 300);
+  await page.screenshot({ path: path.join(EVIDENCE_DIR, "boards.png") });
+  await boardLink.click();
+  await page.waitForFunction(
+    (id) => window.location.pathname === `/boards/${id}`,
+    boardId,
+    { timeout: 10_000 },
+  );
+  boardLinkWorked = true;
+} catch (error) {
+  boardObserved.navigationError = String(error).slice(0, 300);
+}
+assert(
+  "the rail reaches the board through the boards list",
+  boardLinkWorked,
+  boardLinkWorked
+    ? `listed and opened /boards/${boardId}`
+    : `${boardObserved.navigationError ?? ""} (at ${page.url()})`,
+);
+
+const cardShown = await waitForLanes(page);
+const before = await readLanes(page);
+boardObserved.before = before;
+assert(
+  "one lane per column, in definition order",
+  truth.exit === "Success" &&
+    definitionOrder.length > 0 &&
+    JSON.stringify(before.lanes) === JSON.stringify(definitionOrder),
+  `lanes ${JSON.stringify(before.lanes)} vs getBoard ${JSON.stringify(definitionOrder)} (${String(truth.exit)})`,
+);
+assert(
+  "the seeded card is visible in intake",
+  cardShown &&
+    JSON.stringify(before.cardLanes) === JSON.stringify(["intake"]) &&
+    (before.cardText[0] ?? "").includes(boardSeed?.title ?? "\u0000"),
+  `card ${cardId} in ${JSON.stringify(before.cardLanes)}: ${JSON.stringify(before.cardText)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "board.png"),
+  fullPage: true,
+});
+
+const storageBefore = await readStorage(page);
+boardObserved.storageBefore = storageBefore;
+assert(
+  "no client-side persistence key holds board or session state",
+  storageIsClean(storageBefore),
+  `localStorage ${JSON.stringify(storageBefore.local)}, sessionStorage ${JSON.stringify(storageBefore.session)}`,
+);
+
+// The server-side move, outside the browser: the real CLI over the API, at the seeded revision.
+const move = spawnSync(
+  "bun",
+  [
+    "run",
+    path.join(ROOT, "apps/cli/src/index.ts"),
+    "board",
+    "move",
+    "--task",
+    cardId,
+    "--to",
+    "specifying",
+    "--expect-revision",
+    String(boardSeed?.revision ?? 1),
+    "--api",
+    API_URL,
+  ],
+  { cwd: ROOT, encoding: "utf8", timeout: 60_000 },
+);
+boardObserved.move = {
+  status: move.status,
+  stdout: (move.stdout ?? "").trim().slice(0, 300),
+  stderr: (move.stderr ?? "").trim().slice(0, 300),
+};
+const moved = await rpcFromDrive("getTask", { taskId: cardId });
+boardObserved.movedTask = moved.value;
+assert(
+  "factory board move moved the card on the server",
+  move.status === 0 &&
+    moved.value?.column === "specifying" &&
+    moved.value?.revision === (boardSeed?.revision ?? 1) + 1,
+  `exit ${String(move.status)}, server says ${JSON.stringify(moved.value?.column ?? null)} r${String(moved.value?.revision ?? null)}; ${boardObserved.move.stderr || boardObserved.move.stdout}`,
+);
+
+// A reload is a fresh read of both halves: the card is in `specifying` and nowhere else.
+await page.reload({ waitUntil: "domcontentloaded" });
+await waitForLanes(page);
+const afterReload = await readLanes(page);
+boardObserved.afterReload = afterReload;
+assert(
+  "the server-side move is visible on reload",
+  JSON.stringify(afterReload.cardLanes) === JSON.stringify(["specifying"]) &&
+    JSON.stringify(afterReload.lanes) === JSON.stringify(definitionOrder),
+  `after reload the card is in ${JSON.stringify(afterReload.cardLanes)}`,
+);
+
+// And no client state is involved: a second browser context starts with no storage and no cache,
+// so what it shows can only be the server's answer — the same lane the reload showed.
+const freshContext = await browser.newContext({
+  viewport: { width: 1440, height: 900 },
+});
+const freshPage = await freshContext.newPage();
+freshPage.on("request", recordRpcTags);
+await freshPage.goto(`${WEB_URL}/boards/${boardId}`, {
+  waitUntil: "domcontentloaded",
+});
+await waitForLanes(freshPage);
+const fresh = await readLanes(freshPage);
+const freshStorage = await readStorage(freshPage);
+boardObserved.freshContext = { ...fresh, storage: freshStorage };
+assert(
+  "a browser with no client state shows the same board",
+  JSON.stringify(fresh.cardLanes) === JSON.stringify(["specifying"]) &&
+    JSON.stringify(fresh.lanes) === JSON.stringify(definitionOrder) &&
+    storageIsClean(freshStorage),
+  `fresh context: card in ${JSON.stringify(fresh.cardLanes)}, storage ${JSON.stringify(freshStorage)}`,
+);
+await freshPage.screenshot({
+  path: path.join(EVIDENCE_DIR, "board-after-move.png"),
+  fullPage: true,
+});
+await freshContext.close();
+
+// Read-only: no control in the lanes can act on a card, and nothing the board pages sent was a
+// write. The tags are the requests' own, so a move wired to any element would be caught here even
+// if it rendered as something other than a button.
+page.off("request", recordRpcTags);
+const boardWrites = boardRpcTags.filter((tag) => !BOARD_READS.has(tag));
+boardObserved.rpcTags = boardRpcTags;
+assert(
+  "the board is read-only: no move control, and only reads sent",
+  before.controls === 0 &&
+    afterReload.controls === 0 &&
+    boardRpcTags.length > 0 &&
+    boardWrites.length === 0,
+  `controls ${before.controls}/${afterReload.controls}; tags ${JSON.stringify(boardRpcTags)}`,
+);
+
+// A bad board id is refused by the route's decode, as a bad session id is.
+await page.goto(`${WEB_URL}/boards/not-a-board`, {
+  waitUntil: "domcontentloaded",
+});
+const badBoardCopy = (await page.locator("body").innerText()).trim();
+boardObserved.badId = badBoardCopy.slice(0, 200);
+assert(
+  "a bad board id is refused locally",
+  badBoardCopy.includes("Not a board id this control plane mints"),
+  `body: ${JSON.stringify(badBoardCopy.slice(0, 200))}`,
+);
+observed.board = boardObserved;
+
 // Feature: the session's PR link (LOB-65). No RPC opens a PR, so `seed-pr.ts` is the in-process
 // caller of the real PR step — against a loopback GitHub fake, on this API's database and session
 // root — and it exits before the page attaches, so the anchor below is the API's read of the session.
@@ -1320,7 +1684,6 @@ if ((await sessionLink.count()) > 0) {
 // See features/pr-link.md.
 // This runs after the transcript screenshot on purpose: opening the seeded session records it at
 // the top of the newest-first sidebar, and the transcript step above clicks the first sidebar link.
-const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const seedOut = path.join(ROOT, ".verify/run/web-pr-seed.json");
 const seedRun = spawnSync(
   "bun",

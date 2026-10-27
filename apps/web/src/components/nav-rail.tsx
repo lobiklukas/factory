@@ -1,5 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { BoxesIcon, CheckSquareIcon, TerminalIcon } from "lucide-react";
+import {
+  BoxesIcon,
+  CheckSquareIcon,
+  KanbanSquareIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { cn } from "cn";
 import { FactoryMark } from "@/components/factory-mark";
 import {
@@ -11,11 +16,14 @@ import { ThemeToggle } from "@/components/theme-toggle";
 
 /**
  * The narrow rail. Vercel's dashboard pattern: sections are icons because there
- * are three of them, and a label per icon costs 48px of width for nothing. The
+ * are only a handful of them, and a label per icon costs 48px of width for nothing. The
  * label moves into a tooltip on hover and into the pane's own header, so the name
  * is never lost.
  */
 const SECTIONS = [
+  // The board leads (LOB-75): the cockpit is the board (docs/board.md), and sessions are the runs
+  // a card owns. The root still opens on sessions until the card pane makes them panes (LOB-76).
+  { to: "/boards", label: "Boards", icon: KanbanSquareIcon },
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
   { to: "/sandboxes", label: "Sandboxes", icon: BoxesIcon },
   { to: "/approvals", label: "Approvals", icon: CheckSquareIcon },

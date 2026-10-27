@@ -1,0 +1,93 @@
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { Cause, Option, Schema } from "effect";
+import { KanbanSquareIcon } from "lucide-react";
+import { BoardInstanceId } from "@repo/domain/Task";
+import { boardAtom } from "@/lib/atoms/board-atom";
+import { boardLanes } from "@/lib/board-view";
+import { BoardLanesView } from "@/components/board-lanes";
+import { EmptyPane } from "@/components/empty-pane";
+import { Skeleton } from "@/components/ui/skeleton";
+
+export const Route = createFileRoute("/boards/$boardId")({
+  component: BoardRoute,
+});
+
+function BoardRoute() {
+  const { boardId } = Route.useParams();
+  // Decoded, not cast, for the reason the session route gives: a link carrying anything but a
+  // `brd_…` id is refused here rather than reaching the API as a not-found.
+  const parsed = Schema.decodeUnknownOption(BoardInstanceId)(boardId);
+
+  return (
+    <EmptyPane
+      icon={<KanbanSquareIcon strokeWidth={1.75} />}
+      title="Not a board id this control plane mints"
+      detail="A board id is brd_ followed by Crockford base32. A link carrying anything else cannot resolve, so it is refused here instead of reaching the API."
+      visible={Option.isNone(parsed)}
+    >
+      {Option.isSome(parsed) ? <Board boardId={parsed.value} /> : null}
+    </EmptyPane>
+  );
+}
+
+/**
+ * One board's lanes (LOB-75): columns from the definition version the board binds, cards from the
+ * server's list, and no client state between them — a reload is a fresh read of both.
+ */
+const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
+  const result = useAtomValue(boardAtom(boardId));
+
+  if (AsyncResult.isInitial(result)) {
+    return (
+      <div role="status" className="flex flex-1 gap-3 p-6">
+        <span className="sr-only">Loading the board</span>
+        {[0, 1, 2, 3].map((lane) => (
+          <Skeleton key={lane} className="h-48 w-64" aria-hidden />
+        ))}
+      </div>
+    );
+  }
+
+  if (AsyncResult.isFailure(result)) {
+    const error = Cause.findErrorOption(result.cause);
+    const missing =
+      Option.isSome(error) && error.value._tag === "BoardNotFound";
+    return (
+      <EmptyPane
+        icon={<KanbanSquareIcon strokeWidth={1.75} />}
+        title={missing ? "No such board" : "The board did not load"}
+        detail={
+          missing
+            ? `This control plane holds no board ${boardId}. It may have been made against another database.`
+            : Cause.pretty(result.cause)
+        }
+        visible
+      />
+    );
+  }
+
+  const { instance, definition, tasks } = result.value;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-4 py-3">
+        <Link
+          to="/boards"
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          Boards
+        </Link>
+        <h1 className="text-sm font-medium">{instance.repo}</h1>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {definition.name} v{definition.version} · {instance.id}
+        </span>
+        <span className="ml-auto text-[11px] text-muted-foreground">
+          {tasks.length} {tasks.length === 1 ? "card" : "cards"} · read-only
+          here; move a card with factory board move
+        </span>
+      </header>
+      <BoardLanesView board={boardLanes(definition, tasks)} />
+    </div>
+  );
+};

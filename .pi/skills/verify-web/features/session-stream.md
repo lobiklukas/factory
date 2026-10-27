@@ -71,8 +71,8 @@ there is no hand-rolled queue, and the client layer lives in the runtime.
   `subscribe` + `set`) and read the `AsyncResult`.
 - Each click creates a **new** session and sessions are append-only. Clicking ten times leaves ten
   logs; that is expected, not a leak to clean up by hand.
-- `SessionPane` records into the sidebar registry from a `useEffect`, not from the atom. Writing one
-  atom from another needs an `AtomRegistry` in context, and the pane is already where the summary
-  lands.
+- The sidebar is the server's list (LOB-75). `SessionPane` writes nothing to it; a `useEffect` on the
+  streamed status calls `useAtomRefresh(sessionListAtom)`, so the open session's row follows its
+  header without the pane holding a copy.
 - A session id that is not `ses_` + Crockford base32 is refused by the route's decode, never sent to
   the RPC surface as a `not_found`.

@@ -9,6 +9,7 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
+import { LIST_BOARDS_LIMIT } from "@repo/domain/Task";
 import {
   TaskService,
   TaskServiceLive,
@@ -317,6 +318,54 @@ describe("TaskService", () => {
       "canceled",
     ]);
     expect(board.definition.columns[0]?.kind).toBe("resting");
+  });
+
+  it("lists boards newest first, capped at LIST_BOARDS_LIMIT", async () => {
+    // One more than the cap, dated a day ahead so they are the newest rows in a database other
+    // suites write into concurrently: the first page must be exactly these, newest first. Deleted
+    // afterwards, so a dashboard on the same database does not list them for a day — and rows an
+    // earlier run left behind (killed between the insert and the `finally`) are deleted first, by
+    // the repo pattern every run of this case shares, so they cannot outrank real boards for long.
+    const tag = hex(4);
+    const ids = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM board_instances WHERE repo LIKE 'factory-test/list-%' AND created_at > now()`;
+        const rows = yield* sql<{ id: string }>`
+          INSERT INTO board_instances (id, repo, definition_id, definition_version, created_at)
+          SELECT 'brd_' || ${tag} || lpad(n::text, 18, '0'),
+                 'factory-test/list-' || ${tag} || '-' || n,
+                 'default', 1,
+                 now() + interval '1 day' + n * interval '1 second'
+          FROM generate_series(1, ${LIST_BOARDS_LIMIT + 1}) AS n
+          RETURNING id
+        `;
+        return rows.map((row) => row.id);
+      }),
+    );
+    try {
+      expect(ids).toHaveLength(LIST_BOARDS_LIMIT + 1);
+      const boards = await withService((s) => s.listBoards);
+      expect(boards).toHaveLength(LIST_BOARDS_LIMIT);
+      // Newest first: the last inserted (n = 101) leads, and the oldest of the batch (n = 1) is the
+      // one the cap drops.
+      expect(boards.map((board) => board.id)).toEqual(
+        // The id carries `n` zero-padded, so a lexicographic sort is the insertion order.
+        [...ids].sort().reverse().slice(0, LIST_BOARDS_LIMIT),
+      );
+      expect(boards[0]?.definitionId).toBe("default");
+      expect(boards[0]?.definitionVersion).toBe(1);
+      expect(boards[0]?.repo).toBe(
+        `factory-test/list-${tag}-${LIST_BOARDS_LIMIT + 1}`,
+      );
+    } finally {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`DELETE FROM board_instances WHERE id LIKE ${`brd_${tag}%`}`;
+        }),
+      );
+    }
   });
 
   it("refuses to read a board that does not exist, naming the id", async () => {
