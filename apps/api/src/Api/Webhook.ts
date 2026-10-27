@@ -13,9 +13,12 @@
  *    what protects the delivery store and the session queue, and answering it here is what keeps a
  *    huge body from creating a `webhook_deliveries` row.
  * 2. **Verify the signature.** A wrong or missing one is `401` and writes nothing.
- * 3. **Parse and normalize.** A body that is not JSON, or that has no request id, is `400`.
+ * 3. **Parse and normalize.** A body that is not JSON, or that has no request id, is `400`. The
+ *    adapter names the delivery's idempotency key here and nothing else about it: the generic
+ *    sender supplies its own, and the Linear adapter derives one from the issue (LOB-164), because
+ *    which deliveries are the same work is a fact about the sender.
  * 4. **Delegate.** Everything about replays, refusals, mapping and sessions is
- *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own idempotency.
+ *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip.
  *
  * The signature scheme is shared (`hmac-sha256` over the raw body, hex, in a configurable header)
  * because that is what Linear already does; an adapter whose provider signs differently brings its
@@ -30,12 +33,17 @@
 import { Effect, Layer, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
+  linearDeliveryFor,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
 } from "@repo/core";
-import type { TriggerEvent, TriggerRule } from "@repo/domain/Trigger";
+import type {
+  TriggerDelivery,
+  TriggerEvent,
+  TriggerRule,
+} from "@repo/domain/Trigger";
 import { TriggerRules } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -95,7 +103,7 @@ const stringField = (
   return typeof value === "string" ? value : undefined;
 };
 
-/** Linear's `labels` are objects (`{name}`); a payload with bare strings is accepted too. */
+/** A generic sender's `labels`: bare strings, or Linear-style `{name}` objects. */
 const labelNames = (value: unknown): ReadonlyArray<string> => {
   if (!Array.isArray(value)) return [];
   const names: string[] = [];
@@ -107,38 +115,6 @@ const labelNames = (value: unknown): ReadonlyArray<string> => {
     }
   }
   return names;
-};
-
-/**
- * Linear's issue payload, normalized. `key` is the issue id — what a write-back would address —
- * so a delivery about the same issue always names the same thing.
- *
- * Linear's `data` is the issue itself for a `type: "Issue"` webhook; a payload that wraps it as
- * `data.issue` (what a self-hosted relay tends to emit) reads the same way, because both spell the
- * same three fields.
- */
-const linearEvent = (
-  payload: Record<string, unknown>,
-): TriggerEvent | undefined => {
-  const data = asRecord(payload["data"]) ?? payload;
-  const nested = asRecord(data["issue"]);
-  const issue =
-    nested ??
-    (stringField(data, "id") === undefined &&
-    stringField(data, "identifier") === undefined
-      ? asRecord(payload["issue"])
-      : data);
-  if (issue === undefined) return undefined;
-  const key = stringField(issue, "id") ?? stringField(issue, "identifier");
-  if (key === undefined) return undefined;
-  return {
-    source: "linear",
-    key,
-    action: stringField(payload, "action") ?? "create",
-    title: stringField(issue, "title") ?? "",
-    body: stringField(issue, "description") ?? "",
-    labels: labelNames(issue["labels"]),
-  };
 };
 
 /**
@@ -167,17 +143,55 @@ const genericEvent = (
   };
 };
 
-/** One adapter: how its body is authenticated, scoped and normalized. */
+/** A body the adapter cannot turn into a delivery: the `400` it answers, and its code. */
+type Refusal = { readonly refused: string; readonly code: string };
+
+/** How an adapter reads a request header: by name, in any case. */
+type HeaderLookup = (name: string) => string | undefined;
+
+/**
+ * The generic adapter's delivery: the id is the configured header, else the body's own
+ * `requestId` — the sender names its delivery, because nothing else can.
+ */
+const genericDelivery =
+  (deliveryHeader: string) =>
+  (
+    payload: Record<string, unknown>,
+    header: HeaderLookup,
+  ): TriggerDelivery | Refusal => {
+    const requestId =
+      header(deliveryHeader) ??
+      stringField(payload, "requestId") ??
+      stringField(payload, "webhookId") ??
+      stringField(payload, "id");
+    if (requestId === undefined) {
+      return { refused: "missing requestId", code: "missing-request-id" };
+    }
+    const event = genericEvent(payload);
+    if (event === undefined) {
+      return {
+        refused: "the payload does not name an issue or a label",
+        code: "bad-payload",
+      };
+    }
+    return { requestId, event };
+  };
+
+/** One adapter: how its body is authenticated, and how it becomes a delivery. */
 type Adapter = {
   /** The header the signature arrives in, in whatever case `config` named it. */
   readonly signatureHeader: string;
   /** The signature's secret, or `undefined` when this deployment configured none. */
   readonly secret: string | undefined;
-  /** Where a sender may put the delivery id in the body, after the header. */
-  readonly deliveryHeader: string;
-  readonly normalize: (
+  /**
+   * The normalized event and its idempotency key. The key is the adapter's, because which
+   * deliveries are the same work is a fact about the sender: the generic caller names its own,
+   * and the Linear adapter derives it from the issue (`@repo/core/Linear`).
+   */
+  readonly delivery: (
     payload: Record<string, unknown>,
-  ) => TriggerEvent | undefined;
+    header: HeaderLookup,
+  ) => TriggerDelivery | Refusal;
   /** The variable the missing-secret refusal names, so an operator knows what to set. */
   readonly secretVariable: string;
 };
@@ -241,26 +255,14 @@ const handle = (adapter: () => Adapter) =>
       return badRequest("the body is not a JSON object", "bad-json");
     }
 
-    const requestId =
-      (req.headers[config.deliveryHeader.toLowerCase()] as
-        | string
-        | undefined) ??
-      stringField(body, "requestId") ??
-      stringField(body, "webhookId") ??
-      stringField(body, "id");
-    if (requestId === undefined) {
-      return badRequest("missing requestId", "missing-request-id");
+    const header: HeaderLookup = (name) =>
+      req.headers[name.toLowerCase()] as string | undefined;
+    const delivery = config.delivery(body, header);
+    if ("refused" in delivery) {
+      return badRequest(delivery.refused, delivery.code);
     }
 
-    const event = config.normalize(body);
-    if (event === undefined) {
-      return badRequest(
-        "the payload does not name an issue or a label",
-        "bad-payload",
-      );
-    }
-
-    const outcome = yield* triggers.deliver({ requestId, event }).pipe(
+    const outcome = yield* triggers.deliver(delivery).pipe(
       Effect.map((delivered) => ({ ok: true as const, delivered })),
       // A refusal is an answer (`skipped`), so only a real failure reaches here: answer `500` so
       // the sender retries, rather than `200` on work that never got recorded.
@@ -290,17 +292,29 @@ const handle = (adapter: () => Adapter) =>
     });
   });
 
-const LinearRoute = HttpRouter.add(
-  "POST",
-  "/webhooks/linear",
-  handle(() => ({
-    signatureHeader: "linear-signature",
-    secret: process.env["LINEAR_WEBHOOK_SECRET"],
-    secretVariable: "LINEAR_WEBHOOK_SECRET",
-    deliveryHeader: "linear-delivery",
-    normalize: linearEvent,
-  })),
-);
+/**
+ * The Linear adapter (`@repo/core/Linear`, LOB-164). It derives its own delivery: the key is the
+ * issue for a delivery that can start work, so a retry Linear sends with a fresh header and a fresh
+ * `webhookTimestamp` cannot open a second session. `rules` is the value `TriggerServiceLive` maps
+ * with, so the key and the mapping cannot disagree about which payloads a rule claims.
+ */
+const linearRoute = (rules: ReadonlyArray<TriggerRule>) => {
+  const deliver = linearDeliveryFor(rules);
+  return HttpRouter.add(
+    "POST",
+    "/webhooks/linear",
+    handle(() => ({
+      signatureHeader: "linear-signature",
+      secret: process.env["LINEAR_WEBHOOK_SECRET"],
+      secretVariable: "LINEAR_WEBHOOK_SECRET",
+      delivery: (payload, header) =>
+        deliver(payload, { delivery: header("linear-delivery") }) ?? {
+          refused: "the payload does not name a Linear entity",
+          code: "bad-payload",
+        },
+    })),
+  );
+};
 
 const GenericRoute = HttpRouter.add(
   "POST",
@@ -310,9 +324,9 @@ const GenericRoute = HttpRouter.add(
       process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
     secret: process.env["TRIGGER_SECRET"],
     secretVariable: "TRIGGER_SECRET",
-    deliveryHeader:
+    delivery: genericDelivery(
       process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
-    normalize: genericEvent,
+    ),
   })),
 );
 
@@ -337,11 +351,13 @@ const rulesFromEnv = (): ReadonlyArray<TriggerRule> => {
  * Both routes share one `TriggerService` instance: the rules and the session port are per-process
  * configuration, and two instances would be two copies of the same config waiting to drift.
  */
-const WebhookRoutes = Layer.mergeAll(LinearRoute, GenericRoute);
+const rules = rulesFromEnv();
+
+const WebhookRoutes = Layer.mergeAll(linearRoute(rules), GenericRoute);
 
 export const WebhookLive = WebhookRoutes.pipe(
   HttpRouter.provideRequest(
-    TriggerServiceLive({ rules: rulesFromEnv() }).pipe(
+    TriggerServiceLive({ rules }).pipe(
       Layer.provide(
         Layer.mergeAll(TriggerSessionsFromSessionService, NoWriteBack),
       ),
