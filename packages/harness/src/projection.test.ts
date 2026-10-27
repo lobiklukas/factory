@@ -9,8 +9,17 @@
  *
  * Offline and database-free on purpose: these are pure functions over a JSON document.
  */
+import {
+  type ConversationView,
+  ROOT_CONVERSATION_ID,
+} from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { projectInbox, projectUsageDoc, usageCostTotal } from "./projection";
+import {
+  diffView,
+  projectInbox,
+  projectUsageDoc,
+  usageCostTotal,
+} from "./projection";
 
 /** One `pi.usage` entry: Pi Durable stores pi-ai's `Usage`, cost and all. */
 type UsageEntry = {
@@ -133,5 +142,28 @@ describe("projectInbox", () => {
         "pi.inbox": { items: [{ mode: "steer", content: "nameless" }] },
       }),
     ).toEqual([]);
+  });
+});
+
+describe("diffView", () => {
+  const view = (docs: ConversationView["docs"]): ConversationView => ({
+    conversation: { id: ROOT_CONVERSATION_ID },
+    entries: [],
+    docs,
+  });
+
+  it("reports a queue that drains beside the settle before the settle itself", () => {
+    // `factory run` stops at the first event saying the run settled, so a drain committed in the
+    // same revision must come first or `[queued] (empty)` is never printed (LOB-166).
+    const busy = view({
+      "pi.live": { run: { id: 1 }, tools: [] },
+      "pi.inbox": { items: [{ id: 4, mode: "followUp", content: "late" }] },
+    });
+    const idle = view({ "pi.live": { tools: [] }, "pi.inbox": { items: [] } });
+    expect(diffView(busy, idle).map((event) => event._tag)).toEqual([
+      "queued",
+      "live",
+      "status",
+    ]);
   });
 });

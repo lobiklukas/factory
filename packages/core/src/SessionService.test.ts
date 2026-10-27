@@ -5050,6 +5050,50 @@ describe("withdrawing a queued message", () => {
     expect(seen.userEntries).not.toContain("drop me");
     expect(userTexts(seen.settled)).toEqual(["take your time"]);
   }, 120_000);
+
+  it("answers a withdraw on a session nobody owns from the log, without opening an owner", async () => {
+    const outcome = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "an idle session" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "quick one",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy &&
+                  snapshot.entries.at(-1)?.kind === "assistant",
+              ),
+            ),
+          "the turn to settle",
+        );
+        // Released, as an API restart or the idle sweep would leave it.
+        yield* sessions.close;
+
+        const settled = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: first.submissionId,
+        });
+        const unknown = yield* Effect.exit(
+          sessions.withdraw({ sessionId: created.id, submissionId: "999999" }),
+        );
+        // Still historical: neither answer took the log or opened the workspace.
+        const after = yield* sessions.get(created.id);
+        return { settled, unknown, mode: after.session.mode };
+      }),
+    );
+
+    expect(outcome.settled.outcome).toBe("settled");
+    const failure = Exit.findErrorOption(outcome.unknown);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.getOrThrow(failure).code).toBe("not_found");
+    expect(outcome.mode).toBe("historical");
+  }, 120_000);
 });
 
 describe("request limits", () => {

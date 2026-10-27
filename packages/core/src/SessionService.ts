@@ -124,6 +124,7 @@ import {
   requestCuration,
   resetSession,
   snapshotEvent,
+  submissionStanding,
   submitMessage,
   usageCostTotal,
   withdrawMessage,
@@ -1177,8 +1178,29 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<WithdrawMessageResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
-          // Only the owner can commit the withdrawal; a message is queued only while a run is in
-          // flight, and a run in flight means this process already owns the session.
+          // Only an owner can commit the withdrawal, but one need not be live: `pi.inbox` is
+          // durable, so a queue outlives an API restart or the idle sweep's release. When none is,
+          // the committed log answers an unknown or finished id first, so a withdraw that changes
+          // nothing does not open a workspace, take the log, and start a projector to say so.
+          const owners = yield* Ref.get(live);
+          if (Option.isNone(HashMap.get(owners, input.sessionId))) {
+            const standing = yield* withReader(input.sessionId, (storage) =>
+              submissionStanding(storage, input.submissionId),
+            );
+            if (standing === undefined) {
+              return yield* new SessionErrorClass({
+                code: "not_found",
+                message: `submission ${input.submissionId} is not in this session`,
+              });
+            }
+            if (standing === "settled") {
+              return {
+                session: yield* describe(input.sessionId, row),
+                submissionId: input.submissionId,
+                outcome: "settled" as const,
+              };
+            }
+          }
           const owner = yield* acquireOwner(input.sessionId, row);
           const outcome = yield* withdrawMessage(
             owner,

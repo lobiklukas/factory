@@ -25,11 +25,16 @@ turn; in a second, two `factory send --when-busy followUp` calls queue `drop me`
 
 **What proves it.** Three things only a real withdrawal produces: the watcher's last queue reading
 is `keep me` alone, not the pair it was a moment before; the transcript carries `[user] keep me` and
-its answer but never `[user] drop me`; and withdrawing the same id again answers `settled`. A
+its answer but never `[user] drop me`; and withdrawing the same id again answers `settled`. The
+`factory run` window also prints `[queued] (empty)` after `[user] keep me`, the drain a placement
+causes. A
 mutation that answered `withdrawn` without calling Pi Durable failed four checks (the queue reading,
 the repeat, the transcript, and the late withdrawal).
 
 **What it does not prove.** `already_placed` from the terminal: the message a run holds is the
 run's own task, whose submission id `factory run` does not print. The outcome is covered by
 `packages/core/src/SessionService.test.ts` ("withdrawing a queued message"), which withdraws the
-running turn's own submission. Withdrawing a steer before its tool boundary is covered there too.
+running turn's own submission. Withdrawing a steer before its tool boundary is covered there too,
+and so is a withdraw on a session nobody owns, which answers from the log without opening an owner.
+The dashboard's Withdraw button calls the same RPC (`withdrawMessageAtom`); this skill does not
+drive it.

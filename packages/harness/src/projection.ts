@@ -563,6 +563,16 @@ export const diffView = (
     }
   }
 
+  // The queue before liveness: a follower stops at the first event that says the run settled
+  // (`factory run`/`watch`), so a queue reading committed beside it must already be out, or the
+  // drain it reports is never seen (LOB-166).
+  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
+    events.push({
+      _tag: "queued",
+      queued: projectInbox(next.docs),
+    });
+  }
+
   if (previous.docs[LIVE_DOC] !== next.docs[LIVE_DOC]) {
     const before = projectLive(previous.docs);
     const live = projectLive(next.docs);
@@ -576,13 +586,6 @@ export const diffView = (
     events.push({
       _tag: "usage",
       usage: projectUsageDoc(next.docs[USAGE_DOC]),
-    });
-  }
-
-  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
-    events.push({
-      _tag: "queued",
-      queued: projectInbox(next.docs),
     });
   }
 

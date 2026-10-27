@@ -238,6 +238,11 @@ pane "$RUN_WINDOW" > "$EVIDENCE_DIR/withdraw-run.txt"
 check "factory run exits 0 once the turn settles" \
   "$([ "$(exit_code "$RUN_WINDOW" run)" = "0" ] && echo 0 || echo 1)" \
   "exit=$(exit_code "$RUN_WINDOW" run)"
+# The run took the follow-up left in the queue, so the queue the watcher was showing drained, and
+# says so on a line of its own after the kept message is placed.
+check "the watcher prints the drained queue" \
+  "$(grep -x '\[user\] keep me' -A 50 "$EVIDENCE_DIR/withdraw-run.txt" | grep -qxF '[queued] (empty)' && echo 0 || echo 1)" \
+  "[user] keep me, then [queued] (empty)"
 
 settled=1
 for attempt in $(seq 1 20); do
