@@ -1623,6 +1623,9 @@ const BOARD_READS = new Set([
   "listTasks",
   "listSessions",
   "listTaskRuns",
+  // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
+  // this block makes, so a comment sent from here would show as an unexpected write below.
+  "listTaskComments",
   "getSession",
   "watchSession",
   "listApprovals",
@@ -2624,9 +2627,9 @@ assert(
   `page ${JSON.stringify(pageRows)}; listAttention ${JSON.stringify(serverRows)}; groups ${JSON.stringify(attSeeded.groups)}`,
 );
 assert(
-  "each row links to its card, and an approval's to the run that asked",
+  "each row links to its card, an approval's to the run that asked, a question's to the thread",
   gateRow?.href === `/boards/${attBoard}?card=${att.gated}` &&
-    askRow?.href === `/boards/${attBoard}?card=${att.asked}` &&
+    askRow?.href === `/boards/${attBoard}?card=${att.asked}#thread` &&
     approvalRow?.href ===
       `/boards/${attBoard}?card=${att.approval}&run=${approvalRun}`,
   `hrefs ${JSON.stringify([gateRow?.href, askRow?.href, approvalRow?.href])}`,

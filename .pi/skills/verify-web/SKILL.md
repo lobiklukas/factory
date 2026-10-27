@@ -77,6 +77,21 @@ start one it exits non-zero, printing the command to run. The session's model is
 (`MODEL_BACKEND=faux`) so the run is offline and deterministic; its tool calls, transcript, and
 storage are real.
 
+### The card's thread
+
+```sh
+THREAD_API_PORT=9431 THREAD_WEB_PORT=3431 ./thread.sh   # its own asking instance; leaves nothing running
+```
+
+Answering a parked card needs a run that asks, and the faux model asks only when the whole API is
+started with `FAUX_ASK` — which on this instance would park every card run the drive starts. So
+`thread.sh` starts its own API (`FAUX_ASK`) and dashboard, runs `thread.mjs`, and stops both. The
+drive starts a run from a card's pane, requires the pane to show the question it parked on, answers
+it in the browser through a stale-revision refusal (the draft kept, the card re-read), requires the
+block lifted, `factory board show` to agree, and the next run's committed prompt to quote the answer
+(`../verify-board/ask.ts MODE=told`) (`features/thread.md`). Evidence goes to
+`.verify/evidence/latest/thread/`.
+
 ### The spend pane
 
 ```sh
@@ -133,16 +148,17 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                           |
-| ------------------- | ----------------------------------------------------------------- |
-| `up.sh`             | Launch isolated API + web, wait for readiness                     |
-| `down.sh`           | Stop only what `up.sh` started                                    |
-| `doctor.sh`         | Read-only health check of the instance                            |
-| `drive.mjs`         | Browser drive + evidence capture                                  |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask              |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)  |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from     |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it |
+| File                | Purpose                                                            |
+| ------------------- | ------------------------------------------------------------------ |
+| `up.sh`             | Launch isolated API + web, wait for readiness                      |
+| `down.sh`           | Stop only what `up.sh` started                                     |
+| `doctor.sh`         | Read-only health check of the instance                             |
+| `drive.mjs`         | Browser drive + evidence capture                                   |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask               |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)   |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`) |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from      |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it  |
 
 ## Feature map
 

@@ -1,11 +1,13 @@
-import { useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause, Exit, Option } from "effect";
 import {
   ArrowRightIcon,
   BoxesIcon,
+  CheckIcon,
+  MessageSquareIcon,
   PlayIcon,
   UserCheckIcon,
   XIcon,
@@ -13,11 +15,18 @@ import {
 import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
-import type { BoardDefinition, BoardInstanceId, Task } from "@repo/domain/Task";
+import type {
+  BoardDefinition,
+  BoardInstanceId,
+  Task,
+  TaskBlocked,
+} from "@repo/domain/Task";
 import {
   boardAtom,
+  commentTaskAtom,
   moveTaskAtom,
   startRunAtom,
+  taskCommentsAtom,
   taskRunsAtom,
 } from "@/lib/atoms/board-atom";
 import {
@@ -30,6 +39,16 @@ import {
   runStart,
   type MoveRefusal,
 } from "@/lib/board-view";
+import {
+  commentKindLabel,
+  commentRefusal,
+  commentTime,
+  composerIntent,
+  liftedBlock,
+  sendable,
+  THREAD_ANCHOR,
+  type CommentRefusal,
+} from "@/lib/thread-view";
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { RunApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
@@ -37,6 +56,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 /**
@@ -157,6 +177,275 @@ const Moves = ({
           <AlertDescription>
             <span className="font-mono text-[11px] break-words">
               {shown.message}
+            </span>
+          </AlertDescription>
+        </Alert>
+      )}
+    </section>
+  );
+};
+
+const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
+  dependency: "waiting on a dependency",
+  needs_input: "needs input",
+  capability: "missing a capability",
+  transient: "a transient failure",
+};
+
+/**
+ * The card's thread (LOB-239, B7): the question a parked run asked, a person's answer, and every
+ * note, oldest first, each with its kind, its actor and its time, and its body verbatim — whitespace
+ * kept, nothing wrapped into a paraphrase, because the next run on the card is quoted the same text.
+ *
+ * The composer is `commentTask` at the revision this pane rendered, as the dashboard (a person). On a
+ * card blocked `needs_input` the send is the answer, and the server lifts the block in the same
+ * transaction; the pane says so before the send (the button reads **Answer**) and after it (the
+ * block it lifted). A stale revision — the card changed while the person typed — is refused by the
+ * server, and the pane re-reads the card and its thread and keeps the draft: nothing typed is lost,
+ * and nothing is resent behind the person's back, since someone else's answer may already have made
+ * theirs a note.
+ *
+ * The attention view's question rows open the pane at `#thread`; the section then scrolls into view
+ * and the composer takes the focus, so the person lands where the answer is typed.
+ */
+const Thread = ({
+  boardId,
+  task,
+}: {
+  readonly boardId: BoardInstanceId;
+  readonly task: Task;
+}) => {
+  const thread = useAtomValue(taskCommentsAtom(task.id));
+  const refreshThread = useAtomRefresh(taskCommentsAtom(task.id));
+  const refreshBoard = useAtomRefresh(boardAtom(boardId));
+  const comment = useAtomSet(commentTaskAtom, { mode: "promiseExit" });
+  const hash = useLocation({ select: (location) => location.hash });
+  const section = useRef<HTMLElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
+  const [refusal, setRefusal] = useState<CommentRefusal | null>(null);
+  const [landedAt, setLandedAt] = useState<number | null>(null);
+  const [lifted, setLifted] = useState<TaskBlocked | undefined>(undefined);
+  const intent = composerIntent(task);
+  const ready = sendable(draft);
+  const settling = awaitingMove(landedAt, task);
+  // As with a move: a refusal describes the revision the server refused at and no later one.
+  const shown =
+    refusal !== null && task.revision <= refusal.atRevision ? refusal : null;
+  // The lifted block stays on screen until the card is blocked again by something after the answer.
+  const liftedShown =
+    lifted !== undefined &&
+    (task.blocked === undefined ||
+      (landedAt !== null && task.revision < landedAt))
+      ? lifted
+      : undefined;
+  // The last answer stays on screen through a failed refresh; only a first read that fails says so.
+  const listed = Option.getOrUndefined(AsyncResult.value(thread));
+
+  useEffect(() => {
+    if (hash !== THREAD_ANCHOR) return;
+    section.current?.scrollIntoView({ block: "start" });
+    composer.current?.focus({ preventScroll: true });
+  }, [hash]);
+
+  const send = () => {
+    if (!ready.ok || pending || settling) return;
+    const sent = task.revision;
+    const before = task;
+    const body = draft;
+    setPending(true);
+    setRefusal(null);
+    void comment({
+      taskId: task.id,
+      expectedRevision: sent,
+      body,
+      actor: DASHBOARD_ACTOR,
+    })
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) {
+          setDraft("");
+          setLandedAt(exit.value.revision);
+          setLifted(liftedBlock(before, exit.value));
+          return;
+        }
+        setRefusal(
+          commentRefusal(
+            Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
+            Cause.pretty(exit.cause),
+            sent,
+          ),
+        );
+        // The draft stays where it is; the card and its thread are read again, so the next send
+        // expects the revision the server holds and the person sees what changed before they send.
+        refreshBoard();
+        refreshThread();
+      })
+      .finally(() => setPending(false));
+  };
+
+  return (
+    <section
+      ref={section}
+      id={THREAD_ANCHOR}
+      aria-label="Thread"
+      data-thread={task.id}
+      className="flex scroll-mt-3 flex-col gap-2"
+    >
+      <h2 className="flex items-baseline gap-2 text-[11px] font-medium text-muted-foreground uppercase">
+        Thread
+        {listed === undefined ? null : (
+          <span className="font-mono text-[10px]" data-thread-count>
+            {listed.length}
+          </span>
+        )}
+      </h2>
+      {listed === undefined ? (
+        AsyncResult.isFailure(thread) ? (
+          <p className="text-xs text-destructive">
+            The thread did not load: {Cause.pretty(thread.cause)}
+          </p>
+        ) : (
+          <Spinner className="size-3.5 text-muted-foreground" />
+        )
+      ) : listed.length === 0 ? (
+        <p className="text-xs text-muted-foreground" data-thread-empty>
+          No comment on this card yet.
+        </p>
+      ) : (
+        <ol
+          aria-label="Comments, oldest first"
+          className="flex flex-col gap-1.5"
+        >
+          {listed.map((entry, index) => (
+            <li
+              key={`${entry.revision}:${index}`}
+              data-comment-kind={entry.kind}
+              data-comment-actor={entry.actor}
+              data-comment-revision={entry.revision}
+              className={cn(
+                "flex flex-col gap-1 border border-border px-2.5 py-2",
+                entry.kind === "question" && "border-l-2 border-l-amber-500",
+                entry.kind === "answer" && "border-l-2 border-l-emerald-500",
+              )}
+            >
+              <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono text-[10px] text-muted-foreground">
+                <span
+                  className="font-medium tracking-wide text-foreground uppercase"
+                  data-comment-kind-label
+                >
+                  {commentKindLabel(entry.kind)}
+                </span>
+                <span className="truncate" data-comment-by>
+                  {entry.actor}
+                </span>
+                <span>r{entry.revision}</span>
+                <time
+                  dateTime={entry.createdAt}
+                  className="ml-auto shrink-0"
+                  data-comment-at
+                >
+                  {commentTime(entry.createdAt)}
+                </time>
+              </span>
+              <p
+                className="text-xs leading-snug break-words whitespace-pre-wrap"
+                data-comment-body
+              >
+                {entry.body}
+              </p>
+            </li>
+          ))}
+        </ol>
+      )}
+      {liftedShown === undefined ? null : (
+        <p
+          role="status"
+          data-thread-lifted={liftedShown.reason}
+          className="flex items-start gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400"
+        >
+          <CheckIcon className="size-3.5 shrink-0" strokeWidth={1.75} />
+          Answered: the card is no longer blocked (
+          {BLOCK_FROM[liftedShown.reason]} from {liftedShown.column}). The next
+          run on it reads the answer in its prompt.
+        </p>
+      )}
+      <form
+        aria-label={intent.answers ? "Answer the question" : "Comment"}
+        className="flex flex-col gap-1.5"
+        data-thread-intent={intent.answers ? "answer" : "note"}
+        onSubmit={(event) => {
+          event.preventDefault();
+          send();
+        }}
+      >
+        <Textarea
+          ref={composer}
+          value={draft}
+          data-thread-composer
+          aria-label={
+            intent.answers ? "Your answer to the question" : "Your comment"
+          }
+          aria-describedby="thread-intent"
+          placeholder={
+            intent.answers
+              ? "Answer the run's question…"
+              : "Add a note to the card…"
+          }
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              send();
+            }
+          }}
+          className="max-h-48 font-mono"
+        />
+        <div className="flex items-start gap-2">
+          <p
+            id="thread-intent"
+            className="flex-1 text-[11px] text-muted-foreground"
+          >
+            {intent.answers
+              ? `Blocked: needs input from ${intent.from}. Your answer lifts the block, and the next run on the card reads it.`
+              : "A note on the card: its column and state do not change."}
+            {ready.ok || draft === "" ? null : (
+              <span className="block text-destructive" data-thread-unsendable>
+                {ready.reason}.
+              </span>
+            )}
+          </p>
+          <Button
+            type="submit"
+            size="sm"
+            variant={intent.answers ? "default" : "outline"}
+            data-thread-send
+            disabled={!ready.ok || pending || settling}
+            aria-busy={pending}
+          >
+            {pending ? (
+              <Spinner className="size-3.5" />
+            ) : (
+              <MessageSquareIcon className="size-3.5" strokeWidth={1.75} />
+            )}
+            {intent.verb}
+          </Button>
+        </div>
+      </form>
+      {shown === null ? null : (
+        <Alert
+          variant="destructive"
+          role="alert"
+          data-comment-refusal={shown.tag}
+        >
+          <AlertTitle>{shown.title}</AlertTitle>
+          <AlertDescription>
+            <span className="font-mono text-[11px] break-words">
+              {shown.message}
+            </span>
+            <span className="block text-[11px]">
+              Your text is still in the box. The card and its thread were read
+              again: check them, then send it again if it still stands.
             </span>
           </AlertDescription>
         </Alert>
@@ -318,7 +607,8 @@ const RunPanes = ({ sessionId }: { readonly sessionId: SessionId }) => (
 );
 
 /**
- * The card pane (LOB-76): where a person acts on a card.
+ * The card pane (LOB-76): where a person acts on a card — moves it, reads and answers its thread
+ * (LOB-239), and starts and opens its runs.
  *
  * It reads the same board answer the lanes do, so the card here and the card in its lane are one
  * value and cannot disagree about the column or the revision a move will expect. Selection lives in
@@ -348,6 +638,7 @@ export const CardPane = ({
       data-card-pane={task.id}
       data-card-pane-column={task.column}
       data-card-pane-revision={task.revision}
+      data-card-pane-blocked={task.blocked?.reason}
       className="flex min-h-0 w-[38rem] max-w-[60vw] shrink-0 flex-col border-l border-border bg-background"
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-border px-4 py-3">
@@ -379,13 +670,23 @@ export const CardPane = ({
           <XIcon className="size-4" strokeWidth={1.75} />
         </Link>
       </header>
-      <div className="flex max-h-[45%] shrink-0 flex-col gap-4 overflow-y-auto px-4 py-3">
+      <div
+        className={cn(
+          "flex flex-col gap-4 overflow-y-auto px-4 py-3",
+          // With no run open the card's own sections take the pane; with one, the run's panes get
+          // the larger share and these scroll.
+          run === undefined || selection === "none"
+            ? "min-h-0 flex-1"
+            : "max-h-[45%] shrink-0",
+        )}
+      >
         <Moves
           key={task.id}
           boardId={boardId}
           task={task}
           definition={definition}
         />
+        <Thread key={`thread:${task.id}`} boardId={boardId} task={task} />
         <Runs
           boardId={boardId}
           task={task}

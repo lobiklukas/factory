@@ -5,6 +5,7 @@ import type {
   BoardInstanceId,
   TaskId,
 } from "@repo/domain/Task";
+import { THREAD_ANCHOR } from "./thread-view";
 
 /**
  * The attention view's arithmetic (LOB-77): what `/attention` renders from one `listAttention` read.
@@ -68,18 +69,30 @@ export const attentionReasonText = (item: AttentionItem): string => {
 };
 
 /**
- * Where a row's link goes: the card's own pane on its board, and for an approval the run that asked,
- * so the pane opens on the session whose Approvals tab holds the request.
+ * Where a row's link goes: the card's own pane on its board; for an approval, the run that asked, so
+ * the pane opens on the session whose Approvals tab holds the request; and for a question, the
+ * card's thread (`#thread`, LOB-239), where the question is read and answered.
  */
 export const attentionLink = (
   item: AttentionItem,
 ): {
   readonly boardId: BoardInstanceId;
   readonly search: { readonly card: TaskId; readonly run?: SessionId };
-} =>
-  item.reason._tag === "approval"
-    ? {
+  readonly hash?: typeof THREAD_ANCHOR;
+} => {
+  switch (item.reason._tag) {
+    case "approval":
+      return {
         boardId: item.task.boardId,
         search: { card: item.task.id, run: item.reason.sessionId },
-      }
-    : { boardId: item.task.boardId, search: { card: item.task.id } };
+      };
+    case "question":
+      return {
+        boardId: item.task.boardId,
+        search: { card: item.task.id },
+        hash: THREAD_ANCHOR,
+      };
+    case "gate":
+      return { boardId: item.task.boardId, search: { card: item.task.id } };
+  }
+};
