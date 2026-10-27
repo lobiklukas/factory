@@ -1093,12 +1093,38 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return rows[0]?.localPath ?? undefined;
         });
 
-      /** Resolve the repo binding a create asked for, registering the repo on first use. */
+      /**
+       * The repository a card's run works in when the create named none (LOB-255): the card's, and
+       * for a card made before cards carried one, its board's (B2). `undefined` for no card, and for
+       * a card id the tasks table does not hold — the run row's foreign key refuses that one.
+       */
+      const cardRepoFor = (
+        taskId: string | undefined,
+      ): Effect.Effect<RepoSlug | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (taskId === undefined) return undefined;
+          const rows = yield* paper(
+            "read the card's repo",
+            sql<{ repo: string }>`
+              SELECT COALESCE(t.repo, bi.repo) AS repo
+              FROM tasks t JOIN board_instances bi ON bi.id = t.board_id
+              WHERE t.id = ${taskId}
+            `,
+          );
+          const raw = rows[0]?.repo;
+          return raw === undefined ? undefined : yield* toRepoSlug(raw);
+        });
+
+      /**
+       * Resolve the repo binding a create asked for, registering the repo on first use. A card's run
+       * that names no repo is bound to the card's (`cardRepoFor`), so it gets a branch and a worktree
+       * whichever client started it; only a run of no card is a scratch session.
+       */
       const resolveBinding = (
         input: CreateSessionInput,
       ): Effect.Effect<Binding, SessionError> =>
         Effect.gen(function* () {
-          const repo = input.repo;
+          const repo = input.repo ?? (yield* cardRepoFor(input.taskId));
           if (repo === undefined) return {};
           const existing = (yield* paper("read repo", readRepo(repo)))[0];
           const registered =

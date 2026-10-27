@@ -332,6 +332,10 @@ export const Task = Schema.Struct({
   boardId: BoardInstanceId,
   title: Schema.String,
   column: Schema.String,
+  /**
+   * The board's repository, which `createTask` gives every card (LOB-255). Absent only on a card
+   * made before then; a run started for one is still bound to the board's repository.
+   */
   repo: Schema.optional(RepoSlug),
   /** The definition version this task started under (B2). */
   definitionVersion: Schema.Int,
@@ -502,6 +506,21 @@ export class BoardExists extends Schema.TaggedError<BoardExists>()(
   { repo: Schema.String, boardId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A card was asked for on a board with a repository other than the board's (LOB-255). A card
+ * inherits its board's repository (B2), so one naming another would put runs on the board that
+ * work somewhere else. Names both: `repo` is the one the caller named, `boardRepo` the board's.
+ */
+export class BoardRepoMismatch extends Schema.TaggedError<BoardRepoMismatch>()(
+  "BoardRepoMismatch",
+  {
+    boardId: Schema.String,
+    boardRepo: Schema.String,
+    repo: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
   {
@@ -570,6 +589,7 @@ export type TaskError =
   | BoardNotFound
   | DefinitionNotFound
   | BoardExists
+  | BoardRepoMismatch
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -579,6 +599,10 @@ export type TaskError =
   | EmptyComment
   | TaskStorageError;
 
+/**
+ * A new card (B3). `repo` defaults to the board instance's repository, which is the only one a card
+ * on that board may name: another is `BoardRepoMismatch` (LOB-255).
+ */
 export const CreateTaskInput = Schema.Struct({
   boardId: BoardInstanceId,
   title: Schema.String,

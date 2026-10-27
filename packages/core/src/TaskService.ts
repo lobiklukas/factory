@@ -143,6 +143,21 @@ export class BoardExists extends Schema.TaggedError<BoardExists>()(
   { repo: Schema.String, boardId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * `create` named a repository other than its board's (LOB-255). A card inherits its board's repo
+ * (B2) — the default when none is named — so naming another is refused, naming both, and nothing is
+ * written: runs on the card would otherwise work in a repository the board is not over.
+ */
+export class BoardRepoMismatch extends Schema.TaggedError<BoardRepoMismatch>()(
+  "BoardRepoMismatch",
+  {
+    boardId: Schema.String,
+    boardRepo: Schema.String,
+    repo: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 /** The expected revision was not the card's current one; `actual` is what it is now. */
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
@@ -213,6 +228,7 @@ export type TaskError =
   | BoardNotFound
   | DefinitionNotFound
   | BoardExists
+  | BoardRepoMismatch
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -225,6 +241,7 @@ export type TaskError =
 export type CreateTaskInput = {
   readonly boardId: string;
   readonly title: string;
+  /** Defaults to the board's repository; any other is `BoardRepoMismatch` (LOB-255). */
   readonly repo?: string;
   readonly priority?: TaskPriorityType;
   readonly actor: Actor;
@@ -748,15 +765,28 @@ export const TaskServiceLive = Layer.effect(
           Effect.gen(function* () {
             const boards = yield* sql<{
               id: string;
+              repo: string;
               definitionVersion: number;
             }>`
-              SELECT id, definition_version FROM board_instances WHERE id = ${input.boardId}
+              SELECT id, repo, definition_version FROM board_instances WHERE id = ${input.boardId}
             `;
             const board = boards[0];
             if (board === undefined) {
               return yield* new BoardNotFound({
                 boardId: input.boardId,
                 message: `no board ${input.boardId}`,
+              });
+            }
+            // The card's repository is its board's (B2, LOB-255): the default when none is named,
+            // and the only one a caller may name. A card with none made only scratch runs, which
+            // have no branch and so can never leave building.
+            const repo = input.repo ?? board.repo;
+            if (repo !== board.repo) {
+              return yield* new BoardRepoMismatch({
+                boardId: board.id,
+                boardRepo: board.repo,
+                repo,
+                message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
               });
             }
             const id = yield* mintTaskId;
@@ -767,7 +797,7 @@ export const TaskServiceLive = Layer.effect(
                 revision, priority, created_at, updated_at
               )
               VALUES (
-                ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${input.repo ?? null},
+                ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${repo},
                 ${board.definitionVersion}, 1, ${priority}, now(), now()
               )
               RETURNING ${sql.literal(TASK_COLUMNS)}

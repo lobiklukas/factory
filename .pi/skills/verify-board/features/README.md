@@ -3,7 +3,12 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the both-ways phase and `./equivalence.sh` (LOB-87,
+Status reflects the last verified runs: a card created with no repo (LOB-255, 2026-10-28,
+`agent/LOB-255`), API on `:9530`, web on `:3530`, the GitHub fake on `:9533`: `./drive.sh` exit 0,
+**52/52** required checks, with `create.ts`'s **5/5** (`create.json`: the board's repo inherited, another
+refused as `BoardRepoMismatch`, no card written) and `build.ts`'s **4/4** (`build-built.json`: the
+build run bound to the board's repo on `factory/<session-id>`) and **8/8** (`build-pr.json`) folded
+in — the repo-less card reached review with a PR, then done. Before it, the both-ways phase and `./equivalence.sh` (LOB-87,
 2026-10-27, `agent/LOB-87`), API on `:9500`, web on `:3500`, verify-cli's gated API on `:9501`, the
 GitHub fake on `:9503`: `./equivalence.sh` exit 0, its nine steps green — verify-cli's drive (with
 `approve.sh`), verify-web's `drive.mjs` (**91/91**), then `./drive.sh` **51/51** with `both-ways.mjs`'s
