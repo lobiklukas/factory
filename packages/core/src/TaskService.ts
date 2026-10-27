@@ -1,5 +1,6 @@
 /**
- * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9).
+ * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9),
+ * and the thread on each card — a run's question, a person's answer, a note (B7, LOB-73).
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
@@ -20,6 +21,15 @@
  *   (merge). A run is one Pi Durable session, so a run's actor is its session id; any actor that is
  *   a session id is a run and cannot cross a gate. Every other actor is a person.
  *
+ * **The thread is `task_events`, not a table of its own (LOB-73).** A comment is a `commented` event:
+ * B3 makes a card rows plus an append-only history, and a comment is exactly that — input a person
+ * (or a run) wrote against the card, with an actor and the revision it was written at. The ask is a
+ * comment *and* a `needs_input` block, and the answer is a comment *and* the unblock, so each pair is
+ * one transaction over one table; a `task_comments` table would split one mutation's history across
+ * two orderings and duplicate the actor/revision/time columns `task_events` already carries. A
+ * session's log is ruled out for the reason B3 rules it out for cards: the answer is typed by a person
+ * and has no log to replay it from, and the next run is a *different* session that must read it.
+ *
  * Postgres only: the tests run against the real schema from `0007_create_tasks.ts`.
  */
 import { Context, DateTime, Effect, Layer, Option, Schema } from "effect";
@@ -38,9 +48,11 @@ import {
   TaskId,
   TaskRun,
 } from "@repo/domain/Task";
+import { TaskComment } from "@repo/domain/Task";
 import type {
   Actor,
   BlockReason as BlockReasonType,
+  CommentKind,
   TaskPriority as TaskPriorityType,
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
@@ -107,6 +119,12 @@ export class TaskStorageError extends Schema.TaggedError<TaskStorageError>()(
   { message: Schema.String },
 ) {}
 
+/** A comment, question or answer with nothing in it: a thread entry has to say something (LOB-73). */
+export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
+  "EmptyComment",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -115,6 +133,7 @@ export type TaskError =
   | HumanGateRequired
   | AlreadyBlocked
   | NotBlocked
+  | EmptyComment
   | TaskStorageError;
 
 export type CreateTaskInput = {
@@ -151,6 +170,28 @@ export type ListTasksInput = {
   readonly column?: string;
 };
 
+/**
+ * A run's question (B7, LOB-73): the comment it ends parked on, and the `needs_input` block.
+ *
+ * No expected revision: the asker is the run working the card, not a person who read it, so there is
+ * no stale read to refuse — the card is locked and the ask lands on whatever revision it is at.
+ * `askId` makes the ask idempotent: a second ask with the same id records nothing and answers the
+ * card as it is, which is what lets the `ask` tool replay safely after a crash.
+ */
+export type AskTaskInput = {
+  readonly taskId: string;
+  readonly question: string;
+  readonly actor: Actor;
+  readonly askId?: string;
+};
+
+export type CommentTaskInput = {
+  readonly taskId: string;
+  readonly expectedRevision: number;
+  readonly body: string;
+  readonly actor: Actor;
+};
+
 export type TaskServiceShape = {
   /** The board and the definition version it binds (B2), in one read: lanes and cards agree. */
   readonly getBoard: (boardId: string) => Effect.Effect<BoardView, TaskError>;
@@ -164,6 +205,14 @@ export type TaskServiceShape = {
   readonly move: (input: MoveTaskInput) => Effect.Effect<Task, TaskError>;
   readonly block: (input: BlockTaskInput) => Effect.Effect<Task, TaskError>;
   readonly unblock: (input: UnblockTaskInput) => Effect.Effect<Task, TaskError>;
+  /** A run's question: a `question` comment and a `needs_input` block from the card's column. */
+  readonly ask: (input: AskTaskInput) => Effect.Effect<Task, TaskError>;
+  /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
+  readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
+  /** The card's thread, oldest first: every `commented` event, verbatim. */
+  readonly comments: (
+    taskId: string,
+  ) => Effect.Effect<ReadonlyArray<TaskComment>, TaskError>;
   /** A card's runs, newest first (LOB-76). An unknown card is `TaskNotFound`, not an empty list. */
   readonly listRuns: (
     taskId: string,
@@ -628,6 +677,199 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    /** A thread entry that says nothing is refused before anything is written. */
+    const refuseEmpty = (taskId: string, body: string, what: string) =>
+      body.trim().length === 0
+        ? Effect.fail(
+            new EmptyComment({
+              taskId,
+              message: `${what} on task ${taskId} is empty: a thread entry has to say something`,
+            }),
+          )
+        : Effect.void;
+
+    const ask = (input: AskTaskInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (input.askId !== undefined) {
+              // Read under the card's lock, so two replays of one ask cannot both miss each other.
+              const asked = yield* sql<{ n: number }>`
+                SELECT count(*)::int AS n FROM task_events
+                WHERE task_id = ${input.taskId} AND kind = 'commented'
+                  AND payload->>'askId' = ${input.askId}
+              `;
+              if ((asked[0]?.n ?? 0) > 0) return yield* toTask(row);
+            }
+            yield* refuseEmpty(input.taskId, input.question, "the question");
+            // A card blocked for another reason is waiting on something else; parking a question on
+            // it would hide that block behind one an answer could lift. Already `needs_input` is a
+            // second question on the same wait, so it joins the thread and the block stays.
+            if (
+              row.blockedReason !== null &&
+              row.blockedReason !== "needs_input"
+            ) {
+              return yield* new AlreadyBlocked({
+                taskId: input.taskId,
+                message: `task ${input.taskId} is already blocked (${row.blockedReason}); a question cannot park it`,
+              });
+            }
+            yield* appendEvent({
+              _tag: "commented",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              body: input.question,
+              kind: "question",
+              revision: row.revision,
+              ...(input.askId === undefined ? {} : { askId: input.askId }),
+            });
+            if (row.blockedReason !== null) {
+              const rows = yield* sql<TaskRow>`
+                UPDATE tasks SET revision = revision + 1, updated_at = now()
+                WHERE id = ${input.taskId}
+                RETURNING ${sql.literal(TASK_COLUMNS)}
+              `;
+              return yield* toTask(rows[0] as TaskRow);
+            }
+            // The block names the column the card blocked from (B4), and carries the question as its
+            // note so a reader of the card alone sees what it is waiting on.
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = 'needs_input', blocked_column = ${row.column},
+                  blocked_note = ${input.question}, blocked_since = now(),
+                  revision = revision + 2, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "blocked",
+              taskId: TaskId.make(input.taskId),
+              reason: "needs_input",
+              column: row.column,
+              actor: input.actor,
+              revision: row.revision + 1,
+            });
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
+    const comment = (input: CommentTaskInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const row = yield* lockExpected(
+              input.taskId,
+              input.expectedRevision,
+            );
+            yield* refuseEmpty(input.taskId, input.body, "the comment");
+            // Only a person answers (B7): a run that comments on its own parked card is adding to
+            // the question, not closing it.
+            const answers =
+              row.blockedReason === "needs_input" && !isRunActor(input.actor);
+            const kind: CommentKind = answers ? "answer" : "note";
+            yield* appendEvent({
+              _tag: "commented",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              body: input.body,
+              kind,
+              revision: input.expectedRevision,
+            });
+            if (!answers) {
+              const rows = yield* sql<TaskRow>`
+                UPDATE tasks SET revision = revision + 1, updated_at = now()
+                WHERE id = ${input.taskId}
+                RETURNING ${sql.literal(TASK_COLUMNS)}
+              `;
+              return yield* toTask(rows[0] as TaskRow);
+            }
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = NULL, blocked_column = NULL, blocked_note = NULL,
+                  blocked_since = NULL, revision = revision + 2, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "unblocked",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              revision: input.expectedRevision + 1,
+            });
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
+    const decodeEvent = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(TaskEvent),
+    );
+    const decodeComment = Schema.decodeUnknownEffect(TaskComment);
+
+    const comments = (
+      taskId: string,
+    ): Effect.Effect<ReadonlyArray<TaskComment>, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const exists = yield* sql<{ id: string }>`
+            SELECT id FROM tasks WHERE id = ${taskId}
+          `;
+          if (exists[0] === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          // Event order is write order (`id` is an identity), which is the thread's order: a question
+          // and the answer to it are never reordered by a clock that ticked twice in one millisecond.
+          // Ordered by the column, not the `id` text alias, which would sort "100" before "99".
+          const rows = yield* sql<{
+            id: string;
+            payload: string;
+            createdAt: Date | string;
+          }>`
+            SELECT id::text AS id, payload::text AS payload, created_at
+            FROM task_events
+            WHERE task_id = ${taskId} AND kind = 'commented'
+            ORDER BY task_events.id
+          `;
+          return yield* Effect.forEach(rows, (row) =>
+            Effect.gen(function* () {
+              const event = yield* decodeEvent(row.payload);
+              if (event._tag !== "commented") {
+                return yield* Effect.fail(
+                  `event ${row.id} is stored as commented but is ${event._tag}`,
+                );
+              }
+              return yield* decodeComment({
+                taskId: event.taskId,
+                kind: event.kind ?? "note",
+                actor: event.actor,
+                body: event.body,
+                revision: event.revision,
+                createdAt: iso(row.createdAt),
+              });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TaskStorageError({
+                    message: `task ${taskId} holds an unreadable comment ${row.id}: ${String(cause)}`,
+                  }),
+              ),
+            ),
+          );
+        }),
+      );
+
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
 
     /**
@@ -693,6 +935,9 @@ export const TaskServiceLive = Layer.effect(
       move,
       block,
       unblock,
+      ask,
+      comment,
+      comments,
       listRuns,
     } satisfies TaskServiceShape;
   }),

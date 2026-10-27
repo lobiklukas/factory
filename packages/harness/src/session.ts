@@ -82,6 +82,12 @@ import {
   type VerifyRecord,
 } from "./verify";
 import {
+  askExtension,
+  threadExtension,
+  type AskOptions,
+  type ThreadReader,
+} from "./ask";
+import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
   DOCS_SKILL,
@@ -247,7 +253,7 @@ export type OpenSessionOptions = {
    * service, so it is handed in here rather than imported. A session with no asker still gates: a
    * gated call is blocked with a sentence saying there is nobody to ask, never run ungated.
    */
-  readonly ask?: ApprovalAsker;
+  readonly approvalAsker?: ApprovalAsker;
   /**
    * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
    * by the control plane from the card's pinned board definition. Absent: no card, or a column that
@@ -277,6 +283,19 @@ export type OpenSessionOptions = {
    * measures only uncommitted work.
    */
   readonly verify?: VerifyOptions;
+  /**
+   * How this run asks a person (LOB-73, `./ask`): the control plane's callback that records the
+   * question on the run's card and blocks it `needs_input`. Absent: a session with no card, which
+   * has nobody to ask on, so it gets no `ask` tool at all.
+   */
+  readonly ask?: AskOptions;
+  /**
+   * How to read the card's thread (LOB-73): called before every request, its comments rendered
+   * verbatim, oldest first, as the `task_thread` section — so an answer that lands while this harness
+   * is open reaches the next request. Absent (a session with no card), or a thread with no comments:
+   * no section.
+   */
+  readonly thread?: ThreadReader;
 };
 
 export type OpenSession = {
@@ -321,10 +340,18 @@ export const openSession = (
     const pages = options.pages ?? [];
     const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
+    // The card's thread beside them (B7, LOB-73): what earlier runs asked and what a person answered,
+    // so a run that follows a parked one starts from the answer rather than from the bare card.
+    if (options.thread !== undefined) {
+      registry.install(threadExtension(options.thread));
+    }
     registry.install(CodingTools);
     // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
     // its own surface rather than prose about it.
     registry.install(verifyExtension(options.verify));
+    // The ask on the task (B7, LOB-73): only a run bound to a card can ask, because the question is
+    // recorded on the card — a scratch session has nobody to ask on and no tool to ask with.
+    if (options.ask !== undefined) registry.install(askExtension(options.ask));
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
     const tasks = options.tasks ?? [];
@@ -343,7 +370,7 @@ export const openSession = (
         skills.some((skill) => skill.name === DOCS_SKILL)
           ? docsPolicy(policy)
           : policy,
-        options.ask,
+        options.approvalAsker,
       ),
     );
 
@@ -1343,8 +1370,8 @@ export type ForkSessionOptions = {
   readonly model: ModelAccess;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
-  /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.ask`. */
-  readonly ask?: ApprovalAsker;
+  /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
+  readonly approvalAsker?: ApprovalAsker;
   /**
    * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
    * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
@@ -1387,7 +1414,9 @@ export const forkSession = (
       model: options.model,
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
-      ...(options.ask === undefined ? {} : { ask: options.ask }),
+      ...(options.approvalAsker === undefined
+        ? {}
+        : { approvalAsker: options.approvalAsker }),
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.pages === undefined ? {} : { pages: options.pages }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),

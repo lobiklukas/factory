@@ -264,7 +264,7 @@ const turn = async (options: {
       model: scripted(options.command),
       cwd: options.worktree,
       policy: autonomyPolicy(config, options.worktree),
-      ...(options.ask === undefined ? {} : { ask: options.ask }),
+      ...(options.ask === undefined ? {} : { approvalAsker: options.ask }),
     }),
   );
   const submitted = await Effect.runPromise(
@@ -495,7 +495,7 @@ const crashAndRecover = async (options: {
       model: scripted(command),
       cwd: worktree,
       policy,
-      ask: asker.ask,
+      approvalAsker: asker.ask,
     }),
   );
   await Effect.runPromise(
@@ -513,7 +513,7 @@ const crashAndRecover = async (options: {
       model: scripted(undefined),
       cwd: worktree,
       policy,
-      ask: asker.ask,
+      approvalAsker: asker.ask,
     }),
   );
   second.harness.resume();

@@ -120,6 +120,11 @@ const ModelConfig = Config.all({
   fauxEveryTurn: Config.Boolean("FAUX_EVERY_TURN").pipe(
     Config.withDefault(false),
   ),
+  /**
+   * The question the faux script asks with the `ask` tool (LOB-73). Unset, the script never asks: a
+   * verification that proves the parked run (`.pi/skills/verify-board/ask.sh`) sets it.
+   */
+  fauxAsk: Config.option(Config.String("FAUX_ASK")),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -257,6 +262,7 @@ const HttpLive = Effect.gen(function* () {
     model: createModelAccess(backend, {
       fauxCommand: model.fauxCommand,
       fauxEveryTurn: model.fauxEveryTurn,
+      fauxAsk: Option.getOrUndefined(model.fauxAsk),
     }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,

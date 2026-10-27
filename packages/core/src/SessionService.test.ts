@@ -102,6 +102,7 @@ import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { TaskService, TaskServiceLive } from "./TaskService";
 import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
   pullRequestReport,
@@ -6593,6 +6594,305 @@ describe("the verify tool reads the session's workspace", () => {
     } finally {
       await verifyRuntime.dispose();
     }
+  }, 120_000);
+});
+
+/**
+ * The ask on the task (LOB-73, part 2 of LOB-46; docs/board.md B7).
+ *
+ * A run bound to a card is offered the `ask` tool; the faux script asks once its `bash` turn is done
+ * (`fauxAsk`). The claims are the issue's, in its order: the run is **not busy** after it asks and
+ * the card is blocked `needs_input` from the column it was in; the question is on the task; a person's
+ * comment is the answer, and the *next* run's recorded prompt — the committed `pi.system` entries,
+ * what the model was sent — quotes it verbatim. Between the ask and the answer the service is torn
+ * down and a second one built over the same database, which is the restart the drive proves with two
+ * processes (`.pi/skills/verify-board/ask.sh`): the question and the block are rows, so nothing an
+ * owner held in memory is needed to answer them.
+ */
+describe("the ask on the task", () => {
+  const askRoot = mkdtempSync(join(tmpdir(), "factory-core-ask-"));
+  const QUESTION = "Which Postgres major does this target?";
+  // Two lines, an em dash and trailing spaces: an answer that was trimmed, wrapped or re-encoded on
+  // its way into the prompt would not be found verbatim.
+  const ANSWER = "Postgres 16.\n  Keep port 5442 \u2014 it is shared.  ";
+  const PERSON = "person:lukas";
+
+  const askRuntime = (faux: ReturnType<typeof createFauxModelAccess>) =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: faux.access, sessionRoot: askRoot }),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  const promptOf = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      return yield* Effect.acquireUseRelease(
+        Effect.promise(() => PostgresStorage.reader(sql, sessionId)),
+        (storage) => readPromptSections(storage),
+        (storage) => Effect.promise(() => storage.dispose()),
+      );
+    });
+
+  /** A card in `specifying`, on a board of its own, moved there by a person. */
+  const cardInSpecifying = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const tasks = yield* TaskService;
+    const boardId = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+    `;
+    const card = yield* tasks.create({
+      boardId,
+      title: "a thin card",
+      actor: PERSON,
+    });
+    return yield* tasks.move({
+      taskId: card.id,
+      expectedRevision: card.revision,
+      to: "specifying",
+      actor: PERSON,
+    });
+  });
+
+  it("parks the run on the card, survives a restart, and quotes the answer into the next run", async () => {
+    const first = createFauxModelAccess({ fauxAsk: QUESTION });
+    const before = askRuntime(first);
+    const asked = await before
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardInSpecifying;
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "specify it" });
+          yield* waitUntil(
+            Effect.map(
+              tasks.get(card.id),
+              (task) => task.blocked !== undefined,
+            ),
+            "the run to ask",
+          );
+          yield* waitUntil(
+            Effect.map(sessions.get(run.id), (snapshot) => !snapshot.live.busy),
+            "the asking run to settle",
+          );
+          return {
+            card,
+            runId: run.id,
+            // Read while this process still owns the run: "not busy" is a claim about a live owner,
+            // not about a released log, which reads idle by definition.
+            snapshot: yield* sessions.get(run.id),
+            blocked: yield* tasks.get(card.id),
+            thread: yield* tasks.comments(card.id),
+            requests: first.faux.state.callCount,
+            prompt: yield* promptOf(run.id),
+          };
+        }),
+      )
+      .finally(() => before.dispose());
+
+    // Parked, not hanging: the owner is live and idle, the ask's result is in the transcript, and
+    // the model was asked twice — the `bash` turn and the ask — with no request after the ask.
+    expect(asked.snapshot.session.mode).toBe("live");
+    expect(asked.snapshot.live.busy).toBe(false);
+    expect(asked.snapshot.session.status).toBe("idle");
+    expect(
+      asked.snapshot.entries.some(
+        (entry) => entry.kind === "toolResult" && entry.toolName === "ask",
+      ),
+    ).toBe(true);
+    expect(
+      asked.snapshot.entries.filter((entry) => entry.kind === "assistant"),
+    ).toHaveLength(2);
+    expect(asked.requests).toBe(2);
+    // The block is typed and names the column the card blocked from (B4).
+    expect(asked.blocked.blocked?.reason).toBe("needs_input");
+    expect(asked.blocked.blocked?.column).toBe("specifying");
+    expect(asked.blocked.column).toBe("specifying");
+    // The question is on the task, verbatim, written by the run.
+    expect(asked.thread).toEqual([
+      expect.objectContaining({
+        kind: "question",
+        actor: asked.runId,
+        body: QUESTION,
+      }),
+    ]);
+    // The asking run opened with no comments on the card, so its prompt had no thread.
+    expect(asked.prompt["task_thread"]).toBeUndefined();
+
+    // --- the restart: a new service over the same database ---------------------------------------
+    const second = createFauxModelAccess({ fauxAsk: QUESTION });
+    const after = askRuntime(second);
+    const answered = await after
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const reread = yield* tasks.get(asked.card.id);
+          const rereadThread = yield* tasks.comments(asked.card.id);
+          const unblocked = yield* tasks.comment({
+            taskId: asked.card.id,
+            expectedRevision: reread.revision,
+            body: ANSWER,
+            actor: PERSON,
+          });
+          const next = yield* sessions.create({
+            title: reread.title,
+            taskId: reread.id,
+            taskColumn: reread.column,
+          });
+          yield* sessions.send({ sessionId: next.id, content: "go on" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(next.id),
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            "the next run to answer",
+          );
+          return {
+            reread,
+            rereadThread,
+            unblocked,
+            nextId: next.id,
+            card: yield* tasks.get(asked.card.id),
+            thread: yield* tasks.comments(asked.card.id),
+            prompt: yield* promptOf(next.id),
+          };
+        }),
+      )
+      .finally(() => after.dispose());
+
+    // Neither the block nor the question was lost to the restart.
+    expect(answered.reread.blocked).toEqual(asked.blocked.blocked);
+    expect(answered.rereadThread).toEqual(asked.thread);
+    // A person's comment on a `needs_input` card is the answer, and lifts the block.
+    expect(answered.unblocked.blocked).toBeUndefined();
+    expect(answered.thread.map((comment) => comment.kind)).toEqual([
+      "question",
+      "answer",
+    ]);
+    expect(answered.thread[1]?.body).toBe(ANSWER);
+    // The next run was told the thread: the answer verbatim, after the question it answers.
+    const told = answered.prompt["task_thread"] ?? "";
+    expect(told).toContain(`\n${ANSWER}\n`);
+    expect(told.indexOf(QUESTION)).toBeGreaterThan(-1);
+    expect(told.indexOf(QUESTION)).toBeLessThan(told.indexOf(ANSWER));
+    // And, holding the answer, it did not ask again: the card stays unblocked.
+    expect(answered.card.blocked).toBeUndefined();
+    expect(answered.thread).toHaveLength(2);
+  }, 120_000);
+
+  it("tells a parked run's live owner the answer when a person messages that same session", async () => {
+    const faux = createFauxModelAccess({ fauxAsk: QUESTION });
+    const live = askRuntime(faux);
+    const outcome = await live
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardInSpecifying;
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "specify it" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(run.id),
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.some(
+                  (entry) =>
+                    entry.kind === "toolResult" && entry.toolName === "ask",
+                ),
+            ),
+            "the run to ask and settle",
+          );
+          const parked = yield* promptOf(run.id);
+          const blocked = yield* tasks.get(card.id);
+          yield* tasks.comment({
+            taskId: card.id,
+            expectedRevision: blocked.revision,
+            body: ANSWER,
+            actor: PERSON,
+          });
+          // The same session, its owner still live in this process: no `board start`, no reopen.
+          yield* sessions.send({ sessionId: run.id, content: "go on" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(run.id),
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.at(-1)?.kind === "assistant" &&
+                snapshot.entries.at(-1)?.text !== "",
+            ),
+            "the answered run to reply",
+          );
+          return {
+            mode: (yield* sessions.get(run.id)).session.mode,
+            parked,
+            told: yield* promptOf(run.id),
+            card: yield* tasks.get(card.id),
+          };
+        }),
+      )
+      .finally(() => live.dispose());
+
+    expect(outcome.mode).toBe("live");
+    expect(outcome.parked["task_thread"]).toBeUndefined();
+    const told = outcome.told["task_thread"] ?? "";
+    expect(told).toContain(`\n${ANSWER}\n`);
+    expect(told.indexOf(QUESTION)).toBeLessThan(told.indexOf(ANSWER));
+    // Told the answer, the run did not ask again: the card stays unblocked.
+    expect(outcome.card.blocked).toBeUndefined();
+  }, 120_000);
+
+  it("offers a session with no card no ask tool", async () => {
+    const faux = createFauxModelAccess({ fauxAsk: QUESTION });
+    const scratch = askRuntime(faux);
+    const snapshot = await scratch
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "no card" });
+          yield* sessions.send({ sessionId: created.id, content: "hello" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (current) =>
+                !current.live.busy &&
+                current.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            "the scratch run to answer",
+          );
+          return yield* sessions.get(created.id);
+        }),
+      )
+      .finally(() => scratch.dispose());
+
+    // A scratch session has nobody to ask on, so the script — which would ask if it could — replies.
+    expect(
+      snapshot.entries.some(
+        (entry) => entry.kind === "toolResult" && entry.toolName === "ask",
+      ),
+    ).toBe(false);
+    expect(snapshot.entries.at(-1)?.text).toBe("faux-ok (re: hello)");
   }, 120_000);
 });
 

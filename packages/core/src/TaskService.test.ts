@@ -489,3 +489,240 @@ describe("TaskService", () => {
     expect(intake.map((t) => t.id)).toEqual([b.id, a.id]);
   });
 });
+
+/**
+ * The thread on a card (B7, LOB-73): a run's question, a person's answer, and every refusal on the
+ * way — each refusal checked against the event count, because a refused ask that left a comment
+ * behind would be a question nobody can tell was never asked.
+ */
+describe("TaskService — the ask and the thread", () => {
+  /** The `kind` column of every event a card has, in write order. */
+  const eventKinds = (taskId: string): Promise<ReadonlyArray<string>> =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ kind: string }>`
+          SELECT kind FROM task_events WHERE task_id = ${taskId} ORDER BY id
+        `;
+        return rows.map((row) => row.kind);
+      }),
+    );
+
+  /** A card moved into `specifying`, at revision 2. */
+  const inSpecifying = async () => {
+    const boardId = await newBoard();
+    const task = await withService((s) =>
+      s.create({ boardId, title: "thin", actor: LUKAS }),
+    );
+    return withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 1,
+        to: "specifying",
+        actor: LUKAS,
+      }),
+    );
+  };
+
+  it("asks: a question comment and a needs_input block from the card's column, in one mutation", async () => {
+    const task = await inSpecifying();
+    const asked = await withService((s) =>
+      s.ask({ taskId: task.id, question: "Which repo?", actor: RUN }),
+    );
+    expect(asked.blocked?.reason).toBe("needs_input");
+    expect(asked.blocked?.column).toBe("specifying");
+    expect(asked.blocked?.note).toBe("Which repo?");
+    // Two events, one revision each: the comment at 2, the block at 3, the card now at 4.
+    expect(asked.revision).toBe(4);
+    expect(await eventKinds(task.id)).toEqual([
+      "created",
+      "moved",
+      "commented",
+      "blocked",
+    ]);
+    const thread = await withService((s) => s.comments(task.id));
+    expect(thread).toEqual([
+      {
+        taskId: task.id,
+        kind: "question",
+        actor: RUN,
+        body: "Which repo?",
+        revision: 2,
+        createdAt: thread[0]?.createdAt,
+      },
+    ]);
+  });
+
+  it("records an ask once per ask id, so a replayed tool call asks nothing twice", async () => {
+    const task = await inSpecifying();
+    const ask = { taskId: task.id, question: "Which repo?", actor: RUN };
+    const first = await withService((s) =>
+      s.ask({ ...ask, askId: `${RUN}:call-1` }),
+    );
+    const replayed = await withService((s) =>
+      s.ask({ ...ask, askId: `${RUN}:call-1` }),
+    );
+    expect(replayed.revision).toBe(first.revision);
+    expect(await eventCount(task.id)).toBe(4);
+    // A different call is a second question on the same wait: it joins the thread, the block stays.
+    const again = await withService((s) =>
+      s.ask({ ...ask, question: "And which branch?", askId: `${RUN}:call-2` }),
+    );
+    expect(again.blocked?.reason).toBe("needs_input");
+    expect(again.blocked?.since).toBe(first.blocked?.since);
+    expect(again.revision).toBe(first.revision + 1);
+    const thread = await withService((s) => s.comments(task.id));
+    expect(thread.map((comment) => comment.body)).toEqual([
+      "Which repo?",
+      "And which branch?",
+    ]);
+  });
+
+  it("refuses an ask on a card blocked for another reason, and an empty question, writing nothing", async () => {
+    const task = await inSpecifying();
+    await withService((s) =>
+      s.block({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        reason: "dependency",
+        actor: LUKAS,
+      }),
+    );
+    const blocked = await refusal((s) =>
+      s.ask({ taskId: task.id, question: "Which repo?", actor: RUN }),
+    );
+    expect(blocked._tag).toBe("AlreadyBlocked");
+    expect(blocked.message).toContain("dependency");
+
+    const other = await inSpecifying();
+    const empty = await refusal((s) =>
+      s.ask({ taskId: other.id, question: "  \n ", actor: RUN }),
+    );
+    expect(empty._tag).toBe("EmptyComment");
+    const missing = await refusal((s) =>
+      s.ask({ taskId: `tsk_${hex(13)}`, question: "?", actor: RUN }),
+    );
+    expect(missing._tag).toBe("TaskNotFound");
+
+    expect(await eventCount(task.id)).toBe(3);
+    expect(await eventCount(other.id)).toBe(2);
+  });
+
+  it("takes a person's comment on a needs_input card as the answer, and lifts the block", async () => {
+    const task = await inSpecifying();
+    const asked = await withService((s) =>
+      s.ask({ taskId: task.id, question: "Which repo?", actor: RUN }),
+    );
+    const answered = await withService((s) =>
+      s.comment({
+        taskId: task.id,
+        expectedRevision: asked.revision,
+        body: "lobiklukas/factory",
+        actor: LUKAS,
+      }),
+    );
+    expect(answered.blocked).toBeUndefined();
+    expect(answered.column).toBe("specifying");
+    expect(answered.revision).toBe(asked.revision + 2);
+    expect((await eventKinds(task.id)).slice(-2)).toEqual([
+      "commented",
+      "unblocked",
+    ]);
+    const thread = await withService((s) => s.comments(task.id));
+    expect(thread.map((comment) => [comment.kind, comment.actor])).toEqual([
+      ["question", RUN],
+      ["answer", LUKAS],
+    ]);
+    expect(thread[1]?.revision).toBe(asked.revision);
+  });
+
+  it("keeps a run's own comment and a comment on an unblocked card as notes", async () => {
+    const task = await inSpecifying();
+    const asked = await withService((s) =>
+      s.ask({ taskId: task.id, question: "Which repo?", actor: RUN }),
+    );
+    // Only a person answers: the run adding to its own question leaves the card parked.
+    const byRun = await withService((s) =>
+      s.comment({
+        taskId: task.id,
+        expectedRevision: asked.revision,
+        body: "or a fork of it",
+        actor: RUN,
+      }),
+    );
+    expect(byRun.blocked?.reason).toBe("needs_input");
+    expect(byRun.revision).toBe(asked.revision + 1);
+
+    const plain = await inSpecifying();
+    const noted = await withService((s) =>
+      s.comment({
+        taskId: plain.id,
+        expectedRevision: plain.revision,
+        body: "context for later",
+        actor: LUKAS,
+      }),
+    );
+    expect(noted.blocked).toBeUndefined();
+    expect(noted.revision).toBe(plain.revision + 1);
+    const kinds = async (id: string) =>
+      (await withService((s) => s.comments(id))).map((c) => c.kind);
+    expect(await kinds(task.id)).toEqual(["question", "note"]);
+    expect(await kinds(plain.id)).toEqual(["note"]);
+  });
+
+  it("reads the thread in event-id order, not in the text order of the ids", async () => {
+    const task = await inSpecifying();
+    // Two comments whose ids sort one way as numbers and the other as text: -…9 is written first
+    // (it is the smaller number) but "-…9" sorts after "-…8". Negative ids are below anything the
+    // identity hands out, and the run's random stem keeps them unique across runs of this suite.
+    const stem = Number.parseInt(hex(5), 16) + 1;
+    const ids = [-(stem * 10 + 9), -(stem * 10 + 8)];
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        for (const [index, id] of ids.entries()) {
+          const payload = JSON.stringify({
+            _tag: "commented",
+            taskId: task.id,
+            actor: LUKAS,
+            body: index === 0 ? "first" : "second",
+            revision: task.revision,
+            kind: "note",
+          });
+          yield* sql`
+            INSERT INTO task_events (id, task_id, kind, actor, revision, payload)
+            OVERRIDING SYSTEM VALUE
+            VALUES (${id}, ${task.id}, 'commented', ${LUKAS}, ${task.revision}, ${payload}::jsonb)
+          `;
+        }
+      }),
+    );
+    const thread = await withService((s) => s.comments(task.id));
+    expect(thread.map((c) => c.body)).toEqual(["first", "second"]);
+  });
+
+  it("refuses a stale comment and an empty one, writing nothing, and a thread of no card", async () => {
+    const task = await inSpecifying();
+    const stale = await refusal((s) =>
+      s.comment({
+        taskId: task.id,
+        expectedRevision: task.revision - 1,
+        body: "late",
+        actor: LUKAS,
+      }),
+    );
+    expect(stale._tag).toBe("StaleRevision");
+    const empty = await refusal((s) =>
+      s.comment({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        body: "",
+        actor: LUKAS,
+      }),
+    );
+    expect(empty._tag).toBe("EmptyComment");
+    expect(await eventCount(task.id)).toBe(2);
+    const none = await refusal((s) => s.comments(`tsk_${hex(13)}`));
+    expect(none._tag).toBe("TaskNotFound");
+  });
+});

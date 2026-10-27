@@ -99,13 +99,16 @@ describe("the faux script's turns", () => {
 
   it("calls bash on every turn with everyTurn, and answers once it ran", () => {
     expect(
-      callsBash(fauxAnswer(secondTurn, "echo x", undefined, false, true)),
+      callsBash(
+        fauxAnswer(secondTurn, "echo x", undefined, false, undefined, true),
+      ),
     ).toBe(true);
     const answered = fauxAnswer(
       [...secondTurn, bashResult("ran")],
       "echo x",
       undefined,
       false,
+      undefined,
       true,
     );
     expect(callsBash(answered)).toBe(false);
