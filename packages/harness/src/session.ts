@@ -370,7 +370,8 @@ export const openSession = (
     const columnPolicy = skills.some((skill) => skill.name === DOCS_SKILL)
       ? docsPolicy(policy)
       : policy;
-    // A column whose role is a read-only stage writes nothing (LOB-74): the stage is the run's
+    // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
+    // `verify`, and any `bash` that is not a known read command. The stage is the run's
     // column's, resolved from the same profile, so a session cannot be opened in `specifying` and
     // without the rule either.
     const stage = readOnlyStageOf(options.run);

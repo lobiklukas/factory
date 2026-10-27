@@ -71,9 +71,11 @@ repository skills later is a copy rather than a translation.
 
 Built (LOB-74): the first role → tool-policy row. A column whose role is `specifier` is the read-only
 specifying stage (`READ_ONLY_ROLES` in `packages/harness/src/policy.ts`): `openSession` composes the
-rule into the session's `ToolTask` hook from the run's column and role, and `write`, `edit`, `verify`
-and the writes a `bash` command visibly makes are refused with a reason naming the stage and the
-column. Keyed by role rather than by skill or column name, so a renamed column keeps the rule and an
+rule into the session's `ToolTask` hook from the run's column and role, and `write`, `edit` and
+`verify` are refused, as is any `bash` command that is not on an allowlist of read commands (a read
+command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
+and the column. The allowlist reads the command's text, so it stops the accident rather than a
+determined agent (D15). Keyed by role rather than by skill or column name, so a renamed column keeps the rule and an
 edited skill body cannot drop it. The model half of the role, and any other role's tool policy, is
 LOB-207.
 

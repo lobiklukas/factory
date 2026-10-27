@@ -257,6 +257,16 @@ describe("refusals a naive text check would miss", () => {
       "redirecting output to /etc/x is refused",
     ],
     [
+      "a noclobber override redirect, which is not a pipe",
+      bash("echo x >| ~/.bashrc"),
+      "redirecting output to ~/.bashrc is refused",
+    ],
+    [
+      "a write after a substitution, whose later words are still the command's",
+      bash("rm $(cat list) /etc/passwd"),
+      "rm writing /etc/passwd is refused",
+    ],
+    [
       "a redirect from a file descriptor",
       bash("exec 3> /etc/x"),
       "redirecting output to /etc/x is refused",

@@ -11,24 +11,34 @@ the run started in and the role that column declares. No caller sets a flag.
 
 ## What it refuses, and what it leaves alone
 
-| Refused                                                                                           | Allowed                                                |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `write`, `edit` (any path), `verify` (it runs the worktree's own scripts)                         | `read`, `ask`, a tool the rule has never heard of      |
-| a `bash` redirect into a file, a write-table command (`rm`, `cp`, `touch`, `tee <file>`, …)       | `ls`, `grep … 2>/dev/null`, `cat`, a pipeline of reads |
-| `dd of=<file>`, a `git` that changes the repo (`commit`, `push`, `checkout`, `reset`, `stash`, …) | `git log`, `git diff`, `git show`, `git stash list`    |
-| the same writes inside `sh -c '…'` or behind `sudo`/`env`/`timeout`                               | a redirect to a device, `echo 'rm -rf src'` (a string) |
+`bash` is judged by an **allowlist** of read commands (`STAGE_READ_COMMANDS`), so it fails closed: a
+command the stage does not know reads is refused, rather than let through because nobody listed it as
+a write. That is what keeps out the writes a model refused `edit` reaches for next — `sed -i`,
+`perl -pi`, `patch`, `tar x`, `npm install`, `python3 -c`, a script.
 
-The refusal names the stage, the column and the role, and says what to do instead:
+| Refused                                                                                                           | Allowed                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `write`, `edit` (any path), `verify` (it runs the worktree's own scripts)                                         | `read`, `ask`, a tool the rule has never heard of                                                   |
+| a redirect into a file, in every spelling (`>`, `>>`, `>\|`, a heredoc into a file)                               | a redirect to a device (`2>/dev/null`), `tee` with no file                                          |
+| any command not on the list: `rm`, `cp`, `touch`, `perl`, `awk`, `patch`, `tar`, `curl`, `npm`, `eval`, `./x.sh`  | `ls`, `cat`, `head`, `tail`, `grep`, `rg`, `wc`, `sort`, `jq`, `cd`, `test`                         |
+| a read command's writing flag: `sed -i`, `find -delete`/`-exec`, `sort -o`, `rg --pre`, `uniq IN OUT`             | `sed -n '1,40p'`, `find . -name '*.ts'`, `xargs grep`, a `for` loop of reads                        |
+| a `git` not known to read: `commit`, `fetch`, `update-ref`, `branch -D`, `tag v1`, `config k v`, `-c`, `--output` | `log`, `show`, `diff`, `status`, `blame`, `grep`, `branch`, `tag -l`, `worktree list`, `stash list` |
+| the same inside `sh -c '…'`, `$(…)`, backticks, or behind `sudo`/`env`/`timeout`/`xargs`                          | `echo 'rm -rf src'` (a string), `x=$(git rev-parse HEAD)`                                           |
+
+The refusal names the stage, the column and the role, and for `bash` what its `bash` may run:
 
 ```
 Tool call blocked: redirecting output to stage-probe.txt is refused: this run is in the read-only
 specifying stage (column "specifying", role specifier), which reads the workspace and changes nothing
-in it. Read and search instead, and put what you found in your answer or ask a question with the ask
-tool.
+in it. Its bash runs only commands that read (ls, cat, head, tail, grep, rg, find, wc, git log, show,
+diff, status, blame, grep) and redirects nothing into a file. Read and search instead, and put what
+you found in your answer or ask a question with the ask tool.
 ```
 
-The decision also carries it as data — `refusal: { _tag: "ReadOnlyStage", stage, column, role, call,
-what }` on the `block` — so a test asserts the fields rather than parsing the sentence.
+**The typed refusal is the sentence's source, not a second record.** `stageRefusalOf` returns
+`{ _tag: "ReadOnlyStage", stage, column, role, call, what }`, and the tests assert those fields rather
+than parsing prose. Pi Durable's `beforeTool` takes a `block` string and nothing else, so what the
+run's log records — and what the API shows — is the sentence, which names every field.
 
 **The stage decides first.** A write outside the worktree in a specifying run is the stage's refusal,
 not D11's: D11's sentence says "write inside the worktree instead", which would send a read-only run
@@ -57,11 +67,12 @@ refused`, `read-only specifying stage` and `column "specifying"`;
 
 Mutation, observed on 2026-10-27: forcing `openSession` to skip the composition makes seven checks of
 the specifying half fail (the call runs, the file lands), and the building half still passes — which
-is the half that fails if the rule is made global instead (`READ_ONLY_ROLES[role] ?? "specifying"`
+is the half that fails if the rule is made global instead (`READ_ONLY_ROLES.get(role) ?? "specifying"`
 fails `packages/harness` and `packages/core` rows the same way).
 
-Below the drive: `packages/harness/src/policy.stage.test.ts` is the table (17 refusals with their
-typed refusal, 13 allows, the role selection, and the composition order), `policy.hook.test.ts` drives
+Below the drive: `packages/harness/src/policy.stage.test.ts` is the table (the refusals with their
+typed refusal, the allows that keep the stage usable, the role selection — `constructor` is not a
+role — and the composition order), `policy.hook.test.ts` drives
 the `write` and `edit` tools and a shell read through `openSession` in a real harness, `loader.test.ts`
 pins that the role travels in the run profile, and `packages/core`'s `SessionService.test.ts` runs the
 same write in `specifying` on v2, `specifying` on v1 (no skill bound — the role alone makes the stage)
@@ -69,10 +80,14 @@ and `building`, reading the refusal out of the Postgres log.
 
 ## What it does not prove
 
-- **A boundary.** The `bash` half is the same textual read as D11's write rule, with the same holes:
-  `sed -i`, a package manager, an interpreter, a script written earlier, a path in a variable. `git
-branch`, `git tag` and `git config` writes are not read either (each also lists). D15: hooks stop the
-  accident; the specifying stage's missing push credential (LOB-46) is what would stop the rest.
+- **A boundary.** The `bash` half reads the command's text. It fails closed on what the text shows,
+  and cannot see what the text does not: a `sed` script's own `w` command, a program named in an
+  environment variable (`GIT_PAGER=…`, `GIT_EXTERNAL_DIFF=…`), a symlink inside the worktree. D15:
+  hooks stop the accident; the specifying stage's missing push credential (LOB-46) is what would stop
+  the rest.
+- **Every read.** A heredoc's body is read as commands, so a heredoc is refused unless every line of
+  it is a read; `awk`, `xxd` and the interpreters are refused even when they would only read, and a
+  `git` subcommand not in the read table is refused even when it is harmless (`git ls-remote`).
 - **The spec artifact or the parked run.** What a specifying run produces and how it ends are LOB-72
   and LOB-73; this is only what it may not do.
 - **Other roles.** Only `specifier` is read-only. The rest of B6's role → model and tool-policy
