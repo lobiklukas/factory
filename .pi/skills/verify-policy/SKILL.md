@@ -1,6 +1,6 @@
 ---
 name: verify-policy
-description: Drive and prove the session policy — D11's autonomy boundary in `packages/harness/src/policy.ts`, installed as a `ToolTask` hook. Use when asked to verify, test, or show evidence that a force-push, a ref deletion, a push to main, a tag push, a remote change, a write outside the worktree, or egress to a non-allowlisted host is refused, or after changing `packages/harness`, `packages/core`'s session owner, or `apps/api`.
+description: Drive and prove the session policy — D11's autonomy boundary in `packages/harness/src/policy.ts`, installed as a `ToolTask` hook, and the read-only specifying stage (LOB-74). Use when asked to verify, test, or show evidence that a force-push, a ref deletion, a push to main, a tag push, a remote change, a write outside the worktree, egress to a non-allowlisted host, or a specifying run's write is refused, or after changing `packages/harness`, `packages/core`'s session owner, or `apps/api`.
 ---
 
 # Verify the session policy
@@ -25,9 +25,20 @@ policy to `openSession` would still pass every unit test and fail here.
 | Changing remotes                 | `git remote set-url origin https://evil.example/x` | `refusal-remote-change.json`                             |
 | Egress to a non-allowlisted host | `curl https://evil.example/x`                      | `refusal-egress.json`                                    |
 | The control: nothing is refused  | `echo faux-ok`                                     | `refusal-allow.json`                                     |
+| The read-only specifying stage   | `echo stage > stage-probe.txt` in two runs         | `refusal-stage.json`, **and the file in each worktree**  |
 
 Every check is required: `drive.ts` exits non-zero when one fails, and `refusals.sh` fails if any
-case does. A full run is **8/8 cases and 51 checks** (`refusals.json` → `passed: true`).
+case does. A full run is **9/9 cases and 65 checks** (`refusals.json` → `passed: true`).
+
+The `stage` case (LOB-74) is a different drive, `stage.ts`: it seeds one board over the default
+pipeline with a card in `specifying` and a card in `building`, starts a run on each through
+`createSession({ taskId, taskColumn })`, and both runs call `bash` with the **same** write into their
+own worktree. The specifying run must be refused in the stage's words (`read-only specifying stage`,
+`column "specifying"`), with the refusal read back out of the run's log through a reader-mode
+`PostgresStorage`, and no file on disk; the building run must write the file. One drive covering
+both is what makes the rule stage-scoped rather than global: a policy that refused the write in both
+fails the building half, and one that refused it in neither fails the specifying half. See
+`features/stage.md`.
 
 Three things each case asserts beyond "the transcript says refused":
 
@@ -44,11 +55,12 @@ Three things each case asserts beyond "the transcript says refused":
   the same reason. See `features/README.md` for what a whole run was observed to spawn (nothing).
 
 The `allow` case is the control. A policy that refused every command would pass all seven refusals.
+The `stage` case carries its own control, the building run.
 
 ## Launch
 
 ```sh
-./refusals.sh    # the whole surface: eight cases, one API instance each
+./refusals.sh    # the whole surface: nine cases, one API instance each
 ```
 
 `refusals.sh` is the entry point, and it boots one API instance per case because the faux script is
@@ -150,7 +162,11 @@ Never kill by process name. Cleanup removes `.verify/run-policy/sessions` and
   hook this skill's surface installs.
 - **This skill does not prove the `write`/`edit` tool path.** Those tools are refused by the same
   decision, but the faux script only calls `bash`; `packages/harness/src/policy.hook.test.ts` drives
-  them through a real harness.
+  them through a real harness — for D11's worktree rule and for the read-only stage alike.
+- **The stage case needs `DATABASE_URL`, and the API's.** `stage.ts` seeds its cards and reads the
+  run logs back over SQL, so it must point at the database the API instance runs on; `refusals.sh`
+  passes the environment through. A card is seeded straight into its column on purpose: walking one
+  through `planning`'s human gate (and, since LOB-80, `requires[]`) is not this surface.
 
 ## Feature map
 

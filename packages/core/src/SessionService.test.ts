@@ -31,6 +31,7 @@
  * backends with it. Best-effort collection, not a guarantee — do not read the sweep as one.
  */
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -5066,6 +5067,81 @@ describe("a run's prompt comes from its column", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
     expect(failure.value.message).toContain('skill "explain"');
+  }, 120_000);
+
+  /**
+   * A model whose one `bash` call writes a file into the run's worktree, so the same call can be
+   * watched being refused in one column and landing in another (LOB-74). The runtime is the real
+   * service on the real database; only the column the run starts in differs between the two runs.
+   */
+  const STAGE_PROBE = "stage-probe.txt";
+  const stageRoot = mkdtempSync(join(tmpdir(), "factory-core-stage-"));
+  const stageRuntime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createFauxModelAccess({
+        fauxCommand: `echo stage > ${STAGE_PROBE} && echo wrote ${STAGE_PROBE}`,
+      }).access,
+      sessionRoot: stageRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await stageRuntime.dispose();
+  });
+
+  it("refuses a specifying run's write, names the stage, and lets the same write land in building", async () => {
+    const outcome = await stageRuntime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const boardId = yield* newBoard;
+        const run = (column: string, version = 2) =>
+          Effect.gen(function* () {
+            const sessionId = yield* startRun(
+              yield* newCard(boardId, column, version),
+              column,
+            );
+            const worktree = (yield* sessions.get(sessionId)).workspace.path;
+            // The log itself, read without the owner the way a rebuild reads it (D7): the refusal
+            // has to be a fact of the run's log, not only of this process's live view.
+            const storage = yield* Effect.promise(() =>
+              PostgresStorage.reader(sql, sessionId),
+            );
+            const log = yield* readSessionLog(storage).pipe(
+              Effect.ensuring(Effect.promise(() => storage.dispose())),
+            );
+            return {
+              result: log.entries.find((entry) => entry.kind === "toolResult"),
+              wrote: existsSync(join(worktree, STAGE_PROBE)),
+            };
+          });
+        return {
+          specifying: yield* run("specifying"),
+          // Version 1 binds no skill to the column: the role alone makes it the stage.
+          unskilled: yield* run("specifying", 1),
+          building: yield* run("building"),
+        };
+      }),
+    );
+
+    // Refused in specifying, in the stage's own words, and nothing was written.
+    expect(outcome.specifying.result?.isError).toBe(true);
+    expect(outcome.specifying.result?.text).toContain("Tool call blocked");
+    expect(outcome.specifying.result?.text).toContain(
+      `redirecting output to ${STAGE_PROBE} is refused`,
+    );
+    expect(outcome.specifying.result?.text).toContain(
+      "read-only specifying stage",
+    );
+    expect(outcome.specifying.result?.text).toContain('column "specifying"');
+    expect(outcome.specifying.wrote).toBe(false);
+    expect(outcome.unskilled.result?.text).toContain(
+      "read-only specifying stage",
+    );
+    expect(outcome.unskilled.wrote).toBe(false);
+    // The same call in building ran: the rule is the stage's, not the session's.
+    expect(outcome.building.result?.isError).toBe(false);
+    expect(outcome.building.result?.text).toContain(`wrote ${STAGE_PROBE}`);
+    expect(outcome.building.wrote).toBe(true);
   }, 120_000);
 });
 

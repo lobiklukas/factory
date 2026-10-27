@@ -34,6 +34,9 @@
  * - A docs run's write allowlist (`DOCS_WRITE_ALLOWLIST`, LOB-195) narrows the same decision, so it
  *   stops what the same textual read stops: a `write` or `edit` of a code file, not a redirect or
  *   `sed -i` that writes one.
+ * - A read-only stage (`READ_ONLY_ROLES`, LOB-74) refuses `write`, `edit` and `verify` outright and
+ *   a `bash` command by the writes this same read sees in it, so a `sed -i` or a script that writes
+ *   gets past it too.
  */
 import { createHash } from "node:crypto";
 import type { ToolCall } from "@earendil-works/pi-ai";
@@ -51,7 +54,16 @@ export const POLICY_EXTENSION = "policy";
  */
 export type PolicyDecision =
   | { readonly _tag: "allow" }
-  | { readonly _tag: "block"; readonly reason: string }
+  | {
+      readonly _tag: "block";
+      readonly reason: string;
+      /**
+       * What refused it, as data, when the refusal is a stage's rather than D11's (LOB-74): the
+       * stage, the column and the call it refused. Absent on every D11 refusal, whose reason is the
+       * whole record.
+       */
+      readonly refusal?: StageRefusal;
+    }
   /** A gated call: nothing is wrong with it, and a person has to say yes before it runs (LOB-52). */
   | {
       readonly _tag: "ask";
@@ -1367,6 +1379,215 @@ export const docsPolicy = (policy: SessionPolicy): SessionPolicy => ({
       decision._tag === "allow"
         ? Effect.sync(() => decideDocsWrite(policy.rules, call))
         : Effect.succeed(decision),
+    ),
+});
+
+// ---------------------------------------------------------------------------------------------
+// The read-only stage (LOB-74)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The roles whose stage only reads (docs/board.md B4, B6; LOB-74), each with the stage it is.
+ *
+ * Keyed by role because B6 says a role resolves to tool policy in one place: a column that declares
+ * the `specifier` role is the specifying stage whatever the column is called, and a board that
+ * renames the column keeps the rule. This is the tool-policy half of LOB-207's role table, for the
+ * one role the MVP pipeline needs to be read-only; widening it is an edit here, not a change to
+ * the check.
+ */
+export const READ_ONLY_ROLES: Readonly<Record<string, string>> = {
+  specifier: "specifying",
+};
+
+/** A run in a read-only stage: the stage, and the column and role that made it one. */
+export type ReadOnlyStage = {
+  readonly stage: string;
+  readonly column: string;
+  readonly role: string;
+};
+
+/**
+ * The read-only stage a run is in, or `undefined` when its column's role writes (or it has no
+ * column at all — a scratch session is not a stage).
+ */
+export const readOnlyStageOf = (
+  run:
+    | { readonly column?: string | undefined; readonly role?: string }
+    | undefined,
+): ReadOnlyStage | undefined => {
+  if (run?.column === undefined || run.role === undefined) return undefined;
+  const stage = READ_ONLY_ROLES[run.role];
+  return stage === undefined
+    ? undefined
+    : { stage, column: run.column, role: run.role };
+};
+
+/**
+ * A stage's refusal as data (LOB-74): which stage refused which call. `call` is the tool's name and
+ * `what` is the write the policy read in it — the path, or the command word that writes.
+ */
+export type StageRefusal = {
+  readonly _tag: "ReadOnlyStage";
+  readonly stage: string;
+  readonly column: string;
+  readonly role: string;
+  readonly call: string;
+  readonly what: string;
+};
+
+/**
+ * Tools that change the workspace whatever their arguments: `write` and `edit` by definition, and
+ * `verify` because what it runs is the worktree's own scripts (see `./verify`), which a read-only
+ * stage has no change of its own to prove with. `read`, `ask` and `bash` stay: reading the code and
+ * asking about it is the stage's whole job, and `bash` is judged by what it writes (`bashWriteOf`).
+ */
+const STAGE_REFUSED_TOOLS = new Set(["write", "edit", "verify"]);
+
+/**
+ * `git` subcommands that change the repository or its working tree: a read-only stage may log,
+ * show, diff, grep and blame, and may not commit, move a branch, or rewrite a file. `stash` is
+ * judged by its verb (`stash list` and `stash show` read).
+ */
+const GIT_WRITES = new Set([
+  "add",
+  "am",
+  "apply",
+  "checkout",
+  "cherry-pick",
+  "clean",
+  "clone",
+  "commit",
+  "init",
+  "merge",
+  "mv",
+  "pull",
+  "push",
+  "rebase",
+  "reset",
+  "restore",
+  "revert",
+  "rm",
+  "switch",
+  "worktree",
+]);
+
+const GIT_STASH_READS = new Set(["list", "show"]);
+
+/** What a git invocation writes, or `undefined` when it only reads. */
+const gitWriteOf = (words: readonly string[]): string | undefined => {
+  const { subcommand, args } = gitSubcommand(words);
+  if (GIT_WRITES.has(subcommand)) return `git ${subcommand}`;
+  if (subcommand === "stash") {
+    const verb = args.find((word) => !word.startsWith("-"));
+    return verb !== undefined && GIT_STASH_READS.has(verb)
+      ? undefined
+      : "git stash";
+  }
+  return undefined;
+};
+
+/**
+ * The first write a `bash` command makes, as the policy reads its text: a redirect into a file, a
+ * command from the write table, `dd of=`, or a `git` that changes the repository — and the same
+ * inside a shell's `-c` script. `undefined` when the text shows none.
+ *
+ * The same textual read D11's write rule uses, so it has the same holes (the module docstring):
+ * `sed -i`, a package manager, an interpreter, or a script that writes is not seen, and neither is
+ * a `git branch`, `git tag` or `git config` that writes (each also lists, and telling the two apart
+ * is a parser this rule does not need to stop the accident). A redirect to a device
+ * (`2>/dev/null`) is not a write, so ordinary reading commands are not refused.
+ */
+const bashWriteOf = (command: string, depth = 0): string | undefined => {
+  for (const segment of segmentsOf(tokenize(command))) {
+    const redirect = segment.writeTargets.find(
+      (target) => !isNotAWrite(target),
+    );
+    if (redirect !== undefined) return `redirecting output to ${redirect}`;
+    const words = gateWords(segment.argv);
+    const name = baseName(words[0] ?? "");
+    if (name.length === 0) continue;
+    const args = words.slice(1);
+    const script = shellScriptOf(words);
+    if (script !== undefined && depth < 3) {
+      const inner = bashWriteOf(script, depth + 1);
+      if (inner !== undefined) return inner;
+    }
+    if (name === "git") {
+      const write = gitWriteOf(args);
+      if (write !== undefined) return write;
+      continue;
+    }
+    const dd = args.find((word) => word.startsWith("of="));
+    if (name === "dd" && dd !== undefined && !isNotAWrite(dd.slice(3))) {
+      return `dd ${dd}`;
+    }
+    const mode = WRITE_COMMANDS[name];
+    if (mode === undefined) continue;
+    // The same targets D11's write rule reads, so `tee` with no file (a pipe to stdout) and a
+    // write to `/dev/null` are not writes here either.
+    const targets =
+      mode === "last"
+        ? args.slice(-1)
+        : args.filter((word) => !word.startsWith("-"));
+    const target = targets.find((word) => !isNotAWrite(word));
+    if (target !== undefined) return `${name} writing ${target}`;
+  }
+  return undefined;
+};
+
+/** The sentence a stage's refusal is: what was refused, which stage and column, and what to do. */
+const stageSentence = (refusal: StageRefusal): string =>
+  `${refusal.what} is refused: this run is in the read-only ${refusal.stage} stage (column "${refusal.column}", role ${refusal.role}), which reads the workspace and changes nothing in it. Read and search instead, and put what you found in your answer or ask a question with the ask tool.`;
+
+/**
+ * The read-only stage's decision for one call (LOB-74). Pure, like `decideToolCall`: the stage and
+ * the call in, a refusal naming the stage and the column out — or `allow`, which hands the call on
+ * to the session's own policy.
+ */
+export const decideStageCall = (
+  stage: ReadOnlyStage,
+  call: ToolCall,
+): PolicyDecision => {
+  const what = STAGE_REFUSED_TOOLS.has(call.name)
+    ? [call.name, stringField(call.arguments, "path")]
+        .filter((part) => part !== undefined)
+        .join(" ")
+    : call.name === "bash"
+      ? bashWriteOf(stringField(call.arguments, "command") ?? "")
+      : undefined;
+  if (what === undefined) return ALLOW;
+  const refusal: StageRefusal = {
+    _tag: "ReadOnlyStage",
+    ...stage,
+    call: call.name,
+    what,
+  };
+  return { _tag: "block", reason: stageSentence(refusal), refusal };
+};
+
+/**
+ * Compose a read-only stage into a session's policy (LOB-74): a run whose column's role is a
+ * read-only stage writes nothing, and its refusal says which stage and which column.
+ *
+ * The stage decides **first**, unlike the docs rule. A docs run may write, so a write that escapes
+ * the worktree is D11's to word ("write inside the worktree instead"); a read-only run may write
+ * nowhere, and that advice would send it to a second refusal. The stage's sentence is the one the
+ * model can act on. A call the stage allows goes to the wrapped policy unchanged, so every D11
+ * refusal and every gate still holds in a read-only run, and a gated call a stage refuses is never
+ * asked about — nobody should be asked to approve what the stage forbids.
+ */
+export const readOnlyStagePolicy = (
+  policy: SessionPolicy,
+  stage: ReadOnlyStage,
+): SessionPolicy => ({
+  rules: policy.rules,
+  decide: (call) =>
+    Effect.flatMap(
+      Effect.sync(() => decideStageCall(stage, call)),
+      (decision) =>
+        decision._tag === "allow"
+          ? policy.decide(call)
+          : Effect.succeed(decision),
     ),
 });
 
