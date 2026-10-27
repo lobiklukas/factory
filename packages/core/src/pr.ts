@@ -11,14 +11,21 @@ import type {
   SessionId,
   Verification,
 } from "@repo/domain/Session";
-import { CredentialError, CredentialProvider } from "./credentials";
+import { PrError } from "@repo/domain/PullRequest";
+import type { CredentialError } from "@repo/domain/PullRequest";
+import { CredentialProvider } from "./credentials";
 
-/** A PR could not be created. Typed, so callers handle it instead of dumping stderr. */
-export class PrError extends Schema.TaggedError<PrError>()("PrError", {
-  operation: Schema.String,
-  ref: Schema.String,
-  message: Schema.String,
-}) {}
+// The step's answer and its failure are the wire's (LOB-213): declared in `@repo/domain/PullRequest`,
+// where the RPC group reads them, and re-exported here under the names the step always used.
+export {
+  DiffCapLimit,
+  NoChangePullRequest,
+  OpenedPullRequest,
+  OverCapPullRequest,
+  PrError,
+  PullRequestOutcome,
+  PullRequestStep,
+} from "@repo/domain/PullRequest";
 
 export const PullRequest = Schema.Struct({
   number: Schema.Finite,
@@ -48,36 +55,6 @@ const fromGitHub = (pr: typeof GitHubPullRequest.Type): PullRequest => ({
 });
 
 /**
- * Which of the PR step's two paths answered (LOB-212).
- *
- * `"opened"` is the GitHub call; `"already-open"` is the retry that read the `factory.pr` document
- * its log already held and never reached the network. The link is the same either way, which is
- * exactly why the tag has to be here: before it, a first open and a replay were indistinguishable
- * from the answer.
- *
- * `"opened"` means *this invocation made the call*, not *this invocation created the PR*: since
- * LOB-179 the call adopts the PR a killed attempt left behind when GitHub refuses the duplicate, and
- * that is still the call path. The tag separates "went to GitHub" from "the log answered", which is
- * the distinction a caller can act on; whether the PR existed before the call is the log's business.
- */
-export const PullRequestOutcome = Schema.Literals(["opened", "already-open"]);
-export type PullRequestOutcome = typeof PullRequestOutcome.Type;
-
-/**
- * The PR step's answer: the link plus the path that produced it.
- *
- * A superset of `PullRequest`, not a replacement — a client that reads only `{number, url}` keeps
- * decoding this answer with `PullRequest` and is unaffected, which is why the tag lives on the
- * step's result rather than on the forge's own shape.
- */
-export const OpenedPullRequest = Schema.Struct({
-  number: Schema.Finite,
-  url: Schema.String,
-  outcome: PullRequestOutcome,
-});
-export type OpenedPullRequest = typeof OpenedPullRequest.Type;
-
-/**
  * How large a session's diff may be before the PR step opens nothing (LOB-227).
  *
  * Two numbers rather than one, because they bound different costs: the line count is what a
@@ -104,57 +81,6 @@ export type DiffCap = typeof DiffCap.Type;
  * deployment that wants a different bound passes one.
  */
 export const DEFAULT_DIFF_CAP: DiffCap = { maxFiles: 50, maxLines: 2_000 };
-
-/** Which of the cap's two dimensions an over-cap diff broke. */
-export const DiffCapLimit = Schema.Literals(["files", "lines"]);
-export type DiffCapLimit = typeof DiffCapLimit.Type;
-
-/**
- * The answer for a diff the cap refused (LOB-227): no PR, no `factory.pr` document, and the numbers
- * that refused it — which limit, what that limit allows, and what the branch measured.
- *
- * A value rather than a `PrError`, because nothing failed: the step ran, measured, and decided. A
- * caller that retries an error would retry this one too, and the same branch would measure the same;
- * a caller that reads an outcome can instead report the cap and leave the session's PR absent.
- *
- * It carries no `number` and no `url` — there is no PR — which is why the step's answer is a union
- * of two shapes rather than one shape with absent fields: a decoded `{outcome: "over-cap", url}`
- * cannot exist, so no reader has to decide what a missing link on an over-cap answer would mean.
- */
-export const OverCapPullRequest = Schema.Struct({
-  outcome: Schema.Literal("over-cap"),
-  limit: DiffCapLimit,
-  cap: Schema.Finite,
-  measured: Schema.Finite,
-});
-export type OverCapPullRequest = typeof OverCapPullRequest.Type;
-
-/**
- * The answer for a branch with nothing to publish (LOB-196): no PR, no `factory.pr` document, no
- * `pr_url` row — the run measured the branch against its base and found it even.
- *
- * GitHub refuses to open a PR for a head with no commits ahead of its base, so before this the
- * ordinary result of a docs run over docs that need no edit was a typed 422 failure. It is a value
- * for the same reason an over-cap answer is: nothing failed, the step ran, measured and decided, and
- * a caller that retries an error would ask GitHub again for the same empty branch.
- *
- * Nothing is recorded about it, deliberately. A recorded answer would be sticky — the next run that
- * *does* change a file would read it and open nothing — so the transcript entry is the run's own
- * record and the next call measures the branch afresh.
- */
-export const NoChangePullRequest = Schema.Struct({
-  outcome: Schema.Literal("no-change"),
-});
-export type NoChangePullRequest = typeof NoChangePullRequest.Type;
-
-/** What the PR step answers: the link and the path that produced it, the cap that refused it, or
- * the empty branch that had nothing to open. */
-export const PullRequestStep = Schema.Union([
-  OpenedPullRequest,
-  OverCapPullRequest,
-  NoChangePullRequest,
-]);
-export type PullRequestStep = typeof PullRequestStep.Type;
 
 export type PrBodyInput = {
   readonly sessionId: SessionId;
