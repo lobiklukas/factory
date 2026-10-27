@@ -49,7 +49,9 @@ factory board move --task tsk_… --to done --expect-revision 10 --actor person:
 
 After the dashboard phase, in the same tmux pane, each command followed by the exit-code sentinel:
 
-1. **Plan approval.** A person's `planning → building`, at the revision the last accepted move left.
+1. **Plan approval.** A person's `planning → building`, at the revision the last accepted move left —
+   clicked in the dashboard since LOB-87, and read back with `board show`
+   ([equivalence.md](equivalence.md)); from the terminal only when the browser did not make it.
 2. **The build run.** `board start` in `building`; `build.ts MODE=built` waits for it to answer and
    reads its log: exactly one `verify` record, over `apps/web/src/card.ts`, a `VerifyRan` of the
    `.pi/skills/verify-web` skill on the `web` surface, exit 0.
@@ -88,7 +90,7 @@ stays in `building` (a check that passes only when there is no link says so).
 
 `.verify/evidence/lob-240/pass/board/` (LOB-240, 2026-10-27, `agent/LOB-240`): `observed.json`
 (**49/49**), `build-built.json` (3/3), `build-pr.json` (8/8), `pr-body.md` (the body as the fake
-received it), `build-diff.txt`, and the panes `move-building.txt`, `start-build.txt`,
+received it), `build-diff.txt`, and the panes `move-building.txt` (`show-building.txt` since LOB-87, where the browser approves the plan), `start-build.txt`,
 `move-review-no-pr.txt` (the `pr_link` refusal before the PR), `pr.txt`, `ls-pr.txt`,
 `move-review.txt`, `verdict.txt`, `show-verdict.txt`, `move-merge-run.txt`, `move-merge.txt`,
 `show-done.txt`. Before it, `.verify/evidence/lob-86/pass/board/` (43/43, without the gate).

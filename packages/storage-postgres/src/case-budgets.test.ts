@@ -79,6 +79,8 @@ const GUARDED = [
   "pi-type-check.test.ts",
   // Every case spawns `bash` on verify-board's `doctor.sh` against a real listener (LOB-84).
   "verify-board-doctor.test.ts",
+  // Every case spawns `bash` on verify-board's `equivalence.sh` and its fake skills (LOB-87).
+  "verify-board-equivalence.test.ts",
 ] as const;
 
 /**
