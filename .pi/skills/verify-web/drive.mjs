@@ -1301,11 +1301,25 @@ assert(
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
 
+// Back to the session for the transcript screenshot, with a tool result expanded.
+await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+const sessionLink = page.locator("aside a[href^='/sessions/']").first();
+if ((await sessionLink.count()) > 0) {
+  await sessionLink.click();
+  await page.waitForTimeout(1_500);
+  const toolToggle = page.getByRole("button", { name: /bash/i }).first();
+  if ((await toolToggle.count()) > 0) await toolToggle.click();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(EVIDENCE_DIR, "transcript.png") });
+}
+
 // Feature: the session's PR link (LOB-65). No RPC opens a PR, so `seed-pr.ts` is the in-process
 // caller of the real PR step — against a loopback GitHub fake, on this API's database and session
 // root — and it exits before the page attaches, so the anchor below is the API's read of the session.
 // The href is compared with the link the session *recorded*, read back through the API from the page.
 // See features/pr-link.md.
+// This runs after the transcript screenshot on purpose: opening the seeded session records it at
+// the top of the newest-first sidebar, and the transcript step above clicks the first sidebar link.
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const seedOut = path.join(ROOT, ".verify/run/web-pr-seed.json");
 const seedRun = spawnSync(
@@ -1381,18 +1395,6 @@ assert(
   prTarget === "_blank",
   `target=${prTarget}`,
 );
-
-// Back to the session for the transcript screenshot, with a tool result expanded.
-await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
-const sessionLink = page.locator("aside a[href^='/sessions/']").first();
-if ((await sessionLink.count()) > 0) {
-  await sessionLink.click();
-  await page.waitForTimeout(1_500);
-  const toolToggle = page.getByRole("button", { name: /bash/i }).first();
-  if ((await toolToggle.count()) > 0) await toolToggle.click();
-  await page.waitForTimeout(300);
-  await page.screenshot({ path: path.join(EVIDENCE_DIR, "transcript.png") });
-}
 
 observed.consoleErrors = consoleErrors;
 observed.failedResponses = failedResponses;
