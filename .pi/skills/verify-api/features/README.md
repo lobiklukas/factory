@@ -81,6 +81,12 @@ evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.
 there; neither touches the mission path. See `mission.md`, which names what the case does not prove
 (resume across a kill — LOB-231).
 
+The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_72` on 5442, faux, no port bound): `./spec.sh`
+**9/9** (8 driver checks across two processes, 1 shell check that they were two), evidence
+`.verify/evidence/lob-72/`. Like `./pr-once.sh` it starts no API process — the driver opens the
+harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
+
 | Feature                  | Status  | File                               |
 | ------------------------ | ------- | ---------------------------------- |
 | Create a session         | passing | [create.md](create.md)             |
@@ -106,6 +112,7 @@ there; neither touches the mission path. See `mission.md`, which names what the 
 | A mission                | passing | [mission.md](mission.md)           |
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
+| The spec document        | passing | [spec.md](spec.md)                 |
 
 ## Deliberately absent
 
