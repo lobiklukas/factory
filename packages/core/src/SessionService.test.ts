@@ -7145,11 +7145,12 @@ describe("a mission on a session", () => {
 
   it("fans a mission out to workers the mission owns, each in a conversation of its own", async () => {
     // Each worker's check holds until the case writes `release`, so both are live at once and the
-    // fan-out is read off the snapshot rather than raced. Absolute paths: the check runs in the
-    // session's workspace, which this case does not need to know.
+    // fan-out is read off the snapshot rather than raced. An absolute path: the check runs in the
+    // session's workspace, which this case does not need to know, and it only reads outside it — a
+    // check that wrote there would be refused by the session's policy (below).
     const hold = mkdtempSync(join(tmpdir(), "factory-mission-workers-"));
-    const check = (name: string) =>
-      `touch ${join(hold, `${name}.started`)}; while [ ! -f ${join(hold, "release")} ]; do sleep 0.01; done`;
+    const check = () =>
+      `while [ ! -f ${join(hold, "release")} ]; do sleep 0.01; done`;
     try {
       const outcome = await program(
         Effect.gen(function* () {
@@ -7159,8 +7160,8 @@ describe("a mission on a session", () => {
             sessionId: created.id,
             feature: "a mission with two workers",
             workers: [
-              { id: "a", prompt: "do part a", check: check("a") },
-              { id: "b", prompt: "do part b", check: check("b") },
+              { id: "a", prompt: "do part a", check: check() },
+              { id: "b", prompt: "do part b", check: check() },
             ],
           });
           const workersIn = (tasks: readonly SessionTask[]) =>
@@ -7263,6 +7264,52 @@ describe("a mission on a session", () => {
       result._tag === "Failure" ? result.failure.message : undefined;
     expect(messageOf(outcome.duplicate)).toContain('named "a"');
     expect(messageOf(outcome.blank)).toContain("non-empty id and prompt");
+    expect(outcome.snapshot.mission).toBeUndefined();
+    expect(outcome.snapshot.tasks).toEqual([]);
+  }, 120_000);
+
+  it("holds a worker's check to the session's policy, before any task exists", async () => {
+    // A check runs unattended through the execution environment, not as a tool call, so the policy
+    // hooks never see it: the service decides it as it would decide the same `bash` call, and a
+    // command the session's agent could not run is refused at the start, not run by the worker.
+    const outside = mkdtempSync(join(tmpdir(), "factory-mission-outside-"));
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "policed checks" });
+        const start = (check: string) =>
+          Effect.result(
+            sessions.startMission({
+              sessionId: created.id,
+              feature: "a mission",
+              workers: [
+                { id: "fine", prompt: "one", check: "true" },
+                { id: "rogue", prompt: "two", check },
+              ],
+            }),
+          );
+        const write = yield* start(`touch ${join(outside, "escaped")}`);
+        const push = yield* start("git push origin HEAD:main");
+        const egress = yield* start("curl https://evil.example/");
+        const blank = yield* start("   ");
+        const snapshot = yield* sessions.get(created.id);
+        return { write, push, egress, blank, snapshot };
+      }),
+    );
+
+    const messageOf = (result: typeof outcome.write) =>
+      result._tag === "Failure" ? result.failure.message : undefined;
+    for (const refused of [outcome.write, outcome.push, outcome.egress]) {
+      expect(refused._tag).toBe("Failure");
+      expect(messageOf(refused)).toContain(
+        'the mission worker "rogue"\'s check is refused',
+      );
+    }
+    expect(messageOf(outcome.write)).toContain(
+      "only write inside its worktree",
+    );
+    expect(messageOf(outcome.blank)).toContain("empty check");
+    expect(existsSync(join(outside, "escaped"))).toBe(false);
     expect(outcome.snapshot.mission).toBeUndefined();
     expect(outcome.snapshot.tasks).toEqual([]);
   }, 120_000);

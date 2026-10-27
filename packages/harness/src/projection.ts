@@ -495,6 +495,43 @@ export const projectUsageDoc = (
   tools: bucketEntries(objectAt(value, "tools")),
 });
 
+const addModelUsage = (left: ModelUsage, right: ModelUsage): ModelUsage => ({
+  input: left.input + right.input,
+  output: left.output + right.output,
+  cacheRead: left.cacheRead + right.cacheRead,
+  cacheWrite: left.cacheWrite + right.cacheWrite,
+  totalTokens: left.totalTokens + right.totalTokens,
+  costTotal: left.costTotal + right.costTotal,
+});
+
+type UsageBucket = { readonly key: string; readonly usage: ModelUsage };
+
+const mergeBuckets = (
+  buckets: readonly (readonly UsageBucket[])[],
+): readonly UsageBucket[] => {
+  const sums = new Map<string, ModelUsage>();
+  for (const bucket of buckets)
+    for (const { key, usage } of bucket)
+      sums.set(key, addModelUsage(sums.get(key) ?? ZERO_USAGE, usage));
+  return [...sums.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, usage]) => ({ key, usage }));
+};
+
+/**
+ * Several conversations' spend as one session's: each bucket summed by key, sorted as
+ * `projectUsageDoc` sorts them.
+ *
+ * `pi.usage` is per conversation, and a session can hold more than its root: a mission's workers
+ * talk in conversations of their own (LOB-193). The session's spend — what the list reports, what a
+ * fork carries and what the budget cap is checked against — is every conversation's, which is what
+ * `Harness.usage()` sums for a log this process owns; a fold sums the same documents through this.
+ */
+export const mergeUsage = (usages: readonly SessionUsage[]): SessionUsage => ({
+  models: mergeBuckets(usages.map((usage) => usage.models)),
+  tools: mergeBuckets(usages.map((usage) => usage.tools)),
+});
+
 /**
  * What a session's spend adds up to, in the currency `pi.usage` reports: every model bucket plus
  * every tool bucket.

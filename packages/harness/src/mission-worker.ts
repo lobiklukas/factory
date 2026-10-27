@@ -87,6 +87,7 @@ export type MissionWorkerFailureDetail =
   | {
       readonly worker: string;
       readonly reason: "no-environment";
+      readonly message: string;
     }
   | {
       readonly worker: string;
@@ -344,7 +345,11 @@ export const MissionWorkerTask = defineTask<
             case "no-environment":
               return failed(
                 `the worker "${worker.id}" cannot check: ${ran.message}`,
-                { worker: worker.id, reason: "no-environment" },
+                {
+                  worker: worker.id,
+                  reason: "no-environment",
+                  message: ran.message,
+                },
               );
             case "exec-error":
               return failed(

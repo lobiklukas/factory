@@ -22,7 +22,7 @@ import {
 } from "@repo/domain/Session";
 import type { SessionUsage } from "@repo/domain/Session";
 import { CURATION_PROMPT_PREFIX, type ModelAccess } from "./models";
-import { projectUsageDoc } from "./projection";
+import { mergeUsage, projectUsageDoc } from "./projection";
 import { attempt, type Conversation, type Harness } from "./session";
 
 /** The most pages one curation writes when the caller does not choose a limit. */
@@ -269,7 +269,9 @@ export const writeCurationUsage = (
   );
 
 /**
- * The spend a conversation's own ledger records, as the control plane reports it.
+ * The session's spend after a curation was charged, as the control plane reports it: every
+ * conversation's ledger summed (`Harness.usage()`), the root's — where the curation was charged —
+ * and a mission's workers' (LOB-193), because the list's `costTotal` is the session's total.
  *
  * The service derives its activity index from this rather than from a snapshot taken before the
  * call: a run that emitted a usage event while the curation was in flight must not be overwritten
@@ -277,13 +279,10 @@ export const writeCurationUsage = (
  */
 export const readCurationUsage = (
   harness: Harness,
-  conversation: Conversation,
 ): Effect.Effect<SessionUsage, SessionErrorClass> =>
   Effect.map(
-    attempt("read session usage", () =>
-      harness.snapshot(UsageDoc, conversation.id, BACKGROUND_CONTEXT),
-    ),
-    (state) => projectUsageDoc(state),
+    attempt("read session usage", () => harness.usage(BACKGROUND_CONTEXT)),
+    (state) => mergeUsage([projectUsageDoc(state)]),
   );
 
 export type CurationOptions = {

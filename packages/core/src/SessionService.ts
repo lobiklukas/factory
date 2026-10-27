@@ -87,6 +87,7 @@ import {
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
 import type {
+  MissionWorker,
   StartMissionInput,
   StartMissionResult,
 } from "@repo/domain/Mission";
@@ -1894,6 +1895,51 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Workers (LOB-193) are refused the same way, before a task exists: a worker with no id or no
        * prompt, or two that share an id, would fan out into work nobody can attribute.
        */
+      /**
+       * Hold every worker's `check` to the decision an agent's `bash` call gets (D11, D15), before any
+       * task exists.
+       *
+       * A check is a shell command the client supplies, and the worker runs it unattended in the
+       * session's worktree through the execution environment — not through a tool call, so the
+       * policy hooks never see it (LOB-193 review). Deciding it here, with the session's own policy
+       * for its worktree, means a mission can run no command its session's agent could not: a write
+       * outside the worktree, egress past the allowlist, a push to another branch are refused as
+       * they would be for `bash`. A gated command is refused too rather than parked: nobody is
+       * there to approve a check, and a check that waits on a person is not one a join can read.
+       */
+      const refuseUnpolicedChecks = (
+        sessionId: SessionId,
+        worktree: string,
+        workers: readonly MissionWorker[],
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const sessionPolicy = policy.forWorktree(worktree, sessionId);
+          for (const worker of workers) {
+            if (worker.check === undefined) continue;
+            if (worker.check.trim() === "")
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `the mission worker "${worker.id}" declares an empty check`,
+              });
+            const decision = yield* sessionPolicy.decide({
+              type: "toolCall",
+              id: `factory.mission.check:${worker.id}`,
+              name: "bash",
+              arguments: { command: worker.check },
+            });
+            if (decision._tag === "block")
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `the mission worker "${worker.id}"'s check is refused: ${decision.reason}`,
+              });
+            if (decision._tag === "ask")
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `the mission worker "${worker.id}"'s check needs a person's approval (${decision.action}), and a check runs unattended`,
+              });
+          }
+        });
+
       const startMission = (
         input: StartMissionInput,
       ): Effect.Effect<StartMissionResult, SessionError> =>
@@ -1927,6 +1973,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const row = yield* requireSession(input.sessionId);
           const workspace = yield* workspaceFor(row);
+          yield* refuseUnpolicedChecks(
+            input.sessionId,
+            workspace.path,
+            workers,
+          );
           const owner = yield* acquireOwner(input.sessionId, row);
           const taskId = yield* beginMission(owner, {
             feature,
@@ -2603,7 +2654,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // pre-call snapshot plus an increment: a run that emitted its own usage event while the
           // call was in flight would otherwise have its spend overwritten by the snapshot's total.
           // Reading the ledger back can only be at least that event's value.
-          const ledger = yield* readCurationUsage(owner.harness, owner.root);
+          const ledger = yield* readCurationUsage(owner.harness);
           yield* setActivityCost(input.sessionId, costOf(ledger));
           const curation = yield* curationProposals(request, {
             sourceId: input.sessionId,

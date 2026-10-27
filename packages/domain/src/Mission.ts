@@ -198,8 +198,14 @@ export const missionSnapshot = (
  *
  * `id` names the worker within its mission — what a failure, an abort reason and a cost breakdown
  * are keyed by — so two workers of one mission may not share it. `prompt` is what the worker's
- * conversation is asked. `check` is the command, run in the session's workspace, that decides
- * whether the worker succeeded; a worker without one succeeds once its conversation answered.
+ * conversation is asked. `check` is the shell command that decides whether the worker succeeded,
+ * run unattended with the session's workspace as its working directory; a worker without one
+ * succeeds once its conversation answered.
+ *
+ * A check is not a tool call, so the policy hooks never see it run. The server holds it to the
+ * session's policy instead, before the mission starts (`SessionService.startMission`): a check the
+ * session's agent could not run as `bash` — a write outside the worktree, egress past the
+ * allowlist, a push to another branch — or one that would need a person's approval is refused.
  */
 export const MissionWorker = Schema.Struct({
   id: Schema.String,
@@ -224,7 +230,7 @@ export type MissionJoin = typeof MissionJoin.Type;
  *
  * The workspace is not here. The server resolves it from the session, so a client cannot point a
  * mission at a directory that session does not own — the same rule every other session call
- * follows. A worker's `check` runs in that workspace for the same reason.
+ * follows. A worker's `check` runs in that workspace, and is decided by that session's policy.
  */
 export const StartMissionInput = Schema.Struct({
   sessionId: SessionId,

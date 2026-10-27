@@ -15,7 +15,7 @@
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
 // schema, a mis-declared stream, or a lost typed error all fail here. See
 // features/session-stream.md.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
 import {
@@ -1091,17 +1091,31 @@ const program = Effect.gen(function* () {
     `mission=${JSON.stringify(joined.mission ?? null)}`,
   );
 
-  // failFast: `a` fails at once and `b` holds on a file this driver never writes, so `b` can only
-  // leave the task list by being aborted — and the mission settles in implement, never verifying.
+  // failFast: `b` marks that its check started and then beats, in the session's worktree, while
+  // holding on a file this driver never writes; `a` fails only once `b`'s mark exists. So `a`'s
+  // failure finds `b`'s check running, nothing but a kill can end that check, and a beat that stops
+  // is the abort reaching `b`'s process — which the snapshot alone (no outcomes on the wire) could
+  // not tell apart from `b` failing on its own. The writes are inside the worktree because the
+  // session's policy decides every check before the mission starts, as it would decide `bash`.
   const failSession = yield* client.createSession({
     requestId: `verify-api-failfast-${Date.now()}`,
   });
+  const failWorktree = (yield* client.getSession({ sessionId: failSession.id }))
+    .workspace.path;
   const failing = yield* client.startMission({
     sessionId: failSession.id,
     feature: "verify-api failFast probe",
     workers: [
-      { id: "a", prompt: "do part a", check: "exit 1" },
-      { id: "b", prompt: "do part b", check: holdUntil("never") },
+      {
+        id: "a",
+        prompt: "do part a",
+        check: "while [ ! -f .verify-b-checking ]; do sleep 0.01; done; exit 1",
+      },
+      {
+        id: "b",
+        prompt: "do part b",
+        check: `touch .verify-b-checking; ${holdUntil("never").replace("do sleep", "do touch .verify-b-alive; sleep")}`,
+      },
     ],
   });
   const aborted = yield* waitUntil(
@@ -1116,12 +1130,62 @@ const program = Effect.gen(function* () {
       ),
     "the failFast mission to settle",
   );
+  const beatOf = () =>
+    Effect.promise(() =>
+      stat(path.join(failWorktree, ".verify-b-alive")).then(
+        (info) => info.mtimeMs,
+        () => undefined,
+      ),
+    );
+  const beatAtSettle = yield* beatOf();
+  yield* Effect.sleep("500 millis");
+  const beatLater = yield* beatOf();
+  const bChecked = yield* Effect.promise(() =>
+    stat(path.join(failWorktree, ".verify-b-checking")).then(
+      () => true,
+      () => false,
+    ),
+  );
   assert(
-    "a failing worker aborts its sibling under failFast, and the mission stops in implement",
+    "a failing worker stops its sibling's running check under failFast",
+    bChecked && beatAtSettle !== undefined && beatLater === beatAtSettle,
+    `bChecked=${bChecked} beatAtSettle=${beatAtSettle} beatLater=${beatLater}`,
+  );
+  assert(
+    "a mission whose worker failed stops in implement and never verifies",
     aborted.mission?.taskId === failing.taskId &&
       aborted.mission.phase === "implement" &&
       aborted.mission.entered.join(",") === "plan,implement",
     `mission=${JSON.stringify(aborted.mission ?? null)}`,
+  );
+  // A check the session's agent could not run as `bash` is refused before any task exists.
+  const rogue = yield* client
+    .startMission({
+      sessionId: failSession.id,
+      feature: "verify-api rogue check probe",
+      workers: [
+        {
+          id: "rogue",
+          prompt: "escape",
+          check: `touch ${path.join(holdDir, "escaped")}`,
+        },
+      ],
+    })
+    .pipe(Effect.result);
+  const escaped = yield* Effect.promise(() =>
+    stat(path.join(holdDir, "escaped")).then(
+      () => true,
+      () => false,
+    ),
+  );
+  assert(
+    "a worker's check that writes outside the worktree is refused by the session's policy",
+    rogue._tag === "Failure" &&
+      rogue.failure._tag === "SessionError" &&
+      rogue.failure.code === "invalid_input" &&
+      rogue.failure.message.includes("only write inside its worktree") &&
+      !escaped,
+    `rogue=${JSON.stringify(rogue._tag === "Failure" ? rogue.failure : rogue.success)} escaped=${escaped}`,
   );
   Object.assign(observed, {
     missionFanOut: {
@@ -1135,6 +1199,9 @@ const program = Effect.gen(function* () {
         sessionId: failSession.id,
         started: failing,
         settled: aborted.mission ?? null,
+        siblingCheck: { started: bChecked, beatAtSettle, beatLater },
+        rogueCheck:
+          rogue._tag === "Failure" ? rogue.failure : { started: rogue.success },
       },
     },
   });

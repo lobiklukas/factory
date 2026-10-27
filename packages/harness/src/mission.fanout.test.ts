@@ -13,7 +13,7 @@
  * from its own transcript. Postgres is required, because the tasks and their outcomes are the log
  * the API serves.
  */
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue } from "@earendil-works/chord";
@@ -321,12 +321,23 @@ describe("a mission's fan-out", () => {
     const work = checkout();
     const { harness, root } = await startWork(`${logId}-failfast`);
     try {
-      // `b` is never released: the only way it settles is the abort this case is about.
+      // `b` is never released: the only way it settles is the abort this case is about. `a` fails
+      // only once `b` is running its check, so the abort has a live check process to stop, and `b`
+      // beats while that process lives, so the case can tell it was stopped rather than left.
       const mission = await createMission(
         root,
         missionInput(work.dir, [
-          { id: "a", prompt: "do part a", check: "exit 1" },
-          { id: "b", prompt: "do part b", check: work.holds("b") },
+          {
+            id: "a",
+            prompt: "do part a",
+            check: "while [ ! -f b.started ]; do sleep 0.01; done; exit 1",
+          },
+          {
+            id: "b",
+            prompt: "do part b",
+            check:
+              "touch b.started; while [ ! -f b.release ]; do touch b.alive; sleep 0.01; done",
+          },
         ]),
       );
       harness.resume();
@@ -369,16 +380,18 @@ describe("a mission's fan-out", () => {
         },
       });
       // The abort is recorded on the aborted worker itself, not only on the mission that read it.
+      // `a` failed only once `b` had started its check, so `b` was aborted there.
       const aborted = await harness.getTask(b, context);
       expect(aborted?.state.outcome).toEqual({
         status: "aborted",
-        reason: expect.stringMatching(
-          /^the worker "b" was aborted in (open|converse|check): the worker "a" settled failed and the mission joins its workers failFast$/,
-        ),
+        reason:
+          'the worker "b" was aborted in check: the worker "a" settled failed and the mission joins its workers failFast',
       });
-      expect(work.started("b") && existsSync(join(work.dir, "b.release"))).toBe(
-        false,
-      );
+      // And its check process is gone, not left running: the beat it wrote while alive has stopped.
+      const beat = () => statSync(join(work.dir, "b.alive")).mtimeMs;
+      const last = beat();
+      await Effect.runPromise(Effect.sleep("300 millis"));
+      expect(beat()).toBe(last);
       // The mission failed in implement, and never verified.
       expect(
         await Effect.runPromise(readMission(harness, root.id, mission)),
