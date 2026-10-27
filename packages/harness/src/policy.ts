@@ -34,6 +34,10 @@
  * - A docs run's write allowlist (`DOCS_WRITE_ALLOWLIST`, LOB-195) narrows the same decision, so it
  *   stops what the same textual read stops: a `write` or `edit` of a code file, not a redirect or
  *   `sed -i` that writes one.
+ * - A read-only stage (`READ_ONLY_ROLES`, LOB-74) refuses `write`, `edit` and `verify` outright, and
+ *   reads `bash` the other way round: an allowlist of read commands (`STAGE_READ_COMMANDS`), so a
+ *   command it does not know is refused rather than let through. It is still a reading of the text,
+ *   so a `sed` script's own `w` command or a program named in an environment variable gets past.
  */
 import { createHash } from "node:crypto";
 import type { ToolCall } from "@earendil-works/pi-ai";
@@ -329,6 +333,13 @@ const tokenize = (command: string): readonly string[] => {
         continue;
       }
       flush();
+      // `>|` is noclobber's override, a redirect like `>`: read as `>` then `|`, the pipe would end
+      // the segment and lose the target.
+      if (character === ">" && next === "|") {
+        tokens.push(">");
+        index += 1;
+        continue;
+      }
       const doubled = next === character;
       tokens.push(doubled ? `${character}${character}` : character);
       if (doubled) index += 1;
@@ -348,11 +359,24 @@ const tokenize = (command: string): readonly string[] => {
   return tokens;
 };
 
+/**
+ * The simple commands in a token list. A `(` or an opening backtick starts a nested command and its
+ * matching close resumes the one it interrupted, so the words after a substitution are still that
+ * command's: in `rm $(cat list) /etc/passwd`, `/etc/passwd` is an argument of `rm`, not a command of
+ * its own. An unmatched `)` (a `case` pattern) only ends the segment it is in.
+ */
 const segmentsOf = (tokens: readonly string[]): readonly Segment[] => {
+  type Frame = {
+    readonly argv: string[];
+    readonly writeTargets: string[];
+    readonly backtick: boolean;
+  };
   const out: Segment[] = [];
+  const stack: Frame[] = [];
   let argv: string[] = [];
   let writeTargets: string[] = [];
   let redirect: string | undefined;
+  let backtick = false;
 
   const flush = (): void => {
     if (argv.length > 0 || writeTargets.length > 0) {
@@ -362,8 +386,36 @@ const segmentsOf = (tokens: readonly string[]): readonly Segment[] => {
     writeTargets = [];
     redirect = undefined;
   };
+  const open = (byBacktick: boolean): void => {
+    stack.push({ argv, writeTargets, backtick });
+    argv = [];
+    writeTargets = [];
+    redirect = undefined;
+    backtick = byBacktick;
+  };
+  const close = (): void => {
+    flush();
+    const outer = stack.pop();
+    if (outer === undefined) return;
+    argv = outer.argv;
+    writeTargets = outer.writeTargets;
+    backtick = outer.backtick;
+  };
 
   for (const token of tokens) {
+    if (token === "(") {
+      open(false);
+      continue;
+    }
+    if (token === ")") {
+      close();
+      continue;
+    }
+    if (token === "`") {
+      if (backtick) close();
+      else open(true);
+      continue;
+    }
     if (SEGMENT_BREAK.has(token)) {
       flush();
       continue;
@@ -381,6 +433,7 @@ const segmentsOf = (tokens: readonly string[]): readonly Segment[] => {
     }
     argv.push(token);
   }
+  while (stack.length > 0) close();
   flush();
   return out;
 };
@@ -1367,6 +1420,530 @@ export const docsPolicy = (policy: SessionPolicy): SessionPolicy => ({
       decision._tag === "allow"
         ? Effect.sync(() => decideDocsWrite(policy.rules, call))
         : Effect.succeed(decision),
+    ),
+});
+
+// ---------------------------------------------------------------------------------------------
+// The read-only stage (LOB-74)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The roles whose stage only reads (docs/board.md B4, B6; LOB-74), each with the stage it is.
+ *
+ * Keyed by role because B6 says a role resolves to tool policy in one place: a column that declares
+ * the `specifier` role is the specifying stage whatever the column is called, and a board that
+ * renames the column keeps the rule. This is the tool-policy half of LOB-207's role table, for the
+ * one role the MVP pipeline needs to be read-only; widening it is an edit here, not a change to
+ * the check. A map rather than an object literal, because a role is free text in a board definition
+ * and `constructor` must not find `Object.prototype`'s.
+ */
+export const READ_ONLY_ROLES: ReadonlyMap<string, string> = new Map([
+  ["specifier", "specifying"],
+]);
+
+/** A run in a read-only stage: the stage, and the column and role that made it one. */
+export type ReadOnlyStage = {
+  readonly stage: string;
+  readonly column: string;
+  readonly role: string;
+};
+
+/**
+ * The read-only stage a run is in, or `undefined` when its column's role writes (or it has no
+ * column at all — a scratch session is not a stage).
+ */
+export const readOnlyStageOf = (
+  run:
+    | { readonly column?: string | undefined; readonly role?: string }
+    | undefined,
+): ReadOnlyStage | undefined => {
+  if (run?.column === undefined || run.role === undefined) return undefined;
+  const stage = READ_ONLY_ROLES.get(run.role);
+  return stage === undefined
+    ? undefined
+    : { stage, column: run.column, role: run.role };
+};
+
+/**
+ * A stage's refusal as data (LOB-74): which stage refused which call. `call` is the tool's name and
+ * `what` is what the policy refused in it — the tool and its path, a redirect's target, the command
+ * that is not a read, or the flag that makes a read command write.
+ *
+ * This is what the refusal's sentence is built from (`stageSentence`), and it stays inside this
+ * module: Pi Durable's `beforeTool` takes a `block` string and nothing else, so the run's log
+ * records the sentence. The sentence names every field, which is what the log and the model need.
+ */
+export type StageRefusal = {
+  readonly _tag: "ReadOnlyStage";
+  readonly stage: string;
+  readonly column: string;
+  readonly role: string;
+  readonly call: string;
+  readonly what: string;
+};
+
+/**
+ * Tools that change the workspace whatever their arguments: `write` and `edit` by definition, and
+ * `verify` because what it runs is the worktree's own scripts (see `./verify`), which a read-only
+ * stage has no change of its own to prove with. `read`, `ask` and `bash` stay: reading the code and
+ * asking about it is the stage's whole job, and `bash` is judged by `stageBashRefusalOf`.
+ */
+const STAGE_REFUSED_TOOLS = new Set(["write", "edit", "verify"]);
+
+/**
+ * The commands a read-only stage's `bash` may run, each with the flags that make it write or run
+ * another program (`find -delete`, `sed -i`, `sort -o`, `rg --pre`). **An allowlist, so it fails
+ * closed:** a command that is not here is refused, which is what keeps `perl -pi`, `patch`, `tar x`,
+ * `npm install`, `python3 -c` and every program nobody thought of out of a stage that writes
+ * nothing. The cost is that an unusual read is refused too, and the refusal says what reads instead.
+ *
+ * No interpreter is here, `awk` included: what an interpreter does is its program, not its command
+ * line. `git` is judged by its subcommand (`stageGitRefusalOf`); a shell is judged by its `-c`
+ * script, and refused without one.
+ */
+const STAGE_READ_COMMANDS: ReadonlyMap<string, readonly string[]> = new Map([
+  ...[
+    ":",
+    "[",
+    "[[",
+    "basename",
+    "cat",
+    "cd",
+    "cksum",
+    "cmp",
+    "column",
+    "comm",
+    "cut",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "echo",
+    "egrep",
+    "exit",
+    "expand",
+    "export",
+    "false",
+    "fgrep",
+    "fold",
+    "grep",
+    "head",
+    "hexdump",
+    "id",
+    "jq",
+    "join",
+    "ls",
+    "md5sum",
+    "nl",
+    "od",
+    "paste",
+    "popd",
+    "printenv",
+    "printf",
+    "pushd",
+    "pwd",
+    "read",
+    "readlink",
+    "realpath",
+    "rev",
+    "seq",
+    "set",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "sleep",
+    "stat",
+    "strings",
+    "tac",
+    "tail",
+    "tee",
+    "test",
+    "tr",
+    "true",
+    "type",
+    "uname",
+    "unexpand",
+    "uniq",
+    "wc",
+    "which",
+    "whoami",
+  ].map((name): [string, readonly string[]] => [name, []]),
+  ["date", ["-s", "--set"]],
+  ["file", ["-C", "--compile"]],
+  [
+    "find",
+    [
+      "-delete",
+      "-exec",
+      "-execdir",
+      "-ok",
+      "-okdir",
+      "-fprint",
+      "-fprint0",
+      "-fprintf",
+      "-fls",
+    ],
+  ],
+  ["fd", ["-x", "-X", "--exec", "--exec-batch"]],
+  ["rg", ["--pre"]],
+  ["sed", ["-i", "--in-place"]],
+  ["sort", ["-o", "--output"]],
+  ["tree", ["-o"]],
+]);
+
+/**
+ * Whether `word` is the flag `flag`, as the command line spells it: a long flag with or without
+ * `=value` or abbreviated, a one-letter flag inside a cluster or with its value attached (`-ni`,
+ * `-i.bak`, `-ofile`), and a one-dash word flag (`find -delete`) only as itself.
+ */
+const spellsFlag = (word: string, flag: string): boolean => {
+  if (flag.startsWith("--")) {
+    const name = flagName(word);
+    return name.startsWith("--") && name.length > 2 && flag.startsWith(name);
+  }
+  if (flag.length > 2) return word === flag;
+  if (word.startsWith("--")) return false;
+  const cluster = /^-([A-Za-z]+)/.exec(word)?.[1];
+  return cluster !== undefined && cluster.includes(flag.slice(1));
+};
+
+/** The first of `flags` that `args` gives, as the refusal names it. */
+const refusedFlagOf = (
+  args: readonly string[],
+  flags: readonly string[],
+): string | undefined =>
+  flags.find((flag) => args.some((word) => spellsFlag(word, flag)));
+
+/** `git` subcommands that only read, whatever their arguments (`--output` aside). */
+const GIT_READS = new Set([
+  "annotate",
+  "blame",
+  "cat-file",
+  "check-attr",
+  "check-ignore",
+  "cherry",
+  "count-objects",
+  "describe",
+  "diff",
+  "diff-files",
+  "diff-index",
+  "diff-tree",
+  "for-each-ref",
+  "grep",
+  "help",
+  "log",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "name-rev",
+  "range-diff",
+  "rev-list",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "show-branch",
+  "show-ref",
+  "status",
+  "var",
+  "version",
+  "whatchanged",
+]);
+
+/**
+ * `git` subcommands that read or write by their verb, with the verbs that read; `""` is the verb
+ * left out, which for each of these is a listing (`git remote`, `git notes`).
+ */
+const GIT_READ_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["bisect", new Set(["log"])],
+  ["notes", new Set(["", "list", "show"])],
+  ["reflog", new Set(["", "show", "exists"])],
+  ["remote", new Set(["", "show", "get-url"])],
+  ["sparse-checkout", new Set(["list"])],
+  ["stash", new Set(["list", "show"])],
+  ["submodule", new Set(["", "status", "summary"])],
+  ["worktree", new Set(["list"])],
+]);
+
+/**
+ * `git branch`, `git tag` and `git config` both list and write. Each is a read when it gives none
+ * of its writing flags and either asks to list or names no more than a read takes.
+ */
+type GitListing = {
+  readonly writes: readonly string[];
+  readonly lists: readonly string[];
+  /** Flags whose value is the next word, so that word is not counted as an operand. */
+  readonly valued: ReadonlySet<string>;
+  /** The most operands a read gives: `git config user.name` reads, `git config user.name x` sets. */
+  readonly operands: number;
+};
+
+const GIT_LISTINGS: ReadonlyMap<string, GitListing> = new Map([
+  [
+    "branch",
+    {
+      writes: [
+        "-d",
+        "-D",
+        "-m",
+        "-M",
+        "-c",
+        "-C",
+        "-f",
+        "-u",
+        "--delete",
+        "--move",
+        "--copy",
+        "--force",
+        "--set-upstream-to",
+        "--unset-upstream",
+        "--edit-description",
+        "--track",
+        "--create-reflog",
+      ],
+      lists: ["-l", "--list", "--show-current"],
+      valued: new Set([
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--points-at",
+        "--sort",
+        "--format",
+      ]),
+      operands: 0,
+    },
+  ],
+  [
+    "tag",
+    {
+      writes: [
+        "-d",
+        "-a",
+        "-s",
+        "-u",
+        "-f",
+        "-m",
+        "-F",
+        "-e",
+        "--delete",
+        "--annotate",
+        "--sign",
+        "--local-user",
+        "--force",
+        "--message",
+        "--file",
+        "--edit",
+        "--create-reflog",
+      ],
+      lists: ["-l", "--list", "-v", "--verify"],
+      valued: new Set([
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--points-at",
+        "--sort",
+        "--format",
+      ]),
+      operands: 0,
+    },
+  ],
+  [
+    "config",
+    {
+      writes: [
+        "-e",
+        "--add",
+        "--unset",
+        "--unset-all",
+        "--replace-all",
+        "--rename-section",
+        "--remove-section",
+        "--edit",
+      ],
+      lists: [
+        "-l",
+        "--list",
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--get-urlmatch",
+      ],
+      valued: new Set(["-f", "--file", "--blob", "--type", "--default"]),
+      operands: 1,
+    },
+  ],
+]);
+
+/** The words of `args` that are not flags and not a `valued` flag's value. */
+const operandsOf = (
+  args: readonly string[],
+  valued: ReadonlySet<string>,
+): readonly string[] => {
+  const out: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const word = args[index] ?? "";
+    if (!word.startsWith("-")) out.push(word);
+    else if (valued.has(word)) index += 1;
+  }
+  return out;
+};
+
+/**
+ * What a `git` invocation does that a read-only stage refuses, or `undefined` when it only reads.
+ * Fails closed like the command table: a subcommand that is not known to read is refused. A global
+ * `-c` is refused too, because a config value can name a program git runs (`core.pager`,
+ * `diff.external`), and so is `--output`, which makes a `diff` or a `log` write a file.
+ */
+const stageGitRefusalOf = (words: readonly string[]): string | undefined => {
+  const { subcommand, args } = gitSubcommand(words);
+  const globals = words.slice(0, words.length - args.length - 1);
+  if (globals.includes("-c")) return "git -c";
+  if (subcommand.length === 0) return undefined;
+  if (args.some((word) => spellsFlag(word, "--output"))) {
+    return `git ${subcommand} --output`;
+  }
+  if (GIT_READS.has(subcommand)) return undefined;
+  const verbs = GIT_READ_VERBS.get(subcommand);
+  if (verbs !== undefined) {
+    const verb = args.find((word) => !word.startsWith("-")) ?? "";
+    return verbs.has(verb)
+      ? undefined
+      : `git ${[subcommand, verb].filter((part) => part.length > 0).join(" ")}`;
+  }
+  const listing = GIT_LISTINGS.get(subcommand);
+  if (listing !== undefined) {
+    const write = refusedFlagOf(args, listing.writes);
+    if (write !== undefined) return `git ${subcommand} ${write}`;
+    const operands = operandsOf(args, listing.valued);
+    const verb = operands[0] ?? "";
+    // `git config get` and `git config list` are the newer spelling of a read.
+    if (subcommand === "config" && (verb === "get" || verb === "list")) {
+      return undefined;
+    }
+    if (refusedFlagOf(args, listing.lists) !== undefined) return undefined;
+    return operands.length <= listing.operands
+      ? undefined
+      : `git ${subcommand} ${verb}`;
+  }
+  return `git ${subcommand}`;
+};
+
+/** Words that only head a `for` or `select` loop: the loop's name and its list, not a command. */
+const LOOP_HEADS = new Set(["for", "select"]);
+
+/**
+ * What a read-only stage refuses in a `bash` command, or `undefined` when every simple command in it
+ * reads (LOB-74): a redirect into a file, a command that is not in `STAGE_READ_COMMANDS`, a read
+ * command given a flag that makes it write, or a `git` that is not a read — and the same inside a
+ * shell's `-c` script, `$(…)`, backticks or a subshell.
+ *
+ * What it does not see is what the text does not show: a `sed` script's own `w` command, a program
+ * named in an environment variable (`GIT_PAGER=…`), or a path that is a symlink. A heredoc's body is
+ * read as commands, so a heredoc is refused unless every line of it is a read.
+ */
+const stageBashRefusalOf = (command: string, depth = 0): string | undefined => {
+  for (const segment of segmentsOf(tokenize(command))) {
+    const redirect = segment.writeTargets.find(
+      (target) => !isNotAWrite(target),
+    );
+    if (redirect !== undefined) return `redirecting output to ${redirect}`;
+    const words = gateWords(segment.argv);
+    const name = baseName(words[0] ?? "");
+    if (name.length === 0 || LOOP_HEADS.has(name)) continue;
+    const args = words.slice(1);
+    if (SHELLS.has(name)) {
+      const script = shellScriptOf(words);
+      if (script === undefined || depth >= 3) return `running ${name}`;
+      const inner = stageBashRefusalOf(script, depth + 1);
+      if (inner !== undefined) return inner;
+      continue;
+    }
+    if (name === "git") {
+      const refusal = stageGitRefusalOf(args);
+      if (refusal !== undefined) return refusal;
+      continue;
+    }
+    const flags = STAGE_READ_COMMANDS.get(name);
+    if (flags === undefined) return `running ${name}`;
+    const flag = refusedFlagOf(args, flags);
+    if (flag !== undefined) return `${name} ${flag}`;
+    // `tee FILE` and `uniq INPUT OUTPUT` write the file an operand names; `tee` to a pipe or a
+    // device, and `uniq` reading one file, only read.
+    const operands = args.filter((word) => !word.startsWith("-"));
+    const written = name === "tee" ? operands : operands.slice(1);
+    const target = written.find((word) => !isNotAWrite(word));
+    if ((name === "tee" || name === "uniq") && target !== undefined) {
+      return `${name} writing ${target}`;
+    }
+  }
+  return undefined;
+};
+
+/** What a stage's refusal of a `bash` call adds: what its `bash` may run instead. */
+const STAGE_BASH_HINT =
+  " Its bash runs only commands that read (ls, cat, head, tail, grep, rg, find, wc, git log, show, diff, status, blame, grep) and redirects nothing into a file.";
+
+/** The sentence a stage's refusal is: what was refused, which stage and column, and what to do. */
+const stageSentence = (refusal: StageRefusal): string =>
+  `${refusal.what} is refused: this run is in the read-only ${refusal.stage} stage (column "${refusal.column}", role ${refusal.role}), which reads the workspace and changes nothing in it.${refusal.call === "bash" ? STAGE_BASH_HINT : ""} Read and search instead, and put what you found in your answer or ask a question with the ask tool.`;
+
+/**
+ * What a read-only stage refuses in one call, as data, or `undefined` when the stage lets it through
+ * to the session's own policy (LOB-74). Pure, like `decideToolCall`.
+ */
+export const stageRefusalOf = (
+  stage: ReadOnlyStage,
+  call: ToolCall,
+): StageRefusal | undefined => {
+  const what = STAGE_REFUSED_TOOLS.has(call.name)
+    ? [call.name, stringField(call.arguments, "path")]
+        .filter((part) => part !== undefined)
+        .join(" ")
+    : call.name === "bash"
+      ? stageBashRefusalOf(stringField(call.arguments, "command") ?? "")
+      : undefined;
+  return what === undefined
+    ? undefined
+    : { _tag: "ReadOnlyStage", ...stage, call: call.name, what };
+};
+
+/**
+ * The read-only stage's decision for one call (LOB-74): a refusal naming the stage and the column,
+ * or `allow`, which hands the call on to the session's own policy.
+ */
+export const decideStageCall = (
+  stage: ReadOnlyStage,
+  call: ToolCall,
+): PolicyDecision => {
+  const refusal = stageRefusalOf(stage, call);
+  return refusal === undefined ? ALLOW : block(stageSentence(refusal));
+};
+
+/**
+ * Compose a read-only stage into a session's policy (LOB-74): a run whose column's role is a
+ * read-only stage is refused `write`, `edit`, `verify` and every `bash` that is not a known read,
+ * and its refusal says which stage and which column.
+ *
+ * The stage decides **first**, unlike the docs rule. A docs run may write, so a write that escapes
+ * the worktree is D11's to word ("write inside the worktree instead"); a read-only run may write
+ * nowhere, and that advice would send it to a second refusal. The stage's sentence is the one the
+ * model can act on. A call the stage allows goes to the wrapped policy unchanged, so every D11
+ * refusal and every gate still holds in a read-only run, and a gated call a stage refuses is never
+ * asked about — nobody should be asked to approve what the stage forbids.
+ */
+export const readOnlyStagePolicy = (
+  policy: SessionPolicy,
+  stage: ReadOnlyStage,
+): SessionPolicy => ({
+  rules: policy.rules,
+  decide: (call) =>
+    Effect.flatMap(
+      Effect.sync(() => decideStageCall(stage, call)),
+      (decision) =>
+        decision._tag === "allow"
+          ? policy.decide(call)
+          : Effect.succeed(decision),
     ),
 });
 

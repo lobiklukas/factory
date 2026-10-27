@@ -101,6 +101,8 @@ import {
   DOCS_SKILL,
   docsPolicy,
   policyExtension,
+  readOnlyStageOf,
+  readOnlyStagePolicy,
   type ApprovalAsker,
   type SessionPolicy,
 } from "./policy";
@@ -376,11 +378,19 @@ export const openSession = (
     // A column that holds the `docs` skill makes this a documentation run, which may write
     // documentation and nothing else (LOB-195). Composed here, where a policy becomes hooks, so a
     // session cannot be opened with the skill and without the rule.
+    const columnPolicy = skills.some((skill) => skill.name === DOCS_SKILL)
+      ? docsPolicy(policy)
+      : policy;
+    // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
+    // `verify`, and any `bash` that is not a known read command. The stage is the run's
+    // column's, resolved from the same profile, so a session cannot be opened in `specifying` and
+    // without the rule either.
+    const stage = readOnlyStageOf(options.run);
     registry.install(
       policyExtension(
-        skills.some((skill) => skill.name === DOCS_SKILL)
-          ? docsPolicy(policy)
-          : policy,
+        stage === undefined
+          ? columnPolicy
+          : readOnlyStagePolicy(columnPolicy, stage),
         options.approvalAsker,
       ),
     );

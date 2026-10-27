@@ -13,12 +13,11 @@
  * - `skillsExtension` turns those records into one prompt section each, rendered in the order the
  *   column names them.
  *
- * **The role is not resolved here yet, and that is not an oversight.** B6 gives the role the model
- * and the tool policy. Neither has a source of truth in the repo today: the model is the
- * deployment's (one per process, `./models`), and the tool policy is D11's session policy, which is
- * per worktree rather than per role. Inventing a per-role table here would be a config surface
- * nobody asked for, so this issue resolves the column's skills and nothing else — the role clause
- * of B6 is LOB-207, which is where a role → model and tool-policy mapping gets decided.
+ * - The column's `role` is carried through as declared, unresolved. B6 gives the role the model and
+ *   the tool policy; the one piece of that with a source of truth today is the read-only stage
+ *   (`./policy`'s `READ_ONLY_ROLES`, LOB-74), which `openSession` composes into the session's
+ *   policy from this profile. The model is still the deployment's (one per process, `./models`),
+ *   and the rest of the role → model and tool-policy mapping is LOB-207.
  */
 import type { Extension } from "@earendil-works/pi-durable";
 import {
@@ -52,10 +51,12 @@ export type RunSkill = {
 /**
  * A run's column as the board definition declares it (B4, B6). Read by the control plane from the
  * definition version the run's card is pinned to, which is why this is a subset of the domain's
- * `BoardColumn` rather than the whole row: a run needs the column's name and its skills.
+ * `BoardColumn` rather than the whole row: a run needs the column's name, its role and its skills.
  */
 export type RunColumn = {
   readonly name: string;
+  /** The role the column declares (B4), absent where B4 puts "—". */
+  readonly role?: string;
   readonly skills: readonly string[];
 };
 
@@ -63,6 +64,11 @@ export type RunColumn = {
 export type RunProfile = {
   /** The column the run started in; absent for a session with no card. */
   readonly column?: string;
+  /**
+   * The role that column declares (B6), which is what selects a read-only stage's policy at
+   * `openSession` (LOB-74). Absent for a session with no card and for a column with no role.
+   */
+  readonly role?: string;
   readonly skills: readonly RunSkill[];
 };
 
@@ -95,7 +101,11 @@ export const loadRun = (
       }
       skills.push(found);
     }
-    return { column: column.name, skills };
+    return {
+      column: column.name,
+      ...(column.role === undefined ? {} : { role: column.role }),
+      skills,
+    };
   });
 
 /** The name the skills extension is installed under, so a conversation can select it by name. */

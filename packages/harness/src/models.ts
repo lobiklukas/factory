@@ -28,6 +28,7 @@ import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
+import { Effect } from "effect";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 
@@ -167,8 +168,10 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
  * steps, repeatable for the life of a session, and it exercises the tool path a real turn uses.
  *
- * `command` is scriptable so a verification run can hold a turn open deliberately — a command
- * that sleeps is the only way to observe a session that is genuinely busy (`FAUX_COMMAND`).
+ * `command` is scriptable so a verification run can hold a turn open deliberately with a command
+ * that sleeps (`FAUX_COMMAND`). The other way to hold one open is the sleeping script, which naps
+ * before each step rather than in the tool (`fauxSleepMs`, applied by `createFauxModelAccess`:
+ * this function stays a pure reading of the transcript).
  *
  * `verify` adds a step between the two (LOB-78): after the `bash` result the script calls the
  * `verify` tool, and the reply is what that tool reported — the shape of a run that makes a change,
@@ -235,9 +238,40 @@ export const fauxAnswer = (
   );
 };
 
+/**
+ * Whether a request asks the script for a step of a turn, rather than for a compaction's summary or
+ * a curation: the only requests the sleeping script (`fauxSleepMs`) is slow to answer. A summary
+ * that slept would hold a compaction rather than a run, and a curation is not a turn at all.
+ */
+export const isFauxTurnStep = (messages: readonly Message[]): boolean => {
+  const text = lastUserText(messages).trimStart();
+  return (
+    !text.startsWith(SUMMARY_PROMPT_PREFIX) &&
+    !text.startsWith(CURATION_PROMPT_PREFIX)
+  );
+};
+
+/**
+ * Wait `ms`, or less when `signal` aborts first. The sleeping script's nap is the model "thinking",
+ * so an interrupted run must stop waiting the moment it is interrupted, as a real provider's
+ * request would — not wait out the nap and then report the abort. The abort interrupts the sleep,
+ * which ends the nap rather than failing it: the provider sees the signal and answers `aborted`.
+ */
+const fauxNap = (ms: number, signal?: AbortSignal): Promise<void> =>
+  Effect.runPromiseExit(Effect.sleep(ms), { signal }).then(() => undefined);
+
 export type ModelAccessOptions = {
   /** The command the faux script runs, for a run that needs a turn to take a known time. */
   readonly fauxCommand?: string | undefined;
+  /**
+   * How long the sleeping faux script takes over each step of a turn, in milliseconds (LOB-167):
+   * the model "thinks" before it calls `bash` and again before it answers, so a run is genuinely
+   * busy for about twice this long without scripting a slow command. That is what lets a second
+   * message arrive while the run is in flight — a steer that joins it, a follow-up that queues
+   * behind it, a `whenBusy: "reject"` that is refused with `busy` — whatever the tool policy does
+   * with the command. Absent or `0`: the script answers at once.
+   */
+  readonly fauxSleepMs?: number | undefined;
   /** Whether the faux script calls `verify` after its `bash` turn (LOB-78, `fauxAnswer`). */
   readonly fauxVerify?: boolean | undefined;
   /** Whether the faux script calls `bash` on every turn rather than the first (LOB-52, `fauxAnswer`). */
@@ -398,17 +432,23 @@ export const createFauxModelAccess = (
       ? faux.provider
       : pricedProvider(faux.provider, options.fauxCost),
   );
+  const sleepMs = options.fauxSleepMs ?? 0;
   // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
-  const repeat: FauxResponseFactory = (context) => {
+  // It re-queues before it sleeps: a request that arrives during the nap still finds a step.
+  const repeat: FauxResponseFactory = (context, streamOptions) => {
     faux.appendResponses([repeat]);
-    return fauxAnswer(
-      context.messages,
-      fauxCommand,
-      options.fauxCuration,
-      options.fauxVerify ?? false,
-      options.fauxAsk,
-      options.fauxEveryTurn ?? false,
-    );
+    const answer = () =>
+      fauxAnswer(
+        context.messages,
+        fauxCommand,
+        options.fauxCuration,
+        options.fauxVerify ?? false,
+        options.fauxAsk,
+        options.fauxEveryTurn ?? false,
+      );
+    return sleepMs > 0 && isFauxTurnStep(context.messages)
+      ? fauxNap(sleepMs, streamOptions?.signal).then(answer)
+      : answer();
   };
   faux.setResponses([repeat]);
   const modelId = faux.models[0].id;

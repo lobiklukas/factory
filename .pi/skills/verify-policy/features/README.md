@@ -9,11 +9,15 @@ Status reflects the last verified run: **2026-10-05**, API on `:9400`–`:9407`,
 `policy.attack.test.ts`, 12 seam rows in `policy.seam.test.ts`, 5 hook rows in
 `policy.hook.test.ts`, 1 session row in `session.test.ts`) and `packages/core` **11/11**.
 
+The read-only stage (LOB-74) was added on **2026-10-27**, API on `:9500`–`:9508`: `./refusals.sh`
+**9/9 cases, 65 checks**, the ninth being `stage` (two runs, one per column, 14 checks).
+
 | Feature          | Status  | File                                   |
 | ---------------- | ------- | -------------------------------------- |
 | Refusals         | passing | [refusals.md](refusals.md)             |
 | The happy path   | passing | [refusals.md](refusals.md#the-control) |
 | Autonomy as data | passing | [autonomy.md](autonomy.md)             |
+| Read-only stage  | passing | [stage.md](stage.md)                   |
 
 ## Deliberately absent
 
