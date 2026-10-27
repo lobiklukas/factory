@@ -13,6 +13,7 @@ import type {
 import { Effect, Stream } from "effect";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
+import { DASHBOARD_ACTOR } from "../approvals-view";
 import { SESSIONS_KEY } from "./session-list";
 
 /**
@@ -110,10 +111,11 @@ export const startSessionAtom = runtime.fn(
       const rpc = yield* RpcClient;
       // `title` is optional on the wire (CreateSessionInput), and the control plane
       // names a session from its first message, so omitting the key is the honest
-      // default rather than sending an empty string.
-      const session = yield* rpc.client.createSession(
-        input.title === undefined ? {} : { title: input.title },
-      );
+      // default rather than sending an empty string. The spend is the dashboard's (LOB-162).
+      const session = yield* rpc.client.createSession({
+        actor: DASHBOARD_ACTOR,
+        ...(input.title === undefined ? {} : { title: input.title }),
+      });
       yield* rpc.client.sendMessage({
         sessionId: session.id,
         content: input.content,

@@ -132,6 +132,7 @@ import {
   sameTasks,
   usageCostTotal,
   SESSION_DOC_KIND,
+  ACTOR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
@@ -176,6 +177,21 @@ export const SessionDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ repo: "", baseRef: "", branch: "" }),
+});
+
+/**
+ * Who the session's spend is attributed to (LOB-162), committed to the log so the index's
+ * `sessions.actor` is derivable from it (D7). A document of its own rather than a field of the repo
+ * binding: a scratch session writes no binding, and it still has an actor. Written once, at create
+ * (or at a fork or a replay, with the source's actor); a session nobody was attributed has none.
+ */
+export const ActorDoc = defineDoc({
+  kind: ACTOR_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ actor: "" }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -716,6 +732,21 @@ export const writeRepoBinding = (
           // Written on every binding commit, empty included: a document that kept an earlier
           // session's branch after a rebind would name a branch the worktree is not on.
           doc.branch = binding.branch ?? "";
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/** Commit the session's actor (LOB-162). The `sessions` row is the caller's to update. */
+export const writeActor = (
+  conversation: Conversation,
+  actor: string,
+): Effect.Effect<void, SessionError> =>
+  attempt("write actor", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(ActorDoc, conversation.id).then((doc) => {
+          doc.actor = actor;
         }),
       BACKGROUND_CONTEXT,
     ),
@@ -1435,6 +1466,8 @@ type ForkPreamble = {
   readonly binding?: RepoBinding;
   /** The cap the fork inherits (LOB-163), in the same commit, so no run starts under it uncapped. */
   readonly budget?: BudgetSeed;
+  /** The parent's actor (LOB-162), in the same commit, so a rebuilt fork keeps its attribution. */
+  readonly actor?: string;
 };
 
 /**
@@ -1446,8 +1479,8 @@ type ForkPreamble = {
  * names something later is a parent log whose entries do not precede their marker — a broken log
  * rather than a fork to guess at, so it fails the commit instead of writing a wrong transcript.
  *
- * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
- * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
+ * The lineage, the repo binding, the cap and the actor are documents in the same commit, so a fork
+ * that exists at all exists with all of them: there is no window in which a fork is readable but `rebuildIndexes` would fold
  * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
  * parent's prefix — entry for entry, with the parent's PR announcement kept as an inherited line
  * (`forkedKind`), because the parent's `factory.pr` is the one document a fork does not take.
@@ -1493,6 +1526,13 @@ const copyEntries = (
         ? undefined
         : setBudget(tx, conversationId, preamble.budget),
     )
+    .then(() =>
+      preamble.actor === undefined
+        ? undefined
+        : tx.doc(ActorDoc, conversationId).then((doc) => {
+            doc.actor = preamble.actor ?? "";
+          }),
+    )
     .then(() => ({ parent: preamble.parent, at }));
 };
 
@@ -1508,6 +1548,11 @@ export type ForkSessionOptions = {
   readonly lineage: string;
   /** The parent's repo binding, committed into the fork's log beside the lineage. */
   readonly binding?: RepoBinding;
+  /**
+   * Who the fork's spend is attributed to (LOB-162): the parent's actor, committed beside the
+   * lineage so a fork never exists with an indexed actor its log does not record.
+   */
+  readonly actor?: string;
   readonly model: ModelAccess;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
@@ -1584,6 +1629,7 @@ export const forkSession = (
                 ? {}
                 : { binding: options.binding }),
               ...(budget === undefined ? {} : { budget }),
+              ...(options.actor === undefined ? {} : { actor: options.actor }),
             }),
           BACKGROUND_CONTEXT,
         ),
@@ -1616,6 +1662,8 @@ export type SessionLog = {
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
+  /** Who the session's spend is attributed to (LOB-162), when anyone was. */
+  readonly actor?: string;
   /**
    * Every approval the log records, requested order (LOB-147). Pending ones are what a snapshot
    * reports; the settled ones are here because the index rows a rebuild derives cover both.
@@ -1684,6 +1732,10 @@ export const readSessionLog = (
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
+    const actor = bindingString(
+      yield* readDocument(storage, ACTOR_DOC_KIND),
+      "actor",
+    );
     const replayDoc = projectReplayDoc(
       yield* readDocument(storage, REPLAY_DOC_KIND),
     );
@@ -1720,6 +1772,7 @@ export const readSessionLog = (
       ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
+      ...(actor === "" ? {} : { actor }),
       ...(replayDoc.source === ""
         ? {}
         : {

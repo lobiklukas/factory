@@ -77,6 +77,20 @@ start one it exits non-zero, printing the command to run. The session's model is
 (`MODEL_BACKEND=faux`) so the run is offline and deterministic; its tool calls, transcript, and
 storage are real.
 
+### The spend pane
+
+```sh
+SPEND_API_PORT=9421 SPEND_WEB_PORT=3421 ./spend.sh   # its own priced instance; leaves nothing running
+```
+
+`/spend` needs a priced model, which this instance deliberately does not run (the compaction check
+requires a spend line with no dollar figure). So `spend.sh` starts its own API (`FAUX_COST=0.01`) and
+dashboard, runs `spend.mjs`, and stops both. The drive seeds runs by actors and repos of its own,
+one from `factory run`, one from the dashboard's **New session**, and one run each from
+`factory board start` and a card's **Start run** (`seed-spend.ts`), then requires the page's
+repo × actor table to be `listSpend`'s answer and its pairs to be the list's costs added up
+(`features/spend.md`). Evidence goes to `.verify/evidence/latest/spend/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -126,6 +140,8 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `doctor.sh`         | Read-only health check of the instance                            |
 | `drive.mjs`         | Browser drive + evidence capture                                  |
 | `seed-attention.ts` | The attention block's board, cards and the run's ask              |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)  |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from     |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it |
 
 ## Feature map

@@ -419,6 +419,12 @@ most one request. A stop the log refuses to commit fails closed: the request is 
 fork keeps its parent's cap and carries its spend; a replay keeps its source's cap at no spend; a fork
 or a replay of an uncapped session gets `SESSION_BUDGET`, as a create does. The full stop semantics
 are that module's header.
+_As built (LOB-162)._ Spend is keyed by repo and actor. The actor is caller-declared, the way an
+approval decision's is (`createSession({ actor })`; `cli`, `dashboard`, `trigger:<source>`; a fork or
+a replay takes its source's). It is committed as `factory.actor` and indexed as `sessions.actor`.
+`listSpend` groups the list's own `cost_total` by the pair, and the dashboard's `/spend` shows it per
+repo, per actor and per pair. LOB-20's credential replaces the declaration as the actor's source; the
+column, the document and the read stay.
 
 **R5 — `Sandbox` CRD is `v1beta1`.** We inherit a SIG Apps controller and its API may shift.
 Accepted because it replaces exactly the boring, bug-prone machinery (stable identity, pause

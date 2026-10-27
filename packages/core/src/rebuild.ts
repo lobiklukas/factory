@@ -17,7 +17,8 @@
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
  *
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
- * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
+ * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the
+ * actor its spend is attributed to (`factory.actor`, LOB-162), the PR link
  * (`factory.pr`), the approvals a session asked for and the decisions that settled them
  * (`factory.approval.requested` / `.decided` / `.used` → `session_approvals`), spend (`pi.usage`),
  * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
@@ -77,6 +78,8 @@ type FoldedRow = {
   /** The branch a caller named, when it named one (LOB-197). */
   readonly branch: string | null;
   readonly forkedFrom: string | null;
+  /** Who the session's spend is attributed to (LOB-162), when anyone was. */
+  readonly actor: string | null;
   readonly prUrl: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
@@ -172,6 +175,7 @@ export const rebuildIndexes: Effect.Effect<
       baseRef: repo === null ? null : sessionLog.binding.baseRef,
       branch: sessionLog.binding.branch ?? null,
       forkedFrom: sessionLog.forkedFrom ?? null,
+      actor: sessionLog.actor ?? null,
       prUrl: sessionLog.pr?.url ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
@@ -233,13 +237,19 @@ export const rebuildIndexes: Effect.Effect<
   // `NULLIF(…, '')` rather than passing nulls: the client's array encoder refuses an array whose
   // values are *all* null (it has no element to infer a type from), and a batch of scratch sessions
   // is exactly that for `repo` and `base_ref` — and a batch of sessions that are not forks, or have
-  // no PR, is exactly that for `forked_from` and `pr_url`. An empty string is never a legal slug,
-  // session id, or URL, so the sentinel cannot collide with a real value.
+  // no PR, or no actor, is exactly that for `forked_from`, `pr_url` and `actor`. An empty string is
+  // never a legal slug, session id, URL or actor, so the sentinel cannot collide with a real value.
+  //
+  // `cost_total` crosses as text too: the client could not encode a number array holding an unpriced
+  // session (`0`) beside a priced one (`0.02`) — "Failed to encode query" — so a rebuild of any
+  // database with real spend in it failed (found by LOB-162's spend test, which rebuilds one).
+  // `String` of a JS number is its shortest round-trip form, so the stored double is the one the
+  // fold computed.
   for (let at = 0; at < folded.length; at += WRITE_BATCH_ROWS) {
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, actor, pr_url, created_at)
       SELECT
         id,
         title,
@@ -247,6 +257,7 @@ export const rebuildIndexes: Effect.Effect<
         NULLIF(base_ref, ''),
         NULLIF(branch, ''),
         NULLIF(forked_from, ''),
+        NULLIF(actor, ''),
         NULLIF(pr_url, ''),
         created_at
       FROM unnest(
@@ -256,15 +267,17 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.baseRef ?? "")}::text[],
         ${batch.map((row) => row.branch ?? "")}::text[],
         ${batch.map((row) => row.forkedFrom ?? "")}::text[],
+        ${batch.map((row) => row.actor ?? "")}::text[],
         ${batch.map((row) => row.prUrl ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      ) AS folded(id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
+      ) AS folded(id, title, repo, base_ref, branch, forked_from, actor, pr_url, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
         base_ref = EXCLUDED.base_ref,
         branch = EXCLUDED.branch,
         forked_from = EXCLUDED.forked_from,
+        actor = EXCLUDED.actor,
         pr_url = EXCLUDED.pr_url,
         created_at = EXCLUDED.created_at
     `;
@@ -273,7 +286,7 @@ export const rebuildIndexes: Effect.Effect<
       SELECT * FROM unnest(
         ${ids}::text[],
         ${batch.map(() => "idle")}::text[],
-        ${batch.map((row) => row.costTotal)}::double precision[],
+        ${batch.map((row) => String(row.costTotal))}::text[]::double precision[],
         ${batch.map((row) => row.lastActivityAt)}::text[]::timestamptz[]
       )
       ON CONFLICT (session_id) DO UPDATE SET

@@ -62,6 +62,7 @@ import {
   ForkSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
+  ListSpendInput,
   RegisterRepoInput,
   ReplaySessionInput,
   RepoSummary,
@@ -73,6 +74,7 @@ import {
   SessionIdInput,
   SessionSnapshot,
   SessionSummary,
+  SpendReport,
   WithdrawMessageInput,
   WithdrawMessageResult,
 } from "@repo/domain/Session";
@@ -146,6 +148,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("listSessions", {
     payload: ListSessionsInput,
     success: ListSessionsOutput,
+    error: SessionError,
+  }),
+  // Spend keyed by repo and actor (LOB-162): one grouped read of the same index `listSessions`
+  // reads, so the spend pane's numbers are the list's numbers added up, never a fold of a log (R6).
+  Rpc.make("listSpend", {
+    payload: ListSpendInput,
+    success: SpendReport,
     error: SessionError,
   }),
   // The cited knowledge pages a session's log holds (LOB-204), read from the derived rows a rebuild

@@ -1,6 +1,6 @@
 import { Console, Effect, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
-import { RepoSlug } from "@repo/domain/Session";
+import { RepoSlug, SessionActor } from "@repo/domain/Session";
 import {
   BoardInstanceId,
   DEFAULT_DEFINITION_ID,
@@ -51,6 +51,13 @@ const actorFlag = Flag.String("actor").pipe(
   Flag.withDescription(
     "Who makes the move; a session id is a run, anything else is a person",
   ),
+  Flag.withDefault("cli"),
+);
+
+/** Who a run started from the terminal is attributed to (LOB-162): `cli`, as a move's actor is. */
+const runActorFlag = Flag.String("actor").pipe(
+  Flag.withDescription("Who the run's spend is attributed to"),
+  Flag.withSchema(SessionActor),
   Flag.withDefault("cli"),
 );
 
@@ -398,9 +405,10 @@ const startCommand = Command.make(
       ),
       Flag.optional,
     ),
+    actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, api }) {
+  Effect.fnUntraced(function* ({ task, column, prompt, actor, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -418,6 +426,7 @@ const startCommand = Command.make(
         title: card.title,
         taskId: card.id,
         taskColumn,
+        actor,
         ...(card.repo === undefined ? {} : { repo: card.repo }),
       });
       yield* Console.log(`session ${session.id}`);

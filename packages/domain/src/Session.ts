@@ -38,6 +38,23 @@ export const RepoSlug = Schema.String.pipe(
 export type RepoSlug = typeof RepoSlug.Type;
 
 /**
+ * Who a session's spend is attributed to (LOB-162, part 2 of LOB-17): `cli`, `dashboard`, a
+ * trigger's `trigger:<source>`, or whatever name a caller passes.
+ *
+ * This is a string the caller declares, as an approval decision's and a board move's actor already
+ * are. LOB-20's credential changes where the value comes from; it does not change this shape, the
+ * `sessions.actor` column, or the `factory.actor` document that records it. The checks keep a name
+ * readable in the spend pane: nothing blank, no surrounding whitespace and no control character
+ * anywhere — an embedded newline or NUL renders as nothing, so two spellings of one actor would look
+ * like one name in two rows — and at most 200 characters.
+ */
+export const SessionActor = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[^\s\p{Cc}](?:[^\p{Cc}]*[^\s\p{Cc}])?$/u)),
+  Schema.check(Schema.isMaxLength(200)),
+);
+export type SessionActor = typeof SessionActor.Type;
+
+/**
  * A branch a session's worktree may be cut on (D10, LOB-197).
  *
  * The default is `factory/<session-id>`, minted by the server and safe by construction. A caller
@@ -519,6 +536,11 @@ export const CreateSessionInput = Schema.Struct({
    * was started with one, and otherwise no cap.
    */
   budget: Schema.optional(SessionBudgetCap),
+  /**
+   * Who the session's spend is attributed to (LOB-162). Absent: nobody, which the spend pane shows
+   * as unattributed. A fork and a replay take their source's actor rather than naming one.
+   */
+  actor: Schema.optional(SessionActor),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 
@@ -570,6 +592,37 @@ export const ListSessionsOutput = Schema.Struct({
   nextCursor: Schema.optional(Schema.String),
 });
 export type ListSessionsOutput = typeof ListSessionsOutput.Type;
+
+/** What `listSpend` reads (LOB-162): everything the index holds, for now — no window, no filter. */
+export const ListSpendInput = Schema.Struct({});
+export type ListSpendInput = typeof ListSpendInput.Type;
+
+/**
+ * One (repo, actor) pair's spend: how many sessions it holds and what they cost, in the dollars
+ * `pi.usage` reports. The cost is the list's own `costTotal` summed, so the spend pane and the
+ * session list cannot disagree. `repo` is absent for scratch sessions, and `actor` is absent for
+ * sessions nobody was attributed (every session created before LOB-162, or a caller that named
+ * nobody).
+ */
+export const SpendRow = Schema.Struct({
+  repo: Schema.optional(RepoSlug),
+  actor: Schema.optional(SessionActor),
+  sessions: Schema.Int,
+  costTotal: Schema.Finite,
+});
+export type SpendRow = typeof SpendRow.Type;
+
+/**
+ * Spend keyed by repo and actor (LOB-162): one row per pair, costliest first (then by repo, then by
+ * actor, absent last), and the totals across all of them. The pairs are the finest grain the server
+ * answers; a roll-up by repo or by actor alone is a sum the reader does, because every pair is here.
+ */
+export const SpendReport = Schema.Struct({
+  rows: Schema.Array(SpendRow),
+  sessions: Schema.Int,
+  costTotal: Schema.Finite,
+});
+export type SpendReport = typeof SpendReport.Type;
 
 export const SendMessageInput = Schema.Struct({
   sessionId: SessionId,

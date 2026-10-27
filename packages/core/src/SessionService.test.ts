@@ -50,6 +50,7 @@ import type { ApprovalRequest } from "@repo/domain/Approval";
 import type {
   ListSessionsInput,
   ListSessionsOutput,
+  RepoSlug,
   SessionError,
   SessionEvent,
   SessionId,
@@ -57,6 +58,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
   SessionUsage,
+  SpendReport,
 } from "@repo/domain/Session";
 import {
   RepoSlug as RepoSlugSchema,
@@ -8089,6 +8091,259 @@ describe("the budget cap", () => {
       await runtime.dispose();
     }
   }, 120_000);
+});
+
+/**
+ * Spend keyed by repo and actor (LOB-162, part 2 of LOB-17).
+ *
+ * `spend` is the list's own `cost_total` grouped by the session's repo and actor, so the oracle here
+ * is the activity index read per session and added up by the test, against groups the test knows
+ * from what it created: two actors on one repo, one actor on two repos, a session nobody was
+ * attributed, a fork and a replay that take their source's actor, and a session a trigger started.
+ * The faux model is priced (`fauxCost`) so a group's cost is a number a mistake would change. The
+ * repos are this run's own, so the suite's other sessions are never in the groups asserted.
+ *
+ * Then the index forgets every actor and `rebuildIndexes` has to recover them from the log's
+ * `factory.actor` documents: a fold that dropped them would move all of this spend to
+ * "unattributed".
+ */
+describe("spend by repo and actor", () => {
+  const spendRoot = mkdtempSync(join(tmpdir(), "factory-core-spend-"));
+  const COST = 0.01;
+  const tag = randomBytes(4).toString("hex");
+  const web = RepoSlugSchema.make(`spend-${tag}/web`);
+  const api = RepoSlugSchema.make(`spend-${tag}/api`);
+
+  it("groups the list's cost by repo and actor, inherits the actor on a fork and a replay, and a rebuild recovers it", async () => {
+    const faux = createFauxModelAccess({ fauxCost: COST });
+    const spendRuntime = ManagedRuntime.make(
+      TriggerSessionsFromSessionService.pipe(
+        Layer.provideMerge(
+          SessionServiceLive({
+            model: faux.access,
+            sessionRoot: spendRoot,
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const result = await spendRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const triggers = yield* TriggerSessions;
+          const sql = yield* SqlClient;
+
+          // Settled means answered *and* indexed: the reply is in the transcript, and the activity
+          // row holds the spend the log does, so the oracle below reads the run's whole cost.
+          const ran = (id: SessionId) =>
+            waitUntil(
+              Effect.gen(function* () {
+                const snapshot = yield* sessions.get(id);
+                const indexed = yield* sql<{ costTotal: number }>`
+                  SELECT cost_total::float8 AS cost_total
+                  FROM session_activity WHERE session_id = ${id}
+                `;
+                return (
+                  !snapshot.live.busy &&
+                  snapshot.entries.some(
+                    (entry) => entry.kind === "assistant" && entry.text !== "",
+                  ) &&
+                  indexed[0]?.costTotal === usageCostTotal(snapshot.usage)
+                );
+              }),
+              `session ${id} to run`,
+            );
+          const start = (input: {
+            readonly repo: RepoSlug;
+            readonly actor?: string;
+          }) =>
+            Effect.gen(function* () {
+              const created = yield* sessions.create(input);
+              yield* sessions.send({ sessionId: created.id, content: "go" });
+              yield* ran(created.id);
+              return created.id;
+            });
+
+          const amyWeb1 = yield* start({ repo: web, actor: "amy" });
+          const amyWeb2 = yield* start({ repo: web, actor: "amy" });
+          const amyApi = yield* start({ repo: api, actor: "amy" });
+          const bobWeb = yield* start({ repo: web, actor: "bob" });
+          // Nobody named: the pane's "unattributed", and it never ran, so it costs nothing.
+          const nobody = (yield* sessions.create({ repo: web })).id;
+          // A fork continues its parent's work; its own spend starts at nothing.
+          const fork = (yield* sessions.fork({ sessionId: bobWeb })).id;
+          // A replay runs its source's task again, and pays for that run.
+          const replay = (yield* sessions.replay({ sessionId: amyApi })).id;
+          yield* ran(replay);
+          // A trigger's session, through the production port.
+          const triggered = (yield* triggers
+            .create({
+              source: "linear",
+              title: "a trigger's run",
+              requestId: `trigger:spend-${tag}`,
+              deliveryId: `spend-${tag}`,
+              repo: api,
+              baseRef: undefined,
+            })
+            .pipe(Effect.orDie)).id;
+          yield* triggers
+            .send({
+              sessionId: triggered,
+              content: "go",
+              requestId: `trigger:spend-${tag}`,
+            })
+            .pipe(Effect.orDie);
+          yield* ran(triggered);
+
+          const groups: ReadonlyArray<{
+            readonly repo: RepoSlug;
+            readonly actor: string | undefined;
+            readonly ids: ReadonlyArray<SessionId>;
+          }> = [
+            { repo: web, actor: "amy", ids: [amyWeb1, amyWeb2] },
+            { repo: api, actor: "amy", ids: [amyApi, replay] },
+            { repo: web, actor: "bob", ids: [bobWeb, fork] },
+            { repo: web, actor: undefined, ids: [nobody] },
+            { repo: api, actor: "trigger:linear", ids: [triggered] },
+          ];
+          const allIds = groups.flatMap((group) => group.ids);
+          const costs = yield* sql<{ sessionId: string; costTotal: number }>`
+            SELECT session_id, cost_total::float8 AS cost_total
+            FROM session_activity WHERE session_id IN ${sql.in(allIds)}
+          `;
+          const costOf = (id: SessionId) =>
+            costs.find((row) => row.sessionId === id)?.costTotal ?? NaN;
+          const expected = groups.map((group) => ({
+            repo: group.repo,
+            actor: group.actor,
+            sessions: group.ids.length,
+            costTotal: group.ids.reduce((total, id) => total + costOf(id), 0),
+          }));
+
+          const ours = (report: SpendReport) =>
+            report.rows.filter((row) => row.repo === web || row.repo === api);
+          const before = yield* sessions.spend;
+
+          // Forget every actor this case wrote, as a dropped index would, and refold.
+          yield* sql`UPDATE sessions SET actor = NULL WHERE id IN ${sql.in(allIds)}`;
+          const forgotten = yield* sessions.spend;
+          yield* rebuildIndexes;
+          const rebuilt = yield* sessions.spend;
+
+          return {
+            expected,
+            before: ours(before),
+            beforeReport: before,
+            forgotten: ours(forgotten),
+            rebuilt: ours(rebuilt),
+            forkCost: costOf(fork),
+            parentCost: costOf(bobWeb),
+          };
+        }),
+      );
+
+      const key = (row: {
+        readonly repo?: string | undefined;
+        readonly actor?: string | undefined;
+      }) => `${row.repo ?? ""}|${row.actor ?? ""}`;
+      const asMap = (
+        rows: ReadonlyArray<{
+          readonly repo?: string | undefined;
+          readonly actor?: string | undefined;
+          readonly sessions: number;
+          readonly costTotal: number;
+        }>,
+      ) =>
+        new Map(
+          rows.map((row) => [
+            key(row),
+            { sessions: row.sessions, costTotal: row.costTotal },
+          ]),
+        );
+
+      // Every run spent something, so a group's cost distinguishes it from its neighbours.
+      for (const group of result.expected) {
+        if (group.actor !== undefined)
+          expect(group.costTotal).toBeGreaterThan(0);
+      }
+      expect(result.parentCost).toBeGreaterThan(0);
+      // The fork's cost is its own (none yet), not its parent's again: the pair is not counted twice.
+      expect(result.forkCost).toBe(0);
+
+      // The pairs, exactly: no extra row, no missing one, each the list's numbers added up.
+      expect(result.before).toHaveLength(result.expected.length);
+      const before = asMap(result.before);
+      for (const group of result.expected) {
+        const row = before.get(key(group));
+        expect(row?.sessions).toBe(group.sessions);
+        expect(row?.costTotal).toBeCloseTo(group.costTotal, 10);
+      }
+      // The absent actor is absent on the wire, not an empty string.
+      expect(
+        result.before.find(
+          (row) => row.repo === web && row.actor === undefined,
+        ),
+      ).not.toHaveProperty("actor");
+
+      // Costliest first: the order is the report's contract.
+      const costs = result.beforeReport.rows.map((row) => row.costTotal);
+      expect(costs).toEqual([...costs].sort((left, right) => right - left));
+      // The totals are the rows added.
+      expect(result.beforeReport.sessions).toBe(
+        result.beforeReport.rows.reduce(
+          (total, row) => total + row.sessions,
+          0,
+        ),
+      );
+      expect(result.beforeReport.costTotal).toBeCloseTo(
+        result.beforeReport.rows.reduce(
+          (total, row) => total + row.costTotal,
+          0,
+        ),
+        10,
+      );
+
+      // With the index's actors gone, every session of ours is unattributed — the witness that the
+      // rebuild below had something to recover.
+      expect(result.forgotten.every((row) => row.actor === undefined)).toBe(
+        true,
+      );
+      // The log kept them: the rebuilt report is the one before.
+      const rebuilt = asMap(result.rebuilt);
+      expect(result.rebuilt).toHaveLength(result.expected.length);
+      for (const group of result.expected) {
+        const row = rebuilt.get(key(group));
+        expect(row?.sessions).toBe(group.sessions);
+        expect(row?.costTotal).toBeCloseTo(group.costTotal, 10);
+      }
+    } finally {
+      await spendRuntime.dispose();
+    }
+  }, 180_000);
+
+  it("refuses a corrupt actor in the index rather than moving its spend to unattributed", async () => {
+    const exit = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({
+          repo: RepoSlugSchema.make(`spend-${tag}/corrupt`),
+          actor: "amy",
+        });
+        yield* sql`UPDATE sessions SET actor = ${"  "} WHERE id = ${created.id}`;
+        const answer = yield* Effect.exit(sessions.spend);
+        // Put it back, so the suite's later reads of the whole index are not this case's problem.
+        yield* sql`UPDATE sessions SET actor = ${"amy"} WHERE id = ${created.id}`;
+        return answer;
+      }),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    const failure = Exit.findErrorOption(exit);
+    expect(failure._tag === "Some" ? failure.value.code : "none").toBe(
+      "storage",
+    );
+  }, 60_000);
 });
 
 /**

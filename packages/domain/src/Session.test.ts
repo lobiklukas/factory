@@ -27,6 +27,35 @@ describe("a create's budget", () => {
   });
 });
 
+describe("a create's actor (LOB-162)", () => {
+  it("accepts a name, a trigger's namespaced source, and no actor at all", () => {
+    expect(Exit.isSuccess(decodeCreate({ actor: "cli" }))).toBe(true);
+    expect(Exit.isSuccess(decodeCreate({ actor: "trigger:linear" }))).toBe(
+      true,
+    );
+    expect(Exit.isSuccess(decodeCreate({ actor: "Ada Lovelace" }))).toBe(true);
+    expect(Exit.isSuccess(decodeCreate({ actor: "x".repeat(200) }))).toBe(true);
+    expect(Exit.isSuccess(decodeCreate({}))).toBe(true);
+  });
+
+  // Two spellings of one actor would be two rows in the spend pane, and a blank one a row nobody
+  // can read: the contract refuses both before a session exists to be attributed.
+  it.each([
+    ["an empty name", ""],
+    ["only whitespace", "   "],
+    ["a leading space", " cli"],
+    ["a trailing newline", "cli\n"],
+    ["an embedded newline", "a\nb"],
+    ["an embedded tab", "a\tb"],
+    ["an embedded NUL", "a\u0000b"],
+    ["a lone control character", "\u0007"],
+    ["a name over 200 characters", "x".repeat(201)],
+    ["a number", 7],
+  ])("refuses %s", (_label, actor) => {
+    expect(Exit.isFailure(decodeCreate({ actor }))).toBe(true);
+  });
+});
+
 describe("a snapshot's budget", () => {
   const base = {
     session: {

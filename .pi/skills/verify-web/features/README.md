@@ -24,6 +24,7 @@ before it failed only the busy-compaction race named under Known gaps.
 | Card pane (write path)   | passing | [card-pane.md](card-pane.md)               |
 | What needs a person      | passing | [attention.md](attention.md)               |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
+| Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
 
 ## Known gaps
 
