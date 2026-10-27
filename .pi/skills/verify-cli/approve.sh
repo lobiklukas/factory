@@ -8,13 +8,13 @@
 # with `APPROVAL_REQUIRED=sleep` and a faux command that is the gated one. It does not touch the
 # instance ./up.sh started, and it leaves nothing running. `./drive.sh` runs it as its last block.
 #
-#   ./approve.sh                   # API on :9320 (APPROVE_PORT overrides it)
+#   ./approve.sh                   # API on :9330 (APPROVE_PORT overrides it)
 #
 # Evidence: .verify/evidence/latest/cli/approve-*.txt (the raw panes) and approve.json.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${APPROVE_PORT:-9320}"
+PORT="${APPROVE_PORT:-9330}"
 API_URL="http://localhost:$PORT"
 RUN_DIR="$ROOT/.verify/run/cli-approve"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/cli"

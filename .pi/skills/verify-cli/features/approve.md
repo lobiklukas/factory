@@ -28,7 +28,7 @@ is recorded but whose follow-up could not be sent (`resumeFailed`) prints the de
 `error: <code>: the decision is recorded, but <session> was not resumed (…); retry with: factory
 approve <session> --id <request>` and exits non-zero — `--id`, because nothing is pending any more.
 
-**How the skill drives it.** `./approve.sh` owns its own API (`APPROVE_PORT`, default `:9320`) with
+**How the skill drives it.** `./approve.sh` owns its own API (`APPROVE_PORT`, default `:9330`) with
 `MODEL_BACKEND=faux`, `APPROVAL_REQUIRED=sleep`, `FAUX_COMMAND="sleep 1 && echo gated-ran"` and
 `FAUX_EVERY_TURN=true` (the faux agent retries the call on every turn), because a gate is a
 deployment setting and `./up.sh`'s instance must stay ungated for the plain `run` checks. `drive.sh`

@@ -216,7 +216,7 @@ check "and the command exits non-zero" \
 
 # --- approvals: a gated call parked, decided from the CLI, and resumed (LOB-53) ---------------------
 # The gate is a deployment setting, so the approval block owns its own API with
-# `APPROVAL_REQUIRED` set (`./approve.sh`, `APPROVE_PORT`, default :9320); this instance stays
+# `APPROVAL_REQUIRED` set (`./approve.sh`, `APPROVE_PORT`, default :9330); this instance stays
 # ungated so the run above is the plain faux turn. Its checks are in approve.json; the drive fails
 # when any of them does.
 # approve.sh scopes its evidence to `<dir>/cli` as this script does, so it is handed the parent of

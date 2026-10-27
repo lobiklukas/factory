@@ -40,8 +40,13 @@ pull request. Effect control plane, Pi Durable harness, Kubernetes sandboxes.
 - **Local first.** Docker, kind, and local processes only. Nothing is provisioned in Google Cloud
   until a task says so explicitly.
 - **Local Postgres is part of the gate.** `docker compose up -d --wait postgres` (host port 5442) before `bun run test`; the storage suite fails loudly rather than skipping when it is
-  down. On this machine the active docker context may be a stopped Docker Desktop while Colima
-  is running — use `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
+  down. Reach the test database over TCP, never through a Docker context: this machine can run
+  Docker Desktop and Colima at once, each with its own `factory-postgres-1`, and only the one that
+  publishes 5442 is the one tests connect to. `lsof -nP -iTCP:5442 -sTCP:LISTEN` names it. Create a
+  per-worktree database over that port
+  (`PGPASSWORD=factory createdb -h localhost -p 5442 -U factory factory_<slug>`, or the Bun SQL
+  one-liner in `docs/parallel-work.md` §1 when no Postgres client is installed), not with
+  `docker exec`.
 - **Gate every change** with `bun run format:check`, `build`, `lint`, `test`, `type-check`. The
   Effect diagnostics run with `denyWarnings: true`, so a warning fails the build.
 - **Work is tracked in Linear, not in the repo.** Project `Factory MVP` in

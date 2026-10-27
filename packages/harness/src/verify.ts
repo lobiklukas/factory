@@ -823,11 +823,32 @@ const decodeRecord = Schema.decodeUnknownOption(VerifyRecord);
 export const verifyCallsIn = (
   entries: readonly EntryRecord[],
 ): readonly (VerifyRecord | undefined)[] =>
+  timedVerifyCallsIn(entries).map((call) => call.record);
+
+/**
+ * One `verify` call as a log holds it: its decoded record, or `undefined` for a call that left none
+ * (`verifyCallsIn`), and `at`, the tool result's own timestamp (the harness clock, epoch ms) — what
+ * orders calls *across* logs, where entry order says nothing (LOB-80).
+ */
+export type TimedVerifyCall = {
+  readonly record: VerifyRecord | undefined;
+  readonly at: number;
+};
+
+/** `verifyCallsIn`, each call with when its result was written; oldest first. */
+export const timedVerifyCallsIn = (
+  entries: readonly EntryRecord[],
+): readonly TimedVerifyCall[] =>
   entries.flatMap((entry) => {
     const message = entry.model?.[0];
     if (message?.role !== "toolResult" || message.toolName !== VERIFY_TOOL)
       return [];
-    return [Option.getOrUndefined(decodeRecord(message.details))];
+    return [
+      {
+        record: Option.getOrUndefined(decodeRecord(message.details)),
+        at: message.timestamp,
+      },
+    ];
   });
 
 /**
@@ -846,6 +867,17 @@ export const verifyRecordsIn = (
 export const readVerifyRecords = (
   storage: Storage,
 ): Effect.Effect<readonly VerifyRecord[], Error> =>
+  Effect.map(readVerifyCalls(storage), (calls) =>
+    calls.flatMap((call) => (call.record === undefined ? [] : [call.record])),
+  );
+
+/**
+ * Every `verify` call in a session's log, read straight from its storage, oldest first — a call
+ * that left no record included (`timedVerifyCallsIn`).
+ */
+export const readVerifyCalls = (
+  storage: Storage,
+): Effect.Effect<readonly TimedVerifyCall[], Error> =>
   Effect.gen(function* () {
     const entries: EntryRecord[] = [];
     let cursor: Cursor | undefined;
@@ -863,7 +895,7 @@ export const readVerifyRecords = (
       if (cursor === undefined) break;
     }
     // Storage scans newest first.
-    return verifyRecordsIn(entries.reverse());
+    return timedVerifyCallsIn(entries.reverse());
   });
 
 /**

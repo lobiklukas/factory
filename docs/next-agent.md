@@ -108,9 +108,10 @@ command line it resolved.
 
 ### Constraints that will bite
 
-- **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). On this
-  machine the active docker context may be a stopped Docker Desktop while Colima runs:
-  `export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
+- **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). Reach
+  it over TCP, never through a Docker context: Docker Desktop and Colima can both run a
+  `factory-postgres-1` here, and `lsof -nP -iTCP:5442 -sTCP:LISTEN` names the one tests connect to.
+  Create per-worktree databases over that port (`docs/parallel-work.md`), not with `docker exec`.
 - **Gate every change:** `bun run format:check`, `build`, `lint`, `test`, `type-check` — all five,
   green, before you claim anything works. The Effect diagnostics run with `denyWarnings`, so a warning
   fails the build. `.verify/` is excluded from lint on purpose; `.pi/skills` is type-checked
@@ -135,8 +136,9 @@ command line it resolved.
   catches a SIGTERM mid-run).
 - **One writer per checkout.** If you fan out, use isolated subagents (`isolated: true` per item —
   isolation is on for this repo by `.omp/config.yml`) or separate `git worktree add` checkouts, and
-  give each parallel worktree its own database (`createdb factory_<slug>`) and port. A subagent spawned
-  _without_ `isolated: true` edits this checkout directly.
+  give each parallel worktree its own database, created over TCP on port 5442 (see
+  `docs/parallel-work.md` §1), and its own port. A subagent spawned _without_ `isolated: true` edits
+  this checkout directly.
 - **The verify skills share `.verify/run/api.pid`** and each starts its own API, so run them one at a
   time: `verify-api` on `:9200`, `verify-cli` on `:9300` (private tmux server), `verify-web` on `:9100`
   - `:3100`. `verify-api/degraded.sh` stops the local Postgres container and always restarts it.
