@@ -43,11 +43,19 @@ if [ ! -d "$SESSION_ROOT/.git" ]; then
   git -C "$SESSION_ROOT" push -q origin main
 fi
 
+# A second faux model for drive.ts's replay check (LOB-215): a replay onto `faux/faux-2` is a
+# different model with no key. The role table is the one lever a deployment has to publish a faux
+# model beside `faux/faux-1` (apps/api's ROLE_MODELS: every `faux/<id>` it names is served), and
+# `replay-target` is a role no session on this instance runs, so the row changes the catalog and
+# nothing else.
+ROLE_MODELS="replay-target=faux/faux-2"
+
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
+    ROLE_MODELS="$ROLE_MODELS" \
     SESSION_ROOT="$SESSION_ROOT" \
     SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-2000}" \
     MAX_REQUEST_BODY_BYTES="${MAX_REQUEST_BODY_BYTES:-1048576}" \
