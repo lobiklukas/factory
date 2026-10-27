@@ -305,6 +305,11 @@ describe("a run holding the docs skill writes documentation only", () => {
  * started in and the role it declares — and the two cases differ only in that profile. So the
  * refusal in one and the landed write in the other are the selection in `openSession`, and the
  * refusal is read out of the session's log.
+ *
+ * Since LOB-207 the stage is not *offered* `write`, `edit` or `verify` at all (the role's tool
+ * filter, `./loader`'s `resolveRole`), so a model that calls one anyway is answered by Pi Durable's
+ * `tool_unavailable` before any hook runs; the stage's own sentence for those three tools is the
+ * table in `policy.stage.test.ts`, and the hook is what a `bash` write meets here.
  */
 describe("a run in the specifying stage writes nothing", () => {
   const SPECIFYING_RUN: RunProfile = {
@@ -318,7 +323,7 @@ describe("a run in the specifying stage writes nothing", () => {
     skills: [{ name: "implement", body: "# Implement\n\nWrite code." }],
   };
 
-  it("refuses the write tool in specifying, naming the stage, and lets the same call write in building", async () => {
+  it("does not give specifying the write tool, and lets the same call write in building", async () => {
     const path = "stage-spec.md";
     const calls = [{ name: "write", args: { path, content: "spec" } }];
 
@@ -326,10 +331,7 @@ describe("a run in the specifying stage writes nothing", () => {
       await transcript(calls, false, SPECIFYING_RUN),
     );
     expect(specifying[0]?.isError).toBe(true);
-    expect(specifying[0]?.text).toContain("Tool call blocked");
-    expect(specifying[0]?.text).toContain(`write ${path} is refused`);
-    expect(specifying[0]?.text).toContain("read-only specifying stage");
-    expect(specifying[0]?.text).toContain('column "specifying"');
+    expect(specifying[0]?.text).toContain("Tool write is not available");
     expect(existsSync(join(worktree, path))).toBe(false);
 
     const building = toolResults(await transcript(calls, false, BUILDING_RUN));
@@ -337,7 +339,7 @@ describe("a run in the specifying stage writes nothing", () => {
     expect(readFileSync(join(worktree, path), "utf8")).toBe("spec");
   });
 
-  it("refuses an edit and a shell write, and still runs a shell read", async () => {
+  it("has no edit tool, refuses a shell write naming the stage, and still runs a shell read", async () => {
     mkdirSync(join(worktree, "src"), { recursive: true });
     writeFileSync(join(worktree, "src/stage.ts"), "export const a = 1;\n");
     const entries = await transcript(
@@ -358,10 +360,13 @@ describe("a run in the specifying stage writes nothing", () => {
 
     const results = toolResults(entries);
     expect(results.map((entry) => entry.isError)).toEqual([true, true, false]);
-    expect(results[0]?.text).toContain("edit src/stage.ts is refused");
+    expect(results[0]?.text).toContain("Tool edit is not available");
+    expect(results[1]?.text).toContain("Tool call blocked");
     expect(results[1]?.text).toContain(
       "redirecting output to stage-shell.txt is refused",
     );
+    expect(results[1]?.text).toContain("read-only specifying stage");
+    expect(results[1]?.text).toContain('column "specifying"');
     expect(results[2]?.text).toContain("export const a = 1;");
     expect(readFileSync(join(worktree, "src/stage.ts"), "utf8")).toBe(
       "export const a = 1;\n",

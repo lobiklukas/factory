@@ -1487,8 +1487,16 @@ export type StageRefusal = {
  * `verify` because what it runs is the worktree's own scripts (see `./verify`), which a read-only
  * stage has no change of its own to prove with. `read`, `ask` and `bash` stay: reading the code and
  * asking about it is the stage's whole job, and `bash` is judged by `stageBashRefusalOf`.
+ *
+ * The same set is what a read-only role is never *offered* (LOB-207, `./loader`'s `resolveRole`):
+ * `openSession` withholds these tools from the run's tool list, and the refusal here stays behind
+ * that as the second line, for a call to a tool the run should not have been given.
  */
-const STAGE_REFUSED_TOOLS = new Set(["write", "edit", "verify"]);
+export const STAGE_REFUSED_TOOLS: ReadonlySet<string> = new Set([
+  "write",
+  "edit",
+  "verify",
+]);
 
 /**
  * The commands a read-only stage's `bash` may run, each with the flags that make it write or run

@@ -12,6 +12,10 @@ Status reflects the last verified run: **2026-10-05**, API on `:9400`–`:9407`,
 The read-only stage (LOB-74) was added on **2026-10-27**, API on `:9500`–`:9508`: `./refusals.sh`
 **9/9 cases, 65 checks**, the ninth being `stage` (two runs, one per column, 14 checks).
 
+The role's model and tools (LOB-207) were added to the `stage` case on **2026-10-27**, API on
+`:9530`–`:9538`, booted with `ROLE_MODELS=specifier=faux/faux-spec`: **9/9 cases, 70 checks**, `stage`
+19 of them. The new checks are each run's model and the tools each run was offered.
+
 | Feature          | Status  | File                                   |
 | ---------------- | ------- | -------------------------------------- |
 | Refusals         | passing | [refusals.md](refusals.md)             |

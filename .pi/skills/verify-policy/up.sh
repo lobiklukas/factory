@@ -70,6 +70,7 @@ fi
     ALLOWED_ORIGINS="http://localhost:$API_PORT" \
     MODEL_BACKEND="faux" \
     FAUX_COMMAND="$FAUX_COMMAND" \
+    ROLE_MODELS="${ROLE_MODELS:-}" \
     SESSION_ROOT="$SESSION_ROOT" \
     SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-2000}" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
@@ -93,4 +94,5 @@ fi
 
 echo "api  http://localhost:$API_PORT  (pid $(cat "$RUN_DIR/api.pid"))"
 echo "faux command: $FAUX_COMMAND"
+echo "role models: ${ROLE_MODELS:-none}"
 echo "session root: $SESSION_ROOT (origin $(git -C "$SESSION_ROOT" remote get-url origin))"

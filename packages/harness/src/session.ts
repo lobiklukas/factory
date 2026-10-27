@@ -37,6 +37,7 @@ import {
 import { createRegistry } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
@@ -59,7 +60,12 @@ import {
   PrEvidence as PrEvidenceSchema,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
-import { skillsExtension, type RunProfile } from "./loader";
+import {
+  resolveRole,
+  skillsExtension,
+  type RoleModels,
+  type RunProfile,
+} from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
@@ -101,7 +107,6 @@ import {
   DOCS_SKILL,
   docsPolicy,
   policyExtension,
-  readOnlyStageOf,
   readOnlyStagePolicy,
   type ApprovalAsker,
   type SessionPolicy,
@@ -252,7 +257,16 @@ export const attempt = <A>(
 
 export type OpenSessionOptions = {
   readonly storage: Storage;
+  /**
+   * The deployment's model: what a run talks to unless its column's role has a row in `roles`, and
+   * what a session with no card (a scratch session, a fork, a replay) always talks to.
+   */
   readonly model: ModelAccess;
+  /**
+   * The deployment's role → model table (B6, LOB-207, `./loader`'s `RoleModels`), already resolved
+   * against the catalog `model` holds. Absent: every run talks to `model`.
+   */
+  readonly roles?: RoleModels;
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
   /**
@@ -342,6 +356,10 @@ export const openSession = (
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
+    // What the run's role is (B6, LOB-207): its model, the tools it is not offered, and the
+    // read-only stage it makes the run, all from one resolution of the column's role.
+    const role = resolveRole(options.run, options.model, options.roles);
+    const model = role.model;
     // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
     // the whole code extension — tools and sections — renders after the run's own instructions.
     const skills = options.run?.skills ?? [];
@@ -384,8 +402,9 @@ export const openSession = (
     // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
     // `verify`, and any `bash` that is not a known read command. The stage is the run's
     // column's, resolved from the same profile, so a session cannot be opened in `specifying` and
-    // without the rule either.
-    const stage = readOnlyStageOf(options.run);
+    // without the rule either. The refusal stays even though the stage is not offered those three
+    // tools (below): it is what still holds for a call to a tool the run should not have had.
+    const stage = role.stage;
     registry.install(
       policyExtension(
         stage === undefined
@@ -405,7 +424,7 @@ export const openSession = (
       HarnessRuntime.open(
         options.storage,
         {
-          models: options.model.models,
+          models: model.models,
           registry,
           env: (target) =>
             new NodeExecutionEnv({
@@ -417,20 +436,32 @@ export const openSession = (
             // Long sessions compact (B4). The thresholds follow the model's context window
             // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
             // never, and a large one keeps pi-durable's pinned defaults.
-            compaction: compactionPolicyFor(options.model.contextWindow),
+            compaction: compactionPolicyFor(model.contextWindow),
           },
         },
         BACKGROUND_CONTEXT,
       ),
     );
 
+    // The tools the role is not offered, as the registrations the registry holds: Pi Durable's
+    // filter takes tools, and stores their names in the conversation's `pi.agent`.
+    const withheld = registry
+      .snapshot()
+      .tools()
+      .map(({ tool }) => tool)
+      .filter((tool) => role.withheldTools.has(tool.name));
+    // The agent is written when the root is created, and only then: the role's model and its tool
+    // filter are pinned to the run when its session first opens, so a change to the deployment's
+    // role table reaches the next run rather than one in flight, and a replay keeps the model it
+    // was replayed onto.
     const root = yield* attempt("open root conversation", () =>
       harness.root(BACKGROUND_CONTEXT, {
         agent: {
           model: {
-            provider: options.model.provider,
-            modelId: options.model.modelId,
+            provider: model.provider,
+            modelId: model.modelId,
           },
+          ...(withheld.length === 0 ? {} : { tools: { remove: withheld } }),
           cwd: options.cwd,
         },
       }),
@@ -1664,6 +1695,27 @@ export const readPromptSections = (
       }
     }
     return shown;
+  });
+
+/**
+ * The tools a session's requests offer the model now, by name, folded from the log's system
+ * messages the way pi-ai folds them (`toolsAdded`, then `toolsRemoved`, in order).
+ *
+ * What the run was actually offered, read from the log rather than from the registry or the role
+ * that chose it (LOB-207): a role whose tool filter stopped reaching `openSession` shows up here as
+ * a write tool the run was offered, whatever the resolution says it should have been.
+ */
+export const readOfferedTools = (
+  storage: Storage,
+): Effect.Effect<readonly string[], SessionError> =>
+  Effect.gen(function* () {
+    const records = yield* readActiveEntries(storage);
+    const system = records.flatMap((record) =>
+      record.kind === PROMPT_ENTRY_KIND
+        ? (record.model ?? []).filter((message) => message.role === "system")
+        : [],
+    );
+    return getCurrentTools(system).map((tool) => tool.name);
   });
 
 export type { Conversation, ConversationView, Harness, Storage };

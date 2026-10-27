@@ -76,8 +76,19 @@ rule into the session's `ToolTask` hook from the run's column and role, and `wri
 command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
 and the column. The allowlist reads the command's text, so it stops the accident rather than a
 determined agent (D15). Keyed by role rather than by skill or column name, so a renamed column keeps the rule and an
-edited skill body cannot drop it. The model half of the role, and any other role's tool policy, is
-LOB-207.
+edited skill body cannot drop it.
+
+Built (LOB-207): the role resolves to both halves in one function, `resolveRole` in
+`packages/harness/src/loader.ts`, and `openSession` takes the run's model, its withheld tools and its
+read-only stage from that one answer. **The model** is the deployment's role table, `ROLE_MODELS`
+(`specifier=anthropic/claude-haiku-4-5,reviewer=…`), resolved against the process's model catalog at
+boot: a malformed row or a model the process cannot serve fails the boot, and a role with no row (or
+a session with no card) runs the deployment's model. It is deployment config rather than a column of
+the board definition because a model id is a fact about a deployment and a board is not. The model is
+pinned into the run's root conversation when its session first opens, so an edit reaches the next run.
+**The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
+`edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), with LOB-74's hook refusal behind it as the second
+line. `READ_ONLY_ROLES` stays the one table of which roles read only.
 
 ## B7 — Asking a human happens on the task, never in the transcript
 
