@@ -19,6 +19,12 @@ const PROMPT = "Run echo faux-ok and tell me what it printed.";
  * first — never anything this browser remembers (LOB-75 deleted the registry
  * that stood in for it), so a reload or a second browser shows the same list.
  * A list that failed to load says so instead of passing for an empty one.
+ *
+ * Below `md` the list and the pane take turns rather than sharing the width (LOB-210): a fixed
+ * 16rem column beside the rail left a 390 px phone an 86 px pane, so the header's actions were cut
+ * off and the composer wrapped one character per line. There the list is the whole of `/sessions`,
+ * and a session's route shows only its pane, whose header links back here. From `md` up nothing
+ * changes: the list stays beside the pane, so switching sessions never costs a navigation.
  */
 export const SessionSidebar = () => {
   const result = useAtomValue(sessionListAtom);
@@ -31,7 +37,12 @@ export const SessionSidebar = () => {
   const navigate = useNavigate();
   const start = useAtomSet(startSessionAtom, { mode: "promise" });
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-sidebar">
+    <aside
+      className={cn(
+        "flex-col border-border bg-sidebar md:flex md:w-64 md:flex-none md:border-r",
+        sessionId === undefined ? "flex min-w-0 flex-1" : "hidden",
+      )}
+    >
       <div className="border-b border-border p-3">
         <Button
           className="w-full justify-start"

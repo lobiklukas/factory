@@ -118,6 +118,8 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
 - `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png` — the attention
   view of the seeded board with nothing waiting, with its three rows, the card a row opened, and
   every board's view
+- `session-pane-narrow.png`, `fork-lineage-narrow.png` — a session's pane at 390 px, and the session
+  list its header's back link opened there (LOB-210, `features/fork-lineage.md`)
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
   transcript and mode label, console errors, and HTTP responses ≥ 400
 

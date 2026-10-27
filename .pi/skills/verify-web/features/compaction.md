@@ -185,11 +185,12 @@ alone when a reading reports no cost, and the drive asserts the absence of`$` ra
   nothing new, and the admission revision is always published. There is no clock in the reducer to
   bound it, though — a future change could replace the identity comparison with "the task was seen at
   least once", at the cost of hanging whenever the whole task life fits between two folded events.
-- **The reserved height is a desktop-and-tablet guarantee.** At 390px the dashboard's three-column
-  shell leaves the pane a ~60px transcript column, so the verdict's copy stacks nearly a word per line
-  and the tail grows no matter what this box reserves. The drive still asserts no horizontal overflow
-  there, and records the measured height rather than asserting it (`observed.shortNarrow`). The
-  squeeze is the shell's and predates this control.
+- **The reserved height is a desktop-and-tablet guarantee.** It is a claim about the pending state
+  and the verdict sharing one box, and both are sampled only at the drive's own widths. At 390px the
+  pane is the width beside the rail (~340 px since LOB-210; it was a ~60px column before, where the
+  verdict stacked nearly a word per line), the verdict's copy reflows, and the drive asserts no
+  horizontal overflow there and records the measured height rather than asserting it
+  (`observed.shortNarrow`: 64 px on 2026-10-27, 264 px before LOB-210).
 - The drive's console-error list carries one expected entry: the injected 500
   (`Failed to load resource: … 500`). It is the scenario, not a defect.
 - Nothing here is a compaction _policy_: automatic compaction at a threshold is the harness's

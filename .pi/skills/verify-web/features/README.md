@@ -3,12 +3,14 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9530` / web `:3530` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 91/91 required checks passed,
-and `thread.sh` 15/15 on API `:9531` / web `:3531`, from the `agent/LOB-239` worktree against its own
-database on 5442). The one console error in `drive.mjs` is the compaction block's injected 500
-([compaction.md](compaction.md)). Two runs before it failed only the busy-compaction race named under
-Known gaps.
+Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9560` / web `:3560` —
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 97/97 required checks passed,
+from the `agent/LOB-210` worktree against its own database on 5442, which adds LOB-210's five
+390 px shell checks ([fork-lineage.md](fork-lineage.md)) and the refused id's back link
+([routing.md](routing.md)), every one of which fails against the build before it; `thread.sh` last passed 15/15 on the
+`agent/LOB-239` worktree). The one console error in `drive.mjs` is the compaction block's injected
+500 ([compaction.md](compaction.md)). The run before it failed only the busy-compaction race named
+under Known gaps.
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
