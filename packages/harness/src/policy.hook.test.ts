@@ -308,8 +308,8 @@ describe("a run holding the docs skill writes documentation only", () => {
  *
  * Since LOB-207 the stage is not *offered* `write`, `edit` or `verify` at all (the role's tool
  * filter, `./loader`'s `resolveRole`), so a model that calls one anyway is answered by Pi Durable's
- * `tool_unavailable` before any hook runs; the stage's own sentence for those three tools is the
- * table in `policy.stage.test.ts`, and the hook is what a `bash` write meets here.
+ * `tool_unavailable` before any hook runs. The hook is what a `bash` write meets, and what a
+ * `write` or an `edit` meets on a root whose tool list still offers them (the last case here).
  */
 describe("a run in the specifying stage writes nothing", () => {
   const SPECIFYING_RUN: RunProfile = {
@@ -372,5 +372,59 @@ describe("a run in the specifying stage writes nothing", () => {
       "export const a = 1;\n",
     );
     expect(existsSync(join(worktree, "stage-shell.txt"))).toBe(false);
+  });
+
+  /**
+   * The filter is pinned with the root, so a root that still offers every tool — one created before
+   * the filter existed, a run in flight across the deploy that brought it, or one whose tool list
+   * was configured since — reaches the stage's hook with a `write` or an `edit`. That is the hook's
+   * own refusal, end to end, in the stage's words.
+   */
+  it("refuses write and edit by the stage's own rule on a root that still offers them", async () => {
+    mkdirSync(join(worktree, "src"), { recursive: true });
+    writeFileSync(join(worktree, "src/pinned.ts"), "export const b = 1;\n");
+    const path = "stage-pinned.md";
+    const storage = new MemoryStorage();
+    const { harness, root } = await Effect.runPromise(
+      openSession({
+        storage,
+        model: scripted([
+          { name: "write", args: { path, content: "spec" } },
+          {
+            name: "edit",
+            args: {
+              path: "src/pinned.ts",
+              edits: [{ oldText: "b = 1", newText: "b = 2" }],
+            },
+          },
+        ]),
+        cwd: worktree,
+        policy,
+        run: SPECIFYING_RUN,
+      }),
+    );
+    // What a root pinned without the filter holds: every tool, which `tools: null` restores.
+    await root.configure({ tools: null }, BACKGROUND_CONTEXT);
+    const submitted = await Effect.runPromise(
+      submitMessage(root, { content: "go", requestId: "pinned" }),
+    );
+    expect((await submitted.submission.wait(BACKGROUND_CONTEXT)).status).toBe(
+      "done",
+    );
+    const view = await root.viewState(BACKGROUND_CONTEXT);
+    const results = toolResults(projectView(view.value).entries);
+    view.dispose();
+    await Effect.runPromise(closeHarness(harness));
+
+    expect(results.map((entry) => entry.isError)).toEqual([true, true]);
+    expect(results[0]?.text).toContain("Tool call blocked");
+    expect(results[0]?.text).toContain(`write ${path} is refused`);
+    expect(results[0]?.text).toContain("read-only specifying stage");
+    expect(results[0]?.text).toContain('column "specifying"');
+    expect(results[1]?.text).toContain("edit src/pinned.ts is refused");
+    expect(existsSync(join(worktree, path))).toBe(false);
+    expect(readFileSync(join(worktree, "src/pinned.ts"), "utf8")).toBe(
+      "export const b = 1;\n",
+    );
   });
 });

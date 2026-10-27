@@ -26,6 +26,7 @@ import type {
   Tx,
 } from "@earendil-works/pi-durable";
 import {
+  AgentDoc,
   ConversationBusy,
   defineDoc,
   defineEntry,
@@ -66,7 +67,11 @@ import {
   type RoleModels,
   type RunProfile,
 } from "./loader";
-import { compactionPolicyFor, type ModelAccess } from "./models";
+import {
+  compactionPolicyFor,
+  modelAccessFor,
+  type ModelAccess,
+} from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
 import {
@@ -328,6 +333,12 @@ export type OpenSessionOptions = {
 export type OpenSession = {
   readonly harness: Harness;
   readonly root: Conversation;
+  /**
+   * The model the root conversation is pinned to, which its requests go to and its compaction
+   * thresholds follow: the role's (or the deployment's) when this open created the root, and the
+   * one the root was created with on every later open, whatever the role table says now (LOB-207).
+   */
+  readonly model: ModelAccess;
 };
 
 /**
@@ -359,7 +370,15 @@ export const openSession = (
     // What the run's role is (B6, LOB-207): its model, the tools it is not offered, and the
     // read-only stage it makes the run, all from one resolution of the column's role.
     const role = resolveRole(options.run, options.model, options.roles);
-    const model = role.model;
+    // The agent is pinned when the root is created, and only then (`harness.root` below writes it
+    // into a root that does not exist yet), so a reopened run keeps talking to the model it started
+    // on. Its compaction thresholds have to follow that same model rather than whatever the role
+    // table — or a replay's target — resolves to today, so the pinned one is read first.
+    const pinned = yield* readPinnedModel(options.storage);
+    const model =
+      pinned === undefined
+        ? role.model
+        : pinnedAccess(role.model, pinned.provider, pinned.modelId);
     // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
     // the whole code extension — tools and sections — renders after the run's own instructions.
     const skills = options.run?.skills ?? [];
@@ -403,7 +422,9 @@ export const openSession = (
     // `verify`, and any `bash` that is not a known read command. The stage is the run's
     // column's, resolved from the same profile, so a session cannot be opened in `specifying` and
     // without the rule either. The refusal stays even though the stage is not offered those three
-    // tools (below): it is what still holds for a call to a tool the run should not have had.
+    // tools (below), because the filter is pinned with the root: a root created before it existed,
+    // or one whose tool list was configured since, offers `write` and `edit` again, and the hook is
+    // what refuses them there (`policy.hook.test.ts`). Every other call meets `tool_unavailable`.
     const stage = role.stage;
     registry.install(
       policyExtension(
@@ -435,7 +456,8 @@ export const openSession = (
             progress: SESSION_PROGRESS,
             // Long sessions compact (B4). The thresholds follow the model's context window
             // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
-            // never, and a large one keeps pi-durable's pinned defaults.
+            // never, and a large one keeps pi-durable's pinned defaults. `model` is the root's
+            // pinned model on a reopen, so the window is the one the requests actually go to.
             compaction: compactionPolicyFor(model.contextWindow),
           },
         },
@@ -453,7 +475,9 @@ export const openSession = (
     // The agent is written when the root is created, and only then: the role's model and its tool
     // filter are pinned to the run when its session first opens, so a change to the deployment's
     // role table reaches the next run rather than one in flight, and a replay keeps the model it
-    // was replayed onto.
+    // was replayed onto. (Under the faux backend the catalog is only the ids the process was booted
+    // with, so a run pinned to a `faux/*` id the current `ROLE_MODELS` no longer names finds no
+    // model to send to: docs/board.md B6.)
     const root = yield* attempt("open root conversation", () =>
       harness.root(BACKGROUND_CONTEXT, {
         agent: {
@@ -480,8 +504,48 @@ export const openSession = (
       dropped: pagesPrompt.dropped,
     });
 
-    return { harness, root };
+    return { harness, root, model };
   });
+
+/**
+ * The model the session's root conversation is pinned to, read from its committed `pi.agent`; absent
+ * for a log whose root does not exist yet, which is the open that creates it.
+ */
+const readPinnedModel = (
+  storage: Storage,
+): Effect.Effect<
+  { readonly provider: string; readonly modelId: string } | undefined,
+  SessionError
+> =>
+  Effect.gen(function* () {
+    const agent = yield* readDocument(storage, AgentDoc.definition.kind);
+    const model = agent?.["model"];
+    if (typeof model !== "object" || model === null || Array.isArray(model)) {
+      return undefined;
+    }
+    const { provider, modelId } = model;
+    return typeof provider === "string" && typeof modelId === "string"
+      ? { provider, modelId }
+      : undefined;
+  });
+
+/**
+ * The access for the model a root is pinned to, from the catalog `access` was built with. A model
+ * the catalog no longer serves keeps its name — the request fails with Pi Durable's "no model"
+ * rather than silently going to another one — and gets the package's own compaction defaults,
+ * because there is no window to derive thresholds from.
+ */
+const pinnedAccess = (
+  access: ModelAccess,
+  provider: string,
+  modelId: string,
+): ModelAccess =>
+  modelAccessFor(access, `${provider}/${modelId}`) ?? {
+    ...access,
+    provider,
+    modelId,
+    contextWindow: 0,
+  };
 
 /** What the `pages` section came to when a session opened, as the log records it (LOB-205). */
 export type PagePromptRecord = {
@@ -1094,7 +1158,7 @@ export const submissionStanding = (
  * is scanned for, to tell one that is over from one that never was.
  */
 export const withdrawMessage = (
-  open: OpenSession,
+  open: Pick<OpenSession, "harness" | "root">,
   storage: Storage,
   submissionId: string,
 ): Effect.Effect<WithdrawOutcome, SessionError> =>

@@ -1490,7 +1490,8 @@ export type StageRefusal = {
  *
  * The same set is what a read-only role is never *offered* (LOB-207, `./loader`'s `resolveRole`):
  * `openSession` withholds these tools from the run's tool list, and the refusal here stays behind
- * that as the second line, for a call to a tool the run should not have been given.
+ * that for a root whose tool list still offers them: one pinned before the filter existed, or one
+configured since. A run whose root carries the filter meets Pi Durable's `tool_unavailable` first.
  */
 export const STAGE_REFUSED_TOOLS: ReadonlySet<string> = new Set([
   "write",

@@ -17,7 +17,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { MemoryStorage } from "@earendil-works/pi-durable";
+import { MemoryStorage, type Storage } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
@@ -35,7 +35,12 @@ import {
   type RoleModels,
   type RunProfile,
 } from "./loader";
-import { createFauxModelAccess, modelKey, type ModelAccess } from "./models";
+import {
+  createFauxModelAccess,
+  modelAccessFor,
+  modelKey,
+  type ModelAccess,
+} from "./models";
 import { STAGE_REFUSED_TOOLS } from "./policy";
 import {
   closeHarness,
@@ -361,5 +366,91 @@ describe("two roles in one deployment", () => {
       building.entries.find((entry) => entry.kind === "toolResult")?.isError,
     ).toBe(false);
     expect(existsSync(join(building.cwd, "spec.md"))).toBe(true);
+  });
+});
+
+/** The same log, opened again by a later owner: `close` is the harness's, the log outlives it. */
+const sharedLog = (storage: MemoryStorage): Storage =>
+  new Proxy(storage, {
+    get: (target, key) => {
+      if (key === "close") return () => Promise.resolve();
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+/**
+ * A deployment whose two models have different windows, so a compaction policy derived from the
+ * wrong one is visible: `faux-1` keeps pi-ai's default, `faux-small` has 8k. Every answer is `done`.
+ */
+const windowed = (): ModelAccess => {
+  const models = createModels();
+  const faux = fauxProvider({
+    models: [{ id: "faux-1" }, { id: "faux-small", contextWindow: 8192 }],
+  });
+  models.setProvider(faux.provider);
+  const step: FauxResponseFactory = () => {
+    faux.appendResponses([step]);
+    return fauxAssistantMessage("done");
+  };
+  faux.setResponses([step]);
+  return {
+    backend: "faux",
+    models,
+    provider: "faux",
+    modelId: "faux-1",
+    contextWindow: faux.models[0].contextWindow,
+  };
+};
+
+describe("a reopened run", () => {
+  it("keeps the model its root was pinned to, and that model's window, whatever the table says now", async () => {
+    const access = windowed();
+    const small = modelAccessFor(access, "faux/faux-small");
+    if (small === undefined) throw new Error("the catalog serves faux-small");
+    const log = new MemoryStorage();
+    const cwd = mkdtempSync(join(tmpdir(), "factory-roles-reopen-"));
+    const profile = run("specifying", "specifier");
+
+    const turn = (table: RoleModels) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const opened = yield* openSession({
+            storage: sharedLog(log),
+            model: access,
+            roles: table,
+            cwd,
+            run: profile,
+          });
+          const submitted = yield* submitMessage(opened.root, {
+            content: "go",
+          });
+          yield* Effect.promise(() => submitted.submission.wait(context));
+          const pinned = yield* Effect.promise(() =>
+            opened.root.agent(context),
+          );
+          yield* closeHarness(opened.harness);
+          return { model: opened.model, pinned: pinned.model };
+        }),
+      );
+
+    // The first open creates the root on the role's row.
+    const first = await turn(new Map([["specifier", small]]));
+    expect(modelKey(first.model)).toBe("faux/faux-small");
+    expect(first.model.contextWindow).toBe(8192);
+
+    // The row is gone by the time the run is reopened: the root still talks to faux-small, and the
+    // compaction thresholds are derived from faux-small's 8k, not from faux-1's window.
+    const second = await turn(NO_ROLE_MODELS);
+    expect(second.pinned).toEqual({ provider: "faux", modelId: "faux-small" });
+    expect(modelKey(second.model)).toBe("faux/faux-small");
+    expect(second.model.contextWindow).toBe(8192);
+    expect(access.contextWindow).not.toBe(8192);
+
+    // Every request of both turns went to faux-small, as the run's own usage says.
+    const read = await Effect.runPromise(readSessionLog(log));
+    expect(read.usage.models.map((entry) => entry.key)).toEqual([
+      "faux/faux-small",
+    ]);
   });
 });

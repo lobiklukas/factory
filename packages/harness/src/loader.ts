@@ -237,7 +237,8 @@ export type RoleResolution = {
   /**
    * Tool names the run is not offered at all. `openSession` removes them from the run's tool list
    * (`AgentChange.tools`), so the model never sees them; a call it makes anyway is answered
-   * `tool_unavailable` by Pi Durable, and the stage's hook refusal stands behind that.
+   * `tool_unavailable` by Pi Durable. The stage's hook refusal is what holds on a root whose tool
+   * list still offers them (pinned before the filter, or configured since).
    */
   readonly withheldTools: ReadonlySet<string>;
   /** The read-only stage the role makes the run (LOB-74), when it is one. */

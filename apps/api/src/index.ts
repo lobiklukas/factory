@@ -165,7 +165,8 @@ const ModelConfig = Config.all({
  * row, like a session with no card, runs the backend's own model. It is resolved against the
  * backend's catalog at boot (`resolveRoleModels`), so a malformed row or a model the process cannot
  * serve fails the boot rather than a run. Under the faux backend every `faux/<id>` it names is
- * published beside the default, which is how two roles run two models with no key.
+ * published beside the default, which is how two roles run two models with no key — and only those,
+ * so under faux a row dropped while a run is pinned to it strands that run (docs/board.md B6).
  */
 const RoleModelsConfig = Config.String("ROLE_MODELS").pipe(
   Config.withDefault(""),
