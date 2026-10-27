@@ -1,11 +1,12 @@
 /* oxlint-disable effecttsgo/process-env effecttsgo/process-env-in-effect */
 /* oxlint-disable effecttsgo/prefer-schema-over-json */
 /**
- * Inbound trigger routes (LOB-188): two adapters over one seam.
+ * Inbound trigger routes (LOB-188): three adapters over one seam.
  *
- * `POST /webhooks/linear` is the Linear adapter — Linear's own HMAC header and payload — and
+ * `POST /webhooks/linear` is the Linear adapter — Linear's own HMAC header and payload —
+ * `POST /webhooks/sentry` the Sentry receiver (LOB-81, `@repo/core/Sentry`), and
  * `POST /webhooks/generic` is the plain inbound webhook: any sender that can sign a body and name
- * a label. Both do the same four things before the seam sees a delivery, in this order because each
+ * a label. All three do the same things before the seam sees a delivery, in this order because each
  * one is cheaper than the next and refuses more:
  *
  * 1. **Refuse an oversized body** before it is parsed or written down. The server-wide cap (1 MiB,
@@ -13,7 +14,13 @@
  *    what protects the delivery store and the session queue, and answering it here is what keeps a
  *    huge body from creating a `webhook_deliveries` row.
  * 2. **Verify the signature.** A wrong or missing one is `401` and writes nothing.
- * 3. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
+ * 3. **Take a token from the route's rate cap**, when the adapter has one (Sentry's: an alert storm
+ *    is a burst of *signed* deliveries, each of which may open a session). It is counted after the
+ *    signature, so a caller without the secret cannot spend the budget an honest alert needs, and a
+ *    delivery past it is `429 rate-limited` with `Retry-After` — typed, never a `500`, and nothing
+ *    recorded. The cap is per process (`RateLimiter` over its memory store): it bounds how fast one
+ *    process opens work, and unlike the dedupe it is not a fact a restart has to keep.
+ * 4. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
  *    cannot address: a generic body with no request id or no label, or a Linear issue body with no
  *    issue id (any other Linear entity is answered and skipped, id or not). A generic body that
  *    names a lifecycle action (`push`, `schedule`) is `400` too: its `action` is whatever the
@@ -21,14 +28,21 @@
  *    (LOB-235). The adapter names the delivery's idempotency key here and nothing else about it:
  *    the generic sender supplies its own, and the Linear adapter derives one from the issue
  *    (LOB-164), because which deliveries are the same work is a fact about the sender.
- * 4. **Delegate.** Everything about replays, refusals, mapping and sessions is
+ * 5. **Delegate.** Everything about replays, refusals, mapping and sessions is
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip. The one
  *    outcome the route translates is a replay still `received` — work claimed with no outcome
  *    yet — which is `503 in-progress` rather than `200`, so the sender keeps retrying (LOB-216).
  *
  * The signature scheme is shared (`hmac-sha256` over the raw body, hex, in a configurable header)
  * because that is what Linear already does; an adapter whose provider signs differently brings its
- * own check, which is what Slack's timestamped signature does in `@repo/core/Slack` (LOB-191).
+ * own check, which is what Slack's timestamped signature does in `@repo/core/Slack` (LOB-191). Sentry
+ * signs the shared way, but its check is `@repo/core`'s typed `verifySentrySignature`, so the logged
+ * refusal says which of "missing" and "wrong" it was.
+ *
+ * **A refusal is logged; its payload is not.** Every answer before the seam (`401`, `413`, `429`)
+ * writes one warning naming the route, the code, the body's size and the delivery header — never
+ * the body, which on a `401` is a stranger's unauthenticated text and on any route may be an
+ * alert's stack trace and user data.
  *
  * **A route with no secret refuses every delivery.** An unset secret used to mean "accept", which
  * was harmless while `/webhooks/linear` recorded everything as `skipped`; now that a delivery can
@@ -36,10 +50,16 @@
  * So the secret is configuration, not a default: `503` names the missing variable, and a
  * deployment that wants the route sets it.
  */
-import { Effect, Layer, Schema } from "effect";
+import { Duration, Effect, Layer, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { RateLimiter } from "effect/persistence";
 import {
   linearDeliveryFor,
+  SENTRY_REQUEST_ID_HEADER,
+  SENTRY_RESOURCE_HEADER,
+  SENTRY_SIGNATURE_HEADER,
+  sentryDelivery,
+  verifySentrySignature,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -73,22 +93,55 @@ const DEFAULT_SECRET_HEADER = "x-trigger-signature";
 /** Where a generic sender puts the delivery's idempotency key, when it is not in the body. */
 const DEFAULT_DELIVERY_HEADER = "x-trigger-delivery";
 
+/** A signature check's answer: `ok`, or the reason it is not, which the refusal log names. */
+type SignatureVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly refusal: string };
+
 const verifySignature = (
   raw: string,
   signature: string | undefined,
   secret: string,
-): boolean => {
-  if (!signature) return false;
+): SignatureVerdict => {
+  if (!signature) return { ok: false, refusal: "missing-signature" };
   const expected = createHmac("sha256", secret).update(raw).digest("hex");
   try {
     return timingSafeEqual(
       Buffer.from(expected, "hex"),
       Buffer.from(signature, "hex"),
-    );
+    )
+      ? { ok: true }
+      : { ok: false, refusal: "bad-signature" };
   } catch {
-    return false;
+    return { ok: false, refusal: "bad-signature" };
   }
 };
+
+/** The default cap on Sentry deliveries one process admits: this many per window. */
+const DEFAULT_SENTRY_RATE_LIMIT = 20;
+
+/** The default window the Sentry cap counts over, in seconds. */
+const DEFAULT_SENTRY_RATE_WINDOW_S = 60;
+
+/** A positive integer from the environment, or the default when it is unset or not one. */
+const positiveFromEnv = (name: string, fallback: number): number => {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+};
+
+/**
+ * How much of a request header a refusal log may carry. The header is the sender's text, so it is
+ * cut and stripped of control characters: a log line is one line, whoever wrote the header.
+ */
+const MAX_LOGGED_HEADER_CHARS = 128;
+
+const loggable = (value: string | undefined): string =>
+  value === undefined
+    ? "none"
+    : Array.from(value.slice(0, MAX_LOGGED_HEADER_CHARS), (char) => {
+        const code = char.charCodeAt(0);
+        return code < 0x20 || code === 0x7f ? "?" : char;
+      }).join("");
 
 const parseJson = (raw: string): Effect.Effect<unknown> =>
   // oxlint-disable-next-line effecttsgo(prefer-schema-over-json)
@@ -246,14 +299,47 @@ type Adapter = {
   ) => TriggerDelivery | Refusal;
   /** The variable the missing-secret refusal names, so an operator knows what to set. */
   readonly secretVariable: string;
+  /** The route's path, which the refusal log names. */
+  readonly route: string;
+  /** The header naming one delivery, which the refusal log carries in place of the body. */
+  readonly deliveryHeader: string;
+  /**
+   * The adapter's own signature check, when its provider's is typed in `@repo/core`; the shared
+   * hex HMAC over the raw body otherwise.
+   */
+  readonly verify?: (
+    raw: string,
+    signature: string | undefined,
+    secret: string,
+  ) => SignatureVerdict;
+  /**
+   * The route's rate cap: at most `limit` signed deliveries per `windowSeconds` in this process.
+   * Absent is uncapped, which is what the Linear and generic routes are today.
+   */
+  readonly rateCap?: {
+    readonly limit: number;
+    readonly windowSeconds: number;
+  };
 };
 
 const handle = (adapter: () => Adapter) =>
   Effect.gen(function* () {
     const config = adapter();
     const triggers = yield* TriggerService;
+    const limiter = yield* RateLimiter.RateLimiter;
     const req = yield* HttpServerRequest.HttpServerRequest;
     const raw = yield* req.text;
+    const size = Buffer.byteLength(raw, "utf8");
+
+    // The one record a refusal leaves: what was refused and why, never what it said.
+    const logRefusal = (code: string) =>
+      Effect.logWarning(
+        `webhook ${config.route}: refused ${code} (delivery ${loggable(
+          req.headers[config.deliveryHeader.toLowerCase()] as
+            | string
+            | undefined,
+        )}, ${size} bytes)`,
+      );
 
     const secret = config.secret ?? "";
     if (secret === "") {
@@ -272,8 +358,8 @@ const handle = (adapter: () => Adapter) =>
     );
     const limit =
       Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_MAX_BODY_BYTES;
-    const size = Buffer.byteLength(raw, "utf8");
     if (size > limit) {
+      yield* logRefusal("body-too-large");
       return HttpServerResponse.setStatus(
         HttpServerResponse.jsonUnsafe({
           ok: false,
@@ -287,17 +373,88 @@ const handle = (adapter: () => Adapter) =>
     // Header names are case-insensitive, and the incoming map is lowercase; a configured
     // `X-Trigger-Signature` must not turn every signed delivery into a 401.
     const signatureHeader = config.signatureHeader.toLowerCase();
-    if (
-      !verifySignature(
-        raw,
-        req.headers[signatureHeader] as string | undefined,
-        secret,
-      )
-    ) {
+    const verdict = (config.verify ?? verifySignature)(
+      raw,
+      req.headers[signatureHeader] as string | undefined,
+      secret,
+    );
+    if (!verdict.ok) {
+      yield* logRefusal(verdict.refusal);
       return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe({ ok: false, error: "bad signature" }),
+        HttpServerResponse.jsonUnsafe({
+          ok: false,
+          error: "bad signature",
+          code: verdict.refusal,
+        }),
         401,
       );
+    }
+
+    // The rate cap, on signed deliveries only. One key per route: the cap bounds how fast this
+    // process lets the route open work, whoever the sender says it is. A token is spent before the
+    // body is parsed, so a burst of malformed-but-signed bodies is capped too.
+    if (config.rateCap !== undefined) {
+      const { limit: perWindow, windowSeconds } = config.rateCap;
+      const admitted = yield* limiter
+        .consume({
+          algorithm: "fixed-window",
+          onExceeded: "fail",
+          key: `webhook:${config.route}`,
+          limit: perWindow,
+          window: Duration.seconds(windowSeconds),
+        })
+        .pipe(
+          Effect.as({ verdict: "admitted" as const }),
+          Effect.catchTag("RateLimiterError", (error) =>
+            Effect.succeed(
+              error.reason._tag === "RateLimitExceeded"
+                ? {
+                    verdict: "exceeded" as const,
+                    retryAfterSeconds: Math.max(
+                      1,
+                      Math.ceil(Duration.toSeconds(error.reason.retryAfter)),
+                    ),
+                  }
+                : {
+                    verdict: "unavailable" as const,
+                    message: error.message,
+                  },
+            ),
+          ),
+        );
+      if (admitted.verdict === "unavailable") {
+        // The cap's store did not answer. The memory store cannot fail; a shared one could, and the
+        // honest answer then is "not now", not a delivery admitted past a cap nobody counted.
+        yield* logRefusal("rate-cap-unavailable");
+        return HttpServerResponse.jsonUnsafe(
+          {
+            ok: false,
+            code: "rate-cap-unavailable",
+            error: `the rate cap could not be read: ${admitted.message}`,
+          },
+          {
+            status: 503,
+            headers: { "retry-after": String(windowSeconds) },
+          },
+        );
+      }
+      if (admitted.verdict === "exceeded") {
+        yield* logRefusal("rate-limited");
+        return HttpServerResponse.jsonUnsafe(
+          {
+            ok: false,
+            code: "rate-limited",
+            error: `this route admits ${perWindow} deliveries per ${windowSeconds}s; retry after ${admitted.retryAfterSeconds}s`,
+            limit: perWindow,
+            windowSeconds,
+            retryAfterSeconds: admitted.retryAfterSeconds,
+          },
+          {
+            status: 429,
+            headers: { "retry-after": String(admitted.retryAfterSeconds) },
+          },
+        );
+      }
     }
 
     // oxlint-disable-next-line effecttsgo(prefer-schema-over-json)
@@ -378,6 +535,8 @@ const linearRoute = (rules: ReadonlyArray<TriggerRule>) => {
     "POST",
     "/webhooks/linear",
     handle(() => ({
+      route: "/webhooks/linear",
+      deliveryHeader: "linear-delivery",
       signatureHeader: "linear-signature",
       secret: process.env["LINEAR_WEBHOOK_SECRET"],
       secretVariable: "LINEAR_WEBHOOK_SECRET",
@@ -399,6 +558,9 @@ const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
     "POST",
     "/webhooks/generic",
     handle(() => ({
+      route: "/webhooks/generic",
+      deliveryHeader:
+        process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
       signatureHeader:
         process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
       secret: process.env["TRIGGER_SECRET"],
@@ -409,6 +571,39 @@ const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
       ),
     })),
   );
+
+/**
+ * The Sentry receiver (`@repo/core/Sentry`, LOB-81): Sentry's own signature header, checked with the
+ * integration's Client Secret (`SENTRY_CLIENT_SECRET`); the delivery keyed by the alerted event; and
+ * the one rate-capped route — `SENTRY_RATE_LIMIT` signed deliveries per `SENTRY_RATE_WINDOW_SECONDS`
+ * (20 per 60 s by default) in this process. An alert storm is the burst the cap exists for: every
+ * delivery past it is `429`, and every one inside it is still deduped by its event.
+ */
+const sentryRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/sentry",
+  handle(() => ({
+    route: "/webhooks/sentry",
+    deliveryHeader: SENTRY_REQUEST_ID_HEADER,
+    signatureHeader: SENTRY_SIGNATURE_HEADER,
+    secret: process.env["SENTRY_CLIENT_SECRET"],
+    secretVariable: "SENTRY_CLIENT_SECRET",
+    verify: (raw, signature, clientSecret) =>
+      verifySentrySignature({ raw, signature, clientSecret }),
+    rateCap: {
+      limit: positiveFromEnv("SENTRY_RATE_LIMIT", DEFAULT_SENTRY_RATE_LIMIT),
+      windowSeconds: positiveFromEnv(
+        "SENTRY_RATE_WINDOW_SECONDS",
+        DEFAULT_SENTRY_RATE_WINDOW_S,
+      ),
+    },
+    delivery: (payload, header) =>
+      sentryDelivery(payload, {
+        resource: header(SENTRY_RESOURCE_HEADER),
+        requestId: header(SENTRY_REQUEST_ID_HEADER),
+      }),
+  })),
+);
 
 /**
  * The mapping rules a deployment ships: `TRIGGER_RULES` is a JSON array of `{label, repo,
@@ -428,30 +623,45 @@ const rulesFromEnv = (): ReadonlyArray<TriggerRule> => {
 };
 
 /**
- * Both routes share one `TriggerService` instance: the rules and the session port are per-process
+ * Every route shares one `TriggerService` instance: the rules and the session port are per-process
  * configuration, and two instances would be two copies of the same config waiting to drift.
  */
 const rules = rulesFromEnv();
 
 /**
- * Both routes, still asking for the seam per request. Exported so a test can serve them with a fake
- * `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`) are answered before the
+ * Every route, still asking for the seam and the rate cap per request. Exported so a test can serve
+ * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `429`, `400`) are answered before the
  * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
  * `webhookRoutesFor` takes the rules, so a case can configure the ones the generic adapter reads.
  */
 export const webhookRoutesFor = (rules: ReadonlyArray<TriggerRule>) =>
-  Layer.mergeAll(linearRoute(rules), genericRoute(rules));
+  Layer.mergeAll(linearRoute(rules), genericRoute(rules), sentryRoute);
 
 export const WebhookRoutes = webhookRoutesFor(rules);
 
+/**
+ * The routes' rate caps, counted in this process's memory. Provided once beside the seam
+ * (`provideRequest` builds a layer once and hands its services to every request), so every request
+ * counts against the same window; a test serves its own, so its counts start at zero.
+ */
+export const WebhookRateLimiterLive = RateLimiter.layer.pipe(
+  Layer.provide(RateLimiter.layerStoreMemory),
+);
+
 export const WebhookLive = WebhookRoutes.pipe(
   HttpRouter.provideRequest(
-    TriggerServiceLive({ rules }).pipe(
-      Layer.provide(
-        // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
-        // started state when its session opens. Otherwise none.
-        Layer.mergeAll(TriggerSessionsFromSessionService, TriggerWriteBackLive),
+    Layer.mergeAll(
+      TriggerServiceLive({ rules }).pipe(
+        Layer.provide(
+          // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
+          // started state when its session opens. Otherwise none.
+          Layer.mergeAll(
+            TriggerSessionsFromSessionService,
+            TriggerWriteBackLive,
+          ),
+        ),
       ),
+      WebhookRateLimiterLive,
     ),
   ),
 );
