@@ -24,6 +24,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Read the transcript                | `getSession` → the `bash` tool result                                                                                                                                                  | the run really happened, usage is attributed         |
 | Fold a released session (D8)       | the same session reads `historical`, same entries                                                                                                                                      | a paused session is served by folding the log        |
 | Fork a session (LOB-180)           | `forkSession` → the parent's prefix, then a fork-only message                                                                                                                          | a fork is its own log, not a rewrite of the parent   |
+| Replay a session (LOB-215)         | `replaySession` onto `faux/faux-2` → the source's first prompt, each usage keyed by its own model, the source unchanged, the link in the replay's log; refusals typed                  | a replay is the same task on another model           |
 | A fold's stream ends               | exactly one `snapshot` event                                                                                                                                                           | complete is distinguishable from dropped             |
 | Request limits (LOB-21)            | an oversized message → `invalid_input`                                                                                                                                                 | a refusal is typed, not a truncation or a crash      |
 | Transport cap (LOB-21)             | a 2 MiB body → 413, and `/livez` still answers                                                                                                                                         | the configured cap, not Bun's 128 MiB default        |
@@ -70,7 +71,7 @@ to start one, `up.sh` exits non-zero and prints the command to run. It waits for
 `GET /`: the server binds before its migrations are applied (LOB-21), so `/` answers a moment before
 a session can be created. It fails loudly with the log path (`.verify/run/api.log`).
 
-Three settings in `up.sh` exist for the sake of proof, not for production:
+Four settings in `up.sh` exist for the sake of proof, not for production:
 
 - `MODEL_BACKEND=faux` — pi-ai's scripted provider. The session runs a real `bash` tool call and the
   answer is derived from that tool's output, so the tool path is real; the _model_ is not. A drive
@@ -79,6 +80,11 @@ Three settings in `up.sh` exist for the sake of proof, not for production:
   deployment default (15 minutes) you would wait 15 minutes to prove D8's other half.
 - `MAX_REQUEST_BODY_BYTES=1048576` — the transport cap `drive.ts` proves by sending 2 MiB. The
   default is the same 1 MiB; setting it here ties the check to a value this script owns.
+- `ROLE_MODELS=replay-target=$REPLAY_MODEL` (`faux/faux-2` when unset) — a second faux model for
+  the replay check (LOB-215). The role table is the only lever that publishes a `faux/<id>` beside
+  `faux/faux-1`, and no session on this instance runs the `replay-target` role, so the row changes
+  the catalog and nothing else. It is appended to a `ROLE_MODELS` the caller set, not replacing it,
+  and `REPLAY_MODEL` is the variable `drive.ts` reads too, so one override reaches both.
 
 ### Lifecycle and degradation — their own scripts
 
@@ -91,7 +97,7 @@ running, and writes its own evidence:
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
-./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight
+./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight, a generic `push` refused
 ./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
@@ -151,7 +157,12 @@ Run it whenever anything looks off — do not trust a drive run against an insta
 bun drive.ts     # requires the instance from ./up.sh
 ```
 
-Environment: `API_URL` (default `http://localhost:9200`), `EVIDENCE_DIR`.
+Environment: `API_URL` (default `http://localhost:9200`), `EVIDENCE_DIR`, `DATABASE_URL` (the
+database the API writes — the replay check reads the replay's log there through a reader-mode
+storage, because no RPC answers the link it records; required, and never defaulted, so a drive
+cannot read the shared `factory` database; no migrator runs from the drive) and `REPLAY_MODEL`
+(default `faux/faux-2`; `up.sh` reads the same variable, so set it for both). The last line it prints
+is the run count, `N/N checks passed`.
 
 The driver runs in two phases and needs no restart in between: it drives a session while the API
 owns it, then waits (read-free — a read counts as use and keeps the owner open) for the idle sweep

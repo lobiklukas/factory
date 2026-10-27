@@ -53,7 +53,7 @@ Linear signs one. Every check is required.
 3. Its first message is exactly the rule's template rendered from the issue's title and description.
 4. Linear's retry — new header, later `webhookTimestamp` — is `replayed: true`.
 5. A second mapped label added to the same issue later is a replay.
-6. An edit is `skipped` with `action "update" is not "create", …`.
+6. An edit is `skipped` with `action "update" is not "create"`.
 7. An issue labelled `Bug, Frontend` is `skipped` with `no rule matches labels [Bug, Frontend]`.
 8. An issue filed unlabelled, then labelled `factory`, starts its session on the label.
 9. A `Comment` delivery carrying `data.issue` is `200 skipped`, naming `Comment:create`.

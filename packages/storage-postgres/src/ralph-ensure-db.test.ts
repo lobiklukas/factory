@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 /**
  * The ralph driver's `ensure_db` must ask the port whether Postgres is up, not compose's exit code
@@ -239,6 +239,8 @@ const writeFakeDocker = (
  * each worker with `env -u RALPH_DB RALPH_WORKER="$i"` for the same reason. Only `extra` decides
  * what a case is about. Same `Object.entries` read as `turbo-env.test.ts`: a direct
  * `process.env.NAME` is configuration, and a test inheriting a shell's value is not configuring.
+ * A ralph worker's own shell carries both (LOB-209), so a case stubs them into this process and
+ * pins the deletion, and a second case sets `RALPH_WORKER` through `extra` to pin what it hides.
  *
  * The fake has to exist before a child runs: a case that forgot `writeFakeDocker` would drive the
  * machine's real CLI, whose answer depends on the machine — and the cases whose claim is "no compose
@@ -278,23 +280,22 @@ interface BashRun {
 }
 
 /**
- * Run `ensure_db` as a plain statement in the child and read `spawnSync`'s exit status.
- *
- * The `( ... ) || rc=$?` form is wrong: bash suppresses `errexit` in a subshell that is the left
- * operand of `||`, so the driver's own `set -euo pipefail` never applies and a more forgiving
- * harness reports green for a path where the real loop stops. A plain statement inherits errexit.
- * `ensure_db` ends in `die` (`exit 1`), which is exactly the status we read back.
+ * Source the driver and run `statements` after it, as plain statements under the driver's own
+ * errexit — `ensureDb` is the common case. The worker-database case appends a `printf` of
+ * `DATABASE_URL`, so it reads the value the driver hands its agents out of the same shell that ran
+ * `ensure_db`, rather than a second sourcing that could disagree with it.
  */
-const ensureDb = (
+const driveLoop = (
   scratch: Scratch,
-  extra: Record<string, string> = {},
+  statements: string,
+  extra: Record<string, string>,
 ): BashRun => {
   // Run `ensure_db` as a plain statement, not as the left operand of `||`. In
   // `bash -c '...; ( ensure_db ) || rc=$?'` errexit is suppressed inside the
   // subshell (it is the condition of an `||`), so the driver's own `set -euo
   // pipefail` never applies and a more forgiving harness could report green for a
   // path where the real loop would stop. A plain statement inherits errexit.
-  const run = spawnSync("bash", ["-c", 'source "$LOOP"; ensure_db'], {
+  const run = spawnSync("bash", ["-c", `source "$LOOP"; ${statements}`], {
     cwd: scratch.root,
     encoding: "utf8",
     env: childEnv(scratch, extra),
@@ -307,6 +308,19 @@ const ensureDb = (
     stderr: run.stderr ?? "",
   };
 };
+
+/**
+ * Run `ensure_db` as a plain statement in the child and read `spawnSync`'s exit status.
+ *
+ * The `( ... ) || rc=$?` form is wrong: bash suppresses `errexit` in a subshell that is the left
+ * operand of `||`, so the driver's own `set -euo pipefail` never applies and a more forgiving
+ * harness reports green for a path where the real loop stops. A plain statement inherits errexit.
+ * `ensure_db` ends in `die` (`exit 1`), which is exactly the status we read back.
+ */
+const ensureDb = (
+  scratch: Scratch,
+  extra: Record<string, string> = {},
+): BashRun => driveLoop(scratch, "ensure_db", extra);
 
 /**
  * A port nothing answers on, so `pg_port_open` refuses the connect. An ephemeral port is taken and
@@ -513,6 +527,91 @@ describe("the ralph driver's ensure_db", () => {
       for (const call of composeCalls(scratch)) {
         expect(call.cwd, call.argv).toBe(mainRoot());
       }
+    },
+  );
+
+  it(
+    "names the default database whichever ralph worker's shell runs the suite",
+    { timeout: 30_000 },
+    async () => {
+      // LOB-209. A ralph worker runs this suite with the run context `loop.sh` exports to its agents:
+      // `RALPH_WORKER=2` and `DATABASE_URL=…/factory_ralph_2`, sometimes `RALPH_DB` as well. The two
+      // cases above assert the literal `factory_ralph`, so before `childEnv` deleted the driver's
+      // knobs (8fd3c5e) a worker-2 shell reddened both of them on `factory_ralph_2` — and CI and
+      // worker 1, which set none of these, never saw it. This case is that shell, stubbed into the
+      // parent, so the isolation holds in every shell and not only in the one that runs the gate.
+      // `DATABASE_URL` alone never reddened anything: the driver assigns its own from `RALPH_DB`
+      // (the next case), so it is stubbed here only because the run context carries it. Mutation:
+      // drop `delete env["RALPH_WORKER"]` or `delete env["RALPH_DB"]` from `childEnv` — the
+      // existence question asks for `factory_ralph_2`.
+      vi.stubEnv("RALPH_WORKER", "2");
+      vi.stubEnv("RALPH_DB", "factory_ralph_2");
+      vi.stubEnv(
+        "DATABASE_URL",
+        "postgres://factory:factory@localhost:5442/factory_ralph_2",
+      );
+      try {
+        const scratch = mkScratch();
+        const port = await closedPort();
+        await databaseIsUp(port);
+        writeFakeDocker(scratch);
+
+        const run = ensureDb(scratch, {
+          PG_PORT: String(port),
+          FAKE_OWNER: "factory-postgres-1",
+          FAKE_PSQL_OUT: "1",
+        });
+
+        expect(run.status, run.stderr).toBe(0);
+        expect(driverCalls(scratch).map((call) => call.argv)).toEqual([
+          `ps --filter publish=${String(port)} --format {{.Names}}`,
+          "exec factory-postgres-1 psql -U factory -d factory -tAc select 1 from pg_database where datname='factory_ralph'",
+        ]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it(
+    "creates worker N's own database, the one the DATABASE_URL it hands its agents names",
+    { timeout: 30_000 },
+    async () => {
+      // The other half of LOB-209: deleting the driver's knobs from every child must not leave the
+      // per-worker database untested. A worker's agents are told `DATABASE_URL=…/factory_ralph_N`
+      // (`loop.sh` exports it into each session), so `ensure_db` has to create exactly that database,
+      // derived from the worker number — and an inherited `DATABASE_URL` naming some other database
+      // must not win, or the agents test against one `ensure_db` never made. Mutations: drop the
+      // `${_sfx//-/_}` from `RALPH_DB`'s default — the record asks for `factory_ralph`; derive
+      // `DATABASE_URL` as `${DATABASE_URL:-…}` — the printed URL names the inherited `factory`;
+      // hard-code `factory_ralph` in `ensure_db`'s `datname` — the existence question and the
+      // `createdb` stop naming the URL's database.
+      const scratch = mkScratch();
+      const port = await closedPort();
+      await databaseIsUp(port);
+      writeFakeDocker(scratch);
+
+      const run = driveLoop(
+        scratch,
+        "ensure_db; printf '%s' \"$DATABASE_URL\"",
+        {
+          PG_PORT: String(port),
+          FAKE_OWNER: "factory-postgres-1",
+          FAKE_PSQL_OUT: "",
+          RALPH_WORKER: "2",
+          DATABASE_URL: "postgres://factory:factory@localhost:5442/factory",
+        },
+      );
+
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toBe(
+        "postgres://factory:factory@localhost:5442/factory_ralph_2",
+      );
+      expect(driverCalls(scratch).map((call) => call.argv)).toEqual([
+        `ps --filter publish=${String(port)} --format {{.Names}}`,
+        "exec factory-postgres-1 psql -U factory -d factory -tAc select 1 from pg_database where datname='factory_ralph_2'",
+        "exec factory-postgres-1 createdb -U factory factory_ralph_2",
+      ]);
     },
   );
 

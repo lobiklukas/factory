@@ -37,7 +37,7 @@ import type {
 import {
   resolveMapping,
   startsWork,
-  TRIGGER_ACTIONS,
+  TRIGGER_ACTION,
   TriggerError,
   type TriggerDelivery,
   type TriggerEvent,
@@ -378,11 +378,15 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                   ? []
                   : [routing.startsWorkFor];
               if (!startsWork(event.action, asked)) {
+                // The reason names what *this* rule admits, not every action the seam knows: a
+                // caller told `is not "create", "push", "schedule"` would read the lifecycle
+                // actions as open to it, and the generic webhook refuses both (LOB-235).
+                const admitted = [TRIGGER_ACTION, ...asked.flat()];
                 return yield* skip(
                   requestId,
-                  `action "${event.action}" is not ${TRIGGER_ACTIONS.map(
-                    (action) => `"${action}"`,
-                  ).join(", ")}`,
+                  `action "${event.action}" is not ${admitted
+                    .map((action) => `"${action}"`)
+                    .join(", ")}`,
                 );
               }
 

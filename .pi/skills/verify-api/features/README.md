@@ -47,6 +47,12 @@ The stale-claim and in-flight checks (LOB-216) were added to `./webhook.sh` and 
 **14/14**, evidence `.verify/evidence/lob-216/webhook/`. The same drive against the seam from before
 LOB-216 failed the reclaim check (`replayed: true` to an orphaned claim).
 
+The lifecycle-action checks (LOB-235) were added to `./webhook.sh` and run from the
+`agent/LOB-235` worktree on 2026-10-27 (API on `:9520`, faux, the worktree's own database on 5442):
+**17/17**, evidence `.verify/evidence/lob-235/webhook/`. The same drive against the adapter from
+before LOB-235 failed its first new check: a generic `push` on the `docs` label was recorded
+`processed` with `rule "docs" mapped it to …`.
+
 The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
 (`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
 `./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver
@@ -155,6 +161,12 @@ API on `PAGES_PORT=9570`): `./pages.sh` **15/15** (12 driver checks, 3 shell che
 `.verify/evidence/lob-220/api/`, with three mutation runs (no dedupe, a free repeat, no page fold in
 the rebuild) each failing it, in `.verify/evidence/lob-220/mutation/`. See [pages.md](pages.md).
 
+The replay checks (LOB-215) were added to `bun drive.ts` and run from the `agent/LOB-215` worktree
+on 2026-10-27 (API on `:9550`, faux with `faux/faux-2` published by `up.sh`, the worktree's own
+database on 5442): **58/58** (52 before, 6 replay checks), evidence `.verify/evidence/lob-215/`,
+with the no-replay-document mutation run failing exactly the log check (57/58). See
+[replay.md](replay.md).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -165,6 +177,7 @@ the rebuild) each failing it, in `.verify/evidence/lob-220/mutation/`. See [page
 | Compact on demand        | passing | [compact.md](compact.md)                   |
 | Fold a released session  | passing | [fold.md](fold.md)                         |
 | Fork a session           | passing | [fork.md](fork.md)                         |
+| Replay a session         | passing | [replay.md](replay.md)                     |
 | Request limits           | passing | [limits.md](limits.md)                     |
 | Probes and readiness     | passing | [probes.md](probes.md)                     |
 | Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)               |
