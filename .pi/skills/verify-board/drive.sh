@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
-# Drive `factory board ls|show|move|start` in a real tmux terminal and capture the evidence.
+# Drive the board: create a card, then `factory board ls|show|move|start` in a real tmux terminal —
+# the moves and the three refusals — then read the board back in the dashboard, capturing evidence.
 #
 # A command line is only proven by running it the way a person does: a real terminal, a real control
 # plane, and the text it printed read back. Calling the RPC client from a test process would prove
 # the client and nothing about the command — argument parsing, the lane ordering the human reads, the
 # refusal message on stderr, and the exit code a script branches on all live outside the client.
 #
-# Requires the instance from ./up.sh (API on :9400, a seeded board and card in .verify/run/board.json).
+# The three refusals (LOB-84) are the three ways a move is supposed to fail, each matched by the
+# service's own words and a non-zero exit: an undeclared transition, a stale expected revision, and a
+# run actor crossing a human gate. Every check is required; the drive exits non-zero on any miss.
+#
+# Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
+# .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
+# the drive can run twice against one instance — after a failed drive too: the checks find this
+# drive's card by id, not by being the only card in its lane.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
 API_URL="${API_URL:-http://localhost:$API_PORT}"
 RUN_DIR="$ROOT/.verify/run"
+WEB_PORT="${WEB_PORT:-$(cat "$RUN_DIR/web-port" 2>/dev/null || echo 3400)}"
+WEB_URL="${WEB_URL:-http://localhost:$WEB_PORT}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/board"
 SOCK="$RUN_DIR/board-tmux.sock"
 TERM_SESSION="verify-board"
 FACTORY="bun run $ROOT/apps/cli/src/index.ts"
+SKILL="$ROOT/.pi/skills/verify-board"
 
 mkdir -p "$EVIDENCE_DIR"
 
@@ -25,11 +36,8 @@ if [ ! -s "$RUN_DIR/board.json" ]; then
   exit 1
 fi
 
-json() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$RUN_DIR/board.json"; }
-BOARD_ID="$(json boardId)"
-TASK_ID="$(json taskId)"
-TASK_TITLE="$(json title)"
-REVISION="$(sed -n 's/.*"revision":\([0-9]*\).*/\1/p' "$RUN_DIR/board.json")"
+json() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$2"; }
+BOARD_ID="$(json boardId "$RUN_DIR/board.json")"
 # The default pipeline of the seeded definition (0007_create_tasks.ts), in declaration order.
 LANES="intake specifying planning building review done canceled"
 
@@ -58,7 +66,10 @@ write_checks() {
   printf '\n'
 }
 
-t() { tmux -S "$SOCK" "$@"; }
+# A UTF-8 locale for the pane: the human-gate refusal names the move with `→`, and a pane that
+# rendered it as `_` could not match the service's words.
+export LANG="${LANG:-en_US.UTF-8}" LC_ALL="${LC_ALL:-en_US.UTF-8}"
+t() { tmux -u -S "$SOCK" "$@"; }
 pane() { t capture-pane -p -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]]*$//'; }
 capture() { pane > "$EVIDENCE_DIR/$1"; }
 
@@ -94,6 +105,26 @@ if ! curl -sf -m 2 "$API_URL/readyz" >/dev/null 2>&1; then
   exit 1
 fi
 
+# --- create: a card through `createTask`, the door a trigger uses ---------------------------------
+# A phase that dies before it writes its evidence must not leave an earlier run's passing file
+# beside this run's failing `observed.json`.
+rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
+  "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json"
+API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
+  bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
+CREATE_RC=$?
+cat "$RUN_DIR/create.log"
+check "createTask creates the drive's card (create.ts)" \
+  "$([ "$CREATE_RC" = "0" ] && [ -s "$RUN_DIR/card.json" ] && echo 0 || echo 1)" \
+  "exit=$CREATE_RC, see create.json"
+if [ ! -s "$RUN_DIR/card.json" ]; then
+  echo "drive: no card to drive — see $EVIDENCE_DIR/create.json and $RUN_DIR/create.log" >&2
+  exit 1
+fi
+TASK_ID="$(json taskId "$RUN_DIR/card.json")"
+TASK_TITLE="$(json title "$RUN_DIR/card.json")"
+REVISION="$(sed -n 's/.*"revision":\([0-9]*\).*/\1/p' "$RUN_DIR/card.json")"
+
 t kill-server 2>/dev/null || true
 rm -f "$SOCK"
 t new-session -d -s "$TERM_SESSION" -x 200 -y 60 -c "$ROOT"
@@ -103,16 +134,27 @@ fresh
 run_cmd ls "$FACTORY board ls --board $BOARD_ID --api $API_URL" || true
 capture ls.txt
 OBSERVED_LANES="$(grep -E '^[a-z]+  (resting|working|terminal)  [0-9]+$' "$EVIDENCE_DIR/ls.txt" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//')"
-check "the seed created the card at revision 1 in intake" \
-  "$([ "$REVISION" = "1" ] && grep -q '^intake  resting  1$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
-  "revision=$REVISION, lane=intake"
+# The lane a card line sits under: the indented lines after a lane line, up to the next lane line.
+# The board is shared by every drive against this instance, and a drive that stopped before its
+# first move leaves its card in `intake`, so the check finds *this* card under `intake` whatever the
+# lane's count is, rather than assuming it is the only one there.
+lane_of() { # task id, ls capture
+  awk -v id="$1" '
+    /^[a-z]+  (resting|working|terminal)  [0-9]+$/ { lane = $1; next }
+    /^  / && lane != "" && index($0, id) > 0 { print lane; exit }
+  ' "$2"
+}
+CARD_LANE="$(lane_of "$TASK_ID" "$EVIDENCE_DIR/ls.txt")"
+check "the created card is at revision 1 in intake" \
+  "$([ "$REVISION" = "1" ] && [ "$CARD_LANE" = "intake" ] && echo 0 || echo 1)" \
+  "revision=$REVISION, lane=${CARD_LANE:-none}"
 check "board ls exits 0" "$([ "$(exit_code ls)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code ls)"
 check "ls prints every lane in definition order" \
   "$([ "$OBSERVED_LANES" = "$LANES" ] && echo 0 || echo 1)" \
   "lanes=[${OBSERVED_LANES}]"
 check "the card sits in its own lane" \
-  "$(awk -v id="$TASK_ID" '$1 == "intake" && $3 == "1" { getline; if (index($0, id) > 0) found = 1 } END { print (found ? 0 : 1) }' "$EVIDENCE_DIR/ls.txt")" \
-  "$TASK_ID under intake"
+  "$([ "$CARD_LANE" = "intake" ] && echo 0 || echo 1)" \
+  "$TASK_ID under ${CARD_LANE:-no lane}"
 
 # --- show: one card, as the server has it ----------------------------------------------------------
 fresh
@@ -168,10 +210,54 @@ check "start opens a session against the card" \
   "$([ -n "$SESSION_ID" ] && grep -q "task    $TASK_ID in specifying" "$EVIDENCE_DIR/start.txt" && echo 0 || echo 1)" \
   "session=${SESSION_ID:-none}"
 
+# --- move: a person moves the card on to `planning`, the column before the plan approval gate -----
+fresh
+run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision $((REVISION + 1)) --api $API_URL" || true
+capture move-planning.txt
+PLANNING_REVISION="$(sed -n "s/^moved $TASK_ID to planning (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-planning.txt")"
+check "a person moves the card on to planning" \
+  "$([ "$(exit_code planning)" = "0" ] && [ -n "$PLANNING_REVISION" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code planning), revision=${PLANNING_REVISION:-none}"
+
+# --- move: the run crossing a human gate is refused, naming the gate -------------------------------
+# The actor is the session `board start` opened, so the drive does not invent an id. The service
+# only checks that the actor is a well-formed session id (TaskService's `isRunActor`), not that the
+# session exists. `planning → building` is B5's plan approval gate.
+fresh
+run_cmd gate "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor ${SESSION_ID:-ses_missing} --api $API_URL" || true
+capture move-gate.txt
+GATE_MESSAGE="human_gate_required: the move planning → building crosses the plan approval gate, which only a person can make"
+check "a run crossing the plan approval gate is refused, naming the gate" \
+  "$([ -n "$SESSION_ID" ] && grep -qF "$GATE_MESSAGE" "$EVIDENCE_DIR/move-gate.txt" && echo 0 || echo 1)" \
+  "actor=${SESSION_ID:-none}, message verbatim"
+check "and the gate refusal exits non-zero" \
+  "$([ "$(exit_code gate)" != "0" ] && [ -n "$(exit_code gate)" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code gate)"
+
+# --- show: the refusals wrote nothing -------------------------------------------------------------
+fresh
+run_cmd after "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-after.txt
+check "after the refusals the card is where the last accepted move put it" \
+  "$([ "$(exit_code after)" = "0" ] && grep -qx "column    planning" "$EVIDENCE_DIR/show-after.txt" && grep -qx "revision  ${PLANNING_REVISION:-none}" "$EVIDENCE_DIR/show-after.txt" && echo 0 || echo 1)" \
+  "planning at revision ${PLANNING_REVISION:-none}"
+
+# --- web: the dashboard reads the same card -------------------------------------------------------
+# EXPECT_REVISION is the revision the last accepted move returned, so a refusal that bumped the
+# revision reddens the web phase too, not only the `show` above.
+WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" EXPECT_COLUMN=planning \
+  EXPECT_REVISION="${PLANNING_REVISION:-}" EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/web.mjs" > "$RUN_DIR/web-phase.log" 2>&1
+WEB_RC=$?
+cat "$RUN_DIR/web-phase.log"
+check "the dashboard agrees with the server after the refusals (web.mjs)" \
+  "$([ "$WEB_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$WEB_RC, see web.json"
+
 # --- evidence --------------------------------------------------------------------------------------
 {
   printf '{\n'
   printf '  "apiUrl": "%s",\n' "$API_URL"
+  printf '  "webUrl": "%s",\n' "$WEB_URL"
   printf '  "boardId": "%s",\n' "$BOARD_ID"
   printf '  "taskId": "%s",\n' "$TASK_ID"
   printf '  "sessionId": "%s",\n' "${SESSION_ID:-}"

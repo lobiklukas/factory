@@ -77,6 +77,8 @@ const GUARDED = [
   "case-budgets.test.ts",
   // Every case spawns `bun run` — a turbo dry run or a whole `tsc` over `.pi` (LOB-176).
   "pi-type-check.test.ts",
+  // Every case spawns `bash` on verify-board's `doctor.sh` against a real listener (LOB-84).
+  "verify-board-doctor.test.ts",
 ] as const;
 
 /**
