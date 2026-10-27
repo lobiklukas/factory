@@ -31,15 +31,7 @@
  * `DOCS_SCHEDULE_MS` is set. Both deliver through `DocsTriggerLive`, so the route, the daemon, the
  * tests and the drive run the same seam.
  */
-import {
-  Clock,
-  Duration,
-  Effect,
-  Layer,
-  Option,
-  Schedule,
-  Schema,
-} from "effect";
+import { Clock, Duration, Effect, Layer, Option, Schema } from "effect";
 import type { SqlClient } from "effect/sql/SqlClient";
 import type { RepoSlug } from "@repo/domain/Session";
 import { BranchName, RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
@@ -211,7 +203,10 @@ export const docsPushDelivery = (input: {
   if (event === undefined) return undefined;
   if (event.repo === undefined) return undefined;
   const sha = event.key.slice(event.key.lastIndexOf("@") + 1);
-  return { requestId: pushToken(event.repo, sha), event };
+  // `keyedByWork`: the id is the push itself, so GitHub has no fresh delivery of it to offer. A push
+  // that reached a repo nobody had registered yet is recorded `skipped`; once the operator registers
+  // it, redelivering that push from GitHub's log has to start the run rather than replay the skip.
+  return { requestId: pushToken(event.repo, sha), event, keyedByWork: true };
 };
 
 /** One tick of the schedule, as the seam takes it. */
@@ -249,6 +244,16 @@ export type DocsScheduleOptions = {
 /**
  * The interval schedule: one delivery per interval, forever, until it is interrupted.
  *
+ * The clock is aligned to the intervals `scheduleToken` names (multiples of `everyMs` since the
+ * epoch), not to the end of the last tick: after each delivery it sleeps until the next boundary.
+ * A loop that waited `everyMs` *after* each tick (`Schedule.spaced`) would drift later by every
+ * tick's own duration and skip an interval every few ticks. Aligned, a tick that finishes inside its
+ * interval is always followed by a tick for the next one, and no interval is delivered twice. The
+ * guarantee is exact while a tick is shorter than an interval; a tick that outlasts one is followed
+ * at once by a tick for the interval it finished in, so an interval that began *and* ended while a
+ * tick was still running is not delivered — at most once per interval, never a backlog of stale
+ * passes.
+ *
  * A failed delivery is logged and does not stop the clock. A schedule that died on one database
  * blip would break the automation silently — the process is up, the docs runs simply stop — and the
  * seam already records a refusal as an answer, so the only failure that reaches here is a real one
@@ -262,25 +267,32 @@ export const docsSchedule = (
   if (everyMs === undefined || !Number.isFinite(everyMs) || everyMs <= 0) {
     return Effect.void;
   }
-  const tick = Effect.gen(function* () {
-    const at = yield* Clock.currentTimeMillis;
-    const delivery = docsScheduleDelivery({
-      repo: options.repo,
-      at,
-      everyMs,
-    });
-    yield* options.deliver(delivery).pipe(
-      Effect.tapError((cause) =>
-        Effect.logWarning(
-          `docs schedule: delivery ${delivery.requestId} failed: ${cause.message}`,
+  // `target` is the boundary this tick was scheduled for. A timer that wakes a hair early must still
+  // deliver the interval it slept towards, so the tick reads the later of the clock and its target.
+  const tick = (target: number): Effect.Effect<number> =>
+    Effect.gen(function* () {
+      const at = Math.max(yield* Clock.currentTimeMillis, target);
+      const delivery = docsScheduleDelivery({
+        repo: options.repo,
+        at,
+        everyMs,
+      });
+      yield* options.deliver(delivery).pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning(
+            `docs schedule: delivery ${delivery.requestId} failed: ${cause.message}`,
+          ),
         ),
-      ),
-      Effect.ignore,
-    );
-  });
-  return Effect.repeat(tick, Schedule.spaced(Duration.millis(everyMs))).pipe(
-    Effect.asVoid,
-  );
+        Effect.ignore,
+      );
+      const next = (Math.floor(at / everyMs) + 1) * everyMs;
+      const now = yield* Clock.currentTimeMillis;
+      yield* Effect.sleep(Duration.millis(Math.max(0, next - now)));
+      return next;
+    });
+  const loop = (target: number): Effect.Effect<never> =>
+    Effect.flatMap(tick(target), loop);
+  return loop(0).pipe(Effect.asVoid);
 };
 
 /**
@@ -393,6 +405,28 @@ const refusedPush = (error: string, code: string): GitHubWebhookAnswer => ({
 const PushJson = Schema.fromJsonString(Schema.Unknown);
 
 /**
+ * GitHub's merge-commit subject for a pull request from a docs run's own branch:
+ * `Merge pull request #12 from acme/factory/doc-push-…`. The owner is one path segment and the
+ * branch follows it, so `factory/doc-` right after the first `/` is the docs branch itself.
+ */
+const DOCS_MERGE_SUBJECT =
+  /^Merge pull request #\d+ from [^/\s]+\/factory\/doc-/;
+
+/**
+ * Whether a push is the merge of a docs run's own pull request, and so a docs-only change that must
+ * not start the next docs pass. Read from `head_commit.message` (the commit the push left the
+ * branch at), which is the merge commit when the PR was merged with a merge commit. A squash or
+ * rebase merge leaves no trace of the branch in the commit, so those are not recognized here.
+ */
+export const isDocsRunMerge = (payload: unknown): boolean => {
+  const message = stringField(
+    asRecord(asRecord(payload)?.["head_commit"]),
+    "message",
+  );
+  return message !== undefined && DOCS_MERGE_SUBJECT.test(message);
+};
+
+/**
  * One GitHub `push` delivery, as `POST /webhooks/github` takes it (LOB-234): authenticated, read,
  * normalized by `docsPushDelivery`, and handed to the docs seam. In the order each step refuses more,
  * as the other webhook routes do:
@@ -404,7 +438,9 @@ const PushJson = Schema.fromJsonString(Schema.Unknown);
  *   and starts nothing (a session's own `factory/<id>` push must not start a docs run);
  * - a push to the default branch is the seam's: `{status: "processed", sessionId}` the first time,
  *   `replayed: true` for a redelivery, `skipped` (with the reason) for an unregistered repo, and
- *   `500` for a real failure, so GitHub's delivery log shows it.
+ *   `500` for a real failure, so GitHub's delivery log shows it;
+ * - the merge commit of a docs run's own `factory/doc-*` pull request is `200 skipped` before the
+ *   seam (`isDocsRunMerge`): merging a docs PR must not start the next docs pass.
  *
  * The default branch is the payload's own `repository.default_branch` rather than configuration, so
  * a repo whose trunk is `trunk` docs its trunk with nothing set. The delivery id is the push
@@ -445,6 +481,16 @@ export const handleDocsPushWebhook = (input: {
         "the push is a deletion, or names no commit or repository a docs run can start from",
         "bad-payload",
       );
+    }
+    if (isDocsRunMerge(payload)) {
+      // A well-formed push the trigger chooses not to act on: `200 skipped`, not a `400`, so
+      // GitHub's delivery log does not show the factory's own merge as a failure.
+      const reason = `${delivery.requestId} merges a docs run's own ${DOCS_BRANCH_PREFIX}* branch; a docs-only change starts no docs run`;
+      yield* Effect.logInfo(`docs push: ${reason}`);
+      return {
+        status: 200,
+        body: { ok: true, status: "skipped", replayed: false, reason },
+      } satisfies GitHubWebhookAnswer;
     }
     yield* Effect.logInfo(
       `docs push: GitHub delivery ${input.delivery ?? "(no id)"} is ${delivery.requestId}`,

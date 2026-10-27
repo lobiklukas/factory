@@ -84,8 +84,9 @@ The docs-trigger checks (LOB-197) were run from the `ralph/LOB-197` worktree on 
 which names the one caller it does not add.
 
 The docs trigger's callers (LOB-234) were run from the `agent/LOB-234` worktree on 2026-10-27 (API
-on `:9550`, faux, the worktree's own database on 5442): `./docs-trigger-http.sh` **13/13** (10
-driver checks on the `on` boot, 1 on the `off` boot, 2 boot-log checks), evidence
+on `:9550`, faux, the worktree's own database on 5442): `./docs-trigger-http.sh` **15/15** (12
+driver checks on the `on` boot, 1 on the `off` boot, 2 boot-log checks; re-run after the review added
+the interval lower bound, the docs-PR merge skip and the redelivery after registering), evidence
 `.verify/evidence/lob-234/`, with two mutation runs failing it (`mutation-no-daemon/`,
 `mutation-no-push-route/`). `./docs-trigger.sh` and `./linear-writeback.sh` were re-run there too,
 because the module and the GitHub route they drive changed. See `docs-trigger.md`.

@@ -9,14 +9,17 @@
 //          1. before its repo is registered the schedule starts nothing (each tick is a skip)
 //          2. once it is, the daemon starts `factory/doc-schedule-<interval>` sessions, one per
 //             interval: distinct intervals, each a multiple of 400 ms, as many as the wall clock
-//             allows and no more
+//             allows (less the interval it was registered in and the one in flight) and no more
 //          3. a signed `push` to the default branch on `POST /webhooks/github` answers
 //             `{status: "processed", sessionId}`, and that session is on `factory/doc-push-…`
 //          4. GitHub's redelivery of it — a fresh `X-GitHub-Delivery` — answers `replayed: true`
 //          5. a push to a non-default branch is `400 not-default-branch` and starts nothing
 //          6. a wrong `X-Hub-Signature-256`, and GitHub's digest without its `sha256=` prefix, are `401`
 //          7. another event (`ping`) still reaches the `pull_request` handler, which ignores it (`202`)
-//          8. the push repo has exactly the one session the push earned
+//          8. the merge commit of a `factory/doc-*` pull request is `200 skipped` and starts nothing
+//          9. a push to a repo not yet registered is skipped, and GitHub's redelivery of it once the
+//             repo is registered starts its one run
+//         10. the push repo has exactly the one session the push earned
 //   off  — `DOCS_SCHEDULE_MS` unset (the repo set and registered): no schedule session in the same
 //          wall clock.
 //
@@ -62,31 +65,41 @@ const assert = makeChecker(observed);
 const SHA = randomBytes(20).toString("hex");
 
 /** GitHub's `push` body, shaped from its webhook docs: the fields the adapter reads, and a few more. */
-const pushBody = (over: { readonly ref?: string } = {}) => ({
-  ref: over.ref ?? "refs/heads/main",
-  before: "0".repeat(40),
-  after: SHA,
-  created: false,
-  deleted: false,
-  forced: false,
-  compare: `https://github.com/${PUSH_REPO}/compare/0000000...${SHA.slice(0, 7)}`,
-  commits: [
-    {
-      id: SHA,
-      message: "feat: a change worth a docs pass\n\nwith a body nobody reads",
+const pushBody = (
+  over: {
+    readonly ref?: string;
+    readonly repo?: RepoSlug;
+    readonly sha?: string;
+    readonly headMessage?: string;
+  } = {},
+) => {
+  const repo = over.repo ?? PUSH_REPO;
+  const sha = over.sha ?? SHA;
+  const message = over.headMessage ?? "feat: a change worth a docs pass";
+  return {
+    ref: over.ref ?? "refs/heads/main",
+    before: "0".repeat(40),
+    after: sha,
+    created: false,
+    deleted: false,
+    forced: false,
+    compare: `https://github.com/${repo}/compare/0000000...${sha.slice(0, 7)}`,
+    commits: [{ id: sha, message: `${message}\n\nwith a body nobody reads` }],
+    head_commit: { id: sha, message },
+    repository: {
+      id: 1,
+      name: repo.split("/")[1],
+      full_name: repo,
+      default_branch: "main",
+      master_branch: "main",
     },
-  ],
-  head_commit: { id: SHA, message: "feat: a change worth a docs pass" },
-  repository: {
-    id: 1,
-    name: PUSH_REPO.split("/")[1],
-    full_name: PUSH_REPO,
-    default_branch: "main",
-    master_branch: "main",
-  },
-  pusher: { name: "verify-api", email: "verify-api@localhost" },
-  sender: { login: "verify-api", type: "User" },
-});
+    pusher: { name: "verify-api", email: "verify-api@localhost" },
+    sender: { login: "verify-api", type: "User" },
+  };
+};
+
+/** A repo the push reaches before anyone registered it: skipped, then redelivered once it is. */
+const LATE_REPO = RepoSlug.make(`${PUSH_REPO}-late`);
 
 const sign = (raw: string, key = SECRET) =>
   `sha256=${createHmac("sha256", key).update(raw).digest("hex")}`;
@@ -188,14 +201,20 @@ const program = Effect.gen(function* () {
     sessions.length >= 2,
     `${sessions.length} session(s) in ${elapsed}ms`,
   );
+  // Both bounds: no more ticks than the clock had intervals, and — the clock aligned to the
+  // interval boundaries — no fewer than its whole intervals less the one it was registered inside
+  // and the one still in flight when the drive looked.
+  const atMost = Math.ceil(elapsed / EVERY_MS) + 1;
+  const atLeast = Math.floor(elapsed / EVERY_MS) - 1;
   assert(
-    "once per interval: each names its own interval, a multiple of the period, and no more than the clock allows",
+    "once per interval: each names its own interval, a multiple of the period, as many as the clock allows and no more",
     new Set(intervals).size === intervals.length &&
       intervals.every(
         (interval) => Number.isInteger(interval) && interval % EVERY_MS === 0,
       ) &&
-      intervals.length <= Math.ceil(elapsed / EVERY_MS) + 1,
-    `intervals=${intervals.join(",")} (at most ${Math.ceil(elapsed / EVERY_MS) + 1} in ${elapsed}ms)`,
+      intervals.length <= atMost &&
+      intervals.length >= atLeast,
+    `intervals=${intervals.join(",")} (between ${atLeast} and ${atMost} in ${elapsed}ms)`,
   );
 
   // 3: a signed push to the default branch.
@@ -269,7 +288,44 @@ const program = Effect.gen(function* () {
     `status=${ping.status} body=${JSON.stringify(ping.body)}`,
   );
 
-  // 8: the count.
+  // 8: the merge of a docs run's own PR is a push to main too, and must not start the next pass.
+  const merge = yield* Effect.promise(() =>
+    deliver(
+      "docs-pr-merge",
+      pushBody({
+        sha: randomBytes(20).toString("hex"),
+        headMessage: `Merge pull request #12 from ${PUSH_REPO.split("/")[0]}/factory/doc-push-${PUSH_REPO.replace("/", "-")}-${SHA}`,
+      }),
+    ),
+  );
+  assert(
+    "the merge of a factory/doc-* pull request is 200 skipped, naming why",
+    merge.status === 200 &&
+      merge.body?.["status"] === "skipped" &&
+      String(merge.body?.["reason"]).includes("factory/doc-"),
+    `status=${merge.status} body=${JSON.stringify(merge.body)}`,
+  );
+
+  // 9: a push that beat the repo's registration, redelivered from GitHub's log once it is.
+  const late = pushBody({ repo: LATE_REPO });
+  const early = yield* Effect.promise(() => deliver("late-unregistered", late));
+  yield* client.registerRepo({ repo: LATE_REPO, defaultBaseRef: "main" });
+  const redelivered = yield* Effect.promise(() =>
+    deliver("late-redelivered", late),
+  );
+  const lateSessions = yield* sessionsOn(LATE_REPO);
+  assert(
+    "a push to an unregistered repo is skipped, and its redelivery after registering starts one run",
+    early.status === 200 &&
+      early.body?.["status"] === "skipped" &&
+      redelivered.status === 200 &&
+      redelivered.body?.["status"] === "processed" &&
+      redelivered.body?.["replayed"] === false &&
+      lateSessions.length === 1,
+    `early=${JSON.stringify(early.body)} redelivered=${JSON.stringify(redelivered.body)} sessions=${lateSessions.length}`,
+  );
+
+  // 10: the count.
   const pushed = yield* sessionsOn(PUSH_REPO);
   assert(
     "the push repo has exactly the one session the push earned",

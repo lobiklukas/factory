@@ -280,8 +280,9 @@ const MigrationsDaemon = Layer.effectDiscard(
 /**
  * Run the docs schedule for as long as the process lives (LOB-234), beside `MigrationsDaemon` and for
  * the same reason: forked, so a tick that cannot reach Postgres is logged by `docsSchedule` and the
- * next interval tries again instead of failing the boot. Its scope is the router's, so shutdown
- * interrupts it before the session owners are released. Off, it forks nothing.
+ * next interval tries again instead of failing the boot. It is built on `SessionShutdown`
+ * (`HttpLive`), so its scope closes first: shutdown interrupts the schedule, and waits for it, before
+ * the session owners are released. Off, it forks nothing.
  */
 const DocsScheduleDaemon = (schedule: {
   readonly everyMs: number;
@@ -421,14 +422,17 @@ const HttpLive = Effect.gen(function* () {
   // `provideMerge` (not `provide`): `/readyz` needs `SqlClient` itself, so the database services
   // have to stay in the layer's output rather than being kept private to the session layer. The
   // shutdown finalizer registers after the pool, so it runs before the pool closes.
-  // The docs schedule reads the session layer, so it sits under it beside the shutdown finalizer.
+  // The docs schedule reads the session layer, so it sits under it with the shutdown finalizer —
+  // built *on* `SessionShutdown` rather than beside it. `provideMerge` builds the two in one
+  // sequential scope, shutdown first, so the daemon's fiber is interrupted (and awaited) before
+  // `sessions.close` releases the owners; siblings in `Layer.mergeAll` would close in parallel, and a
+  // tick inside `sessions.create` could open an owner while `close` was releasing them.
   const SessionDaemons = Option.match(docsSchedule.repo, {
     onNone: () => SessionShutdown,
     onSome: (repo) =>
       docsEveryMs > 0
-        ? Layer.mergeAll(
-            SessionShutdown,
-            DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
+        ? DocsScheduleDaemon({ everyMs: docsEveryMs, repo }).pipe(
+            Layer.provideMerge(SessionShutdown),
           )
         : SessionShutdown,
   });

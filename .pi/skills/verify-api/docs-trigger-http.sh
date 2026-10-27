@@ -9,7 +9,8 @@
 # `SessionService`. Two boots, because the schedule is read once at boot:
 #
 #   on   DOCS_SCHEDULE_MS=400, DOCS_SCHEDULE_REPO=<stamped>, GITHUB_WEBHOOK_SECRET — the schedule
-#        ticks, a push starts one session, a redelivery is a replay, the refusals are 400 and 401
+#        ticks, a push starts one session, a redelivery is a replay, the refusals are 400 and 401,
+#        a docs PR's merge is skipped, a push redelivered after its repo is registered starts its run
 #   off  DOCS_SCHEDULE_MS unset, the same kind of repo set and registered — no schedule session
 #
 # Isolation is `up.sh`'s: its own port, its own session root, its own pid. The repos carry a per-run
