@@ -33,6 +33,7 @@ import {
   CredentialProvider,
   SessionService,
   SessionServiceLive,
+  type SessionServiceShape,
   staticTokenProvider,
 } from "@repo/core";
 import { makeChecker } from "./harness.ts";
@@ -111,7 +112,7 @@ const prEntries = (
 ): number =>
   entries.filter((entry) => entry.kind === "other" && entry.text === "").length;
 
-const step = (sessions: SessionService, sessionId: SessionId) =>
+const step = (sessions: SessionServiceShape, sessionId: SessionId) =>
   sessions
     .openPullRequest({
       sessionId,
