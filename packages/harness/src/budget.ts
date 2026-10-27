@@ -5,8 +5,9 @@
  * Stop semantics — what "the cap stops a run at the limit" means, exactly:
  *
  * - **What is capped.** The session's spend in the currency `pi.usage` reports (US dollars): both
- *   buckets of the root conversation's ledger, models and tools — the same total the session list
- *   shows (LOB-153, `usageCostTotal`). The cap lives in the session's own log, as the `factory.budget`
+ *   buckets, models and tools, of every conversation's ledger in the log — the root's and those a
+ *   mission's workers talk in (LOB-193), summed by `Harness.usage()` — the same total the session
+ *   list shows (LOB-153, `usageCostTotal`). The cap lives in the session's own log, as the `factory.budget`
  *   document `writeBudget` commits at create, so it survives a restart and a fold reads it back (D7).
  * - **When it is checked.** Before every model request a run would send: Pi Durable's `beforeRequest`
  *   hook on the generation task, which runs before the first request of a run, before each request
@@ -46,6 +47,7 @@ import type {
   Conversation,
   ConversationId,
   Extension,
+  Harness,
   HookApi,
   Tx,
 } from "@earendil-works/pi-durable";
@@ -56,7 +58,6 @@ import {
   GenerationTask,
   hook,
   ROOT_CONVERSATION_ID,
-  UsageDoc,
 } from "@earendil-works/pi-durable";
 import { DateTime, Effect } from "effect";
 import {
@@ -308,22 +309,23 @@ const stopRun = (
 const checkBudget = (
   api: HookApi,
   context: ChordContext,
-  root: Conversation | undefined,
+  session: BudgetSession | undefined,
 ): Effect.Effect<undefined> =>
   Effect.gen(function* () {
-    // The root conversation's, whichever conversation asks: the cap is the session's, and so is
-    // the ledger the list reports (`pi.usage` is per conversation).
+    // The root conversation's cap, whichever conversation asks: the cap is the session's.
     const budget = yield* Effect.promise(() =>
       api.snapshot(BudgetDoc, ROOT_CONVERSATION_ID, context),
     );
     const cap = budget?.cap ?? 0;
-    if (cap <= 0 || root === undefined) return undefined;
-    const usage = yield* Effect.promise(() =>
-      api.snapshot(UsageDoc, ROOT_CONVERSATION_ID, context),
-    );
+    if (cap <= 0 || session === undefined) return undefined;
+    // And the session's spend, which is every conversation's: `pi.usage` is per conversation, and a
+    // mission's worker is charged in a conversation of its own (LOB-193). Reading the root's ledger
+    // alone would let a worker spend past the cap and never trip it.
+    const usage = yield* Effect.promise(() => session.harness.usage(context));
     // What a fork inherited from its parent counts too: a fork is the same work, carried on.
     const spent =
       (budget?.carried ?? 0) + usageCostTotal(projectUsageDoc(usage));
+    const { root } = session;
     if (spent < cap) return undefined;
     const at = DateTime.formatIso(yield* DateTime.now);
     // A stop that cannot be recorded still stops: an unannounced stop is a worse report, but a
@@ -343,19 +345,33 @@ const checkBudget = (
   });
 
 /**
+ * What the hook needs of the session it guards: the root it stops, and the harness whose
+ * `usage()` is the session's spend across every conversation.
+ */
+export type BudgetSession = {
+  readonly root: Conversation;
+  readonly harness: Pick<Harness, "usage">;
+};
+
+/**
  * The cap, as an extension installed at `openSession` for every session. A session with no cap pays
- * one document read per request and nothing else. `root` is read when a request is about to be sent,
- * which is always after the harness that owns the hook has opened its root conversation.
+ * one document read per request and nothing else. `session` is read when a request is about to be
+ * sent, which is always after the harness that owns the hook has opened its root conversation.
+ *
+ * The hook runs before every generation request in the log, a mission worker's included — its
+ * conversation is the worker's, its generation task is Pi Durable's — so a worker's request is
+ * checked against the session's cap like any other. The stop aborts the root, whose ordinary
+ * ownership scope holds the mission and so, bottom-up, its workers and their runs.
  */
 export const budgetExtension = (
-  root: () => Conversation | undefined,
+  session: () => BudgetSession | undefined,
 ): Extension =>
   defineExtension({
     name: BUDGET_EXTENSION,
     hooks: [
       hook(GenerationTask, {
         beforeRequest: (_request, api, context) =>
-          Effect.runPromise(checkBudget(api, context, root())),
+          Effect.runPromise(checkBudget(api, context, session())),
       }),
     ],
   });

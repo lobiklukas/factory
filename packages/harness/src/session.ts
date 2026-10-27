@@ -102,6 +102,7 @@ import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   BudgetDoc,
   budgetExtension,
+  type BudgetSession,
   inheritBudget,
   setBudget,
   type BudgetSeed,
@@ -142,6 +143,7 @@ import {
   projectReplayComparisons,
   projectReplayDoc,
   projectTasks,
+  mergeUsage,
   projectUsageDoc,
   projectView,
   sameTasks,
@@ -482,7 +484,7 @@ export const openSession = (
     // the hook is a no-op until `writeBudget` commits one. It stops a run through the root
     // conversation, which exists only once the harness below is open — and no request can be sent
     // before then, so the hook reads it late rather than taking it here.
-    let opened: Conversation | undefined;
+    let opened: BudgetSession | undefined;
     registry.install(budgetExtension(() => opened));
 
     const harness = yield* attempt("open harness", () =>
@@ -534,7 +536,7 @@ export const openSession = (
         },
       }),
     );
-    opened = root;
+    opened = { root, harness };
 
     // What the section came to, committed beside it: a page the budget dropped is a fact about this
     // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
@@ -1358,11 +1360,13 @@ const readDocument = (
   kind: string,
   /** One family member by key; absent reads the singleton of that kind. */
   key?: string,
+  /** The conversation whose document it is; the root's unless named. */
+  conversationId: ConversationId = ROOT_CONVERSATION_ID,
 ): Effect.Effect<JsonRecord | undefined, SessionError> =>
   Effect.gen(function* () {
     const address = {
       kind,
-      scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID },
+      scope: { kind: "conversation", conversationId },
       ...(key === undefined ? {} : { key }),
     } as const;
     const record = yield* attempt(`find ${kind}`, () =>
@@ -1374,6 +1378,56 @@ const readDocument = (
     );
     return stored?.value;
   });
+
+/** Conversations per storage round trip while summing a log's spend. */
+const CONVERSATION_PAGE = 100;
+
+/**
+ * A log's spend, read without owning it: every conversation's `pi.usage`, summed (`mergeUsage`).
+ *
+ * The root's ledger alone is not the session's spend once a mission fans out (LOB-193): each worker
+ * talks in a conversation of its own, and its requests are charged there. This is `Harness.usage()`
+ * for a reader-mode `Storage`, so a fold, a fork's carried spend and a rebuilt index count what the
+ * budget cap counted while the session ran.
+ */
+export const readLogUsage = (
+  storage: Storage,
+): Effect.Effect<SessionUsage, SessionError> =>
+  Effect.gen(function* () {
+    const usages: SessionUsage[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* attempt("scan conversations", () =>
+        storage.scanConversations(
+          {},
+          CONVERSATION_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      );
+      for (const conversation of page.items)
+        usages.push(
+          projectUsageDoc(
+            yield* readDocument(storage, USAGE_DOC, undefined, conversation.id),
+          ),
+        );
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    return mergeUsage(usages);
+  });
+
+/**
+ * A live session's spend: `Harness.usage()`, every conversation's `pi.usage` summed — the root's
+ * and those of a mission's workers (LOB-193) — projected the way a fold projects one ledger.
+ */
+export const readSessionUsage = (
+  harness: Harness,
+): Effect.Effect<SessionUsage, SessionError> =>
+  Effect.map(
+    attempt("read session usage", () => harness.usage(BACKGROUND_CONTEXT)),
+    (state) => mergeUsage([projectUsageDoc(state)]),
+  );
 
 /** Entries per storage round trip while folding a log. */
 const ENTRY_PAGE = 500;
@@ -1796,7 +1850,8 @@ export const readBudgetSource = (
   storage: Storage,
 ): Effect.Effect<BudgetSource, SessionError> =>
   Effect.gen(function* () {
-    const usage = projectUsageDoc(yield* readDocument(storage, USAGE_DOC));
+    // Every conversation's spend, a mission's workers' included (LOB-193): what the cap counted.
+    const usage = yield* readLogUsage(storage);
     const budget = projectBudgetDoc(
       yield* readDocument(storage, BUDGET_DOC_KIND),
       usage,
@@ -1868,7 +1923,7 @@ export const readSessionLog = (
   Effect.gen(function* () {
     const records = yield* readAllEntries(storage);
     const pages = projectPages(records);
-    const usage = yield* readDocument(storage, USAGE_DOC);
+    const usage = yield* readLogUsage(storage);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
@@ -1889,7 +1944,7 @@ export const readSessionLog = (
     return {
       entries: records.map(projectEntry),
       pages,
-      usage: projectUsageDoc(usage),
+      usage,
       approvals: projectApprovals(records),
       replayComparisons: projectReplayComparisons(replayValue),
       binding: {
@@ -2024,11 +2079,13 @@ const snapshotOf = (
   entries: readonly EntryRecord[],
   mission: MissionSnapshot | undefined,
   budgetDoc: JsonValue | undefined,
+  /** The session's spend: every conversation's (`readSessionUsage`), not the view's root alone. */
+  usage: SessionUsage,
   replayDoc: JsonValue | undefined,
   proposedIssues: ProposedIssues | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
-  const budget = projectBudgetDoc(budgetDoc, projection.usage);
+  const budget = projectBudgetDoc(budgetDoc, usage);
   const replayComparisons = projectReplayComparisons(replayDoc);
   return {
     session: {
@@ -2047,7 +2104,7 @@ const snapshotOf = (
     workspace: ref.workspace,
     entries: projection.entries,
     live: projection.live,
-    usage: projection.usage,
+    usage,
     queued: projection.queued,
     tasks,
     // Folded from the whole log, not from the view: an approval is not a turn, and the view holds
@@ -2198,6 +2255,7 @@ export const readLiveSnapshot = (
       const entries = yield* readConversationEntries(session.root);
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
+      const usage = yield* readSessionUsage(session.harness);
       const replay = yield* readReplayDoc(session.harness, session.root);
       const proposed = yield* readProposedIssues(session.harness, session.root);
       return snapshotOf(
@@ -2207,6 +2265,7 @@ export const readLiveSnapshot = (
         entries,
         mission,
         budget,
+        usage,
         replay,
         proposed,
       );
@@ -2259,13 +2318,39 @@ export const liveSessionEvents = (
       const entries = yield* readConversationEntries(session.root);
       const sent = new Set(entries.map((entry) => String(entry.id)));
 
+      // The session's spend is every conversation's (LOB-193): a mission's worker is charged in its
+      // own conversation, which the root's view never shows changing. So a `usage` event carries
+      // `Harness.usage()`, re-read whenever the root's ledger changes and whenever the task graph
+      // does — a worker's request is a task of its conversation, so its spend lands beside a graph
+      // revision. Reads are chained, so totals are reported in the order they were read, and one
+      // that matches the last reported is dropped. Totals only grow.
+      let reported = yield* readSessionUsage(session.harness);
+      let reading: Promise<void> = Promise.resolve();
+      const refreshUsage = () => {
+        reading = reading.then(() =>
+          session.harness.usage(BACKGROUND_CONTEXT).then(
+            (state) => {
+              const usage = mergeUsage([projectUsageDoc(state)]);
+              if (JSON.stringify(usage) === JSON.stringify(reported)) return;
+              reported = usage;
+              Queue.offerUnsafe(queue, { _tag: "usage", usage });
+            },
+            // A harness that closed under the stream has nothing more to report.
+            () => undefined,
+          ),
+        );
+      };
+
       unsubscribe = state.subscribe((next) => {
         const events = diffView(previous, next, sent);
         previous = next;
-        for (const event of events) Queue.offerUnsafe(queue, event);
+        for (const event of events)
+          if (event._tag === "usage") refreshUsage();
+          else Queue.offerUnsafe(queue, event);
       });
 
       unsubscribeTasks = graph.subscribe((next) => {
+        refreshUsage();
         const tasks = projectTasks(next);
         if (sameTasks(previousTasks, tasks)) return;
         previousTasks = tasks;
@@ -2290,6 +2375,7 @@ export const liveSessionEvents = (
             entries,
             mission,
             budget,
+            reported,
             replay,
             proposed,
           ),

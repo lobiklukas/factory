@@ -11,6 +11,7 @@ export * from "./replay";
 export * from "./curate";
 export * from "./decompose";
 export * from "./mission";
+export * from "./mission-worker";
 export * from "./verify";
 export * from "./ask";
 export * from "./budget";

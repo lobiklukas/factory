@@ -22,22 +22,31 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context as ChordContext } from "@earendil-works/chord";
 import {
   MemoryStorage,
+  UsageDoc,
   type Storage,
   type StorageWrite,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
-import type { SessionSnapshot } from "@repo/domain/Session";
-import { Effect } from "effect";
+import type { SessionEvent, SessionSnapshot } from "@repo/domain/Session";
+import { Effect, Fiber, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 import { describeBudgetStop, writeBudget } from "./budget";
 import { createFauxModelAccess } from "./models";
-import { BUDGET_STOPPED_ENTRY_KIND } from "./projection";
+import { MISSION_TASKS, MissionTask, type MissionResult } from "./mission";
+import {
+  BUDGET_STOPPED_ENTRY_KIND,
+  projectUsageDoc,
+  usageCostTotal,
+} from "./projection";
 import { readReplaySource, replaySession } from "./replay";
 import {
   closeHarness,
   forkSession,
   isBusy,
+  liveSessionEvents,
   openSession,
+  readBudgetSource,
   readHistoricalSnapshot,
   readLiveSnapshot,
   submitMessage,
@@ -220,6 +229,118 @@ describe("a budget cap", () => {
     expect(folded.budget).toEqual(live.budget);
     expect(folded.budget?.stopped).toBeDefined();
     expect(kinds(folded)).toEqual(kinds(live));
+  });
+});
+
+/** A session on the priced faux model whose harness runs missions, the way the control plane opens one. */
+const openWithMissions = async (cap: number | undefined): Promise<Opened> => {
+  const storage = new MemoryStorage();
+  const cwd = mkdtempSync(join(tmpdir(), "factory-budget-mission-"));
+  const { access, faux } = createFauxModelAccess({ fauxCost: COST });
+  const session = await Effect.runPromise(
+    openSession({ storage, model: access, cwd, tasks: MISSION_TASKS }),
+  );
+  if (cap !== undefined)
+    await Effect.runPromise(writeBudget(session.root, cap));
+  return {
+    ...session,
+    storage,
+    calls: () => faux.state.callCount,
+    ref: ref(cwd),
+  };
+};
+
+/** Start a mission with one worker and no check, and wait for it to settle. */
+const runMission = async (session: Opened) => {
+  const mission: TaskId<MissionResult> = await session.root.commit(
+    (tx) =>
+      tx.createTask(
+        MissionTask,
+        {
+          feature: "a feature",
+          workspace: {
+            path: session.ref.workspace.path,
+            commands: { verify: "true" },
+            commandsSource: "repo",
+          },
+          workers: [{ id: "a", prompt: "go" }],
+        },
+        { ownership: { kind: "conversation" } },
+      ),
+    BACKGROUND_CONTEXT,
+  );
+  session.harness.resume();
+  return session.harness.waitForTask(mission, BACKGROUND_CONTEXT);
+};
+
+/**
+ * A mission's worker talks in a conversation of its own (LOB-193), so its requests are charged to
+ * that conversation's `pi.usage`, not the root's. The cap is the session's, and so is the spend the
+ * session reports: both have to count the worker's ledger, or a capped session overspends through
+ * its workers and reports none of it.
+ */
+describe("a budget across a mission's workers", () => {
+  it("stops a worker's run at the session's cap, though the root spent nothing", async () => {
+    // The worker's first answer costs a cent and reaches a one-cent cap that the root, which sent
+    // no request at all, is nowhere near: a check of the root's ledger alone would let the reply's
+    // request through, and the worker would complete.
+    const session = await openWithMissions(COST);
+    const settled = await runMission(session);
+
+    expect(session.calls()).toBe(1);
+    // The stop aborts the root, whose scope holds the mission and, bottom-up, its worker.
+    expect(settled.state.outcome.status).toBe("aborted");
+    const after = await snapshot(session);
+    expect(
+      after.entries.filter((entry) => entry.kind === "budget"),
+    ).toHaveLength(1);
+    expect(after.budget?.stopped?.spent).toBeCloseTo(COST, 10);
+    expect(spent(after)).toBeCloseTo(COST, 10);
+    await Effect.runPromise(closeHarness(session.harness));
+  });
+
+  it("reports the worker's spend as the session's, live and folded", async () => {
+    const session = await openWithMissions(undefined);
+    // Attached before the mission starts: the root's view never changes while the worker spends,
+    // so a `usage` event that carries the worker's spend can only come from the session-wide read.
+    const events: SessionEvent[] = [];
+    const attached = Effect.runFork(
+      liveSessionEvents(session, session.ref).pipe(
+        Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+      ),
+    );
+    const settled = await runMission(session);
+    expect(settled.state.outcome.status).toBe("completed");
+    const reported = (): number | undefined => {
+      const last = events.findLast((event) => event._tag === "usage");
+      return last?._tag === "usage" ? usageCostTotal(last.usage) : undefined;
+    };
+    for (let waited = 0; (reported() ?? 0) < 2 * COST - 1e-9; waited += 5) {
+      if (waited > 10_000)
+        throw new Error("no usage event reported the worker's spend");
+      await Effect.runPromise(Effect.sleep("5 millis"));
+    }
+    await Effect.runPromise(Fiber.interrupt(attached));
+    expect(reported()).toBeCloseTo(2 * COST, 10);
+    // Two requests in the worker's conversation, none in the root's.
+    expect(session.calls()).toBe(2);
+    const root = await session.harness.snapshot(
+      UsageDoc,
+      session.root.id,
+      BACKGROUND_CONTEXT,
+    );
+    expect(usageCostTotal(projectUsageDoc(root))).toBe(0);
+
+    const live = await snapshot(session);
+    expect(spent(live)).toBeCloseTo(2 * COST, 10);
+    const folded = await Effect.runPromise(
+      readHistoricalSnapshot(session.storage, session.ref),
+    );
+    expect(folded.usage).toEqual(live.usage);
+    // A fork carries what the cap would have counted.
+    const source = await Effect.runPromise(readBudgetSource(session.storage));
+    expect(source.spent).toBeCloseTo(2 * COST, 10);
+    await Effect.runPromise(closeHarness(session.harness));
   });
 });
 
