@@ -18,6 +18,13 @@ import { describe, expect, it } from "vitest";
  * pins both halves: no workaround is left in `.pi/skills`, and every `@repo/*` package a driver
  * imports is one the root declares and links.
  *
+ * The manifest scan only reads `@repo/*` names out of the root `package.json`, and a declared package
+ * can still fail to resolve: the verify-api pr-once drive died before its first phase on
+ * `@effect/platform-bun`, then on `@repo/harness` (LOB-214). So a stronger case asks Bun's own
+ * resolver, from each driver's directory, for every bare import the driver makes (external packages
+ * and subpaths too, not just `@repo/*`). Unlike the rest of this file it spawns a subprocess, so it
+ * needs `bun` on `PATH`.
+ *
  * The docs half: `AGENTS.md` and `docs/parallel-work.md` used to prescribe
  * `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` to reach the test database. On this machine
  * Docker Desktop publishes 5442, so a `docker exec` into Colima's `factory-postgres-1` created
