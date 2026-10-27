@@ -69,6 +69,8 @@ import type {
   SessionSummary,
   SessionUsage,
   SessionWorkspace,
+  WithdrawMessageInput,
+  WithdrawMessageResult,
 } from "@repo/domain/Session";
 import {
   RepoSlug,
@@ -124,6 +126,7 @@ import {
   snapshotEvent,
   submitMessage,
   usageCostTotal,
+  withdrawMessage,
   writeApprovalDecided,
   writeApprovalRequested,
   writeCurationUsage,
@@ -180,6 +183,13 @@ export type SessionServiceShape = {
   readonly interrupt: (
     sessionId: SessionId,
   ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
+   * message a run already took, or one already over, is an outcome rather than a failure.
+   */
+  readonly withdraw: (
+    input: WithdrawMessageInput,
+  ) => Effect.Effect<WithdrawMessageResult, SessionError>;
   /**
    * Fork a session at one of its entries: a new session whose transcript is the parent's prefix
    * (LOB-180). The fork's log is its own, so neither transcript can reach the other.
@@ -1160,6 +1170,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* interruptConversation(owner.root);
           yield* touchActivity(sessionId);
           return yield* describe(sessionId, row);
+        });
+
+      const withdraw = (
+        input: WithdrawMessageInput,
+      ): Effect.Effect<WithdrawMessageResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Only the owner can commit the withdrawal; a message is queued only while a run is in
+          // flight, and a run in flight means this process already owns the session.
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const outcome = yield* withdrawMessage(
+            owner,
+            owner.storage,
+            input.submissionId,
+          );
+          yield* touchActivity(input.sessionId);
+          return {
+            session: yield* describe(input.sessionId, row),
+            submissionId: input.submissionId,
+            outcome,
+          };
         });
 
       /**
@@ -2298,6 +2329,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         get,
         send,
         interrupt,
+        withdraw,
         fork,
         replay,
         reset,

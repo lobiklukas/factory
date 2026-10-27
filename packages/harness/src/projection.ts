@@ -481,7 +481,13 @@ export type SessionProjection = {
   readonly queued: readonly QueuedMessage[];
 };
 
-/** `pi.inbox` → queued messages. */
+/**
+ * `pi.inbox` → queued messages.
+ *
+ * An item's id is its submission's: a branded number in the document, sent as the opaque string
+ * `sendMessage` answers (LOB-166). Reading it only as a string dropped every real item, and a queued
+ * message a client cannot name is one it cannot withdraw.
+ */
 export const projectInbox = (
   docs: Readonly<Record<string, JsonValue>>,
 ): readonly QueuedMessage[] => {
@@ -490,7 +496,13 @@ export const projectInbox = (
   return items.flatMap((item) => {
     const obj = asObject(item);
     if (obj === undefined) return [];
-    const id = stringAt(obj, "id");
+    const raw = obj["id"];
+    const id =
+      typeof raw === "number"
+        ? String(raw)
+        : typeof raw === "string"
+          ? raw
+          : undefined;
     if (id === undefined) return [];
     const modeRaw = stringAt(obj, "mode");
     const mode =

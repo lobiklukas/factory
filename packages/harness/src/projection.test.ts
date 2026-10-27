@@ -10,7 +10,7 @@
  * Offline and database-free on purpose: these are pure functions over a JSON document.
  */
 import { describe, expect, it } from "vitest";
-import { projectUsageDoc, usageCostTotal } from "./projection";
+import { projectInbox, projectUsageDoc, usageCostTotal } from "./projection";
 
 /** One `pi.usage` entry: Pi Durable stores pi-ai's `Usage`, cost and all. */
 type UsageEntry = {
@@ -107,5 +107,31 @@ describe("usageCostTotal", () => {
 
   it("is zero for a ledger with nothing in it", () => {
     expect(usageCostTotal({ models: [], tools: [] })).toBe(0);
+  });
+});
+
+describe("projectInbox", () => {
+  it("names a queued message by the submission id Pi Durable stores as a number", () => {
+    // The shape `pi.inbox` commits: the id is the submission's branded number (LOB-166).
+    const queued = projectInbox({
+      "pi.inbox": {
+        items: [
+          { id: 7, mode: "steer", content: "steer me" },
+          { id: 9, mode: "followUp", content: "follow me" },
+        ],
+      },
+    });
+    expect(queued).toEqual([
+      { id: "7", mode: "steer", content: "steer me" },
+      { id: "9", mode: "followUp", content: "follow me" },
+    ]);
+  });
+
+  it("drops an item with no usable id rather than inventing one", () => {
+    expect(
+      projectInbox({
+        "pi.inbox": { items: [{ mode: "steer", content: "nameless" }] },
+      }),
+    ).toEqual([]);
   });
 });

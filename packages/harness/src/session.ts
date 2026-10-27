@@ -22,6 +22,7 @@ import type {
   Page,
   Storage,
   Submission,
+  SubmissionRecord,
   Tx,
 } from "@earendil-works/pi-durable";
 import {
@@ -851,6 +852,86 @@ export const interrupt = (
   conversation: Conversation,
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
+
+/**
+ * What withdrawing a message came to (LOB-166): `withdrawn` when it was still queued and is now out
+ * of the inbox, `already_placed` when a run has taken it, `settled` when it is already over.
+ */
+export type WithdrawOutcome = "withdrawn" | "already_placed" | "settled";
+
+/** Submissions read per storage page while looking one up by its wire id. */
+const SUBMISSION_PAGE = 100;
+
+/**
+ * The submission of `conversationId` whose wire id is `submissionId`, or `undefined`.
+ *
+ * The wire id is the opaque string `submitMessage` answered; Pi Durable's ids are branded numbers,
+ * and the brand is applied only by the package, so the record is found by scanning the
+ * conversation's submissions rather than by minting a branded id here. The scan is in ascending id
+ * order, so it stops at the first id past the one asked for.
+ */
+const findSubmission = (
+  storage: Storage,
+  conversationId: ConversationId,
+  submissionId: string,
+): Effect.Effect<SubmissionRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    if (!/^[0-9]+$/.test(submissionId)) return undefined;
+    const target = Number(submissionId);
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page: Page<SubmissionRecord, Cursor> = yield* attempt(
+        "scan submissions",
+        () =>
+          storage.scanSubmissions(
+            { conversationId },
+            SUBMISSION_PAGE,
+            cursor,
+            BACKGROUND_CONTEXT,
+          ),
+      );
+      for (const record of page.items) {
+        if (record.id === target) return record;
+        if (record.id > target) return undefined;
+      }
+      cursor = page.next;
+      if (cursor === undefined) return undefined;
+    }
+  });
+
+/**
+ * Withdraw a queued message (LOB-166): Pi Durable settles the submission `unanswered` with reason
+ * `aborted` and removes its inbox item in one commit, so the message never reaches the transcript
+ * and every watcher sees the queue shrink.
+ *
+ * A message a run has already taken, or one that is over, is not an error — it is an answer the
+ * caller branches on, because the request was well-formed and the log simply moved first. An id
+ * this session never admitted is `not_found`.
+ */
+export const withdrawMessage = (
+  open: OpenSession,
+  storage: Storage,
+  submissionId: string,
+): Effect.Effect<WithdrawOutcome, SessionError> =>
+  Effect.gen(function* () {
+    const notFound = new SessionErrorClass({
+      code: "not_found",
+      message: `submission ${submissionId} is not in this session`,
+    });
+    const record = yield* findSubmission(storage, open.root.id, submissionId);
+    if (record === undefined) return yield* notFound;
+    const result = yield* attempt("withdraw message", () =>
+      open.harness.abortSubmission(record.id, BACKGROUND_CONTEXT, open.root.id),
+    );
+    switch (result) {
+      case "aborted":
+        return "withdrawn";
+      case "not_found":
+        return yield* notFound;
+      default:
+        return result;
+    }
+  });
 
 /**
  * Start a new model context (LOB-181). Pi Durable appends a `pi.reset` entry that heads the next

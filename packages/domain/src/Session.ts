@@ -295,6 +295,32 @@ export const SendMessageResult = Schema.Struct({
 });
 export type SendMessageResult = typeof SendMessageResult.Type;
 
+/**
+ * What withdrawing a queued message came to (LOB-166). `withdrawn` is the only outcome that changed
+ * anything: the message left the queue and will never reach the transcript. `already_placed` means
+ * a run took it first, `settled` that it is already over — the log moved before the request did.
+ */
+export const WithdrawOutcome = Schema.Literals([
+  "withdrawn",
+  "already_placed",
+  "settled",
+]);
+export type WithdrawOutcome = typeof WithdrawOutcome.Type;
+
+/** Withdraw one queued message, named by the `submissionId` `sendMessage` answered. */
+export const WithdrawMessageInput = Schema.Struct({
+  sessionId: SessionId,
+  submissionId: Schema.String,
+});
+export type WithdrawMessageInput = typeof WithdrawMessageInput.Type;
+
+export const WithdrawMessageResult = Schema.Struct({
+  session: SessionSummary,
+  submissionId: Schema.String,
+  outcome: WithdrawOutcome,
+});
+export type WithdrawMessageResult = typeof WithdrawMessageResult.Type;
+
 export const CreateSessionInput = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Deduplicates a retried create: the same request id returns the same session. */
@@ -451,7 +477,7 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
 /**
  * A session request that cannot be served. `code` is the part callers branch on.
  *
- * - `not_found` — no such session.
+ * - `not_found` — no such session, or no such message in it to withdraw.
  * - `busy` — the session is running and the caller asked for `whenBusy: "reject"`.
  * - `invalid_input` — the request was well-formed but refused: a message over the length cap, a
  *   malformed repo slug, an unreadable list cursor.
