@@ -1010,6 +1010,36 @@ export type GitHubWebhookAnswer = {
   readonly body: Readonly<Record<string, unknown>>;
 };
 
+/**
+ * The two refusals every GitHub delivery gets before its event is read, whichever event it is: no
+ * secret configured is `503` (an unsigned route would let anyone who can reach the port act), and a
+ * wrong or missing `X-Hub-Signature-256` is `401`. `undefined` is "authentic": the caller reads the
+ * event. One function, so the `pull_request` mirror and the docs `push` (LOB-234) cannot disagree
+ * about what a signed GitHub delivery is.
+ */
+export const refuseGitHubDelivery = (input: {
+  readonly secret: string | undefined;
+  readonly raw: string;
+  readonly signature: string | undefined;
+}): GitHubWebhookAnswer | undefined => {
+  const secret = input.secret ?? "";
+  if (secret === "") {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error:
+          "this route has no secret configured (GITHUB_WEBHOOK_SECRET); it accepts nothing until one is set",
+        code: "not-configured",
+      },
+    };
+  }
+  if (!verifyGitHubSignature(input.raw, input.signature, secret)) {
+    return { status: 401, body: { ok: false, error: "bad signature" } };
+  }
+  return undefined;
+};
+
 const JsonBody = Schema.fromJsonString(Schema.Unknown);
 
 /**
@@ -1033,21 +1063,8 @@ export const handleGitHubPullRequestWebhook = (input: {
   readonly event: string | undefined;
 }): Effect.Effect<GitHubWebhookAnswer, never, LinearIssueSync | SqlClient> =>
   Effect.gen(function* () {
-    const secret = input.secret ?? "";
-    if (secret === "") {
-      return {
-        status: 503,
-        body: {
-          ok: false,
-          error:
-            "this route has no secret configured (GITHUB_WEBHOOK_SECRET); it accepts nothing until one is set",
-          code: "not-configured",
-        },
-      };
-    }
-    if (!verifyGitHubSignature(input.raw, input.signature, secret)) {
-      return { status: 401, body: { ok: false, error: "bad signature" } };
-    }
+    const refused = refuseGitHubDelivery(input);
+    if (refused !== undefined) return refused;
     if (input.event !== "pull_request") {
       return {
         status: 202,

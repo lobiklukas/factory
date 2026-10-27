@@ -1,11 +1,19 @@
 /* oxlint-disable effecttsgo/process-env effecttsgo/process-env-in-effect */
 /**
- * `POST /webhooks/github` (LOB-15): GitHub's `pull_request` events, mirrored on the Linear issue the
- * PR's session was delegated from — a merge moves it to done, an unmerged close explains itself.
+ * `POST /webhooks/github`: one GitHub webhook, two events, picked by `X-GitHub-Event`.
  *
- * The route is thin on purpose: verifying `X-Hub-Signature-256`, reading the event, and syncing are
- * all `@repo/core`'s `handleGitHubPullRequestWebhook`, so the unit tests and the verify drive run
- * exactly what this route runs. The secret is `GITHUB_WEBHOOK_SECRET`, read per request like the
+ * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
+ *   merge moves it to done, an unmerged close explains itself.
+ * - `push` (LOB-234) is the docs trigger's: a push to the repository's default branch starts one docs
+ *   run on `factory/doc-<push>` (`@repo/core`'s `handleDocsPushWebhook`), a redelivery is a replay,
+ *   and a push to any other branch is `400` and starts nothing.
+ *
+ * One route rather than two because GitHub sends every event a webhook subscribes to to one URL with
+ * one secret, and both handlers refuse an unsigned delivery the same way (`refuseGitHubDelivery`).
+ *
+ * The route is thin on purpose: verifying `X-Hub-Signature-256`, reading the event, and syncing or
+ * delivering are all `@repo/core`'s (`handleGitHubPullRequestWebhook`, `handleDocsPushWebhook`), so
+ * the unit tests and the verify drives run exactly what this route runs. The secret is `GITHUB_WEBHOOK_SECRET`, read per request like the
  * trigger routes' secrets; unset, the route refuses every delivery (`503`). The sync is the process's
  * one `LinearIssueSync` (`./LinearSync`), which writes nothing when no Linear key is set.
  *
@@ -17,16 +25,21 @@
  * a `pull_request` payload carries the PR's body and two repository objects, and smaller than
  * GitHub's own 25 MB ceiling by far.
  *
- * Only `pull_request` is read. GitHub's issue events (`@repo/core`'s `githubDelivery`, LOB-190) are a
- * different adapter and are not wired here; such a delivery is answered `202` and ignored.
+ * Only `pull_request` and `push` are read. GitHub's issue events (`@repo/core`'s `githubDelivery`,
+ * LOB-190) are a different adapter and are not wired here; such a delivery is answered `202` and
+ * ignored.
  */
 import { Effect, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   GITHUB_EVENT_HEADER,
   GITHUB_SIGNATURE_HEADER,
+  handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
 } from "@repo/core";
+
+/** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
+const GITHUB_DELIVERY_HEADER = "x-github-delivery";
 
 /** The default cap on a GitHub webhook body, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
@@ -86,12 +99,23 @@ export const GitHubWebhookLive = HttpRouter.add(
     }
     const raw = yield* readCapped(req, limit);
     if (raw === undefined) return tooLarge(limit);
-    const answer = yield* handleGitHubPullRequestWebhook({
-      secret: process.env["GITHUB_WEBHOOK_SECRET"],
-      raw,
-      signature: req.headers[GITHUB_SIGNATURE_HEADER],
-      event: req.headers[GITHUB_EVENT_HEADER],
-    });
+    const secret = process.env["GITHUB_WEBHOOK_SECRET"];
+    const signature = req.headers[GITHUB_SIGNATURE_HEADER];
+    const event = req.headers[GITHUB_EVENT_HEADER];
+    const answer =
+      event === "push"
+        ? yield* handleDocsPushWebhook({
+            secret,
+            raw,
+            signature,
+            delivery: req.headers[GITHUB_DELIVERY_HEADER],
+          })
+        : yield* handleGitHubPullRequestWebhook({
+            secret,
+            raw,
+            signature,
+            event,
+          });
     return HttpServerResponse.setStatus(
       HttpServerResponse.jsonUnsafe(answer.body),
       answer.status,

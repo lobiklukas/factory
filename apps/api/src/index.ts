@@ -3,11 +3,12 @@ import {
   CredentialProvider,
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
+  runDocsSchedule,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
-import { SessionBudgetCap } from "@repo/domain/Session";
+import { RepoSlug, SessionBudgetCap } from "@repo/domain/Session";
 import {
   createModelAccess,
   DEFAULT_AUTONOMY,
@@ -203,6 +204,26 @@ const SessionBudgetConfig = Config.option(
   Config.schema(SessionBudgetCap, "SESSION_BUDGET"),
 );
 
+/**
+ * The docs trigger's interval schedule (LOB-197, started here by LOB-234).
+ *
+ * `DOCS_SCHEDULE_MS` is the interval and `DOCS_SCHEDULE_REPO` the repo each tick docs. Unset (or
+ * `<= 0`) the schedule is off and delivers nothing — the default, because a scheduled docs run is a
+ * deployment's choice. An interval with no repo fails the boot rather than ticking at nothing, and so
+ * does a value that is not an integer or a repo that is not `owner/name`. The repo still has to be
+ * registered: until it is, each tick is recorded `skipped` naming it, the way any trigger's is.
+ */
+const DocsScheduleConfig = Config.all({
+  everyMs: Config.option(Config.Int("DOCS_SCHEDULE_MS")),
+  repo: Config.option(Config.schema(RepoSlug, "DOCS_SCHEDULE_REPO")),
+});
+
+/** A docs schedule the boot refuses: an interval with no repo to run it over. */
+class InvalidDocsSchedule extends Schema.TaggedError<InvalidDocsSchedule>()(
+  "InvalidDocsSchedule",
+  { message: Schema.String },
+) {}
+
 /** The first line of a cause, short enough for one log line. */
 const firstLine = (cause: Cause.Cause<unknown>): string =>
   Cause.pretty(cause).split("\n")[0]?.trim() ?? "unknown failure";
@@ -271,6 +292,26 @@ const MigrationsDaemon = Layer.effectDiscard(
 );
 
 /**
+ * Run the docs schedule for as long as the process lives (LOB-234), beside `MigrationsDaemon` and for
+ * the same reason: forked, so a tick that cannot reach Postgres is logged by `docsSchedule` and the
+ * next interval tries again instead of failing the boot. It is built on `SessionShutdown`
+ * (`HttpLive`), so its scope closes first: shutdown interrupts the schedule, and waits for it, before
+ * the session owners are released. Off, it forks nothing.
+ */
+const DocsScheduleDaemon = (schedule: {
+  readonly everyMs: number;
+  readonly repo: RepoSlug;
+}) =>
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* Effect.logInfo(
+        `docs schedule: every ${schedule.everyMs}ms over ${schedule.repo} (DOCS_SCHEDULE_MS)`,
+      );
+      yield* Effect.forkScoped(runDocsSchedule(schedule));
+    }),
+  );
+
+/**
  * Say which credential source the process selected (LOB-51). Building the provider is what refuses
  * an unsupported configuration (a GitHub App id with no App flow), so this line is also the boot's
  * evidence that the static token, not an App, is what the control plane will use.
@@ -323,6 +364,14 @@ const HttpLive = Effect.gen(function* () {
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
+  const docsSchedule = yield* DocsScheduleConfig;
+  const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
+  if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
+    return yield* new InvalidDocsSchedule({
+      message:
+        "DOCS_SCHEDULE_MS is set but DOCS_SCHEDULE_REPO is not: the docs schedule needs the repo it docs",
+    });
+  }
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -388,8 +437,26 @@ const HttpLive = Effect.gen(function* () {
   // `provideMerge` (not `provide`): `/readyz` needs `SqlClient` itself, so the database services
   // have to stay in the layer's output rather than being kept private to the session layer. The
   // shutdown finalizer registers after the pool, so it runs before the pool closes.
+  // The docs schedule reads the session layer, so it sits under it with the shutdown finalizer —
+  // built *on* `SessionShutdown` rather than beside it. `provideMerge` builds the two in one
+  // sequential scope, shutdown first, so the daemon's fiber is interrupted (and awaited) before
+  // `sessions.close` releases the owners; siblings in `Layer.mergeAll` would close in parallel, and a
+  // tick inside `sessions.create` could open an owner while `close` was releasing them.
+  const SessionDaemons = Option.match(docsSchedule.repo, {
+    onNone: () => SessionShutdown,
+    onSome: (repo) =>
+      docsEveryMs > 0
+        ? DocsScheduleDaemon({ everyMs: docsEveryMs, repo }).pipe(
+            Layer.provideMerge(SessionShutdown),
+          )
+        : SessionShutdown,
+  });
+  if (docsEveryMs <= 0) {
+    yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
+  }
+
   const RouterDependencies = Layer.mergeAll(
-    SessionShutdown.pipe(Layer.provideMerge(SessionDeps)),
+    SessionDaemons.pipe(Layer.provideMerge(SessionDeps)),
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
