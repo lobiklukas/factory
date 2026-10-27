@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { TerminalIcon } from "lucide-react";
 import { Schema } from "effect";
 import { SessionId } from "@repo/domain/Session";
+import { SessionApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
 import { EmptyPane } from "@/components/empty-pane";
 
@@ -23,7 +24,13 @@ function SessionRoute() {
       detail="A session id is ses_ followed by Crockford base32. A link carrying anything else cannot resolve, so it is refused here instead of reaching the API as a not-found you cannot act on."
       visible={parsed._tag === "None"}
     >
-      {parsed._tag === "Some" ? <SessionPane sessionId={parsed.value} /> : null}
+      {parsed._tag === "Some" ? (
+        <>
+          {/* A run parked on an approval says so above its transcript (LOB-53). */}
+          <SessionApprovals sessionId={parsed.value} />
+          <SessionPane sessionId={parsed.value} />
+        </>
+      ) : null}
     </EmptyPane>
   );
 }

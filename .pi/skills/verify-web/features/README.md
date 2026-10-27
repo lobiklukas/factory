@@ -4,13 +4,15 @@ One file per user-facing feature. Each answers: what it is, how a user reaches i
 it with the harness, and what observable end state proves it works.
 
 Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9530` / web `:3530` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 72/72 required checks passed,
-from the `agent/LOB-76` worktree, against its own database on 5442).
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 78/78 required checks passed,
+from the `agent/LOB-53` worktree, against its own database on 5442). The one console error is the
+compaction block's injected 500 ([compaction.md](compaction.md)).
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)   |
 | Routing                  | passing | [routing.md](routing.md)                   |
+| Approvals inbox          | passing | [routing.md](routing.md)                   |
 | Browser reaches the API  | passing | [api-connectivity.md](api-connectivity.md) |
 | Session stream           | passing | [session-stream.md](session-stream.md)     |
 | Fork lineage             | passing | [fork-lineage.md](fork-lineage.md)         |
@@ -31,10 +33,12 @@ from the `agent/LOB-76` worktree, against its own database on 5442).
   failed once (the summary settled before the run started) and passed on the next run, with no
   change between them. A failure there with `busyStarted=true` and no `requested`+`busy` sample is
   the race, not a regression.
-- **`/sandboxes` and `/approvals` are off the rail.** They became panes of a card's run (LOB-76); the
-  routes still render their milestone copy (M4, M3) for an old link, and `drive.mjs` asserts it.
-  That copy predates the run pane: the card's Approvals pane reads and decides through the live
-  `ApprovalsRpc` (driven in `card-pane.md`); what M3 still owes is a hook that makes a run ask.
+- **`/sandboxes` and `/approvals` are off the rail.** They became panes of a card's run (LOB-76).
+  `/sandboxes` still renders its milestone copy (M4), and `drive.mjs` asserts it. `/approvals` is
+  every run's pending approvals since LOB-53, reached by URL or from a session pane that is waiting
+  on one — not from the rail, where the attention view (LOB-77) is the place for "a person is
+  needed". The dashboard seeds its approvals through `requestApproval` (its API is ungated); the
+  gated run that parks and resumes is driven by `verify-cli/approve.sh`.
 - **The rail has no attention count.** The rail is the natural place to say "two cards need a person",
   and the board (LOB-22) is what produces that number. Nothing backs it today, so a badge would be
   fiction.

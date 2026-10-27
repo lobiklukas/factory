@@ -40,7 +40,8 @@ export type SessionRpcClient = SessionClient["Service"]["client"];
  * The whole API's client: sessions, approvals and the board's `TasksRpc` group (LOB-61).
  *
  * `factory board start` needs both halves of the surface — it reads a card and then opens the run
- * against it — so the board commands hold one client over `RpcApi` rather than two layers. The
+ * against it — so the board commands hold one client over `RpcApi` rather than two layers; so do
+ * `factory approve` / `deny` (LOB-53), which decide over `ApprovalsRpc` and then follow the session. The
  * session commands keep `SessionClient`, because a command that cannot reach the board should not
  * fail to compile with it.
  */

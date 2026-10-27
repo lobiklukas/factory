@@ -15,8 +15,9 @@ which adds the session list beside the pane.
 - The session sidebar is the server's `listSessions` (LOB-75): its rows are the first page in the
   server's order, and with no sessions it says `No sessions on this control plane yet`
 - The theme toggle sits at the rail's foot and dark is the default
-- `/sandboxes` and `/approvals`, reached by URL only, render their milestone copy rather than an
-  empty table
+- `/sandboxes`, reached by URL only, renders its milestone copy rather than an empty table;
+  `/approvals`, reached by URL or from a waiting session's pane, is every run's pending approvals
+  (LOB-53, [routing.md](routing.md))
 
 ## How to get to it (user POV)
 
