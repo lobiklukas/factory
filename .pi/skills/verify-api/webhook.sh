@@ -8,7 +8,11 @@
 # the trigger configuration, which has to exist *before* the API boots because the routes read it
 # once when they are built:
 #
-#   TRIGGER_RULES           the mapping rules, as JSON — one rule, this run's own repo
+#   TRIGGER_RULES           the mapping rules, as JSON — three rules on this run's own repo:
+#                           `factory`; a `docs` rule that admits `push` and `schedule` the way
+#                           `docsTriggerRules` does; and a `release` rule that admits `release`. The
+#                           drive proves the generic adapter refuses an action either rule admits
+#                           before the rule could admit it (LOB-235)
 #   TRIGGER_SECRET          the generic adapter's shared secret
 #   LINEAR_WEBHOOK_SECRET   the Linear adapter's, so the drive can sign a Linear delivery too
 #   TRIGGER_MAX_BODY_BYTES  2 KiB, so the drive's 4 KiB body proves the trigger cap and not the
@@ -24,8 +28,8 @@ export TRIGGER_SECRET="${TRIGGER_SECRET:-verify-api-trigger-secret}"
 export LINEAR_WEBHOOK_SECRET="${LINEAR_WEBHOOK_SECRET:-verify-api-linear-secret}"
 export TRIGGER_MAX_BODY_BYTES="${TRIGGER_MAX_BODY_BYTES:-2048}"
 TRIGGER_RULES="$(printf \
-  '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Work on {{title}}: {{body}}"}]' \
-  "$TRIGGER_REPO")"
+  '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Work on {{title}}: {{body}}"},{"label":"docs","repo":"%s","baseRef":"main","prompt":"Document {{title}}: {{body}}","startsWorkFor":["push","schedule"]},{"label":"release","repo":"%s","baseRef":"main","prompt":"Release {{title}}","startsWorkFor":["release"]}]' \
+  "$TRIGGER_REPO" "$TRIGGER_REPO" "$TRIGGER_REPO")"
 export TRIGGER_RULES
 
 mkdir -p "$EVIDENCE_DIR"

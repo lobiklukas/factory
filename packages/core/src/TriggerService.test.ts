@@ -415,7 +415,9 @@ describe("the trigger seam", () => {
 
         expect(outcome.status).toBe("skipped");
         expect(outcome.replayed).toBe(false);
-        expect(outcome.reason).toContain('action "update"');
+        // The reason names what the routing rule admits — `factory` asks for nothing beyond a
+        // create — rather than every action the seam knows (LOB-235).
+        expect(outcome.reason).toBe('action "update" is not "create"');
         expect(created).toHaveLength(0);
       },
       { registerRepo: [repo] },
@@ -456,7 +458,22 @@ describe("the trigger seam", () => {
           ),
         );
         expect(both.status).toBe("skipped");
-        expect(both.reason).toContain('action "push"');
+        expect(both.reason).toBe('action "push" is not "create"');
+        expect(created).toHaveLength(0);
+
+        // The docs rule's refusal names what *it* admits, so the reason and the filter agree.
+        const docsEdit = await run(
+          trigger.deliver(
+            deliver(`${runId}-docs-update`, {
+              action: "update",
+              labels: ["factory-docs"],
+            }),
+          ),
+        );
+        expect(docsEdit.status).toBe("skipped");
+        expect(docsEdit.reason).toBe(
+          'action "update" is not "create", "push", "schedule"',
+        );
         expect(created).toHaveLength(0);
 
         const docsOnly = await run(
