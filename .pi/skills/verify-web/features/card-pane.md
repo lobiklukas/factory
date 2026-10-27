@@ -34,9 +34,12 @@ transcript, approvals and sandbox as panes (LOB-76, part 2 of LOB-22).
   other session id renders `[data-run-foreign=<id>]` and no run panes.
 - **Run panes.** Transcript (the session pane, composer and steering included), Approvals (the run's
   pending `listApprovals`, each `li[data-approval=<request id>]` with `[data-decide=approved|denied]`
-  buttons, disabled while the decision is in flight; the click is `decideApproval` as `dashboard`)
+  buttons, disabled while the decision is in flight; the click is `decideApproval` as `dashboard`,
+  with `resume: true` since LOB-53 so the run wakes with the answer — the same row component as
+  `/approvals` and the session pane, `components/approvals.tsx`)
   and Sandbox (none: runs execute in-process, B12).
-  `/sandboxes` and `/approvals` left the rail for these; the routes stay, so an old link still reads.
+  `/sandboxes` and `/approvals` left the rail for these; the routes stay (`/approvals` is every run's
+  pending list since LOB-53, see [routing.md](routing.md)).
 - Selection is in the URL only; nothing is kept in the browser's storage.
 
 ## How to get to it (user POV)
@@ -87,9 +90,10 @@ Evidence: `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png`,
   other RPC passes through.
 - **The revision bump is a block and an unblock**, not a move, so the card's column is the same
   before and after and "does not visually move" is a claim about one lane, not a race with another.
-- **The approval is seeded through the API, not produced by a run.** No hook gates a tool call yet
-  (M3), so the faux run never asks; `requestApproval` is the contract a gated action will call, and
-  the pane is proven against it. The CLI half of "a move in `factory board move` appears in the
+- **The approval is seeded through the API, not produced by a run.** `up.sh` starts the API ungated,
+  so the faux run never asks; `requestApproval` is the contract a gated call uses (LOB-52), and the
+  pane is proven against it. The gated run that parks and resumes on a decision is driven from the
+  terminal by `.pi/skills/verify-cli/approve.sh` (LOB-53). The CLI half of "a move in `factory board move` appears in the
   browser, and the reverse" is driven here through the real CLI entry point (`apps/cli/src/index.ts`
   over the real API), not in `verify-cli`.
 - **The `needs_input` walk is not here.** Answering a block needs LOB-46's spec stage; the parent

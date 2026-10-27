@@ -1350,16 +1350,177 @@ assert(
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "sandboxes.png") });
 
-await page.goto(`${WEB_URL}/approvals`, { waitUntil: "domcontentloaded" });
-const approvalsCopy = (await page.locator("body").innerText()).trim();
-observed.approvals = approvalsCopy;
+// Feature: the approvals inbox (LOB-53). See features/routing.md.
+//
+// `/approvals` used to say what was missing ("No approvals pending" + M3); that assertion is flipped,
+// not deleted: the route now lists every run's pending approvals from `listPendingApprovals` and
+// decides them. The request is made from the drive through the API's own `requestApproval` — what a
+// gated call does — on a fresh session, so the oracle is this run's request and not whatever an
+// earlier run left pending. The session pane shows it first, `/approvals` decides it, and the
+// oracle for "decided, gone, and the session resumed" is the API asked from here, not the page.
+const inbox = {};
+const inboxSession = await rpcFromDrive("createSession", {
+  title: "verify-web approvals inbox",
+});
+const inboxSessionId = inboxSession.value?.id ?? "";
+const inboxRequestId = `verify-web-inbox-${Date.now()}`;
+const INBOX_ACTION = "verify-web: publish the package";
+const inboxAsked =
+  inboxSessionId === ""
+    ? { exit: null }
+    : await rpcFromDrive("requestApproval", {
+        sessionId: inboxSessionId,
+        requestId: inboxRequestId,
+        action: INBOX_ACTION,
+        detail: "npm publish --tag next",
+      });
+const inboxDecides = [];
+const recordInboxDecide = (request) => {
+  if (!/\/rpc\/?$/.test(request.url()) || request.method() !== "POST") return;
+  for (const line of (request.postData() ?? "").split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (message?._tag === "Request" && message.tag === "decideApproval")
+        inboxDecides.push(message.payload);
+    } catch {
+      // Not an envelope line.
+    }
+  }
+};
+const inboxRow = `[data-approvals-inbox] [data-approval='${inboxRequestId}'][data-approval-session='${inboxSessionId}']`;
+const sessionStrip = `[data-session-approvals='${inboxSessionId}'] [data-approval='${inboxRequestId}']`;
+
+// The session pane says its run is waiting, with the decision in reach.
+await page.goto(`${WEB_URL}/sessions/${inboxSessionId}`, {
+  waitUntil: "domcontentloaded",
+});
+inbox.sessionShown = await page
+  .waitForSelector(sessionStrip, { timeout: 15_000 })
+  .then(
+    () => true,
+    () => false,
+  );
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "session-approval.png"),
+});
 assert(
-  "approvals says what is missing",
-  approvalsCopy.includes("No approvals pending") &&
-    approvalsCopy.includes("M3"),
-  `body: ${JSON.stringify(approvalsCopy.slice(0, 200))}`,
+  "the session pane shows its pending approval",
+  inboxAsked.exit === "Success" && inbox.sessionShown,
+  `session ${inboxSessionId || "none"}; requested ${String(inboxAsked.exit)}; strip shown ${inbox.sessionShown}`,
 );
+
+// `/approvals` lists it beside every other run's, and Approve decides it in place.
+await page.goto(`${WEB_URL}/approvals`, { waitUntil: "domcontentloaded" });
+inbox.listed = await page.waitForSelector(inboxRow, { timeout: 15_000 }).then(
+  () => true,
+  () => false,
+);
+const approvalsCopy = (await page.locator("body").innerText()).trim();
+observed.approvals = approvalsCopy.slice(0, 400);
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "approvals.png") });
+const pendingBeforeInbox = await rpcFromDrive("listPendingApprovals", {});
+page.on("request", recordInboxDecide);
+inbox.cleared = false;
+if (inbox.listed) {
+  try {
+    await page.locator(`${inboxRow} [data-decide='approved']`).click();
+    await page.waitForSelector(inboxRow, {
+      state: "detached",
+      timeout: 15_000,
+    });
+    inbox.cleared = true;
+  } catch (error) {
+    inbox.error = String(error).slice(0, 300);
+  }
+}
+page.off("request", recordInboxDecide);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "approvals-decided.png"),
+});
+const pendingAfterInbox = await rpcFromDrive("listPendingApprovals", {});
+const inPending = (result) =>
+  (result.value?.approvals ?? []).some(
+    (request) =>
+      request.sessionId === inboxSessionId &&
+      request.requestId === inboxRequestId,
+  );
+inbox.decides = inboxDecides;
+inbox.pendingBefore = inPending(pendingBeforeInbox);
+inbox.pendingAfter = inPending(pendingAfterInbox);
+assert(
+  "approvals shows the pending approval and decides it",
+  inbox.listed &&
+    approvalsCopy.includes(INBOX_ACTION) &&
+    approvalsCopy.includes(inboxSessionId) &&
+    !approvalsCopy.includes("Policy enforcement is M3") &&
+    inbox.pendingBefore &&
+    inbox.cleared &&
+    inboxDecides.length === 1 &&
+    inboxDecides[0]?.sessionId === inboxSessionId &&
+    inboxDecides[0]?.requestId === inboxRequestId &&
+    inboxDecides[0]?.decision === "approved" &&
+    inboxDecides[0]?.actor === "dashboard" &&
+    inboxDecides[0]?.resume === true &&
+    pendingAfterInbox.exit === "Success" &&
+    !inbox.pendingAfter,
+  `listed ${inbox.listed}, cleared ${inbox.cleared}; API pending before ${inbox.pendingBefore}, after ${inbox.pendingAfter}; sent ${JSON.stringify(inboxDecides)}`,
+);
+
+// The decision resumed the session: its log holds the follow-up naming the decision, and a run
+// answered it. Read from the API, and polled, because the run lands after the click's answer — and
+// up.sh's faux turn sleeps (`FAUX_COMMAND`, 12 s by default), so the wait is up to 40 s.
+let resumedEntries = [];
+for (let attempt = 0; attempt < 160; attempt += 1) {
+  const read = await rpcFromDrive("getSession", { sessionId: inboxSessionId });
+  resumedEntries = read.value?.entries ?? [];
+  const resumedAt = resumedEntries.findIndex(
+    (entry) =>
+      entry.kind === "user" &&
+      String(entry.text).startsWith(`Approved: \`${INBOX_ACTION}\``),
+  );
+  if (
+    resumedAt >= 0 &&
+    read.value?.live?.busy === false &&
+    resumedEntries
+      .slice(resumedAt)
+      .some((entry) => entry.kind === "assistant" && entry.text !== "")
+  )
+    break;
+  await new Promise((resolve) => setTimeout(resolve, 250));
+}
+const resumedUser = resumedEntries.find(
+  (entry) =>
+    entry.kind === "user" &&
+    String(entry.text).startsWith(`Approved: \`${INBOX_ACTION}\``),
+);
+inbox.resumedWith = resumedUser?.text ?? null;
+assert(
+  "the decided approval resumed its session",
+  resumedUser !== undefined &&
+    String(resumedUser.text).includes("approved by dashboard") &&
+    resumedEntries.some(
+      (entry) =>
+        entry.kind === "assistant" &&
+        String(entry.text).includes(String(resumedUser.text)),
+    ),
+  `follow-up ${JSON.stringify(inbox.resumedWith)}; ${resumedEntries.length} entries`,
+);
+
+// And the session pane no longer says it is waiting: the decided approval left both lists.
+await page.goto(`${WEB_URL}/sessions/${inboxSessionId}`, {
+  waitUntil: "domcontentloaded",
+});
+await page.waitForSelector("header h1", { timeout: 15_000 }).catch(() => {});
+await page.waitForTimeout(2_500);
+inbox.sessionStripAfter = await page
+  .locator(`[data-session-approvals='${inboxSessionId}']`)
+  .count();
+assert(
+  "the session pane drops the decided approval",
+  inbox.sessionStripAfter === 0,
+  `strip elements after the decision: ${inbox.sessionStripAfter}`,
+);
+observed.approvalsInbox = inbox;
 
 // A bad session id is refused by the route's decode, not sent to the RPC surface
 // as a `not_found` the user cannot act on. See features/routing.md.

@@ -15,9 +15,7 @@ import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
 import type { BoardDefinition, BoardInstanceId, Task } from "@repo/domain/Task";
 import {
-  approvalsAtom,
   boardAtom,
-  decideApprovalAtom,
   moveTaskAtom,
   startRunAtom,
   taskRunsAtom,
@@ -32,19 +30,14 @@ import {
   runStart,
   type MoveRefusal,
 } from "@/lib/board-view";
+import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
+import { RunApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-
-/**
- * Who the dashboard says made a move. A person, by construction: a run's actor is its session id
- * (B1), and this string is not one, so `TaskService` lets it cross a human gate. Identity beyond an
- * actor string is LOB-20's; `factory board move` says `cli` for the same reason.
- */
-export const DASHBOARD_ACTOR = "dashboard";
 
 /**
  * The card pane's moves (LOB-76): one button per transition the card's column declares, and
@@ -290,88 +283,6 @@ const Runs = ({
 };
 
 /**
- * What a run is waiting on a person for (D11): the pending approvals of the selected run, with the
- * decision beside each. This is where `/approvals` went (LOB-76) — an approval belongs to a run,
- * and a run belongs to a card, so a top-level list with no card around it answered the wrong
- * question.
- */
-const ApprovalsPane = ({ sessionId }: { readonly sessionId: SessionId }) => {
-  const pending = useAtomValue(approvalsAtom(sessionId));
-  const decide = useAtomSet(decideApprovalAtom, { mode: "promiseExit" });
-  // The request a decision is in flight for: its buttons stay disabled until the RPC answers, so a
-  // double click cannot send two decisions.
-  const [deciding, setDeciding] = useState<string | null>(null);
-
-  if (AsyncResult.isInitial(pending)) {
-    return <Spinner className="m-4 size-3.5 text-muted-foreground" />;
-  }
-  if (AsyncResult.isFailure(pending)) {
-    return (
-      <p className="p-4 text-xs text-destructive">
-        The approvals did not load: {Cause.pretty(pending.cause)}
-      </p>
-    );
-  }
-  if (pending.value.approvals.length === 0) {
-    return (
-      <p className="p-4 text-xs text-muted-foreground" data-no-approvals>
-        This run is not waiting on an approval.
-      </p>
-    );
-  }
-  return (
-    <ul aria-label="Pending approvals" className="flex flex-col gap-2 p-4">
-      {pending.value.approvals.map((request) => (
-        <li
-          key={request.requestId}
-          data-approval={request.requestId}
-          className="flex flex-col gap-1.5 border border-border p-3"
-        >
-          <span className="font-mono text-[11px]">{request.action}</span>
-          {request.detail.length === 0 ? null : (
-            <span className="text-xs text-muted-foreground">
-              {request.detail}
-            </span>
-          )}
-          <span className="flex gap-2">
-            {(["approved", "denied"] as const).map((decision) => (
-              <Button
-                key={decision}
-                type="button"
-                size="sm"
-                variant={decision === "approved" ? "default" : "outline"}
-                data-decide={decision}
-                disabled={deciding === request.requestId}
-                aria-busy={deciding === request.requestId}
-                onClick={() => {
-                  setDeciding(request.requestId);
-                  void decide({
-                    sessionId,
-                    requestId: request.requestId,
-                    decision,
-                    actor: DASHBOARD_ACTOR,
-                  })
-                    .then((exit) => {
-                      if (Exit.isFailure(exit)) {
-                        toast.error("The decision was not recorded", {
-                          description: Cause.pretty(exit.cause),
-                        });
-                      }
-                    })
-                    .finally(() => setDeciding(null));
-                }}
-              >
-                {decision === "approved" ? "Approve" : "Deny"}
-              </Button>
-            ))}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-};
-
-/**
  * The selected run, as panes inside the card (LOB-76): its transcript and steering (the session
  * pane, composer included), its approvals, and its sandbox. `/sandboxes` and `/approvals` left the
  * rail for here, because each only means something for one run of one card.
@@ -394,7 +305,7 @@ const RunPanes = ({ sessionId }: { readonly sessionId: SessionId }) => (
       <SessionPane sessionId={sessionId} />
     </TabsContent>
     <TabsContent value="approvals" className="min-h-0 overflow-y-auto">
-      <ApprovalsPane sessionId={sessionId} />
+      <RunApprovals sessionId={sessionId} />
     </TabsContent>
     <TabsContent value="sandbox" className="p-4">
       <p className="flex items-start gap-2 text-xs text-muted-foreground">

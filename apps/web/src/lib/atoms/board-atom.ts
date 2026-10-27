@@ -139,7 +139,23 @@ export const approvalsAtom = Atom.family((sessionId: SessionId) =>
     .pipe(Atom.withReactivity([APPROVALS_KEY]), Atom.withRefresh(BOARD_POLL)),
 );
 
-/** Settles one pending approval; the pending list re-reads once the decision is committed. */
+/**
+ * Every session's pending approvals, oldest first (LOB-53): the `/approvals` pane, the operator's
+ * inbox. Polled like a board, and re-read at once when a decision from this page lands.
+ */
+export const pendingApprovalsAtom = runtime
+  .atom(
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.listPendingApprovals({});
+    }),
+  )
+  .pipe(Atom.withReactivity([APPROVALS_KEY]), Atom.withRefresh(BOARD_POLL));
+
+/**
+ * Settles one pending approval; every pending list re-reads once the decision is committed. The
+ * dashboard's decisions resume their session (`decisionFor`), so the run a person answered wakes.
+ */
 export const decideApprovalAtom = runtime.fn(
   (input: DecideApprovalInput) =>
     Effect.gen(function* () {
