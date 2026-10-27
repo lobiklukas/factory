@@ -326,6 +326,18 @@ describe("githubPullRequestLifecycle", () => {
     });
     expect(githubPullRequestLifecycle({ action: "closed" })).toBeUndefined();
   });
+
+  it("names the PR by its page, and keeps GitHub's API resource beside it", () => {
+    // GitHub's real payload: `url` is the API resource, `html_url` the page. The page is the PR's
+    // link (what the step records); the resource is kept only to match a session recorded before.
+    const api = "https://api.github.com/repos/acme/widgets/pulls/7";
+    expect(
+      githubPullRequestLifecycle({
+        action: "closed",
+        pull_request: { number: 7, url: api, html_url: pr.url, merged: true },
+      }),
+    ).toEqual({ _tag: "merged", pr, apiUrl: api });
+  });
 });
 
 /** A request the fake saw: the operation, its variables, and the key it carried. */
@@ -853,6 +865,10 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
   const runId = randomBytes(6).toString("hex");
   const runtime = ManagedRuntime.make(DatabaseLive);
 
+  /** The trigger case's repo and delivery: `TriggerService` writes both, so the suite removes them. */
+  const triggerSlug = `acme/linear-trigger-${runId}`;
+  const triggerDelivery = `linear:TRG-${runId}:mapped`;
+
   // The rows have no log behind them, so they leave with the suite rather than waiting for a
   // rebuild in another suite to find them.
   afterAll(async () => {
@@ -860,21 +876,28 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
       Effect.gen(function* () {
         const sql = yield* SqlClient;
         yield* sql`DELETE FROM sessions WHERE id LIKE ${`ses_lws_%_${runId}`}`;
+        yield* sql`DELETE FROM webhook_deliveries WHERE request_id = ${triggerDelivery}`;
+        yield* sql`DELETE FROM repos WHERE slug = ${triggerSlug}`;
       }),
     );
     await runtime.dispose();
   });
 
-  const seedSession = (id: string, requestId: string | null, prUrl: string) =>
-    runtime.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient;
-        yield* sql`
-          INSERT INTO sessions (id, title, request_id, pr_url)
-          VALUES (${id}, 'linear write-back case', ${requestId}, ${prUrl})
-        `;
-      }),
-    );
+  /** Every session a case seeded: `run` puts them back before each body reads them. */
+  const seeded = new Map<
+    string,
+    { readonly requestId: string | null; readonly prUrl: string }
+  >();
+
+  /**
+   * A session row for a case. It has no log behind it, so another suite's rebuild test — which
+   * empties `sessions` and refills it from its own logs — can delete it at any moment; `run` upserts
+   * every seeded row in the transaction the body runs in, which holds them until the body is done.
+   */
+  const seedSession = (id: string, requestId: string | null, prUrl: string) => {
+    seeded.set(id, { requestId, prUrl });
+    return Promise.resolve();
+  };
 
   /** Run against the fake Linear and the real database, with both write-backs wired. */
   const run = <A, E>(
@@ -882,7 +905,24 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
     body: Effect.Effect<A, E, LinearIssueSync | SqlClient>,
   ) =>
     runtime.runPromiseExit(
-      body.pipe(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            // `DO UPDATE` rather than `DO NOTHING`: it locks a row that already exists, so a
+            // concurrent `DELETE FROM sessions` waits for this transaction instead of removing the
+            // row between this read and the body's.
+            for (const [id, row] of seeded) {
+              yield* sql`
+                INSERT INTO sessions (id, title, request_id, pr_url)
+                VALUES (${id}, 'linear write-back case', ${row.requestId}, ${row.prUrl})
+                ON CONFLICT (id) DO UPDATE SET pr_url = EXCLUDED.pr_url
+              `;
+            }
+            return yield* body;
+          }),
+        );
+      }).pipe(
         Effect.provide(
           LinearIssueSyncLive(config).pipe(Layer.provide(fake.layer)),
         ),
@@ -1012,7 +1052,7 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
     // The seam, on the real delivery store, with a counting session layer and Linear refusing every
     // read: before the move was best effort, the refusal failed the delivery, gave its claim back,
     // and every redelivery sent the rule's prompt to the same session once more.
-    const slug = `acme/linear-trigger-${runId}` as RepoSlug;
+    const slug = triggerSlug as RepoSlug;
     const rules: ReadonlyArray<TriggerRule> = [
       { label: "factory", repo: slug, prompt: "{{key}}: {{title}}" },
     ];
@@ -1056,7 +1096,7 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
           yield* sql`INSERT INTO repos (slug) VALUES (${slug}) ON CONFLICT (slug) DO NOTHING`;
           const trigger = yield* TriggerService;
           const delivery = {
-            requestId: `linear:TRG-${runId}:mapped`,
+            requestId: triggerDelivery,
             event: {
               source: "linear",
               key: `TRG-${runId}`,
@@ -1155,6 +1195,36 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
       });
       expect(fake.issue.state).toEqual(DONE);
     });
+
+    it.each([
+      ["the page (`html_url`), as the step records it", "page"],
+      [
+        "the API resource (`url`), as a session recorded before LOB-15 holds it",
+        "api",
+      ],
+    ] as const)(
+      "matches GitHub's real payload, where `url` and `html_url` differ: a session recording %s",
+      async (_, recorded) => {
+        const page = `${pr.url}-real-${recorded}-${runId}`;
+        const api = `https://api.github.com/repos/acme/widgets/pulls/7-real-${recorded}-${runId}`;
+        const id = `ses_lws_gh${recorded}_${runId}`;
+        await seedSession(
+          id,
+          `trigger:linear:${key(id)}:mapped`,
+          recorded === "page" ? page : api,
+        );
+        const fake = makeLinear({ identifier: key(id), start: REVIEW });
+        const raw = JSON.stringify({
+          action: "closed",
+          pull_request: { number: 7, url: api, html_url: page, merged: true },
+        });
+        expect(await hook(fake, { raw })).toEqual({
+          status: 200,
+          body: { ok: true, event: "merged", synced: 1 },
+        });
+        expect(fake.issue.state).toEqual(DONE);
+      },
+    );
 
     it("a sync Linear refuses is a 500 the delivery log shows", async () => {
       const url = `${pr.url}-gh500-${runId}`;

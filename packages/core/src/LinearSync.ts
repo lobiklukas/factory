@@ -28,8 +28,10 @@
  * **What this does not do: re-review.** The other half of that separation — a review recorded as
  * its own item, invalidated by a new commit so a stale approval forces a re-review — needs a review
  * record, and the factory keeps none yet (the review itself is GitHub's, D16). It is not built here;
- * it belongs with the review item (LOB-36), and until that lands LOB-15's review criterion is met
- * only in the half above.
+ * it belongs with the review item (LOB-36, whose acceptance already says a `synchronize` event
+ * invalidates the previous verdict and a stale approval never survives a push). LOB-15's review
+ * criterion is therefore **partially met**: the issue's state is the task's and no review verdict
+ * reaches it; re-review on a new commit is LOB-36's.
  *
  * **Every write is idempotent, so a retry is always safe.** That is what makes "no duplicate
  * comments on retry" a property rather than a hope, and it is the same rule Jira, GitHub and Slack
@@ -481,15 +483,37 @@ export const LinearIssueSyncLive = (
     LinearIssueSync,
     Effect.gen(function* () {
       const http = yield* HttpClient.HttpClient;
-      /** One permit per issue; an issue's lock lives as long as the layer. */
-      const locks = new Map<string, Semaphore.Semaphore>();
-      const lockOf = (issueId: string): Semaphore.Semaphore => {
-        const existing = locks.get(issueId);
-        if (existing !== undefined) return existing;
-        const created = Semaphore.makeUnsafe(1);
-        locks.set(issueId, created);
-        return created;
-      };
+      /**
+       * One permit per issue, held only while someone uses it: an entry counts the operations that
+       * hold or wait for its permit and leaves the map when the last one is done, so a long-running
+       * process keeps a lock per issue *in flight*, not per issue it ever touched. The count moves
+       * in `Effect.sync`, which nothing interleaves with, and the release runs on interruption too.
+       */
+      const locks = new Map<
+        string,
+        { readonly semaphore: Semaphore.Semaphore; users: number }
+      >();
+      const withIssueLock = <A, E>(
+        issueId: string,
+        effect: Effect.Effect<A, E>,
+      ): Effect.Effect<A, E> =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const entry = locks.get(issueId) ?? {
+              semaphore: Semaphore.makeUnsafe(1),
+              users: 0,
+            };
+            entry.users += 1;
+            locks.set(issueId, entry);
+            return entry;
+          }),
+          (entry) => entry.semaphore.withPermits(1)(effect),
+          (entry) =>
+            Effect.sync(() => {
+              entry.users -= 1;
+              if (entry.users === 0) locks.delete(issueId);
+            }),
+        );
       const timeout = config.requestTimeout ?? LINEAR_REQUEST_TIMEOUT;
       const headers = {
         authorization: Redacted.value(config.apiKey),
@@ -630,78 +654,77 @@ export const LinearIssueSyncLive = (
         issueId: string,
         writes: Writes,
       ): Effect.Effect<void, LinearSyncError> =>
-        lockOf(issueId)
-          .withPermits(1)(
-            Effect.gen(function* () {
-              const issue = yield* readIssue(issueId);
-              if (
-                writes.attachment !== undefined &&
-                !issue.attachments.nodes.some(
-                  (node) => node.url === writes.attachment?.url,
-                )
-              ) {
-                yield* mutate(
-                  "attachmentCreate",
-                  issueId,
-                  LINEAR_ATTACHMENT_CREATE,
-                  {
-                    input: {
-                      issueId: issue.id,
-                      url: writes.attachment.url,
-                      title: writes.attachment.title,
-                    },
+        withIssueLock(
+          issueId,
+          Effect.gen(function* () {
+            const issue = yield* readIssue(issueId);
+            if (
+              writes.attachment !== undefined &&
+              !issue.attachments.nodes.some(
+                (node) => node.url === writes.attachment?.url,
+              )
+            ) {
+              yield* mutate(
+                "attachmentCreate",
+                issueId,
+                LINEAR_ATTACHMENT_CREATE,
+                {
+                  input: {
+                    issueId: issue.id,
+                    url: writes.attachment.url,
+                    title: writes.attachment.title,
                   },
-                );
+                },
+              );
+            }
+            if (
+              writes.comment !== undefined &&
+              !issue.comments.nodes.some((node) =>
+                node.body.includes(writes.comment?.marker ?? ""),
+              )
+            ) {
+              yield* mutate("commentCreate", issueId, LINEAR_COMMENT_CREATE, {
+                input: { issueId: issue.id, body: writes.comment.body },
+              });
+            }
+            if (writes.phase !== undefined) {
+              const decision = nextLinearState({
+                current: issue.state,
+                states: issue.team.states.nodes,
+                mapping: config.states,
+                phase: writes.phase,
+              });
+              switch (decision._tag) {
+                case "missing":
+                  return yield* new LinearSyncError({
+                    issueId,
+                    operation,
+                    message: `${issue.identifier}'s team has no workflow state named "${decision.name}" (it has: ${decision.available.join(", ")})`,
+                    transient: false,
+                  });
+                case "stay":
+                  yield* Effect.logDebug(
+                    `linear: ${issue.identifier} stays: ${decision.why}`,
+                  );
+                  break;
+                case "move":
+                  yield* mutate("issueUpdate", issueId, LINEAR_ISSUE_UPDATE, {
+                    id: issue.id,
+                    input: { stateId: decision.state.id },
+                  });
+                  yield* Effect.logInfo(
+                    `linear: ${issue.identifier} ${issue.state.name} → ${decision.state.name} (${operation})`,
+                  );
+                  break;
               }
-              if (
-                writes.comment !== undefined &&
-                !issue.comments.nodes.some((node) =>
-                  node.body.includes(writes.comment?.marker ?? ""),
-                )
-              ) {
-                yield* mutate("commentCreate", issueId, LINEAR_COMMENT_CREATE, {
-                  input: { issueId: issue.id, body: writes.comment.body },
-                });
-              }
-              if (writes.phase !== undefined) {
-                const decision = nextLinearState({
-                  current: issue.state,
-                  states: issue.team.states.nodes,
-                  mapping: config.states,
-                  phase: writes.phase,
-                });
-                switch (decision._tag) {
-                  case "missing":
-                    return yield* new LinearSyncError({
-                      issueId,
-                      operation,
-                      message: `${issue.identifier}'s team has no workflow state named "${decision.name}" (it has: ${decision.available.join(", ")})`,
-                      transient: false,
-                    });
-                  case "stay":
-                    yield* Effect.logDebug(
-                      `linear: ${issue.identifier} stays: ${decision.why}`,
-                    );
-                    break;
-                  case "move":
-                    yield* mutate("issueUpdate", issueId, LINEAR_ISSUE_UPDATE, {
-                      id: issue.id,
-                      input: { stateId: decision.state.id },
-                    });
-                    yield* Effect.logInfo(
-                      `linear: ${issue.identifier} ${issue.state.name} → ${decision.state.name} (${operation})`,
-                    );
-                    break;
-                }
-              }
-            }),
-          )
-          .pipe(
-            Effect.retry({
-              ...RETRY,
-              while: (error: LinearSyncError) => error.transient,
-            }),
-          );
+            }
+          }),
+        ).pipe(
+          Effect.retry({
+            ...RETRY,
+            while: (error: LinearSyncError) => error.transient,
+          }),
+        );
 
       return LinearIssueSync.of({
         started: (input) =>
@@ -881,7 +904,13 @@ export const LinearSessionWriteBack = Layer.effect(
 export type PullRequestLifecycle =
   | {
       readonly _tag: "merged" | "closed";
+      /** The PR by its page (`html_url`): what the PR step records in `sessions.pr_url`. */
       readonly pr: PullRequestLink;
+      /**
+       * The PR's API resource (`pull_request.url`). Matched as well as the page, because a session
+       * whose PR was opened before the step recorded the page (LOB-15) holds this one instead.
+       */
+      readonly apiUrl?: string;
     }
   | { readonly _tag: "other"; readonly action: string };
 
@@ -908,9 +937,11 @@ export const githubPullRequestLifecycle = (
   if (typeof url !== "string" || typeof number !== "number") return undefined;
   const action = typeof body?.["action"] === "string" ? body["action"] : "";
   if (action !== "closed") return { _tag: "other", action };
+  const apiUrl = pr?.["url"];
   return {
     _tag: pr?.["merged"] === true ? "merged" : "closed",
     pr: { number, url },
+    ...(typeof apiUrl === "string" && apiUrl !== url ? { apiUrl } : {}),
   };
 };
 
@@ -933,7 +964,8 @@ export const syncPullRequestLifecycle = (
       readonly id: SessionId;
       readonly requestId: string | null;
     }>`
-      SELECT id, request_id FROM sessions WHERE pr_url = ${event.pr.url}
+      SELECT id, request_id FROM sessions
+      WHERE pr_url = ${event.pr.url} OR pr_url = ${event.apiUrl ?? event.pr.url}
     `.pipe(
       Effect.mapError(storageError(event.pr.url, "read the PR's sessions")),
     );

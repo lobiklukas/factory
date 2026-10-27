@@ -15,12 +15,14 @@
  * B11: outbound, idempotent). So the port answers `void` with no error: an implementation retries
  * what it can and logs what it could not, and every write it makes is idempotent, so the next
  * report — the caller's retry of the step answers `already-open` and reports again — converges the
- * mirror instead of the step having to.
+ * mirror instead of the step having to. The session layer does not take that on trust: it bounds
+ * the report (`SESSION_WRITE_BACK_BUDGET`) and logs any failure or defect it raises, so an
+ * implementation that breaks the contract still cannot fail or stall the step.
  *
  * `pullRequestReport` is the one reading of a step's exit, so every tracker agrees on which exits
  * are a PR, which are a failed run, and which are an interrupt that says nothing about the run.
  */
-import { Cause, Context, Effect, Exit, Option } from "effect";
+import { Cause, Context, Duration, Effect, Exit, Option } from "effect";
 import type { SessionError, SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
 import type { CredentialError } from "./credentials";
@@ -43,6 +45,14 @@ export type SessionWriteBackShape = {
     readonly evidence: Effect.Effect<readonly VerifyRecord[]>;
   }) => Effect.Effect<void>;
 };
+
+/**
+ * How long the PR step waits for its report before it answers anyway. The caller of the step is
+ * waiting on an RPC; a tracker that answers slowly, request after request and retry after retry,
+ * must not turn that wait into tens of seconds. Generous enough for one report's few requests to a
+ * healthy tracker; a report cut short is completed by the next, because every write is idempotent.
+ */
+export const SESSION_WRITE_BACK_BUDGET: Duration.Input = "10 seconds";
 
 export const SessionWriteBack = Context.Reference<SessionWriteBackShape>(
   "@repo/core/SessionWriteBack",

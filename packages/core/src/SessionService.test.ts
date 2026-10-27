@@ -104,6 +104,7 @@ import {
   pullRequestReport,
   SessionWriteBack,
   type PullRequestReport,
+  type SessionWriteBackShape,
 } from "./SessionWriteBack";
 import {
   MAX_MESSAGE_CHARS,
@@ -1499,6 +1500,26 @@ describe("repo binding", () => {
  * `docs/testing-third-parties.md`. Every request is recorded, which is how "exactly one POST" is
  * asserted rather than inferred.
  */
+/**
+ * A case's PR, `{number, url}` with `url` the page, as GitHub's REST API answers it: `url` is the
+ * API resource and `html_url` the page (LOB-15). The client must read `html_url`, so a fake that
+ * answered the page as `url` would hide a client that recorded the API resource.
+ */
+const asGitHubAnswer = (body: unknown): unknown => {
+  if (Array.isArray(body)) return body.map(asGitHubAnswer);
+  if (typeof body !== "object" || body === null) return body;
+  const pr = body as Record<string, unknown>;
+  if (typeof pr["number"] !== "number" || typeof pr["url"] !== "string") {
+    return body;
+  }
+  const page = new URL(pr["url"]);
+  return {
+    ...pr,
+    url: `https://api.github.com/repos${page.pathname.replace("/pull/", "/pulls/")}`,
+    html_url: pr["url"],
+  };
+};
+
 const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
   /**
    * What GitHub was asked. The request body is kept because the PR body is one of the things a case
@@ -1530,9 +1551,9 @@ const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
           // A slow answer is how a case can hold a step inside GitHub's call, which is the window a
           // second caller would otherwise slip through.
           if (delayMs > 0) yield* Effect.sleep(delayMs);
-          const text = yield* Schema.encodeEffect(Json)(body).pipe(
-            Effect.orDie,
-          );
+          const text = yield* Schema.encodeEffect(Json)(
+            asGitHubAnswer(body),
+          ).pipe(Effect.orDie);
           const response = new Response(text, {
             status,
             headers: { "content-type": "application/json" },
@@ -2320,6 +2341,63 @@ describe("a slow tracker", () => {
       );
       expect(result.other.answer).toMatchObject({ outcome: "opened" });
       expect(result.first.answer).toMatchObject({ outcome: "opened" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+describe("a write-back that breaks its contract", () => {
+  /** A session layer whose tracker reports with `pullRequest`, and a short report budget. */
+  const withTracker = (pullRequest: SessionWriteBackShape["pullRequest"]) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+        writeBackBudget: "200 millis",
+      }).pipe(
+        Layer.provide(Layer.succeed(SessionWriteBack, { pullRequest })),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+
+  it("never answering: the PR step answers once the report's budget is spent", async () => {
+    const github = makeGithubFake(201, {
+      number: 38,
+      url: "https://github.com/lobiklukas/factory/pull/38",
+    });
+    const runtime = withTracker(() => Effect.never);
+    try {
+      const result = await runtime.runPromise(
+        drive({
+          title: "a report that never answers",
+          files: 1,
+          lines: 1,
+        }).pipe(
+          Effect.provide(github.layer),
+          // Far longer than the budget, far shorter than "never": a stall fails the case here.
+          Effect.timeout("30 seconds"),
+        ),
+      );
+      expect(result.answer).toMatchObject({ number: 38, outcome: "opened" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("dying: the defect is logged, and the PR step's answer stands", async () => {
+    const github = makeGithubFake(201, {
+      number: 39,
+      url: "https://github.com/lobiklukas/factory/pull/39",
+    });
+    const runtime = withTracker(() => Effect.die(new Error("tracker bug")));
+    try {
+      const result = await runtime.runPromise(
+        drive({ title: "a report that dies", files: 1, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      expect(result.answer).toMatchObject({ number: 39, outcome: "opened" });
     } finally {
       await runtime.dispose();
     }

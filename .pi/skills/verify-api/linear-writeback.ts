@@ -279,6 +279,16 @@ const run = Effect.gen(function* () {
       : null;
   const afterPr = issue(DELIVERED);
   const prUrl = observed.pr?.url ?? "(no PR)";
+  // What GitHub itself calls this PR, spelled here rather than read back from the factory: the page
+  // a person opens and a webhook names as `html_url`, and the API resource it names as `url`. The
+  // fake answers both, so a client that recorded the wrong one fails here and at the merge below.
+  const prPage = `https://github.com/${REPO}/pull/${observed.pr?.number ?? 0}`;
+  const prApi = `https://api.github.com/repos/${REPO}/pulls/${observed.pr?.number ?? 0}`;
+  assert(
+    "the session records the PR's page, not GitHub's API resource",
+    prUrl === prPage,
+    `recorded=${prUrl} page=${prPage}`,
+  );
   assert(
     "the PR step opens a PR, and the issue carries it as an attachment",
     opened.outcome === "opened" &&
@@ -371,7 +381,7 @@ const run = Effect.gen(function* () {
   const before = writesTo(DELIVERED);
   const pushed = yield* githubHook({
     action: "synchronize",
-    pull_request: { number, html_url: prUrl, merged: false },
+    pull_request: { number, url: prApi, html_url: prPage, merged: false },
   });
   assert(
     "a new commit on the PR writes nothing to the issue: its state is the task's, not the review's",
@@ -383,7 +393,7 @@ const run = Effect.gen(function* () {
   );
   const mergedBody = {
     action: "closed",
-    pull_request: { number, html_url: prUrl, merged: true },
+    pull_request: { number, url: prApi, html_url: prPage, merged: true },
   };
   const forged = yield* githubHook(mergedBody, "not-the-secret");
   const stillInReview = issue(DELIVERED)?.state.name === "In Review";

@@ -147,9 +147,11 @@ describe("buildPrBody", () => {
 
 describe("createPullRequest", () => {
   it("opens a PR and asserts body carries session id, model, spend", async () => {
+    // GitHub's real answer carries two links: `url` is the API resource, `html_url` the page.
     const { requests, client } = makeFakeHttp(201, {
       number: 7,
-      url: "https://github.com/o/r/pull/7",
+      url: "https://api.github.com/repos/o/r/pulls/7",
+      html_url: "https://github.com/o/r/pull/7",
     });
     const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
     // need Option import
@@ -171,6 +173,9 @@ describe("createPullRequest", () => {
     );
     const res = await Effect.runPromise(program);
     expect(res.number).toBe(7);
+    // The page, not the API resource: it is what the session records, what the dashboard and the
+    // Linear attachment link to, and what a `pull_request` webhook's `html_url` matches (LOB-15).
+    expect(res.url).toBe("https://github.com/o/r/pull/7");
     expect(requests[0]!.body).toMatchObject({
       head: "factory/s-1",
       base: "main",
@@ -200,7 +205,8 @@ describe("createPullRequest", () => {
   it("adopts the PR GitHub already opened when it refuses a duplicate", async () => {
     const existing = {
       number: 12,
-      url: "https://github.com/o/r/pull/12",
+      url: "https://api.github.com/repos/o/r/pulls/12",
+      html_url: "https://github.com/o/r/pull/12",
     };
     const { requests, client } = makeRoutedFake(({ method }) =>
       method === "POST"
@@ -230,7 +236,10 @@ describe("createPullRequest", () => {
         ),
       ),
     );
-    expect(opened).toEqual(existing);
+    expect(opened).toEqual({
+      number: 12,
+      url: "https://github.com/o/r/pull/12",
+    });
     // The lookup is what makes the refused create an answer: it asks for this head, on this base.
     expect(requests.map((request) => request.method)).toEqual(["POST", "GET"]);
     expect(requests[1]!.path).toBe("/repos/o/r/pulls");
@@ -284,7 +293,11 @@ describe("createPullRequest", () => {
     try {
       const { requests, client } = makeRoutedFake(() => ({
         status: 201,
-        body: { number: 3, url: "http://127.0.0.1:9411/o/r/pull/3" },
+        body: {
+          number: 3,
+          url: "http://127.0.0.1:9411/repos/o/r/pulls/3",
+          html_url: "http://127.0.0.1:9411/o/r/pull/3",
+        },
       }));
       const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
       await Effect.runPromise(

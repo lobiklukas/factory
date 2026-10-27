@@ -20,9 +20,11 @@
  * seam that changes and `SessionBus` is how streams keep working.
  */
 import {
+  Cause,
   Clock,
   Context,
   DateTime,
+  Duration,
   Effect,
   Exit,
   FiberMap,
@@ -150,7 +152,10 @@ import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
-import { SessionWriteBack } from "./SessionWriteBack";
+import {
+  SESSION_WRITE_BACK_BUDGET,
+  SessionWriteBack,
+} from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
 
@@ -329,6 +334,11 @@ export type SessionServiceOptions = {
    * `DEFAULT_DIFF_CAP`, so a deployment that never configures this still has a bound.
    */
   readonly prCap?: DiffCap;
+  /**
+   * How long the PR step waits for its write-back before it answers anyway (LOB-15). Absent:
+   * `SESSION_WRITE_BACK_BUDGET`. A test shortens it.
+   */
+  readonly writeBackBudget?: Duration.Input;
 };
 
 type SessionRow = {
@@ -486,6 +496,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const skills = yield* SkillService;
       /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
       const writeBack = yield* SessionWriteBack;
+      const writeBackBudget = Duration.fromInputUnsafe(
+        options.writeBackBudget ?? SESSION_WRITE_BACK_BUDGET,
+      );
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -1238,7 +1251,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * The PR step, and its exit reported to the write-back. Every exit is reported — the PR, a
        * refusal, an error — so a tracker can mirror it (LOB-15). The report runs outside the gate:
        * the gate is every session's, and a tracker slow to answer must not hold up another session's
-       * PR. It cannot fail; the step's own answer is what returns.
+       * PR.
+       *
+       * The port promises not to fail or stall the step; this is where that promise is kept rather
+       * than trusted. The report has a total budget (`writeBackBudget`) — an implementation's own
+       * per-request timeouts and retries can add up to more than a caller should wait — and any
+       * failure or defect it raises is logged, never the step's. Its writes are idempotent, so a
+       * report cut short is completed by the next one.
        */
       const openPr = (
         input: OpenPullRequestArgs,
@@ -1249,19 +1268,34 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       > =>
         Effect.gen(function* () {
           const { stepped, storage } = yield* stepPr(input);
-          yield* writeBack.pullRequest({
-            sessionId: input.sessionId,
-            result: stepped,
-            evidence: readVerifyRecords(storage).pipe(
-              // A log that cannot be read is said, not passed off as "no verification recorded".
-              Effect.tapError((error) =>
-                Effect.logWarning(
-                  `session ${input.sessionId}: could not read its verify records for the write-back: ${error.message}`,
+          yield* writeBack
+            .pullRequest({
+              sessionId: input.sessionId,
+              result: stepped,
+              evidence: readVerifyRecords(storage).pipe(
+                // A log that cannot be read is said, not passed off as "no verification recorded".
+                Effect.tapError((error) =>
+                  Effect.logWarning(
+                    `session ${input.sessionId}: could not read its verify records for the write-back: ${error.message}`,
+                  ),
+                ),
+                Effect.orElseSucceed(() => []),
+              ),
+            })
+            .pipe(
+              Effect.timeoutOrElse({
+                duration: writeBackBudget,
+                orElse: () =>
+                  Effect.logWarning(
+                    `session ${input.sessionId}: the PR step's write-back did not finish within ${Duration.toMillis(writeBackBudget)}ms; the step answers without it`,
+                  ),
+              }),
+              Effect.catchCause((cause) =>
+                Effect.logError(
+                  `session ${input.sessionId}: the PR step's write-back failed; the step answers without it: ${Cause.pretty(cause)}`,
                 ),
               ),
-              Effect.orElseSucceed(() => []),
-            ),
-          });
+            );
           return yield* stepped;
         });
 

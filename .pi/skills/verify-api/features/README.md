@@ -59,9 +59,11 @@ on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**,
 also posts to changed. See [linear.md](linear.md).
 
 The Linear write-back checks (LOB-15) were run from the `agent/LOB-15` worktree on 2026-10-27
-(faux, the worktree's own database on 5442, the loopback Linear fake on `:9511` and GitHub fake on
-`:9512`): `./linear-writeback.sh` **11/11**, evidence `.verify/evidence/lob-15/`, with the
-no-marker mutation run failing 3 of them. See [linear-writeback.md](linear-writeback.md).
+(faux, the worktree's own database on 5442, the loopback Linear fake on `:9512` and GitHub fake on
+`:9513`): `./linear-writeback.sh` **12/12**, evidence `.verify/evidence/lob-15/`, with the
+no-marker mutation run failing 3 of them. The GitHub fake now answers a PR's `url` and `html_url`
+as GitHub does, so `./pr-once.sh`, `./docs-run.sh` and `./docs-trigger.sh` were re-run there too,
+all passing. See [linear-writeback.md](linear-writeback.md).
 
 The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
 (`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
