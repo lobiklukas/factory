@@ -17,6 +17,8 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       unblockTask: (input) => tasks.unblock(input as any),
       commentTask: (input) => tasks.comment(input),
       listTaskComments: (input) => tasks.comments(input.taskId),
+      getTaskSpec: (input) =>
+        tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
       listTaskRuns: (input) => tasks.listRuns(input.taskId),
       listAttention: (input) => tasks.attention(input.boardId),
     });

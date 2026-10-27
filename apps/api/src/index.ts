@@ -132,6 +132,20 @@ const ModelConfig = Config.all({
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
   /**
+   * The `spec` calls the faux script makes when a run is offered the tool (LOB-238): a JSON array of
+   * the tool's arguments, tried in order until one is accepted. Unset, the script never specs; a
+   * verification that proves the specifier's spec (`.pi/skills/verify-board/drive.sh`) sets it. A
+   * value that is not a JSON array of objects fails the boot.
+   */
+  fauxSpec: Config.option(
+    Config.schema(
+      Schema.fromJsonString(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
+      "FAUX_SPEC",
+    ),
+  ),
+  /**
    * What each faux request costs, in US dollars (LOB-163). pi-ai's faux reports no cost, so a capped
    * session on it could never reach its cap; a verification that proves the cap
    * (`.pi/skills/verify-api/budget.sh`) prices it. `0` by default: free, as before.
@@ -384,6 +398,7 @@ const HttpLive = Effect.gen(function* () {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
+    fauxSpec: Option.getOrUndefined(model.fauxSpec),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,

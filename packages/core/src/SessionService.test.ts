@@ -7614,6 +7614,231 @@ describe("the ask on the task", () => {
 });
 
 /**
+ * The specifying run's spec (LOB-238): a run in `specifying` — the column that declares the
+ * `specifier` role — is offered the `spec` tool, and what it declares is committed to its log and
+ * recorded on its card, readable through `TaskService.spec` (the `getTaskSpec` RPC's answer).
+ *
+ * The faux script plays the model that forgets `gaps` once (`fauxSpec`'s first attempt), reads the
+ * refusal, and retries with the field; then, its spec declaring a gap, it asks (`fauxAsk`) and parks.
+ * The same script on a card in `planning` is offered no `spec` tool at all, so it never specs.
+ */
+describe("the specifying run's spec", () => {
+  const specRoot = mkdtempSync(join(tmpdir(), "factory-core-spec-"));
+  const PERSON = "person:lukas";
+  const QUESTION = "Which Postgres major does this card target?";
+  const SPEC = {
+    goal: "Pin the card's Postgres major",
+    acceptance: ["the compose file names one major"],
+    gaps: ["which major the card targets"],
+    openQuestions: [QUESTION],
+  };
+  const { gaps: _gaps, ...WITHOUT_GAPS } = SPEC;
+
+  const specRuntime = () =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({
+          model: createFauxModelAccess({
+            fauxAsk: QUESTION,
+            fauxSpec: [WITHOUT_GAPS, SPEC],
+          }).access,
+          sessionRoot: specRoot,
+        }),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A card moved by a person through each of `columns`, on a board of its own. */
+  const cardIn = (...columns: string[]) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      let card = yield* tasks.create({
+        boardId,
+        title: "a thin card",
+        actor: PERSON,
+      });
+      for (const to of columns) {
+        card = yield* tasks.move({
+          taskId: card.id,
+          expectedRevision: card.revision,
+          to,
+          actor: PERSON,
+        });
+      }
+      return card;
+    });
+
+  const storedSpec = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      return yield* Effect.acquireUseRelease(
+        Effect.promise(() => PostgresStorage.reader(sql, sessionId)),
+        (storage) => Effect.map(readSessionLog(storage), (log) => log.spec),
+        (storage) => Effect.promise(() => storage.dispose()),
+      );
+    });
+
+  it("commits the spec to the run's log and the card, after a refusal naming `gaps`, then parks on the ask", async () => {
+    const runtime = specRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying");
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "specify it" });
+          yield* waitUntil(
+            Effect.map(
+              tasks.get(card.id),
+              (task) => task.blocked !== undefined,
+            ),
+            "the specifying run to ask",
+          );
+          yield* waitUntil(
+            Effect.map(sessions.get(run.id), (snapshot) => !snapshot.live.busy),
+            "the specifying run to settle",
+          );
+          return {
+            card,
+            runId: run.id,
+            snapshot: yield* sessions.get(run.id),
+            spec: yield* tasks.spec(card.id),
+            blocked: yield* tasks.get(card.id),
+            thread: yield* tasks.comments(card.id),
+            stored: yield* storedSpec(run.id),
+          };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    const results = outcome.snapshot.entries.filter(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "spec",
+    );
+    expect(results.map((entry) => entry.isError === true)).toEqual([
+      true,
+      false,
+    ]);
+    expect(results[0]?.text).toContain(
+      "spec refused: `gaps` is missing — declare the gaps, `[]` when there are none",
+    );
+    // The log holds the retry's spec, and the card the same one, declared by this run.
+    expect(outcome.stored).toEqual(SPEC);
+    expect(outcome.spec).toEqual({
+      taskId: outcome.card.id,
+      sessionId: outcome.runId,
+      column: "specifying",
+      ...SPEC,
+      revision: outcome.card.revision,
+      createdAt: outcome.spec?.createdAt,
+    });
+    // A gap still parks the run through the ask: the spec, then the question, which ends the run.
+    expect(outcome.snapshot.entries.at(-1)?.toolName).toBe("ask");
+    expect(outcome.blocked.blocked?.reason).toBe("needs_input");
+    expect(outcome.blocked.blocked?.column).toBe("specifying");
+    expect(outcome.thread.map((comment) => comment.kind)).toEqual(["question"]);
+    // The spec moved the card one revision, the ask two more.
+    expect(outcome.blocked.revision).toBe(outcome.card.revision + 3);
+  }, 120_000);
+
+  it("records the run's own column when a person moved the card on before the run specced", async () => {
+    const runtime = specRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying");
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          // The run is pinned to `specifying`; the card is not.
+          const moved = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: card.revision,
+            to: "planning",
+            actor: PERSON,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "specify it" });
+          yield* waitUntil(
+            Effect.map(
+              tasks.get(card.id),
+              (task) => task.blocked !== undefined,
+            ),
+            "the specifying run to ask",
+          );
+          yield* waitUntil(
+            Effect.map(sessions.get(run.id), (snapshot) => !snapshot.live.busy),
+            "the specifying run to settle",
+          );
+          return { moved, spec: yield* tasks.spec(card.id) };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.moved.column).toBe("planning");
+    // The spec is the specifying stage's, as the role that wrote it was: not `from planning`.
+    expect(outcome.spec?.column).toBe("specifying");
+    expect(outcome.spec?.revision).toBe(outcome.moved.revision);
+  }, 120_000);
+
+  it("offers no spec tool to a run outside the specifying role", async () => {
+    const runtime = specRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying", "planning");
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "plan it" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(run.id),
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.some(
+                  (entry) =>
+                    entry.kind === "toolResult" && entry.toolName === "ask",
+                ),
+            ),
+            "the planning run to ask",
+          );
+          return {
+            snapshot: yield* sessions.get(run.id),
+            spec: yield* tasks.spec(card.id),
+            stored: yield* storedSpec(run.id),
+          };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    // The same script specs whenever it is offered the tool; here it went straight to its ask.
+    expect(
+      outcome.snapshot.entries.some((entry) => entry.toolName === "spec"),
+    ).toBe(false);
+    expect(outcome.spec).toBeUndefined();
+    expect(outcome.stored).toBeUndefined();
+  }, 120_000);
+});
+
+/**
  * The PR states what was verified (LOB-79, part 2 of LOB-16), from the run's recorded `verify`
  * results and nothing the model wrote.
  *

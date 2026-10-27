@@ -15,6 +15,13 @@
 # has been answered does not ask again, so later phases on the same card take ordinary turns. The
 # question is recorded in .verify/run/faux-ask, which drive.sh matches the card's thread against.
 #
+# FAUX_SPEC is the specifier's `spec` calls (LOB-238): a run offered the tool — one in `specifying`,
+# whose column declares the `specifier` role — first sends a spec without `gaps`, which the tool
+# refuses naming the field, then retries with them; a run whose prompt carries the answered thread
+# declares the same spec with its gaps closed. The accepted attempt is recorded in
+# .verify/run/faux-spec, which drive.sh matches the run's log and the card against. Fixed, like
+# FAUX_COMMAND, for the same reason: the drive's checks are about these exact values.
+#
 # FAUX_COMMAND is fixed, not taken from the caller's environment: the drive's probes depend on what
 # it does (it must hold the turn open, and print `faux-ok`), so a value left exported by another
 # skill must not silently change the instance. The sleep is 8 s, not ask.sh's 4 s, because the busy
@@ -28,6 +35,11 @@ WEB_PORT="${WEB_PORT:-3400}"
 RUN_DIR="$ROOT/.verify/run"
 FAUX_COMMAND="sleep 8; echo faux-ok"
 FAUX_ASK="${FAUX_ASK:-Which Postgres major does this card target?}"
+SPEC_GOAL='"goal":"Pin the Postgres major this card targets"'
+SPEC_ACCEPTANCE='"acceptance":["docker-compose.yml names one Postgres major","the README says which"]'
+SPEC_QUESTIONS='"openQuestions":["Which Postgres major does this card target?"]'
+FAUX_SPEC_ACCEPTED="{$SPEC_GOAL,$SPEC_ACCEPTANCE,\"gaps\":[\"the card does not say which Postgres major it targets\"],$SPEC_QUESTIONS}"
+FAUX_SPEC="[{$SPEC_GOAL,$SPEC_ACCEPTANCE,$SPEC_QUESTIONS},$FAUX_SPEC_ACCEPTED]"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL
 
@@ -77,11 +89,13 @@ fi
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
     FAUX_COMMAND="$FAUX_COMMAND" \
     FAUX_ASK="$FAUX_ASK" \
+    FAUX_SPEC="$FAUX_SPEC" \
     SESSION_ROOT="$SESSION_ROOT" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
 echo "$WEB_PORT" > "$RUN_DIR/web-port"
 printf '%s\n' "$FAUX_ASK" > "$RUN_DIR/faux-ask"
+printf '%s\n' "$FAUX_SPEC_ACCEPTED" > "$RUN_DIR/faux-spec"
 
 # The dashboard, pointed at this API. ALLOWED_ORIGINS above names its origin, or the browser's RPC
 # call is blocked by CORS.

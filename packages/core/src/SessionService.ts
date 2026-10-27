@@ -101,6 +101,7 @@ import type {
   RunColumn,
   RunProfile,
   SessionRef,
+  SpecOptions,
   ThreadReader,
 } from "@repo/harness";
 import {
@@ -853,6 +854,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       });
 
       /**
+       * How a specifying run posts its spec (LOB-238): a `specified` event on its card, by the run
+       * itself, keyed by the session and the tool call so a replayed call posts nothing twice. The
+       * harness offers the tool only to a role that writes the spec, so this is handed to every run
+       * of a card and used by the specifier's alone. The spec records the run's own column — the one
+       * its role came from — not the card's current one, which a person may have moved on since.
+       */
+      const specFor = (
+        sessionId: SessionId,
+        taskId: string,
+        column: string | undefined,
+      ): SpecOptions => ({
+        post: ({ spec, callId }) =>
+          forHarness(
+            tasks.declareSpec({
+              taskId,
+              actor: sessionId,
+              ...(column === undefined ? {} : { column }),
+              goal: spec.goal,
+              acceptance: spec.acceptance,
+              gaps: spec.gaps,
+              openQuestions: spec.openQuestions,
+              specId: `${sessionId}:${callId}`,
+            }),
+          ).then((card) => ({ taskId: card.id, revision: card.revision })),
+      });
+
+      /**
        * One `session_pages` row as the domain's page, or a storage error naming the page whose JSON
        * text does not decode. Shared by the page reads so a row is decoded one way.
        */
@@ -1079,6 +1107,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
         readonly thread?: ThreadReader;
+        /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
+        readonly spec?: SpecOptions;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -1139,7 +1169,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               },
               ...(card === undefined
                 ? {}
-                : { ask: askFor(id, card), thread: threadFor(card) }),
+                : {
+                    ask: askFor(id, card),
+                    thread: threadFor(card),
+                    spec: specFor(id, card, run.column),
+                  }),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -1183,6 +1217,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             verify,
             ask,
             thread,
+            spec,
           }) =>
             openSession({
               storage,
@@ -1200,6 +1235,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               approvalAsker: askerFor(id),
               ...(ask === undefined ? {} : { ask }),
               ...(thread === undefined ? {} : { thread }),
+              ...(spec === undefined ? {} : { spec }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
