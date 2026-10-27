@@ -35,15 +35,15 @@ precedent ("an index, not a projection").
 
 ## B4 — The default pipeline
 
-| Column       | Kind     | Role        | Exit requires                                                            |
-| ------------ | -------- | ----------- | ------------------------------------------------------------------------ |
-| `intake`     | resting  | —           | a person moves it on (nothing auto-starts; the card may be nearly empty) |
-| `specifying` | working  | `specifier` | a `spec` doc, gaps declared (explicitly `[]` when there are none)        |
-| `planning`   | working  | `planner`   | a plan doc **and a human move**                                          |
-| `building`   | working  | `builder`   | a run that completed, a non-empty diff, and a PR link                    |
-| `review`     | working  | `reviewer`  | a review verdict, and a human merge (the move into `done`)               |
-| `done`       | terminal | —           | —                                                                        |
-| `canceled`   | terminal | —           | —                                                                        |
+| Column       | Kind     | Role        | Exit requires                                                                                                              |
+| ------------ | -------- | ----------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `intake`     | resting  | —           | a person moves it on (nothing auto-starts; the card may be nearly empty)                                                   |
+| `specifying` | working  | `specifier` | a `spec` doc, gaps declared (explicitly `[]` when there are none)                                                          |
+| `planning`   | working  | `planner`   | a plan doc **and a human move**                                                                                            |
+| `building`   | working  | `builder`   | a run that completed, a non-empty diff, and a PR link                                                                      |
+| `review`     | working  | `reviewer`  | a passing verification of the change (`verified`, from v3; B8), a review verdict, and a human merge (the move into `done`) |
+| `done`       | terminal | —           | —                                                                                                                          |
+| `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
 transient`) plus the column it blocked from, so a blocked card stays visible in its own lane and
@@ -102,6 +102,23 @@ card carries the thread as its `task_thread` prompt section.
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body
 artifact a reviewer may skip into a condition of the move. A skill's output is what a gate checks, so
 the verify-skill convention becomes mechanism.
+
+Built (LOB-80): `TaskService.move` checks the leaving column's `requires[]` under the card's pinned
+definition version, after the declared transition and the human gate, and refuses with
+`RequirementUnmet` naming the key. The default pipeline's `review` declares `verified` from version 3:
+the card's newest `verify` call over a change (across all its runs) must have passed for every surface
+that change touched — a passing verification of another surface does not count. "Newest" is by when
+the call was recorded, so a resumed older run's later call counts; a newest call that left no record
+(blocked or crashed) refuses the move rather than falling back to an older pass. A move into
+`canceled` is never gated. Only keys with a recorded artifact are checked (`packages/core/src/
+requirements.ts` lists why the others are not yet); the logs are read before the card is locked, at
+the revision the move expected.
+
+A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
+declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or
+carries a `verify-<surface>` skill for each one. A surface with neither — or a path outside every
+package, with no declared command — records no evidence, which never passes, so such a card can only
+leave `review` for `canceled`; the refusal names that remedy. "Nothing could check it" is not a pass.
 
 ## B9 — Ordering and caps
 

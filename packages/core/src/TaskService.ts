@@ -21,6 +21,18 @@
  *   (merge). A run is one Pi Durable session, so a run's actor is its session id; any actor that is
  *   a session id is a run and cannot cross a gate. Every other actor is a person.
  *
+ * **Exit requirements (B5, B8; LOB-80).** A move out of a column checks the column's `requires[]`
+ * under the card's pinned definition version, after the transition and the gate, and a requirement
+ * that is not met refuses the move with `RequirementUnmet`, naming it. Which keys are checked, and
+ * against what, is `./requirements`; `verified` reads the `verify` records in the logs of the card's
+ * runs. The logs are read *before* the card is locked, not inside the transaction: a log fold is
+ * unbounded work on other connections, and holding the row lock (and a pool connection) across it
+ * would let a long log stall every other move of the card. The evidence is judged only for the
+ * revision the caller expected — a card read at any other revision is refused as `StaleRevision`
+ * before its logs are read — and the transaction's own revision check then proves the card did not
+ * change while they were (every write to a card bumps its revision). A `verify` call a run records
+ * in that window is concurrent with the move, which is ordered before it (`./requirements`).
+ *
  * **The thread is `task_events`, not a table of its own (LOB-73).** A comment is a `commented` event:
  * B3 makes a card rows plus an append-only history, and a comment is exactly that — input a person
  * (or a run) wrote against the card, with an actor and the revision it was written at. The ask is a
@@ -56,7 +68,14 @@ import type {
   TaskPriority as TaskPriorityType,
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
+import { readVerifyCalls } from "@repo/harness";
+import { PostgresStorage } from "@repo/storage-postgres";
 import { mintTaskId } from "./ids";
+import {
+  exitRequirements,
+  requirementVerdict,
+  type RunEvidence,
+} from "./requirements";
 
 /** Every new card starts in the default definition's first column (B4). */
 export const INITIAL_COLUMN = "intake";
@@ -104,6 +123,21 @@ export class HumanGateRequired extends Schema.TaggedError<HumanGateRequired>()(
   },
 ) {}
 
+/**
+ * A move out of a column whose checked `requires[]` the card has not met (B5, B8; LOB-80). Names the
+ * requirement by key, and the message says what is missing (`./requirements`).
+ */
+export class RequirementUnmet extends Schema.TaggedError<RequirementUnmet>()(
+  "RequirementUnmet",
+  {
+    taskId: Schema.String,
+    column: Schema.String,
+    to: Schema.String,
+    requirement: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class AlreadyBlocked extends Schema.TaggedError<AlreadyBlocked>()(
   "AlreadyBlocked",
   { taskId: Schema.String, message: Schema.String },
@@ -131,6 +165,7 @@ export type TaskError =
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
+  | RequirementUnmet
   | AlreadyBlocked
   | NotBlocked
   | EmptyComment
@@ -259,6 +294,14 @@ const TASK_COLUMNS = [
   "created_at",
   "updated_at",
 ].join(", ");
+
+/**
+ * What `move` judged about the card's exit before locking it, at the caller's expected revision: the
+ * first unmet requirement, if any.
+ */
+type ExitJudgement = {
+  readonly unmet: RequirementUnmet | undefined;
+};
 
 const iso = (value: Date | string): string =>
   DateTime.formatIso(DateTime.makeUnsafe(value));
@@ -557,7 +600,139 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const decodeColumns = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(Schema.Array(BoardColumn)),
+    );
+
+    /**
+     * The column a card sits in, by name and as the definition version it pinned declares it (B2):
+     * `undefined` for a card that is gone, and `declared` absent for a column its definition does
+     * not name.
+     */
+    const pinnedColumn = (taskId: string) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          column: string;
+          revision: number;
+          columns: string;
+        }>`
+          SELECT t."column", t.revision, bd.columns::text AS columns
+          FROM tasks t
+          JOIN board_instances bi ON bi.id = t.board_id
+          JOIN board_definitions bd
+            ON bd.id = bi.definition_id AND bd.version = t.definition_version
+          WHERE t.id = ${taskId}
+        `;
+        const row = rows[0];
+        if (row === undefined) return undefined;
+        const columns = yield* decodeColumns(row.columns).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TaskStorageError({
+                message: `task ${taskId}'s definition holds an invalid column set: ${String(cause)}`,
+              }),
+          ),
+        );
+        return {
+          name: row.column,
+          revision: row.revision,
+          declared: columns.find((candidate) => candidate.name === row.column),
+        };
+      });
+
+    /**
+     * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
+     * truth for what it did). One batched read folds every run's log; none is opened as an owner.
+     */
+    const runEvidence = (taskId: string) =>
+      Effect.gen(function* () {
+        const runs = yield* sql<{ sessionId: string }>`
+          SELECT session_id FROM task_runs
+          WHERE task_id = ${taskId}
+          ORDER BY started_at, id
+        `;
+        const ids = runs.map((run) => run.sessionId);
+        const logs = yield* Effect.tryPromise({
+          try: () => PostgresStorage.readers(sql, ids),
+          catch: (cause) =>
+            new TaskStorageError({
+              message: `task ${taskId}: could not read its runs' logs: ${String(cause)}`,
+            }),
+        });
+        return yield* Effect.forEach(
+          ids,
+          (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
+            const storage = logs.get(sessionId);
+            return storage === undefined
+              ? Effect.succeed({ sessionId, calls: [] })
+              : readVerifyCalls(storage).pipe(
+                  Effect.map((calls) => ({ sessionId, calls })),
+                  Effect.mapError(
+                    (cause) =>
+                      new TaskStorageError({
+                        message: `task ${taskId}: run ${sessionId}'s verify records do not read: ${cause.message}`,
+                      }),
+                  ),
+                );
+          },
+        );
+      });
+
+    /**
+     * The first exit requirement leaving the card's current column for `to` does not meet, judged
+     * before the card is locked (module doc) and only at the revision the caller expected: a card at
+     * another revision is refused as `StaleRevision` here, before its logs are read, so the
+     * transaction's revision check is what holds the judgement to the card it locks. A card the read
+     * does not find is left to the transaction, which refuses it as `TaskNotFound`.
+     */
+    const judgeExit = (
+      input: MoveTaskInput,
+    ): Effect.Effect<ExitJudgement, TaskError | SqlError> =>
+      Effect.gen(function* () {
+        const pinned = yield* pinnedColumn(input.taskId);
+        if (pinned === undefined) return { unmet: undefined };
+        if (pinned.revision !== input.expectedRevision) {
+          return yield* new StaleRevision({
+            taskId: input.taskId,
+            expected: input.expectedRevision,
+            actual: pinned.revision,
+            message: `task ${input.taskId} is at revision ${pinned.revision}, not ${input.expectedRevision}: someone moved it first`,
+          });
+        }
+        const column = pinned.declared;
+        const requirements = exitRequirements(column, input.to);
+        if (column === undefined || requirements.length === 0)
+          return { unmet: undefined };
+        const runs = yield* runEvidence(input.taskId);
+        for (const requirement of requirements) {
+          const verdict = requirementVerdict(requirement, runs);
+          if (!verdict.met) {
+            return {
+              unmet: new RequirementUnmet({
+                taskId: input.taskId,
+                column: column.name,
+                to: input.to,
+                requirement: requirement.key,
+                message: `the move ${column.name} → ${input.to} needs "${requirement.key}" (${requirement.description}), which is not met: ${verdict.reason}`,
+              }),
+            };
+          }
+        }
+        return { unmet: undefined };
+      });
+
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const exit = yield* judgeExit(input);
+          return yield* moveLocked(input, exit);
+        }),
+      );
+
+    const moveLocked = (
+      input: MoveTaskInput,
+      exit: ExitJudgement,
+    ): Effect.Effect<Task, TaskError> =>
       withStorage(
         sql.withTransaction(
           Effect.gen(function* () {
@@ -583,6 +758,7 @@ export const TaskServiceLive = Layer.effect(
                 message: `the move ${from} → ${input.to} crosses the ${gate} gate, which only a person can make`,
               });
             }
+            if (exit.unmet !== undefined) return yield* exit.unmet;
             const rows = yield* sql<TaskRow>`
               UPDATE tasks
               SET "column" = ${input.to}, revision = revision + 1, updated_at = now()
