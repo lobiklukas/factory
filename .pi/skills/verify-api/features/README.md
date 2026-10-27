@@ -58,6 +58,13 @@ on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**,
 `.verify/evidence/lob-164/`, and `./webhook.sh` re-run there **12/12** because the Linear route it
 also posts to changed. See [linear.md](linear.md).
 
+The Linear write-back checks (LOB-15) were run from the `agent/LOB-15` worktree on 2026-10-27
+(faux, the worktree's own database on 5442, the loopback Linear fake on `:9512` and GitHub fake on
+`:9513`): `./linear-writeback.sh` **12/12**, evidence `.verify/evidence/lob-15/`, with the
+no-marker mutation run failing 3 of them. The GitHub fake now answers a PR's `url` and `html_url`
+as GitHub does, so `./pr-once.sh`, `./docs-run.sh` and `./docs-trigger.sh` were re-run there too,
+all passing. See [linear-writeback.md](linear-writeback.md).
+
 The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
 (`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
 `./docs-run.sh` **13/13**, evidence `.verify/evidence/lob-228/`. Like `./pr-once.sh` it starts no API
@@ -98,34 +105,35 @@ The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2
 `.verify/evidence/lob-72/`. Like `./pr-once.sh` it starts no API process — the driver opens the
 harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
 
-| Feature                  | Status  | File                               |
-| ------------------------ | ------- | ---------------------------------- |
-| Create a session         | passing | [create.md](create.md)             |
-| Repo binding             | passing | [repo-binding.md](repo-binding.md) |
-| Session list             | passing | [session-list.md](session-list.md) |
-| Watch a live session     | passing | [live-stream.md](live-stream.md)   |
-| Reset a session          | passing | [reset.md](reset.md)               |
-| Compact on demand        | passing | [compact.md](compact.md)           |
-| Fold a released session  | passing | [fold.md](fold.md)                 |
-| Fork a session           | passing | [fork.md](fork.md)                 |
-| Request limits           | passing | [limits.md](limits.md)             |
-| Probes and readiness     | passing | [probes.md](probes.md)             |
-| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)       |
-| Errors over the wire     | passing | [errors.md](errors.md)             |
-| One PR across a kill     | passing | [pr-once.md](pr-once.md)           |
-| Inbound triggers         | passing | [trigger.md](trigger.md)           |
-| Jira adapter             | passing | [jira.md](jira.md)                 |
-| GitHub issues adapter    | passing | [github.md](github.md)             |
-| Slack adapter            | passing | [slack.md](slack.md)               |
-| Linear adapter           | passing | [linear.md](linear.md)             |
-| Approvals                | passing | [approvals.md](approvals.md)       |
-| Curate a session's pages | passing | [curate.md](curate.md)             |
-| A mission                | passing | [mission.md](mission.md)           |
-| A docs run               | passing | [docs-run.md](docs-run.md)         |
-| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
-| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)   |
-| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)   |
-| The spec document        | passing | [spec.md](spec.md)                 |
+| Feature                  | Status  | File                                       |
+| ------------------------ | ------- | ------------------------------------------ |
+| Create a session         | passing | [create.md](create.md)                     |
+| Repo binding             | passing | [repo-binding.md](repo-binding.md)         |
+| Session list             | passing | [session-list.md](session-list.md)         |
+| Watch a live session     | passing | [live-stream.md](live-stream.md)           |
+| Reset a session          | passing | [reset.md](reset.md)                       |
+| Compact on demand        | passing | [compact.md](compact.md)                   |
+| Fold a released session  | passing | [fold.md](fold.md)                         |
+| Fork a session           | passing | [fork.md](fork.md)                         |
+| Request limits           | passing | [limits.md](limits.md)                     |
+| Probes and readiness     | passing | [probes.md](probes.md)                     |
+| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)               |
+| Errors over the wire     | passing | [errors.md](errors.md)                     |
+| One PR across a kill     | passing | [pr-once.md](pr-once.md)                   |
+| Inbound triggers         | passing | [trigger.md](trigger.md)                   |
+| Jira adapter             | passing | [jira.md](jira.md)                         |
+| GitHub issues adapter    | passing | [github.md](github.md)                     |
+| Slack adapter            | passing | [slack.md](slack.md)                       |
+| Linear adapter           | passing | [linear.md](linear.md)                     |
+| Linear write-back        | passing | [linear-writeback.md](linear-writeback.md) |
+| Approvals                | passing | [approvals.md](approvals.md)               |
+| Curate a session's pages | passing | [curate.md](curate.md)                     |
+| A mission                | passing | [mission.md](mission.md)                   |
+| A docs run               | passing | [docs-run.md](docs-run.md)                 |
+| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)         |
+| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)           |
+| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)           |
+| The spec document        | passing | [spec.md](spec.md)                         |
 
 ## Deliberately absent
 
