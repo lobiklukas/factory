@@ -71,6 +71,20 @@ describe("loadRun", () => {
     });
   });
 
+  it("carries the column's role, which is what selects a read-only stage (LOB-74)", () => {
+    expect(
+      run({ name: "specifying", role: "specifier", skills: ["specify"] }),
+    ).toMatchObject({
+      ok: true,
+      profile: { column: "specifying", role: "specifier" },
+    });
+    // No role declared, none invented.
+    expect(run({ name: "intake", skills: [] })).toEqual({
+      ok: true,
+      profile: { column: "intake", skills: [] },
+    });
+  });
+
   it("refuses a column that names a skill the factory does not hold, naming both", () => {
     const loaded = run({ name: "specifying", skills: ["specify", "explain"] });
 
