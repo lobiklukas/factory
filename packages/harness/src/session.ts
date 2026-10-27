@@ -22,6 +22,7 @@ import type {
   Page,
   Storage,
   Submission,
+  SubmissionRecord,
   Tx,
 } from "@earendil-works/pi-durable";
 import {
@@ -49,6 +50,7 @@ import type {
   SessionWorkspace,
   Timestamp,
   TranscriptEntry,
+  WithdrawOutcome,
 } from "@repo/domain/Session";
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
@@ -895,6 +897,122 @@ export const interrupt = (
   conversation: Conversation,
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
+
+/** Submissions read per storage page while looking one up by its wire id. */
+const SUBMISSION_PAGE = 100;
+
+/**
+ * The wire id as the number Pi Durable's ids are, or `undefined` for one no submission can have.
+ *
+ * The wire id is the opaque string `submitMessage` answered; the brand is applied only by the
+ * package, so a record is matched by comparing numbers rather than by minting a branded id here.
+ */
+const submissionNumber = (submissionId: string): number | undefined =>
+  /^[0-9]+$/.test(submissionId) ? Number(submissionId) : undefined;
+
+/**
+ * The submission of `conversationId` whose wire id is `submissionId`, or `undefined`.
+ *
+ * A full scan of the conversation's submissions in ascending id order, stopping at the first id
+ * past the one asked for. It is the slow path: the withdraw of a message still queued finds it in
+ * `Harness.inspect()` instead, and only a message that is over, or never existed, comes here.
+ */
+const findSubmission = (
+  storage: Storage,
+  conversationId: ConversationId,
+  target: number,
+): Effect.Effect<SubmissionRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page: Page<SubmissionRecord, Cursor> = yield* attempt(
+        "scan submissions",
+        () =>
+          storage.scanSubmissions(
+            { conversationId },
+            SUBMISSION_PAGE,
+            cursor,
+            BACKGROUND_CONTEXT,
+          ),
+      );
+      for (const record of page.items) {
+        if (record.id === target) return record;
+        if (record.id > target) return undefined;
+      }
+      cursor = page.next;
+      if (cursor === undefined) return undefined;
+    }
+  });
+
+/**
+ * Where a session's submission stands, read from committed storage alone (LOB-166): `open` while it
+ * is queued or placed, `settled` once it is over, `undefined` for an id the session never admitted.
+ *
+ * What a withdraw asks before it opens an owner: a session nobody owns can still hold a durable
+ * queue (an API restart, an idle sweep), but an unknown or finished id needs no owner to answer.
+ */
+export const submissionStanding = (
+  storage: Storage,
+  submissionId: string,
+): Effect.Effect<"open" | "settled" | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const target = submissionNumber(submissionId);
+    if (target === undefined) return undefined;
+    const record = yield* findSubmission(storage, ROOT_CONVERSATION_ID, target);
+    if (record === undefined) return undefined;
+    return record.status === "queued" || record.status === "placed"
+      ? "open"
+      : "settled";
+  });
+
+/**
+ * Withdraw a queued message (LOB-166): Pi Durable settles the submission `unanswered` with reason
+ * `aborted` and removes its inbox item in one commit, so the message never reaches the transcript
+ * and every watcher sees the queue shrink.
+ *
+ * A message a run has already taken, or one that is over, is not an error — it is an answer the
+ * caller branches on, because the request was well-formed and the log simply moved first. An id
+ * this session never admitted is `not_found`.
+ *
+ * The message is looked up in `Harness.inspect()`, which holds exactly the queued and placed
+ * submissions, so withdrawing on a long session does not read its history. Only an id missing there
+ * is scanned for, to tell one that is over from one that never was.
+ */
+export const withdrawMessage = (
+  open: OpenSession,
+  storage: Storage,
+  submissionId: string,
+): Effect.Effect<WithdrawOutcome, SessionError> =>
+  Effect.gen(function* () {
+    const notFound = new SessionErrorClass({
+      code: "not_found",
+      message: `submission ${submissionId} is not in this session`,
+    });
+    const target = submissionNumber(submissionId);
+    if (target === undefined) return yield* notFound;
+    const inspection = yield* attempt("inspect submissions", () =>
+      open.harness.inspect(BACKGROUND_CONTEXT),
+    );
+    const record =
+      inspection.submissions.find(
+        (candidate) =>
+          candidate.conversationId === open.root.id && candidate.id === target,
+      ) ?? (yield* findSubmission(storage, open.root.id, target));
+    if (record === undefined) return yield* notFound;
+    // Pi Durable's own answer decides the outcome, so a message that settled between the read and
+    // the abort is reported as settled rather than as withdrawn.
+    const result = yield* attempt("withdraw message", () =>
+      open.harness.abortSubmission(record.id, BACKGROUND_CONTEXT, open.root.id),
+    );
+    switch (result) {
+      case "aborted":
+        return "withdrawn";
+      case "not_found":
+        return yield* notFound;
+      default:
+        return result;
+    }
+  });
 
 /**
  * Start a new model context (LOB-181). Pi Durable appends a `pi.reset` entry that heads the next

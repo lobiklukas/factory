@@ -55,6 +55,8 @@ import {
   SessionIdInput,
   SessionSnapshot,
   SessionSummary,
+  WithdrawMessageInput,
+  WithdrawMessageResult,
 } from "@repo/domain/Session";
 
 /**
@@ -83,6 +85,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("sendMessage", {
     payload: SendMessageInput,
     success: SendMessageResult,
+    error: SessionError,
+  }),
+  // Withdrawing takes a queued message back out of the inbox before a run places it (LOB-166). A
+  // message the log already placed or settled is an outcome in the answer, not an error.
+  Rpc.make("withdrawMessage", {
+    payload: WithdrawMessageInput,
+    success: WithdrawMessageResult,
     error: SessionError,
   }),
   Rpc.make("interruptSession", {
