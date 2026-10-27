@@ -34,7 +34,7 @@ import type { Spec } from "./spec";
 
 /**
  * The skill whose body is a decomposition's instructions, seeded by
- * `0021_seed_decompose_skill.ts`. Named here, once, so the seed and the caller cannot disagree.
+ * `0022_seed_decompose_skill.ts`. Named here, once, so the seed and the caller cannot disagree.
  */
 export const DECOMPOSITION_SKILL = "decompose";
 

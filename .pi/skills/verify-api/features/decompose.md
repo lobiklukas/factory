@@ -8,7 +8,7 @@ else: no tracker issue, no session, no card, no event (LOB-201, part 1 of LOB-43
 ## What it is
 
 - `proposeDecomposition({ sessionId })` makes one model call: the `decompose` skill (seeded by
-  `0021_seed_decompose_skill.ts`) as its instructions, the session's spec as its input. The answer
+  `0022_seed_decompose_skill.ts`) as its instructions, the session's spec as its input. The answer
   is decoded by `decodeProposedIssues` (`packages/domain/src/Decomposition.ts`) and, when accepted,
   committed as one document. The call's spend is charged to the session's own ledger.
 - Each proposal is a title, a goal, a change, acceptance lines, and `blockedBy` — other proposals by

@@ -28,6 +28,13 @@ import type {
 } from "@earendil-works/pi-durable";
 import { Data, Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+import {
+  CHECKPOINT_SHAPE,
+  compressFold,
+  decompressFold,
+  encodeFold,
+  restoreFold,
+} from "./Checkpoint";
 
 /**
  * Pi Durable `Storage` over the Postgres commit log (docs/design.md D7).
@@ -43,6 +50,16 @@ import { SqlClient } from "effect/sql/SqlClient";
  * - `reader` — never writes and does not own the log. Every read first catches up on commits
  *   appended since the last read, so the control plane can read a session without opening a
  *   `Harness`.
+ *
+ * Open costs the tail, not the log (LOB-186). The owner writes a checkpoint of its fold
+ * (`log_checkpoints`, encoded by `./Checkpoint`) every `checkpointEvery` commits, and every open,
+ * either mode, restores the newest checkpoint that is still valid and folds only the commits after
+ * it. Valid means the running shape and a commit at its seq that is the commit it was taken after;
+ * anything else — no row, a stale shape, a log truncated or rewritten under it, a fold that does not
+ * decode, a failed read — is ignored, and the open folds the whole log as it always has (a failed
+ * read or a fold that does not decode is logged as a warning). The checkpoint is an optimisation of
+ * a derived value: the commit it follows neither waits for its write nor fails with it, and
+ * deleting every row costs one full fold per log.
  */
 
 export type StorageMode = "owner" | "reader";
@@ -58,6 +75,23 @@ export class StorageLogError extends Data.TaggedError("StorageLogError")<{
 }
 
 const BATCH_SIZE = 500;
+
+/**
+ * Commits an owner folds past its last checkpoint before it writes the next one.
+ *
+ * It bounds an open's tail at this many commits, at the price of encoding and writing the whole fold
+ * once per interval. One read page (`BATCH_SIZE`) is the tail it buys: an open past a checkpoint is
+ * then one checkpoint query and one or two commit pages, whatever the log's length.
+ */
+export const CHECKPOINT_EVERY = 500;
+
+/** How one open was answered, so a caller (and a test) can see what the open cost. */
+export type OpenReport = {
+  /** The seq of the checkpoint the open restored, or `undefined` when it folded from the start. */
+  readonly checkpoint: number | undefined;
+  /** Commit rows the open read and folded. */
+  readonly commitsRead: number;
+};
 
 /**
  * Commit rows one batched read answers per round trip (`PostgresStorage.readers`).
@@ -77,15 +111,29 @@ const isWrites = (value: unknown): value is readonly StorageWrite[] =>
 
 type Row = { readonly seq: string | number | bigint; readonly writes: string };
 
+type CheckpointRow = {
+  readonly seq: string | number | bigint;
+  readonly fold: Uint8Array;
+};
+
 /** One commit row of one of the logs a batched read asked for. */
 type BatchedRow = Row & { readonly logId: string };
 
 export class PostgresStorage implements Storage {
-  private readonly store = new MemoryStorage();
+  private store = new MemoryStorage();
   private readonly mode: StorageMode;
   private lastSeq = 0;
+  /** The seq the newest checkpoint this instance restored or wrote was taken at. */
+  private checkpointSeq = 0;
+  private commitsRead = 0;
+  private report: OpenReport = { checkpoint: undefined, commitsRead: 0 };
   private closed = false;
   private poisoned: unknown = undefined;
+  /**
+   * The checkpoint writes this owner has started, chained so they land in the order they were
+   * taken. A commit does not wait on it; `checkpointsWritten` and `close` do.
+   */
+  private checkpointWrites: Promise<void> = Promise.resolve();
   /** Serializes commits (owner) and log catch-up (reader) so folds never interleave. */
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -93,22 +141,33 @@ export class PostgresStorage implements Storage {
     private readonly sql: SqlClient,
     private readonly logId: string,
     mode: StorageMode,
+    private readonly checkpointEvery: number,
   ) {
     this.mode = mode;
   }
 
-  /** Open one log, folding every commit already in it. */
+  /**
+   * Open one log: restore its checkpoint when it has a valid one, then fold every commit after it.
+   *
+   * `checkpointEvery` is how many commits an owner folds past its last checkpoint before writing
+   * the next (`CHECKPOINT_EVERY`); a reader never writes one.
+   */
   static open(
     sql: SqlClient,
-    options: { readonly logId: string; readonly mode?: StorageMode },
+    options: {
+      readonly logId: string;
+      readonly mode?: StorageMode;
+      readonly checkpointEvery?: number;
+    },
     _context: Context,
   ): Promise<PostgresStorage> {
     const storage = new PostgresStorage(
       sql,
       options.logId,
       options.mode ?? "owner",
+      options.checkpointEvery ?? CHECKPOINT_EVERY,
     );
-    return storage.catchUp().then(() => storage);
+    return storage.serialize(() => storage.openLog()).then(() => storage);
   }
 
   /**
@@ -148,6 +207,11 @@ export class PostgresStorage implements Storage {
    * empty fold and a missing key would be a different answer. And commits still arrive in `seq`
    * order per log: the page is ordered by `(log_id, seq)` and keyed on that pair, so a page may
    * split a log across two queries without reordering or dropping the half that did not fit.
+   *
+   * It never reads a checkpoint, so every log it answers costs a full fold. It has two callers: the
+   * index rebuild (`rebuildIndexes`), the recovery path, where a fold that trusted a derived row
+   * could only rebuild what that row already believed; and the board's run evidence
+   * (`TaskService`), which pays the full fold of each run's log on every read.
    *
    * The stores are detached and hold no connection, so the caller drops the map when it is done.
    */
@@ -231,9 +295,34 @@ export class PostgresStorage implements Storage {
     }
   }
 
+  /**
+   * Resolves when every checkpoint write this owner has started has landed or failed (a failure is
+   * logged, never thrown). A commit resolves before its checkpoint is written; a caller that needs
+   * the row — a test, a benchmark — waits here. `close` waits here too.
+   */
+  checkpointsWritten(): Promise<void> {
+    return this.checkpointWrites;
+  }
+
+  /** How this instance's open was answered: the checkpoint it restored and the commits it read. */
+  get opened(): OpenReport {
+    return this.report;
+  }
+
+  /**
+   * The fold this instance holds, encoded as a checkpoint would store it.
+   *
+   * Two opens of one log at one seq answer identically exactly when these are equal, so this is how
+   * an open from a checkpoint is compared with the full fold. `undefined` when the installed
+   * `MemoryStorage` is not the shape `./Checkpoint` encodes.
+   */
+  encodedFold(): string | undefined {
+    return encodeFold(this.store);
+  }
+
   /** Fold every commit after `lastSeq` into memory. */
-  private catchUp(): Promise<void> {
-    const fold = Effect.gen({ self: this }, function* () {
+  private foldTail() {
+    return Effect.gen({ self: this }, function* () {
       for (;;) {
         const rows = yield* this.sql<Row>`
           SELECT seq, writes::text AS writes
@@ -259,11 +348,128 @@ export class PostgresStorage implements Storage {
               }),
           });
           this.lastSeq = seq;
+          this.commitsRead += 1;
         }
         if (rows.length < BATCH_SIZE) return;
       }
     });
-    return this.serialize(() => Effect.runPromise(fold));
+  }
+
+  /**
+   * Restore the log's checkpoint when it is valid, leaving the empty fold when it is not.
+   *
+   * The query is the validity check: the shape must be the running one, and commit `seq` must exist
+   * and hash to what it hashed to when the checkpoint was taken; a row that fails it is not
+   * returned, which is the quiet case. A row that passes and still does not decode, or a query that
+   * fails (a missing table, a permission), is a fault: it is logged as a warning, and the fold that
+   * follows answers either way, so the only symptom it would otherwise have is a slower open.
+   */
+  private restoreCheckpoint() {
+    return Effect.gen({ self: this }, function* () {
+      const rows = yield* this.sql<CheckpointRow>`
+        SELECT k.seq, k.fold
+        FROM log_checkpoints k
+        JOIN commits c ON c.log_id = k.log_id AND c.seq = k.seq
+        WHERE k.log_id = ${this.logId}
+          AND k.shape = ${CHECKPOINT_SHAPE}
+          AND md5(c.writes::text) = k.commit_hash
+      `;
+      const row = rows[0];
+      if (row === undefined) return;
+      const seq = Number(row.seq);
+      const encoded = yield* Effect.try(() => decompressFold(row.fold));
+      const restored = restoreFold(encoded, seq);
+      if (restored === undefined) {
+        yield* Effect.logWarning(
+          `checkpoint of log ${this.logId} at commit ${seq} did not decode; folding the whole log`,
+        );
+        return;
+      }
+      this.store = restored;
+      this.lastSeq = seq;
+      this.checkpointSeq = seq;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning(
+          `checkpoint of log ${this.logId} could not be read; folding the whole log`,
+          cause,
+        ),
+      ),
+    );
+  }
+
+  /**
+   * Start writing the fold as the log's checkpoint, when the owner has folded `checkpointEvery`
+   * commits past the last one.
+   *
+   * Only the encoding happens here, synchronously, because the next commit mutates the store the
+   * fold is read from. Compressing (off the event loop) and the upsert run on `checkpointWrites`,
+   * which the commit does not wait on: a checkpoint is an optimisation, so neither its cost nor a
+   * lock its upsert waits behind lands on the commit's latency. The chain keeps writes in the order
+   * they were taken, so a later checkpoint is never replaced by an earlier one.
+   *
+   * The row is taken from commit `seq` itself (`INSERT … SELECT … FROM commits`), so a checkpoint
+   * can only name a commit the log holds, and its hash is the one an open compares. It never fails:
+   * a failure is logged, and a checkpoint that did not land is only a slower next open. The interval
+   * restarts on a failed write too, so a write that cannot succeed (a fold too large for a row, say)
+   * is not retried on every commit.
+   */
+  private checkpointIfDue(): void {
+    if (this.mode !== "owner") return;
+    const seq = this.lastSeq;
+    if (seq - this.checkpointSeq < this.checkpointEvery) return;
+    this.checkpointSeq = seq;
+    const warn = (cause: unknown) =>
+      Effect.logWarning(
+        `checkpoint of log ${this.logId} at commit ${seq} was not written`,
+        cause,
+      );
+    let encoded: string | undefined;
+    try {
+      encoded = encodeFold(this.store);
+    } catch (cause) {
+      // A fold too large to stringify, say: the commit has landed, so this is only a warning.
+      Effect.runFork(warn(cause));
+      return;
+    }
+    if (encoded === undefined) return;
+    const write = Effect.gen({ self: this }, function* () {
+      const fold = yield* Effect.tryPromise(() => compressFold(encoded));
+      yield* this.sql`
+        INSERT INTO log_checkpoints (log_id, seq, shape, commit_hash, fold)
+        SELECT log_id, seq, ${CHECKPOINT_SHAPE}, md5(writes::text), ${fold}
+        FROM commits
+        WHERE log_id = ${this.logId} AND seq = ${seq}
+        ON CONFLICT (log_id) DO UPDATE SET
+          seq = EXCLUDED.seq,
+          shape = EXCLUDED.shape,
+          commit_hash = EXCLUDED.commit_hash,
+          fold = EXCLUDED.fold,
+          written_at = now()
+      `;
+    }).pipe(Effect.catchCause(warn));
+    this.checkpointWrites = this.checkpointWrites.then(() =>
+      Effect.runPromise(write),
+    );
+  }
+
+  /** The first fold: checkpoint, tail, and — for an owner that read a long tail — a new checkpoint. */
+  private openLog(): Promise<void> {
+    const open = Effect.gen({ self: this }, function* () {
+      yield* this.restoreCheckpoint();
+      yield* this.foldTail();
+      this.report = {
+        checkpoint: this.checkpointSeq === 0 ? undefined : this.checkpointSeq,
+        commitsRead: this.commitsRead,
+      };
+      this.checkpointIfDue();
+    });
+    return Effect.runPromise(open);
+  }
+
+  /** Fold every commit appended since the last read. */
+  private catchUp(): Promise<void> {
+    return this.serialize(() => Effect.runPromise(this.foldTail()));
   }
 
   /** Readers observe commits appended by the owner; the owner already holds the fold. */
@@ -297,6 +503,7 @@ export class PostgresStorage implements Storage {
           () => {
             const seq = prepared.apply();
             this.lastSeq = seq;
+            this.checkpointIfDue();
             return seq;
           },
           (cause: unknown) => {
@@ -461,9 +668,10 @@ export class PostgresStorage implements Storage {
     );
   }
 
+  /** Close, after the checkpoint writes already started have settled. */
   close(context: Context): Promise<void> {
     if (this.closed) return Promise.resolve();
     this.closed = true;
-    return this.store.close(context);
+    return this.checkpointWrites.then(() => this.store.close(context));
   }
 }
