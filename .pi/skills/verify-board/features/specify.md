@@ -11,10 +11,12 @@ rather than on a card of its own, so the card that reaches `planning` (and LOB-8
 after it) is one that was specified and answered.
 
 The column is the specifying stage: `specifying` declares the `specifier` role, so its runs are
-read-only (LOB-74, `READ_ONLY_ROLES` in `packages/harness/src/policy.ts`). The asking run's turn is a
-`bash` read — the sleep that makes it busy — and the drive asserts that read ran rather than was
-refused: a stage that blocked the specifier's reads would also be the reason a run could never get as
-far as asking.
+read-only (LOB-74, `READ_ONLY_ROLES` in `packages/harness/src/policy.ts`). The drive asserts two
+separate facts about that. The run's column, as its `task_runs` row names it, declares a role that
+`readOnlyStageOf` resolves to the `specifying` stage — so a pipeline whose column stopped declaring
+`specifier` fails the drive. And the asking run's turn, a `bash` read (the sleep that makes it busy),
+was not refused: a stage that blocked the specifier's reads would also be the reason a run could never
+get as far as asking. Neither shows the stage _refusing_ anything; see below.
 
 ## How a user reaches it
 
@@ -30,8 +32,10 @@ factory board move --task tsk_… --to planning --expect-revision 6
 
 ## How the skill drives it
 
-`./up.sh` starts its API with the script this phase needs: `FAUX_COMMAND="sleep 4; echo faux-ok"`
-(the sleeping command `verify-api`'s `sigterm.sh` and `ask.sh` hold a turn open with) and
+`./up.sh` starts its API with the script this phase needs: `FAUX_COMMAND="sleep 8; echo faux-ok"`
+(the sleeping command `verify-api`'s `sigterm.sh` and `ask.sh` hold a turn open with, at twice
+`ask.sh`'s 4 s because the busy probe here starts after `board start` returns, a tmux round-trip and
+a cold `bun`; fixed, so an exported `FAUX_COMMAND` cannot change it) and
 `FAUX_ASK=<question>`, which it records in `.verify/run/faux-ask`. The faux model asks only when the
 run was offered `ask` and its prompt has no `task_thread` yet, so every later run on the answered card
 takes an ordinary turn.
@@ -44,8 +48,9 @@ private tmux pane:
 2. `ask.ts MODE=busy` (EVIDENCE_PREFIX=specify) sees the run **busy** while the sleep holds its turn:
    the control without which "not busy after the ask" could not fail.
 3. `ask.ts MODE=parked`: the card is blocked; within 5 s of the block the run is **not busy**, no tool
-   runs and nothing is queued; its `bash` read ran (not refused by the stage); the transcript ends on
-   the ask's result; the thread holds one `question` by that run, verbatim.
+   runs and nothing is queued; the run's column resolves to the read-only `specifying` stage (role
+   `specifier`); its `bash` read was not refused; the transcript ends on the ask's result; the thread
+   holds one `question` by that run, verbatim.
 4. `board show` — `blocked   needs_input from specifying since …`, and the question under
    `[question] <ses_…> (revision 2)`.
 5. `board comment --body $'Postgres 16.\n  Keep port 5442 \xe2\x80\x94 it is shared.'` at the revision
@@ -72,8 +77,11 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
 - the `ask` tool's result without `terminate` (the run replies after asking): "the run ended on its
   ask" and "after the ask the run is parked" fail;
 - the thread section rendered without answers: all three `told` checks fail;
-- `sleep` dropped from the stage's read allowlist: the busy control, "the run's read ran in the
-  specifying stage" and the parked check fail.
+- `sleep` dropped from the stage's read allowlist: the busy control, "the run's read was not
+  refused" and the parked check fail;
+- `READ_ONLY_ROLES` keyed by a role `specifying` does not declare (the stage no longer applies, and
+  the read still runs): "the run's column is the read-only specifying stage" and the parked check
+  fail, while "the run's read was not refused" still passes — which is why the two are separate.
 
 ## What it does not prove
 
@@ -83,8 +91,11 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
 - **The spec document (LOB-72).** A run cannot write `factory.spec`: `writeSpec` is harness-only, with
   no model tool and no RPC, so nothing ties the ask to a spec's `openQuestions` yet. The validator and
   its durability are `.pi/skills/verify-api`'s `spec.sh`.
-- **The stage's refusals.** The drive shows the stage letting a read through; that it refuses writes
-  is `.pi/skills/verify-policy`'s `stage` case.
+- **The stage's refusals, or that the session applied it.** The drive shows the run's column
+  resolving to the stage and a read getting through, which a session opened without the stage would
+  also do. That `openSession` composes the stage and it refuses writes is `packages/core`'s
+  `SessionService.test.ts` ("refuses a specifying run's write …") and `.pi/skills/verify-policy`'s
+  `stage` case.
 - **The thread in the dashboard.** The card pane does not render the thread; the web phase reads the
   card after it has left `specifying`.
 - What a real model asks, or when: `MODEL_BACKEND=faux` scripts it.

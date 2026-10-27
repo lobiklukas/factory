@@ -44,8 +44,9 @@ factory board start --task tsk_… --prompt "go on"               # the next run
 1. **Process 1.** `FAUX_COMMAND="sleep 4; echo faux-ok"` holds the run's `bash` turn open, so the probe
    first sees the run **busy** — the control that makes the next check able to fail. `FAUX_ASK` makes
    the faux script call `ask` after that turn. `ask.ts MODE=parked` then asserts, within 5 s of the
-   block: the live owner is not busy, no tool runs and nothing is queued, the run's `bash` read ran
-   rather than being refused by the read-only stage, the transcript ends on the ask's result, and the
+   block: the live owner is not busy, no tool runs and nothing is queued, the run's column resolves to
+   the read-only `specifying` stage and its `bash` read was not refused, the transcript ends on the
+   ask's result, and the
    question is on the task by the run. `factory board show` prints
    `needs_input from specifying` and the question verbatim.
 2. **SIGTERM**, then **process 2** (a different pid). `board show` still prints the block and the

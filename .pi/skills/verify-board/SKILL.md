@@ -62,9 +62,13 @@ card; `ask.sh` calls `seed.ts` without
 `SEED_CARD=0` and gets a board and a card from the service (so `task_events` gets its `created` row).
 `MODEL_BACKEND=faux` keeps `board start` offline: the session, its worktree and its `factory.task`
 document are real; only the model behind it is scripted. The script is the specify phase's
-(LOB-85): `FAUX_COMMAND="sleep 4; echo faux-ok"` holds a run's turn open so it is provably busy, and
+(LOB-85): `FAUX_COMMAND="sleep 8; echo faux-ok"` holds a run's turn open so it is provably busy, and
 `FAUX_ASK` is the question a run asks when its prompt carries no task thread yet, recorded in
-`.verify/run/faux-ask` for `drive.sh`. Both can be overridden; a run on an answered card never asks.
+`.verify/run/faux-ask` for `drive.sh`. `FAUX_ASK` can be overridden; `FAUX_COMMAND` is fixed, and an
+exported one is ignored, because the probes need its sleep (the busy control) and its `faux-ok` (the
+read was not refused). The 8 s leaves the busy probe, which starts after `board start` returns, the
+tmux round-trip and a cold `bun`, several seconds of margin under load. A run on an answered card
+never asks.
 
 The dashboard (`apps/web`'s `bun run dev`, pid in `.verify/run/web.pid`) points at this API, whose
 `ALLOWED_ORIGINS` names the web origin. `up.sh` waits for both. Override the ports with `API_PORT` and

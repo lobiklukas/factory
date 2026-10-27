@@ -14,13 +14,19 @@
 # the run asks with the `ask` tool when its prompt carries no task thread yet. A run on a card that
 # has been answered does not ask again, so later phases on the same card take ordinary turns. The
 # question is recorded in .verify/run/faux-ask, which drive.sh matches the card's thread against.
+#
+# FAUX_COMMAND is fixed, not taken from the caller's environment: the drive's probes depend on what
+# it does (it must hold the turn open, and print `faux-ok`), so a value left exported by another
+# skill must not silently change the instance. The sleep is 8 s, not ask.sh's 4 s, because the busy
+# probe here starts after `board start` returns, a tmux round-trip and a cold `bun` start — about
+# 1 s on an idle machine, and more under a parallel gate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
 WEB_PORT="${WEB_PORT:-3400}"
 RUN_DIR="$ROOT/.verify/run"
-FAUX_COMMAND="${FAUX_COMMAND:-sleep 4; echo faux-ok}"
+FAUX_COMMAND="sleep 8; echo faux-ok"
 FAUX_ASK="${FAUX_ASK:-Which Postgres major does this card target?}"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL

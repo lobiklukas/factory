@@ -7,7 +7,9 @@
 //   MODE=busy   SESSION_ID=…            the run is genuinely busy (the sleeping FAUX_COMMAND), which is
 //                                       what makes "not busy after the ask" a check that can fail
 //   MODE=parked SESSION_ID=… TASK_ID=…  once the card is blocked, the live owner is idle, the ask is
-//                                       the last thing in the transcript, and nothing runs
+//                                       the last thing in the transcript, and nothing runs; the run's
+//                                       column resolves to the read-only stage and its read was not
+//                                       refused
 //   MODE=told   SESSION_ID=… TASK_ID=…  the next run settled, its committed prompt quotes ANSWER
 //                                       verbatim after QUESTION, and it did not ask again
 //
@@ -22,7 +24,11 @@ import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
 import type { SessionId } from "@repo/domain/Session";
 import type { TaskId } from "@repo/domain/Task";
-import { readPromptSections, THREAD_SECTION_KEY } from "@repo/harness";
+import {
+  readOnlyStageOf,
+  readPromptSections,
+  THREAD_SECTION_KEY,
+} from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Scope } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -113,14 +119,43 @@ const parked = Effect.gen(function* () {
     snapshot.live.tools.length === 0 && snapshot.queued.length === 0,
     `live tools=${snapshot.live.tools.length} queued=${snapshot.queued.length}`,
   );
-  // The card sits in `specifying`, whose role is the read-only stage (LOB-74): the run's `bash`
-  // read — the sleep that made it busy — must have run, not been refused, or the stage would be
-  // blocking the very reads a specifier asks from.
+  // Two facts, kept apart because neither implies the other. First, the run's column — the one its
+  // `task_runs` row names, the row `SessionService` resolves the run's profile from — is the
+  // read-only stage: the definition's role for it resolves through `READ_ONLY_ROLES`
+  // (`readOnlyStageOf`, LOB-74). A pipeline whose `specifying` stopped declaring `specifier` fails
+  // here. That `openSession` then refuses the stage's writes is not observable from a run that only
+  // reads; `SessionService.test.ts` and `verify-policy`'s `stage` case prove it.
+  const runs = yield* client.listTaskRuns({ taskId: TASK });
+  const own = runs.find((entry) => entry.sessionId === SESSION);
+  const board = yield* client.getBoard({ boardId: blocked.value.boardId });
+  const declared =
+    own === undefined ||
+    board.definition.version !== blocked.value.definitionVersion
+      ? undefined
+      : board.definition.columns.find((column) => column.name === own.column);
+  const stage =
+    own === undefined || declared === undefined
+      ? undefined
+      : readOnlyStageOf({
+          column: own.column,
+          ...(declared.role === undefined ? {} : { role: declared.role }),
+        });
+  observed.facts["runColumn"] = own?.column ?? null;
+  observed.facts["runRole"] = declared?.role ?? null;
+  observed.facts["readOnlyStage"] = stage ?? null;
+  check(
+    "the run's column is the read-only specifying stage",
+    stage?.stage === "specifying" && stage.role === "specifier",
+    `column=${own?.column ?? "-"} role=${declared?.role ?? "-"} stage=${stage?.stage ?? "none"}`,
+  );
+  // Second, the run's `bash` read — the sleep that made it busy — was not refused: a stage that
+  // blocked the reads a specifier asks from would be why a run never gets as far as asking. The
+  // command is the one the caller fixed (`up.sh`, `ask.sh`), which prints `faux-ok`.
   const read = snapshot.entries.find(
     (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
   );
   check(
-    "the run's read ran in the specifying stage, not refused",
+    "the run's read was not refused",
     read !== undefined &&
       read.isError !== true &&
       read.text.includes("faux-ok"),
