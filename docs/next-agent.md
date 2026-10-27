@@ -108,9 +108,10 @@ command line it resolved.
 
 ### Constraints that will bite
 
-- **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). On this
-  machine the active docker context may be a stopped Docker Desktop while Colima runs:
-  `export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
+- **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). Reach
+  it over TCP, never through a Docker context: Docker Desktop and Colima can both run a
+  `factory-postgres-1` here, and `lsof -nP -iTCP:5442 -sTCP:LISTEN` names the one tests connect to.
+  Create per-worktree databases over that port (`docs/parallel-work.md`), not with `docker exec`.
 - **Gate every change:** `bun run format:check`, `build`, `lint`, `test`, `type-check` — all five,
   green, before you claim anything works. The Effect diagnostics run with `denyWarnings`, so a warning
   fails the build. `.verify/` is excluded from lint on purpose; `.pi/skills` is type-checked
