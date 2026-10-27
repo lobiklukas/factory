@@ -24,6 +24,7 @@ import { PrEvidence } from "@repo/domain/Session";
 import type {
   ModelUsage,
   QueuedMessage,
+  SessionBudget,
   SessionEvent,
   SessionLive,
   SessionStatus,
@@ -98,6 +99,18 @@ export const PAGE_ENTRY_KIND = "factory.page.written";
  * indistinguishable from a run that never reached the PR step at all.
  */
 export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
+/**
+ * A session's spend ceiling and its last stop (LOB-163, `./budget`). A document because the cap is
+ * state a hook reads before every request, and the stop beside it is what a snapshot reports.
+ */
+export const BUDGET_DOC_KIND = "factory.budget";
+/**
+ * The entry a budget stop is announced with (LOB-163): the cap stopped a run before its next model
+ * request. An entry beside the document for the reason `factory.pr.opened` is one: an attached
+ * client sees entries, not factory documents, and a stop nobody watching can see is a run that
+ * merely went quiet.
+ */
+export const BUDGET_STOPPED_ENTRY_KIND = "factory.budget.stopped";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 /**
@@ -298,6 +311,8 @@ const entryKind = (kind: string): TranscriptEntryKind => {
       return "compaction";
     case TITLE_ENTRY_KIND:
       return "title";
+    case BUDGET_STOPPED_ENTRY_KIND:
+      return "budget";
     default:
       return "other";
   }
@@ -308,12 +323,13 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title and the no-change entries carry no model content, so their text comes from their
-  // data — which is what makes a no-op PR step a readable line rather than an empty entry.
+  // The title, no-change and budget entries carry no model content, so their text comes from their
+  // data — which is what makes a no-op PR step or a budget stop a readable line, not an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
-      : entry.kind === NO_CHANGE_ENTRY_KIND
+      : entry.kind === NO_CHANGE_ENTRY_KIND ||
+          entry.kind === BUDGET_STOPPED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")
         : messageText(message);
   return {
@@ -512,6 +528,34 @@ export const sameTasks = (
       task.conversations.every((id, at) => id === other.conversations[at])
     );
   });
+
+/**
+ * `factory.budget` and the session's spend → its budget (LOB-163), or `undefined` for a session with
+ * no cap. `spent` is the log's own `pi.usage` total plus what it inherited (`carried`, a fork's). The seed's cap is `0`, which is "no cap": `SessionBudgetCap` refuses a zero, so no session
+ * asked for one. The stop is reported only once one was recorded (`stoppedAt` set).
+ */
+export const projectBudgetDoc = (
+  value: JsonValue | undefined,
+  usage: SessionUsage,
+): SessionBudget | undefined => {
+  const cap = numberAt(value, "cap");
+  if (cap <= 0) return undefined;
+  const at = stringAt(value, "stoppedAt") ?? "";
+  return {
+    cap,
+    // A fork's inherited spend counts as the hook counts it (`BudgetDoc.carried`).
+    spent: numberAt(value, "carried") + usageCostTotal(usage),
+    ...(at === ""
+      ? {}
+      : {
+          stopped: {
+            at,
+            spent: numberAt(value, "stoppedSpent"),
+            cap: numberAt(value, "stoppedCap"),
+          },
+        }),
+  };
+};
 
 /** Everything a snapshot of one session carries, from either the live view or a fold. */
 export type SessionProjection = {

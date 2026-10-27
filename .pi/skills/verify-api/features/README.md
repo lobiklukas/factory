@@ -111,6 +111,15 @@ The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2
 `.verify/evidence/lob-72/`. Like `./pr-once.sh` it starts no API process — the driver opens the
 harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
 
+The budget-cap checks (LOB-163) were run from the `agent/LOB-163` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_163` on 5442, faux priced at `FAUX_COST=0.01`,
+`SESSION_BUDGET=1`, API on `BUDGET_PORT=9570`): `./budget.sh` **19/19** (12 driver checks, 7 shell
+checks), evidence `.verify/evidence/lob-163/api/`. `bun drive.ts` was re-run there too (API on
+`:9571`, faux): **52/52**, evidence `.verify/evidence/lob-163/verify-api/` — every session now has
+the hook installed and a fork writes its parent's cap, and nothing the drive asserts changed. See
+[budget.md](budget.md), which names what the drive does not reach (forks and replays, the dashboard
+row).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -140,6 +149,7 @@ harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)           |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)           |
 | The spec document        | passing | [spec.md](spec.md)                         |
+| A budget cap             | passing | [budget.md](budget.md)                     |
 
 ## Deliberately absent
 

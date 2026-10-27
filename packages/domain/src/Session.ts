@@ -112,6 +112,7 @@ export const TranscriptEntryKind = Schema.Literals([
   "reset",
   "compaction",
   "title",
+  "budget",
   "other",
 ]);
 export type TranscriptEntryKind = typeof TranscriptEntryKind.Type;
@@ -206,6 +207,40 @@ export const SessionUsage = Schema.Struct({
   tools: Schema.Array(Schema.Struct({ key: Schema.String, usage: ModelUsage })),
 });
 export type SessionUsage = typeof SessionUsage.Type;
+
+/**
+ * A session's spend ceiling (LOB-163), in the currency `pi.usage` reports (US dollars). A positive
+ * finite number: a cap of zero would stop every run before its first request, which is not a budget
+ * but a disabled session, and nothing asks for that.
+ */
+export const SessionBudgetCap = Schema.Finite.pipe(
+  Schema.check(Schema.isGreaterThan(0)),
+);
+export type SessionBudgetCap = typeof SessionBudgetCap.Type;
+
+/**
+ * The last time the cap stopped a run: when, what the session had spent, and the cap it was held to.
+ * `spent` is at least `cap` — the cap stops a run once spend *reaches* it.
+ */
+export const SessionBudgetStop = Schema.Struct({
+  at: Timestamp,
+  spent: Schema.Finite,
+  cap: Schema.Finite,
+});
+export type SessionBudgetStop = typeof SessionBudgetStop.Type;
+
+/**
+ * A capped session's budget, as its log records it (LOB-163): the cap, the spend it is measured
+ * against (both `pi.usage` buckets, the same total the list shows), and the last stop, if the cap has
+ * stopped a run. A session with no cap has no budget, so the snapshot's field is absent rather than
+ * carrying an infinite one.
+ */
+export const SessionBudget = Schema.Struct({
+  cap: Schema.Finite,
+  spent: Schema.Finite,
+  stopped: Schema.optional(SessionBudgetStop),
+});
+export type SessionBudget = typeof SessionBudget.Type;
 
 /**
  * Where a session's work actually lives, as the server resolved it (docs/features.md §3 A1).
@@ -374,6 +409,12 @@ export const SessionSnapshotFields = {
    * reports the phase it reached, because the document it commits outlives the task.
    */
   mission: Schema.optional(MissionSnapshot),
+  /**
+   * The session's spend ceiling and where it stands (LOB-163). Absent for a session created without
+   * a cap. `stopped` is what tells an operator the cap ended a run, rather than a person or an error;
+   * the transcript carries the same stop as a `budget` entry.
+   */
+  budget: Schema.optional(SessionBudget),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
@@ -469,6 +510,12 @@ export const CreateSessionInput = Schema.Struct({
   taskId: Schema.optional(Schema.String),
   /** The column the run was started from. Defaults to "building". */
   taskColumn: Schema.optional(Schema.String),
+  /**
+   * The session's spend ceiling, in US dollars (LOB-163). A run stops before the first model request
+   * it would send once the session's spend has reached it. Absent: the server's default cap, if it
+   * was started with one, and otherwise no cap.
+   */
+  budget: Schema.optional(SessionBudgetCap),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 

@@ -1,10 +1,10 @@
-import { RepoSlug } from "@repo/domain/Session";
+import { RepoSlug, SessionBudgetCap } from "@repo/domain/Session";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
 import { SessionClient } from "../rpc";
-import { followSession } from "../transcript";
+import { followSession, formatDollars } from "../transcript";
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -29,23 +29,34 @@ export const runCommand = Command.make(
       Flag.withDescription("Ref the session starts from"),
       Flag.optional,
     ),
+    budget: Flag.Finite("budget").pipe(
+      Flag.withDescription(
+        "Spend ceiling for the session, in US dollars: the run stops before a model request once it is reached",
+      ),
+      Flag.withSchema(SessionBudgetCap),
+      Flag.optional,
+    ),
     api: Flag.String("api").pipe(
       Flag.withDescription("Control plane base URL"),
       Flag.optional,
     ),
   },
-  Effect.fnUntraced(function* ({ task, repo, baseRef, api }) {
+  Effect.fnUntraced(function* ({ task, repo, baseRef, budget, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
 
-      const input: { repo?: RepoSlug; baseRef?: string } = {};
+      const input: { repo?: RepoSlug; baseRef?: string; budget?: number } = {};
       if (Option.isSome(repo)) input.repo = repo.value;
       if (Option.isSome(baseRef)) input.baseRef = baseRef.value;
+      if (Option.isSome(budget)) input.budget = budget.value;
 
       const session = yield* client.createSession(input);
       yield* Console.log(`session ${session.id}`);
+      if (Option.isSome(budget)) {
+        yield* Console.log(`budget ${formatDollars(budget.value)}`);
+      }
 
       const opened = yield* client.getSession({ sessionId: session.id });
       yield* Console.log(`workspace ${opened.workspace.path}`);
@@ -63,6 +74,14 @@ export const runCommand = Command.make(
         printMode: false,
       });
       yield* Console.log(`answer: ${answer ?? "(no answer)"}`);
+      // The cap stopping the run is the reason there was no answer, and says so on a line of its own
+      // (the transcript printed the `[budget]` entry as it landed).
+      const after = yield* client.getSession({ sessionId: session.id });
+      if (after.budget?.stopped !== undefined) {
+        yield* Console.log(
+          `stopped: budget reached (${formatDollars(after.budget.stopped.spent)} of ${formatDollars(after.budget.stopped.cap)})`,
+        );
+      }
     });
 
     yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));
@@ -75,6 +94,10 @@ export const runCommand = Command.make(
     {
       command: 'factory run "fix the flaky test"',
       description: "Run a task in a scratch session",
+    },
+    {
+      command: 'factory run "fix the flaky test" --budget 2',
+      description: "Run a task that stops once it has spent $2",
     },
     {
       command: 'factory run "tighten the parser" --repo lobiklukas/factory',

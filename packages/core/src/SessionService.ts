@@ -142,6 +142,7 @@ import {
   writeApprovalDecided,
   writeApprovalRequested,
   writeApprovalUsed,
+  writeBudget,
   writeCurationUsage,
   writeRepoBinding,
   writeTaskBinding,
@@ -391,6 +392,12 @@ export type SessionServiceOptions = {
    * `SESSION_WRITE_BACK_BUDGET`. A test shortens it.
    */
   readonly writeBackBudget?: Duration.Input;
+  /**
+   * The spend ceiling a session gets when its create names none (LOB-163), in US dollars — and a
+   * fork or a replay of an uncapped session too (a capped one's keeps its source's cap). Absent: a
+   * session is capped only when its create asks for one or its source had one.
+   */
+  readonly defaultBudget?: number;
 };
 
 type SessionRow = {
@@ -1256,6 +1263,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               column,
             });
           }
+          // The cap is the log's (LOB-163): the harness's hook reads it before every request, and a
+          // fold reports it. Written before create answers, so no message can start a run under it
+          // before it is there.
+          const budget = input.budget ?? options.defaultBudget;
+          if (budget !== undefined) {
+            yield* writeBudget(owner.root, budget);
+          }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
           return yield* describe(id, row);
@@ -1584,6 +1598,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     model: options.model,
                     cwd,
                     policy: sessionPolicy,
+                    // A fork keeps its parent's cap and carries its spend; an uncapped parent's
+                    // fork gets the default a create would (LOB-163).
+                    ...(options.defaultBudget === undefined
+                      ? {}
+                      : { defaultBudget: options.defaultBudget }),
                   }),
                 (parentStorage) =>
                   Effect.promise(() => parentStorage.dispose()),
@@ -1671,6 +1690,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 run,
                 verify,
                 approvalAsker: askerFor(id),
+                // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
+                // the default a create would (LOB-163).
+                ...(options.defaultBudget === undefined
+                  ? {}
+                  : { defaultBudget: options.defaultBudget }),
               }),
           ).pipe(
             Effect.tapError(() =>
@@ -2230,6 +2254,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return setActivityStatus(sessionId, event.status);
           case "usage":
             return setActivityCost(sessionId, costOf(event.usage));
+          case "entry":
+            // A budget stop (LOB-163) is also a log line, so an operator reading the process's logs
+            // — or motel — sees which session the cap stopped, not only a client watching it.
+            return event.entry.kind === "budget"
+              ? Effect.logWarning(
+                  `session ${sessionId} stopped by its budget: ${event.entry.text}`,
+                ).pipe(Effect.andThen(touchActivity(sessionId)))
+              : touchActivity(sessionId);
           case "snapshot":
             return setActivityStatus(sessionId, event.session.status).pipe(
               Effect.andThen(touchActivity(sessionId)),

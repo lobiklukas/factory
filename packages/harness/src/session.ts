@@ -76,6 +76,14 @@ import {
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
+  BudgetDoc,
+  budgetExtension,
+  inheritBudget,
+  setBudget,
+  type BudgetSeed,
+  type BudgetSource,
+} from "./budget";
+import {
   verifyCallsIn,
   verifyExtension,
   type VerifyOptions,
@@ -103,6 +111,7 @@ import {
   evidenceAt,
   pendingApprovals,
   projectApprovals,
+  projectBudgetDoc,
   projectEntry,
   projectPrDoc,
   projectPages,
@@ -111,6 +120,7 @@ import {
   projectUsageDoc,
   projectView,
   sameTasks,
+  usageCostTotal,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
@@ -124,6 +134,7 @@ import {
   APPROVAL_DECIDED_KIND,
   APPROVAL_USED_KIND,
   APPROVAL_REQUESTED_KIND,
+  BUDGET_DOC_KIND,
   FORK_DOC_KIND,
   REPLAY_DOC_KIND,
   USAGE_DOC,
@@ -383,6 +394,12 @@ export const openSession = (
         options.approvalAsker,
       ),
     );
+    // The budget cap (LOB-163, `./budget`), on every session: the cap is a document in the log, so
+    // the hook is a no-op until `writeBudget` commits one. It stops a run through the root
+    // conversation, which exists only once the harness below is open — and no request can be sent
+    // before then, so the hook reads it late rather than taking it here.
+    let opened: Conversation | undefined;
+    registry.install(budgetExtension(() => opened));
 
     const harness = yield* attempt("open harness", () =>
       HarnessRuntime.open(
@@ -418,6 +435,7 @@ export const openSession = (
         },
       }),
     );
+    opened = root;
 
     // What the section came to, committed beside it: a page the budget dropped is a fact about this
     // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
@@ -1310,6 +1328,8 @@ const draftOf = (
 type ForkPreamble = {
   readonly parent: string;
   readonly binding?: RepoBinding;
+  /** The cap the fork inherits (LOB-163), in the same commit, so no run starts under it uncapped. */
+  readonly budget?: BudgetSeed;
 };
 
 /**
@@ -1362,6 +1382,11 @@ const copyEntries = (
             doc.baseRef = preamble.binding?.baseRef ?? "";
           }),
     )
+    .then(() =>
+      preamble.budget === undefined
+        ? undefined
+        : setBudget(tx, conversationId, preamble.budget),
+    )
     .then(() => ({ parent: preamble.parent, at }));
 };
 
@@ -1399,6 +1424,12 @@ export type ForkSessionOptions = {
   readonly pages?: readonly CitedPage[];
   /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /**
+   * The cap a fork of an uncapped parent gets (LOB-163): the server's default, as a create gets it.
+   * A capped parent's fork keeps the parent's cap and carries its spend (`inheritBudget`), so a fork
+   * is never a way around a cap — a fork of a session the cap stopped is stopped too.
+   */
+  readonly defaultBudget?: number;
 };
 
 export type ForkedSession = OpenSession & {
@@ -1419,6 +1450,11 @@ export const forkSession = (
 ): Effect.Effect<ForkedSession, SessionError> =>
   Effect.gen(function* () {
     const source = yield* readForkSource(options.parent, options.at);
+    const budget = inheritBudget(
+      yield* readBudgetSource(options.parent),
+      options.defaultBudget,
+      true,
+    );
     const opened = yield* openSession({
       storage: options.child,
       model: options.model,
@@ -1441,6 +1477,7 @@ export const forkSession = (
               ...(options.binding === undefined
                 ? {}
                 : { binding: options.binding }),
+              ...(budget === undefined ? {} : { budget }),
             }),
           BACKGROUND_CONTEXT,
         ),
@@ -1504,6 +1541,24 @@ const bindingString = (value: JsonValue | undefined, key: string): string =>
         return typeof field === "string" ? field : "";
       })()
     : "";
+
+/**
+ * A log's cap and spend, as a fork or a replay of it inherits them (LOB-163): read through the same
+ * projection a snapshot uses, so the spend a fork carries is the spend its parent reported.
+ */
+export const readBudgetSource = (
+  storage: Storage,
+): Effect.Effect<BudgetSource, SessionError> =>
+  Effect.gen(function* () {
+    const usage = projectUsageDoc(yield* readDocument(storage, USAGE_DOC));
+    const budget = projectBudgetDoc(
+      yield* readDocument(storage, BUDGET_DOC_KIND),
+      usage,
+    );
+    return budget === undefined
+      ? { spent: usageCostTotal(usage) }
+      : { cap: budget.cap, spent: budget.spent };
+  });
 
 /**
  * Read a session nobody owns by folding its log through a reader-mode `Storage`. No `Harness` is
@@ -1656,8 +1711,10 @@ const snapshotOf = (
   ref: SessionRef,
   entries: readonly EntryRecord[],
   mission: MissionSnapshot | undefined,
+  budgetDoc: JsonValue | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
+  const budget = projectBudgetDoc(budgetDoc, projection.usage);
   return {
     session: {
       id: ref.id,
@@ -1684,8 +1741,22 @@ const snapshotOf = (
     // Absent rather than an empty phase when the session never started a mission, and present with
     // the phase it reached even after the mission settled: the record outlives the task (LOB-230).
     ...(mission === undefined ? {} : { mission }),
+    // Absent for a session with no cap (LOB-163); a stop the cap made is `budget.stopped`.
+    ...(budget === undefined ? {} : { budget }),
   };
 };
+
+/**
+ * The budget document of a session this process owns (LOB-163), as JSON for `projectBudgetDoc` —
+ * the same reader the fold uses, so the two paths cannot disagree about a cap or a stop.
+ */
+const readBudgetDoc = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<JsonValue | undefined, SessionError> =>
+  attempt("read budget", () =>
+    harness.snapshot(BudgetDoc, conversation.id, BACKGROUND_CONTEXT),
+  );
 
 const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
   _tag: "snapshot",
@@ -1753,7 +1824,8 @@ export const readLiveSnapshot = (
       );
       const entries = yield* readConversationEntries(session.root);
       const mission = yield* readMissionSnapshot(session.harness, session.root);
-      return snapshotOf(state.value, tasks, ref, entries, mission);
+      const budget = yield* readBudgetDoc(session.harness, session.root);
+      return snapshotOf(state.value, tasks, ref, entries, mission, budget);
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
@@ -1821,10 +1893,11 @@ export const liveSessionEvents = (
       // snapshot: a phase change is a document commit, and the stream reports entries and tasks, so
       // a subscriber that needs the new phase re-reads the snapshot rather than being told twice.
       const mission = yield* readMissionSnapshot(session.harness, session.root);
+      const budget = yield* readBudgetDoc(session.harness, session.root);
       yield* Queue.offer(
         queue,
         snapshotEvent(
-          snapshotOf(state.value, previousTasks, ref, entries, mission),
+          snapshotOf(state.value, previousTasks, ref, entries, mission, budget),
         ),
       );
       return Stream.fromQueue(queue);
@@ -1844,6 +1917,10 @@ export const readHistoricalSnapshot = (
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
     const mission = yield* readFoldedMission(storage);
+    const budget = projectBudgetDoc(
+      yield* readDocument(storage, BUDGET_DOC_KIND),
+      log.usage,
+    );
     return {
       session: {
         id: ref.id,
@@ -1874,6 +1951,8 @@ export const readHistoricalSnapshot = (
       // The point of the fold (LOB-147): a request committed before the owner was released is still
       // waiting here, so a restarted control plane asks a person for the same answer, not again.
       approvals: pendingOf(ref.id, log.approvals),
+      // The cap and its last stop are document state (LOB-163): a released session reports both.
+      ...(budget === undefined ? {} : { budget }),
     };
   });
 

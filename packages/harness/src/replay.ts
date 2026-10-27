@@ -27,6 +27,7 @@ import {
   attempt,
   closeHarness,
   openSession,
+  readBudgetSource,
   readSessionLog,
   SessionDoc,
   submitMessage,
@@ -36,6 +37,7 @@ import {
   type SubmittedMessage,
 } from "./session";
 import type { VerifyOptions } from "./verify";
+import { inheritBudget, setBudget, type BudgetSource } from "./budget";
 
 /**
  * The link between a replay and the session it replays, committed to the replay's own log.
@@ -81,6 +83,8 @@ export type ReplaySource = {
   readonly binding: RepoBinding;
   /** The model the source's log records, when it records one. */
   readonly model?: string;
+  /** The source's cap and spend (LOB-163): a replay keeps the cap, not the spend. */
+  readonly budget: BudgetSource;
 };
 
 /**
@@ -122,9 +126,11 @@ export const readReplaySource = (
       });
     }
     const model = recordedModel(log.usage);
+    const budget = yield* readBudgetSource(storage);
     return {
       prompt: prompt.text,
       binding,
+      budget,
       ...(model === undefined ? {} : { model }),
     };
   });
@@ -150,6 +156,12 @@ export type ReplaySessionOptions = {
   readonly run?: RunProfile;
   /** What the replay's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /**
+   * The cap a replay of an uncapped source gets (LOB-163): the server's default, as a create gets
+   * it. A capped source's replay keeps its cap — the one thing a replay changes is the model — but
+   * starts at no spend, because it is a fresh run of the source's task, not its continuation.
+   */
+  readonly defaultBudget?: number;
 };
 
 export type ReplayedSession = OpenSession & {
@@ -207,7 +219,16 @@ export const replaySession = (
                   data: { title: options.title },
                 }),
               ];
-        return Promise.all([doc, binding, ...title]);
+        // The cap is in this commit, before the prompt's: the run the prompt starts is capped from
+        // its first request.
+        const budget = inheritBudget(
+          options.source.budget,
+          options.defaultBudget,
+          false,
+        );
+        const cap =
+          budget === undefined ? [] : [setBudget(tx, opened.root.id, budget)];
+        return Promise.all([doc, binding, ...title, ...cap]);
       }, BACKGROUND_CONTEXT),
     ).pipe(
       Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),

@@ -7,6 +7,7 @@ import {
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
+import { SessionBudgetCap } from "@repo/domain/Session";
 import {
   createModelAccess,
   DEFAULT_AUTONOMY,
@@ -126,6 +127,12 @@ const ModelConfig = Config.all({
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
   /**
+   * What each faux request costs, in US dollars (LOB-163). pi-ai's faux reports no cost, so a capped
+   * session on it could never reach its cap; a verification that proves the cap
+   * (`.pi/skills/verify-api/budget.sh`) prices it. `0` by default: free, as before.
+   */
+  fauxCost: Config.Finite("FAUX_COST").pipe(Config.withDefault(0)),
+  /**
    * Whether the faux script calls `verify` after its `bash` turn (LOB-78's `fauxVerify`). Off by
    * default; `.pi/skills/verify-board/requires.sh` sets it so a run on a card records the evidence
    * a column's `verified` requirement checks (LOB-80).
@@ -145,6 +152,17 @@ const ModelConfig = Config.all({
     Config.withDefault(15 * 60_000),
   ),
 });
+
+/**
+ * The spend ceiling a session gets when its create names none (LOB-163), in US dollars — and a fork
+ * or a replay of an uncapped session, which names none either (a capped one's keeps its source's
+ * cap). Unset: no default, so only a create that asks for a cap, or a fork or replay of a capped
+ * session, gets one. A value that is not a positive number fails
+ * the boot rather than silently leaving every session uncapped.
+ */
+const SessionBudgetConfig = Config.option(
+  Config.schema(SessionBudgetCap, "SESSION_BUDGET"),
+);
 
 /** The first line of a cause, short enough for one log line. */
 const firstLine = (cause: Cause.Cause<unknown>): string =>
@@ -253,6 +271,7 @@ const HttpLive = Effect.gen(function* () {
   const model = yield* ModelConfig;
   const prCap = yield* PrCapConfig;
   const autonomy = yield* ApprovalGateConfig;
+  const defaultBudget = yield* SessionBudgetConfig;
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -260,6 +279,13 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
+  );
+  yield* Effect.logInfo(
+    Option.match(defaultBudget, {
+      onNone: () => "session budget: none by default (a create may name one)",
+      onSome: (budget) =>
+        `session budget: $${budget} by default (SESSION_BUDGET)`,
+    }),
   );
   if (backend === "faux") {
     yield* Effect.logWarning(
@@ -275,6 +301,7 @@ const HttpLive = Effect.gen(function* () {
       fauxCommand: model.fauxCommand,
       fauxEveryTurn: model.fauxEveryTurn,
       fauxAsk: Option.getOrUndefined(model.fauxAsk),
+      fauxCost: model.fauxCost,
       fauxVerify: model.fauxVerify,
       fauxSleepMs: model.fauxSleepMs,
     }),
@@ -282,6 +309,10 @@ const HttpLive = Effect.gen(function* () {
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,
     autonomy,
+    ...Option.match(defaultBudget, {
+      onNone: () => ({}),
+      onSome: (budget) => ({ defaultBudget: budget }),
+    }),
   }).pipe(Layer.provide(SessionWriteBackLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
