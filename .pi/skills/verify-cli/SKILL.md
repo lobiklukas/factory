@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` in apps/cli) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` in apps/cli) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -28,6 +28,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `factory watch`, historical  | `mode: historical` after the idle sweep, same answer                    | the fold path, and the label that tells them apart |
 | Typed errors                 | unknown id → `error: not_found`, non-zero exit                          | a script can branch on `code`, not on prose        |
 | `factory withdraw` (LOB-166) | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript | withdrawing is a write, not a hidden row           |
+| `factory approve` (LOB-53)   | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed   | the answer reaches the run, not only the row       |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -38,7 +39,14 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./doctor.sh      # read-only; exits non-zero when the instance is not worth driving
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
 ./withdraw.sh    # self-contained: its own API on :9310 (WITHDRAW_PORT) with a sleeping faux turn
+./approve.sh     # self-contained: its own gated API on :9320 (APPROVE_PORT); drive.sh runs it last
 ```
+
+`approve.sh` is separate for the same kind of reason: an approval exists only once a gated call asks,
+and the gate is a deployment setting (`APPROVAL_REQUIRED=sleep`, with the faux command the gated one
+and `FAUX_EVERY_TURN=true`), so it boots its own API under `.verify/run/cli-approve/` rather than gate
+the instance `up.sh` started. `drive.sh` calls it as its last block, so one drive covers both; set
+`APPROVE_PORT` into your port block when you run the drive. See `features/approve.md`.
 
 `withdraw.sh` is separate from `drive.sh` because a message only queues behind a run in flight: it
 boots its own API with `FAUX_COMMAND="sleep 15 && echo faux-ok"` (`WITHDRAW_SLEEP_S`), its own

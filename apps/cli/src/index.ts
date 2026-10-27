@@ -1,6 +1,11 @@
 import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 import { Command } from "effect/cli";
+import {
+  approvalsCommand,
+  approveCommand,
+  denyCommand,
+} from "./commands/approve";
 import { boardCommand } from "./commands/board";
 import { lsCommand } from "./commands/ls";
 import { runCommand } from "./commands/run";
@@ -21,6 +26,9 @@ const root = Command.make("factory").pipe(
     sendCommand,
     withdrawCommand,
     boardCommand,
+    approvalsCommand,
+    approveCommand,
+    denyCommand,
   ]),
 );
 

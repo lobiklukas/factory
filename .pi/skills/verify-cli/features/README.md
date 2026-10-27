@@ -3,6 +3,10 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory approvals` / `approve` / `deny` were verified **2026-10-27** from the `agent/LOB-53`
+worktree: `./drive.sh` (API on `:9530`) **21/21**, its last check being `./approve.sh` (API on
+`:9531`) at **18/18**.
+
 `factory send` / `factory withdraw` were verified **2026-10-27** from the `agent/LOB-166` worktree
 with `./withdraw.sh` (API on `:9561`) — **13/13** checks — and `./drive.sh` re-run there (API on
 `:9560`) at 20/20.
@@ -19,6 +23,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory watch`                     | passing | [watch.md](watch.md)       |
 | Typed errors                        | passing | [errors.md](errors.md)     |
 | `factory send` / `factory withdraw` | passing | [withdraw.md](withdraw.md) |
+| `factory approve` / `deny`          | passing | [approve.md](approve.md)   |
 
 ## Deliberately absent
 
