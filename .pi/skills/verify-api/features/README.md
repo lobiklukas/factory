@@ -83,6 +83,13 @@ The docs-trigger checks (LOB-197) were run from the `ralph/LOB-197` worktree on 
 `.verify/evidence/lob-197/`. Like `./docs-run.sh` it starts no API process. See `docs-trigger.md`,
 which names the one caller it does not add.
 
+The docs trigger's callers (LOB-234) were run from the `agent/LOB-234` worktree on 2026-10-27 (API
+on `:9550`, faux, the worktree's own database on 5442): `./docs-trigger-http.sh` **13/13** (10
+driver checks on the `on` boot, 1 on the `off` boot, 2 boot-log checks), evidence
+`.verify/evidence/lob-234/`, with two mutation runs failing it (`mutation-no-daemon/`,
+`mutation-no-push-route/`). `./docs-trigger.sh` and `./linear-writeback.sh` were re-run there too,
+because the module and the GitHub route they drive changed. See `docs-trigger.md`.
+
 The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
 `:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and

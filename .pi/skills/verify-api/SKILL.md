@@ -39,6 +39,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | An approval across a kill (LOB-52) | `approval-restart.sh`: a gated call parks idle on one approval, SIGKILL, a fresh process folds it pending, a retry re-asks nothing, approved it runs once, and the next run asks again | an ask survives the process, and is asked once       |
 | A mission (LOB-230)                | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                                                                   | a mission's phase is the session's state, not a call |
 | A docs trigger (LOB-197)           | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main                                                    | a docs run starts without a person, off the trunk    |
+| Docs trigger callers (LOB-234)     | `docs-trigger-http.sh`: `DOCS_SCHEDULE_MS=400` ticks sessions, unset none; a signed push processed, a redelivery replayed, another branch 400, a bad signature 401                     | a deployment starts docs runs with no script         |
 | The `verify` tool (LOB-78)         | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first                                                           | a run's verification is a record, not prose          |
 | PR evidence (LOB-79)               | `pr-evidence.sh`: the body names the skill, its exit code and a bounded excerpt; a truncation is marked; no evidence is said                                                           | the PR states what was verified, from the record     |
 | A Linear issue (LOB-164)           | `linear.sh`: a labeled issue opens one session on its rule's repo, the issue as its prompt; a retry, an edit open none                                                                 | work arrives from Linear exactly once                |
@@ -96,6 +97,7 @@ running, and writes its own evidence:
 ./linear.sh      # api on :9415 — Linear issue webhooks: one session per labeled issue, skips named
 ./linear-writeback.sh  # fake Linear on :9416, fake GitHub on :9417 — the issue's states, PR and failure comments
 ./docs-trigger.sh  # fake GitHub on :9410 — a push and a schedule start docs runs on factory/doc-<id>
+./docs-trigger-http.sh  # api on :9422, booted twice — the schedule daemon and the signed GitHub push route (features/docs-trigger.md)
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
