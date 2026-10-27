@@ -5,10 +5,11 @@
  * press makes the control unavailable in the same tick, and a focused button that turns `disabled`
  * drops focus to `body`.
  */
-import { isValidElement } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { CompactButton } from "./compact-button";
+import { Button } from "./ui/button";
 
 const BUSY = "Wait for this run to finish before compacting";
 
@@ -35,12 +36,17 @@ const buttonAttributes = (markup: string): ReadonlyMap<string, string> => {
 const render = (overrides: Partial<Props>) =>
   renderToStaticMarkup(<CompactButton {...props(overrides)} />);
 
-/** The `onClick` the control hands its button, read off the element tree it returns. */
+/**
+ * The `onClick` the control hands its `Button`, found by element type in the tree it returns (not
+ * by position, so reordering the fragment does not break it).
+ */
 const clickOf = (overrides: Partial<Props>): (() => void) => {
   const tree: unknown = CompactButton(props(overrides));
-  if (!isValidElement<{ children: ReadonlyArray<unknown> }>(tree))
+  if (!isValidElement<{ children?: ReactNode }>(tree))
     throw new Error("CompactButton rendered no element");
-  const button = tree.props.children[0];
+  const button = Children.toArray(tree.props.children).find(
+    (child) => isValidElement(child) && child.type === Button,
+  );
   if (!isValidElement<{ onClick: () => void }>(button))
     throw new Error("CompactButton rendered no button");
   return button.props.onClick;
@@ -79,6 +85,9 @@ describe("CompactButton", () => {
     expect(markup).not.toContain("compact-blocked");
   });
 
+  // This pins the control's own guard only: it calls `onClick` directly, so it never passes
+  // through Base UI's press swallowing, which is what stops a keyboard Enter or Space on an
+  // `aria-disabled` button in a browser. `.pi/skills/verify-web/drive.mjs` covers that path.
   it("ignores a press while it is unavailable and admits one when it is not", () => {
     const onPress = vi.fn();
     clickOf({ running: true, onPress })();
