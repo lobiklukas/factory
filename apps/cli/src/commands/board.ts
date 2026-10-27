@@ -16,7 +16,8 @@ import { BoardClient } from "../rpc";
  *
  * **Refusals are printed, not swallowed.** The board's refusals are typed values that name what
  * failed — `UndeclaredTransition` names both columns, `StaleRevision` names the revision it found,
- * `HumanGateRequired` names the gate — so the command prints the service's own message verbatim
+ * `HumanGateRequired` names the gate, `RequirementUnmet` the column's exit requirement (LOB-80) — so
+ * the command prints the service's own message verbatim
  * (docs/board.md B5: "a refusal names the failing requirement") and exits non-zero. A script that
  * cannot tell a refused move from a successful one is worse than no command.
  */

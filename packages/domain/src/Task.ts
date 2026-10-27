@@ -114,6 +114,14 @@ export const HUMAN_GATES: Readonly<Record<string, string>> = {
   "review→done": "merge",
 };
 
+/**
+ * The requirement a column declares when leaving it takes a passing verification of the card's
+ * change (B8, LOB-80, part 3 of LOB-16). The default pipeline's `review` column declares it from
+ * definition version 3 (`0018_seed_verified_requirement.ts`); `TaskService` checks it against the
+ * `verify` records of the card's runs and refuses the move, naming it, when it is not met.
+ */
+export const VERIFIED_REQUIREMENT = "verified";
+
 /** The columns a card in `from` may move to, in the order the pipeline declares them. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];
@@ -418,6 +426,22 @@ export class HumanGateRequired extends Schema.TaggedError<HumanGateRequired>()(
   },
 ) {}
 
+/**
+ * A move out of a column whose `requires[]` the card has not met (B5, B8; LOB-80). Names the
+ * requirement by its `key`, and `message` says which column, which move and what is missing —
+ * B5's "a refusal names the failing requirement", never a bare "denied".
+ */
+export class RequirementUnmet extends Schema.TaggedError<RequirementUnmet>()(
+  "RequirementUnmet",
+  {
+    taskId: Schema.String,
+    column: Schema.String,
+    to: Schema.String,
+    requirement: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class AlreadyBlocked extends Schema.TaggedError<AlreadyBlocked>()(
   "AlreadyBlocked",
   { taskId: Schema.String, message: Schema.String },
@@ -445,6 +469,7 @@ export type TaskError =
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
+  | RequirementUnmet
   | AlreadyBlocked
   | NotBlocked
   | EmptyComment

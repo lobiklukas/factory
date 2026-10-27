@@ -6,16 +6,18 @@ reaches it, how the skill drives it, and what observable end state proves it wor
 Status reflects the last verified runs: **2026-10-27**, `agent/LOB-73`, `MODEL_BACKEND=faux` —
 `./drive.sh` in tmux, API on `:9520`, **15/15** required checks passed (`observed.json` beside the raw
 panes); `./ask.sh`, API on `:9521` across two processes, **14/14** drive checks and **10/10** probe checks
-passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`). Evidence:
-`.verify/evidence/latest/board/`.
+passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
+`./requires.sh` (LOB-80, 2026-10-27, `agent/LOB-80`), API on `:9522`, **24/24** checks passed
+(`requires-observed.json`). Evidence: `.verify/evidence/latest/board/`.
 
-| Feature               | Status  | File                 |
-| --------------------- | ------- | -------------------- |
-| `factory board ls`    | passing | [ls.md](ls.md)       |
-| `factory board show`  | passing | [show.md](show.md)   |
-| `factory board move`  | passing | [move.md](move.md)   |
-| `factory board start` | passing | [start.md](start.md) |
-| the ask on the task   | passing | [ask.md](ask.md)     |
+| Feature               | Status  | File                       |
+| --------------------- | ------- | -------------------------- |
+| `factory board ls`    | passing | [ls.md](ls.md)             |
+| `factory board show`  | passing | [show.md](show.md)         |
+| `factory board move`  | passing | [move.md](move.md)         |
+| `factory board start` | passing | [start.md](start.md)       |
+| the ask on the task   | passing | [ask.md](ask.md)           |
+| `requires[]` on exit  | passing | [requires.md](requires.md) |
 
 ## Deliberately absent
 

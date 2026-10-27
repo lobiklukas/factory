@@ -154,6 +154,7 @@ const REFUSAL_TITLES: Readonly<Record<string, string>> = {
   StaleRevision: "Someone changed this card first",
   UndeclaredTransition: "This column does not declare that move",
   HumanGateRequired: "Only a person can make this move",
+  RequirementUnmet: "This column's exit requirement is not met",
   TaskNotFound: "This card no longer exists",
   TaskStorageError: "The board could not record the move",
 };
