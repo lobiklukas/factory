@@ -44,6 +44,21 @@ if (ledgerPath === undefined || ledgerPath === "") {
 
 const empty: Ledger = { requests: [], pulls: [] };
 
+/**
+ * A PR as GitHub's REST API answers it: `url` is the API resource and `html_url` the page. The
+ * ledger's `url` is the page — what the factory should record — and the answer carries both, so a
+ * client that read the wrong field would record `api.github.com` and its drive would see it.
+ */
+const answer = (
+  owner: string,
+  repo: string,
+  pull: { readonly number: number; readonly url: string },
+) => ({
+  number: pull.number,
+  url: `https://api.github.com/repos/${owner}/${repo}/pulls/${pull.number}`,
+  html_url: pull.url,
+});
+
 const read = (): Ledger => {
   try {
     return JSON.parse(readFileSync(ledgerPath, "utf8")) as Ledger;
@@ -140,7 +155,7 @@ const server = Bun.serve({
         hung = true;
         await new Promise<never>(() => {});
       }
-      return json(201, { number: created.number, url: created.url });
+      return json(201, answer(owner, repo, created));
     }
 
     if (request.method === "GET") {
@@ -155,7 +170,7 @@ const server = Bun.serve({
         200,
         read()
           .pulls.filter((pull) => pull.head === branch && pull.base === base)
-          .map((pull) => ({ number: pull.number, url: pull.url })),
+          .map((pull) => answer(owner, repo, pull)),
       );
     }
 

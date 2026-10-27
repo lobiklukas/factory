@@ -20,10 +20,13 @@
  * seam that changes and `SessionBus` is how streams keep working.
  */
 import {
+  Cause,
   Clock,
   Context,
   DateTime,
+  Duration,
   Effect,
+  Exit,
   FiberMap,
   FileSystem,
   HashMap,
@@ -118,6 +121,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readVerifyRecords,
   readCurationUsage,
   readReplaySource,
   replaySession,
@@ -152,6 +156,10 @@ import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
+import {
+  SESSION_WRITE_BACK_BUDGET,
+  SessionWriteBack,
+} from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
 
@@ -337,6 +345,11 @@ export type SessionServiceOptions = {
    * `DEFAULT_DIFF_CAP`, so a deployment that never configures this still has a bound.
    */
   readonly prCap?: DiffCap;
+  /**
+   * How long the PR step waits for its write-back before it answers anyway (LOB-15). Absent:
+   * `SESSION_WRITE_BACK_BUDGET`. A test shortens it.
+   */
+  readonly writeBackBudget?: Duration.Input;
 };
 
 type SessionRow = {
@@ -492,6 +505,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const path = yield* Path.Path;
       const policy = yield* Policy;
       const skills = yield* SkillService;
+      /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
+      const writeBack = yield* SessionWriteBack;
+      const writeBackBudget = Duration.fromInputUnsafe(
+        options.writeBackBudget ?? SESSION_WRITE_BACK_BUDGET,
+      );
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -1223,14 +1241,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * did rather than from the caller: the model that spent the most, and the total. The owner's
        * workspace is what the step measures the branch in, and the configured cap is passed with it
        * (LOB-227).
+       *
+       * The step runs inside the PR gate and answers its exit with the owner's log; `openPr` reports
+       * that exit once the gate is released (LOB-15).
        */
-      const openPr = (
-        input: OpenPullRequestArgs,
-      ): Effect.Effect<
-        PullRequestStep,
-        SessionError | PrError | CredentialError,
-        CredentialProvider | HttpClient.HttpClient
-      > =>
+      const stepPr = (input: OpenPullRequestArgs) =>
         prGate.withPermits(1)(
           Effect.gen(function* () {
             const row = yield* requireSession(input.sessionId);
@@ -1258,7 +1273,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   : costliest,
               undefined,
             );
-            const opened = yield* openPullRequest({
+            const stepped = yield* openPullRequest({
               harness: owner.harness,
               conversation: owner.root,
               sessionId: input.sessionId,
@@ -1278,11 +1293,64 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // it is not a requirement of the session service, so it does not leave through this
               // method's type.
               Effect.provideService(SqlClient, sql),
+              Effect.exit,
             );
-            yield* touchActivity(input.sessionId);
-            return opened;
+            if (Exit.isSuccess(stepped)) yield* touchActivity(input.sessionId);
+            return { stepped, storage: owner.storage };
           }),
         );
+
+      /**
+       * The PR step, and its exit reported to the write-back. Every exit is reported — the PR, a
+       * refusal, an error — so a tracker can mirror it (LOB-15). The report runs outside the gate:
+       * the gate is every session's, and a tracker slow to answer must not hold up another session's
+       * PR.
+       *
+       * The port promises not to fail or stall the step; this is where that promise is kept rather
+       * than trusted. The report has a total budget (`writeBackBudget`) — an implementation's own
+       * per-request timeouts and retries can add up to more than a caller should wait — and any
+       * failure or defect it raises is logged, never the step's. Its writes are idempotent, so a
+       * report cut short is completed by the next one.
+       */
+      const openPr = (
+        input: OpenPullRequestArgs,
+      ): Effect.Effect<
+        PullRequestStep,
+        SessionError | PrError | CredentialError,
+        CredentialProvider | HttpClient.HttpClient
+      > =>
+        Effect.gen(function* () {
+          const { stepped, storage } = yield* stepPr(input);
+          yield* writeBack
+            .pullRequest({
+              sessionId: input.sessionId,
+              result: stepped,
+              evidence: readVerifyRecords(storage).pipe(
+                // A log that cannot be read is said, not passed off as "no verification recorded".
+                Effect.tapError((error) =>
+                  Effect.logWarning(
+                    `session ${input.sessionId}: could not read its verify records for the write-back: ${error.message}`,
+                  ),
+                ),
+                Effect.orElseSucceed(() => []),
+              ),
+            })
+            .pipe(
+              Effect.timeoutOrElse({
+                duration: writeBackBudget,
+                orElse: () =>
+                  Effect.logWarning(
+                    `session ${input.sessionId}: the PR step's write-back did not finish within ${Duration.toMillis(writeBackBudget)}ms; the step answers without it`,
+                  ),
+              }),
+              Effect.catchCause((cause) =>
+                Effect.logError(
+                  `session ${input.sessionId}: the PR step's write-back failed; the step answers without it: ${Cause.pretty(cause)}`,
+                ),
+              ),
+            );
+          return yield* stepped;
+        });
 
       /**
        * Fork a session at one of its entries (LOB-180, D7).

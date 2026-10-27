@@ -89,6 +89,26 @@ export class TriggerSessions extends Context.Service<
   TriggerSessionsShape
 >()("@repo/core/TriggerSessions") {}
 
+/**
+ * The request id a delivery's session is created under: the delivery's own id, namespaced, because
+ * `sessions.request_id` dedupes client retries too and a delivery id that happened to equal a
+ * caller's request id would hand that caller this session.
+ *
+ * Exported with its inverse so a reader that has only the session — the Linear write-back
+ * (LOB-15) finding which issue a PR belongs to — reads the prefix from here rather than spelling
+ * it, and cannot break the day it changes.
+ */
+export const sessionRequestIdOf = (deliveryId: string): string =>
+  `trigger:${deliveryId}`;
+
+/** The delivery a session was created for, or `undefined` for a session no trigger opened. */
+export const deliveryIdOfSession = (
+  requestId: string | null | undefined,
+): string | undefined =>
+  requestId?.startsWith("trigger:") === true
+    ? requestId.slice("trigger:".length)
+    : undefined;
+
 /** Where an adapter posts the session's link back. Part 1 ships no adapter that needs one. */
 export type TriggerWriteBackShape = {
   readonly write: (input: {
@@ -324,10 +344,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               const session = yield* sessions.create({
                 title: event.title,
                 deliveryId: requestId,
-                // Namespaced, because `sessions.request_id` dedupes client retries too: a delivery
-                // id that happened to equal a caller's request id would hand that caller this
-                // session.
-                requestId: `trigger:${requestId}`,
+                // Namespaced (`sessionRequestIdOf`): `sessions.request_id` dedupes client retries
+                // too.
+                requestId: sessionRequestIdOf(requestId),
                 repo: mapping.repo,
                 baseRef: mapping.baseRef,
               });

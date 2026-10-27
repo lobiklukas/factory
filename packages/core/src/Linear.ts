@@ -235,6 +235,22 @@ const isMappedWork = (
 ): boolean =>
   canStartWork(event, rules) && resolveMapping(rules, event) !== undefined;
 
+/** The key of the one delivery an issue starts work under (`linear:<issue id>:mapped`). */
+const linearMappedRequestId = (issueId: string): string =>
+  `linear:${issueId}:mapped`;
+
+const MAPPED_KEY = /^linear:(.+):mapped$/;
+
+/**
+ * The Linear issue a delivery id names, when it is the issue's mapped key — the inverse of
+ * `linearMappedRequestId`, beside it so the two cannot drift. A session opened for that delivery is
+ * the issue's one session, which is how the write-back (LOB-15, `./LinearSync`) finds the issue a
+ * PR or a failure belongs to without a second record of the binding.
+ */
+export const linearIssueOfDelivery = (
+  deliveryId: string | undefined,
+): string | undefined => MAPPED_KEY.exec(deliveryId ?? "")?.[1];
+
 /** The idempotency key for a normalized Linear event: **one issue is one unit of work**. */
 export const linearRequestId = (
   event: TriggerEvent,
@@ -242,7 +258,7 @@ export const linearRequestId = (
   payload: unknown,
   headers: LinearDeliveryHeaders = {},
 ): string => {
-  if (isMappedWork(event, rules)) return `linear:${event.key}:mapped`;
+  if (isMappedWork(event, rules)) return linearMappedRequestId(event.key);
   if (canStartWork(event, rules)) {
     const labels = [...new Set(event.labels)].sort().join(",");
     return `linear:${event.key}:unmapped:${labels === "" ? "no-labels" : labels}`;

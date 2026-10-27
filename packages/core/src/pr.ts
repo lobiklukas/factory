@@ -27,6 +27,27 @@ export const PullRequest = Schema.Struct({
 export type PullRequest = typeof PullRequest.Type;
 
 /**
+ * A pull request as GitHub's REST API spells it, as far as the step reads it.
+ *
+ * GitHub answers two links: `url` is the API resource (`https://api.github.com/repos/o/r/pulls/7`)
+ * and `html_url` is the page a person opens (`https://github.com/o/r/pull/7`). The factory's
+ * `PullRequest.url` is the page — it is what `sessions.pr_url` records, what the dashboard and the
+ * Linear attachment link to, and what a `pull_request` webhook names as `html_url`, which is how a
+ * merge finds its session (LOB-15). Reading GitHub's `url` here recorded the API resource instead,
+ * so a merge matched no session and every link opened JSON.
+ */
+const GitHubPullRequest = Schema.Struct({
+  number: Schema.Finite,
+  html_url: Schema.String,
+});
+
+/** The factory's `PullRequest` from GitHub's answer: its number and its page. */
+const fromGitHub = (pr: typeof GitHubPullRequest.Type): PullRequest => ({
+  number: pr.number,
+  url: pr.html_url,
+});
+
+/**
  * Which of the PR step's two paths answered (LOB-212).
  *
  * `"opened"` is the GitHub call; `"already-open"` is the retry that read the `factory.pr` document
@@ -535,7 +556,8 @@ export const createPullRequest = (
       if (existing !== undefined) return existing;
     }
     return yield* HttpClientResponse.filterStatusOk(response).pipe(
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(PullRequest)),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(GitHubPullRequest)),
+      Effect.map(fromGitHub),
       Effect.mapError((error) => {
         const status =
           error._tag === "HttpClientError" &&
@@ -591,9 +613,11 @@ const findPullRequest = (input: {
     return yield* input.http.execute(request).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap(
-        HttpClientResponse.schemaBodyJson(Schema.Array(PullRequest)),
+        HttpClientResponse.schemaBodyJson(Schema.Array(GitHubPullRequest)),
       ),
-      Effect.map((found) => found[0]),
+      Effect.map((found) =>
+        found[0] === undefined ? undefined : fromGitHub(found[0]),
+      ),
       Effect.mapError(
         () =>
           new PrError({
