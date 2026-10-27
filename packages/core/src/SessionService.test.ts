@@ -115,6 +115,7 @@ import {
   MAX_PAGE_SIZE,
   SessionService,
   SessionServiceLive,
+  type SessionServiceShape,
 } from "./SessionService";
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-core-"));
@@ -5328,6 +5329,172 @@ describe("withdrawing a queued message", () => {
     expect(Option.isSome(failure)).toBe(true);
     expect(Option.getOrThrow(failure).code).toBe("not_found");
     expect(outcome.mode).toBe("historical");
+  }, 120_000);
+});
+
+describe("a message that arrives while a run is in flight", () => {
+  // The sleeping faux script (LOB-167): the model naps before each step of a turn, so a turn is
+  // busy for about two seconds whatever the tool does, and a second message genuinely arrives
+  // while the first run is in flight. The stock script answers too fast to send behind.
+  const inFlightRoot = mkdtempSync(join(tmpdir(), "factory-core-in-flight-"));
+  const sleeping = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createFauxModelAccess({ fauxSleepMs: 1_000 }).access,
+      sessionRoot: inFlightRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await sleeping.dispose();
+  });
+
+  const settledAfter = (
+    sessions: SessionServiceShape,
+    sessionId: SessionId,
+    text: string,
+  ) =>
+    waitUntil(
+      sessions
+        .get(sessionId)
+        .pipe(
+          Effect.map(
+            (snapshot) =>
+              !snapshot.live.busy &&
+              snapshot.queued.length === 0 &&
+              snapshot.entries.some(
+                (entry) => entry.kind === "user" && entry.text === text,
+              ) &&
+              snapshot.entries.at(-1)?.kind === "assistant",
+          ),
+        ),
+      `the run that took "${text}" to settle`,
+    );
+
+  /** The answers in a transcript: assistant entries that call no tool. */
+  const answers = (snapshot: SessionSnapshot): readonly string[] =>
+    snapshot.entries
+      .filter(
+        (entry) => entry.kind === "assistant" && entry.toolCalls.length === 0,
+      )
+      .map((entry) => entry.text);
+
+  it("places a steer in the running run, which answers it instead of starting another", async () => {
+    const outcome = await sleeping.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a run to steer" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the first turn to start",
+        );
+        const steer = yield* sessions.send({
+          sessionId: created.id,
+          content: "use the steer",
+          whenBusy: "steer",
+        });
+        // Read while the model still naps over its first step: the steer waits for the tool round.
+        const queued = (yield* sessions.get(created.id)).queued;
+        yield* settledAfter(sessions, created.id, "use the steer");
+        return {
+          first,
+          steer,
+          queued,
+          settled: yield* sessions.get(created.id),
+        };
+      }),
+    );
+
+    expect(outcome.first.placement).toBe("run");
+    expect(outcome.steer.placement).toBe("steer");
+    expect(outcome.queued).toEqual([
+      {
+        id: outcome.steer.submissionId,
+        mode: "steer",
+        content: "use the steer",
+      },
+    ]);
+
+    // One run: it called bash once and answered once, and the answer is the steer's. A follow-up
+    // would have been a second run — two answers, the first one about "take your time".
+    const kinds = outcome.settled.entries.map((entry) => entry.kind);
+    expect(answers(outcome.settled)).toEqual(["faux-ok (re: use the steer)"]);
+    expect(
+      outcome.settled.entries.filter((entry) => entry.kind === "toolResult"),
+    ).toHaveLength(1);
+    // The steer joined after the tool round, not before the run's first step.
+    const steerAt = outcome.settled.entries.findIndex(
+      (entry) => entry.kind === "user" && entry.text === "use the steer",
+    );
+    expect(steerAt).toBeGreaterThan(kinds.indexOf("toolResult"));
+    expect(steerAt).toBeLessThan(kinds.lastIndexOf("assistant"));
+  }, 120_000);
+
+  it("refuses whenBusy: reject with busy while the run is in flight, and queues nothing", async () => {
+    const outcome = await sleeping.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a run to refuse" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the first turn to start",
+        );
+        const refused = yield* Effect.exit(
+          sessions.send({
+            sessionId: created.id,
+            content: "only if idle",
+            whenBusy: "reject",
+          }),
+        );
+        const during = yield* sessions.get(created.id);
+        yield* settledAfter(sessions, created.id, "take your time");
+        const settled = yield* sessions.get(created.id);
+        // The same flag on the same session once it is idle starts a run: reject refuses only a
+        // busy session, it is not a refusal of the message.
+        const idle = yield* sessions.send({
+          sessionId: created.id,
+          content: "now that you are idle",
+          whenBusy: "reject",
+        });
+        yield* settledAfter(sessions, created.id, "now that you are idle");
+        return {
+          refused,
+          during,
+          settled,
+          idle,
+          after: yield* sessions.get(created.id),
+        };
+      }),
+    );
+
+    const failure = Exit.findErrorOption(outcome.refused);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.getOrThrow(failure).code).toBe("busy");
+    // Refused, so it never joined the queue and never reached the transcript.
+    expect(outcome.during.live.busy).toBe(true);
+    expect(outcome.during.queued).toEqual([]);
+    const userTexts = (snapshot: SessionSnapshot) =>
+      snapshot.entries
+        .filter((entry) => entry.kind === "user")
+        .map((entry) => entry.text);
+    expect(userTexts(outcome.settled)).toEqual(["take your time"]);
+    expect(answers(outcome.settled)).toEqual(["faux-ok (re: take your time)"]);
+
+    expect(outcome.idle.placement).toBe("run");
+    expect(userTexts(outcome.after)).toEqual([
+      "take your time",
+      "now that you are idle",
+    ]);
   }, 120_000);
 });
 
