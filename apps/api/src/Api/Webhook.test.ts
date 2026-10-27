@@ -29,7 +29,11 @@ import type {
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebhookRoutes, webhookRoutesFor } from "./Webhook";
+import {
+  WebhookRateLimiterLive,
+  WebhookRoutes,
+  webhookRoutesFor,
+} from "./Webhook";
 
 const SECRETS = ["TRIGGER_SECRET", "LINEAR_WEBHOOK_SECRET"] as const;
 const saved = new Map(SECRETS.map((name) => [name, process.env[name]]));
@@ -50,15 +54,18 @@ const serve = (routes: typeof WebhookRoutes) =>
   HttpRouter.toWebHandler(
     routes.pipe(
       HttpRouter.provideRequest(
-        Layer.succeed(
-          TriggerService,
-          TriggerService.of({
-            deliver: (delivery) =>
-              Effect.sync(() => {
-                delivered.push(delivery);
-                return answer;
-              }),
-          }),
+        Layer.mergeAll(
+          Layer.succeed(
+            TriggerService,
+            TriggerService.of({
+              deliver: (delivery) =>
+                Effect.sync(() => {
+                  delivered.push(delivery);
+                  return answer;
+                }),
+            }),
+          ),
+          WebhookRateLimiterLive,
         ),
       ),
     ),

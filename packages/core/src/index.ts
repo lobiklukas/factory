@@ -14,6 +14,7 @@ export * from "./Jira";
 export * from "./GitHub";
 export * from "./DocsTrigger";
 export * from "./Slack";
+export * from "./Sentry";
 export * from "./git";
 export * from "./Linear";
 export * from "./LinearSync";
