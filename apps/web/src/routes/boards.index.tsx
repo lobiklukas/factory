@@ -3,6 +3,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
 import { KanbanSquareIcon } from "lucide-react";
+import { LIST_BOARDS_LIMIT } from "@repo/domain/Task";
 import { boardsAtom } from "@/lib/atoms/board-atom";
 import { EmptyPane } from "@/components/empty-pane";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,6 +54,12 @@ function BoardsRoute() {
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
         <h1 className="mb-4 text-sm font-medium">Boards</h1>
+        {boards.length >= LIST_BOARDS_LIMIT && (
+          <p className="mb-3 max-w-xl text-xs text-muted-foreground">
+            The {LIST_BOARDS_LIMIT} newest boards; older ones are on the server
+            but not listed here.
+          </p>
+        )}
         <ul aria-label="Boards" className="flex max-w-xl flex-col gap-1">
           {boards.map((board) => (
             <li key={board.id}>

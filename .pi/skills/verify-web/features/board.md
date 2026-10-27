@@ -26,16 +26,17 @@ order, with the cards the server lists in each (LOB-75, part 1 of LOB-22).
 
 ## How to get to it (user POV)
 
-Open the dashboard, click **Boards** in the rail, click a board. `./up.sh` seeds one board with one
-card in `intake` through the board skill's seed (`.pi/skills/verify-board/seed.ts`), recorded in
-`.verify/run/board.json`.
+Open the dashboard, click **Boards** in the rail, click a board. Each `node drive.mjs` run seeds its
+own board with one card in `intake` through the board skill's seed (`.pi/skills/verify-board/seed.ts`),
+so a rerun against the same `./up.sh` instance moves a fresh card rather than the last run's.
 
 ## Driving it with drive.mjs
 
 The block runs after the session checks. The oracle for the lane order is `getBoard`, asked from the
 drive process rather than the page. It requires:
 
-1. the seed in `board.json` (`brd_…`, `tsk_…`, revision 1);
+1. the seed to print `brd_…`, `tsk_…` at revision 1, and the API's `getBoard` to hold that board (a
+   miss means the drive's `DATABASE_URL` is not the API's);
 2. the rail's **Boards** link, then the board's own link, to reach `/boards/<id>`;
 3. the rendered lane names, left to right, to equal the definition's column names exactly;
 4. the seeded card to be in `intake` and nowhere else, carrying its title;
@@ -54,9 +55,12 @@ Evidence: `boards.png`, `board.png`, `board-after-move.png`, and `observed.board
 
 - **The drive performs no move through the dashboard.** The one move it needs is the CLI's, made
   outside the browser; the read-only check would fail if the page sent a write.
-- **`./up.sh` evaluates the seed from `apps/api`.** bun's isolated linker links `@repo/core` only into
+- **The drive evaluates the seed from `apps/api`.** bun's isolated linker links `@repo/core` only into
   the workspaces that depend on it, so `bun run .pi/skills/verify-board/seed.ts` cannot resolve it from
   `.pi/`. The seed has no relative imports, so `bun -e "$(cat seed.ts)"` with `apps/api` as the
   working directory runs it unchanged.
-- **`/boards` lists every board in the database**, test boards included, capped at 100 newest. On a
-  database the test suite also writes to, the seeded board is first because it is newest.
+- **`/boards` lists every board in the database**, test boards included, capped at the 100 newest
+  (`LIST_BOARDS_LIMIT`); at the cap the page says older boards are not listed. The seeded board is
+  first because it is newest. The `listBoards` test dates its rows a day ahead to be the newest, and
+  deletes any such rows an earlier killed run left before it inserts, so they cannot push the seed
+  off the page for long.

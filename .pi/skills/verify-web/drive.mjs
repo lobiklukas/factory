@@ -6,7 +6,7 @@
 //   WEB_URL       default http://localhost:3100
 //   API_URL       default http://localhost:9100
 //   EVIDENCE_DIR  default .verify/evidence/latest
-//   BOARD_FILE    default .verify/run/board.json (written by ./up.sh's seed)
+//   DATABASE_URL  the API's database; the board block seeds its own board into it
 //
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
@@ -19,7 +19,6 @@ import { chromium } from "@playwright/test";
 const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3100";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9100";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
-const BOARD_FILE = process.env["BOARD_FILE"] ?? ".verify/run/board.json";
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../..",
@@ -375,8 +374,12 @@ await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement)
     document.activeElement.blur();
 });
+// The sidebar is the server's session list (LOB-75), so every session on the database sits in the
+// tab order before the pane: the walk's budget grows with the links the sidebar renders, or a
+// database that has seen a few drive runs pushes the fork action past a fixed cap.
+const sidebarLinks = await page.locator("a[href^='/sessions/']").count();
 const tabOrder = [];
-for (let step = 0; step < 30; step += 1) {
+for (let step = 0; step < 30 + sidebarLinks; step += 1) {
   await page.keyboard.press("Tab");
   const name = await focusedName();
   tabOrder.push(name);
@@ -1373,31 +1376,58 @@ if ((await sessionLink.count()) > 0) {
 // Feature: the board's lanes (LOB-75). See features/board.md.
 //
 // Lanes come from the definition, cards from the server, and the browser holds nothing between
-// them. `./up.sh` seeds one board and one card in `intake` through the real `TaskService`
-// (`.pi/skills/verify-board/seed.ts`); the oracle for the lane order is `getBoard` asked from this
-// process, so a definition that reorders its columns changes the expectation rather than breaking
-// the check. **The dashboard performs no move here**: the board UI is read-only in LOB-75, every
-// request the board pages send is recorded and asserted to be a read, and the one move this block
-// needs is made the way a person makes it outside the browser — `factory board move` against the
-// API — before the reload that has to show it.
+// them. Each run seeds its **own** board and one card in `intake` through the real `TaskService`
+// (`.pi/skills/verify-board/seed.ts`), so the drive can be rerun against the same `./up.sh`
+// instance: the move below changes only this run's card. The oracle for the lane order is
+// `getBoard` asked from this process, so a definition that reorders its columns changes the
+// expectation rather than breaking the check. **The dashboard performs no move here**: the board UI
+// is read-only in LOB-75, every request the board pages send is recorded and asserted to be a read,
+// and the one move this block needs is made the way a person makes it outside the browser —
+// `factory board move` against the API — before the reload that has to show it.
+//
+// The seed is evaluated from `apps/api` rather than run by path: bun's isolated linker (bun.lock
+// `configVersion: 1`) links `@repo/core` and `@repo/storage-postgres` only into the workspaces that
+// depend on them, and a file under `.pi/` resolves bare imports from its own directory upwards,
+// where the root `node_modules` holds neither. The seed has no relative imports, so its text runs
+// as-is. It writes to this process's `DATABASE_URL`, which must be the one the API was started
+// with; a mismatch is caught below, because the API then does not hold the board.
 const boardObserved = {};
 let seeded = null;
+const seed = spawnSync(
+  "bun",
+  [
+    "-e",
+    await readFile(path.join(ROOT, ".pi/skills/verify-board/seed.ts"), "utf8"),
+  ],
+  { cwd: path.join(ROOT, "apps/api"), encoding: "utf8", timeout: 60_000 },
+);
+boardObserved.seed = {
+  status: seed.status,
+  stdout: (seed.stdout ?? "").trim().slice(0, 300),
+  stderr: (seed.stderr ?? "").trim().slice(0, 300),
+};
 try {
-  seeded = JSON.parse(await readFile(BOARD_FILE, "utf8"));
+  seeded = JSON.parse(boardObserved.seed.stdout);
 } catch (error) {
   boardObserved.seedError = String(error).slice(0, 200);
 }
 const boardId = typeof seeded?.boardId === "string" ? seeded.boardId : "";
 const cardId = typeof seeded?.taskId === "string" ? seeded.taskId : "";
+const truth = await rpcFromDrive("getBoard", { boardId });
 assert(
   "a board and a card were seeded",
-  boardId.startsWith("brd_") &&
+  seed.status === 0 &&
+    boardId.startsWith("brd_") &&
     cardId.startsWith("tsk_") &&
-    seeded?.revision === 1,
-  `${BOARD_FILE}: ${JSON.stringify(seeded ?? boardObserved.seedError ?? null)}`,
+    seeded?.revision === 1 &&
+    truth.exit === "Success",
+  seed.status !== 0 || seeded === null
+    ? `seed exit ${String(seed.status)}: ${boardObserved.seed.stderr || boardObserved.seed.stdout || boardObserved.seedError}`
+    : truth.exit === "Success"
+      ? JSON.stringify(seeded)
+      : `seeded ${boardId}, but the API's getBoard says ${String(truth.exit)} — is DATABASE_URL the one ./up.sh started the API with?`,
 );
 
-const truth = await rpcFromDrive("getBoard", { boardId });
 const definitionOrder = (truth.value?.definition?.columns ?? []).map(
   (column) => column.name,
 );

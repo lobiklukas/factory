@@ -323,11 +323,14 @@ describe("TaskService", () => {
   it("lists boards newest first, capped at LIST_BOARDS_LIMIT", async () => {
     // One more than the cap, dated a day ahead so they are the newest rows in a database other
     // suites write into concurrently: the first page must be exactly these, newest first. Deleted
-    // afterwards, so a dashboard on the same database does not list them for a day.
+    // afterwards, so a dashboard on the same database does not list them for a day — and rows an
+    // earlier run left behind (killed between the insert and the `finally`) are deleted first, by
+    // the repo pattern every run of this case shares, so they cannot outrank real boards for long.
     const tag = hex(4);
     const ids = await runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
+        yield* sql`DELETE FROM board_instances WHERE repo LIKE 'factory-test/list-%' AND created_at > now()`;
         const rows = yield* sql<{ id: string }>`
           INSERT INTO board_instances (id, repo, definition_id, definition_version, created_at)
           SELECT 'brd_' || ${tag} || lpad(n::text, 18, '0'),
