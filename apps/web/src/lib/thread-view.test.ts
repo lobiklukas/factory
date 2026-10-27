@@ -14,9 +14,11 @@ import {
   commentRefusal,
   commentTime,
   composerIntent,
+  draftAfterSend,
   liftedBlock,
   sendable,
 } from "./thread-view";
+import { refusalIsCurrent } from "./board-view";
 
 const AT = "2026-10-27T19:04:05.123Z";
 const needsInput: TaskBlocked = {
@@ -136,5 +138,33 @@ describe("liftedBlock", () => {
     expect(
       liftedBlock({ blocked: dependency }, { blocked: dependency }),
     ).toBeUndefined();
+  });
+});
+
+describe("draftAfterSend", () => {
+  it("clears a draft that is exactly what was sent", () => {
+    expect(draftAfterSend("Postgres 16.", "Postgres 16.")).toBe("");
+  });
+
+  it("keeps what was typed after the send while it was in flight", () => {
+    expect(draftAfterSend("Postgres 16.\nAlso 17.", "Postgres 16.")).toBe(
+      "\nAlso 17.",
+    );
+  });
+
+  it("keeps a draft edited inside the sent text whole", () => {
+    expect(draftAfterSend("Postgres 17.", "Postgres 16.")).toBe("Postgres 17.");
+  });
+});
+
+describe("a comment refusal is current by the move's rule", () => {
+  it("lasts until the card passes the revision the server refused at", () => {
+    const stale = commentRefusal(
+      { _tag: "StaleRevision", message: "at 5, not 4", actual: 5 },
+      "",
+      4,
+    );
+    expect(refusalIsCurrent(stale, { revision: 5 })).toBe(true);
+    expect(refusalIsCurrent(stale, { revision: 7 })).toBe(false);
   });
 });

@@ -32,11 +32,14 @@ import {
 import {
   awaitingMove,
   blockedLabel,
+  landedOn,
   moveRefusal,
   offeredMoves,
+  recordLanding,
   refusalIsCurrent,
   runSelection,
   runStart,
+  type Landed,
   type MoveRefusal,
 } from "@/lib/board-view";
 import {
@@ -44,6 +47,7 @@ import {
   commentRefusal,
   commentTime,
   composerIntent,
+  draftAfterSend,
   liftedBlock,
   sendable,
   THREAD_ANCHOR,
@@ -60,6 +64,39 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 /**
+ * The card's writes, one per pane (LOB-239): Moves and the Thread both write the card at the revision
+ * on screen, so while either is in flight, or has landed and the board read has not caught up, both
+ * hold their sends. Otherwise a move clicked just after an answer (or a comment just after a move)
+ * sends the old revision and is refused as stale for the person's own write.
+ */
+type CardWrites = {
+  /** A write from this pane is in flight. */
+  readonly busy: boolean;
+  /** A write landed at a revision the board read does not show yet. */
+  readonly settling: boolean;
+  /** The revision the last landed write answered, while the card on screen is that card. */
+  readonly landedAt: number | null;
+  readonly begin: () => void;
+  readonly landed: (revision: number) => void;
+  readonly end: () => void;
+};
+
+const useCardWrites = (task: Task): CardWrites => {
+  const [busy, setBusy] = useState(false);
+  const [landed, setLanded] = useState<Landed>(null);
+  const landedAt = landedOn(landed, task);
+  return {
+    busy,
+    settling: awaitingMove(landedAt, task),
+    landedAt,
+    begin: () => setBusy(true),
+    landed: (revision) =>
+      setLanded((previous) => recordLanding(previous, task.id, revision)),
+    end: () => setBusy(false),
+  };
+};
+
+/**
  * The card pane's moves (LOB-76): one button per transition the card's column declares, and
  * nothing else (docs/board.md B5).
  *
@@ -72,24 +109,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
  * at the revision the server refused at: once it moves on (a CLI move, a poll), the refusal is about
  * a card that is gone. And after a move lands the buttons stay disabled until the board read shows
  * the revision the server answered, so a second click cannot send the old revision and be refused as
- * stale for the person's own move.
+ * stale for the person's own move. The hold is the pane's (`CardWrites`), shared with the Thread.
  */
 const Moves = ({
   boardId,
   task,
   definition,
+  writes,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
   readonly definition: BoardDefinition;
+  readonly writes: CardWrites;
 }) => {
   const move = useAtomSet(moveTaskAtom, { mode: "promiseExit" });
   const refreshBoard = useAtomRefresh(boardAtom(boardId));
   const [pending, setPending] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<MoveRefusal | null>(null);
-  const [landedAt, setLandedAt] = useState<number | null>(null);
   const moves = offeredMoves(task, definition);
-  const settling = awaitingMove(landedAt, task);
   const shown = refusalIsCurrent(refusal, task) ? refusal : null;
 
   return (
@@ -119,12 +156,13 @@ const Moves = ({
                     ? `Move to ${offered.to}`
                     : `Move to ${offered.to}: the ${offered.gate} gate, a person's move`
                 }
-                disabled={pending !== null || settling}
+                disabled={pending !== null || writes.busy || writes.settling}
                 aria-busy={pending === offered.to}
                 className="w-full justify-start"
                 onClick={() => {
                   const sent = task.revision;
                   setPending(offered.to);
+                  writes.begin();
                   setRefusal(null);
                   void move({
                     taskId: task.id,
@@ -134,7 +172,7 @@ const Moves = ({
                   })
                     .then((exit) => {
                       if (Exit.isSuccess(exit)) {
-                        setLandedAt(exit.value.revision);
+                        writes.landed(exit.value.revision);
                         return;
                       }
                       setRefusal(
@@ -150,7 +188,10 @@ const Moves = ({
                       // truth again, so the next attempt expects the revision it actually holds.
                       refreshBoard();
                     })
-                    .finally(() => setPending(null));
+                    .finally(() => {
+                      setPending(null);
+                      writes.end();
+                    });
                 }}
               >
                 {pending === offered.to ? (
@@ -205,15 +246,21 @@ const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
  * and nothing is resent behind the person's back, since someone else's answer may already have made
  * theirs a note.
  *
+ * A send typed on while it is in flight keeps what was typed after it: only the sent text is cleared.
+ * Like a move, a landed comment holds both the composer and the moves until the board read shows it
+ * (`CardWrites`): an answer lands two revisions on, and the old one would be refused as stale.
+ *
  * The attention view's question rows open the pane at `#thread`; the section then scrolls into view
  * and the composer takes the focus, so the person lands where the answer is typed.
  */
 const Thread = ({
   boardId,
   task,
+  writes,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
+  readonly writes: CardWrites;
 }) => {
   const thread = useAtomValue(taskCommentsAtom(task.id));
   const refreshThread = useAtomRefresh(taskCommentsAtom(task.id));
@@ -225,14 +272,13 @@ const Thread = ({
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<CommentRefusal | null>(null);
-  const [landedAt, setLandedAt] = useState<number | null>(null);
   const [lifted, setLifted] = useState<TaskBlocked | undefined>(undefined);
   const intent = composerIntent(task);
   const ready = sendable(draft);
-  const settling = awaitingMove(landedAt, task);
+  const held = pending || writes.busy || writes.settling;
+  const { landedAt } = writes;
   // As with a move: a refusal describes the revision the server refused at and no later one.
-  const shown =
-    refusal !== null && task.revision <= refusal.atRevision ? refusal : null;
+  const shown = refusalIsCurrent(refusal, task) ? refusal : null;
   // The lifted block stays on screen until the card is blocked again by something after the answer.
   const liftedShown =
     lifted !== undefined &&
@@ -250,11 +296,12 @@ const Thread = ({
   }, [hash]);
 
   const send = () => {
-    if (!ready.ok || pending || settling) return;
+    if (!ready.ok || held) return;
     const sent = task.revision;
     const before = task;
     const body = draft;
     setPending(true);
+    writes.begin();
     setRefusal(null);
     void comment({
       taskId: task.id,
@@ -264,8 +311,8 @@ const Thread = ({
     })
       .then((exit) => {
         if (Exit.isSuccess(exit)) {
-          setDraft("");
-          setLandedAt(exit.value.revision);
+          setDraft((current) => draftAfterSend(current, body));
+          writes.landed(exit.value.revision);
           setLifted(liftedBlock(before, exit.value));
           return;
         }
@@ -281,7 +328,10 @@ const Thread = ({
         refreshBoard();
         refreshThread();
       })
-      .finally(() => setPending(false));
+      .finally(() => {
+        setPending(false);
+        writes.end();
+      });
   };
 
   return (
@@ -420,7 +470,7 @@ const Thread = ({
             size="sm"
             variant={intent.answers ? "default" : "outline"}
             data-thread-send
-            disabled={!ready.ok || pending || settling}
+            disabled={!ready.ok || held}
             aria-busy={pending}
           >
             {pending ? (
@@ -626,6 +676,7 @@ export const CardPane = ({
   readonly run: SessionId | undefined;
 }) => {
   const blocked = blockedLabel(task);
+  const writes = useCardWrites(task);
   const runs = useAtomValue(taskRunsAtom(task.id));
   const selection = runSelection(
     run,
@@ -685,8 +736,14 @@ export const CardPane = ({
           boardId={boardId}
           task={task}
           definition={definition}
+          writes={writes}
         />
-        <Thread key={`thread:${task.id}`} boardId={boardId} task={task} />
+        <Thread
+          key={`thread:${task.id}`}
+          boardId={boardId}
+          task={task}
+          writes={writes}
+        />
         <Runs
           boardId={boardId}
           task={task}

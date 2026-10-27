@@ -63,7 +63,9 @@ ask. The drive requires:
    (`commentTask` from the drive, the run's session id as actor: revision +1, still blocked); the
    answer typed and sent from the stale pane to be refused `StaleRevision` with the service's `is at
 revision N, not M`, the card still blocked on the server, and the typed text still in the
-   composer; once the reads are let through, the pane at the server's revision with the note in its
+   composer; the page to issue `getBoard` and `listTaskComments` within 500 ms of the refused send,
+   sent at a moment neither poll was due for a second, so the re-read is the refusal's and not the
+   poll's; once the reads are let through, the pane at the server's revision with the note in its
    thread and the draft unchanged;
 5. a second click to land: `[data-thread-lifted=needs_input]`, the pane and `getTask` unblocked, no
    reload, the thread ending with an `answer` by `dashboard` whose body is the typed text byte for
@@ -85,5 +87,12 @@ Evidence: `.verify/evidence/latest/thread/` — `thread-question.png`, `thread-f
 - **The pane's reads are held for the stale send**, as the card pane's stale move holds them: the
   board and thread poll every 2 s, and a poll landing between the run's note and the click would make
   the click send the fresh revision.
+- **The refusal's re-read is timed, not inferred from the result.** The poll alone would bring the
+  pane to the server's revision once the reads are released, so "the pane caught up" proves nothing
+  about the refusal handler. The drive records when the page issued each read, sends when both polls
+  are at least 1 s off, and requires both reads inside 500 ms of the send.
+- **Moves and the Thread share one write hold** (`CardWrites` in `card-pane.tsx`): an answer lands at
+  R+2, so after either write both the moves and the composer wait for the board read to show it.
+  Text typed while a send is in flight is kept; only the sent text is cleared (`draftAfterSend`).
 - **The run's note is a note, not an answer**, because its actor is a session id (B7: only a person
   answers). That is what lets the drive bump the revision without lifting the block it then answers.

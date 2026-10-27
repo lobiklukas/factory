@@ -139,16 +139,54 @@ export const runStart = (task: Task, definition: BoardDefinition): RunStart => {
  * do next. Anything that is not one of the board's typed refusals — a transport failure, a defect —
  * keeps its tag and the text it came with rather than being dressed up as one.
  */
-export type MoveRefusal = {
+export type Refusal = {
   readonly tag: string;
   readonly title: string;
   readonly message: string;
   /**
    * The card revision the server held when it refused: a `StaleRevision`'s `actual`, otherwise the
-   * revision the click sent. The refusal describes that revision and no later one.
+   * revision the write sent. The refusal describes that revision and no later one.
    */
   readonly atRevision: number;
 };
+
+export type MoveRefusal = Refusal;
+
+/** A typed failure as the RPC client hands it back: its tag, its message, and for a stale write the revision found. */
+export type RefusedWith =
+  | {
+      readonly _tag: string;
+      readonly message: string;
+      readonly actual?: unknown;
+    }
+  | undefined;
+
+/**
+ * A card write's refusal, worded with `titles` (one heading per typed refusal) and `untitled` for
+ * anything else. Shared by the pane's two writes — a move and a comment (LOB-239) — so they word a
+ * refusal and date it (`atRevision`) the same way.
+ */
+export const refusalWith =
+  (titles: Readonly<Record<string, string>>, untitled: string) =>
+  (error: RefusedWith, fallback: string, sentRevision: number): Refusal =>
+    error === undefined
+      ? {
+          tag: "Unknown",
+          title: untitled,
+          message: fallback,
+          atRevision: sentRevision,
+        }
+      : {
+          tag: error._tag,
+          title: titles[error._tag] ?? untitled,
+          message: error.message.length > 0 ? error.message : fallback,
+          atRevision:
+            error._tag === "StaleRevision" &&
+            typeof error.actual === "number" &&
+            error.actual > sentRevision
+              ? error.actual
+              : sentRevision,
+        };
 
 const REFUSAL_TITLES: Readonly<Record<string, string>> = {
   StaleRevision: "Someone changed this card first",
@@ -159,35 +197,11 @@ const REFUSAL_TITLES: Readonly<Record<string, string>> = {
   TaskStorageError: "The board could not record the move",
 };
 
-export const moveRefusal = (
-  error:
-    | {
-        readonly _tag: string;
-        readonly message: string;
-        readonly actual?: unknown;
-      }
-    | undefined,
+export const moveRefusal: (
+  error: RefusedWith,
   fallback: string,
   sentRevision: number,
-): MoveRefusal =>
-  error === undefined
-    ? {
-        tag: "Unknown",
-        title: "The move did not go through",
-        message: fallback,
-        atRevision: sentRevision,
-      }
-    : {
-        tag: error._tag,
-        title: REFUSAL_TITLES[error._tag] ?? "The move did not go through",
-        message: error.message.length > 0 ? error.message : fallback,
-        atRevision:
-          error._tag === "StaleRevision" &&
-          typeof error.actual === "number" &&
-          error.actual > sentRevision
-            ? error.actual
-            : sentRevision,
-      };
+) => MoveRefusal = refusalWith(REFUSAL_TITLES, "The move did not go through");
 
 /**
  * Whether a refusal still describes the card on screen. Once the card's revision passes the one the
@@ -195,11 +209,10 @@ export const moveRefusal = (
  * about a card that no longer exists, so the pane drops it rather than showing it over the new
  * column's moves.
  */
-export const refusalIsCurrent = (
-  refusal: MoveRefusal | null,
+export const refusalIsCurrent = <R extends { readonly atRevision: number }>(
+  refusal: R | null,
   task: Pick<Task, "revision">,
-): refusal is MoveRefusal =>
-  refusal !== null && task.revision <= refusal.atRevision;
+): refusal is R => refusal !== null && task.revision <= refusal.atRevision;
 
 /**
  * Whether the pane is still waiting for the board read to show a move it made. A move lands before
@@ -210,6 +223,37 @@ export const awaitingMove = (
   landedAt: number | null,
   task: Pick<Task, "revision">,
 ): boolean => landedAt !== null && task.revision < landedAt;
+
+/**
+ * The last write the card pane landed on a card: the card and the revision the server answered. One
+ * per pane, not one per section, because a move and a comment (LOB-239) bump the same revision — an
+ * answer lands at R+2 — so either write has to hold both sends until the board read catches up, or
+ * the other section sends the old revision and is refused as stale for the person's own write.
+ */
+export type Landed = {
+  readonly taskId: Task["id"];
+  readonly revision: number;
+} | null;
+
+/** The revision the pane is waiting to see on `task`, or `null` when nothing it wrote is pending. */
+export const landedOn = (
+  landed: Landed,
+  task: Pick<Task, "id">,
+): number | null =>
+  landed !== null && landed.taskId === task.id ? landed.revision : null;
+
+/** `landed` after a write on `taskId` came back at `revision`: never earlier than one already landed. */
+export const recordLanding = (
+  landed: Landed,
+  taskId: Task["id"],
+  revision: number,
+): Landed => {
+  const previous = landedOn(landed, { id: taskId });
+  return {
+    taskId,
+    revision: previous === null ? revision : Math.max(previous, revision),
+  };
+};
 
 /**
  * Whether the run the URL names (`?run=`) is one of this card's runs (LOB-76), so the pane opens a

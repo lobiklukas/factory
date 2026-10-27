@@ -208,13 +208,23 @@ page.on("pageerror", (error) =>
 // Every `commentTask` the page sends, with the revision it expected: the page's writes are the claim.
 const pageComments = [];
 const pageTags = new Set();
+// When the page issued each card read and each comment, so a re-read the refusal asked for can be told
+// apart from the board's poll (`BOARD_POLL`, 2 s): the refusal's lands within milliseconds of it.
+const READ_TAGS = ["getBoard", "listTaskComments"];
+const POLL_MS = 2_000;
+const pageReads = [];
 page.on("request", (request) => {
   if (!/\/rpc\/?$/.test(request.url())) return;
   const body = request.postData() ?? "";
   for (const line of body.split("\n")) {
     try {
       const message = JSON.parse(line);
-      if (typeof message?.tag === "string") pageTags.add(message.tag);
+      if (typeof message?.tag === "string") {
+        pageTags.add(message.tag);
+        if ([...READ_TAGS, "commentTask"].includes(message.tag)) {
+          pageReads.push({ tag: message.tag, at: Date.now() });
+        }
+      }
       if (message?.tag === "commentTask") pageComments.push(message.payload);
     } catch {
       // Not an envelope line.
@@ -227,6 +237,16 @@ const waitFor = (predicate, arg, timeout) =>
     () => true,
     () => false,
   );
+/** Polls `check` (sync or async) every 100 ms until it holds or `ms` pass. */
+const until = async (check, ms) => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await check();
+    if (value || Date.now() >= deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+};
+const lastRead = (tag) => pageReads.findLast((read) => read.tag === tag);
 const shot = (name) =>
   page.screenshot({ path: path.join(EVIDENCE_DIR, `${name}.png`) });
 
@@ -319,7 +339,12 @@ const parkedShown = await waitFor(
 const parked = await readThread(page);
 const parkedTask = await rpc("getTask", { taskId: CARD });
 const parkedThread = await rpc("listTaskComments", { taskId: CARD });
-const parkedSession = await rpc("getSession", { sessionId: first.run });
+// The question and the block are written inside the ask tool, before the turn ends: the session goes
+// idle a moment after the pane shows them, so it is polled (as verify-board's ask.ts does), not read once.
+const parkedSession = await until(async () => {
+  const read = await rpc("getSession", { sessionId: first.run });
+  return read.value?.live?.busy === false ? read : null;
+}, 5_000).then((idle) => idle ?? rpc("getSession", { sessionId: first.run }));
 const keptParked = await page.evaluate(
   () => window.__threadNoReload === "parked",
 );
@@ -457,6 +482,23 @@ const runNote = await rpc("commentTask", {
 });
 const composer = page.locator("section[data-thread] [data-thread-composer]");
 await composer.fill(ANSWER);
+// Send at a moment no poll of the board or the thread is due for at least a second (each polls every
+// 2 s, so one such moment comes within a period): a read that follows the refusal within half a
+// second is then the refusal's own re-read, not the poll's.
+const QUIET_MS = 1_000;
+const REREAD_MS = 500;
+const pollDue = () =>
+  Object.fromEntries(
+    READ_TAGS.map((tag) => {
+      const last = lastRead(tag);
+      return [tag, last === undefined ? 0 : last.at + POLL_MS - Date.now()];
+    }),
+  );
+const quiet = await until(
+  () => Object.values(pollDue()).every((due) => due > QUIET_MS),
+  10_000,
+);
+const dueAtSend = pollDue();
 await page.locator("section[data-thread] [data-thread-send]").click();
 const refused = await waitFor(
   () =>
@@ -466,6 +508,24 @@ const refused = await waitFor(
   null,
   15_000,
 );
+const sentAt =
+  pageReads.findLast((read) => read.tag === "commentTask")?.at ?? Infinity;
+const rereadsAfter = () =>
+  pageReads.filter(
+    (read) =>
+      READ_TAGS.includes(read.tag) &&
+      read.at >= sentAt &&
+      read.at <= sentAt + REREAD_MS,
+  );
+await until(
+  () =>
+    READ_TAGS.every((tag) => rereadsAfter().some((read) => read.tag === tag)),
+  REREAD_MS + 200,
+);
+const rereads = rereadsAfter().map((read) => ({
+  tag: read.tag,
+  afterSendMs: read.at - sentAt,
+}));
 const stale = await readThread(page);
 const staleTruth = await rpc("getTask", { taskId: CARD });
 await shot("thread-stale");
@@ -478,6 +538,8 @@ observed.facts.stale = {
   },
   view: stale,
   server: staleTruth.value,
+  pollDueAtSendMs: dueAtSend,
+  rereads,
 };
 assert(
   "an answer sent from a stale pane is refused as stale, and the card stays blocked",
@@ -497,6 +559,13 @@ assert(
   "the refused answer is kept in the composer, not lost",
   stale?.draft === ANSWER,
   `draft ${JSON.stringify(stale?.draft ?? null)}`,
+);
+assert(
+  "the refusal itself re-reads the card and its thread, not the next poll",
+  quiet &&
+    Object.values(dueAtSend).every((due) => due > QUIET_MS) &&
+    READ_TAGS.every((tag) => rereads.some((read) => read.tag === tag)),
+  `poll due at send ${JSON.stringify(dueAtSend)} ms; reads within ${REREAD_MS} ms of the send ${JSON.stringify(rereads)}`,
 );
 freeze = false;
 for (const route of held.splice(0)) await route.continue().catch(() => {});
@@ -664,7 +733,19 @@ assert(
     toldChecks.every(([, entry]) => entry.passed),
   `run ${String(second.run)}; ask.ts told exit ${String(told.status)}; ${toldChecks.map(([name, entry]) => `${entry.passed ? "ok" : "FAILED"}: ${name}`).join("; ")}`,
 );
-await page.waitForTimeout(2_500);
+// The pane polls: wait for it to list the second run, rather than for a fixed time.
+await waitFor(
+  ([one, two]) =>
+    document.querySelector(`aside[data-card-pane] li[data-run='${one}']`) !==
+      null &&
+    document.querySelector(`aside[data-card-pane] li[data-run='${two}']`) !==
+      null &&
+    document.querySelectorAll(
+      "section[data-thread] li[data-comment-kind='question']",
+    ).length === 1,
+  [first.run, second.run],
+  15_000,
+);
 const settled = await readThread(page);
 await shot("thread-next-run");
 assert(

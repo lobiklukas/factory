@@ -87,7 +87,7 @@ Answering a parked card needs a run that asks, and the faux model asks only when
 started with `FAUX_ASK` — which on this instance would park every card run the drive starts. So
 `thread.sh` starts its own API (`FAUX_ASK`) and dashboard, runs `thread.mjs`, and stops both. The
 drive starts a run from a card's pane, requires the pane to show the question it parked on, answers
-it in the browser through a stale-revision refusal (the draft kept, the card re-read), requires the
+it in the browser through a stale-revision refusal (the draft kept, the card re-read by the refusal itself, timed apart from the poll), requires the
 block lifted, `factory board show` to agree, and the next run's committed prompt to quote the answer
 (`../verify-board/ask.ts MODE=told`) (`features/thread.md`). Evidence goes to
 `.verify/evidence/latest/thread/`.

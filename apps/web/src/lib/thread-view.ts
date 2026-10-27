@@ -1,5 +1,6 @@
 import type { CommentKind, Task, TaskBlocked } from "@repo/domain/Task";
 import { MAX_COMMENT_CHARS } from "@repo/domain/Task";
+import { refusalWith, type Refusal, type RefusedWith } from "./board-view";
 
 /**
  * The card pane's thread arithmetic (LOB-239): what the Thread section says about `listTaskComments`
@@ -77,16 +78,7 @@ export const sendable = (draft: string): Sendable =>
  * else's answer already lifted the block, the same words would now be a note, and that is the
  * person's call to make, not the page's.
  */
-export type CommentRefusal = {
-  readonly tag: string;
-  readonly title: string;
-  readonly message: string;
-  /**
-   * The card revision the server held when it refused: a `StaleRevision`'s `actual`, otherwise the
-   * revision the send carried. The refusal is about that revision and no later one.
-   */
-  readonly atRevision: number;
-};
+export type CommentRefusal = Refusal;
 
 const REFUSAL_TITLES: Readonly<Record<string, string>> = {
   StaleRevision: "The card changed while you wrote",
@@ -95,35 +87,22 @@ const REFUSAL_TITLES: Readonly<Record<string, string>> = {
   TaskStorageError: "The board could not record the comment",
 };
 
-export const commentRefusal = (
-  error:
-    | {
-        readonly _tag: string;
-        readonly message: string;
-        readonly actual?: unknown;
-      }
-    | undefined,
+export const commentRefusal: (
+  error: RefusedWith,
   fallback: string,
   sentRevision: number,
-): CommentRefusal =>
-  error === undefined
-    ? {
-        tag: "Unknown",
-        title: "The comment did not go through",
-        message: fallback,
-        atRevision: sentRevision,
-      }
-    : {
-        tag: error._tag,
-        title: REFUSAL_TITLES[error._tag] ?? "The comment did not go through",
-        message: error.message.length > 0 ? error.message : fallback,
-        atRevision:
-          error._tag === "StaleRevision" &&
-          typeof error.actual === "number" &&
-          error.actual > sentRevision
-            ? error.actual
-            : sentRevision,
-      };
+) => CommentRefusal = refusalWith(
+  REFUSAL_TITLES,
+  "The comment did not go through",
+);
+
+/**
+ * What stays in the composer once a send lands: only the part that was sent is cleared. The box is
+ * editable while the send is in flight, so text typed after the send — appended to the sent body —
+ * is kept; a draft edited anywhere else is kept whole, since the page cannot tell what of it was sent.
+ */
+export const draftAfterSend = (current: string, sent: string): string =>
+  current.startsWith(sent) ? current.slice(sent.length) : current;
 
 /**
  * The block a landed comment lifted, or `undefined` when it lifted none: the card the send was made
