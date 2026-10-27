@@ -169,7 +169,8 @@ rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" 
   "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
   "$EVIDENCE_DIR/pr-body.md" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
-  "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png
+  "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png \
+  "$EVIDENCE_DIR"/{move,show}-building.txt
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -396,6 +397,20 @@ both_await() { # name, seconds: prints the page's signal; non-zero once the page
   done
   return 1
 }
+both_reap() { # seconds: the page's exit status; a page still alive after them is killed and fails
+  local _
+  for _ in $(seq 1 $(($1 * 10))); do
+    if ! kill -0 "$BOTH_PID" 2>/dev/null; then
+      wait "$BOTH_PID"
+      return $?
+    fi
+    sleep 0.1
+  done
+  echo "drive: both-ways.mjs still running after its last signal — killing it" >&2
+  kill "$BOTH_PID" 2>/dev/null || true
+  wait "$BOTH_PID" 2>/dev/null || true
+  return 124
+}
 BOTH_OPENED="$(both_await opened 60)"
 check "a browser page holds the card before the terminal moves it" \
   "$([ "$BOTH_OPENED" = "specifying ${SPECIFIED_REVISION:-?}" ] && echo 0 || echo 1)" \
@@ -454,7 +469,7 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
 # and the terminal reads it back (LOB-87).
 both_signal browser-move "${PLANNING_REVISION:-0}"
 BROWSER_MOVED="$(both_await browser-moved 60)"
-wait "$BOTH_PID"
+both_reap 15
 BOTH_RC=$?
 trap - EXIT
 cat "$RUN_DIR/both-ways.log"

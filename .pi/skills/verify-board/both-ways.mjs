@@ -56,6 +56,8 @@ const FOLLOW_TIMEOUT_MS = 15_000;
 const OPEN_TIMEOUT_MS = 30_000;
 // The person the dashboard moves as (apps/web `DASHBOARD_ACTOR`), B5: a person may cross a gate.
 const DASHBOARD_ACTOR = "dashboard";
+// One oracle read; the API answers in milliseconds, so this only bounds an API that went away.
+const RPC_TIMEOUT_MS = 10_000;
 
 /** One RPC call from the drive process, the oracle the page is compared with (NDJSON envelope). */
 const rpc = async (tag, payload) => {
@@ -65,6 +67,8 @@ const rpc = async (tag, payload) => {
       method: "POST",
       headers: { "content-type": "application/ndjson" },
       body: `${JSON.stringify({ _tag: "Request", id: requestId, tag, payload, headers: [] })}\n`,
+      // An API that stops answering is a failed read, not a page process drive.sh waits on forever.
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
     const envelope = (await response.text())
       .split("\n")
