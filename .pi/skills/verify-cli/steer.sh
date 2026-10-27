@@ -13,6 +13,10 @@
 #   ./steer.sh                     # API on :9320 (STEER_PORT overrides it)
 #
 # Evidence: .verify/evidence/latest/cli/steer-*.txt (the raw panes) and steer.json.
+#
+# The harness below (check/write_checks, start_api/wait_ready/stop_api, the session root, run_cmd)
+# is withdraw.sh's, copied; moving it into .pi/skills/lib/ for both drivers is left to the .pi
+# driver cleanup (LOB-236), so a fix to one belongs in the other until then.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -97,6 +101,14 @@ trap 'stop_api' EXIT
 
 if [ -f "$RUN_DIR/api.pid" ] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null; then
   echo "a steer API is already running (pid $(cat "$RUN_DIR/api.pid"))" >&2
+  exit 1
+fi
+
+# Another API on this port would answer /readyz in place of this script's own, which then fails to
+# bind — and every check would run against an instance without FAUX_SLEEP_MS, its own DB, and its
+# own session root.
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already in use — set STEER_PORT to a free one" >&2
   exit 1
 fi
 

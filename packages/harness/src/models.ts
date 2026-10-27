@@ -248,7 +248,7 @@ export const isFauxTurnStep = (messages: readonly Message[]): boolean => {
  * request would — not wait out the nap and then report the abort. The abort interrupts the sleep,
  * which ends the nap rather than failing it: the provider sees the signal and answers `aborted`.
  */
-export const fauxNap = (ms: number, signal?: AbortSignal): Promise<void> =>
+const fauxNap = (ms: number, signal?: AbortSignal): Promise<void> =>
   Effect.runPromiseExit(Effect.sleep(ms), { signal }).then(() => undefined);
 
 export type ModelAccessOptions = {

@@ -5392,18 +5392,39 @@ describe("a message that arrives while a run is in flight", () => {
             .pipe(Effect.map((snapshot) => snapshot.live.busy)),
           "the first turn to start",
         );
+        // Every queue reading a watcher is sent, from before the steer is admitted until the run
+        // settles. Read from the stream, not one `get`: the steer's wait in the queue is a state
+        // the watcher is told about, so no wall-clock window decides whether the test sees it.
+        const readings = yield* Ref.make<
+          ReadonlyArray<SessionSnapshot["queued"]>
+        >([]);
+        const watcher = yield* sessions.events(created.id).pipe(
+          Stream.runForEach((event) =>
+            event._tag === "snapshot" || event._tag === "queued"
+              ? Ref.update(readings, (all) => [...all, event.queued])
+              : Effect.void,
+          ),
+          Effect.forkChild,
+        );
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.length > 0)),
+          "the watcher's snapshot",
+        );
         const steer = yield* sessions.send({
           sessionId: created.id,
           content: "use the steer",
           whenBusy: "steer",
         });
-        // Read while the model still naps over its first step: the steer waits for the tool round.
-        const queued = (yield* sessions.get(created.id)).queued;
         yield* settledAfter(sessions, created.id, "use the steer");
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.at(-1)?.length === 0)),
+          "the watcher to see the queue drain",
+        );
+        yield* Fiber.interrupt(watcher);
         return {
           first,
           steer,
-          queued,
+          readings: yield* Ref.get(readings),
           settled: yield* sessions.get(created.id),
         };
       }),
@@ -5411,13 +5432,16 @@ describe("a message that arrives while a run is in flight", () => {
 
     expect(outcome.first.placement).toBe("run");
     expect(outcome.steer.placement).toBe("steer");
-    expect(outcome.queued).toEqual([
+    // Until the tool round places it, the steer waits in the queue under its own mode; then the
+    // queue drains.
+    expect(outcome.readings).toContainEqual([
       {
         id: outcome.steer.submissionId,
         mode: "steer",
         content: "use the steer",
       },
     ]);
+    expect(outcome.readings.at(-1)).toEqual([]);
 
     // One run: it called bash once and answered once, and the answer is the steer's. A follow-up
     // would have been a second run — two answers, the first one about "take your time".
