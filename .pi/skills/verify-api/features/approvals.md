@@ -58,8 +58,20 @@ without being asked again (LOB-52, `./approval-restart.sh`).
 
 ## How a user reaches it
 
-The approvals RPC group (`ApprovalsRpc`) on the same `/rpc` endpoint as the session group. The CLI
-decide command and the dashboard approvals pane are LOB-53; this feature is the contract they call.
+The approvals RPC group (`ApprovalsRpc`) on the same `/rpc` endpoint as the session group. Its
+consumers (LOB-53) are `factory approvals` / `approve` / `deny` (`.pi/skills/verify-cli/approve.sh`)
+and the dashboard's `/approvals` pane, session pane and card Approvals tab (`verify-web`).
+
+Two additions came with them, both additive on the contract:
+
+- `listPendingApprovals({ limit? })` — every session's pending requests, oldest first, one page
+  (clamped to 1…100, default 100), from the same `session_approvals` index without the session
+  filter. The operator's inbox.
+- `decideApproval({ …, resume: true })` — after the decision is committed, the session is handed a
+  follow-up naming it (``Approved: `<action>` (request <id>) was approved by <actor>. Run it now…`` /
+  `Denied: … Do not run it again…`), sent under `approval-resume:<request id>` so a repeated decision
+  resumes once; the answer carries `resumedWith`, the follow-up's submission id. Without `resume`
+  nothing but the decision happens, which is what `approval-restart.sh` and `drive.ts` rely on.
 
 ## What proves it
 

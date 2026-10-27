@@ -47,6 +47,7 @@ import type {
   ApprovalRequest,
   DecideApprovalInput,
   ListApprovalsOutput,
+  ListPendingApprovalsInput,
   RequestApprovalInput,
 } from "@repo/domain/Approval";
 import type {
@@ -185,6 +186,27 @@ const DEFAULT_PAGE_SIZE = 25;
  * read the real value rather than a copy. */
 export const MAX_PAGE_SIZE = 100;
 
+/**
+ * The follow-up a decision hands its session when the caller asks to `resume` it (LOB-53): what the
+ * agent reads on the turn that wakes it. A gated call asked once and parked the run; this is how the
+ * run learns the answer without a person typing it. Approved, it names the call to run again; denied,
+ * it says not to — the gate refuses the call either way, so the sentence only saves a wasted turn.
+ */
+export const approvalResumeMessage = (
+  request: Pick<ApprovalRequest, "action" | "requestId">,
+  decision: Pick<ApprovalDecision, "decision" | "actor">,
+): string =>
+  decision.decision === "approved"
+    ? `Approved: \`${request.action}\` (request ${request.requestId}) was approved by ${decision.actor}. Run it now; the approval covers one run of that call.`
+    : `Denied: \`${request.action}\` (request ${request.requestId}) was denied by ${decision.actor}. Do not run it again. Carry on without it, or end your turn and say what is blocked.`;
+
+/**
+ * The request id a decision's follow-up is sent under: one decision resumes its session once, however
+ * often the decision is repeated (`send` deduplicates on it).
+ */
+export const approvalResumeRequestId = (requestId: string): string =>
+  `approval-resume:${requestId}`;
+
 export type SessionServiceShape = {
   readonly create: (
     input?: CreateSessionInput,
@@ -266,6 +288,10 @@ export type SessionServiceShape = {
   /** The requests of one session still waiting for a decision, oldest first. */
   readonly listApprovals: (
     sessionId: SessionId,
+  ) => Effect.Effect<ListApprovalsOutput, SessionError>;
+  /** Every session's requests still waiting for a decision, oldest first, one page (LOB-53). */
+  readonly listPendingApprovals: (
+    input: ListPendingApprovalsInput,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
   /**
    * Record (or replace) one cited knowledge page (LOB-204).
@@ -2002,7 +2028,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             });
           }
           const row = yield* requireSession(input.sessionId);
-          return yield* approvalGate.withPermits(1)(
+          const settled = yield* approvalGate.withPermits(1)(
             Effect.gen(function* () {
               const known = yield* recordOf(input.sessionId, input.requestId);
               if (known === undefined) {
@@ -2016,7 +2042,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   known.decision.decision === input.decision &&
                   known.decision.actor === input.actor
                 ) {
-                  return known.decision;
+                  return { request: known.request, decision: known.decision };
                 }
                 return yield* new SessionErrorClass({
                   code: "invalid_input",
@@ -2052,9 +2078,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 `,
               );
               yield* touchActivity(input.sessionId);
-              return decision;
+              return { request: known.request, decision };
             }),
           );
+          if (input.resume !== true) return settled.decision;
+          // Outside the permit: the run this wakes may hit the same gate, and its ask takes it.
+          // The decision is already committed, so a failed send fails the call with the decision
+          // on file — repeating it is idempotent and resends under the same request id.
+          const sent = yield* send({
+            sessionId: input.sessionId,
+            content: approvalResumeMessage(settled.request, settled.decision),
+            requestId: approvalResumeRequestId(input.requestId),
+          });
+          yield* Effect.logInfo(
+            `approval ${input.requestId} ${settled.decision.decision}; session resumed with submission ${sent.submissionId} (${sent.placement})`,
+          );
+          return { ...settled.decision, resumedWith: sent.submissionId };
         });
 
       /**
@@ -2091,6 +2130,46 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               (row) => toApprovalRecord(sessionId, row).request,
             ),
           };
+        });
+
+      /**
+       * Every session's pending requests (LOB-53): the same index `listApprovals` reads, without the
+       * session filter, so the operator's inbox is one statement however many sessions are waiting.
+       * Oldest first, then by session and request id, which is a total order a page can stop at.
+       */
+      const listPendingApprovals = (
+        input: ListPendingApprovalsInput,
+      ): Effect.Effect<ListApprovalsOutput, SessionError> =>
+        Effect.gen(function* () {
+          const limit = Math.min(
+            Math.max(input.limit ?? MAX_PAGE_SIZE, 1),
+            MAX_PAGE_SIZE,
+          );
+          const rows = yield* paper(
+            "list pending approvals",
+            sql<ApprovalRow & { readonly sessionId: string }>`
+              SELECT
+                session_id,
+                request_id,
+                action,
+                detail,
+                to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
+                decision,
+                actor,
+                to_char(decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS decided_at,
+                to_char(used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS used_at
+              FROM session_approvals
+              WHERE decision IS NULL
+              ORDER BY requested_at, session_id, request_id
+              LIMIT ${limit}
+            `,
+          );
+          const approvals: ApprovalRequest[] = [];
+          for (const row of rows) {
+            const sessionId = yield* toSessionId(row.sessionId);
+            approvals.push(toApprovalRecord(sessionId, row).request);
+          }
+          return { approvals };
         });
 
       const recordActivity = (
@@ -2682,6 +2761,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         requestApproval,
         decideApproval,
         listApprovals,
+        listPendingApprovals,
         recordPage,
         listPages,
         curate,

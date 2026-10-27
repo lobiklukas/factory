@@ -32,6 +32,11 @@ export const ApprovalDecision = Schema.Struct({
   decision: ApprovalVerdict,
   actor: Schema.String,
   decidedAt: Timestamp,
+  /**
+   * The follow-up message that handed the session this decision (LOB-53): the submission id the
+   * session's queue knows it by. Present only when the caller asked to `resume` the session.
+   */
+  resumedWith: Schema.optional(Schema.String),
 });
 export type ApprovalDecision = typeof ApprovalDecision.Type;
 
@@ -48,8 +53,24 @@ export const DecideApprovalInput = Schema.Struct({
   requestId: Schema.String,
   decision: ApprovalVerdict,
   actor: Schema.String,
+  /**
+   * Hand the session the decision as a follow-up message once it is recorded (LOB-53), so a run
+   * that parked on the approval resumes: approved, the agent runs the call; denied, it carries on
+   * without it. The message is deduplicated by the request id, so repeating the decision resumes
+   * once. Absent or `false`: the decision is recorded and nothing else happens.
+   */
+  resume: Schema.optional(Schema.Boolean),
 });
 export type DecideApprovalInput = typeof DecideApprovalInput.Type;
+
+/**
+ * Every session's pending requests (LOB-53): what the dashboard's `/approvals` pane and
+ * `factory approvals` list. A page of at most `limit` (the server clamps it), oldest first.
+ */
+export const ListPendingApprovalsInput = Schema.Struct({
+  limit: Schema.optional(Schema.Int),
+});
+export type ListPendingApprovalsInput = typeof ListPendingApprovalsInput.Type;
 
 /** The requests still waiting for a decision, oldest first. */
 export const ListApprovalsOutput = Schema.Struct({

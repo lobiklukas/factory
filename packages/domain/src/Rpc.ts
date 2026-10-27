@@ -4,6 +4,7 @@ import {
   ApprovalDecision,
   DecideApprovalInput,
   ListApprovalsOutput,
+  ListPendingApprovalsInput,
   RequestApprovalInput,
   ApprovalRequest,
 } from "@repo/domain/Approval";
@@ -171,8 +172,9 @@ export class SessionRpc extends RpcGroup.make(
 ) {}
 
 /**
- * The approval surface (docs/design.md D11, LOB-146): request, decide, and the pending list. The
- * list reads the service's pending set; a session's approvals are committed to its log either way.
+ * The approval surface (docs/design.md D11, LOB-146): request, decide, and the pending list — one
+ * session's, or every session's (LOB-53). The lists read the service's pending set; a session's
+ * approvals are committed to its log either way.
  */
 export class ApprovalsRpc extends RpcGroup.make(
   Rpc.make("requestApproval", {
@@ -187,6 +189,12 @@ export class ApprovalsRpc extends RpcGroup.make(
   }),
   Rpc.make("listApprovals", {
     payload: SessionIdInput,
+    success: ListApprovalsOutput,
+    error: SessionError,
+  }),
+  // Every session's pending requests (LOB-53): the operator's inbox, read from the same index.
+  Rpc.make("listPendingApprovals", {
+    payload: ListPendingApprovalsInput,
     success: ListApprovalsOutput,
     error: SessionError,
   }),
