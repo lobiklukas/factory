@@ -3974,8 +3974,21 @@ describe("session list", () => {
         // what the list shows, and the rebuild below is what puts the log's number back. Both
         // halves matter for LOB-153 — the fold has to write `cost_total` from `pi.usage`, or a
         // stale number would outlive the repair.
-        yield* sql`UPDATE session_activity SET cost_total = 9.99 WHERE session_id = ${created.id}`;
-        const corrupted = find((yield* sessions.list({ limit: 100 })).sessions);
+        //
+        // Corrupted until the list reads it back, not once: the index is written by the activity
+        // stream, which can still be applying the turn's `usage` event after `busy` reads false,
+        // and that late write put the log's 0 back over a single 9.99 (LOB-237; seen once in a
+        // dozen runs under load). A list that folded the log per read would never show 9.99, so
+        // the wait times out on exactly the regression the corruption exists to catch.
+        let corrupted: SessionListEntry | undefined;
+        yield* waitUntil(
+          Effect.gen(function* () {
+            yield* sql`UPDATE session_activity SET cost_total = 9.99 WHERE session_id = ${created.id}`;
+            corrupted = find((yield* sessions.list({ limit: 100 })).sessions);
+            return corrupted?.costTotal === 9.99;
+          }),
+          "the list to show the corrupted cost column",
+        );
 
         // Drop the derived rows, as losing an index table would. Every row, not just this case's:
         // the claim under test is that the whole index comes back from the log, and the database
