@@ -35,8 +35,10 @@ service's `message` matched verbatim on the pane, and by a non-zero exit:
    `task … is at revision 2, not 1: someone moved it first`.
 3. **Undeclared transition**: `specifying → done` — `column "specifying" declares no transition to
 "done"`, both columns named.
-4. `board start` opens a run on the card (features/start.md); a person then moves it on to
-   `planning` (exit 0, the revision read off the `moved …` line).
+4. `board start` opens a run on the card (features/start.md), which asks; a person answers it, a
+   second run is told the answer (specify.md), and a person then moves the card on to `planning` at
+   the revision `board show` printed after the answer (exit 0, the revision read off the `moved …`
+   line).
 5. **A run crossing a human gate**: `planning → building` with `--actor` set to the session id
    `board start` printed — `human_gate_required: the move planning → building crosses the plan
 approval gate, which only a person can make`, matched with its code.

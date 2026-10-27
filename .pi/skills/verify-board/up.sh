@@ -8,12 +8,26 @@
 #
 # MODEL_BACKEND=faux keeps `board start` offline: opening a run is real (a session, a worktree, a
 # `factory.task` document), only the model behind it is scripted.
+#
+# The script is the one the drive's specify phase needs (LOB-85): FAUX_COMMAND sleeps, so a run is
+# provably busy before it asks, as sigterm.sh and ask.sh hold a turn open; FAUX_ASK is the question
+# the run asks with the `ask` tool when its prompt carries no task thread yet. A run on a card that
+# has been answered does not ask again, so later phases on the same card take ordinary turns. The
+# question is recorded in .verify/run/faux-ask, which drive.sh matches the card's thread against.
+#
+# FAUX_COMMAND is fixed, not taken from the caller's environment: the drive's probes depend on what
+# it does (it must hold the turn open, and print `faux-ok`), so a value left exported by another
+# skill must not silently change the instance. The sleep is 8 s, not ask.sh's 4 s, because the busy
+# probe here starts after `board start` returns, a tmux round-trip and a cold `bun` start — about
+# 1 s on an idle machine, and more under a parallel gate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
 WEB_PORT="${WEB_PORT:-3400}"
 RUN_DIR="$ROOT/.verify/run"
+FAUX_COMMAND="sleep 8; echo faux-ok"
+FAUX_ASK="${FAUX_ASK:-Which Postgres major does this card target?}"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL
 
@@ -61,10 +75,13 @@ fi
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT,http://localhost:$WEB_PORT" \
     MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
+    FAUX_COMMAND="$FAUX_COMMAND" \
+    FAUX_ASK="$FAUX_ASK" \
     SESSION_ROOT="$SESSION_ROOT" \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
 echo "$WEB_PORT" > "$RUN_DIR/web-port"
+printf '%s\n' "$FAUX_ASK" > "$RUN_DIR/faux-ask"
 
 # The dashboard, pointed at this API. ALLOWED_ORIGINS above names its origin, or the browser's RPC
 # call is blocked by CORS.

@@ -11,6 +11,12 @@
 # service's own words and a non-zero exit: an undeclared transition, a stale expected revision, and a
 # run actor crossing a human gate. Every check is required; the drive exits non-zero on any miss.
 #
+# Between the run's start and the move to `planning` the card takes the question path (LOB-85,
+# docs/board.md B7): the run in `specifying` asks and parks — not busy, the card blocked
+# `needs_input` — a person answers with `board comment`, and the next run's recorded prompt quotes
+# the answer verbatim. The two facts no command prints (is the run busy, what was it told) are
+# `ask.ts`'s probes, as in ask.sh; everything a person reads is read back from the pane.
+#
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
 # .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
 # the drive can run twice against one instance — after a failed drive too: the checks find this
@@ -28,6 +34,7 @@ SOCK="$RUN_DIR/board-tmux.sock"
 TERM_SESSION="verify-board"
 FACTORY="bun run $ROOT/apps/cli/src/index.ts"
 SKILL="$ROOT/.pi/skills/verify-board"
+PROBE="$SKILL/ask.ts"
 
 mkdir -p "$EVIDENCE_DIR"
 
@@ -40,6 +47,17 @@ json() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$2"; }
 BOARD_ID="$(json boardId "$RUN_DIR/board.json")"
 # The default pipeline of the seeded definition (0007_create_tasks.ts), in declaration order.
 LANES="intake specifying planning building review done canceled"
+# The question ./up.sh's faux script asks (FAUX_ASK), and the answer the drive types. The answer is
+# two lines and an em dash, as in ask.sh: one trimmed, wrapped or re-encoded on its way into the next
+# run's prompt would not be found verbatim. The pane types it as a `$'…'` word, so the shell hands
+# the CLI one argument with the newline in it; ANSWER is the same bytes, for the probe.
+QUESTION="$(cat "$RUN_DIR/faux-ask" 2>/dev/null)"
+ANSWER_WORD="\$'Postgres 16.\\n  Keep port 5442 \\xe2\\x80\\x94 it is shared.'"
+ANSWER="$(printf 'Postgres 16.\n  Keep port 5442 \xe2\x80\x94 it is shared.')"
+if [ -z "$QUESTION" ]; then
+  echo "no faux question in $RUN_DIR/faux-ask — run ./down.sh and ./up.sh again" >&2
+  exit 1
+fi
 
 failed=0
 rows=()
@@ -109,7 +127,8 @@ fi
 # A phase that dies before it writes its evidence must not leave an earlier run's passing file
 # beside this run's failing `observed.json`.
 rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
-  "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json"
+  "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
+  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -200,19 +219,78 @@ check "and the undeclared refusal exits non-zero" \
   "$([ "$(exit_code undeclared)" != "0" ] && [ -n "$(exit_code undeclared)" ] && echo 0 || echo 1)" \
   "exit=$(exit_code undeclared)"
 
-# --- start: a run bound to the card -----------------------------------------------------------------
+# --- start: a run bound to the card, sent a prompt so it takes a turn -----------------------------
 fresh
-run_cmd start "$FACTORY board start --task $TASK_ID --api $API_URL" || true
+run_cmd start "$FACTORY board start --task $TASK_ID --prompt 'specify this card' --api $API_URL" || true
 capture start.txt
 SESSION_ID="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/start.txt" | head -1)"
 check "board start exits 0" "$([ "$(exit_code start)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code start)"
 check "start opens a session against the card" \
   "$([ -n "$SESSION_ID" ] && grep -q "task    $TASK_ID in specifying" "$EVIDENCE_DIR/start.txt" && echo 0 || echo 1)" \
   "session=${SESSION_ID:-none}"
+check "and sends the run its prompt" \
+  "$(grep -qx 'sent    specify this card' "$EVIDENCE_DIR/start.txt" && echo 0 || echo 1)" \
+  "prompt verbatim"
+
+# --- specify: the run asks and parks (LOB-85) -------------------------------------------------------
+# up.sh's FAUX_COMMAND sleeps, so the run is busy first: without that control, "not busy after the
+# ask" could not tell a parked run from a probe that never saw it busy.
+probe() { # mode, extra env...
+  local mode="$1"
+  shift
+  env MODE="$mode" API_URL="$API_URL" TASK_ID="$TASK_ID" QUESTION="$QUESTION" ANSWER="$ANSWER" \
+    EVIDENCE_DIR="$EVIDENCE_DIR" EVIDENCE_PREFIX=specify "$@" bun "$PROBE" > "$RUN_DIR/specify-$mode.log" 2>&1
+  local rc=$?
+  cat "$RUN_DIR/specify-$mode.log"
+  return "$rc"
+}
+probe busy SESSION_ID="${SESSION_ID:-}"
+check "the run is busy while its turn runs (the control)" "$?" "see specify-busy.json"
+probe parked SESSION_ID="${SESSION_ID:-}"
+check "after the ask the run is parked, not busy" "$?" "see specify-parked.json"
+
+fresh
+run_cmd asked "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-asked.txt
+ASKED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-asked.txt")"
+check "the parked card is blocked needs_input from specifying" \
+  "$([ "$(exit_code asked)" = "0" ] && grep -q '^blocked   needs_input from specifying since ' "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code asked), revision=${ASKED_REVISION:-?}"
+check "show prints the run's question verbatim" \
+  "$(grep -qF "  [question] ${SESSION_ID:-ses_missing} (revision $((REVISION + 1)))" "$EVIDENCE_DIR/show-asked.txt" && grep -qxF "    $QUESTION" "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
+  "question by ${SESSION_ID:-none}"
+
+# --- answer: a person's comment on the blocked card lifts the block ---------------------------------
+fresh
+run_cmd answer "$FACTORY board comment --task $TASK_ID --expect-revision ${ASKED_REVISION:-0} --body $ANSWER_WORD --actor person:verify-board --api $API_URL" || true
+capture comment.txt
+check "board comment answers the question and lifts the block" \
+  "$([ "$(exit_code answer)" = "0" ] && grep -qx "answered: $TASK_ID is no longer blocked (needs_input from specifying)" "$EVIDENCE_DIR/comment.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code answer)"
+
+fresh
+run_cmd answered "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-answered.txt
+ANSWERED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-answered.txt")"
+# The answer is printed indented under its header, one pane line per line of the body.
+check "after the answer the card is unblocked, the answer under the question" \
+  "$([ "$(exit_code answered)" = "0" ] && grep -qx 'blocked   -' "$EVIDENCE_DIR/show-answered.txt" && grep -qx 'thread    2' "$EVIDENCE_DIR/show-answered.txt" && grep -qF '  [answer] person:verify-board' "$EVIDENCE_DIR/show-answered.txt" && grep -qxF '      Keep port 5442 — it is shared.' "$EVIDENCE_DIR/show-answered.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code answered), revision=${ANSWERED_REVISION:-?}"
+
+# --- the next run: told the answer ------------------------------------------------------------------
+fresh
+run_cmd next "$FACTORY board start --task $TASK_ID --prompt 'go on' --api $API_URL" || true
+capture start-next.txt
+NEXT_SESSION_ID="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/start-next.txt" | head -1)"
+check "board start opens the next run on the answered card" \
+  "$([ "$(exit_code next)" = "0" ] && [ -n "$NEXT_SESSION_ID" ] && [ "$NEXT_SESSION_ID" != "$SESSION_ID" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code next), session=${NEXT_SESSION_ID:-none}"
+probe told SESSION_ID="${NEXT_SESSION_ID:-}"
+check "the next run's recorded prompt contains the answer verbatim" "$?" "see specify-told.json"
 
 # --- move: a person moves the card on to `planning`, the column before the plan approval gate -----
 fresh
-run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision $((REVISION + 1)) --api $API_URL" || true
+run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision ${ANSWERED_REVISION:-0} --api $API_URL" || true
 capture move-planning.txt
 PLANNING_REVISION="$(sed -n "s/^moved $TASK_ID to planning (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-planning.txt")"
 check "a person moves the card on to planning" \
@@ -261,6 +339,7 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
   printf '  "boardId": "%s",\n' "$BOARD_ID"
   printf '  "taskId": "%s",\n' "$TASK_ID"
   printf '  "sessionId": "%s",\n' "${SESSION_ID:-}"
+  printf '  "nextSessionId": "%s",\n' "${NEXT_SESSION_ID:-}"
   printf '  "checks": {\n'
   write_checks
   printf '  }\n}\n'
