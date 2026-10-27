@@ -694,6 +694,15 @@ describe("the ralph driver's shell contract", () => {
           err: `${"x".repeat(5000)}\n`,
           asks: 20,
         },
+        // The two tails are kept apart: an `out` that ends mid-line in a digit and an `err` that starts
+        // with digits must not join into a status neither file holds (`Error: 4` + `29` is not 429).
+        // Mutation: drop the `printf '\n'` between the tails — this scenario reads `provider`.
+        {
+          name: "tails do not join",
+          out: "Error: 4",
+          err: "29 lines written\n",
+          asks: 1,
+        },
         // Each file's tail, not the head: an error long scrolled past is not the one the run ended on.
         {
           name: "429 scrolled past",
@@ -739,6 +748,7 @@ describe("the ralph driver's shell contract", () => {
         "429 in err": ["provider"],
         "overloaded in out": ["provider"],
         "503 in out, err full": ["provider"],
+        "tails do not join": ["clean"],
         "429 scrolled past": ["clean"],
       });
       // `provider_failed` is a pure read of two files: it never consults docker.

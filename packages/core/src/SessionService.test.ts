@@ -6170,13 +6170,17 @@ describe("this suite's database", () => {
     // bolted shut from here, because closing it would mean this file writing a row into the
     // database it exists not to write to. So it is stated rather than hidden: the count is in the
     // message below, and the case above is the one that holds unconditionally.
+    //
+    // Only settled rows are witnessed (see `settledSessionIds`): a session younger than an hour when
+    // this file started — another suite's in-flight row, or a local API run's — is not asked about,
+    // and the message says so, so a green here is not read as covering those.
     const now = await maintenance.runPromise(sessionIds.pipe(Effect.orDie));
     const missing = configuredSessionIdsAtStart.filter(
       (id) => !now.includes(id),
     );
     expect(
       missing,
-      `the configured database no longer holds ${missing.length} of the ${configuredSessionIdsAtStart.length} session(s) it held before this file ran, so this suite deleted rows that were never its own`,
+      `the configured database no longer holds ${missing.length} of the ${configuredSessionIdsAtStart.length} settled session(s) (older than an hour; younger rows are not witnessed) it held before this file ran, so this suite deleted rows that were never its own`,
     ).toEqual([]);
   });
 
