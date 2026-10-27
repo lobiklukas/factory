@@ -390,9 +390,25 @@ How `PostgresStorage` works, so the next agent does not have to re-derive it:
   it). A commit rejected by validation is _not_ poisoned and writes nothing.
 - **Reader mode** runs `SELECT … WHERE seq > lastSeq` before every read. It is correct but costs a
   query per read; when the control plane serves many reads, drive catch-up from `NOTIFY` instead.
-- **No snapshots.** Opening a log replays all of it, and the whole fold lives in memory. Fine
-  for a session's lifetime today; revisit with a snapshot/checkpoint if long sessions make open
-  slow (it is a replay of `commits` in batches of 500).
+- **Open restores a checkpoint, then folds the tail (LOB-186).** The owner writes its fold to
+  `log_checkpoints` every `CHECKPOINT_EVERY` (500) commits — `MemoryStorage`'s own fields, encoded
+  by `packages/storage-postgres/src/Checkpoint.ts` and gzipped — and every open, either mode,
+  restores it and folds only the commits after it. A checkpoint is served only when its shape (the
+  encoding plus the installed Pi Durable version) is the running one and commit `seq` still hashes
+  to what it did when the checkpoint was taken; anything else falls back to the full fold, and a
+  failed read or a fold that does not decode also logs a warning. The commit that is due a
+  checkpoint encodes the fold synchronously (the next commit mutates it) and resolves; the gzip
+  (async) and upsert run on a per-owner chain the commit does not wait on, which
+  `checkpointsWritten()` and `close` do wait on. The whole fold still lives in memory.
+  `PostgresStorage.readers` always folds the whole log and never reads a checkpoint; its callers
+  are the index rebuild (the recovery path) and the board's run evidence in `TaskService`, which
+  therefore still pays a full fold per run log per read. Deleting `log_checkpoints` rows is always
+  safe. On a 10 250-commit log the storage open went from 167–204 ms (full fold, 10 250 commits
+  read) to 37–46 ms (checkpoint at 10 000, 250 read); `packages/storage-postgres/scripts/bench-open.ts`
+  reruns it. That is the storage half only: a historical session read (`readSessionLog`) still
+  pages and projects every entry of the fold, so a session open in the API is O(log) in in-memory
+  reads. A Pi Durable bump turns every checkpoint stale (one full fold per log), and if it changes
+  `MemoryStorage`'s fields the `foldShape()` test fails — revisit `Checkpoint.ts` then.
 - **`writes` is `json`, not `jsonb`**, on purpose: strings must round-trip, and `jsonb` rejects
   lone surrogates and U+0000. Nothing queries inside it.
 - **`seq` is read back as `Number`.** Safe far beyond any realistic log; noted so nobody is
