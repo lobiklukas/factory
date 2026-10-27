@@ -11,10 +11,12 @@ phase's probes' **11/11** (`specify-busy.json`, `specify-parked.json`, `specify-
 `./ask.sh`, API on `:9501` across two processes, **14/14** drive checks and **11/11** probe checks
 passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
 `./requires.sh` (LOB-80, 2026-10-27, `agent/LOB-80`), API on `:9522`, **24/24** checks passed
-(`requires-observed.json`). Evidence: `.verify/evidence/latest/board/`.
+(`requires-observed.json`). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
+`:9510`, **18/18** checks passed (`create-board.json`). Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                         | Status  | File                         |
 | ------------------------------- | ------- | ---------------------------- |
+| `factory board create`          | passing | [boards.md](boards.md)       |
 | create a card (`createTask`)    | passing | [create.md](create.md)       |
 | `factory board ls`              | passing | [ls.md](ls.md)               |
 | `factory board show`            | passing | [show.md](show.md)           |

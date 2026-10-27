@@ -1,8 +1,13 @@
 import { Console, Effect, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
-import { BoardInstanceId, TaskId } from "@repo/domain/Task";
+import { RepoSlug, SessionActor } from "@repo/domain/Session";
+import {
+  BoardInstanceId,
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
+  TaskId,
+} from "@repo/domain/Task";
 import type { Task, TaskComment } from "@repo/domain/Task";
-import { SessionActor } from "@repo/domain/Session";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
@@ -10,10 +15,11 @@ import { BoardClient } from "../rpc";
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
  *
- * The verbs are the ones a person needs to work a card from a terminal: read the lanes and what
- * sits in them (`ls`), read one card and its thread (`show`), move it (`move`), answer what a parked
- * run asked (`comment`, LOB-73), and start the run that advances it (`start`). Nothing here folds a log or reads the database; every answer is the
- * server's, which is what keeps `factory board ls` and the RPC list in agreement.
+ * The verbs are the ones a person needs to work a card from a terminal: make the board a repository's
+ * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card and
+ * its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73), and
+ * start the run that advances it (`start`). Nothing here folds a log or reads the database; every
+ * answer is the server's, which is what keeps `factory board ls` and the RPC list in agreement.
  *
  * **Refusals are printed, not swallowed.** The board's refusals are typed values that name what
  * failed — `UndeclaredTransition` names both columns, `StaleRevision` names the revision it found,
@@ -53,6 +59,85 @@ const runActorFlag = Flag.String("actor").pipe(
   Flag.withDescription("Who the run's spend is attributed to"),
   Flag.withSchema(SessionActor),
   Flag.withDefault("cli"),
+);
+
+/**
+ * `factory board create` — a board over a repository (B2, LOB-208).
+ *
+ * The definition defaults to the shipped pipeline and its version to that definition's newest, which
+ * is what the server pins when none is named; `--definition-version` is for a board that must run an
+ * older pipeline (not `--version`, which is the CLI's own global flag). The repo and the definition
+ * id are decoded here against the domain's own schemas, so a malformed one is `invalid_input` and
+ * nothing is sent. An unknown definition, or a version of it that does not exist, is the server's
+ * `definition_not_found`, printed verbatim; a repository that already has a board is the server's
+ * `board_exists`, naming that board (one board per repository).
+ */
+const createCommand = Command.make(
+  "create",
+  {
+    repo: Flag.String("repo").pipe(
+      Flag.withDescription("The repository the board is for (owner/name)"),
+    ),
+    definition: Flag.String("definition").pipe(
+      Flag.withDescription("The board definition the board binds"),
+      Flag.withDefault(DEFAULT_DEFINITION_ID),
+    ),
+    definitionVersion: Flag.Int("definition-version").pipe(
+      Flag.withDescription(
+        "The definition version to pin (defaults to the newest)",
+      ),
+      Flag.optional,
+    ),
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({ repo, definition, definitionVersion, api }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const repoSlug = decodeId(RepoSlug, repo);
+      if (repoSlug === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--repo "${repo}" is not a repository (owner/name)`,
+        );
+      }
+      const definitionId = decodeId(DefinitionId, definition);
+      if (definitionId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--definition "${definition}" is not a definition id`,
+        );
+      }
+      const { client } = yield* BoardClient;
+      const board = yield* client.createBoard({
+        repo: repoSlug,
+        definitionId,
+        ...(Option.isSome(definitionVersion)
+          ? { definitionVersion: definitionVersion.value }
+          : {}),
+      });
+      yield* Console.log(`board       ${board.id}`);
+      yield* Console.log(`repo        ${board.repo}`);
+      yield* Console.log(
+        `definition  ${board.definitionId} v${board.definitionVersion}`,
+      );
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription("Create a board for a repository"),
+  Command.withExamples([
+    {
+      command: "factory board create --repo lobiklukas/factory",
+      description: "The default pipeline at its newest version",
+    },
+    {
+      command:
+        "factory board create --repo lobiklukas/factory --definition-version 1",
+      description: "The default pipeline pinned to version 1",
+    },
+  ]),
 );
 
 /** A lane's cards, indented under the lane's own line so the lane stays readable at a glance. */
@@ -371,9 +456,10 @@ const startCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Read and move cards on a board: lanes, one card, a move, a comment, a run",
+    "Create a board, then read and move its cards: lanes, one card, a move, a comment, a run",
   ),
   Command.withSubcommands([
+    createCommand,
     lsCommand,
     showCommand,
     moveCommand,

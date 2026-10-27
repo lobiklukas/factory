@@ -1,6 +1,8 @@
 /**
  * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9),
- * and the thread on each card — a run's question, a person's answer, a note (B7, LOB-73).
+ * and the thread on each card — a run's question, a person's answer, a note (B7, LOB-73). The boards
+ * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
+ * exist before any card and this service is the one that reads it back for every card.
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
@@ -53,6 +55,7 @@ import {
   BoardInstance,
   BoardInstanceId,
   BoardView,
+  type CreateBoardInput,
   GATED_COLUMNS,
   gatedExit,
   LIST_BOARDS_LIMIT,
@@ -73,7 +76,7 @@ import type {
 import { SessionId } from "@repo/domain/Session";
 import { readVerifyCalls } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
-import { mintTaskId } from "./ids";
+import { mintBoardId, mintTaskId } from "./ids";
 import {
   exitRequirements,
   requirementVerdict,
@@ -95,6 +98,30 @@ export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
 export class BoardNotFound extends Schema.TaggedError<BoardNotFound>()(
   "BoardNotFound",
   { boardId: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * `createBoard` named a definition the factory does not hold, or a version of it that does not exist
+ * (LOB-208). `version` is the one the caller named; it is absent when no version of the id exists.
+ */
+export class DefinitionNotFound extends Schema.TaggedError<DefinitionNotFound>()(
+  "DefinitionNotFound",
+  {
+    definitionId: Schema.String,
+    version: Schema.optional(Schema.Int),
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * `createBoard` was asked for a second board over a repository that already has one (LOB-208): the
+ * MVP has one board per repository, and more than one is deferred board customization
+ * (docs/board.md, deferred item 8). `boardId` is the board the repository already has, so a retried
+ * call can read the answer it was after rather than be left with a bare "no".
+ */
+export class BoardExists extends Schema.TaggedError<BoardExists>()(
+  "BoardExists",
+  { repo: Schema.String, boardId: Schema.String, message: Schema.String },
 ) {}
 
 /** The expected revision was not the card's current one; `actual` is what it is now. */
@@ -165,6 +192,8 @@ export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
+  | DefinitionNotFound
+  | BoardExists
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -235,6 +264,14 @@ export type TaskServiceShape = {
   readonly getBoard: (boardId: string) => Effect.Effect<BoardView, TaskError>;
   /** Every board instance, newest first, capped at `LIST_BOARDS_LIMIT` (LOB-75). */
   readonly listBoards: Effect.Effect<ReadonlyArray<BoardInstance>, TaskError>;
+  /**
+   * A new board over a named definition (B2, LOB-208), pinned to the version the caller names or, by
+   * default, the definition's newest. An unknown definition or version is `DefinitionNotFound`; a
+   * repository that already has a board is `BoardExists`, naming it (one board per repository).
+   */
+  readonly createBoard: (
+    input: CreateBoardInput,
+  ) => Effect.Effect<BoardInstance, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   readonly get: (taskId: string) => Effect.Effect<Task, TaskError>;
   readonly list: (
@@ -288,6 +325,24 @@ type TaskRow = {
   readonly updatedAt: Date | string;
 };
 
+/** One `board_instances` row, read through `BOARD_INSTANCE_COLUMNS`. */
+type BoardInstanceRow = {
+  readonly id: string;
+  readonly repo: string;
+  readonly definitionId: string;
+  readonly definitionVersion: number;
+  readonly createdAt: Date | string;
+};
+
+/** The instance columns under the names `BoardInstance` decodes, for `listBoards` and `createBoard`. */
+const BOARD_INSTANCE_COLUMNS = [
+  "id",
+  "repo",
+  `definition_id AS "definitionId"`,
+  `definition_version AS "definitionVersion"`,
+  `created_at AS "createdAt"`,
+].join(", ");
+
 /** The column list, spelled out once so every read returns the same shape. */
 const TASK_COLUMN_NAMES = [
   "id",
@@ -330,6 +385,18 @@ export const TaskServiceLive = Layer.effect(
     const decodeBoard = Schema.decodeUnknownEffect(BoardView);
     const decodeInstance = Schema.decodeUnknownEffect(BoardInstance);
     const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(TaskEvent));
+
+    const toInstance = (
+      row: BoardInstanceRow,
+    ): Effect.Effect<BoardInstance, TaskStorageError> =>
+      decodeInstance({ ...row, createdAt: iso(row.createdAt) }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TaskStorageError({
+              message: `board ${row.id} does not decode: ${String(cause)}`,
+            }),
+        ),
+      );
 
     const toTask = (row: TaskRow): Effect.Effect<Task, TaskStorageError> =>
       decodeTask({
@@ -505,33 +572,89 @@ export const TaskServiceLive = Layer.effect(
       TaskError
     > = withStorage(
       Effect.gen(function* () {
-        const rows = yield* sql<{
-          id: string;
-          repo: string;
-          definitionId: string;
-          definitionVersion: number;
-          createdAt: Date | string;
-        }>`
-            SELECT id, repo,
-                   definition_id AS "definitionId",
-                   definition_version AS "definitionVersion",
-                   created_at AS "createdAt"
+        const rows = yield* sql<BoardInstanceRow>`
+            SELECT ${sql.literal(BOARD_INSTANCE_COLUMNS)}
             FROM board_instances
             ORDER BY created_at DESC, id DESC
             LIMIT ${LIST_BOARDS_LIMIT}
           `;
-        return yield* Effect.forEach(rows, (row) =>
-          decodeInstance({ ...row, createdAt: iso(row.createdAt) }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new TaskStorageError({
-                  message: `board ${row.id} does not decode: ${String(cause)}`,
-                }),
-            ),
-          ),
-        );
+        return yield* Effect.forEach(rows, toInstance);
       }),
     );
+
+    /**
+     * The one writer of `board_instances` (LOB-208): an instance over `definitionId`, at the version
+     * named or the newest one, for a repository that has no board yet.
+     *
+     * One board per repository (docs/board.md, deferred item 8): the transaction takes an advisory
+     * lock on the repository before it looks, so two concurrent creates for one repo cannot both see
+     * none and both insert — the second waits, then finds the first's board and is `BoardExists`.
+     *
+     * The insert is one `INSERT … SELECT` over the definition's own rows, so the version the board
+     * pins is the version that exists at the moment of the insert — there is no read-then-write
+     * window in which "the newest" could be a row the insert then fails to reference. No row selected
+     * is the refusal: the definition, or that version of it, is not in the factory's database (B2).
+     */
+    const createBoard = (
+      input: CreateBoardInput,
+    ): Effect.Effect<BoardInstance, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              SELECT pg_advisory_xact_lock(hashtext(${`board_instances:${input.repo}`}))
+            `;
+            const existing = yield* sql<{ id: string }>`
+              SELECT id FROM board_instances
+              WHERE repo = ${input.repo}
+              ORDER BY created_at, id
+              LIMIT 1
+            `;
+            const found = existing[0];
+            if (found !== undefined) {
+              return yield* new BoardExists({
+                repo: input.repo,
+                boardId: found.id,
+                message: `repository ${input.repo} already has board ${found.id}`,
+              });
+            }
+            const id = yield* mintBoardId;
+            const rows =
+              input.definitionVersion === undefined
+                ? yield* sql<BoardInstanceRow>`
+                    INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    SELECT ${id}, ${input.repo}, bd.id, bd.version
+                    FROM board_definitions bd
+                    WHERE bd.id = ${input.definitionId}
+                    ORDER BY bd.version DESC
+                    LIMIT 1
+                    RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
+                  `
+                : yield* sql<BoardInstanceRow>`
+                    INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    SELECT ${id}, ${input.repo}, bd.id, bd.version
+                    FROM board_definitions bd
+                    WHERE bd.id = ${input.definitionId}
+                      AND bd.version = ${input.definitionVersion}
+                    RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
+                  `;
+            const row = rows[0];
+            if (row === undefined) {
+              return yield* input.definitionVersion === undefined
+                ? new DefinitionNotFound({
+                    definitionId: input.definitionId,
+                    message: `no board definition ${input.definitionId}`,
+                  })
+                : new DefinitionNotFound({
+                    definitionId: input.definitionId,
+                    version: input.definitionVersion,
+                    message: `board definition ${input.definitionId} has no version ${input.definitionVersion}`,
+                  });
+            }
+            return yield* toInstance(row);
+          }),
+        ),
+      );
 
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
       withStorage(
@@ -1297,6 +1420,7 @@ export const TaskServiceLive = Layer.effect(
     return {
       getBoard,
       listBoards,
+      createBoard,
       create,
       get,
       list,

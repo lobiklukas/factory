@@ -14,10 +14,13 @@ import {
   AttentionItem,
   BlockTaskInput,
   BoardInstance,
+  BoardExists,
   BoardNotFound,
   BoardView,
   CommentTaskInput,
+  CreateBoardInput,
   CreateTaskInput,
+  DefinitionNotFound,
   EmptyComment,
   GetBoardInput,
   GetTaskInput,
@@ -230,6 +233,8 @@ export class ApprovalsRpc extends RpcGroup.make(
 const TaskErrorSchema = Schema.Union([
   TaskNotFound,
   BoardNotFound,
+  DefinitionNotFound,
+  BoardExists,
   StaleRevision,
   UndeclaredTransition,
   HumanGateRequired,
@@ -254,6 +259,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("listBoards", {
     payload: ListBoardsInput,
     success: Schema.Array(BoardInstance),
+    error: TaskErrorSchema,
+  }),
+  // A new board over a named definition, pinned to its newest version unless the caller names one
+  // (LOB-208): the instance every card and run on the board reads its columns through (B2).
+  Rpc.make("createBoard", {
+    payload: CreateBoardInput,
+    success: BoardInstance,
     error: TaskErrorSchema,
   }),
   Rpc.make("createTask", {
