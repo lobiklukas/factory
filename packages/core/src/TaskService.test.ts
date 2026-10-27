@@ -1004,6 +1004,29 @@ describe("TaskService — the card's spec (LOB-238)", () => {
     expect(spec?.revision).toBe(asked.revision);
   });
 
+  it("records the declaring run's column, not the column the card was moved on to", async () => {
+    const task = await inSpecifying();
+    const planned = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "planning",
+        actor: LUKAS,
+      }),
+    );
+    await withService((s) =>
+      s.declareSpec({
+        taskId: task.id,
+        actor: RUN,
+        column: "specifying",
+        ...SPEC,
+      }),
+    );
+    const spec = await withService((s) => s.spec(task.id));
+    expect(spec?.column).toBe("specifying");
+    expect(spec?.revision).toBe(planned.revision);
+  });
+
   it("records a spec once per spec id, so a replayed tool call posts nothing twice", async () => {
     const task = await inSpecifying();
     const post = { taskId: task.id, actor: RUN, ...SPEC };

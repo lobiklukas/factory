@@ -7751,6 +7751,49 @@ describe("the specifying run's spec", () => {
     expect(outcome.blocked.revision).toBe(outcome.card.revision + 3);
   }, 120_000);
 
+  it("records the run's own column when a person moved the card on before the run specced", async () => {
+    const runtime = specRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying");
+          const run = yield* sessions.create({
+            title: card.title,
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          // The run is pinned to `specifying`; the card is not.
+          const moved = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: card.revision,
+            to: "planning",
+            actor: PERSON,
+          });
+          yield* sessions.send({ sessionId: run.id, content: "specify it" });
+          yield* waitUntil(
+            Effect.map(
+              tasks.get(card.id),
+              (task) => task.blocked !== undefined,
+            ),
+            "the specifying run to ask",
+          );
+          yield* waitUntil(
+            Effect.map(sessions.get(run.id), (snapshot) => !snapshot.live.busy),
+            "the specifying run to settle",
+          );
+          return { moved, spec: yield* tasks.spec(card.id) };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.moved.column).toBe("planning");
+    // The spec is the specifying stage's, as the role that wrote it was: not `from planning`.
+    expect(outcome.spec?.column).toBe("specifying");
+    expect(outcome.spec?.revision).toBe(outcome.moved.revision);
+  }, 120_000);
+
   it("offers no spec tool to a run outside the specifying role", async () => {
     const runtime = specRuntime();
     const outcome = await runtime

@@ -269,6 +269,13 @@ export type DeclareSpecInput = {
   readonly acceptance: ReadonlyArray<string>;
   readonly gaps: ReadonlyArray<string>;
   readonly openQuestions: ReadonlyArray<string>;
+  /**
+   * The column the declaring run was started in (its `task_runs.column`), recorded as the spec's
+   * column. The harness offers the tool by the run's pinned role, not by where the card is now, so a
+   * specifier resumed after a person moved the card on still declares a spec *from specifying*.
+   * Absent, the card's current column is recorded.
+   */
+  readonly column?: string;
   readonly specId?: string;
 };
 
@@ -1244,7 +1251,7 @@ export const TaskServiceLive = Layer.effect(
               taskId: TaskId.make(input.taskId),
               actor: input.actor,
               revision: row.revision,
-              column: row.column,
+              column: input.column ?? row.column,
               goal: input.goal,
               acceptance: [...input.acceptance],
               gaps: [...input.gaps],

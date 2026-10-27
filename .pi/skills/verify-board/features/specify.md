@@ -126,6 +126,11 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
   `specify.test.ts` and `packages/core`'s `SessionService.test.ts` ("offers no spec tool to a run
   outside the specifying role"). The validator and its durability are `.pi/skills/verify-api`'s
   `spec.sh`.
+- **A spec posted after the card moved on.** The tool follows the run's pinned role, so a specifier
+  resumed after a person moved the card to `planning` can still post; the spec then records the
+  run's column, `specifying`, not the card's. That is `packages/core`'s `SessionService.test.ts`
+  ("records the run's own column when a person moved the card on …"); the drive does not move a card
+  under a live run.
 - **`spec_doc` as an exit requirement.** `specifying` declares `spec_doc` in `requires[]`, and it is
   still not checked (`packages/core/src/requirements.ts`): the move to `planning` goes through with
   or without a spec.

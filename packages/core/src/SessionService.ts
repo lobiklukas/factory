@@ -857,14 +857,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * How a specifying run posts its spec (LOB-238): a `specified` event on its card, by the run
        * itself, keyed by the session and the tool call so a replayed call posts nothing twice. The
        * harness offers the tool only to a role that writes the spec, so this is handed to every run
-       * of a card and used by the specifier's alone.
+       * of a card and used by the specifier's alone. The spec records the run's own column — the one
+       * its role came from — not the card's current one, which a person may have moved on since.
        */
-      const specFor = (sessionId: SessionId, taskId: string): SpecOptions => ({
+      const specFor = (
+        sessionId: SessionId,
+        taskId: string,
+        column: string | undefined,
+      ): SpecOptions => ({
         post: ({ spec, callId }) =>
           forHarness(
             tasks.declareSpec({
               taskId,
               actor: sessionId,
+              ...(column === undefined ? {} : { column }),
               goal: spec.goal,
               acceptance: spec.acceptance,
               gaps: spec.gaps,
@@ -1166,7 +1172,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : {
                     ask: askFor(id, card),
                     thread: threadFor(card),
-                    spec: specFor(id, card),
+                    spec: specFor(id, card, run.column),
                   }),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),

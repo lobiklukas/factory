@@ -408,16 +408,16 @@ describe("a card, a run and an event", () => {
   });
 
   /**
-   * `TaskEvent`'s six tags, and the two fields B5 says every move carries.
+   * `TaskEvent`'s seven tags, and the two fields B5 says every move carries.
    *
    * B5: "Every move carries an **actor** and an expected **revision**". This is the case that proves
-   * all six variants declare both, rather than the four that read as moves — a block and a comment
+   * all seven variants declare both, rather than the four that read as moves — a block and a comment
    * are moves too, and an event without an actor would break the audit trail `Task.ts:186` claims.
    *
    * The `task_events` table's `kind` column is what a writer would store, and it is unconstrained
-   * `TEXT`: nothing in the database ties a row's `kind` to these six. That gap is recorded by the
+   * `TEXT`: nothing in the database ties a row's `kind` to these seven. That gap is recorded by the
    * case in `PostgresStorage.test.ts` that stores a column set the contract rejects; here the claim
-   * is only that the *contract* has six and every one carries both fields.
+   * is only that the *contract* has seven and every one carries both fields.
    *
    * Mutation: drop `revision` from the `commented` variant — that variant's refusal goes.
    */
@@ -440,6 +440,15 @@ describe("a card, a run and an event", () => {
       { _tag: "unblocked", taskId: A_TASK_ID },
       { _tag: "commented", taskId: A_TASK_ID, body: "which repo?" },
       {
+        _tag: "specified",
+        taskId: A_TASK_ID,
+        column: "specifying",
+        goal: "pin the Postgres major",
+        acceptance: ["the compose file names one major"],
+        gaps: [],
+        openQuestions: [],
+      },
+      {
         _tag: "priorityChanged",
         taskId: A_TASK_ID,
         from: "normal",
@@ -454,7 +463,7 @@ describe("a card, a run and an event", () => {
       expect(refuses(TaskEvent, { ...variant, revision: 2 })).toBe(true);
       expect(refuses(TaskEvent, { ...variant, actor: "person:1" })).toBe(true);
     }
-    // A seventh tag is refused, so the set is closed at six.
+    // An eighth tag is refused, so the set is closed at seven.
     expect(
       refuses(TaskEvent, {
         _tag: "renamed",

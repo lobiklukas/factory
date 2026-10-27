@@ -32,9 +32,14 @@ whoever writes it (LOB-72, part 1 of LOB-46).
 
 ## How a user reaches it
 
-Not yet: it is harness-only by scope (no task table, no RPC, no UI). Its first caller is the
-specifying stage's run (LOB-73), which writes the spec and parks the task on a gap. Until then the
-"real client" of this document is the harness API itself, and that is what the drive uses: the same
+Through a specifying run (LOB-238). A run whose column's role is `specifier` is offered the `spec`
+tool, which writes this document through `decodeSpec` and `commitSpec` and then posts it on the card
+as a `specified` task event. The card's spec, its newest `specified` event, is read with the
+`getTaskSpec` RPC, printed as the `spec` block of `factory board show`, and shown in the card pane's
+Spec section. `.pi/skills/verify-board`'s `features/specify.md` is the end-to-end proof: a faux
+specifier refused for a missing `gaps`, its retry, the spec on the card and the ask that parks it.
+
+This page proves the document under it: the drive below talks to the harness API directly, the same
 `openSession` on the same `PostgresStorage` the control plane opens.
 
 ## What proves it
@@ -60,11 +65,10 @@ and a version-1 `factory.spec` value reading as no spec).
 
 ## What it does not prove
 
-- **The stage using it.** Nothing in a run writes a spec yet, and the `specifying` column's exit
-  requirement is not checked against the document: the ask, the `needs_input` block and the parked
-  run are LOB-73's, read-only enforcement LOB-74's.
-- **A spec over the wire.** `getSession` does not carry the spec; when the board shows one it reads
-  it from the task, which is LOB-73's.
+- **The stage using it.** That is verify-board's `features/specify.md`. The `specifying` column's
+  exit requirement (`spec_doc`) is still not checked against the document.
+- **A spec over the wire from the session.** `getSession` does not carry the spec; the board reads
+  the card's copy with `getTaskSpec`, which verify-board drives.
 - **A fork's spec.** A fork copies entries, not documents, so a forked session starts with no spec.
   That is the same as every other `factory.*` document and is not driven here.
 
