@@ -1021,12 +1021,16 @@ describe("the skills table and its seeds", () => {
       `,
     );
 
-  /** Every board definition version, as a comparable snapshot. 0015 must not move any of them. */
+  /**
+   * Every version of the shipped `default` definition, as a comparable snapshot. 0015 must not move
+   * any of them. Only the shipped rows: other suites (core's `createBoard` cases) add definitions of
+   * their own to the same database while this file runs, and a whole-table snapshot would see them.
+   */
   const definitions = () =>
     Effect.runPromise(
       sql<{ id: string; version: number; name: string; columns: string }>`
         SELECT id, version, name, columns::text AS columns
-        FROM board_definitions ORDER BY id, version
+        FROM board_definitions WHERE id = 'default' ORDER BY version
       `,
     );
 

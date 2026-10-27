@@ -1,6 +1,6 @@
 import { Clock, Effect, Random } from "effect";
 import { SessionId } from "@repo/domain/Session";
-import { TaskId } from "@repo/domain/Task";
+import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 
 /**
  * Session ids: Crockford base32 (no `i`, `l`, `o`, `u`) with ten characters of millisecond
@@ -43,4 +43,9 @@ export const mintSessionId: Effect.Effect<SessionId> = mint("ses_").pipe(
 /** Task ids (`tsk_`, same alphabet and shape as session ids; see `packages/domain/src/Task.ts`). */
 export const mintTaskId: Effect.Effect<TaskId> = mint("tsk_").pipe(
   Effect.map((id) => TaskId.make(id)),
+);
+
+/** Board instance ids (`brd_`, the same shape again; `BoardInstanceId` in `packages/domain/src/Task.ts`). */
+export const mintBoardId: Effect.Effect<BoardInstanceId> = mint("brd_").pipe(
+  Effect.map((id) => BoardInstanceId.make(id)),
 );
