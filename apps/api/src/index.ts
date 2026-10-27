@@ -3,23 +3,25 @@ import {
   CredentialProvider,
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
+  runDocsSchedule,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
-import { SessionBudgetCap } from "@repo/domain/Session";
+import { RepoSlug, SessionBudgetCap } from "@repo/domain/Session";
 import {
   createModelAccess,
   DEFAULT_AUTONOMY,
   FAUX_COMMAND,
   FAUX_MODEL_ID,
   modelKey,
+  parseFauxModelScripts,
   parseRoleModels,
   resolveRoleModels,
   type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
-import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
+import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
@@ -131,6 +133,20 @@ const ModelConfig = Config.all({
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
   /**
+   * The `spec` calls the faux script makes when a run is offered the tool (LOB-238): a JSON array of
+   * the tool's arguments, tried in order until one is accepted. Unset, the script never specs; a
+   * verification that proves the specifier's spec (`.pi/skills/verify-board/drive.sh`) sets it. A
+   * value that is not a JSON array of objects fails the boot.
+   */
+  fauxSpec: Config.option(
+    Config.schema(
+      Schema.fromJsonString(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
+      "FAUX_SPEC",
+    ),
+  ),
+  /**
    * What each faux request costs, in US dollars (LOB-163). pi-ai's faux reports no cost, so a capped
    * session on it could never reach its cap; a verification that proves the cap
    * (`.pi/skills/verify-api/budget.sh`) prices it. `0` by default: free, as before.
@@ -148,6 +164,16 @@ const ModelConfig = Config.all({
    * arrive while it is in flight (`.pi/skills/verify-cli/steer.sh`). `0`: the script answers at once.
    */
   fauxSleepMs: Config.Int("FAUX_SLEEP_MS").pipe(Config.withDefault(0)),
+  /**
+   * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
+   * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
+   * change while every other run keeps `FAUX_COMMAND` — what `.pi/skills/verify-board/drive.sh`
+   * needs to take one card from a read-only specify run to a PR. A row for a model the faux backend
+   * does not publish fails the boot (`parseFauxModelScripts`). Empty: every model runs one script.
+   */
+  fauxModelScripts: Config.String("FAUX_MODEL_SCRIPTS").pipe(
+    Config.withDefault(""),
+  ),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -188,6 +214,26 @@ const fauxRoleModels = (declared: ReadonlyMap<string, string>): string[] =>
 const SessionBudgetConfig = Config.option(
   Config.schema(SessionBudgetCap, "SESSION_BUDGET"),
 );
+
+/**
+ * The docs trigger's interval schedule (LOB-197, started here by LOB-234).
+ *
+ * `DOCS_SCHEDULE_MS` is the interval and `DOCS_SCHEDULE_REPO` the repo each tick docs. Unset (or
+ * `<= 0`) the schedule is off and delivers nothing — the default, because a scheduled docs run is a
+ * deployment's choice. An interval with no repo fails the boot rather than ticking at nothing, and so
+ * does a value that is not an integer or a repo that is not `owner/name`. The repo still has to be
+ * registered: until it is, each tick is recorded `skipped` naming it, the way any trigger's is.
+ */
+const DocsScheduleConfig = Config.all({
+  everyMs: Config.option(Config.Int("DOCS_SCHEDULE_MS")),
+  repo: Config.option(Config.schema(RepoSlug, "DOCS_SCHEDULE_REPO")),
+});
+
+/** A docs schedule the boot refuses: an interval with no repo to run it over. */
+class InvalidDocsSchedule extends Schema.TaggedError<InvalidDocsSchedule>()(
+  "InvalidDocsSchedule",
+  { message: Schema.String },
+) {}
 
 /** The first line of a cause, short enough for one log line. */
 const firstLine = (cause: Cause.Cause<unknown>): string =>
@@ -257,6 +303,26 @@ const MigrationsDaemon = Layer.effectDiscard(
 );
 
 /**
+ * Run the docs schedule for as long as the process lives (LOB-234), beside `MigrationsDaemon` and for
+ * the same reason: forked, so a tick that cannot reach Postgres is logged by `docsSchedule` and the
+ * next interval tries again instead of failing the boot. It is built on `SessionShutdown`
+ * (`HttpLive`), so its scope closes first: shutdown interrupts the schedule, and waits for it, before
+ * the session owners are released. Off, it forks nothing.
+ */
+const DocsScheduleDaemon = (schedule: {
+  readonly everyMs: number;
+  readonly repo: RepoSlug;
+}) =>
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* Effect.logInfo(
+        `docs schedule: every ${schedule.everyMs}ms over ${schedule.repo} (DOCS_SCHEDULE_MS)`,
+      );
+      yield* Effect.forkScoped(runDocsSchedule(schedule));
+    }),
+  );
+
+/**
  * Say which credential source the process selected (LOB-51). Building the provider is what refuses
  * an unsupported configuration (a GitHub App id with no App flow), so this line is also the boot's
  * evidence that the static token, not an App, is what the control plane will use.
@@ -309,6 +375,14 @@ const HttpLive = Effect.gen(function* () {
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
+  const docsSchedule = yield* DocsScheduleConfig;
+  const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
+  if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
+    return yield* new InvalidDocsSchedule({
+      message:
+        "DOCS_SCHEDULE_MS is set but DOCS_SCHEDULE_REPO is not: the docs schedule needs the repo it docs",
+    });
+  }
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -331,15 +405,29 @@ const HttpLive = Effect.gen(function* () {
   }
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).
+  // The default first, so a run with no role row still talks to it (LOB-207).
+  const fauxModels = [
+    ...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)]),
+  ];
+  const fauxModelScripts = yield* parseFauxModelScripts(
+    model.fauxModelScripts,
+    fauxModels,
+  );
+  if (backend === "faux" && fauxModelScripts.size > 0) {
+    yield* Effect.logInfo(
+      `faux model scripts: ${[...fauxModelScripts.keys()].join(", ")} (FAUX_MODEL_SCRIPTS)`,
+    );
+  }
   const modelAccess = createModelAccess(backend, {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
+    fauxSpec: Option.getOrUndefined(model.fauxSpec),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
-    // The default first, so a run with no role row still talks to it (LOB-207).
-    fauxModels: [...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)])],
+    fauxModels,
+    fauxModelScripts,
   });
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
   yield* Effect.logInfo(
@@ -373,8 +461,26 @@ const HttpLive = Effect.gen(function* () {
   // `provideMerge` (not `provide`): `/readyz` needs `SqlClient` itself, so the database services
   // have to stay in the layer's output rather than being kept private to the session layer. The
   // shutdown finalizer registers after the pool, so it runs before the pool closes.
+  // The docs schedule reads the session layer, so it sits under it with the shutdown finalizer —
+  // built *on* `SessionShutdown` rather than beside it. `provideMerge` builds the two in one
+  // sequential scope, shutdown first, so the daemon's fiber is interrupted (and awaited) before
+  // `sessions.close` releases the owners; siblings in `Layer.mergeAll` would close in parallel, and a
+  // tick inside `sessions.create` could open an owner while `close` was releasing them.
+  const SessionDaemons = Option.match(docsSchedule.repo, {
+    onNone: () => SessionShutdown,
+    onSome: (repo) =>
+      docsEveryMs > 0
+        ? DocsScheduleDaemon({ everyMs: docsEveryMs, repo }).pipe(
+            Layer.provideMerge(SessionShutdown),
+          )
+        : SessionShutdown,
+  });
+  if (docsEveryMs <= 0) {
+    yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
+  }
+
   const RouterDependencies = Layer.mergeAll(
-    SessionShutdown.pipe(Layer.provideMerge(SessionDeps)),
+    SessionDaemons.pipe(Layer.provideMerge(SessionDeps)),
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,

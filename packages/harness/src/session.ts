@@ -111,6 +111,7 @@ import {
   type AskOptions,
   type ThreadReader,
 } from "./ask";
+import { commitSpec, specExtension, type SpecOptions } from "./specify";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -350,6 +351,13 @@ export type OpenSessionOptions = {
    * no section.
    */
   readonly thread?: ThreadReader;
+  /**
+   * How a specifying run posts its spec on its card (LOB-238, `./specify`): the control plane's
+   * callback that records the spec as a `specified` event. The `spec` tool is installed only when
+   * this is given *and* the run's role writes the spec (`SPEC_ROLES`); any other run — a planner on
+   * the same card, a scratch session — is not offered it.
+   */
+  readonly spec?: SpecOptions;
 };
 
 export type OpenSession = {
@@ -424,6 +432,11 @@ export const openSession = (
     // The ask on the task (B7, LOB-73): only a run bound to a card can ask, because the question is
     // recorded on the card — a scratch session has nobody to ask on and no tool to ask with.
     if (options.ask !== undefined) registry.install(askExtension(options.ask));
+    // The specifier's spec (LOB-238): committed to the log and posted on the card, by a tool rather
+    // than a file so the read-only stage can make it. Only the role that writes the spec gets it.
+    if (options.spec !== undefined && role.writesSpec) {
+      registry.install(specExtension(options.spec));
+    }
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
     const tasks = options.tasks ?? [];
@@ -874,7 +887,8 @@ export const readConversationVerifyCalls = (
  * The input is `unknown` on purpose: a spec arrives from a model's completion call or a request
  * body, and the validator is the only thing that may say it is one. A refusal commits nothing — the
  * log keeps whatever spec it held before, so a bad second attempt cannot erase a good first one — and
- * fails with the `SpecRefused` that names the field, `gaps` when the specifier declared none.
+ * fails with the `SpecRefused` that names the field, `gaps` when the specifier declared none. A run's
+ * own writer is the `spec` tool (LOB-238, `./specify`), which shares the validator and `commitSpec`.
  *
  * Every field is written on every commit, empty lists included: a spec that kept an earlier
  * attempt's gaps after a rewrite would declare gaps the specifier withdrew. Answers the spec as
@@ -888,13 +902,7 @@ export const writeSpec = (
     const spec = yield* decodeSpec(input);
     yield* attempt("write spec", () =>
       conversation.commit(
-        (tx) =>
-          tx.doc(SpecDoc, conversation.id).then((doc) => {
-            doc.goal = spec.goal;
-            doc.acceptance = [...spec.acceptance];
-            doc.gaps = [...spec.gaps];
-            doc.openQuestions = [...spec.openQuestions];
-          }),
+        (tx) => commitSpec(tx, conversation.id, spec),
         BACKGROUND_CONTEXT,
       ),
     );

@@ -16,7 +16,7 @@
  * Needs Postgres: `docker compose up -d --wait postgres`. Every row this file writes carries a
  * per-run repo slug or a per-run session root, so it is safe against a database other suites use.
  */
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +27,16 @@ import type { TriggerDelivery } from "@repo/domain/Trigger";
 import { resolveMapping, startsWork } from "@repo/domain/Trigger";
 import { createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Duration, Effect, Layer, ManagedRuntime } from "effect";
+import {
+  Clock,
+  Duration,
+  Effect,
+  Fiber,
+  Layer,
+  ManagedRuntime,
+  Schedule,
+} from "effect";
+import { TestClock } from "effect/testing";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import {
@@ -39,6 +48,9 @@ import {
   docsSchedule,
   docsScheduleDelivery,
   docsTriggerRules,
+  handleDocsPushWebhook,
+  isDocsRunMerge,
+  runDocsSchedule,
   scheduleToken,
 } from "./DocsTrigger";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -83,6 +95,8 @@ describe("a push delivery", () => {
     expect(delivery?.event.action).toBe("push");
     expect(delivery?.event.repo).toBe(`acme/docs-trigger-${runId}`);
     expect(delivery?.event.labels).toEqual(["docs"]);
+    // Keyed by the push, so a skip for an unregistered repo is reclaimable by its redelivery.
+    expect(delivery?.keyedByWork).toBe(true);
     // The commit messages are the prompt's body, one line each: a push of two commits reads as two
     // lines, and a message's own body is not copied into the prompt.
     expect(delivery?.event.body).toBe(
@@ -169,6 +183,27 @@ describe("a push delivery", () => {
   });
 });
 
+describe("a docs run's own merge", () => {
+  it("is recognized from GitHub's merge-commit subject, and nothing else is", () => {
+    const push = (message: string) => ({ head_commit: { message } });
+    expect(
+      isDocsRunMerge(
+        push("Merge pull request #7 from acme/factory/doc-schedule-acme-x-1"),
+      ),
+    ).toBe(true);
+    for (const message of [
+      "Merge pull request #7 from acme/factory/ses_1",
+      "Merge pull request #7 from acme/feature/factory/doc-x",
+      "docs: Merge pull request #7 from acme/factory/doc-x",
+      "feat: a change",
+    ]) {
+      expect(isDocsRunMerge(push(message))).toBe(false);
+    }
+    expect(isDocsRunMerge({})).toBe(false);
+    expect(isDocsRunMerge(undefined)).toBe(false);
+  });
+});
+
 describe("the schedule", () => {
   it("names each tick after the interval it covers, not the wake", () => {
     // Two wakes inside one interval are one delivery — the seam answers the second as a replay —
@@ -201,7 +236,7 @@ describe("the schedule", () => {
           }),
         );
         yield* Effect.sleep(Duration.millis(120));
-        yield* Effect.suspend(() => Effect.sync(() => fiber.interruptUnsafe()));
+        yield* Fiber.interrupt(fiber);
       }),
     );
 
@@ -210,6 +245,74 @@ describe("the schedule", () => {
     // one would be a replay rather than a second run.
     const ids = new Set(delivered.map((delivery) => delivery.requestId));
     expect(ids.size).toBe(delivered.length);
+  });
+
+  it("delivers every interval in a row, however long each tick takes inside it", async () => {
+    // On a test clock, so "every interval" is exact rather than a wall-clock bound. Each delivery
+    // takes a third of the interval: a loop that waited the interval *after* each tick would wake
+    // at 0, 400, 800, 1200 … and skip every fourth interval; one aligned to the boundaries the
+    // tokens name delivers 0, 1, 2, 3 … with no gap and no repeat.
+    const everyMs = 300;
+    const delivered: Array<string> = [];
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          docsSchedule({
+            everyMs,
+            repo,
+            deliver: (delivery) =>
+              Effect.sleep(Duration.millis(100)).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    delivered.push(delivery.requestId);
+                  }),
+                ),
+              ),
+          }),
+        );
+        for (let step = 0; step < 30; step += 1) {
+          yield* TestClock.adjust(Duration.millis(100));
+        }
+        yield* Fiber.interrupt(fiber);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    const expected = Array.from({ length: 10 }, (_, interval) =>
+      scheduleToken(repo, interval * everyMs, everyMs),
+    );
+    expect(delivered).toEqual(expected);
+  });
+
+  it("delivers the interval it finished in after a tick that outlasts its own, never a stale one", async () => {
+    const everyMs = 300;
+    const delivered: Array<string> = [];
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          docsSchedule({
+            everyMs,
+            repo,
+            deliver: (delivery) =>
+              Effect.sleep(Duration.millis(450)).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    delivered.push(delivery.requestId);
+                  }),
+                ),
+              ),
+          }),
+        );
+        for (let step = 0; step < 12; step += 1) {
+          yield* TestClock.adjust(Duration.millis(150));
+        }
+        yield* Fiber.interrupt(fiber);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    // Ticks start at 0, 450, 900, 1350: each the interval the clock is in, none repeated.
+    expect(delivered).toEqual(
+      [0, 450, 900, 1350].map((at) => scheduleToken(repo, at, everyMs)),
+    );
   });
 
   it("fires nothing at all when it is disabled", async () => {
@@ -228,9 +331,7 @@ describe("the schedule", () => {
             }),
           );
           yield* Effect.sleep(Duration.millis(60));
-          yield* Effect.suspend(() =>
-            Effect.sync(() => fiber.interruptUnsafe()),
-          );
+          yield* Fiber.interrupt(fiber);
         }),
       );
       expect(delivered).toEqual([]);
@@ -383,4 +484,269 @@ describe("a docs delivery through the seam", () => {
     // branch (`at` is floored to its interval).
     expect(snapshot.workspace.branch).toBe(`factory/doc-${delivery.requestId}`);
   }, 90_000);
+});
+
+/**
+ * The callers (LOB-234): the route's handler and the daemon's schedule, against the same real seam
+ * and session layer. Each case owns a repo of its own, so the counts above are not disturbed and a
+ * count here is this case's alone.
+ */
+const webhookRepo = `acme/docs-webhook-${runId}` as RepoSlug;
+const unregisteredRepo = `acme/docs-unregistered-${runId}` as RepoSlug;
+const scheduleRepo = `acme/docs-schedule-${runId}` as RepoSlug;
+const secret = `docs-webhook-secret-${runId}`;
+
+/** GitHub's `X-Hub-Signature-256`: `sha256=` and the hex HMAC of the raw body. */
+const sign = (raw: string, key = secret) =>
+  `sha256=${createHmac("sha256", key).update(raw).digest("hex")}`;
+
+const githubPush = (over: {
+  readonly repo?: RepoSlug;
+  readonly ref?: string;
+  readonly defaultBranch?: string;
+  readonly sha?: string;
+  readonly headMessage?: string;
+}) => {
+  const message = over.headMessage ?? "feat: worth a docs pass";
+  return JSON.stringify({
+    ref: over.ref ?? "refs/heads/main",
+    before: "0".repeat(40),
+    after: over.sha ?? sha,
+    deleted: false,
+    repository: {
+      full_name: over.repo ?? webhookRepo,
+      default_branch: over.defaultBranch ?? "main",
+    },
+    head_commit: { id: over.sha ?? sha, message },
+    commits: [{ message }],
+  });
+};
+
+const sessionsOn = (slug: RepoSlug, branchLike = "factory/doc-%") =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{ count: string }>`
+      SELECT count(*)::text AS count FROM sessions
+      WHERE repo = ${slug} AND branch LIKE ${branchLike}
+    `;
+    return Number(rows[0]?.count ?? "0");
+  });
+
+const countOn = (slug: RepoSlug, branchLike = "factory/doc-%") =>
+  run(sessionsOn(slug, branchLike));
+
+/** Whether the seam recorded a delivery for this id at all. */
+const deliveryRows = (requestId: string) =>
+  run(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ count: string }>`
+        SELECT count(*)::text AS count FROM webhook_deliveries
+        WHERE request_id = ${requestId}
+      `;
+      return Number(rows[0]?.count ?? "0");
+    }),
+  );
+
+const register = (slug: RepoSlug) =>
+  run(
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* sessions.registerRepo({ repo: slug, localPath: repoDir });
+    }),
+  );
+
+const webhook = (input: {
+  readonly raw: string;
+  readonly signature?: string | undefined;
+  readonly secret?: string | undefined;
+}) =>
+  run(
+    handleDocsPushWebhook({
+      secret: "secret" in input ? input.secret : secret,
+      raw: input.raw,
+      signature: "signature" in input ? input.signature : sign(input.raw),
+      delivery: randomBytes(8).toString("hex"),
+    }),
+  );
+
+describe("the GitHub push route's handler (LOB-234)", () => {
+  const pushId = `push-${webhookRepo.replace("/", "-")}-${sha}`;
+
+  it("refuses every delivery until a secret is configured, and an unsigned or wrongly signed one", async () => {
+    await register(webhookRepo);
+    const raw = githubPush({});
+
+    const unconfigured = await webhook({ raw, secret: undefined });
+    expect(unconfigured.status).toBe(503);
+    expect(unconfigured.body["code"]).toBe("not-configured");
+
+    const wrong = await webhook({
+      raw,
+      signature: sign(raw, "not-the-secret"),
+    });
+    expect(wrong.status).toBe(401);
+    const missing = await webhook({ raw, signature: undefined });
+    expect(missing.status).toBe(401);
+    // GitHub prefixes the digest with `sha256=`: the bare hex a Linear-style check accepts is not
+    // GitHub's header, and must not pass as one.
+    const bare = await webhook({ raw, signature: sign(raw).slice(7) });
+    expect(bare.status).toBe(401);
+
+    // A refusal before the seam writes nothing: no delivery row, no session.
+    expect(await deliveryRows(pushId)).toBe(0);
+    expect(await countOn(webhookRepo)).toBe(0);
+  }, 60_000);
+
+  it("refuses a push to a branch that is not the payload's default branch, and starts nothing", async () => {
+    for (const raw of [
+      githubPush({ ref: "refs/heads/factory/ses_1" }),
+      githubPush({ ref: "refs/tags/v1" }),
+      // The default branch is the payload's, not "main": a repo whose trunk is `trunk` is not docsed
+      // by a push to its `main`.
+      githubPush({ ref: "refs/heads/main", defaultBranch: "trunk" }),
+    ]) {
+      const answer = await webhook({ raw });
+      expect(answer.status).toBe(400);
+      expect(answer.body["code"]).toBe("not-default-branch");
+    }
+    const noBranch = await webhook({ raw: JSON.stringify({ zen: "ping" }) });
+    expect(noBranch.status).toBe(400);
+    expect(noBranch.body["code"]).toBe("bad-payload");
+    const notJson = await webhook({ raw: "not json" });
+    expect(notJson.status).toBe(400);
+
+    expect(await deliveryRows(pushId)).toBe(0);
+    expect(await countOn(webhookRepo)).toBe(0);
+  }, 60_000);
+
+  it("starts one docs session for a signed push to the default branch, and a redelivery is a replay", async () => {
+    const raw = githubPush({});
+    const first = await webhook({ raw });
+    expect(first.status).toBe(200);
+    expect(first.body["status"]).toBe("processed");
+    expect(first.body["replayed"]).toBe(false);
+    const sessionId = first.body["sessionId"] as SessionId;
+    expect(typeof sessionId).toBe("string");
+
+    const snapshot = await run(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.get(sessionId);
+      }),
+    );
+    expect(snapshot.workspace.branch).toBe(`factory/doc-${pushId}`);
+
+    // GitHub's redelivery carries a fresh `X-GitHub-Delivery` (the helper draws one per call); the
+    // id is the push, so it is the same delivery.
+    const again = await webhook({ raw });
+    expect(again.status).toBe(200);
+    expect(again.body["replayed"]).toBe(true);
+    expect(again.body["status"]).toBe("processed");
+    expect(await countOn(webhookRepo)).toBe(1);
+  }, 90_000);
+
+  it("answers a push to a repo nobody registered as skipped, and the redelivery after registering starts it", async () => {
+    const raw = githubPush({ repo: unregisteredRepo });
+    const answer = await webhook({ raw });
+    expect(answer.status).toBe(200);
+    expect(answer.body["status"]).toBe("skipped");
+    expect(String(answer.body["reason"])).toContain(unregisteredRepo);
+    expect(await countOn(unregisteredRepo)).toBe(0);
+
+    // The id is the push, so GitHub has no fresh delivery of it: the operator registers the repo and
+    // redelivers that push from GitHub's log, and the skip is reclaimed rather than replayed.
+    await register(unregisteredRepo);
+    const redelivered = await webhook({ raw });
+    expect(redelivered.status).toBe(200);
+    expect(redelivered.body["status"]).toBe("processed");
+    expect(redelivered.body["replayed"]).toBe(false);
+    expect(typeof redelivered.body["sessionId"]).toBe("string");
+    expect(await countOn(unregisteredRepo)).toBe(1);
+
+    // And once processed, a further redelivery is an ordinary replay.
+    const again = await webhook({ raw });
+    expect(again.body["replayed"]).toBe(true);
+    expect(again.body["status"]).toBe("processed");
+    expect(await countOn(unregisteredRepo)).toBe(1);
+  }, 90_000);
+
+  it("skips the merge of a docs run's own pull request, so a docs PR does not start the next pass", async () => {
+    const mergeSha = "b".repeat(40);
+    const raw = githubPush({
+      sha: mergeSha,
+      headMessage: `Merge pull request #12 from acme/factory/doc-push-acme-x-${sha}\n\ndocs: update`,
+    });
+    const answer = await webhook({ raw });
+    expect(answer.status).toBe(200);
+    expect(answer.body["status"]).toBe("skipped");
+    expect(String(answer.body["reason"])).toContain("factory/doc-");
+    // Answered before the seam: nothing recorded, nothing started.
+    expect(
+      await deliveryRows(`push-${webhookRepo.replace("/", "-")}-${mergeSha}`),
+    ).toBe(0);
+    expect(await countOn(webhookRepo, `factory/doc-push-%-${mergeSha}`)).toBe(
+      0,
+    );
+  }, 60_000);
+});
+
+describe("the docs schedule as the daemon runs it (LOB-234)", () => {
+  it("starts one docs session per interval on the real seam", async () => {
+    await register(scheduleRepo);
+    const everyMs = 300;
+    // Watched until two ticks have landed rather than for a fixed wall clock: a tick is a real
+    // session (a worktree, a log, a harness), and under the whole gate's load one can take longer
+    // than the interval. The bound below is what makes "once per interval" a check.
+    const elapsed = await run(
+      Effect.gen(function* () {
+        const started = yield* Clock.currentTimeMillis;
+        const fiber = yield* Effect.forkChild(
+          runDocsSchedule({ everyMs, repo: scheduleRepo }),
+        );
+        yield* sessionsOn(scheduleRepo, "factory/doc-schedule-%").pipe(
+          Effect.repeat({
+            until: (landed) => landed >= 2,
+            schedule: Schedule.spaced(Duration.millis(100)).pipe(
+              Schedule.upTo({ duration: Duration.seconds(60) }),
+            ),
+          }),
+        );
+        // Awaited, not fired: a tick still inside `sessions.create` must land (or be abandoned)
+        // before the counts below are read and before the next case counts this repo.
+        yield* Fiber.interrupt(fiber);
+        return (yield* Clock.currentTimeMillis) - started;
+      }),
+    );
+    const branches = await run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ branch: string }>`
+          SELECT branch FROM sessions
+          WHERE repo = ${scheduleRepo} AND branch LIKE 'factory/doc-schedule-%'
+        `;
+        return rows.map((row) => row.branch);
+      }),
+    );
+    const intervals = branches.map((branch) => Number(branch.split("-").pop()));
+    expect(intervals.length).toBeGreaterThanOrEqual(2);
+    // Each tick names its own interval, a multiple of the period: two wakes inside one interval are
+    // one delivery, so the seam answers the second as a replay rather than starting a second run.
+    expect(new Set(intervals).size).toBe(intervals.length);
+    expect(intervals.every((interval) => interval % everyMs === 0)).toBe(true);
+    // And never more ticks than the clock had intervals.
+    expect(intervals.length).toBeLessThanOrEqual(
+      Math.ceil(elapsed / everyMs) + 1,
+    );
+  }, 90_000);
+
+  it("returns at once and starts nothing when it is off", async () => {
+    const before = await countOn(scheduleRepo, "factory/doc-schedule-%");
+    for (const everyMs of [undefined, 0]) {
+      // Not forked: an off schedule that looped anyway would hang this case past its timeout.
+      await run(runDocsSchedule({ everyMs, repo: scheduleRepo }));
+    }
+    await Effect.runPromise(Effect.sleep(Duration.millis(400)));
+    expect(await countOn(scheduleRepo, "factory/doc-schedule-%")).toBe(before);
+  }, 30_000);
 });

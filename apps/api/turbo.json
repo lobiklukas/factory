@@ -21,11 +21,13 @@
         "FAUX_EVERY_TURN",
         "APPROVAL_REQUIRED",
         "FAUX_ASK",
+        "FAUX_SPEC",
         "FAUX_COST",
         "SESSION_BUDGET",
         "ROLE_MODELS",
         "FAUX_VERIFY",
         "FAUX_SLEEP_MS",
+        "FAUX_MODEL_SCRIPTS",
         "SESSION_ROOT",
         "SESSION_IDLE_TIMEOUT_MS",
         "PR_CAP_MAX_FILES",
@@ -37,13 +39,16 @@
         "DEVTOOLS_URL",
         "GITHUB_APP_ID",
         "GITHUB_APP_INSTALLATION_ID",
-        "GITHUB_API_URL"
+        "GITHUB_API_URL",
+        "DOCS_SCHEDULE_MS",
+        "DOCS_SCHEDULE_REPO"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       "passThroughEnv": [
         "ANTHROPIC_API_KEY",
         "GITHUB_TOKEN",
-        "GITHUB_APP_PRIVATE_KEY"
+        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_WEBHOOK_SECRET"
       ]
     }
   }

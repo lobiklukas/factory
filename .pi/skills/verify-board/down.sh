@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUN_DIR="$ROOT/.verify/run"
 
-for name in api web; do
+for name in api web github; do
   pidfile="$RUN_DIR/$name.pid"
   [ -f "$pidfile" ] || continue
   pid="$(cat "$pidfile")"
@@ -28,6 +28,7 @@ if [ -S "$sock" ]; then
   echo "stopped the drive's tmux server"
 fi
 
-rm -f "$RUN_DIR/board.json" "$RUN_DIR/card.json"
-rm -rf "$RUN_DIR/sessions"
+rm -f "$RUN_DIR/board.json" "$RUN_DIR/card.json" "$RUN_DIR/github-ledger.json" "$RUN_DIR/github-mode"
+# The fixture repo goes with the session root: the build runs' worktrees are linked into it.
+rm -rf "$RUN_DIR/sessions" "$RUN_DIR/board-repo"
 echo "run dir cleaned; evidence kept in $ROOT/.verify/evidence"

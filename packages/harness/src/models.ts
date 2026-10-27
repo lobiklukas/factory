@@ -22,15 +22,17 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Message,
+  ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
+import { SPEC_TOOL } from "./specify";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -76,6 +78,46 @@ const toolResultText = (
     }
   }
   return undefined;
+};
+
+/** Every `toolName` result in the transcript, oldest first, as whether each was an error. */
+const toolResultErrors = (
+  messages: readonly Message[],
+  toolName: string,
+): readonly boolean[] =>
+  messages.flatMap((message) =>
+    message.role === "toolResult" && message.toolName === toolName
+      ? [message.isError]
+      : [],
+  );
+
+/** A spec attempt the faux script sends (`fauxSpec`): the `spec` tool's arguments, verbatim. */
+export type FauxSpecAttempt = ToolCall["arguments"];
+
+/**
+ * The `spec` call the faux script makes next, or `undefined` when it is done specifying (LOB-238).
+ *
+ * Only a run offered the tool specs, and only until one attempt is accepted. A run whose prompt has
+ * no task thread yet tries the attempts in order, one per refusal, so a first attempt without `gaps`
+ * is the model that forgot the field and the next is its retry. A run whose prompt carries the thread
+ * — the run after a person answered — declares the last attempt with its gaps closed (`gaps` and
+ * `openQuestions` empty), once: the answer is what closed them.
+ */
+const nextSpecAttempt = (
+  messages: readonly Message[],
+  attempts: readonly FauxSpecAttempt[],
+): FauxSpecAttempt | undefined => {
+  if (attempts.length === 0 || !offersTool(messages, SPEC_TOOL))
+    return undefined;
+  const results = toolResultErrors(messages, SPEC_TOOL);
+  if (results.some((isError) => !isError)) return undefined;
+  if (sectionInEffect(messages, THREAD_SECTION_KEY)) {
+    const last = attempts.at(-1);
+    return results.length > 0 || last === undefined
+      ? undefined
+      : { ...last, gaps: [], openQuestions: [] };
+  }
+  return attempts[results.length];
 };
 
 /** The user's newest message, flattened. */
@@ -185,6 +227,10 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * and whose prompt carries no task thread yet asks `ask`, verbatim. The tool ends the run, so there
  * is no reply. A run whose prompt *does* carry the thread — the run after a person answered — does
  * not ask again and replies as usual, which is how one script plays both runs of the story.
+ *
+ * `spec` adds the specifier's declaration before the ask (LOB-238): a run offered the `spec` tool
+ * calls it with the scripted attempts until one is accepted (`nextSpecAttempt`), and only then asks
+ * — a run declares what it is missing before it asks a person for it.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
@@ -193,6 +239,7 @@ export const fauxAnswer = (
   verify = false,
   ask?: string,
   everyTurn = false,
+  spec: readonly FauxSpecAttempt[] = [],
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -220,6 +267,12 @@ export const fauxAnswer = (
   const verified = verify ? toolResultText(turn, VERIFY_TOOL) : undefined;
   if (verify && verified === undefined) {
     return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
+      stopReason: "toolUse",
+    });
+  }
+  const specAttempt = nextSpecAttempt(messages, spec);
+  if (specAttempt !== undefined) {
+    return fauxAssistantMessage(fauxToolCall(SPEC_TOOL, specAttempt), {
       stopReason: "toolUse",
     });
   }
@@ -282,6 +335,12 @@ export type ModelAccessOptions = {
    */
   readonly fauxAsk?: string | undefined;
   /**
+   * The `spec` calls the faux script makes, in order, when the run was offered the tool (LOB-238,
+   * `fauxAnswer`): each is the tool's arguments verbatim, and the next is sent only when the one
+   * before it was refused. Absent or empty: never specs.
+   */
+  readonly fauxSpec?: readonly FauxSpecAttempt[] | undefined;
+  /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
    */
@@ -307,7 +366,80 @@ export type ModelAccessOptions = {
    * real provider's cost does. Absent or `0`: free, as before.
    */
   readonly fauxCost?: number | undefined;
+  /**
+   * A script per published faux model id, overriding `fauxCommand` and `fauxVerify` for a request
+   * made under that model (LOB-86). Under the faux backend a model *is* its script, so a role that
+   * runs another model (`ROLE_MODELS`, LOB-207) is how one process plays two kinds of run: a
+   * read-only specifier whose command only sleeps and prints, and a builder whose command writes
+   * and commits a change and then verifies it. A model with no entry runs the process's script.
+   */
+  readonly fauxModelScripts?: FauxModelScripts | undefined;
 };
+
+/** What one faux model's script does differently from the process's (`fauxModelScripts`). */
+export type FauxScript = {
+  /** The command its first turn calls `bash` with, instead of `fauxCommand`. */
+  readonly command?: string | undefined;
+  /** Whether it calls `verify` after its `bash` turn, instead of `fauxVerify`. */
+  readonly verify?: boolean | undefined;
+};
+
+/** Faux model id → its script. */
+export type FauxModelScripts = ReadonlyMap<string, FauxScript>;
+
+/** `FAUX_MODEL_SCRIPTS` is not a script table, or names a model the faux backend does not publish. */
+export class InvalidFauxModelScripts extends Schema.TaggedError<InvalidFauxModelScripts>()(
+  "InvalidFauxModelScripts",
+  { message: Schema.String },
+) {}
+
+/** The table as a deployment writes it: a JSON object of model id → `{command?, verify?}`. */
+const FauxModelScriptsJson = Schema.fromJsonString(
+  Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      command: Schema.optional(Schema.NonEmptyString),
+      verify: Schema.optional(Schema.Boolean),
+    }),
+  ),
+);
+
+/**
+ * Read the faux script table (`FAUX_MODEL_SCRIPTS`) against the model ids the faux backend
+ * publishes. Blank is an empty table. Anything that does not decode, or a row for a model nobody
+ * can run, fails the boot rather than being ignored: a script keyed by a typo would leave the run
+ * it was meant for on the process's script, and the verification that relied on it would prove
+ * the wrong run.
+ */
+export const parseFauxModelScripts = (
+  text: string,
+  published: readonly string[],
+): Effect.Effect<FauxModelScripts, InvalidFauxModelScripts> =>
+  Effect.gen(function* () {
+    if (text.trim().length === 0) return new Map();
+    // A misspelt field (`verfy`) is as much a typo as a misspelt model id: it must fail, not be
+    // stripped, or the row it was meant for runs without it.
+    const table = yield* Schema.decodeEffect(FauxModelScriptsJson)(text, {
+      onExcessProperty: "error",
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new InvalidFauxModelScripts({
+            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?}} object: ${cause.message}`,
+          }),
+      ),
+    );
+    const scripts = new Map<string, FauxScript>();
+    for (const [model, script] of Object.entries(table)) {
+      if (!published.includes(model)) {
+        return yield* new InvalidFauxModelScripts({
+          message: `faux model script for ${model}, which the faux backend does not publish (it publishes ${published.join(", ")})`,
+        });
+      }
+      scripts.set(model, script);
+    }
+    return scripts;
+  });
 
 /** An answer with `amount` added to what it cost, as a provider reports its own price. */
 const charge = (
@@ -435,16 +567,25 @@ export const createFauxModelAccess = (
   const sleepMs = options.fauxSleepMs ?? 0;
   // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
   // It re-queues before it sleeps: a request that arrives during the nap still finds a step.
-  const repeat: FauxResponseFactory = (context, streamOptions) => {
+  // A request carries the model it was made under, so a model's own script is looked up per
+  // request rather than per process (`fauxModelScripts`).
+  const repeat: FauxResponseFactory = (
+    context,
+    streamOptions,
+    _state,
+    model,
+  ) => {
     faux.appendResponses([repeat]);
+    const script = options.fauxModelScripts?.get(model.id);
     const answer = () =>
       fauxAnswer(
         context.messages,
-        fauxCommand,
+        script?.command ?? fauxCommand,
         options.fauxCuration,
-        options.fauxVerify ?? false,
+        script?.verify ?? options.fauxVerify ?? false,
         options.fauxAsk,
         options.fauxEveryTurn ?? false,
+        options.fauxSpec ?? [],
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)

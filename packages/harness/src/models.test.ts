@@ -6,14 +6,21 @@
  * threshold commits one summary and heads the context with it — is
  * `session.test.ts`'s "compaction" block, and the RPC path is `.pi/skills/verify-api`.
  */
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import {
+  Type,
+  type AssistantMessage,
+  type Message,
+} from "@earendil-works/pi-ai";
+import { Effect, Exit } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   compactionPolicyFor,
   createModelAccess,
   fauxAnswer,
   isFauxTurnStep,
+  parseFauxModelScripts,
 } from "./models";
+import { VERIFY_TOOL } from "./verify";
 
 /** pi-durable's pinned defaults, which a large window must keep to the token. */
 const PINNED = {
@@ -121,6 +128,75 @@ describe("the faux script's turns", () => {
   });
 });
 
+describe("the faux script's spec (LOB-238)", () => {
+  const offered = (sections?: Record<string, string>): Message => ({
+    role: "system",
+    content: "",
+    toolsAdded: [
+      { name: "spec", description: "", parameters: Type.Object({}) },
+    ],
+    ...(sections === undefined ? {} : { sections }),
+    timestamp: 0,
+  });
+  const user: Message = { role: "user", content: "specify", timestamp: 0 };
+  const result = (toolName: string, isError: boolean): Message => ({
+    role: "toolResult",
+    toolCallId: `call_${toolName}`,
+    toolName,
+    content: [{ type: "text", text: isError ? "refused" : "ran" }],
+    isError,
+    timestamp: 0,
+  });
+  const first = { goal: "g", acceptance: [], openQuestions: [] };
+  const second = { ...first, gaps: ["which major"], openQuestions: ["q?"] };
+  /** The arguments of the spec call an answer makes, or `undefined` when it makes none. */
+  const specCall = (messages: readonly Message[]) => {
+    const answer = fauxAnswer(
+      messages,
+      "echo x",
+      undefined,
+      false,
+      undefined,
+      false,
+      [first, second],
+    );
+    const call = answer.content.find((part) => part.type === "toolCall");
+    return call?.name === "spec" ? call.arguments : undefined;
+  };
+  const ran = [offered(), user, result("bash", false)];
+
+  it("tries the attempts in order, one per refusal, and stops once one is accepted", () => {
+    expect(specCall(ran)).toEqual(first);
+    expect(specCall([...ran, result("spec", true)])).toEqual(second);
+    expect(
+      specCall([...ran, result("spec", true), result("spec", false)]),
+    ).toBeUndefined();
+    // Out of attempts: the script replies rather than calling forever.
+    expect(
+      specCall([...ran, result("spec", true), result("spec", true)]),
+    ).toBeUndefined();
+  });
+
+  it("does not spec when the run was not offered the tool, or before its bash turn", () => {
+    expect(specCall([user, result("bash", false)])).toBeUndefined();
+    expect(specCall([offered(), user])).toBeUndefined();
+  });
+
+  it("declares the last attempt with its gaps closed once the thread is in the prompt", () => {
+    const answered = [
+      offered({ task_thread: "<task_thread>…</task_thread>" }),
+      user,
+      result("bash", false),
+    ];
+    expect(specCall(answered)).toEqual({
+      ...second,
+      gaps: [],
+      openQuestions: [],
+    });
+    expect(specCall([...answered, result("spec", true)])).toBeUndefined();
+  });
+});
+
 describe("the sleeping faux script", () => {
   const user = (text: string): Message => ({
     role: "user",
@@ -185,4 +261,95 @@ describe("the sleeping faux script", () => {
     expect(isFauxTurnStep([user("  <conversation>x")])).toBe(false);
     expect(isFauxTurnStep([user("fix the bug")])).toBe(true);
   }, 10_000);
+});
+
+/**
+ * A script per faux model (LOB-86): the builder role's model writes and verifies, every other model
+ * keeps the process's script. `.pi/skills/verify-board/drive.sh`'s build phase is the end-to-end
+ * proof; these cases pin which model gets which step.
+ */
+describe("a faux model's own script", () => {
+  const access = createModelAccess("faux", {
+    fauxCommand: "sleep 8; echo faux-ok",
+    fauxModels: ["faux-1", "builder"],
+    fauxModelScripts: new Map([
+      ["builder", { command: "git commit -am build", verify: true }],
+    ]),
+  });
+  const turn = (modelId: string, messages: Message[]) => {
+    const model = access.models.getModel("faux", modelId);
+    if (model === undefined) throw new Error(`faux does not serve ${modelId}`);
+    return access.models.completeSimple(model, { messages });
+  };
+  const toolCall = (message: AssistantMessage) =>
+    message.content.flatMap((part) =>
+      part.type === "toolCall"
+        ? [{ name: part.name, arguments: part.arguments }]
+        : [],
+    );
+  const user: Message = { role: "user", content: "go", timestamp: 0 };
+  const bashResult: Message = {
+    role: "toolResult",
+    toolCallId: "call_1",
+    toolName: "bash",
+    content: [{ type: "text", text: "built" }],
+    isError: false,
+    timestamp: 0,
+  };
+
+  it("runs the model's command under that model, and the process's under any other", async () => {
+    expect(toolCall(await turn("builder", [user]))).toEqual([
+      { name: "bash", arguments: { command: "git commit -am build" } },
+    ]);
+    expect(toolCall(await turn("faux-1", [user]))).toEqual([
+      { name: "bash", arguments: { command: "sleep 8; echo faux-ok" } },
+    ]);
+  });
+
+  it("verifies after the bash turn only where the model's script says so", async () => {
+    expect(toolCall(await turn("builder", [user, bashResult]))).toEqual([
+      { name: VERIFY_TOOL, arguments: {} },
+    ]);
+    const plain = await turn("faux-1", [user, bashResult]);
+    expect(toolCall(plain)).toEqual([]);
+    expect(plain.content).toEqual([{ type: "text", text: "built (re: go)" }]);
+  });
+});
+
+describe("parseFauxModelScripts", () => {
+  const parse = (text: string) =>
+    Effect.runSyncExit(parseFauxModelScripts(text, ["faux-1", "builder"]));
+
+  it("reads a model's command and verify flag, and blank as no table", () => {
+    const parsed = parse(
+      '{"builder": {"command": "bash build.sh", "verify": true}}',
+    );
+    expect(Exit.isSuccess(parsed) && [...parsed.value]).toEqual([
+      ["builder", { command: "bash build.sh", verify: true }],
+    ]);
+    const blank = parse("  ");
+    expect(Exit.isSuccess(blank) && blank.value.size).toBe(0);
+  });
+
+  it("refuses a model the faux backend does not publish, naming it", () => {
+    const parsed = parse('{"bulider": {"verify": true}}');
+    expect(Exit.isFailure(parsed)).toBe(true);
+    expect(JSON.stringify(parsed)).toContain(
+      "faux model script for bulider, which the faux backend does not publish",
+    );
+  });
+
+  it("refuses a table that is not one", () => {
+    for (const text of [
+      '["builder"]',
+      '{"builder": {"verify": "yes"}}',
+      '{"builder": {"cmd": "x"}}',
+      '{"builder": {"command": "git commit", "verfy": true}}',
+      "{",
+    ]) {
+      const parsed = parse(text);
+      expect(Exit.isFailure(parsed)).toBe(true);
+      expect(JSON.stringify(parsed)).toContain("faux model scripts are not a");
+    }
+  });
 });

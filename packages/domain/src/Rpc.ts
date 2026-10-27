@@ -24,6 +24,7 @@ import {
   EmptyComment,
   GetBoardInput,
   GetTaskInput,
+  GetTaskSpecInput,
   HumanGateRequired,
   ListAttentionInput,
   ListBoardsInput,
@@ -38,6 +39,7 @@ import {
   TaskComment,
   TaskNotFound,
   TaskRun,
+  TaskSpec,
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
@@ -309,6 +311,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("listTaskComments", {
     payload: ListTaskCommentsInput,
     success: Schema.Array(TaskComment),
+    error: TaskErrorSchema,
+  }),
+  // The card's spec (LOB-238): what its newest specifying run declared with the `spec` tool, or
+  // `null` when none has. Written in-process by the run, like the ask, so this group only reads it.
+  Rpc.make("getTaskSpec", {
+    payload: GetTaskSpecInput,
+    success: Schema.NullOr(TaskSpec),
     error: TaskErrorSchema,
   }),
   // A card's runs, newest first (LOB-76): how the card pane keeps a run started from it in reach.

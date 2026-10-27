@@ -3,13 +3,20 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: **2026-10-27**, `agent/LOB-85`, `MODEL_BACKEND=faux` —
+Status reflects the last verified runs: **2026-10-27**, `agent/LOB-86`, `MODEL_BACKEND=faux` —
+`./drive.sh` with its build, PR, review and merge phases, API on `:9500`, web on `:3500`, the GitHub
+fake on `:9503`, **43/43** required drive checks passed, with `build.ts`'s **3/3** (`build-built.json`)
+and **8/8** (`build-pr.json`) folded in, twice against one `./up.sh` instance, and exit 1 naming
+`credential_error` under `BOARD_GITHUB=off` ([build.md](build.md)). Before it, `agent/LOB-85` —
 `./drive.sh` in tmux, API on `:9500`, web on `:3500`, **30/30** required drive checks passed
 (`observed.json` beside the raw panes), with `create.ts`'s **2/2** (`create.json`), the specify
 phase's probes' **11/11** (`specify-busy.json`, `specify-parked.json`, `specify-told.json`) and
 `web.mjs`'s **3/3** (`web.json`, `web-board.png`) folded in, twice against one `./up.sh` instance;
 `./ask.sh`, API on `:9501` across two processes, **14/14** drive checks and **11/11** probe checks
 passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
+The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`, web on `:3520`:
+`./drive.sh` **35/35** required checks, with `spec.ts`'s **9/9** (`spec-declared.json`, `spec-closed.json`) and
+`spec-pane.mjs`'s **4/4** (`spec-pane.json`, `spec-pane.png`) folded in.
 `./requires.sh` (LOB-80, 2026-10-27, `agent/LOB-80`), API on `:9522`, **24/24** checks passed
 (`requires-observed.json`). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
 `:9510`, **18/18** checks passed (`create-board.json`). Evidence: `.verify/evidence/latest/board/`.
@@ -24,6 +31,8 @@ passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `as
 | `factory board start`           | passing | [start.md](start.md)         |
 | the board read back in the web  | passing | [dashboard.md](dashboard.md) |
 | specify, ask, answer (the card) | passing | [specify.md](specify.md)     |
+| build, PR + evidence, merge     | passing | [build.md](build.md)         |
+| the specifying run's spec       | passing | [specify.md](specify.md)     |
 | the ask on the task             | passing | [ask.md](ask.md)             |
 | `requires[]` on exit            | passing | [requires.md](requires.md)   |
 
