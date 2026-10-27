@@ -9,7 +9,11 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { LIST_BOARDS_LIMIT } from "@repo/domain/Task";
+import {
+  declaredTransitions,
+  humanGate,
+  LIST_BOARDS_LIMIT,
+} from "@repo/domain/Task";
 import {
   TaskService,
   TaskServiceLive,
@@ -255,6 +259,81 @@ describe("TaskService", () => {
     expect(done.column).toBe("done");
     // created + 5 accepted moves; both refused gates added nothing.
     expect(await eventCount(task.id)).toBe(6);
+  });
+
+  it("accepts every move the shared table declares out of a column, and refuses every other", async () => {
+    // The card pane offers `declaredTransitions(column)` (LOB-76); this is the server half of "a
+    // move the API would refuse is not offered": one fresh card per target, so each answer is the
+    // service's own for that single move out of `intake`.
+    const boardId = await newBoard();
+    const { definition } = await withService((s) => s.getBoard(boardId));
+    const offered = declaredTransitions("intake");
+    for (const column of definition.columns) {
+      const task = await withService((s) =>
+        s.create({ boardId, title: `to ${column.name}`, actor: LUKAS }),
+      );
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const service = yield* TaskService;
+          return yield* service
+            .move({
+              taskId: task.id,
+              expectedRevision: 1,
+              to: column.name,
+              actor: LUKAS,
+            })
+            .pipe(
+              Effect.match({
+                onFailure: (error) => error._tag,
+                onSuccess: (moved) => moved.column,
+              }),
+            );
+        }),
+      );
+      expect([column.name, outcome]).toEqual([
+        column.name,
+        offered.includes(column.name) ? column.name : "UndeclaredTransition",
+      ]);
+    }
+    // And every target the table names is a column the seeded definition declares.
+    const names = definition.columns.map((column) => column.name);
+    for (const column of names) {
+      for (const to of declaredTransitions(column)) {
+        expect(names).toContain(to);
+      }
+      expect(humanGate(column, column)).toBeUndefined();
+    }
+  });
+
+  it("lists a card's runs newest first, empty for a card with none, and refuses an unknown card", async () => {
+    const boardId = await newBoard();
+    const task = await withService((s) =>
+      s.create({ boardId, title: "runs", actor: LUKAS }),
+    );
+    expect(await withService((s) => s.listRuns(task.id))).toEqual([]);
+
+    const first = `ses_${"0".repeat(10)}${hex(8)}`;
+    const second = `ses_${"1".repeat(10)}${hex(8)}`;
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+          VALUES (${first}, ${task.id}, ${first}, 'specifying', now() - interval '1 minute'),
+                 (${second}, ${task.id}, ${second}, 'planning', now())
+        `;
+      }),
+    );
+    const runs = await withService((s) => s.listRuns(task.id));
+    expect(runs.map((run) => [run.sessionId, run.column])).toEqual([
+      [second, "planning"],
+      [first, "specifying"],
+    ]);
+    expect(runs.every((run) => run.taskId === task.id)).toBe(true);
+    expect(runs[0]?.finishedAt).toBeUndefined();
+
+    const err = await refusal((s) => s.listRuns(`tsk_${"0".repeat(26)}`));
+    expect(err._tag).toBe("TaskNotFound");
   });
 
   it("round-trips every typed block reason through get, then unblocks", async () => {
