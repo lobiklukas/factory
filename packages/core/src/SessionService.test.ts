@@ -52,9 +52,19 @@ import type {
   SessionEvent,
   SessionId,
   SessionListEntry,
+  SessionSnapshot,
+  SessionSummary,
+  SessionUsage,
 } from "@repo/domain/Session";
-import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import { DatabaseConfig, DatabaseLive } from "@repo/storage-postgres";
+import {
+  RepoSlug as RepoSlugSchema,
+  SessionId as SessionIdSchema,
+} from "@repo/domain/Session";
+import {
+  DatabaseConfig,
+  DatabaseLive,
+  PostgresStorage,
+} from "@repo/storage-postgres";
 import {
   Clock,
   ConfigProvider,
@@ -67,14 +77,25 @@ import {
   Random,
   Redacted,
   Ref,
+  Schema,
   Stream,
 } from "effect";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createModelAccess } from "@repo/harness";
+import {
+  createFauxModelAccess,
+  createModelAccess,
+  readPromptSections,
+  readSessionLog,
+  usageCostTotal,
+} from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
-import { staticTokenProvider } from "./credentials";
+import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
+import type { OpenedPullRequest, PullRequestStep } from "./pr";
+import { SkillService, SkillServiceLive } from "./SkillService";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -419,9 +440,12 @@ process.env["DATABASE_URL"] = runDatabaseUrl;
 const runtime = ManagedRuntime.make(
   // `provideMerge` keeps the database in the runtime's context, so a test can run SQL and the
   // rebuild against the same pool the service uses.
-  SessionServiceLive({ model: createModelAccess("faux"), sessionRoot }).pipe(
-    Layer.provideMerge(DatabaseLayer),
-  ),
+  // Two faux models, so a replay onto a *different* model is a difference this suite can make: the
+  // backend publishes one id unless told otherwise (LOB-198).
+  SessionServiceLive({
+    model: createModelAccess("faux", { fauxModels: ["faux-1", "faux-2"] }),
+    sessionRoot,
+  }).pipe(Layer.provideMerge(DatabaseLayer)),
 );
 
 const program = <A, E>(
@@ -544,6 +568,9 @@ describe("SessionService", () => {
 
         const live = yield* sessions.get(created.id);
         expect(live.session.mode).toBe("live");
+        // A session that started no durable task reports an empty live-task list (LOB-183): the
+        // field is present on every snapshot, so a client never has to tell "none" from "not sent".
+        expect(live.tasks).toEqual([]);
         expect(live.entries.map((entry) => entry.kind)).toEqual([
           "title",
           "user",
@@ -560,6 +587,15 @@ describe("SessionService", () => {
         expect(live.entries.at(-1)?.text).toBe("faux-ok (re: hello)");
         // The faux provider reports token usage, so spend survives the projection.
         expect(live.usage.models[0]?.usage.totalTokens).toBeGreaterThan(0);
+        // The list shows cost per session, and the number it shows is the snapshot's ledger added
+        // up (LOB-153): both buckets, through the one helper the rebuild fold also uses. It is 0
+        // here — neither the faux model nor a built-in tool charges — so the arithmetic with a
+        // non-zero tool bucket is pinned in the harness's `projection.test.ts`, and that a tool's
+        // bucket reaches a real log is pinned in `session.test.ts`.
+        const listed = (yield* sessions.list({ limit: 100 })).sessions.find(
+          (entry) => entry.id === created.id,
+        );
+        expect(listed?.costTotal).toBe(usageCostTotal(live.usage));
 
         return { id: created.id, entries: live.entries };
       }),
@@ -739,6 +775,643 @@ describe("SessionService", () => {
   });
 });
 
+/**
+ * Forking a session at one of its entries (LOB-180).
+ *
+ * A session is a log (D7), so every claim here is about two logs: the fork keeps the parent's
+ * entries through the fork point and nothing after it, and a message admitted to either one lands
+ * in that one only. The parent is deliberately left owned while the fork is taken — that is the
+ * interesting case, because the fork reads a log another owner is writing.
+ */
+describe("fork", () => {
+  it("forks at the last entry and the two transcripts diverge", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the parent's first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        const forked = yield* sessions.get(fork.id);
+
+        // The fork's own turn: it must not reach the parent's transcript.
+        yield* sessions.send({ sessionId: fork.id, content: "fork only" });
+        yield* waitUntil(
+          sessions.get(fork.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the fork's turn to settle",
+        );
+        const diverged = yield* sessions.get(fork.id);
+        const parentAfter = yield* sessions.get(parent.id);
+
+        return {
+          parent: parent.id,
+          before,
+          fork,
+          forked,
+          diverged,
+          parentAfter,
+        };
+      }),
+    );
+
+    expect(result.fork.id).not.toBe(result.parent);
+    expect(result.fork.forkedFrom).toBe(result.parent);
+    expect(result.fork.mode).toBe("live");
+    expect(result.fork.title).toBe("forking");
+
+    // The fork's transcript starts as the parent's, text for text and kind for kind.
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+    expect(result.forked.session.forkedFrom).toBe(result.parent);
+
+    // Both transcripts grow, and neither carries the other's message.
+    expect(result.diverged.entries.length).toBeGreaterThan(
+      result.forked.entries.length,
+    );
+    expect(
+      result.diverged.entries.some((entry) => entry.text.includes("fork only")),
+    ).toBe(true);
+    expect(
+      result.parentAfter.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(result.before.entries.map((entry) => [entry.kind, entry.text]));
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("forks at a named entry, so the fork ends where the parent had not", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "at an entry" });
+        yield* sessions.send({ sessionId: parent.id, content: "first" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the first turn to settle",
+        );
+        const before = yield* sessions.get(parent.id);
+        // An entry in the middle of the transcript, not its last one.
+        const at = before.entries[1];
+        if (at === undefined) throw new Error("unreachable");
+        const fork = yield* sessions.fork({ sessionId: parent.id, at: at.id });
+        const forked = yield* sessions.get(fork.id);
+        return { before, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.before.entries
+        .slice(0, 2)
+        .map((entry) => [entry.kind, entry.text]),
+    );
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("refuses an entry id that belongs to another session", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "forking" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        // Deliberately longer than the parent: entry ids are per-log numbers, so an id from another
+        // session that happened to name an entry here would *be* this session's entry, and there is
+        // nothing else it could mean (the case below pins that). What a foreign id can be is
+        // absent, and that is what this case drives.
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        for (const content of ["other", "and another"]) {
+          yield* sessions.send({ sessionId: elsewhere.id, content });
+          yield* waitUntil(
+            sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+            "the other turn to settle",
+          );
+        }
+        const other = yield* sessions.get(elsewhere.id);
+        const own = yield* sessions.get(parent.id);
+        const foreign = other.entries.at(-1);
+        if (foreign === undefined) throw new Error("unreachable");
+        // The premise, checked rather than assumed: this id names no entry of the parent.
+        expect(own.entries.map((entry) => entry.id)).not.toContain(foreign.id);
+        const outcome = yield* Effect.exit(
+          sessions.fork({ sessionId: parent.id, at: foreign.id }),
+        );
+        // A refused fork leaves no index row behind: the row is written before the log, so the
+        // failure path has to take it back (an orphan row is invisible to the list and would wait
+        // for a rebuild).
+        const strays = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE forked_from = ${parent.id}
+        `;
+        return { outcome, strays };
+      }),
+    );
+
+    expect(result.strays).toEqual([]);
+    const { outcome } = result;
+    expect(Exit.isFailure(outcome)).toBe(true);
+    if (Exit.isSuccess(outcome)) throw new Error("unreachable");
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value._tag).toBe("SessionError");
+    expect(failure.value.code).toBe("invalid_input");
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("takes this session's entry when a foreign session used the same number", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const parent = yield* sessions.create({ title: "numbers" });
+        yield* sessions.send({ sessionId: parent.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(parent.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the turn to settle",
+        );
+        const elsewhere = yield* sessions.create({ title: "elsewhere" });
+        yield* sessions.send({ sessionId: elsewhere.id, content: "other" });
+        yield* waitUntil(
+          sessions.get(elsewhere.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the other turn to settle",
+        );
+        const own = yield* sessions.get(parent.id);
+        const other = yield* sessions.get(elsewhere.id);
+        // Ids are minted per log, so `1` is an entry of both sessions. Forking this one at that
+        // number means this one's entry: there is no other thing it could name.
+        const shared = other.entries[1];
+        if (shared === undefined) throw new Error("unreachable");
+        expect(own.entries.map((entry) => entry.id)).toContain(shared.id);
+        const fork = yield* sessions.fork({
+          sessionId: parent.id,
+          at: shared.id,
+        });
+        const forked = yield* sessions.get(fork.id);
+        return { own, forked };
+      }),
+    );
+
+    expect(
+      result.forked.entries.map((entry) => [entry.kind, entry.text]),
+    ).toEqual(
+      result.own.entries.slice(0, 2).map((entry) => [entry.kind, entry.text]),
+    );
+
+    await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.close;
+      }),
+    );
+  }, 120_000);
+
+  it("keeps the lineage in the fork's log, so a rebuild recovers it", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "lineage" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        yield* sessions.close;
+        // The index is a cache: wiping the column must not lose who the fork came from, because
+        // the fork's log carries its own `factory.fork` document (D7).
+        yield* sql`UPDATE sessions SET forked_from = NULL WHERE id = ${fork.id}`;
+        const blanked = yield* sessions.get(fork.id);
+        const report = yield* rebuildIndexes;
+        const refolded = yield* sessions.get(fork.id);
+        return { parent: parent.id, fork: fork.id, blanked, report, refolded };
+      }),
+    );
+
+    expect(result.blanked.session.forkedFrom).toBeUndefined();
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.refolded.session.forkedFrom).toBe(result.parent);
+  }, 120_000);
+
+  /**
+   * The list is where the operator sees lineage (LOB-182): one page names the fork's parent and
+   * leaves the parent's own row alone. The field comes from the index row, not from the session's
+   * log, so the same case checks both halves of that claim — a blanked row loses the lineage and a
+   * rebuild puts it back, which is what makes the list's cost one query rather than a fold (R6).
+   */
+  it("shows the lineage on the fork's list row and only there", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "lineage list" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        const find = (entries: readonly SessionListEntry[], id: string) =>
+          entries.find((entry) => entry.id === id);
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        // The index is a cache: blanking the column must remove the lineage from the list, or the
+        // field is being served from somewhere a rebuild would disagree with.
+        yield* sql`UPDATE sessions SET forked_from = NULL WHERE id = ${fork.id}`;
+        const blanked = (yield* sessions.list({ limit: 100 })).sessions;
+        yield* rebuildIndexes;
+        const refolded = (yield* sessions.list({ limit: 100 })).sessions;
+        return {
+          parent: parent.id,
+          fork: fork.id,
+          parentRow: find(listed, parent.id),
+          forkRow: find(listed, fork.id),
+          blankedRow: find(blanked, fork.id),
+          refoldedRow: find(refolded, fork.id),
+        };
+      }),
+    );
+
+    expect(result.parentRow?.forkedFrom).toBeUndefined();
+    expect(result.forkRow?.forkedFrom).toBe(result.parent);
+    expect(result.blankedRow?.forkedFrom).toBeUndefined();
+    expect(result.refoldedRow?.forkedFrom).toBe(result.parent);
+  }, 120_000);
+
+  /**
+   * Lineage is a display field, so a broken index value must not fail the page (LOB-182). A row
+   * whose `forked_from` is not a session id is a corrupted index, not a session the list cannot
+   * name: the row still renders, without lineage, and `rebuildIndexes` is what repairs the column.
+   */
+  it("drops a malformed lineage instead of failing the list", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const parent = yield* sessions.create({ title: "malformed lineage" });
+        const fork = yield* sessions.fork({ sessionId: parent.id });
+        yield* sql`UPDATE sessions SET forked_from = ${"not a session id"} WHERE id = ${fork.id}`;
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        const row = listed.find((entry) => entry.id === fork.id);
+        const report = yield* rebuildIndexes;
+        const refolded = (yield* sessions.list({ limit: 100 })).sessions.find(
+          (entry) => entry.id === fork.id,
+        );
+        return { parent: parent.id, row, report, refolded };
+      }),
+    );
+
+    expect(result.row).toBeDefined();
+    expect(result.row?.forkedFrom).toBeUndefined();
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.refolded?.forkedFrom).toBe(result.parent);
+  }, 120_000);
+});
+
+/**
+ * Replaying a recorded session on another model (LOB-198).
+ *
+ * A replay is the same task in a new session, so these claims are one-directional: exactly one new
+ * session exists afterwards, its first user entry is the source's, its model is not — and the source
+ * is the log it was, down to its commit count and head. That last part is what makes "replay a
+ * recorded run" not a rewrite of it, so it is asserted against `commits` rather than against a
+ * projection that could agree with itself.
+ */
+describe("replay", () => {
+  /** One log as the database holds it: how many commits, and the newest sequence number. */
+  const logState = (logId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ commits: number; head: string | null }>`
+        SELECT count(*)::int AS commits, max(seq)::text AS head
+        FROM commits WHERE log_id = ${logId}
+      `;
+      return rows[0] ?? { commits: 0, head: null };
+    });
+
+  /** How many sessions the index holds, which is what a refusal must not add to. */
+  const sessionCount = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{ rows: number }>`
+      SELECT count(*)::int AS rows FROM sessions
+    `;
+    return rows[0]?.rows ?? 0;
+  });
+
+  /** The `SessionError` code a refused call failed with, or `"ok"` when it succeeded. */
+  const refusalCode = (exit: Exit.Exit<unknown, SessionError>): string => {
+    if (exit._tag !== "Failure") return "ok";
+    const failure = Exit.findErrorOption(exit);
+    return failure._tag === "Some" ? failure.value.code : "defect";
+  };
+
+  it("replays the prompt on another model and leaves the source log untouched", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "replaying",
+          repo: factoryRepo,
+        });
+        yield* sessions.send({
+          sessionId: source.id,
+          content: "fix the flaky login test",
+        });
+        yield* waitUntil(
+          sessions.get(source.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the source's turn to settle",
+        );
+        const before = yield* sessions.get(source.id);
+        const sourceLog = yield* logState(source.id);
+        const countBefore = yield* sessionCount;
+
+        const replay = yield* sessions.replay({
+          sessionId: source.id,
+          model: "faux/faux-2",
+        });
+        yield* waitUntil(
+          sessions.get(replay.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the replay's turn to settle",
+        );
+        const replayed = yield* sessions.get(replay.id);
+        const sourceAfter = yield* sessions.get(source.id);
+        const sourceLogAfter = yield* logState(source.id);
+        const countAfter = yield* sessionCount;
+
+        // Release the owners, then read the replay's log the way a rebuild does: the link has to
+        // be in the log, not only in this call's answer (D7).
+        yield* sessions.close;
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.reader(sql, replay.id),
+        );
+        const log = yield* readSessionLog(storage).pipe(
+          Effect.ensuring(Effect.promise(() => storage.dispose())),
+        );
+        const folded = yield* sessions.get(replay.id);
+
+        return {
+          source: source.id,
+          replay,
+          before,
+          replayed,
+          sourceAfter,
+          sourceLog,
+          sourceLogAfter,
+          countBefore,
+          countAfter,
+          log,
+          folded,
+        };
+      }),
+    );
+
+    // One new session, and it is the replay.
+    expect(result.replay.id).not.toBe(result.source);
+    expect(result.countAfter).toBe(result.countBefore + 1);
+    expect(result.replay.mode).toBe("live");
+    // The source's task, run again: its first user entry is the replay's, text for text.
+    const firstUser = (snapshot: {
+      entries: readonly { kind: string; text: string }[];
+    }) => snapshot.entries.find((entry) => entry.kind === "user")?.text;
+    expect(firstUser(result.before)).toBe("fix the flaky login test");
+    expect(firstUser(result.replayed)).toBe(firstUser(result.before));
+    // ... on a different model, which the spend the log records is keyed by.
+    expect(result.before.usage.models.map((model) => model.key)).toEqual([
+      "faux/faux-1",
+    ]);
+    expect(result.replayed.usage.models.map((model) => model.key)).toEqual([
+      "faux/faux-2",
+    ]);
+
+    // The source is unchanged: same entries after as before, same commit count, same head.
+    expect(result.sourceAfter.entries).toEqual(result.before.entries);
+    expect(result.sourceLog.commits).toBeGreaterThan(0);
+    expect(result.sourceLogAfter).toEqual(result.sourceLog);
+
+    // The replay's own log carries the link between both sessions and both models.
+    expect(result.log.replay).toEqual({
+      source: result.source,
+      model: "faux/faux-2",
+      from: "faux/faux-1",
+    });
+    // The repo binding and the title are the replay's own committed facts, so a fold has them.
+    expect(result.log.binding).toEqual({ repo: factoryRepo, baseRef: "main" });
+    expect(
+      result.log.entries.some(
+        (entry) => entry.kind === "title" && entry.text === "replaying",
+      ),
+    ).toBe(true);
+    // And a session nobody owns reads the same transcript.
+    expect(result.folded.session.mode).toBe("historical");
+    expect(result.folded.entries).toEqual(result.replayed.entries);
+  }, 120_000);
+
+  it("refuses an unknown session, a session with no repo, and a model it does not serve", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const scratch = yield* sessions.create({
+          title: "no repo to replay into",
+        });
+        yield* sessions.send({ sessionId: scratch.id, content: "hello" });
+        yield* waitUntil(
+          sessions.get(scratch.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the scratch turn to settle",
+        );
+        const countBefore = yield* sessionCount;
+        const noRepo = yield* Effect.exit(
+          sessions.replay({ sessionId: scratch.id }),
+        );
+        const unknown = yield* Effect.exit(
+          sessions.replay({
+            sessionId: SessionIdSchema.make(`ses_${"0".repeat(26)}`),
+          }),
+        );
+        const noModel = yield* Effect.exit(
+          sessions.replay({ sessionId: scratch.id, model: "faux/faux-9" }),
+        );
+        const countAfter = yield* sessionCount;
+        return { noRepo, unknown, noModel, countBefore, countAfter };
+      }),
+    );
+
+    // A refusal is typed, and a refused replay leaves no session behind.
+    expect(refusalCode(result.noRepo)).toBe("invalid_input");
+    expect(refusalCode(result.unknown)).toBe("not_found");
+    expect(refusalCode(result.noModel)).toBe("invalid_input");
+    expect(result.countAfter).toBe(result.countBefore);
+  }, 120_000);
+});
+
+/**
+ * Reset (LOB-181): a new model context, opened with the handoff note, over the same transcript.
+ *
+ * What the service owes: the entry is in the log (not in this process), the transcript keeps the
+ * turns before it, and a released session folds to the same thing the live read showed. The model
+ * context itself is read at the harness boundary, where a `ContextView` is available
+ * (`packages/harness/src/session.test.ts`); this is the contract the RPC surface serves.
+ */
+describe("reset", () => {
+  it("keeps the transcript, marks the boundary, and folds to the same entries", async () => {
+    const { resetSummary, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "resetting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "the turn the reset ends",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the reset to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const resetSummary = yield* sessions.reset({
+          sessionId: created.id,
+          handoff: "we were fixing the flaky login test",
+        });
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { resetSummary, before, live, folded };
+      }),
+    );
+
+    expect(resetSummary.id).toBe(live.session.id);
+    expect(resetSummary.status).toBe("idle");
+    // The title is untouched: a reset clears the context, not the session.
+    expect(live.session.title).toBe("resetting");
+
+    const resetEntry = live.entries.find((entry) => entry.kind === "reset");
+    expect(resetEntry?.text).toBe("we were fixing the flaky login test");
+    expect(live.entries.length).toBe(before.entries.length + 1);
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, history included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  });
+
+  it("resets to an entry with no text for a missing or blank handoff", async () => {
+    const entries = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "bare reset" });
+        yield* sessions.reset({ sessionId: created.id });
+        // A whitespace-only note is no note: a context that opens with a blank message is worse
+        // than one that opens with nothing, and the service is where that is decided.
+        yield* sessions.reset({ sessionId: created.id, handoff: "   \n " });
+        const snapshot = yield* sessions.get(created.id);
+        yield* sessions.close;
+        return snapshot.entries;
+      }),
+    );
+
+    const resets = entries.filter((entry) => entry.kind === "reset");
+    expect(resets).toHaveLength(2);
+    expect(resets.map((entry) => entry.text)).toEqual(["", ""]);
+  });
+});
+
+/**
+ * B4's manual half (LOB-185): `compact` admits a compaction task, answers its id, and the summary
+ * the task writes is a transcript entry — one the fold agrees with, so a released session shows it
+ * too. The model context itself (that the next request starts at the summary) is the harness's
+ * contract and is read there (`packages/harness/src/session.test.ts`).
+ *
+ * The message is long on purpose: Pi Durable summarizes an *old prefix* and keeps the newest
+ * `keepRecentTokens` verbatim, so a transcript shorter than that tail has nothing to compact and
+ * the task completes without a summary. 90k characters is ~22.5k tokens, past the 20k tail this
+ * window's policy keeps.
+ */
+describe("compact", () => {
+  it("admits a compaction task and lands its summary in the transcript", async () => {
+    const { result, before, live, folded } = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "compacting" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "z".repeat(90_000),
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn before the compaction to settle",
+        );
+        const before = yield* sessions.get(created.id);
+
+        const result = yield* sessions.compact({
+          sessionId: created.id,
+          instructions: "  focus on the long message  ",
+        });
+        // The task settles in the background, so the entry is what to wait for — not `busy`,
+        // which a compaction never sets (it is not a run).
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map((snapshot) =>
+                snapshot.entries.some((entry) => entry.kind === "compaction"),
+              ),
+            ),
+          "the compaction's summary entry",
+        );
+        const live = yield* sessions.get(created.id);
+
+        // Release the owner, so the second read is D8's historical path — the fold.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { result, before, live, folded };
+      }),
+    );
+
+    // The call answers the task's id and the session it belongs to; the work is the task's.
+    expect(result.taskId.length).toBeGreaterThan(0);
+    expect(result.session.id).toBe(live.session.id);
+    // A compaction is not a run: the session is idle before it, while it works, and after it.
+    expect(result.session.status).toBe("idle");
+
+    const summaries = live.entries.filter(
+      (entry) => entry.kind === "compaction",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.text.length).toBeGreaterThan(0);
+    // Nothing is dropped: the turns the summary stands in for are still readable above it.
+    expect(live.entries.slice(0, before.entries.length)).toEqual(
+      before.entries,
+    );
+
+    // D8: the fold is a different read path and must not disagree, summary included.
+    expect(folded.session.mode).toBe("historical");
+    expect(folded.entries).toEqual(live.entries);
+  }, 120_000);
+});
+
 describe("repo binding", () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(
@@ -811,8 +1484,816 @@ describe("repo binding", () => {
   });
 });
 
+/**
+ * The GitHub PR endpoint behind an `HttpClient.make` fake: the same shape `pr.test.ts` uses, so the
+ * whole step is driven with no network and no credential, per the GitHub row in
+ * `docs/testing-third-parties.md`. Every request is recorded, which is how "exactly one POST" is
+ * asserted rather than inferred.
+ */
+const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
+  /**
+   * What GitHub was asked. The request body is kept because the PR body is one of the things a case
+   * asserts (LOB-228 lists the branch's changed paths); a client that sent the right count and the
+   * wrong body would pass a case that only counted.
+   */
+  const requests: Array<{
+    readonly method: string;
+    readonly url: string;
+    readonly body: unknown;
+  }> = [];
+  const Json = Schema.fromJsonString(Schema.Unknown);
+  const layer = Layer.merge(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) =>
+        Effect.gen(function* () {
+          const sent =
+            request.body._tag === "Uint8Array"
+              ? yield* Schema.decodeEffect(Json)(
+                  new TextDecoder().decode(request.body.body),
+                )
+              : undefined;
+          requests.push({
+            method: request.method,
+            url: url.pathname,
+            body: sent,
+          });
+          // A slow answer is how a case can hold a step inside GitHub's call, which is the window a
+          // second caller would otherwise slip through.
+          if (delayMs > 0) yield* Effect.sleep(delayMs);
+          const text = yield* Schema.encodeEffect(Json)(body).pipe(
+            Effect.orDie,
+          );
+          const response = new Response(text, {
+            status,
+            headers: { "content-type": "application/json" },
+          });
+          return HttpClientResponse.fromWeb(request, response);
+        }).pipe(Effect.orDie),
+      ),
+    ),
+    Layer.succeed(
+      CredentialProvider,
+      staticTokenProvider(Option.some(Redacted.make("tok"))),
+    ),
+  );
+  return { requests, layer };
+};
+
+/**
+ * An answer that opened or replayed a PR, or a failure naming the answer that opened none.
+ *
+ * The step's answer is a union since LOB-227 (and gained its third member in LOB-196), so a case that
+ * expects a link has to say what it expects when there is none: narrowing on the two outcomes that
+ * carry one is what makes a refusal in an ordinary PR case read as the refusal it is rather than as a
+ * missing field, and a fourth outcome would fail to compile here instead of passing silently.
+ */
+const opened = (answer: PullRequestStep): OpenedPullRequest => {
+  if (answer.outcome === "opened" || answer.outcome === "already-open") {
+    return answer;
+  }
+  throw new Error(`the step opened no PR: ${JSON.stringify(answer)}`);
+};
+
+/**
+ * A session bound to `repoRoot` with one file committed on its own branch.
+ *
+ * Since LOB-196 a PR needs a diff: a branch even with its base answers `no-change` and never reaches
+ * GitHub, so a case about the *call* has to start from work a PR could carry. Registration is
+ * explicit here rather than inherited from whichever case ran first, so these cases do not depend on
+ * their order in the file.
+ */
+const sessionWithDiff = (title: string) =>
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* sessions.registerRepo({
+      repo: factoryRepo,
+      url: "https://github.com/lobiklukas/factory.git",
+      localPath: repoRoot,
+    });
+    const created = yield* sessions.create({
+      repo: factoryRepo,
+      baseRef: "main",
+      title,
+    });
+    const snapshot = yield* sessions.get(created.id);
+    commitDiff({ worktree: snapshot.workspace.path, files: 1, lines: 1 });
+    return { created, worktree: snapshot.workspace.path };
+  });
+
+describe("the PR step", () => {
+  it("opens exactly one PR, records it in the log and the index, and reports it from both reads", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/7";
+    const github = makeGithubFake(201, { number: 7, url });
+
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { created } = yield* sessionWithDiff("open a PR");
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR",
+          // The session's own branch, because the cap measures the branch the PR names (LOB-227).
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const opened = yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+        // Reading the session back must not reach GitHub: the link is the log's and the index's.
+        const snapshot = yield* sessions.get(created.id);
+        const list = yield* sessions.list({});
+        // A step that runs twice is the same PR, and there is no second call to make it so.
+        const repeated = yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+
+        // The window a retry has to close: the document committed, the index row lost. A second
+        // call reads the log and writes the row again, without a second GitHub call.
+        const sql = yield* SqlClient;
+        yield* sql`UPDATE sessions SET pr_url = NULL WHERE id = ${created.id}`;
+        const lost = yield* sql<{ prUrl: string | null }>`
+          SELECT pr_url FROM sessions WHERE id = ${created.id}
+        `;
+        yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+        const recovered = yield* sessions.get(created.id);
+
+        return {
+          opened,
+          repeated,
+          lost: lost[0]?.prUrl,
+          recovered: recovered.session.prUrl,
+          summary: snapshot.session,
+          listed: list.sessions.find((row) => row.id === created.id),
+        };
+      }),
+    );
+
+    expect(github.requests).toEqual([
+      {
+        method: "POST",
+        url: "/repos/lobiklukas/factory/pulls",
+        body: expect.anything(),
+      },
+    ]);
+    // The first call made the request, so it says so; the retry read the log, so it says that.
+    expect(result.opened).toEqual({ number: 7, url, outcome: "opened" });
+    expect(result.repeated).toEqual({
+      number: 7,
+      url,
+      outcome: "already-open",
+    });
+    expect(result.summary.prUrl).toBe(url);
+    expect(result.listed?.prUrl).toBe(url);
+    // The lost row is restored from the log by a retry, and there is no second PR to show for it.
+    expect(result.lost).toBeNull();
+    expect(result.recovered).toBe(url);
+    // Still one, after three step calls and four reads.
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+
+  it("opens one PR for two overlapping calls, because the step is serialized", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/9";
+    // Slow enough that the second caller is inside the first one's window: without the gate both
+    // read an empty document and both would post.
+    const github = makeGithubFake(201, { number: 9, url }, 100);
+
+    const pair = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { created } = yield* sessionWithDiff("open a PR twice at once");
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR twice at once",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const opened = yield* Effect.all(
+          [asked, asked].map((input) =>
+            sessions.openPullRequest(input).pipe(Effect.provide(github.layer)),
+          ),
+          { concurrency: "unbounded" },
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return { opened, prUrl: snapshot.session.prUrl };
+      }),
+    );
+
+    expect(github.requests).toHaveLength(1);
+    // Serialized, so exactly one of the two overlapped calls is the one that opened it.
+    expect(pair.opened.map((answer) => answer.outcome).sort()).toEqual([
+      "already-open",
+      "opened",
+    ]);
+    expect(
+      pair.opened.map((answer) => {
+        const { number, url: link } = opened(answer);
+        return { number, url: link };
+      }),
+    ).toEqual([
+      { number: 9, url },
+      { number: 9, url },
+    ]);
+    expect(pair.prUrl).toBe(url);
+  }, 120_000);
+
+  it("answers a client that reads only {number, url} exactly as it did before the tag", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/13";
+    const github = makeGithubFake(201, { number: 13, url });
+
+    const answer = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { created } = yield* sessionWithDiff(
+          "open a PR for a narrow client",
+        );
+        const asked = {
+          sessionId: created.id,
+          title: "factory: open a PR for a narrow client",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        return yield* sessions
+          .openPullRequest(asked)
+          .pipe(Effect.provide(github.layer));
+      }),
+    );
+
+    // The tag is additive: a client holding only `PullRequest` still decodes the answer, and it
+    // holds only the two fields it knows.
+    const narrow = Schema.decodeSync(PullRequest)(opened(answer));
+    expect(narrow).toEqual({ number: 13, url });
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+
+  it("opens one PR per session, not one per branch: the guard is the session's own log", async () => {
+    const firstUrl = "https://github.com/lobiklukas/factory/pull/11";
+    const secondUrl = "https://github.com/lobiklukas/factory/pull/12";
+    const onFirst = makeGithubFake(201, { number: 11, url: firstUrl });
+    const onSecond = makeGithubFake(201, { number: 12, url: secondUrl });
+
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const one = (yield* sessionWithDiff("one session on the branch"))
+          .created;
+        const two = (yield* sessionWithDiff(
+          "a second session on the same branch",
+        )).created;
+        // The same head and base for both. A guard keyed by the branch would answer the second
+        // session with the first one's PR and leave it with no link of its own; the guard is the
+        // session's `factory.pr`, so each session opens its PR. The shared head has to be a real
+        // ref since LOB-227 — the cap measures `main...head` in the session's worktree, and a
+        // branch that is not there is a measurement failure rather than an empty diff — and it has
+        // to carry a diff since LOB-196, so it is the first session's own branch: a ref belongs to
+        // the repository, so the second session's worktree measures the same committed file.
+        const asked = {
+          title: "factory: one branch, two sessions",
+          head: `factory/${one.id}`,
+          base: "main",
+        };
+        const openedOne = yield* sessions
+          .openPullRequest({ ...asked, sessionId: one.id })
+          .pipe(Effect.provide(onFirst.layer));
+        const openedTwo = yield* sessions
+          .openPullRequest({ ...asked, sessionId: two.id })
+          .pipe(Effect.provide(onSecond.layer));
+        // The retry of the first session is still answered by its log: one session, one call.
+        const repeatedOne = yield* sessions
+          .openPullRequest({ ...asked, sessionId: one.id })
+          .pipe(Effect.provide(onFirst.layer));
+        const readOne = yield* sessions.get(one.id);
+        const readTwo = yield* sessions.get(two.id);
+        return {
+          openedOne,
+          openedTwo,
+          repeatedOne,
+          oneUrl: readOne.session.prUrl,
+          twoUrl: readTwo.session.prUrl,
+        };
+      }),
+    );
+
+    // The ledger, not the answer: a step that reads the log makes no request to make its answer.
+    expect(onFirst.requests).toHaveLength(1);
+    expect(onSecond.requests).toHaveLength(1);
+    expect(result.openedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "opened",
+    });
+    expect(result.openedTwo).toEqual({
+      number: 12,
+      url: secondUrl,
+      outcome: "opened",
+    });
+    expect(result.repeatedOne).toEqual({
+      number: 11,
+      url: firstUrl,
+      outcome: "already-open",
+    });
+    // Each session reports the PR it opened, so neither link was borrowed from the other.
+    expect(result.oneUrl).toBe(firstUrl);
+    expect(result.twoUrl).toBe(secondUrl);
+  }, 120_000);
+
+  it("restores the link from the log after the index rows are deleted", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/8";
+    const github = makeGithubFake(201, { number: 8, url });
+
+    const rebuilt = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const { created } = yield* sessionWithDiff(
+          "open a PR and lose the index",
+        );
+        yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: open a PR and lose the index",
+            head: `factory/${created.id}`,
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+
+        // Only this session's index rows: the log is what a rebuild must answer from.
+        yield* sql`DELETE FROM sessions WHERE id = ${created.id}`;
+        yield* sql`DELETE FROM session_activity WHERE session_id = ${created.id}`;
+        const gone = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE id = ${created.id}
+        `;
+        const report = yield* rebuildIndexes;
+        // A fresh service reads the refolded index, never the owner's memory: this instance is the
+        // same process, so what is proved here is the row, not the fold.
+        const restored = yield* sessions.get(created.id);
+        const list = yield* sessions.list({});
+        return {
+          gone,
+          report,
+          prUrl: restored.session.prUrl,
+          listed: list.sessions.find((row) => row.id === created.id)?.prUrl,
+        };
+      }),
+    );
+
+    expect(rebuilt.gone).toEqual([]);
+    expect(rebuilt.report.sessions).toBeGreaterThan(0);
+    expect(rebuilt.prUrl).toBe(url);
+    expect(rebuilt.listed).toBe(url);
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+});
+
+/*
+ * The fixtures the diff cases share: what the branch carries, and the session that carries it.
+ * They live here rather than inside one `describe` because "the diff cap" and "an empty diff" are
+ * two questions about the same measurement.
+ */
+
+/** The `prOpened` entries a folded transcript holds: the PR entry carries no model content. */
+const prEntries = (
+  entries: ReadonlyArray<{
+    readonly kind: string;
+    readonly text: string;
+  }>,
+): number =>
+  entries.filter((entry) => entry.kind === "other" && entry.text === "").length;
+
+/**
+ * Commit `files` files of `lines` lines each on the session's branch, in its own worktree.
+ *
+ * The commit is what the step measures: it reads the *branch's* diff, so a change left uncommitted
+ * in the worktree is not part of what a PR would carry and is not counted here either. `git add -A`
+ * inside the worktree only ever stages what this case just wrote — the worktree is a fresh checkout
+ * of `main`. Zero files commits nothing at all, which is how the empty-diff cases below start a run
+ * from an unchanged checkout.
+ */
+const commitDiff = (input: {
+  readonly worktree: string;
+  readonly files: number;
+  readonly lines: number;
+}): void => {
+  if (input.files === 0) return;
+  for (let file = 0; file < input.files; file += 1) {
+    writeFileSync(
+      join(input.worktree, `change-${file}.txt`),
+      "x\n".repeat(input.lines),
+    );
+  }
+  execSync("git add -A", { cwd: input.worktree, stdio: "ignore" });
+  execSync(
+    `git commit -m ${JSON.stringify(`change ${input.files}x${input.lines}`)}`,
+    { cwd: input.worktree, stdio: "ignore" },
+  );
+};
+
+/**
+ * A session bound to `repoRoot` with a committed diff, and the answer the step gave for it.
+ *
+ * The session's own worktree is what the diff is committed into, read from the snapshot as a
+ * client would read it, and the same snapshot is read back afterwards for what the step left
+ * behind.
+ */
+const drive = (input: {
+  readonly title: string;
+  readonly files: number;
+  readonly lines: number;
+}) =>
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* sessions.registerRepo({
+      repo: factoryRepo,
+      url: "https://github.com/lobiklukas/factory.git",
+      localPath: repoRoot,
+    });
+    const created = yield* sessions.create({
+      repo: factoryRepo,
+      baseRef: "main",
+      title: input.title,
+    });
+    const before = yield* sessions.get(created.id);
+    commitDiff({
+      worktree: before.workspace.path,
+      files: input.files,
+      lines: input.lines,
+    });
+    const answer = yield* sessions.openPullRequest({
+      sessionId: created.id,
+      title: `factory: ${input.title}`,
+      head: `factory/${created.id}`,
+      base: "main",
+    });
+    const after = yield* sessions.get(created.id);
+    return {
+      sessionId: created.id,
+      worktree: before.workspace.path,
+      answer,
+      prUrl: after.session.prUrl,
+      prEntries: prEntries(after.entries),
+      entries: after.entries,
+    };
+  });
+
+/**
+ * The cap on a session's diff (LOB-227), driven through the step that would open the PR.
+ *
+ * Every case here goes through a real worktree and a real branch: the session is bound to
+ * `repoRoot`, so opening it cuts `factory/<id>` off `main`, this file commits a change on that
+ * branch, and the step measures it with `git diff --numstat` exactly as it would in a deployment.
+ * A fake git would prove the arithmetic and nothing else — that the diff the step reads is the
+ * branch's, that the base is the one the PR names, and that an uncommitted change is not counted
+ * are all facts of the real command.
+ *
+ * "Records no document" is asserted twice per refusal, because either half alone is weak: the
+ * transcript holds no `prOpened`, and the widened-cap case opens the same session afterwards and is
+ * answered `opened` rather than `already-open` — which it could not be if a `factory.pr` document
+ * had been committed by the refusal.
+ */
+
+describe("the diff cap", () => {
+  it("opens the one PR when the branch's diff is inside the cap", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/31";
+    const github = makeGithubFake(201, { number: 31, url });
+    const result = await program(
+      drive({ title: "a small diff", files: 2, lines: 10 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    // A diff that is really there, and really measured: two files, twenty lines.
+    expect(
+      execSync("git diff --numstat main...HEAD", {
+        cwd: result.worktree,
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n"),
+    ).toEqual(["10\t0\tchange-0.txt", "10\t0\tchange-1.txt"]);
+    expect(result.answer).toEqual({ number: 31, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
+    expect(result.prUrl).toBe(url);
+    expect(result.prEntries).toBe(1);
+    // The body lists the paths the same measurement counted (LOB-228): the reviewer reads what the
+    // cap refused on, rather than opening the diff to find out.
+    const sent = github.requests[0]?.body as { readonly body: string };
+    expect(sent.body).toContain("## Changed files");
+    expect(sent.body).toContain("- change-0.txt");
+    expect(sent.body).toContain("- change-1.txt");
+  }, 120_000);
+
+  it("refuses a diff with too many files, under the line cap", async () => {
+    const github = makeGithubFake(201, {
+      number: 32,
+      url: "https://github.com/lobiklukas/factory/pull/32",
+    });
+    // 51 files of one line each: over `maxFiles`, far under `maxLines`. The dimensions are
+    // enforced separately, so this must refuse on the file count and say so.
+    const result = await program(
+      drive({ title: "a wide diff", files: 51, lines: 1 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    expect(result.answer).toEqual({
+      outcome: "over-cap",
+      limit: "files",
+      cap: DEFAULT_DIFF_CAP.maxFiles,
+      measured: 51,
+    });
+    // Nothing was asked of GitHub, nothing was committed, and the index still says no PR.
+    expect(github.requests).toEqual([]);
+    expect(result.prUrl).toBeUndefined();
+    expect(result.prEntries).toBe(0);
+  }, 120_000);
+
+  it("refuses a diff with too many lines, under the file cap", async () => {
+    const github = makeGithubFake(201, {
+      number: 33,
+      url: "https://github.com/lobiklukas/factory/pull/33",
+    });
+    // One file, 2001 lines: over `maxLines`, far under `maxFiles`.
+    const result = await program(
+      drive({ title: "a deep diff", files: 1, lines: 2_001 }).pipe(
+        Effect.provide(github.layer),
+      ),
+    );
+
+    expect(result.answer).toEqual({
+      outcome: "over-cap",
+      limit: "lines",
+      cap: DEFAULT_DIFF_CAP.maxLines,
+      measured: 2_001,
+    });
+    expect(github.requests).toEqual([]);
+    expect(result.prUrl).toBeUndefined();
+    expect(result.prEntries).toBe(0);
+  }, 120_000);
+
+  it("accepts the same diff when the configured cap is widened", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/34";
+    const github = makeGithubFake(201, { number: 34, url });
+    // The limits are configuration, not constants in the check: this diff is the one the case above
+    // refuses, and a deployment that allows more files opens it.
+    const wide = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+        prCap: { maxFiles: 60, maxLines: DEFAULT_DIFF_CAP.maxLines },
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      const result = await wide.runPromise(
+        drive({ title: "a wide diff, allowed", files: 51, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      expect(result.answer).toEqual({ number: 34, url, outcome: "opened" });
+      expect(github.requests).toHaveLength(1);
+      expect(result.prUrl).toBe(url);
+    } finally {
+      await wide.dispose();
+    }
+  }, 120_000);
+
+  it("does not re-measure a branch whose PR the log already records", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/35";
+    const github = makeGithubFake(201, { number: 35, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "a small diff, then a large one",
+        });
+        const openedOnce = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: openedOnce.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        const asked = {
+          sessionId: created.id,
+          title: "factory: a small diff, then a large one",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const first = yield* sessions.openPullRequest(asked);
+        // The branch then grows past the cap. The PR exists, so the step's answer is the one its
+        // log records — the cap bounds what the step would open, not what it already opened.
+        commitDiff({
+          worktree: openedOnce.workspace.path,
+          files: 1,
+          lines: DEFAULT_DIFF_CAP.maxLines + 1,
+        });
+        const repeated = yield* sessions.openPullRequest(asked);
+        return { first, repeated };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(opened(result.first)).toEqual({
+      number: 35,
+      url,
+      outcome: "opened",
+    });
+    expect(opened(result.repeated)).toEqual({
+      number: 35,
+      url,
+      outcome: "already-open",
+    });
+    // One POST for both: the retry was answered by the log, whatever the branch has become.
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+
+  it("fails, naming the range, rather than opening a PR it could not measure", async () => {
+    const github = makeGithubFake(201, {
+      number: 36,
+      url: "https://github.com/lobiklukas/factory/pull/36",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "a branch whose base does not exist",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: snapshot.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        const exit = yield* Effect.exit(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: a branch whose base does not exist",
+            head: `factory/${created.id}`,
+            base: "no-such-base",
+          }),
+        );
+        return { exit, head: `factory/${created.id}` };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    // A checkout whose base cannot be read is not a diff that fits: the cap does not disappear
+    // because the measurement broke, and no PR is opened on an unmeasured branch.
+    expect(result.exit._tag).toBe("Failure");
+    if (result.exit._tag !== "Failure") throw new Error("unreachable");
+    const error = result.exit.cause.reasons.flatMap((reason) =>
+      reason._tag === "Fail"
+        ? [reason.error as { operation: string; ref: string }]
+        : [],
+    )[0];
+    expect(error?.operation).toBe("diffSize");
+    expect(error?.ref).toBe(`no-such-base...${result.head}`);
+    expect(github.requests).toEqual([]);
+  }, 120_000);
+});
+
+/**
+ * A branch with nothing to publish (LOB-196): the ordinary result of a docs run over docs that need
+ * no edit, and the run that used to reach GitHub with an empty branch and fail on its 422.
+ *
+ * Both cases drive a real worktree and a real `git diff --numstat`, because "nothing changed" is a
+ * fact about a branch: a fake that answered zero would prove only that the step can read a number it
+ * was handed.
+ */
+describe("an empty diff", () => {
+  it("answers no-change for two runs on an unchanged checkout, announcing each in the transcript", async () => {
+    const github = makeGithubFake(201, {
+      number: 40,
+      url: "https://github.com/lobiklukas/factory/pull/40",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        // Two runs over one unchanged checkout, each its own session — which is what a docs run is.
+        const first = yield* drive({
+          title: "docs that need no edit",
+          files: 0,
+          lines: 0,
+        });
+        const second = yield* drive({
+          title: "docs that still need no edit",
+          files: 0,
+          lines: 0,
+        });
+        return { first, second };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    // The ledger, not an inferred count: a no-op run is not an empty-diff *attempt*, it is no
+    // request at all, twice over.
+    expect(github.requests).toEqual([]);
+    // A value rather than a failure — the run settles — and the state it settles in names no PR.
+    expect(result.first.answer).toEqual({ outcome: "no-change" });
+    expect(result.second.answer).toEqual({ outcome: "no-change" });
+    expect(result.first.prUrl).toBeUndefined();
+    expect(result.first.prEntries).toBe(0);
+    // What a person watching the run reads: one line saying nothing needed documenting, and the base
+    // it was measured against. Without it a no-op run is silence.
+    const said = result.second.entries.filter((entry) =>
+      entry.text.includes("no documentation change"),
+    );
+    expect(said).toHaveLength(1);
+    expect(said[0]?.text).toContain("main");
+  }, 120_000);
+
+  it("opens the PR when a run does change a file, because the guard records nothing", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/41";
+    const github = makeGithubFake(201, { number: 41, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "docs, then an edit",
+        });
+        const before = yield* sessions.get(created.id);
+        const asked = {
+          sessionId: created.id,
+          title: "factory: docs, then an edit",
+          head: `factory/${created.id}`,
+          base: "main",
+        };
+        const empty = yield* sessions.openPullRequest(asked);
+        // The next run edits a page on the same branch: a recorded "nothing to do" would answer
+        // this one too, so what makes the guard safe is that it left nothing behind to read.
+        commitDiff({ worktree: before.workspace.path, files: 1, lines: 3 });
+        const changed = yield* sessions.openPullRequest(asked);
+        const after = yield* sessions.get(created.id);
+        return {
+          empty,
+          changed,
+          prUrl: after.session.prUrl,
+          prEntries: prEntries(after.entries),
+        };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(result.empty).toEqual({ outcome: "no-change" });
+    expect(result.changed).toEqual({ number: 41, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
+    expect(result.prUrl).toBe(url);
+    expect(result.prEntries).toBe(1);
+  }, 120_000);
+
+  it("still opens the PR for a directory that is not its own checkout, where nothing was measured", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/42";
+    const github = makeGithubFake(201, { number: 42, url });
+    // A slug no case registered: the session's working directory is a plain directory, so the step
+    // has no branch to read. "Nothing to publish" is a measurement, and a step that could not
+    // measure must not read the absence as an empty diff — that is `diffCapRefusal`'s rule too.
+    const unmeasured = RepoSlugSchema.make("lobiklukas/unregistered");
+
+    const answer = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          repo: unmeasured,
+          baseRef: "main",
+          title: "a session with no worktree",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        const step = yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: a session with no worktree",
+            head: `factory/${created.id}`,
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+        return { step, worktree: snapshot.workspace.path };
+      }),
+    );
+
+    expect(answer.step).toEqual({ number: 42, url, outcome: "opened" });
+    expect(github.requests).toHaveLength(1);
+  }, 120_000);
+});
+
 /** The page size this loop drives the list with, and the page size the old bound assumed. */
 const PAGE_SIZE = 25;
+
 /**
  * Filler rows this test writes itself. More than the old fixed budget of ten pages (`10 × 25`),
  * so the test fails on a database of *any* size unless the loop is bounded by the data it reads
@@ -2135,6 +3616,12 @@ describe("session list", () => {
         const find = (entries: readonly SessionListEntry[]) =>
           entries.find((entry) => entry.id === created.id);
         const before = find((yield* sessions.list({ limit: 100 })).sessions);
+        // The list's cost is the index column, not a fold per read (R6): a corrupted column is
+        // what the list shows, and the rebuild below is what puts the log's number back. Both
+        // halves matter for LOB-153 — the fold has to write `cost_total` from `pi.usage`, or a
+        // stale number would outlive the repair.
+        yield* sql`UPDATE session_activity SET cost_total = 9.99 WHERE session_id = ${created.id}`;
+        const corrupted = find((yield* sessions.list({ limit: 100 })).sessions);
 
         // Drop the derived rows, as losing an index table would. Every row, not just this case's:
         // the claim under test is that the whole index comes back from the log, and the database
@@ -2151,10 +3638,11 @@ describe("session list", () => {
         }>`
           SELECT slug, url, default_base_ref FROM repos WHERE slug = ${factoryRepo}
         `;
-        return { before, empty, report, after, repos };
+        return { before, corrupted, empty, report, after, repos };
       }),
     );
 
+    expect(result.corrupted?.costTotal).toBe(9.99);
     expect(result.empty).toBe(0);
     expect(result.report.sessions).toBeGreaterThan(0);
     expect(result.after).toBeDefined();
@@ -2425,6 +3913,924 @@ describe("approvals", () => {
     if (failure._tag !== "Some") throw new Error("unreachable");
     expect(failure.value.code).toBe("invalid_input");
   });
+});
+
+/**
+ * An approval is durable across release (LOB-147): the request is committed into the log, and both
+ * answers to "what is waiting" are folds of it — the snapshot folds the entries, the list reads the
+ * `session_approvals` row that indexes them, and `rebuildIndexes` re-derives the row from the log.
+ */
+describe("approvals after the owner is released", () => {
+  it("reports the pending approval from the fold, twice, and re-asks for nothing", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "durable approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+          detail: "a person has to answer this",
+        });
+        // The row is written with the request, so the pending list answers before anything folds.
+        const indexed = yield* sessions.listApprovals(created.id);
+
+        // Release the owner: from here the session is read by folding its log (D8).
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        const refolded = yield* sessions.get(created.id);
+        const listed = yield* sessions.listApprovals(created.id);
+        // A repeat after the release reads what the first request left behind — the row and the
+        // entry — rather than asking again.
+        const repeated = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-durable",
+          action: "push refs/heads/main",
+        });
+        const entries = (yield* sessions.get(created.id)).entries.filter(
+          (entry) => entry.kind === "other",
+        ).length;
+        // Leave no owner running: an owned session rewrites its own activity row on every event.
+        yield* sessions.close;
+        return {
+          request,
+          indexed,
+          folded,
+          refolded,
+          listed,
+          repeated,
+          entries,
+        };
+      }),
+    );
+
+    expect(outcome.indexed.approvals).toEqual([outcome.request]);
+    // The fold, not a remembered set: this snapshot comes from the log alone.
+    expect(outcome.folded.session.mode).toBe("historical");
+    expect(outcome.folded.approvals).toEqual([outcome.request]);
+    // Folding the same log again yields the same list, id by id.
+    expect(outcome.refolded.approvals).toEqual(outcome.folded.approvals);
+    expect(outcome.listed.approvals).toEqual([outcome.request]);
+    expect(outcome.repeated).toEqual(outcome.request);
+    // One request, one entry: the retry was answered by the record, not appended beside it.
+    expect(outcome.entries).toBe(1);
+  }, 120_000);
+
+  it("rebuilds the pending row from the log when the row is lost", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "rebuilt approvals" });
+        const request = yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "apr-rebuilt",
+          action: "tag v1",
+        });
+        yield* sessions.close;
+        // Lose the derived row, the way a dropped table or a write killed before it committed
+        // loses it. The log still holds the request.
+        yield* sql`DELETE FROM session_approvals WHERE session_id = ${created.id}`;
+        const withoutRow = yield* sessions.listApprovals(created.id);
+        const stillFolded = yield* sessions.get(created.id);
+        const report = yield* rebuildIndexes;
+        const rebuilt = yield* sessions.listApprovals(created.id);
+        return { request, withoutRow, stillFolded, report, rebuilt };
+      }),
+    );
+
+    // The list is an index: with the row gone it answers nothing until a rebuild refolds.
+    expect(outcome.withoutRow.approvals).toEqual([]);
+    // The snapshot never depended on the row — it folds the log.
+    expect(outcome.stillFolded.approvals).toEqual([outcome.request]);
+    expect(outcome.report.sessions).toBeGreaterThan(0);
+    expect(outcome.rebuilt.approvals).toEqual([outcome.request]);
+  }, 120_000);
+});
+
+/**
+ * The run's prompt is resolved from its column (docs/board.md B6, LOB-174).
+ *
+ * The claim is about what the model was *told*, so it is read from the log rather than from the
+ * extension that built it: `pi.system` entries are the system prompt Pi Durable replays before a
+ * request, and they are committed, so a run that has already answered still says what it was told.
+ *
+ * Each case makes its own board instance over definition version 2
+ * (`0010_seed_pipeline_skills.ts`), the version that binds the seeded skills to their stages, and
+ * its own card. Sessions here are scratch ones (no repo), because the column is the only thing
+ * under test — a repo would add a clone that says nothing about the prompt.
+ */
+/**
+ * Cited knowledge pages (LOB-204, part 1 of LOB-47).
+ *
+ * A page is a log fact and a derived row: `recordPage` commits the `factory.page` document and the
+ * entry that announces it, `listPages` reads the rows, and `rebuildIndexes` refills those rows from
+ * the entries. The three cases below are the acceptance criteria in that order — round trip with
+ * citations, a rebuild that reproduces pages after the rows are deleted, and a citation of a session
+ * that does not exist still reading back.
+ */
+describe("cited pages", () => {
+  it("records two pages with their citations and reads them back by name", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "the session a page learned from",
+        });
+        const host = yield* sessions.create({ title: "cited pages" });
+        // `ses_` with zeros is syntactically a session id and is nobody's: the citation is data.
+        const unknown = "ses_0000000000000000";
+        const traps = yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "b-batch-the-fold",
+          kind: "trap",
+          content: "a per-batch delete clobbers another batch's rows",
+          links: ["a-the-log-is-the-truth"],
+          sources: [source.id],
+        });
+        const decisions = yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "a-the-log-is-the-truth",
+          kind: "decision",
+          content: "the log is the truth; the rows are a cache",
+          links: [],
+          sources: [source.id, unknown],
+        });
+        const listed = yield* sessions.listPages({ sessionId: host.id });
+        const rows = yield* sql<{ name: string }>`
+          SELECT name FROM session_pages WHERE session_id = ${host.id}
+        `;
+        const empty = yield* sessions.create({ title: "no pages" });
+        const nothing = yield* sessions.listPages({ sessionId: empty.id });
+        return {
+          traps,
+          decisions,
+          listed,
+          nothing,
+          rows: rows.length,
+          sessionId: host.id,
+        };
+      }),
+    );
+
+    // Ordered by name, not by the order they were written: two logs that recorded them in a
+    // different order read back the same way.
+    expect(outcome.listed.pages.map((page) => page.name)).toEqual([
+      "a-the-log-is-the-truth",
+      "b-batch-the-fold",
+    ]);
+    expect(outcome.listed.pages[0]).toEqual({
+      name: "a-the-log-is-the-truth",
+      kind: "decision",
+      content: "the log is the truth; the rows are a cache",
+      links: [],
+      sources: [outcome.decisions.sources[0], "ses_0000000000000000"],
+    });
+    // The citation of a session nobody can find is stored as given (criterion 3).
+    expect(outcome.listed.pages[0]?.sources).toContain("ses_0000000000000000");
+    expect(outcome.listed.pages[1]?.links).toEqual(["a-the-log-is-the-truth"]);
+    expect(outcome.rows).toBe(2);
+    // A session that taught nothing has no pages, and reads as none rather than as an error.
+    expect(outcome.nothing.pages).toEqual([]);
+  }, 120_000);
+
+  it("replaces a page it already holds, and refuses one with no name", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({ title: "replace a page" });
+        const first = yield* sessions.recordPage({
+          sessionId: created.id,
+          name: "a-page",
+          kind: "guide",
+          content: "first draft",
+          links: [],
+          sources: [],
+        });
+        const second = yield* sessions.recordPage({
+          sessionId: created.id,
+          name: "a-page",
+          kind: "guide",
+          content: "second draft",
+          links: ["another-page"],
+          sources: [],
+        });
+        const listed = yield* sessions.listPages({ sessionId: created.id });
+        const rows = yield* sql<{ name: string }>`
+          SELECT name FROM session_pages WHERE session_id = ${created.id}
+        `;
+        const refused = yield* Effect.exit(
+          sessions.recordPage({
+            sessionId: created.id,
+            name: "  ",
+            kind: "guide",
+            content: "nobody can cite this",
+            links: [],
+            sources: [],
+          }),
+        );
+        return { first, second, listed, rows: rows.length, refused };
+      }),
+    );
+
+    expect(outcome.listed.pages).toHaveLength(1);
+    expect(outcome.listed.pages[0]?.content).toBe("second draft");
+    expect(outcome.rows).toBe(1);
+    const failure = Exit.findErrorOption(outcome.refused);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.isSome(failure) ? failure.value._tag : undefined).toBe(
+      "SessionError",
+    );
+  }, 120_000);
+
+  it("reproduces the pages from the log after the derived rows are deleted", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({ title: "a citation to keep" });
+        const host = yield* sessions.create({ title: "rebuild the pages" });
+        yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "b-second",
+          kind: "trap",
+          content: "the second page",
+          links: ["a-first"],
+          sources: [source.id],
+        });
+        yield* sessions.recordPage({
+          sessionId: host.id,
+          name: "a-first",
+          kind: "decision",
+          content: "the first page",
+          links: [],
+          sources: ["ses_0000000000000001"],
+        });
+        const before = yield* sessions.listPages({ sessionId: host.id });
+        // The rows are the cache, so deleting them must cost nothing a rebuild cannot refill.
+        yield* sql`DELETE FROM session_pages WHERE session_id = ${host.id}`;
+        const blanked = yield* sessions.listPages({ sessionId: host.id });
+        const report = yield* rebuildIndexes;
+        const refolded = yield* sessions.listPages({ sessionId: host.id });
+        return { before, blanked, report, refolded, sessionId: host.id };
+      }),
+    );
+
+    expect(outcome.before.pages).toHaveLength(2);
+    expect(outcome.blanked.pages).toEqual([]);
+    expect(outcome.report.sessions).toBeGreaterThan(0);
+    // Same pages, same citations, same order — from the `factory.page` entries in the log.
+    expect(outcome.refolded.pages).toEqual(outcome.before.pages);
+  }, 120_000);
+});
+
+/**
+ * The pages a session carries reach its prompt (LOB-205, part 2 of LOB-47).
+ *
+ * The service reads `session_pages` on every owner acquisition and hands the pages to
+ * `openSession`, so a session opened *after* its pages were recorded is told them. The proof is the
+ * committed `pi.system` entry — the prompt Pi Durable replays before a request — rather than the
+ * extension that built it: it is what the model was sent, and it survives the run that sent it.
+ *
+ * The owner is released between recording and sending (`sessions.close`) because a live owner is not
+ * reopened: the read happens at open, which is exactly the freshness rule being tested — a page
+ * curated since the session last ran reaches its next run.
+ */
+describe("the cited pages a session carries", () => {
+  /** The prompt sections a session's own log leaves in effect, read the way a client would. */
+  const promptSections = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readPromptSections(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
+
+  it("tells the next run the pages the session holds, and says nothing about pages it lacks", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const source = yield* sessions.create({
+          title: "the session that taught this",
+        });
+        const told = yield* sessions.create({ title: "a session with pages" });
+        const bare = yield* sessions.create({ title: "a session with none" });
+        yield* sessions.recordPage({
+          sessionId: told.id,
+          name: "a-the-log-is-the-truth",
+          kind: "decision",
+          content: "the log is the truth; the rows are a cache",
+          links: ["b-batch-the-fold"],
+          sources: [source.id],
+        });
+        yield* sessions.recordPage({
+          sessionId: told.id,
+          name: "b-batch-the-fold",
+          kind: "trap",
+          content: "a per-batch delete clobbers another batch's rows",
+          links: [],
+          sources: [source.id],
+        });
+        // Release every owner, so the next send opens a harness rather than reusing the one that was
+        // open when the pages were written.
+        yield* sessions.close;
+        yield* sessions.send({ sessionId: told.id, content: "begin" });
+        yield* sessions.send({ sessionId: bare.id, content: "begin" });
+        yield* waitUntil(
+          sessions
+            .get(told.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the paged run to settle",
+        );
+        yield* waitUntil(
+          sessions
+            .get(bare.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the bare run to settle",
+        );
+        return {
+          source: source.id,
+          told: yield* promptSections(told.id),
+          bare: yield* promptSections(bare.id),
+        };
+      }),
+    );
+
+    // The section is in the prompt the model was sent, with both pages and their citation — the
+    // exact text, because "the prompt shows the pages it received" is what the run was told.
+    expect(outcome.told["pages"]).toBe(
+      [
+        "<pages>",
+        "## a-the-log-is-the-truth (decision)",
+        "the log is the truth; the rows are a cache",
+        "links: b-batch-the-fold",
+        `sources: ${outcome.source}`,
+        "",
+        "## b-batch-the-fold (trap)",
+        "a per-batch delete clobbers another batch's rows",
+        `sources: ${outcome.source}`,
+        "</pages>",
+      ].join("\n"),
+    );
+    // A session with no pages is told nothing about pages: no section, not an empty one.
+    expect(outcome.bare["pages"]).toBeUndefined();
+  }, 120_000);
+});
+
+/**
+ * The bounded curator pass (LOB-206, part 3 of LOB-47).
+ *
+ * The pass is one call over a finished session, and what it may write is bounded by `maxPages`. The
+ * cases below are the acceptance criteria in order: a session that taught something writes at most
+ * K pages for exactly one call, a session that taught nothing new writes nothing for exactly one
+ * call, and the call's spend is charged to the curated session rather than to a curator's own.
+ *
+ * The request count is read from the model provider's counter, not from the pass's answer: a suite
+ * that trusted the pass to report its own call count would pass a regression that made two.
+ */
+describe("the curator pass over a finished session", () => {
+  const curateRoot = mkdtempSync(join(tmpdir(), "factory-core-curate-"));
+
+  /** A service over a scripted model, so the cap and the "nothing new" answer can both happen. */
+  const withCuration = (fauxCuration: string, fauxCommand?: string) => {
+    const faux = createFauxModelAccess({
+      fauxCuration,
+      ...(fauxCommand === undefined ? {} : { fauxCommand }),
+    });
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot: curateRoot }).pipe(
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    const program = <A, E>(
+      effect: Effect.Effect<A, E, SessionService | SqlClient>,
+    ) => runtime.runPromise(effect);
+    return { faux, runtime, program };
+  };
+
+  /** Three proposals, so a cap of two has work to do. */
+  const threeProposals = JSON.stringify(
+    Array.from({ length: 3 }, (_, index) => ({
+      name: `page-${index}`,
+      kind: "trap",
+      content: `what the session taught number ${index}`,
+      links: [],
+      sources: [],
+    })),
+  );
+
+  /** A session that ran one turn: a real transcript with a tool result in it. */
+  const taught = (
+    sessions: {
+      create: (input: {
+        title: string;
+      }) => Effect.Effect<SessionSummary, SessionError>;
+      send: (input: {
+        sessionId: SessionId;
+        content: string;
+      }) => Effect.Effect<{ placement: string }, SessionError>;
+      get: (id: SessionId) => Effect.Effect<SessionSnapshot, SessionError>;
+    },
+    title: string,
+  ) =>
+    Effect.gen(function* () {
+      const created = yield* sessions.create({ title });
+      yield* sessions.send({ sessionId: created.id, content: "do the work" });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        "the turn to settle",
+      );
+      return created;
+    });
+
+  it("writes at most maxPages from one call, and cites the session it curated", async () => {
+    const { faux, runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(
+            sessions,
+            "a session that taught something",
+          );
+          const before = faux.faux.state.callCount;
+          const curated = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 2,
+          });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, calls, pages: pages.pages, sessionId: created.id };
+        }),
+      );
+
+      // K configured is K written, from a model that proposed more.
+      expect(outcome.curated.pages.map((page) => page.name)).toEqual([
+        "page-0",
+        "page-1",
+      ]);
+      expect(outcome.curated.proposed).toBe(3);
+      expect(outcome.calls).toBe(1);
+      // The pages are the session's own: a derived row and a log fact, read back by `listPages`.
+      expect(outcome.pages.map((page) => page.name)).toEqual([
+        "page-0",
+        "page-1",
+      ]);
+      for (const page of outcome.pages) {
+        expect(page.sources).toEqual([outcome.sessionId]);
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("commits nothing, for one call, when the session already holds what was proposed", async () => {
+    const { faux, runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(sessions, "a session curated twice");
+          const first = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 3,
+          });
+          const before = faux.faux.state.callCount;
+          const second = yield* sessions.curate({
+            sessionId: created.id,
+            maxPages: 3,
+          });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { first, second, calls, pages: pages.pages };
+        }),
+      );
+
+      expect(outcome.first.pages).toHaveLength(3);
+      // Learned nothing new: the second pass wrote no page, and still made exactly one call.
+      expect(outcome.second.pages).toEqual([]);
+      expect(outcome.second.proposed).toBe(3);
+      expect(outcome.calls).toBe(1);
+      expect(outcome.pages).toHaveLength(3);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("charges the call to the curated session, and opens no session of its own", async () => {
+    const { runtime, program } = withCuration(threeProposals);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* taught(
+            sessions,
+            "a session that pays for its curation",
+          );
+          const before = yield* sessions.get(created.id);
+          const listedBefore = yield* sessions.list({ limit: 100 });
+          yield* sessions.curate({ sessionId: created.id, maxPages: 3 });
+          const after = yield* sessions.get(created.id);
+          const listedAfter = yield* sessions.list({ limit: 100 });
+          return { created, before, after, listedBefore, listedAfter };
+        }),
+      );
+
+      const tokens = (usage: SessionUsage): number =>
+        usage.models.reduce(
+          (total, model) => total + model.usage.totalTokens,
+          0,
+        );
+      // The spend is the curated session's: its own ledger grew by the call.
+      expect(tokens(outcome.after.usage)).toBeGreaterThan(
+        tokens(outcome.before.usage),
+      );
+      // And there is no curator session anywhere to carry it instead.
+      expect(outcome.listedAfter.sessions).toHaveLength(
+        outcome.listedBefore.sessions.length,
+      );
+      expect(
+        outcome.listedAfter.sessions.some(
+          (session) => session.id === outcome.created.id,
+        ),
+      ).toBe(true);
+      // The index row agrees with the ledger: what `listSessions` reports as spend is what the log
+      // says the session spent, curation included.
+      const curatedRow = outcome.listedAfter.sessions.find(
+        (session) => session.id === outcome.created.id,
+      );
+      const totalCost = outcome.after.usage.models.reduce(
+        (total, model) => total + model.usage.costTotal,
+        0,
+      );
+      expect(curatedRow?.costTotal).toBeCloseTo(totalCost);
+      // A curated session has not started running: both its summary and the pass itself stay idle.
+      expect(outcome.after.session.status).toBe("idle");
+      expect(outcome.after.live.busy).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("commits no page, for one call, when the model proposes nothing", async () => {
+    const { faux, runtime, program } = withCuration("[]");
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a session that taught nothing",
+          });
+          const before = faux.faux.state.callCount;
+          const curated = yield* sessions.curate({ sessionId: created.id });
+          const calls = faux.faux.state.callCount - before;
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, calls, pages: pages.pages };
+        }),
+      );
+
+      // An empty answer is an answer: no page, and the one call the pass is allowed to make.
+      expect(outcome.curated.pages).toEqual([]);
+      expect(outcome.calls).toBe(1);
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("writes a page the model proposed twice only once", async () => {
+    const twice = JSON.stringify([
+      {
+        name: "a-trap",
+        kind: "trap",
+        content: "the same lesson",
+        links: [],
+        sources: [],
+      },
+      {
+        name: "a-trap",
+        kind: "trap",
+        content: "the same lesson",
+        links: [],
+        sources: [],
+      },
+      {
+        name: "another",
+        kind: "guide",
+        content: "a second lesson",
+        links: [],
+        sources: [],
+      },
+    ]);
+    const { runtime, program } = withCuration(twice);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a repeated proposal",
+          });
+          const curated = yield* sessions.curate({ sessionId: created.id });
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { curated, pages: pages.pages };
+        }),
+      );
+
+      expect(outcome.curated.proposed).toBe(3);
+      expect(outcome.curated.pages.map((page) => page.name)).toEqual([
+        "a-trap",
+        "another",
+      ]);
+      expect(outcome.pages.map((page) => page.name)).toEqual([
+        "a-trap",
+        "another",
+      ]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("charges an answer it cannot read to the curated session, then refuses it", async () => {
+    const { runtime, program } = withCuration(
+      "I think the session taught one useful thing.",
+    );
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "an unreadable curation",
+          });
+          const before = yield* sessions.get(created.id);
+          const refused = yield* Effect.exit(
+            sessions.curate({ sessionId: created.id }),
+          );
+          const after = yield* sessions.get(created.id);
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          return { refused, before, after, pages: pages.pages };
+        }),
+      );
+
+      const failure = Exit.findErrorOption(outcome.refused);
+      expect(Option.isSome(failure)).toBe(true);
+      expect(Option.getOrThrow(failure).code).toBe("harness");
+      // The call was made and billed, so the session carries it even though nothing was written.
+      const tokens = (usage: SessionUsage): number =>
+        usage.models.reduce(
+          (total, model) => total + model.usage.totalTokens,
+          0,
+        );
+      expect(tokens(outcome.after.usage)).toBeGreaterThan(
+        tokens(outcome.before.usage),
+      );
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a session that is still running, without asking the model", async () => {
+    // A command that takes long enough for a curation attempt to arrive while it runs.
+    const { faux, runtime, program } = withCuration(threeProposals, "sleep 3");
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "a running session",
+          });
+          // The counter is read before the turn and after it settles: the in-flight turn spends its
+          // own two calls (the tool call and the answer), so a third would be the refusal asking the
+          // model anyway — which spends a call and writes nothing, worse than either answer.
+          const before = faux.faux.state.callCount;
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "take your time",
+          });
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+            "the turn to start",
+          );
+          const refused = yield* Effect.exit(
+            sessions.curate({ sessionId: created.id }),
+          );
+          const pages = yield* sessions.listPages({ sessionId: created.id });
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+            "the turn to settle",
+          );
+          const calls = faux.faux.state.callCount - before;
+          return { refused, calls, pages: pages.pages };
+        }),
+      );
+
+      const failure = Exit.findErrorOption(outcome.refused);
+      expect(Option.isSome(failure)).toBe(true);
+      const error = Option.getOrThrow(failure);
+      expect(error._tag).toBe("SessionError");
+      expect(error.code).toBe("busy");
+      // Exactly the turn's own two calls: the refused curation added none.
+      expect(outcome.calls).toBe(2);
+      expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+describe("a run's prompt comes from its column", () => {
+  /** A board instance over the definition version that binds skills to the stages (0010). */
+  const newBoard = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const id = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (
+        ${id},
+        ${`factory-test/${randomBytes(3).toString("hex")}`},
+        'default',
+        2
+      )
+    `;
+    return id;
+  });
+
+  /**
+   * A card in `column` on `boardId`, pinned to the definition version it started under. The id's
+   * shape is the domain's, not the table's.
+   */
+  const newCard = (boardId: string, column: string, version = 2) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const id = `tsk_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
+        VALUES (${id}, ${boardId}, ${`a card in ${column}`}, ${column}, ${version}, 1)
+      `;
+      return id;
+    });
+
+  /** Start a run on a card and let it settle, so the log holds the prompt it ran under. */
+  const startRun = (
+    cardId: string,
+    column: string,
+  ): Effect.Effect<SessionId, SessionError, SessionService> =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const created = yield* sessions.create({
+        taskId: cardId,
+        taskColumn: column,
+      });
+      yield* sessions.send({
+        sessionId: created.id,
+        content: `begin in ${column}`,
+      });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        `the ${column} run to settle`,
+      );
+      return created.id;
+    });
+
+  /** The prompt sections the run's own log leaves in effect. */
+  const promptSections = (
+    sessionId: SessionId,
+  ): Effect.Effect<Readonly<Record<string, string>>, SessionError, SqlClient> =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readPromptSections(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
+
+  /** Edit the `specify` skill's body through the service that owns it, returning what it was. */
+  const editSpecifyBody = (body: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const skills = yield* SkillService;
+        const before = yield* skills.get("specify");
+        yield* skills.upsert({ ...before, body });
+        return before;
+      }).pipe(Effect.provide(SkillServiceLive)),
+    );
+
+  it("tells a specifying run the specify skill, and a building run nothing of it", async () => {
+    const prompts = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const specCard = yield* newCard(boardId, "specifying");
+        const buildCard = yield* newCard(boardId, "building");
+        return {
+          specifying: yield* promptSections(
+            yield* startRun(specCard, "specifying"),
+          ),
+          building: yield* promptSections(
+            yield* startRun(buildCard, "building"),
+          ),
+        };
+      }),
+    );
+
+    // 0009's seeded body, which is what "the run receives the specify skill text" means.
+    expect(prompts.specifying["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(prompts.building["skill_specify"]).toBeUndefined();
+    // The building run is not prompt-less: it carries its own column's skill, so the absence above
+    // is the column's doing rather than a session that was told nothing at all.
+    expect(prompts.building["skill_implement"]).toContain("smallest change");
+  }, 120_000);
+
+  it("changes the next run's prompt when a seeded body is edited", async () => {
+    const marker = `# Specify\n\nAsk about ${randomBytes(4).toString("hex")} before writing code.`;
+
+    const before = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+
+    const seeded = await editSpecifyBody(marker);
+    const after = await program(
+      Effect.gen(function* () {
+        // A new card and a new run: what a run is told is resolved when its session opens, so the
+        // next run is where an edited body shows up.
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        return yield* promptSections(yield* startRun(cardId, "specifying"));
+      }),
+    );
+    // Put the seed back, so a later case reads what 0009 wrote rather than this one's text.
+    await editSpecifyBody(seeded.body);
+
+    expect(before["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(before["skill_specify"]).not.toContain(marker);
+    expect(after["skill_specify"]).toContain(marker);
+  }, 120_000);
+
+  it("refuses to open a run whose column names a skill the factory does not hold", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        // A definition of its own, so the seeded pipeline is left exactly as 0010 wrote it.
+        const definitionId = `dangling${randomBytes(3).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns)
+          VALUES (
+            ${definitionId}, 1, 'Dangling pipeline',
+            ${JSON.stringify([
+              { name: "intake", kind: "resting", skills: [], requires: [] },
+              {
+                name: "specifying",
+                kind: "working",
+                role: "specifier",
+                skills: ["explain"],
+                requires: [],
+              },
+            ])}::jsonb
+          )
+        `;
+        const boardId = `brd_${randomBytes(13).toString("hex")}`;
+        yield* sql`
+          INSERT INTO board_instances (id, repo, definition_id, definition_version)
+          VALUES (${boardId}, ${`factory-test/${randomBytes(3).toString("hex")}`}, ${definitionId}, 1)
+        `;
+        const cardId = yield* newCard(boardId, "specifying", 1);
+        const sessions = yield* SessionService;
+        return yield* Effect.exit(
+          sessions.create({ taskId: cardId, taskColumn: "specifying" }),
+        );
+      }),
+    );
+
+    const failure = Exit.findErrorOption(outcome);
+    expect(failure._tag).toBe("Some");
+    if (failure._tag !== "Some") throw new Error("unreachable");
+    expect(failure.value.code).toBe("invalid_input");
+    expect(failure.value.message).toContain('skill "explain"');
+  }, 120_000);
 });
 
 describe("request limits", () => {
@@ -3109,4 +5515,156 @@ describe("a session holds no credential", () => {
       expect(contents).not.toContain(token);
     }
   });
+});
+
+/**
+ * A mission over the service (LOB-230): start one, and read the phase it reached off the session's
+ * snapshot rather than off a second call.
+ *
+ * The phases run as one durable task (`packages/harness/src/mission.ts`), so this is the case the
+ * harness suite cannot make: the task is admitted by a service call, and the answer is read back
+ * through the same `getSession` a client uses. A scratch session declares no `.factory/config`, so
+ * the mission reaches `verify` and fails there for the honest reason — the repo declares no verify
+ * command — which is a settled mission whose phase is still readable.
+ */
+describe("a mission on a session", () => {
+  it("reports no mission for a session that never started one", async () => {
+    const snapshots = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "no mission" });
+        const live = yield* sessions.get(created.id);
+        // The fold is a different read path and must not disagree about there being no mission.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { live, folded };
+      }),
+    );
+
+    // Absent, not an empty phase: "no mission" and "a mission with no phase yet" are different
+    // facts, and a client handed `phase: ""` would have to guess which one it got.
+    expect(snapshots.live.mission).toBeUndefined();
+    expect(snapshots.folded.mission).toBeUndefined();
+    expect(snapshots.folded.session.mode).toBe("historical");
+  }, 120_000);
+
+  it("starts one, answers its id, and reports the phase it reached", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a mission" });
+        const started = yield* sessions.startMission({
+          sessionId: created.id,
+          feature: "a mission over the service",
+        });
+        // The phase the mission is in, as it commits phases: `plan` first, and `verify` once the
+        // phases have run. Read through the snapshot, which is the surface the contract names.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map((snapshot) => snapshot.mission?.phase === "verify"),
+            ),
+          "the mission to reach verify",
+        );
+        const snapshot = yield* sessions.get(created.id);
+        // The mission settles there: a scratch session declares no verify command, so the phase
+        // that runs is the one that reports it. The task is gone from the live list, the record is
+        // not — that is what makes the phase readable after the work has stopped.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (state) =>
+                  !state.tasks.some((task) => task.kind === "factory.mission"),
+              ),
+            ),
+          "the mission to settle",
+        );
+        const settled = yield* sessions.get(created.id);
+        // Release the owner: the mission's record is a document, so the fold reports it too.
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { started, snapshot, settled, folded };
+      }),
+    );
+
+    // The id the call answered is the mission's, and it is the one the snapshot names.
+    expect(outcome.started.sessionId).toBe(outcome.snapshot.session.id);
+    expect(outcome.started.taskId).toEqual(expect.any(String));
+    expect(outcome.snapshot.mission).toEqual({
+      taskId: outcome.started.taskId,
+      phase: "verify",
+      entered: ["plan", "implement", "verify"],
+    });
+    // A settled mission still reports the phase it reached, and the transcript says nothing about
+    // it: a mission is not a turn (the phases that do work are LOB-231's).
+    expect(outcome.settled.mission).toEqual(outcome.snapshot.mission);
+    expect(outcome.settled.tasks.map((task) => task.kind)).not.toContain(
+      "factory.mission",
+    );
+    expect(outcome.settled.entries.some((entry) => entry.kind === "user")).toBe(
+      false,
+    );
+    // D8: the live read and the fold must not disagree about the mission either.
+    expect(outcome.folded.session.mode).toBe("historical");
+    expect(outcome.folded.mission).toEqual(outcome.snapshot.mission);
+  }, 120_000);
+
+  it("reports no mission on a fork of a session that ran one", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "forked mission" });
+        yield* sessions.startMission({
+          sessionId: created.id,
+          feature: "a mission the fork must not inherit",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.mission !== undefined)),
+          "the parent to record its mission",
+        );
+        const parent = yield* sessions.get(created.id);
+        const fork = yield* sessions.fork({
+          sessionId: created.id,
+          at: parent.entries[parent.entries.length - 1]?.id,
+        });
+        const forked = yield* sessions.get(fork.id);
+        return { parent, forked };
+      }),
+    );
+
+    // The parent has a mission; the fork has none. A fork is a new log whose entries are copied and
+    // whose mission documents are not (`copyEntries`), so this also pins that: a fork that grew a
+    // mission out of its parent's log would report a phase nothing in this log ever ran.
+    expect(outcome.parent.mission?.taskId).toEqual(expect.any(String));
+    expect(outcome.forked.mission).toBeUndefined();
+  }, 120_000);
+
+  it("refuses a mission with no feature, and answers no id for it", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "blank mission" });
+        const refused = yield* Effect.result(
+          sessions.startMission({ sessionId: created.id, feature: "   " }),
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return { refused, snapshot };
+      }),
+    );
+
+    // A blank feature is refused before a task is created: a mission whose phases and result are
+    // about nothing is worse than a typed error.
+    expect(outcome.refused._tag).toBe("Failure");
+    expect(
+      outcome.refused._tag === "Failure"
+        ? outcome.refused.failure.message
+        : undefined,
+    ).toContain("feature");
+    expect(outcome.snapshot.mission).toBeUndefined();
+  }, 120_000);
 });

@@ -6,7 +6,11 @@
  * (`ConversationView.docs`), so they are read defensively: an unknown or renamed field drops out
  * of the projection instead of breaking it, which is the point of having a projection at all.
  */
-import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
+import type {
+  ConversationView,
+  EntryRecord,
+  TaskGraph,
+} from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
   ImageContent,
@@ -22,11 +26,13 @@ import type {
   SessionLive,
   SessionStatus,
   SessionUsage,
+  SessionTask,
   ToolCallRef,
   ToolSlotView,
   TranscriptEntry,
   TranscriptEntryKind,
 } from "@repo/domain/Session";
+import type { ApprovalVerdict } from "@repo/domain/Approval";
 
 /** The conversation documents this projection reads, and the entry kind this package writes. */
 export const LIVE_DOC = "pi.live";
@@ -38,9 +44,146 @@ export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
+/** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
+export const FORK_DOC_KIND = "factory.fork";
+/**
+ * The link a replay's log records (LOB-198): the session it replays, itself, and both models.
+ *
+ * It lives in the *replay's* log, never the source's: replaying must not change the recorded run it
+ * replays, so the source stays byte-identical and this document is the only place the pair is named.
+ */
+export const REPLAY_DOC_KIND = "factory.replay";
+
+/**
+ * `factory.replay` → the pair of sessions a replay names, and the model it ran on with the one its
+ * source recorded. An empty field is a document that does not say, which every reader copes with:
+ * `model` empty means the log never saw a turn.
+ */
+export const projectReplayDoc = (
+  value: JsonValue | undefined,
+): {
+  readonly source: string;
+  readonly replay: string;
+  readonly model: string;
+  readonly from: string;
+} => ({
+  source: stringAt(value, "source") ?? "",
+  replay: stringAt(value, "replay") ?? "",
+  model: stringAt(value, "model") ?? "",
+  from: stringAt(value, "from") ?? "",
+});
+
 export const TITLE_ENTRY_KIND = "factory.title";
+/**
+ * The entry a session's PR is announced with (LOB-177). It carries the link, and it exists because
+ * Pi Durable's conversation view mounts only its own built-in documents: a `PrDoc` commit is not
+ * visible to an attached client, so the record and the announcement are two writes in one commit.
+ */
+export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
+/**
+ * The entry a recorded page is announced with. Distinct from the document kind (`factory.page`), as
+ * `factory.pr` is announced by `factory.pr.opened`: documents and entries are different namespaces,
+ * and one name for both would make a fold over entries unable to say which it was reading.
+ */
+export const PAGE_ENTRY_KIND = "factory.page.written";
+/**
+ * The entry an unchanged branch is announced with (LOB-196): the PR step measured the branch
+ * against its base, found nothing to publish, and opened nothing.
+ *
+ * An entry rather than a document, for the reason `factory.pr.opened` is one: a no-change answer
+ * leaves the session's state untouched — no PR, no document, no row — so what a person watching the
+ * run has to read it from is the transcript. Without it a no-op run is silence, which is
+ * indistinguishable from a run that never reached the PR step at all.
+ */
+export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
+/**
+ * One approval as a log records it (D11, LOB-147): the request, and the decision that settled it.
+ *
+ * The session id is not here, because a log *is* one session: the caller that needs it has it, and
+ * carrying it would let a fold fabricate an id its log never named.
+ */
+export type ApprovalLogRecord = {
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+  readonly decision?: {
+    readonly decision: ApprovalVerdict;
+    readonly actor: string;
+    readonly decidedAt: string;
+  };
+};
+
+/** The verdict in a decision entry, or `undefined` for anything that is not one. */
+const verdictAt = (
+  value: JsonValue | undefined,
+): ApprovalVerdict | undefined => {
+  const verdict = stringAt(value, "decision");
+  return verdict === "approved" || verdict === "denied" ? verdict : undefined;
+};
+
+/**
+ * `factory.approval.requested` and `factory.approval.decided` → one record per request id.
+ *
+ * Folded rather than accumulated, so two folds of one log agree: a repeated request id (a retried
+ * request whose first commit landed, or a log that recorded the same request twice) is one record,
+ * the first request winning, and a decision settles the request it names. A decision whose request
+ * is not in the log settles nothing, and is dropped rather than invented into a request.
+ *
+ * Order is the pending list's order — `requestedAt`, then `requestId` for two asks in one
+ * millisecond — because both the snapshot fold and the index's list answer from it.
+ */
+export const projectApprovals = (
+  entries: readonly EntryRecord[],
+): readonly ApprovalLogRecord[] => {
+  const records = new Map<string, ApprovalLogRecord>();
+  for (const entry of entries) {
+    const requestId = stringAt(entry.data, "requestId");
+    if (requestId === undefined) continue;
+    if (entry.kind === APPROVAL_REQUESTED_KIND) {
+      if (records.has(requestId)) continue;
+      const action = stringAt(entry.data, "action");
+      const requestedAt = stringAt(entry.data, "requestedAt");
+      if (action === undefined || requestedAt === undefined) continue;
+      records.set(requestId, {
+        requestId,
+        action,
+        detail: stringAt(entry.data, "detail") ?? "",
+        requestedAt,
+      });
+      continue;
+    }
+    if (entry.kind !== APPROVAL_DECIDED_KIND) continue;
+    const record = records.get(requestId);
+    if (record === undefined || record.decision !== undefined) continue;
+    const decision = verdictAt(entry.data);
+    const actor = stringAt(entry.data, "actor");
+    const decidedAt = stringAt(entry.data, "decidedAt");
+    if (
+      decision === undefined ||
+      actor === undefined ||
+      decidedAt === undefined
+    )
+      continue;
+    records.set(requestId, {
+      ...record,
+      decision: { decision, actor, decidedAt },
+    });
+  }
+  return [...records.values()].sort((left, right) =>
+    left.requestedAt === right.requestedAt
+      ? left.requestId.localeCompare(right.requestId)
+      : left.requestedAt.localeCompare(right.requestedAt),
+  );
+};
+
+/** The requests still waiting for a decision, in the same order as the fold. */
+export const pendingApprovals = (
+  records: readonly ApprovalLogRecord[],
+): readonly ApprovalLogRecord[] =>
+  records.filter((record) => record.decision === undefined);
 
 type ContentBlock = TextContent | ThinkingContent | ToolCall | ImageContent;
 
@@ -77,6 +220,15 @@ const arrayAt = (
   const value = asObject(parent)?.[key];
   return Array.isArray(value) ? value : [];
 };
+
+/** A JSON array of strings, with anything else at an element dropped rather than guessed. */
+const stringsAt = (
+  parent: JsonValue | undefined,
+  key: string,
+): readonly string[] =>
+  arrayAt(parent, key).flatMap((value) =>
+    typeof value === "string" ? [value] : [],
+  );
 
 /** Flatten model content blocks to their text. */
 const blocksText = (blocks: readonly ContentBlock[]): string =>
@@ -133,11 +285,14 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title entry carries no model content, so its text comes from its data.
+  // The title and the no-change entries carry no model content, so their text comes from their
+  // data — which is what makes a no-op PR step a readable line rather than an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
-      : messageText(message);
+      : entry.kind === NO_CHANGE_ENTRY_KIND
+        ? (stringAt(asObject(entry.data), "text") ?? "")
+        : messageText(message);
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),
@@ -189,6 +344,27 @@ export const projectLive = (
   };
 };
 
+/**
+ * The PR `factory.pr` records: the link, its number, and where it came from. An unwritten document
+ * and a document with no URL project the same way, because `initial()` is a document with no URL —
+ * there is no PR until the URL is there, so "is there one" is `url !== ""` rather than a flag.
+ */
+export type PrDocView = {
+  readonly url: string;
+  readonly number: number;
+  readonly base: string;
+  readonly head: string;
+  readonly openedAt: string;
+};
+
+export const projectPrDoc = (value: JsonValue | undefined): PrDocView => ({
+  url: stringAt(value, "url") ?? "",
+  number: numberAt(value, "number"),
+  base: stringAt(value, "base") ?? "",
+  head: stringAt(value, "head") ?? "",
+  openedAt: stringAt(value, "openedAt") ?? "",
+});
+
 const ZERO_USAGE: ModelUsage = {
   input: 0,
   output: 0,
@@ -214,16 +390,87 @@ const readModelUsage = (value: JsonValue): ModelUsage => {
 const bucketEntries = (
   bucket: JsonRecord | undefined,
 ): readonly { readonly key: string; readonly usage: ModelUsage }[] =>
-  Object.entries(bucket ?? {}).map(([key, value]) => ({
-    key,
-    usage: readModelUsage(value),
-  }));
+  // Sorted by key so two projections of one ledger compare equal and a client's list does not
+  // reshuffle: `pi.usage`'s buckets are objects, and their key order is not a contract.
+  Object.entries(bucket ?? {})
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, value]) => ({
+      key,
+      usage: readModelUsage(value),
+    }));
 
+/**
+ * `pi.usage` → the session's spend, both buckets (LOB-153).
+ *
+ * A tool's usage has no model identity and is keyed by the tool's name instead; both buckets carry
+ * the same counters. A document that predates `tools` (or a conversation that ran none) reads as
+ * an empty list, so "nothing reported" and "nothing to report" project the same way.
+ */
 export const projectUsageDoc = (
   value: JsonRecord | undefined,
 ): SessionUsage => ({
   models: bucketEntries(objectAt(value, "models")),
+  tools: bucketEntries(objectAt(value, "tools")),
 });
+
+/**
+ * What a session's spend adds up to, in the currency `pi.usage` reports: every model bucket plus
+ * every tool bucket.
+ *
+ * The list surface shows this (`costTotal`) and the rebuild fold writes it (`session_activity`), so
+ * the two have to add the same buckets or a rebuilt index disagrees with the live one for any
+ * session whose spend is not all model spend. Exported rather than inlined in either place for
+ * exactly that reason: one definition, two callers.
+ */
+export const usageCostTotal = (usage: SessionUsage): number =>
+  [...usage.models, ...usage.tools].reduce(
+    (total, bucket) => total + bucket.usage.costTotal,
+    0,
+  );
+
+/**
+ * `Harness.taskGraph()` → the live tasks a session reports (LOB-183).
+ *
+ * Sorted by id so two projections of the same graph compare equal and a client's list does not
+ * reshuffle: the graph is keyed by decimal id, and object key order is not a contract.
+ */
+export const projectTasks = (graph: TaskGraph): readonly SessionTask[] =>
+  Object.entries(graph.tasks)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([id, node]) => ({
+      id,
+      kind: node.kind,
+      status: node.state.status,
+      ...(node.state.status === "completing"
+        ? {}
+        : { phase: node.state.phase }),
+      waitingOn:
+        node.state.status === "waiting" ? node.state.on.map(String) : [],
+      ...(node.owner === undefined ? {} : { owner: String(node.owner) }),
+      conversations: node.conversations.map(String),
+    }));
+
+/** Whether two task projections say the same thing, field by field. */
+export const sameTasks = (
+  left: readonly SessionTask[],
+  right: readonly SessionTask[],
+): boolean =>
+  left.length === right.length &&
+  left.every((task, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      task.id === other.id &&
+      task.kind === other.kind &&
+      task.status === other.status &&
+      task.phase === other.phase &&
+      task.owner === other.owner &&
+      task.waitingOn.length === other.waitingOn.length &&
+      task.waitingOn.every((id, at) => id === other.waitingOn[at]) &&
+      task.conversations.length === other.conversations.length &&
+      task.conversations.every((id, at) => id === other.conversations[at])
+    );
+  });
 
 /** Everything a snapshot of one session carries, from either the live view or a fold. */
 export type SessionProjection = {
@@ -255,10 +502,15 @@ export const projectInbox = (
 };
 
 /** A live conversation view → a snapshot. */
-export const projectView = (view: ConversationView): SessionProjection => {
+export const projectView = (
+  view: ConversationView,
+  /** The transcript to project. Defaults to the view's active window; the read paths pass the
+   * whole log, so a `pi.reset` is a marker in the transcript rather than a truncation of it. */
+  entries: readonly EntryRecord[] = view.entries,
+): SessionProjection => {
   const live = projectLive(view.docs);
   return {
-    entries: view.entries.map(projectEntry),
+    entries: entries.map(projectEntry),
     live,
     usage: projectUsageDoc(view.docs[USAGE_DOC]),
     status: live.busy ? "busy" : "idle",
@@ -276,13 +528,26 @@ export const projectView = (view: ConversationView): SessionProjection => {
 export const diffView = (
   previous: ConversationView,
   next: ConversationView,
+  /** Entry ids the receiver already has. Defaults to what `previous` holds, which is right for a
+   * diff against a view; an attach seeds it with the snapshot it sent. Ids are added as they are
+   * reported, so an entry is never sent twice. */
+  sent: Set<string> = new Set(
+    previous.entries.map((entry) => String(entry.id)),
+  ),
 ): readonly SessionEvent[] => {
   const events: SessionEvent[] = [];
 
-  const known = new Set(previous.entries.map((entry) => String(entry.id)));
   for (const entry of next.entries) {
-    if (!known.has(String(entry.id))) {
-      events.push({ _tag: "entry", entry: projectEntry(entry) });
+    const id = String(entry.id);
+    if (sent.has(id)) continue;
+    sent.add(id);
+    events.push({ _tag: "entry", entry: projectEntry(entry) });
+    // The PR link is announced by the entry committed beside its document, so a client attached
+    // across that commit sees exactly one `prOpened` — a new entry is never re-sent — and one
+    // that attaches afterwards reads the link from the session's summary instead.
+    if (entry.kind === PR_OPENED_ENTRY_KIND) {
+      const prUrl = stringAt(entry.data, "url");
+      if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
     }
   }
 
@@ -310,4 +575,45 @@ export const diffView = (
   }
 
   return events;
+};
+
+/**
+ * The cited knowledge pages a log holds (LOB-204), folded from the `factory.page` entries that
+ * announce each one.
+ *
+ * The entries, not the `factory.page` documents, are what a rebuild can see: a fold reads `commits`,
+ * and a document is a separate record. So every page is committed twice in one transaction — the
+ * document for the typed read, the entry for this fold — exactly as the PR step announces itself
+ * (LOB-177).
+ *
+ * A later entry for the same name replaces the earlier one, and the fold is ordered by name, so two
+ * logs that committed the same pages in a different order read back the same way.
+ */
+export type PageLogRecord = {
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: readonly string[];
+  readonly sources: readonly string[];
+};
+
+export const projectPages = (
+  entries: readonly EntryRecord[],
+): readonly PageLogRecord[] => {
+  const pages = new Map<string, PageLogRecord>();
+  for (const entry of entries) {
+    if (entry.kind !== PAGE_ENTRY_KIND) continue;
+    const name = stringAt(entry.data, "name");
+    if (name === undefined || name === "") continue;
+    pages.set(name, {
+      name,
+      kind: stringAt(entry.data, "kind") ?? "",
+      content: stringAt(entry.data, "content") ?? "",
+      links: stringsAt(entry.data, "links"),
+      sources: stringsAt(entry.data, "sources"),
+    });
+  }
+  return [...pages.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
 };

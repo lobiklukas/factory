@@ -11,7 +11,9 @@ import {
   AlreadyBlocked,
   BlockTaskInput,
   BoardNotFound,
+  BoardView,
   CreateTaskInput,
+  GetBoardInput,
   GetTaskInput,
   HumanGateRequired,
   ListTasksInput,
@@ -25,11 +27,23 @@ import {
   UnblockTaskInput,
 } from "@repo/domain/Task";
 import {
+  CurateSessionInput,
+  CurateSessionResult,
+  ListPagesInput,
+  ListPagesOutput,
+} from "@repo/domain/Page";
+import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
+import {
+  CompactSessionInput,
+  CompactSessionResult,
   CreateSessionInput,
+  ForkSessionInput,
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReplaySessionInput,
   RepoSummary,
+  ResetSessionInput,
   SendMessageInput,
   SendMessageResult,
   SessionError,
@@ -72,14 +86,63 @@ export class SessionRpc extends RpcGroup.make(
     success: SessionSummary,
     error: SessionError,
   }),
+  Rpc.make("forkSession", {
+    payload: ForkSessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  // A replay runs the same task again in a new session, on another model (LOB-198). The source's
+  // log is only read, so the answer is the new session, not a copy of the old one's transcript.
+  Rpc.make("replaySession", {
+    payload: ReplaySessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  // A reset is not an interrupt: it starts a new model context (with the handoff note as its first
+  // message) and leaves the transcript's past in place, marked by the `reset` entry (LOB-181).
+  Rpc.make("resetSession", {
+    payload: ResetSessionInput,
+    success: SessionSummary,
+    error: SessionError,
+  }),
+  // Compaction is a task in the log, not a request: the call admits it and answers its id, and
+  // the summary arrives as a `compaction` entry when it settles (B4).
+  Rpc.make("compactSession", {
+    payload: CompactSessionInput,
+    success: CompactSessionResult,
+    error: SessionError,
+  }),
   Rpc.make("listSessions", {
     payload: ListSessionsInput,
     success: ListSessionsOutput,
     error: SessionError,
   }),
+  // The cited knowledge pages a session's log holds (LOB-204), read from the derived rows a rebuild
+  // refills from that log.
+  Rpc.make("listPages", {
+    payload: ListPagesInput,
+    success: ListPagesOutput,
+    error: SessionError,
+  }),
+  // One bounded curator pass over a finished session (LOB-206): the answer is what it wrote, and an
+  // empty list is a pass that found nothing new rather than a pass that did not run.
+  Rpc.make("curateSession", {
+    payload: CurateSessionInput,
+    success: CurateSessionResult,
+    error: SessionError,
+  }),
   Rpc.make("registerRepo", {
     payload: RegisterRepoInput,
     success: RepoSummary,
+    error: SessionError,
+  }),
+  // A mission is a session's, not a client's: starting one answers its id, and the phase it
+  // reached is read off `getSession`'s snapshot rather than off a second call (LOB-230). The
+  // surface decision — this group, not a `MissionRpc` of its own — is recorded in
+  // `@repo/domain/Mission`.
+  Rpc.make("startMission", {
+    payload: StartMissionInput,
+    success: StartMissionResult,
     error: SessionError,
   }),
   Rpc.make("watchSession", {
@@ -124,6 +187,14 @@ const TaskErrorSchema = Schema.Union([
 ]);
 
 export class TasksRpc extends RpcGroup.make(
+  // The board itself: the instance and the definition version it binds, which is the read a client
+  // needs before it can print lanes in definition order (LOB-61). Cards are a separate call, so a
+  // client that only wants the columns does not fold every card to learn them.
+  Rpc.make("getBoard", {
+    payload: GetBoardInput,
+    success: BoardView,
+    error: TaskErrorSchema,
+  }),
   Rpc.make("createTask", {
     payload: CreateTaskInput,
     success: Task,

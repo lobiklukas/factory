@@ -12,7 +12,7 @@
 // features/session-stream.md.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SessionRpc } from "@repo/domain/Rpc";
+import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Exit, Fiber, Ref, Stream } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -102,6 +102,13 @@ observed.probes = {
 };
 
 const textOf = (entry) => entry.text;
+
+/** Both `pi.usage` buckets, as one number: the total a session has spent on models and tools. */
+const tokensOf = (snapshot) =>
+  [...snapshot.usage.models, ...snapshot.usage.tools].reduce(
+    (total, bucket) => total + bucket.usage.totalTokens,
+    0,
+  );
 const lastAssistant = (entries) =>
   entries.filter((entry) => entry.kind === "assistant").at(-1);
 
@@ -291,6 +298,16 @@ const program = Effect.gen(function* () {
       snapshot.entries.length === 0,
     `first event=${snapshot?._tag} mode=${snapshot?.session?.mode}`,
   );
+  // Feature: the live-task list (LOB-183). No durable task is started here — this driver has no
+  // RPC that starts one — so the list is present and empty, which is what an idle session's panel
+  // reads. The projection itself is proven in `packages/harness/src/tasks.test.ts`.
+  assert(
+    "the snapshot carries the live-task list",
+    snapshot?._tag === "snapshot" &&
+      Array.isArray(snapshot.tasks) &&
+      snapshot.tasks.length === 0,
+    `tasks=${JSON.stringify(snapshot?._tag === "snapshot" ? snapshot.tasks : null)}`,
+  );
   assert(
     "the stream carries entries as they commit",
     events.some((event) => event._tag === "entry"),
@@ -381,6 +398,89 @@ const program = Effect.gen(function* () {
     `${historicalEvents.length} event(s): ${historicalEvents.map((event) => event._tag).join(", ")}`,
   );
 
+  // Feature: fork (LOB-180). A session is one log (D7), so a fork is a second log holding the
+  // parent's entries through the fork point. Its transcript must start as the parent's and then
+  // diverge: a message admitted to the fork must not reach the parent, or the "try a different
+  // approach" action would rewrite the history it was meant to leave alone.
+  const forked = yield* client.forkSession({ sessionId: created.id });
+  assert(
+    "forkSession",
+    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(forked.id) &&
+      forked.id !== created.id &&
+      forked.forkedFrom === created.id,
+    `id=${forked.id} parent=${created.id} forkedFrom=${forked.forkedFrom}`,
+  );
+  const forkPrefix = yield* client.getSession({ sessionId: forked.id });
+  assert(
+    "the fork's transcript is the parent's prefix, text for text",
+    JSON.stringify(forkPrefix.entries.map(textOf)) ===
+      JSON.stringify(folded.entries.map(textOf)),
+    `${forkPrefix.entries.length} fork entries, parent had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork's summary names the session it came from",
+    forkPrefix.session.forkedFrom === created.id,
+    `forkedFrom=${forkPrefix.session.forkedFrom}`,
+  );
+
+  const FORKED_PROMPT = `${PROMPT} fork`;
+  yield* client.sendMessage({ sessionId: forked.id, content: FORKED_PROMPT });
+  const forkSettled = yield* waitUntil(
+    client
+      .getSession({ sessionId: forked.id })
+      .pipe(
+        Effect.map((snapshot) => (snapshot.live.busy ? undefined : snapshot)),
+      ),
+    "the fork's run to settle",
+  );
+  const parentAfter = yield* client.getSession({ sessionId: created.id });
+  assert(
+    "a message sent to the fork does not appear in the parent",
+    parentAfter.entries.every((entry) => !entry.text.includes(FORKED_PROMPT)) &&
+      JSON.stringify(parentAfter.entries.map(textOf)) ===
+        JSON.stringify(folded.entries.map(textOf)),
+    `parent has ${parentAfter.entries.length} entries, folded read had ${folded.entries.length}`,
+  );
+  assert(
+    "the fork keeps its prefix and answers on its own",
+    forkSettled.entries.length > forkPrefix.entries.length &&
+      forkSettled.entries
+        .slice(0, forkPrefix.entries.length)
+        .every(
+          (entry, index) => entry.text === forkPrefix.entries[index]?.text,
+        ) &&
+      forkSettled.entries.some(
+        (entry) => entry.text === `faux-ok (re: ${FORKED_PROMPT})`,
+      ),
+    `${forkSettled.entries.length} entries, last=${JSON.stringify(forkSettled.entries.at(-1)?.text)}`,
+  );
+  // Feature: the fork point is an entry of *this* session. The fork has grown past the parent's
+  // last entry, so its newest entry id names no entry of the parent: asking the parent to fork there
+  // must be a typed `invalid_input`, not a crash and not a fork of a history it never had. (Entry
+  // ids are per-log numbers, so an id that exists in both logs *is* this session's entry; what a
+  // foreign id can be is absent.)
+  const foreignEntry = forkSettled.entries.at(-1)?.id ?? "0";
+  const foreign = yield* Effect.exit(
+    client.forkSession({ sessionId: created.id, at: foreignEntry }),
+  );
+  const foreignFailure = Exit.findErrorOption(foreign);
+  assert(
+    "forking at another session's entry is refused as invalid_input",
+    Exit.isFailure(foreign) &&
+      foreignFailure._tag === "Some" &&
+      foreignFailure.value._tag === "SessionError" &&
+      foreignFailure.value.code === "invalid_input",
+    `at=${foreignEntry} ${JSON.stringify(foreignFailure)}`,
+  );
+
+  observed.fork = {
+    id: forked.id,
+    forkedFrom: forked.forkedFrom,
+    prefixEntries: forkPrefix.entries.length,
+    divergedEntries: forkSettled.entries.length,
+    foreignRefusal: foreignEntry,
+  };
+
   // Feature: request limits. An oversized message is refused with a typed error rather than
   // crashing the server or being silently truncated.
   const oversized = yield* Effect.exit(
@@ -421,6 +521,398 @@ const program = Effect.gen(function* () {
     interrupted.status === "idle",
     `mode=${interrupted.mode} status=${interrupted.status}`,
   );
+
+  // Feature: reset (LOB-181). A reset starts a new model context whose first message is the handoff
+  // note. The transcript keeps what came before it and marks the boundary with the `reset` entry,
+  // so the old turns are still readable above the new context rather than truncated by it.
+  const toReset = yield* client.createSession({
+    requestId: `verify-api-reset-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toReset.id,
+    content: "reset probe: before",
+  });
+  // Wait for the answer itself, not for `busy` to be false: a read taken before the run starts would
+  // see `idle`, the wait would pass at once, and the reset could land before the turn it is meant to
+  // end — which would make the "one entry longer" assertion below meaningless.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toReset.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some(
+            (entry) => entry.kind === "assistant" && entry.text.length > 0,
+          ),
+        ),
+      ),
+    "the pre-reset turn to settle",
+  );
+  const beforeReset = yield* client.getSession({ sessionId: toReset.id });
+  const handoff = "reset probe: carry on from here";
+  const resetSummary = yield* client.resetSession({
+    sessionId: toReset.id,
+    handoff,
+  });
+  const afterReset = yield* client.getSession({ sessionId: toReset.id });
+  const resetKinds = afterReset.entries.map((entry) => entry.kind);
+  const resetEntry = afterReset.entries.find((entry) => entry.kind === "reset");
+  assert(
+    "resetSession answers with the session",
+    resetSummary.id === toReset.id && resetSummary.status === "idle",
+    `id=${resetSummary.id} mode=${resetSummary.mode} status=${resetSummary.status}`,
+  );
+  assert(
+    "a reset keeps the transcript and marks where it happened",
+    resetEntry?.text === handoff &&
+      afterReset.entries.length === beforeReset.entries.length + 1 &&
+      JSON.stringify(beforeReset.entries.map((entry) => entry.id)) ===
+        JSON.stringify(
+          afterReset.entries
+            .slice(0, beforeReset.entries.length)
+            .map((entry) => entry.id),
+        ),
+    `kinds=${resetKinds.join(", ")} reset=${JSON.stringify(resetEntry?.text ?? null)}`,
+  );
+  // A second reset with no handoff leaves an empty context and still marks the boundary, so
+  // "reset" and "reset with notes" are one shape rather than two.
+  yield* client.resetSession({ sessionId: toReset.id });
+  const bareReset = yield* client.getSession({ sessionId: toReset.id });
+  const bareEntries = bareReset.entries.filter(
+    (entry) => entry.kind === "reset",
+  );
+  assert(
+    "a reset with no handoff still marks the entry",
+    bareEntries.length === 2 && bareEntries.at(-1)?.text === "",
+    `reset entries=${bareEntries.length} last=${JSON.stringify(bareEntries.at(-1)?.text ?? null)}`,
+  );
+
+  // Feature: compaction (LOB-185). `compactSession` admits a compaction task in the log and
+  // answers its id; the summary it writes is a `compaction` entry, and everything it stands in for
+  // is still in the transcript. The message before it is long on purpose: Pi Durable summarizes an
+  // old prefix and keeps the newest `keepRecentTokens` (20k on this window's policy) verbatim, so a
+  // shorter transcript has nothing to compact and the task completes without a summary.
+  const toCompact = yield* client.createSession({
+    requestId: `verify-api-compact-${Date.now()}`,
+  });
+  yield* client.sendMessage({
+    sessionId: toCompact.id,
+    content: "y".repeat(90_000),
+  });
+  // Wait for the answer, not for `busy` to clear: a compaction admitted before the run has written
+  // its entries would have nothing to summarize.
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map(
+          (state) =>
+            !state.live.busy &&
+            state.entries.some((entry) => entry.kind === "assistant"),
+        ),
+      ),
+    "the turn before the compaction to settle",
+  );
+  const compactAdmitted = yield* client.compactSession({
+    sessionId: toCompact.id,
+    instructions: "the long probe message",
+  });
+  yield* waitUntil(
+    client
+      .getSession({ sessionId: toCompact.id })
+      .pipe(
+        Effect.map((state) =>
+          state.entries.some((entry) => entry.kind === "compaction"),
+        ),
+      ),
+    "the compaction's summary entry",
+  );
+  const afterCompact = yield* client.getSession({ sessionId: toCompact.id });
+  const summary = afterCompact.entries.find(
+    (entry) => entry.kind === "compaction",
+  );
+  assert(
+    "compactSession answers a task id and its summary lands in the transcript",
+    compactAdmitted.taskId.length > 0 &&
+      compactAdmitted.session.id === toCompact.id &&
+      compactAdmitted.session.status === "idle" &&
+      summary !== undefined &&
+      summary.text.length > 0 &&
+      // Nothing is dropped: what the summary stands in for is still readable.
+      afterCompact.entries.some(
+        (entry) => entry.kind === "user" && entry.text.startsWith("y"),
+      ),
+    `taskId=${compactAdmitted.taskId} status=${compactAdmitted.session.status} kinds=${afterCompact.entries.map((entry) => entry.kind).join(", ")}`,
+  );
+
+  // Feature: approvals (LOB-50). A gated action asks a person first: the request is recorded in the
+  // session's log and listed as pending until a decision settles it. The check runs over the same RPC
+  // client, against a session of its own, and it survives the owner being released (the fold).
+  const approvals = yield* RpcClient.make(ApprovalsRpc);
+  const toApprove = yield* client.createSession({
+    requestId: `verify-api-approval-${Date.now()}`,
+  });
+  const ask = {
+    sessionId: toApprove.id,
+    requestId: `approve-${Date.now()}`,
+    action: "push refs/heads/main",
+    detail: "verify-api probe",
+  };
+  const requested = yield* approvals.requestApproval(ask);
+  const pendingBefore = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "requestApproval is listed as pending",
+    requested.requestId === ask.requestId &&
+      requested.action === ask.action &&
+      pendingBefore.approvals.length === 1 &&
+      pendingBefore.approvals[0]?.requestId === ask.requestId,
+    `pending=${pendingBefore.approvals.map((approval) => approval.requestId).join(", ")}`,
+  );
+
+  // A second identical request is the same request: one pending row, not two.
+  yield* approvals.requestApproval(ask);
+  const pendingAfterRetry = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "a second identical request leaves one pending row",
+    pendingAfterRetry.approvals.length === 1,
+    `pending rows=${pendingAfterRetry.approvals.length}`,
+  );
+
+  // The fold: wait for the owner to be released, then the pending list still answers from the log.
+  yield* Effect.sleep(6_000);
+  const foldedApproval = yield* waitUntil(
+    client
+      .getSession({ sessionId: toApprove.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.session.mode === "historical" ? snapshot : undefined,
+        ),
+      ),
+    "the approval session's owner to be released",
+  );
+  const pendingFolded = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "the pending approval survives the owner being released",
+    foldedApproval.session.mode === "historical" &&
+      pendingFolded.approvals.length === 1,
+    `mode=${foldedApproval.session.mode} pending=${pendingFolded.approvals.length}`,
+  );
+
+  // Decide it. The actor string is what the caller said it was, and it must come back in the
+  // decision and survive in the evidence file.
+  const actor = "verify-api operator";
+  const decision = yield* approvals.decideApproval({
+    sessionId: toApprove.id,
+    requestId: ask.requestId,
+    decision: "approved",
+    actor,
+  });
+  const pendingAfterDecide = yield* approvals.listApprovals({
+    sessionId: toApprove.id,
+  });
+  assert(
+    "decideApproval settles the request and the pending list empties",
+    decision.decision === "approved" &&
+      decision.actor === actor &&
+      pendingAfterDecide.approvals.length === 0,
+    `decision=${decision.decision} actor=${decision.actor} pending=${pendingAfterDecide.approvals.length}`,
+  );
+  Object.assign(observed, {
+    approvals: {
+      sessionId: toApprove.id,
+      requested,
+      pendingAfterRetry: pendingAfterRetry.approvals,
+      pendingFolded: pendingFolded.approvals,
+      decision,
+      pendingAfterDecide: pendingAfterDecide.approvals,
+    },
+  });
+
+  // Feature: a mission (LOB-230). `startMission` admits one durable task and answers its id; the
+  // phase it reaches is read off the session's snapshot, which is the surface the contract chose
+  // over a `MissionRpc` of its own. Driven on a session of its own, so nothing here depends on the
+  // transcript the rest of this driver sends.
+  //
+  // A scratch session declares no `.factory/config`, so the mission's verify phase reports that the
+  // repo declares no verify command and the mission settles `failed` there. That is the honest end
+  // for this run: what the wire is being asked to prove is the id and the phase, not that this
+  // driver's directory can verify itself.
+  const missionSession = yield* client.createSession({
+    requestId: `verify-api-mission-${Date.now()}`,
+  });
+  const beforeMission = yield* client.getSession({
+    sessionId: missionSession.id,
+  });
+  assert(
+    "a session that never ran a mission reports none, not an empty phase",
+    beforeMission.mission === undefined,
+    `mission=${JSON.stringify(beforeMission.mission ?? null)}`,
+  );
+  const started = yield* client.startMission({
+    sessionId: missionSession.id,
+    feature: "verify-api mission probe",
+  });
+  assert(
+    "startMission answers the mission's id",
+    started.sessionId === missionSession.id &&
+      typeof started.taskId === "string" &&
+      started.taskId.length > 0,
+    `sessionId=${started.sessionId} taskId=${started.taskId}`,
+  );
+  const atVerify = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.mission?.phase === "verify" ? snapshot : undefined,
+        ),
+      ),
+    "the mission to reach verify",
+  );
+  assert(
+    "the phase the mission reached is readable through the snapshot",
+    atVerify.mission?.taskId === started.taskId &&
+      atVerify.mission.phase === "verify" &&
+      atVerify.mission.entered.join(",") === "plan,implement,verify",
+    `mission=${JSON.stringify(atVerify.mission ?? null)}`,
+  );
+  // The mission is a live task while it runs and gone from the list once it settles; either way the
+  // record is the log's, which is what makes the phase readable afterwards.
+  const settledMission = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.some((task) => task.kind === "factory.mission")
+            ? undefined
+            : snapshot,
+        ),
+      ),
+    "the mission to settle",
+  );
+  assert(
+    "a settled mission still reports the phase it reached",
+    settledMission.mission?.phase === "verify",
+    `mission=${JSON.stringify(settledMission.mission ?? null)} tasks=${settledMission.tasks.map((task) => task.kind).join(", ") || "none"}`,
+  );
+
+  // The fold: the mission's record is a document, so a released owner still reports it.
+  yield* Effect.sleep(6_000);
+  const foldedMission = yield* waitUntil(
+    client
+      .getSession({ sessionId: missionSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.session.mode === "historical" ? snapshot : undefined,
+        ),
+      ),
+    "the mission session's owner to be released",
+  );
+  assert(
+    "the fold reports the mission the live read reported",
+    foldedMission.mission?.taskId === started.taskId &&
+      foldedMission.mission.phase === settledMission.mission?.phase,
+    `mode=${foldedMission.session.mode} mission=${JSON.stringify(foldedMission.mission ?? null)}`,
+  );
+  Object.assign(observed, {
+    mission: {
+      sessionId: missionSession.id,
+      started,
+      live: settledMission.mission ?? null,
+      folded: foldedMission.mission ?? null,
+      tasksAtVerify: atVerify.tasks.map((task) => task.kind),
+    },
+  });
+
+  // Feature: curate a finished session's pages (LOB-206). One bounded model call over the transcript
+  // and the pages the session already holds proposes page writes; the server commits at most
+  // `maxPages` of them, cites the curated session, and commits nothing when it taught nothing new.
+  // Driven over the RPC client, on a session of its own, so the contract is what is proven — and
+  // with the faux model deriving its answer from the transcript, so a page can only exist if this
+  // session really ran a tool.
+  const toCurate = yield* client.createSession({
+    requestId: `verify-api-curate-${Date.now()}`,
+  });
+  yield* client.sendMessage({ sessionId: toCurate.id, content: PROMPT });
+  const curatedIdle = yield* waitUntil(
+    client
+      .getSession({ sessionId: toCurate.id })
+      .pipe(
+        Effect.map((state) =>
+          !state.live.busy &&
+          state.entries.some(
+            (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+          )
+            ? state
+            : undefined,
+        ),
+      ),
+    "the curated session's bash result",
+  );
+  const spentBefore = tokensOf(curatedIdle);
+  const knownIds = new Set(
+    (yield* client.listSessions({ limit: 250 })).sessions.map(
+      (session) => session.id,
+    ),
+  );
+  const curated = yield* client.curateSession({
+    sessionId: toCurate.id,
+    maxPages: 1,
+  });
+  const heldPages = yield* client.listPages({ sessionId: toCurate.id });
+  const afterCurate = yield* client.getSession({ sessionId: toCurate.id });
+  const spentAfter = tokensOf(afterCurate);
+  assert(
+    "curateSession writes a page citing the session, and charges the call to it",
+    curated.pages.length === 1 &&
+      curated.proposed >= 1 &&
+      curated.pages[0]?.sources.includes(toCurate.id) === true &&
+      heldPages.pages.some((page) => page.name === curated.pages[0]?.name) &&
+      // The call's spend lands in the curated session's own ledger, not a curator's.
+      spentAfter > spentBefore,
+    `pages=${curated.pages.map((page) => page.name).join(", ")} proposed=${curated.proposed} sources=${curated.pages[0]?.sources.join(", ")} tokens=${spentBefore}->${spentAfter}`,
+  );
+
+  // A curator is a call, not a run: no session of its own may appear on the list for having
+  // curated. The curated session was already known before the call, so a new row is a curator's.
+  const listedAfterCurate = yield* client.listSessions({ limit: 250 });
+  const curatorSessions = listedAfterCurate.sessions.filter(
+    (session) => !knownIds.has(session.id),
+  );
+  assert(
+    "a curation opens no session of its own",
+    curatorSessions.length === 0,
+    `new sessions: ${curatorSessions.map((session) => session.id).join(", ") || "none"}`,
+  );
+
+  // The same pass again: the session already holds what the model proposes, so it commits nothing.
+  // It still costs its one call, which is what makes "learned nothing new" cheap rather than free.
+  const repeatCurated = yield* client.curateSession({
+    sessionId: toCurate.id,
+    maxPages: 1,
+  });
+  const heldAfterRepeat = yield* client.listPages({ sessionId: toCurate.id });
+  assert(
+    "a second curation commits nothing when the session already holds the proposal",
+    repeatCurated.pages.length === 0 &&
+      repeatCurated.proposed >= 1 &&
+      heldAfterRepeat.pages.length === heldPages.pages.length,
+    `pages=${repeatCurated.pages.length} proposed=${repeatCurated.proposed} held=${heldPages.pages.length}->${heldAfterRepeat.pages.length}`,
+  );
+  Object.assign(observed, {
+    curation: {
+      sessionId: toCurate.id,
+      first: curated,
+      pagesHeld: heldPages.pages,
+      repeat: repeatCurated,
+      tokens: { before: spentBefore, after: spentAfter },
+    },
+  });
 
   return { id: created.id };
 }).pipe(Effect.provide(ProtocolLive), Effect.scoped);

@@ -10,19 +10,25 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
+  AnyTask,
   Conversation,
+  ConversationId,
   ConversationView,
   Cursor,
+  EntryDraft,
   EntryId,
   EntryRecord,
   Harness,
+  Page,
   Storage,
   Submission,
+  Tx,
 } from "@earendil-works/pi-durable";
 import {
   ConversationBusy,
   defineDoc,
   defineEntry,
+  defineExtension,
   Harness as HarnessRuntime,
   LiveDoc,
   ROOT_CONVERSATION_ID,
@@ -37,33 +43,66 @@ import type {
   SessionEvent,
   SessionId,
   SessionSnapshot,
+  SessionTask,
   SessionUsage,
   SessionWorkspace,
   Timestamp,
   TranscriptEntry,
 } from "@repo/domain/Session";
-import type { ApprovalVerdict } from "@repo/domain/Approval";
+import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
+import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
+import type { Page as CitedPage } from "@repo/domain/Page";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
-import type { ModelAccess } from "./models";
+import { skillsExtension, type RunProfile } from "./loader";
+import { compactionPolicyFor, type ModelAccess } from "./models";
+// The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
+// the shapes they promise have a single writer and a single reader.
+import {
+  MISSION_BINDING_DOC_KIND,
+  MISSION_DOC_KIND,
+  MissionBindingDoc,
+  MissionDoc,
+  PageDoc,
+  PagePromptDoc,
+  PrDoc,
+} from "./docs";
+import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
+  DOCS_SKILL,
+  docsPolicy,
   policyExtension,
   type SessionPolicy,
 } from "./policy";
 import {
   diffView,
+  pendingApprovals,
+  projectApprovals,
   projectEntry,
+  projectPrDoc,
+  projectPages,
+  projectReplayDoc,
+  projectTasks,
   projectUsageDoc,
   projectView,
+  sameTasks,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
+  PR_DOC_KIND,
+  PR_OPENED_ENTRY_KIND,
+  NO_CHANGE_ENTRY_KIND,
+  PAGE_ENTRY_KIND,
+  type PageLogRecord,
   TITLE_ENTRY_KIND,
   APPROVAL_DECIDED_KIND,
   APPROVAL_REQUESTED_KIND,
+  FORK_DOC_KIND,
+  REPLAY_DOC_KIND,
   USAGE_DOC,
+  type ApprovalLogRecord,
   type JsonRecord,
 } from "./projection";
 
@@ -89,7 +128,7 @@ export const SessionDoc = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ repo: "", baseRef: "" }),
+  initial: () => ({ repo: "", baseRef: "", branch: "" }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -102,10 +141,37 @@ export const TaskDoc = defineDoc({
   initial: () => ({}),
 });
 
+/**
+ * A forked session's lineage, committed to its own log (LOB-180).
+ *
+ * `parent` is the session it was forked from. `at` is the fork's *own* copy of the last entry it
+ * took, which is where the fork point sits in this log; entry ids are minted per log, so the
+ * parent's id for that entry would name a different entry here. Nothing reads `at` yet. The
+ * `sessions` row carries the same parent as an index, so a summary never folds a log; this document
+ * is what a rebuild recovers that parent from (D7).
+ */
+export const ForkDoc = defineDoc({
+  kind: FORK_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ parent: "", at: "" }),
+});
+
 /** The repo a session is bound to, as the log records it. */
 export type RepoBinding = {
   readonly repo: string;
   readonly baseRef: string;
+  /**
+   * The branch the session's worktree is cut on, when a caller named one (LOB-197). Absent means
+   * the default `factory/<session-id>` (D10), so a session that never named a branch records
+   * nothing here rather than recording the default twice — the id derives it.
+   *
+   * A fork and a replay do not inherit it: two sessions on one branch would commit over each other,
+   * so the parent's binding is copied without this field.
+   */
+  readonly branch?: string;
 };
 
 /** Storage is remote here, so partial answers commit less often than the 100 ms default. */
@@ -159,6 +225,28 @@ export type OpenSessionOptions = {
    * can reach by forgetting an argument.
    */
   readonly policy?: SessionPolicy;
+  /**
+   * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
+   * by the control plane from the card's pinned board definition. Absent: no card, or a column that
+   * names no skills, so nothing is injected.
+   */
+  readonly run?: RunProfile;
+  /**
+   * Durable tasks this session may start (LOB-230). Pi Durable resolves a task by kind against the
+   * registry, and a kind nobody installed settles `orphaned` — so a caller that starts one
+   * (`startMission`) has to install it here. Absent: a session that starts no tasks of its own,
+   * which is every caller but the control plane.
+   */
+  readonly tasks?: readonly AnyTask[];
+  /**
+   * The cited pages the session's prompt carries (LOB-205), read by the control plane at open.
+   *
+   * Absent: no pages, so no `pages` section. The module that assembles them (`./pages`) owns the
+   * budget and the drop order; this option is the pages themselves, because only the control plane
+   * can read them — they live in the session's log and its derived rows, not in a document family
+   * that a prompt section could enumerate.
+   */
+  readonly pages?: readonly CitedPage[];
 };
 
 export type OpenSession = {
@@ -192,13 +280,36 @@ export const openSession = (
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
+    // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
+    // the whole code extension — tools and sections — renders after the run's own instructions.
+    const skills = options.run?.skills ?? [];
+    if (skills.length > 0) registry.install(skillsExtension(skills));
+    // The knowledge the session carries, one section beside the skills, installed before the tools
+    // for the same reason they are. It is assembled and measured here, once, so what the run was
+    // told and what it cost are the same value — the record written below is that value, not a
+    // second measurement of the same text.
+    const pages = options.pages ?? [];
+    const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
+    if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
     registry.install(CodingTools);
+    // The tasks the control plane starts on a session's behalf, installed like any other extension:
+    // that is what makes the kind resolvable when a caller creates the task.
+    const tasks = options.tasks ?? [];
+    if (tasks.length > 0)
+      registry.install(defineExtension({ name: "factory.tasks", tasks }));
     // The policy is an extension beside the tools, not a wrapper around them (D15): Pi Durable
     // resolves the hooks of every selected extension before the tool task runs, so a refusal is a
     // task result the model reads, not an exception somewhere in the call path.
+    const policy =
+      options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd);
+    // A column that holds the `docs` skill makes this a documentation run, which may write
+    // documentation and nothing else (LOB-195). Composed here, where a policy becomes hooks, so a
+    // session cannot be opened with the skill and without the rule.
     registry.install(
       policyExtension(
-        options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd),
+        skills.some((skill) => skill.name === DOCS_SKILL)
+          ? docsPolicy(policy)
+          : policy,
       ),
     );
 
@@ -213,7 +324,13 @@ export const openSession = (
               cwd: target.cwd ?? options.cwd,
               shellEnv: sessionShellEnv(),
             }),
-          settings: { progress: SESSION_PROGRESS },
+          settings: {
+            progress: SESSION_PROGRESS,
+            // Long sessions compact (B4). The thresholds follow the model's context window
+            // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
+            // never, and a large one keeps pi-durable's pinned defaults.
+            compaction: compactionPolicyFor(options.model.contextWindow),
+          },
         },
         BACKGROUND_CONTEXT,
       ),
@@ -231,9 +348,78 @@ export const openSession = (
       }),
     );
 
+    // What the section came to, committed beside it: a page the budget dropped is a fact about this
+    // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
+    // Written on every open, an empty page set included, so a session that was told pages once and
+    // holds none now records the absence instead of leaving the last answer standing.
+    yield* writePagePrompt(root, {
+      cap: PAGES_TOKEN_CAP,
+      tokens: pagesPrompt.tokens,
+      held: pages.length,
+      included: pagesPrompt.included,
+      dropped: pagesPrompt.dropped,
+    });
+
     return { harness, root };
   });
 
+/** What the `pages` section came to when a session opened, as the log records it (LOB-205). */
+export type PagePromptRecord = {
+  /** The budget the section was assembled under, in tokens. */
+  readonly cap: number;
+  /** What the rendered section cost, tag included. */
+  readonly tokens: number;
+  /** How many pages the session held when it opened: `0` is a session with no pages at all. */
+  readonly held: number;
+  /** The pages it carried, in the order it carried them. */
+  readonly included: readonly string[];
+  /** The pages the budget left out, in the order they were ranked. */
+  readonly dropped: readonly string[];
+};
+
+/**
+ * Commit what the session's `pages` section came to.
+ *
+ * A document rather than an entry: this is state — the latest answer for this session's prompt — and
+ * not an event in the transcript, so an attached client has nothing to render and the model has
+ * nothing to read.
+ */
+export const writePagePrompt = (
+  conversation: Conversation,
+  record: PagePromptRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write page prompt", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(PagePromptDoc, conversation.id).then((doc) => {
+          doc.cap = record.cap;
+          doc.tokens = record.tokens;
+          doc.held = record.held;
+          doc.included = [...record.included];
+          doc.dropped = [...record.dropped];
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * What this session's last open was told, or `undefined` when it has never been opened.
+ *
+ * The record is written on every open, so "no pages" is a record saying `held: 0` rather than a
+ * missing one; `undefined` is the document's seed, which only a session this harness never opened
+ * can have.
+ */
+export const readPagePrompt = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<PagePromptRecord | undefined, SessionError> =>
+  attempt("read page prompt", () =>
+    harness.snapshot(PagePromptDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(
+    Effect.map((record) =>
+      record === undefined || record.cap === 0 ? undefined : record,
+    ),
+  );
 /**
  * An approval request, committed to the log the moment the session asks (D11). Like the title it
  * carries no model content, so the agent never sees it.
@@ -322,6 +508,9 @@ export const writeRepoBinding = (
         tx.doc(SessionDoc, conversation.id).then((doc) => {
           doc.repo = binding.repo;
           doc.baseRef = binding.baseRef;
+          // Written on every binding commit, empty included: a document that kept an earlier
+          // session's branch after a rebind would name a branch the worktree is not on.
+          doc.branch = binding.branch ?? "";
         }),
       BACKGROUND_CONTEXT,
     ),
@@ -331,6 +520,195 @@ export type TaskBinding = {
   readonly taskId: string;
   readonly column: string;
 };
+
+/** The PR a session opened, as the log records it. */
+export type PullRequestRecord = {
+  readonly url: string;
+  readonly number: number;
+  readonly base: string;
+  readonly head: string;
+  readonly openedAt: string;
+};
+
+/**
+ * The PR a session opened, announced in the transcript so an attached client learns the link
+ * (LOB-177). It carries no model content, so the agent never sees it.
+ */
+export const PrOpenedEntry = defineEntry<{
+  readonly url: string;
+  readonly number: number;
+}>(PR_OPENED_ENTRY_KIND);
+
+/**
+ * Commit the PR a session opened. The log, not the `sessions` row, is what makes the link survive a
+ * dropped index; the caller updates the row as well so a list needs no fold (LOB-177).
+ *
+ * One commit, two shapes of the same fact, because they answer different questions: the `factory.pr`
+ * document is the record a retried step reads before it calls GitHub, and the entry is what an
+ * attached client can see — Pi Durable mounts only its own documents in a conversation view, so a
+ * document alone would open the PR silently for everyone already watching.
+ */
+export const writePullRequestDoc = (
+  conversation: Conversation,
+  pullRequest: PullRequestRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write pull request", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PrDoc, conversation.id).then((doc) => {
+            doc.url = pullRequest.url;
+            doc.number = pullRequest.number;
+            doc.base = pullRequest.base;
+            doc.head = pullRequest.head;
+            doc.openedAt = pullRequest.openedAt;
+          }),
+          tx.appendEntry(PrOpenedEntry, conversation.id, {
+            data: { url: pullRequest.url, number: pullRequest.number },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * The PR this session already opened, read from the committed document — so a step that runs twice
+ * reads the first run's answer instead of asking GitHub again. `undefined` when there is none.
+ */
+export const readPullRequestDoc = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<PullRequestRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const doc = yield* attempt("read pull request", () =>
+      harness.snapshot(PrDoc, conversation.id, BACKGROUND_CONTEXT),
+    );
+    if (doc === undefined || doc.url === "") return undefined;
+    return {
+      url: doc.url,
+      number: doc.number,
+      base: doc.base,
+      head: doc.head,
+      openedAt: doc.openedAt,
+    };
+  });
+
+/**
+ * A run that found nothing to publish, announced in the transcript (LOB-196).
+ *
+ * It carries no model content, so the agent never sees it — which is the point: the step's answer
+ * is a fact about the branch, not a turn. It is an entry rather than a document because a no-change
+ * answer leaves no state behind (no `factory.pr`, no `pr_url` row), so the log's transcript is the
+ * only place a person can see that the run ran and published nothing.
+ *
+ * The sentence names documentation because an unchanged branch is the *docs* run's ordinary result
+ * (LOB-37: docs that need no edit). The guard itself is about the diff, not about the skill: any
+ * run whose branch is even with its base has no PR to open, and GitHub would refuse one anyway.
+ */
+export const NoDocumentationChangeEntry = defineEntry<{
+  readonly text: string;
+}>(NO_CHANGE_ENTRY_KIND);
+
+/** The line this entry carries: what a no-op run says it did. */
+export const noDocumentationChange = (base: string): string =>
+  `no documentation change: the branch has nothing to publish against ${base}`;
+
+/**
+ * Announce that the run published nothing. Nothing else is written: there is no PR to record, so a
+ * retry of this step re-measures the branch rather than reading this entry.
+ */
+export const writeNoDocumentationChange = (
+  conversation: Conversation,
+  base: string,
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write no documentation change", () =>
+    conversation
+      .commit(
+        (tx) =>
+          tx.appendEntry(NoDocumentationChangeEntry, conversation.id, {
+            data: { text: noDocumentationChange(base) },
+          }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
+
+/**
+ * A cited knowledge page, announced in the transcript (LOB-204).
+ *
+ * It carries no model content, so the agent never sees it; the fold over these entries is what a
+ * rebuild reads, because a document is not part of `commits`.
+ */
+export const PageEntry = defineEntry<{
+  readonly name: string;
+  readonly kind: string;
+  readonly content: string;
+  readonly links: string[];
+  readonly sources: string[];
+}>(PAGE_ENTRY_KIND);
+
+/**
+ * Commit one page: the `factory.page` family member, keyed by its name, and the entry that
+ * announces it, in one commit (LOB-204).
+ *
+ * Two shapes of one fact, for the reason the PR step has two (LOB-177): the document is the typed
+ * record a reader asks for by name, and the entry is what a fold — a rebuild included — can see.
+ * The row `session_pages` reads is the caller's to write, as the `sessions` row is the PR step's.
+ */
+export const writePage = (
+  conversation: Conversation,
+  page: PageLogRecord,
+): Effect.Effect<void, SessionError> =>
+  attempt("write page", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PageDoc, conversation.id, page.name, page.name).then((doc) => {
+            doc.name = page.name;
+            doc.kind = page.kind;
+            doc.content = page.content;
+            doc.links = [...page.links];
+            doc.sources = [...page.sources];
+          }),
+          tx.appendEntry(PageEntry, conversation.id, {
+            // Copied into mutable arrays: the entry's data is JSON, and a `readonly string[]` is
+            // not one (`JsonValue` wants the mutable array).
+            data: {
+              name: page.name,
+              kind: page.kind,
+              content: page.content,
+              links: [...page.links],
+              sources: [...page.sources],
+            },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * One page, read from the committed document. `undefined` when this session never committed one by
+ * that name — a family member that was never written has no record to read, and an empty seed is
+ * not a page.
+ */
+export const readPage = (
+  harness: Harness,
+  conversation: Conversation,
+  name: string,
+): Effect.Effect<PageLogRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const doc = yield* attempt("read page", () =>
+      harness.snapshot(PageDoc, conversation.id, name, BACKGROUND_CONTEXT),
+    );
+    if (doc === undefined || doc.kind === "") return undefined;
+    return {
+      name: doc.name,
+      kind: doc.kind,
+      content: doc.content,
+      links: doc.links,
+      sources: doc.sources,
+    };
+  });
 
 /** Commit the task binding. */
 export const writeTaskBinding = (
@@ -347,6 +725,13 @@ export const writeTaskBinding = (
       BACKGROUND_CONTEXT,
     ),
   );
+
+/** Where a fork came from, as the fork's own log records it. */
+export type ForkLineage = {
+  readonly parent: string;
+  /** The entry the fork was taken at, or `""` when the parent had no entries. */
+  readonly at: string;
+};
 
 /** The message a caller sends a session, in the control plane's terms. */
 export type MessageDraft = {
@@ -408,8 +793,38 @@ export const interrupt = (
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
 
+/**
+ * Start a new model context (LOB-181). Pi Durable appends a `pi.reset` entry that heads the next
+ * context, carrying `handoff` as its user message when given; the entries before it stay in the
+ * log, so the transcript keeps the past and marks where the reset happened.
+ */
+export const resetSession = (
+  conversation: Conversation,
+  handoff: string | undefined,
+): Effect.Effect<void, SessionError> =>
+  attempt("reset session", () =>
+    conversation.reset(handoff, BACKGROUND_CONTEXT),
+  );
+
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
+
+/**
+ * Compact the session on demand (B4): Pi Durable admits a compaction task that summarizes an old
+ * prefix of the model context and places the summary as the new head marker, so the transcript
+ * keeps every entry and the model's next request starts from the summary.
+ *
+ * The task id is the wire form of Pi Durable's branded id, like a submission's. Nothing to compact
+ * — a context shorter than the policy keeps verbatim — completes the task without a summary, which
+ * is the package's rule (range selection finds no cut), not a failure here.
+ */
+export const compactSession = (
+  conversation: Conversation,
+  instructions: string | undefined,
+): Effect.Effect<string, SessionError> =>
+  attempt("compact session", () =>
+    conversation.compact(instructions, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(String));
 
 /**
  * Whether a run is in flight. Read from the committed `pi.live` document, so it is what the log
@@ -428,11 +843,14 @@ export const isBusy = (
 const readDocument = (
   storage: Storage,
   kind: string,
+  /** One family member by key; absent reads the singleton of that kind. */
+  key?: string,
 ): Effect.Effect<JsonRecord | undefined, SessionError> =>
   Effect.gen(function* () {
     const address = {
       kind,
       scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID },
+      ...(key === undefined ? {} : { key }),
     } as const;
     const record = yield* attempt(`find ${kind}`, () =>
       storage.findDocument(address, "current", BACKGROUND_CONTEXT),
@@ -448,8 +866,61 @@ const readDocument = (
 const ENTRY_PAGE = 500;
 
 /**
- * The active transcript: the newest head marker, then the entries from its head. That is the same
- * slice `viewState()` shows, so a fold and a live attach describe the same session.
+ * The transcript: every entry the conversation ever committed, oldest first.
+ *
+ * It is read from the start of the log rather than from the newest head marker, because a head
+ * marker (`pi.reset`, `pi.compaction`) says where the *model's* context begins, not where the
+ * transcript does. A reset keeps the past and marks where it happened (LOB-181), and a fold that
+ * started at the head would also drop the `factory.title` entry a rebuild reads the title from.
+ * Both read paths use this, so a fold and a live attach still describe the same session.
+ */
+const scanEntries = (
+  scan: (
+    cursor: Cursor | undefined,
+  ) => Effect.Effect<Page<EntryRecord, Cursor>, SessionError>,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
+    const records: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* scan(cursor);
+      records.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    // Storage scans newest first.
+    return records.reverse();
+  });
+
+const readAllEntries = (
+  storage: Storage,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      storage.scanEntries(
+        { conversationId: ROOT_CONVERSATION_ID },
+        ENTRY_PAGE,
+        cursor,
+        BACKGROUND_CONTEXT,
+      ),
+    ),
+  );
+
+/** The same transcript for a session this process owns, read through its conversation. */
+const readConversationEntries = (
+  conversation: Conversation,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  scanEntries((cursor) =>
+    attempt("scan entries", () =>
+      conversation.entries({}, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
+    ),
+  );
+
+/**
+ * The *active window*: the newest head marker, then the entries from its head. That is what Pi
+ * Durable folds into a request, so it is the right slice for a question about the model's current
+ * context — the prompt sections a run has in effect — and the wrong one for the transcript, which
+ * is `readAllEntries`, because a `pi.reset` would truncate it.
  */
 const readActiveEntries = (
   storage: Storage,
@@ -462,23 +933,228 @@ const readActiveEntries = (
         BACKGROUND_CONTEXT,
       ),
     );
-    const query =
-      marker === undefined
-        ? { conversationId: ROOT_CONVERSATION_ID }
-        : { conversationId: ROOT_CONVERSATION_ID, minEntryId: marker.head };
+    return yield* scanEntries((cursor) =>
+      attempt("scan entries", () =>
+        storage.scanEntries(
+          marker === undefined
+            ? { conversationId: ROOT_CONVERSATION_ID }
+            : {
+                conversationId: ROOT_CONVERSATION_ID,
+                minEntryId: marker.head,
+              },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      ),
+    );
+  });
 
+/**
+ * The entries a fork of this log keeps: its whole transcript, oldest first, through `at`.
+ *
+ * The transcript is read from the beginning rather than from the newest head marker, because the
+ * copy that follows reassigns entry ids and every head marker names an id: reading from the start
+ * keeps every marker inside the copy, so a fork of a session that was reset keeps the same active
+ * context it had. `at` absent means "the last entry", which is the fork `verify-api` drives; an id
+ * that is not an entry of this log is refused as `invalid_input`, not silently rounded to the end.
+ */
+export const readForkSource = (
+  storage: Storage,
+  at: string | undefined,
+): Effect.Effect<readonly EntryRecord[], SessionError> =>
+  Effect.gen(function* () {
     const records: EntryRecord[] = [];
     let cursor: Cursor | undefined;
     for (;;) {
       const page = yield* attempt("scan entries", () =>
-        storage.scanEntries(query, ENTRY_PAGE, cursor, BACKGROUND_CONTEXT),
+        storage.scanEntries(
+          { conversationId: ROOT_CONVERSATION_ID },
+          ENTRY_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
       );
       records.push(...page.items);
       cursor = page.next;
       if (cursor === undefined) break;
     }
-    // Storage scans newest first.
-    return records.reverse();
+    // Storage scans newest first; a transcript reads oldest first.
+    records.reverse();
+    if (at === undefined) return records;
+    const end = records.findIndex((entry) => String(entry.id) === at);
+    if (end === -1) {
+      return yield* new SessionErrorClass({
+        code: "invalid_input",
+        message: `entry ${at} is not in this session`,
+      });
+    }
+    return records.slice(0, end + 1);
+  });
+
+/** The draft for one copied entry, its head marker rewritten to the copy of the entry it names. */
+const draftOf = (
+  entry: EntryRecord,
+  copied: ReadonlyMap<EntryId, EntryId>,
+): EntryDraft => {
+  // `"self"` is how the draft API says "the entry being written", which is what a reset's head
+  // marker is in the parent.
+  const head =
+    entry.head === undefined
+      ? undefined
+      : entry.head === entry.id
+        ? ("self" as const)
+        : copied.get(entry.head);
+  if (entry.head !== undefined && head === undefined) {
+    throw new Error(
+      `entry ${entry.id} starts its context at ${entry.head}, which is not an earlier entry`,
+    );
+  }
+  return {
+    kind: entry.kind,
+    ...(entry.model === undefined ? {} : { model: entry.model }),
+    ...(entry.data === undefined ? {} : { data: entry.data }),
+    ...(entry.edits === undefined ? {} : { edits: entry.edits }),
+    ...(head === undefined ? {} : { head }),
+  };
+};
+
+/** Where a fork came from, and the repo binding its parent had, in the fork's own commit. */
+type ForkPreamble = {
+  readonly parent: string;
+  readonly binding?: RepoBinding;
+};
+
+/**
+ * Copy a parent's entries into a fork's own log, oldest first, in the callers' one commit.
+ *
+ * Entry ids are minted per log, so every copy gets a new id and every head marker has to be
+ * rewritten to the copy of the entry it named. Walking oldest first is what makes that possible:
+ * a marker's entry has already been copied by the time the marker is written, and a marker that
+ * names something later is a parent log whose entries do not precede their marker — a broken log
+ * rather than a fork to guess at, so it fails the commit instead of writing a wrong transcript.
+ *
+ * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
+ * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
+ * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
+ * parent's prefix.
+ */
+const copyEntries = (
+  tx: Tx,
+  conversationId: ConversationId,
+  source: readonly EntryRecord[],
+  preamble: ForkPreamble,
+): Promise<ForkLineage> => {
+  const copied = new Map<EntryId, EntryId>();
+  let at = "";
+  return source
+    .reduce<Promise<void>>(
+      (previous, entry) =>
+        previous.then(() =>
+          tx
+            .appendEntry(conversationId, draftOf(entry, copied))
+            .then((record) => {
+              copied.set(entry.id, record.id);
+              at = String(record.id);
+            }),
+        ),
+      Promise.resolve(),
+    )
+    .then(() =>
+      tx.doc(ForkDoc, conversationId).then((doc) => {
+        doc.parent = preamble.parent;
+        doc.at = at;
+        return doc;
+      }),
+    )
+    .then(() =>
+      preamble.binding === undefined
+        ? undefined
+        : tx.doc(SessionDoc, conversationId).then((doc) => {
+            doc.repo = preamble.binding?.repo ?? "";
+            doc.baseRef = preamble.binding?.baseRef ?? "";
+          }),
+    )
+    .then(() => ({ parent: preamble.parent, at }));
+};
+
+/** What a fork needs: the log to copy from, the log to write, and where to run. */
+export type ForkSessionOptions = {
+  /** The parent's log, opened in reader mode: a fork never takes ownership of the parent. */
+  readonly parent: Storage;
+  /** The fork's own log, opened in owner mode. */
+  readonly child: Storage;
+  /** The entry to fork at, or absent for the parent's last entry. */
+  readonly at?: string;
+  /** The session the fork is taken from, committed into the fork's log as its lineage. */
+  readonly lineage: string;
+  /** The parent's repo binding, committed into the fork's log beside the lineage. */
+  readonly binding?: RepoBinding;
+  readonly model: ModelAccess;
+  readonly cwd: string;
+  readonly policy?: SessionPolicy;
+  /**
+   * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
+   * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
+   * does, rather than through a second, special-cased open path.
+   */
+  readonly run?: RunProfile;
+  /**
+   * The cited pages the session's prompt carries (LOB-205), read by the control plane at open.
+   *
+   * Absent: no pages, so no `pages` section. The module that assembles them (`./pages`) owns the
+   * budget and the drop order; this option is the pages themselves, because only the control plane
+   * can read them (they live in the session's log and its derived rows, not in a document family a
+   * prompt section could enumerate).
+   */
+  readonly pages?: readonly CitedPage[];
+};
+
+export type ForkedSession = OpenSession & {
+  /** The entry the fork was taken at, `""` when the parent had no entries. */
+  readonly at: string;
+};
+
+/**
+ * Open a new session whose transcript is another session's prefix (LOB-180, D7).
+ *
+ * A session *is* a log (D7), so a fork is another log with the parent's entries copied in: Pi
+ * Durable's own `Conversation.fork` forks a conversation *inside* one storage, which would make
+ * the fork unreadable as a session of its own. The copy is one commit on the new log, so a fork
+ * either has the whole prefix or does not exist.
+ */
+export const forkSession = (
+  options: ForkSessionOptions,
+): Effect.Effect<ForkedSession, SessionError> =>
+  Effect.gen(function* () {
+    const source = yield* readForkSource(options.parent, options.at);
+    const opened = yield* openSession({
+      storage: options.child,
+      model: options.model,
+      cwd: options.cwd,
+      ...(options.policy === undefined ? {} : { policy: options.policy }),
+      ...(options.run === undefined ? {} : { run: options.run }),
+      ...(options.pages === undefined ? {} : { pages: options.pages }),
+    });
+    const lineage = yield* attempt(
+      "copy the parent's entries",
+      () =>
+        opened.root.commit(
+          (tx) =>
+            copyEntries(tx, opened.root.id, source, {
+              parent: options.lineage,
+              ...(options.binding === undefined
+                ? {}
+                : { binding: options.binding }),
+            }),
+          BACKGROUND_CONTEXT,
+        ),
+      // A copy that fails leaves no fork, and an open harness on a child log nobody can read is a
+      // lease the caller never releases: close it here, where the failure is.
+    ).pipe(
+      Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),
+    );
+    return { ...opened, at: lineage.at };
   });
 
 export type SessionLog = {
@@ -486,12 +1162,37 @@ export type SessionLog = {
   readonly usage: SessionUsage;
   /** The repo binding the log records, empty when the session is a scratch one. */
   readonly binding: RepoBinding;
+  /** The PR the log records, when the session opened one. */
+  readonly pr?: PullRequestRecord;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
   /** The job spec committed to the log, when present. */
   readonly spec?: string;
   /** The acceptance criteria committed to the log, when present. */
   readonly criteria?: string;
+  /** The session this log was forked from, when it was forked (LOB-180). */
+  readonly forkedFrom?: string;
+  /**
+   * Every approval the log records, requested order (LOB-147). Pending ones are what a snapshot
+   * reports; the settled ones are here because the index rows a rebuild derives cover both.
+   */
+  readonly approvals: readonly ApprovalLogRecord[];
+  /**
+   * The cited knowledge pages the log holds, by name (LOB-204), folded from the `factory.page`
+   * entries. Read from the raw entries rather than from the transcript projection, because a page
+   * is not a transcript entry a client renders.
+   */
+  readonly pages: readonly PageLogRecord[];
+  /**
+   * The replay this log is, when it is one (LOB-198): the session it replays and the model it ran on,
+   * with the model its source recorded. It is committed to this log alone, which is why replaying a
+   * session leaves the source's log untouched.
+   */
+  readonly replay?: {
+    readonly source: string;
+    readonly model: string;
+    readonly from: string;
+  };
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -512,24 +1213,57 @@ export const readSessionLog = (
   storage: Storage,
 ): Effect.Effect<SessionLog, SessionError> =>
   Effect.gen(function* () {
-    const records = yield* readActiveEntries(storage);
+    const records = yield* readAllEntries(storage);
+    const pages = projectPages(records);
     const usage = yield* readDocument(storage, USAGE_DOC);
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
+    const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
+    const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
+    const replayDoc = projectReplayDoc(
+      yield* readDocument(storage, REPLAY_DOC_KIND),
+    );
     const taskId = bindingString(taskDoc, "taskId");
     const spec = bindingString(specDoc, "spec");
     const criteria = bindingString(criteriaDoc, "criteria");
+    const forkedFrom = bindingString(forkDoc, "parent");
     return {
       entries: records.map(projectEntry),
+      pages,
       usage: projectUsageDoc(usage),
+      approvals: projectApprovals(records),
       binding: {
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
+        ...(bindingString(binding, "branch") === ""
+          ? {}
+          : { branch: bindingString(binding, "branch") }),
       },
+      ...(prDoc.url === ""
+        ? {}
+        : {
+            pr: {
+              url: prDoc.url,
+              number: prDoc.number,
+              base: prDoc.base,
+              head: prDoc.head,
+              openedAt: prDoc.openedAt,
+            },
+          }),
       ...(spec === "" ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
+      ...(forkedFrom === "" ? {} : { forkedFrom }),
+      ...(replayDoc.source === ""
+        ? {}
+        : {
+            replay: {
+              source: replayDoc.source,
+              model: replayDoc.model,
+              from: replayDoc.from,
+            },
+          }),
       ...(taskId === ""
         ? {}
         : {
@@ -541,7 +1275,51 @@ export const readSessionLog = (
     };
   });
 
+/** The Pi Durable entry kind that carries system prompt sections. */
+const PROMPT_ENTRY_KIND = "pi.system";
+
+export type PromptSections = Readonly<Record<string, string>>;
+
+/**
+ * The prompt sections a session's log leaves in effect, folded the way Pi Durable folds them: a
+ * later `pi.system` entry replaces a section by name, and a `null` removes it.
+ *
+ * This is what the run was actually told, read from the log rather than from the extension that
+ * built it, so a caller can show or measure the injected text (B6's "its size measurable") and a
+ * test can assert on the prompt without intercepting a model request.
+ */
+export const readPromptSections = (
+  storage: Storage,
+): Effect.Effect<PromptSections, SessionError> =>
+  Effect.gen(function* () {
+    const records = yield* readActiveEntries(storage);
+    const shown: Record<string, string> = {};
+    for (const record of records) {
+      if (record.kind !== PROMPT_ENTRY_KIND) continue;
+      for (const message of record.model ?? []) {
+        if (message.role !== "system") continue;
+        for (const [key, value] of Object.entries(message.sections ?? {})) {
+          if (value === null) delete shown[key];
+          else shown[key] = value;
+        }
+      }
+    }
+    return shown;
+  });
+
 export type { Conversation, ConversationView, Harness, Storage };
+
+/**
+ * A session this process owns: the conversation its transcript lives in, and the harness whose
+ * task graph says what is running there (LOB-183).
+ *
+ * Both are needed to answer "what is this session doing": entries and documents come from the
+ * conversation view, and tasks are session-wide, so only the harness sees them.
+ */
+export type LiveSession = {
+  readonly harness: Harness;
+  readonly root: Conversation;
+};
 
 /** What the control plane knows about a session outside its log. */
 export type SessionRef = {
@@ -550,13 +1328,32 @@ export type SessionRef = {
   readonly createdAt: Timestamp;
   /** Where the session works, already resolved by the control plane (`@repo/domain/Session`). */
   readonly workspace: SessionWorkspace;
+  /** The PR the index remembers, so a read needs no fold to report it (LOB-177). */
+  readonly prUrl?: string;
+  /** The session this one was forked from, when the index row says so (LOB-180). */
+  readonly forkedFrom?: SessionId;
 };
+
+const pendingOf = (
+  sessionId: SessionId,
+  records: readonly ApprovalLogRecord[],
+): readonly ApprovalRequest[] =>
+  pendingApprovals(records).map((record) => ({
+    sessionId,
+    requestId: record.requestId,
+    action: record.action,
+    detail: record.detail,
+    requestedAt: record.requestedAt,
+  }));
 
 const snapshotOf = (
   view: ConversationView,
+  tasks: readonly SessionTask[],
   ref: SessionRef,
+  entries: readonly EntryRecord[],
+  mission: MissionSnapshot | undefined,
 ): SessionSnapshot => {
-  const projection = projectView(view);
+  const projection = projectView(view, entries);
   return {
     session: {
       id: ref.id,
@@ -568,12 +1365,21 @@ const snapshotOf = (
       ...(ref.workspace.baseRef === undefined
         ? {}
         : { baseRef: ref.workspace.baseRef }),
+      ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
+      ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
     },
     workspace: ref.workspace,
     entries: projection.entries,
     live: projection.live,
     usage: projection.usage,
     queued: projection.queued,
+    tasks,
+    // Folded from the whole log, not from the view: an approval is not a turn, and the view holds
+    // the active window only — a request older than a compaction still has to be answered.
+    approvals: pendingOf(ref.id, projectApprovals(entries)),
+    // Absent rather than an empty phase when the session never started a mission, and present with
+    // the phase it reached even after the mission settled: the record outlives the task (LOB-230).
+    ...(mission === undefined ? {} : { mission }),
   };
 };
 
@@ -582,57 +1388,141 @@ const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
   ...snapshot,
 });
 
+/**
+ * The mission a session is running, read off the two documents a start commits (LOB-230): the
+ * binding names the mission's task id, and the mission's own document names the phase it reached.
+ *
+ * `undefined` is "no mission": either the session never started one, or the mission's document still
+ * holds its seed because no phase has committed yet. The snapshot reports that as an absent field
+ * rather than as an empty phase — the two are different facts, and a client handed an empty phase
+ * would have to guess which one it got.
+ */
+const readMissionSnapshot = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<MissionSnapshot | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const binding = yield* attempt("read mission binding", () =>
+      harness.snapshot(MissionBindingDoc, conversation.id, BACKGROUND_CONTEXT),
+    );
+    const taskId = binding?.taskId ?? "";
+    if (taskId === "") return undefined;
+    const doc = yield* attempt("read mission", () =>
+      harness.snapshot(MissionDoc, conversation.id, taskId, BACKGROUND_CONTEXT),
+    );
+    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+  });
+
+/** `readMissionSnapshot` for a session nobody owns: the same two documents, folded from its log. */
+const readFoldedMission = (
+  storage: Storage,
+): Effect.Effect<MissionSnapshot | undefined, SessionError> =>
+  Effect.gen(function* () {
+    const binding = yield* readDocument(storage, MISSION_BINDING_DOC_KIND);
+    const taskId = bindingString(binding, "taskId");
+    if (taskId === "") return undefined;
+    const doc = yield* readDocument(storage, MISSION_DOC_KIND, taskId);
+    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+  });
+
 /** A live session's current state, read without subscribing to anything. */
 export const readLiveSnapshot = (
-  conversation: Conversation,
+  session: LiveSession,
   ref: SessionRef,
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const state = yield* attempt("read conversation view", () =>
-      conversation.viewState(BACKGROUND_CONTEXT),
+      session.root.viewState(BACKGROUND_CONTEXT),
     );
-    const snapshot = snapshotOf(state.value, ref);
-    state.dispose();
-    return snapshot;
+    // The view holds the active window only; the transcript is the whole log. The scan is fallible,
+    // so the handle is released whether it answers or not — a leaked mount keeps this session's
+    // projections alive in the process for as long as the API runs. The task graph is a third mount
+    // and is released the same way: it is session-wide, so only the harness can answer "what is
+    // running here".
+    return yield* Effect.gen(function* () {
+      const graph = yield* attempt("read task graph", () =>
+        session.harness.taskGraph(BACKGROUND_CONTEXT),
+      );
+      const tasks = yield* Effect.ensuring(
+        Effect.succeed(projectTasks(graph.value)),
+        Effect.sync(() => graph.dispose()),
+      );
+      const entries = yield* readConversationEntries(session.root);
+      const mission = yield* readMissionSnapshot(session.harness, session.root);
+      return snapshotOf(state.value, tasks, ref, entries, mission);
+    }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
 /**
- * A live session's events: a snapshot of the committed view, then one event per change for as long
- * as the stream runs.
+ * A live session's events: a snapshot of the committed view and the live-task list, then one event
+ * per change for as long as the stream runs.
  *
  * Views are diffed rather than op streams are forwarded, so a subscriber that falls behind still
  * receives a correct picture: entries are appended, and a document compared by reference tells us
- * it changed.
+ * it changed. The task graph is diffed the same way, through its projection: a task that appears,
+ * changes phase or settles publishes a graph revision, and a revision that projects the same list
+ * is dropped so the panel is not woken for nothing.
  */
 export const liveSessionEvents = (
-  conversation: Conversation,
+  session: LiveSession,
   ref: SessionRef,
 ): Stream.Stream<SessionEvent, SessionError> =>
   Stream.unwrap(
     Effect.gen(function* () {
       const state = yield* attempt("read conversation view", () =>
-        conversation.viewState(BACKGROUND_CONTEXT),
+        session.root.viewState(BACKGROUND_CONTEXT),
+      );
+      const graph = yield* attempt("read task graph", () =>
+        session.harness.taskGraph(BACKGROUND_CONTEXT),
       );
       const queue = yield* Queue.unbounded<SessionEvent>();
       let previous = state.value;
+      let previousTasks = projectTasks(graph.value);
       let unsubscribe: (() => void) | undefined;
+      let unsubscribeTasks: (() => void) | undefined;
 
+      // Registered before the fallible scan below, so a failed read releases the mount instead of
+      // leaving this session's projections running in the process.
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           unsubscribe?.();
+          unsubscribeTasks?.();
           state.dispose();
+          graph.dispose();
         }),
       );
 
+      // The transcript the snapshot below carries is the whole log, while the view the diffs come
+      // from holds the active window: a `pi.reset` truncates the view. Entry ids already sent are
+      // tracked here so an entry committed between the view read and the scan reaches the client
+      // exactly once, whether it arrives in the snapshot or as an event.
+      const entries = yield* readConversationEntries(session.root);
+      const sent = new Set(entries.map((entry) => String(entry.id)));
+
       unsubscribe = state.subscribe((next) => {
-        const events = diffView(previous, next);
+        const events = diffView(previous, next, sent);
         previous = next;
         for (const event of events) Queue.offerUnsafe(queue, event);
       });
 
+      unsubscribeTasks = graph.subscribe((next) => {
+        const tasks = projectTasks(next);
+        if (sameTasks(previousTasks, tasks)) return;
+        previousTasks = tasks;
+        Queue.offerUnsafe(queue, { _tag: "tasks", tasks });
+      });
+
       // Offer the snapshot before subscribing has a chance to enqueue anything, so a client never
-      // sees an event for a session it has not been told about.
-      yield* Queue.offer(queue, snapshotEvent(snapshotOf(state.value, ref)));
+      // sees an event for a session it has not been told about. The mission is read once, with the
+      // snapshot: a phase change is a document commit, and the stream reports entries and tasks, so
+      // a subscriber that needs the new phase re-reads the snapshot rather than being told twice.
+      const mission = yield* readMissionSnapshot(session.harness, session.root);
+      yield* Queue.offer(
+        queue,
+        snapshotEvent(
+          snapshotOf(state.value, previousTasks, ref, entries, mission),
+        ),
+      );
       return Stream.fromQueue(queue);
     }),
   );
@@ -649,6 +1539,7 @@ export const readHistoricalSnapshot = (
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
+    const mission = yield* readFoldedMission(storage);
     return {
       session: {
         id: ref.id,
@@ -663,12 +1554,22 @@ export const readHistoricalSnapshot = (
         ...(ref.workspace.baseRef === undefined
           ? {}
           : { baseRef: ref.workspace.baseRef }),
+        ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
+        ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
       },
       workspace: ref.workspace,
       entries: log.entries,
       live: { busy: false, tools: [] },
       usage: log.usage,
       queued: [],
+      // Nobody owns this log, so nothing runs in it: a sandbox that ran it is paused or gone (D8).
+      tasks: [],
+      // The mission is document state, not live state: a released session still reports the phase
+      // its mission reached, which is what part 3 reads to resume it (LOB-230).
+      ...(mission === undefined ? {} : { mission }),
+      // The point of the fold (LOB-147): a request committed before the owner was released is still
+      // waiting here, so a restarted control plane asks a person for the same answer, not again.
+      approvals: pendingOf(ref.id, log.approvals),
     };
   });
 

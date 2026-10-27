@@ -31,6 +31,7 @@ const events = client.watchSession({ sessionId });
 - `status` events include `busy` and then `idle` in that order
 - an `entry` event carries the answer text, which is derived from the `bash` tool's output
 - `getSession` afterwards agrees with the streamed entries, and reports non-zero token usage
+- the snapshot carries `tasks`, empty here: this session started no durable task (LOB-183)
 
 ## Gotchas
 

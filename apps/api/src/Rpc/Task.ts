@@ -6,6 +6,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
   Effect.gen(function* () {
     const tasks = yield* TaskService;
     return TasksRpc.of({
+      getBoard: (input) => tasks.getBoard(input.boardId),
       createTask: (input) => tasks.create(input as any),
       getTask: (input) => tasks.get(input.taskId),
       listTasks: (input) => tasks.list(input as any),

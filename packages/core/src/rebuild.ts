@@ -16,9 +16,12 @@
  *   an already-registered slug keeps what it has.
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
  *
- * What it always answers from the fold: title (`factory.title` entries), repo and base ref
- * (`factory.session`), spend (`pi.usage`), created/last activity (`commits.committed_at`), and
- * status — always `idle`, because a rebuild runs in a process that owns nothing (D8).
+ * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
+ * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the PR link
+ * (`factory.pr`), the approvals a session asked for and the decisions that settled them
+ * (`factory.approval.requested` / `.decided` → `session_approvals`), spend (`pi.usage`),
+ * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
+ * in a process that owns nothing (D8).
  *
  * How it is shaped, because a recovery path is only as good as how long it takes to run: the fold
  * reads every session log in pages (`PostgresStorage.readers`) and writes the index rows in batches,
@@ -28,12 +31,13 @@
  */
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
+import { PageStrings } from "@repo/domain/Page";
 import type { SessionError } from "@repo/domain/Session";
 import {
   SessionError as SessionErrorClass,
   SessionId,
 } from "@repo/domain/Session";
-import { readSessionLog } from "@repo/harness";
+import { readSessionLog, usageCostTotal } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 
 export type RebuildReport = {
@@ -51,11 +55,27 @@ type LogRow = {
   readonly lastActivityAt: string;
 };
 
+/** One `session_approvals` row as the fold renders it; `null` where a decision has not settled. */
+type FoldedApproval = {
+  readonly sessionId: string;
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+  readonly decision: string | null;
+  readonly actor: string | null;
+  readonly decidedAt: string | null;
+};
+
 type FoldedRow = {
   readonly id: string;
   readonly title: string;
   readonly repo: string | null;
   readonly baseRef: string | null;
+  /** The branch a caller named, when it named one (LOB-197). */
+  readonly branch: string | null;
+  readonly forkedFrom: string | null;
+  readonly prUrl: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
   readonly costTotal: number;
@@ -107,11 +127,20 @@ export const rebuildIndexes: Effect.Effect<
   });
 
   const folded: FoldedRow[] = [];
+  const approvals: FoldedApproval[] = [];
   const taskRuns: {
     id: string;
     taskId: string;
     sessionId: string;
     column: string;
+  }[] = [];
+  const pages: {
+    sessionId: string;
+    name: string;
+    kind: string;
+    content: string;
+    links: string;
+    sources: string;
   }[] = [];
   for (const log of sessionLogs) {
     const storage = folds.get(log.logId);
@@ -128,10 +157,10 @@ export const rebuildIndexes: Effect.Effect<
     const title = sessionLog.entries
       .filter((entry) => entry.kind === "title")
       .at(-1)?.text;
-    const costTotal = sessionLog.usage.models.reduce(
-      (total, model) => total + model.usage.costTotal,
-      0,
-    );
+    // Both `pi.usage` buckets, models and tools: the live writer (`SessionService`'s projector)
+    // adds them the same way, so a rebuilt `cost_total` matches the number the list showed before
+    // the index was emptied. Model-only would quietly drop a tool's spend (LOB-153).
+    const costTotal = usageCostTotal(sessionLog.usage);
     const repo =
       sessionLog.binding.repo === "" ? null : sessionLog.binding.repo;
     folded.push({
@@ -139,10 +168,46 @@ export const rebuildIndexes: Effect.Effect<
       title: title ?? "",
       repo,
       baseRef: repo === null ? null : sessionLog.binding.baseRef,
+      branch: sessionLog.binding.branch ?? null,
+      forkedFrom: sessionLog.forkedFrom ?? null,
+      prUrl: sessionLog.pr?.url ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
       costTotal,
     });
+    for (const record of sessionLog.approvals) {
+      approvals.push({
+        sessionId: log.logId,
+        requestId: record.requestId,
+        action: record.action,
+        detail: record.detail,
+        requestedAt: record.requestedAt,
+        decision: record.decision?.decision ?? null,
+        actor: record.decision?.actor ?? null,
+        decidedAt: record.decision?.decidedAt ?? null,
+      });
+    }
+    // The pages are the `factory.page` entries, not the documents: a fold reads `commits`, and a
+    // document is a separate record (LOB-204). Each row is written with its citations as JSON text,
+    // so a rebuild reproduces a page that cites a session the index no longer holds.
+    for (const page of sessionLog.pages) {
+      pages.push({
+        sessionId: log.logId,
+        name: page.name,
+        kind: page.kind,
+        content: page.content,
+        links: yield* Schema.encodeEffect(PageStrings)(page.links).pipe(
+          Effect.mapError((cause) =>
+            storageError("encode a page's links", cause),
+          ),
+        ),
+        sources: yield* Schema.encodeEffect(PageStrings)(page.sources).pipe(
+          Effect.mapError((cause) =>
+            storageError("encode a page's sources", cause),
+          ),
+        ),
+      });
+    }
     if (sessionLog.task !== undefined) {
       taskRuns.push({
         id: log.logId,
@@ -161,22 +226,43 @@ export const rebuildIndexes: Effect.Effect<
 
   // Two statements per batch of index rows rather than two per row: the fold's cost has to be in
   // the number of rows, not in the number of round trips it takes to write them.
+  //
+  // `NULLIF(…, '')` rather than passing nulls: the client's array encoder refuses an array whose
+  // values are *all* null (it has no element to infer a type from), and a batch of scratch sessions
+  // is exactly that for `repo` and `base_ref` — and a batch of sessions that are not forks, or have
+  // no PR, is exactly that for `forked_from` and `pr_url`. An empty string is never a legal slug,
+  // session id, or URL, so the sentinel cannot collide with a real value.
   for (let at = 0; at < folded.length; at += WRITE_BATCH_ROWS) {
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, created_at)
-      SELECT * FROM unnest(
+      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
+      SELECT
+        id,
+        title,
+        NULLIF(repo, ''),
+        NULLIF(base_ref, ''),
+        NULLIF(branch, ''),
+        NULLIF(forked_from, ''),
+        NULLIF(pr_url, ''),
+        created_at
+      FROM unnest(
         ${ids}::text[],
         ${batch.map((row) => row.title)}::text[],
-        ${batch.map((row) => row.repo)}::text[],
-        ${batch.map((row) => row.baseRef)}::text[],
+        ${batch.map((row) => row.repo ?? "")}::text[],
+        ${batch.map((row) => row.baseRef ?? "")}::text[],
+        ${batch.map((row) => row.branch ?? "")}::text[],
+        ${batch.map((row) => row.forkedFrom ?? "")}::text[],
+        ${batch.map((row) => row.prUrl ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      )
+      ) AS folded(id, title, repo, base_ref, branch, forked_from, pr_url, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
         base_ref = EXCLUDED.base_ref,
+        branch = EXCLUDED.branch,
+        forked_from = EXCLUDED.forked_from,
+        pr_url = EXCLUDED.pr_url,
         created_at = EXCLUDED.created_at
     `;
     yield* sql`
@@ -203,6 +289,51 @@ export const rebuildIndexes: Effect.Effect<
     `;
   }
 
+  // Fold `factory.approval.*` entries into `session_approvals`, so a rebuild recovers what is
+  // waiting for a person (`listApprovals`) as well as what a snapshot shows. A part of the log is
+  // authoritative for its session here, so a session's rows are replaced rather than merged: a
+  // request the log no longer records is not pending, whatever the row said.
+  //
+  // The delete is one statement over every session with a request, *not* one per write batch: a
+  // session's rows are contiguous in `approvals` but not aligned to a batch boundary, so a batch
+  // that deleted its own sessions would clobber the first batch's rows for a session the two
+  // batches share — a rebuild that loses rows its log still holds, which is the one thing this
+  // recovery path may not do. Replacing a batch's worth of rows is an insert, not a delete, so
+  // batching the writes costs nothing.
+  //
+  // `NULLIF(…, '')` for the same reason the `sessions` write above uses it: the client's array
+  // encoder refuses an array whose values are all null, and a batch of requests nobody decided is
+  // exactly that for `decision`, `actor` and `decided_at`.
+  const approvalSessions = [...new Set(approvals.map((row) => row.sessionId))];
+  if (approvalSessions.length > 0) {
+    yield* sql`DELETE FROM session_approvals WHERE session_id = ANY(${approvalSessions}::text[])`;
+  }
+  for (let at = 0; at < approvals.length; at += WRITE_BATCH_ROWS) {
+    const batch = approvals.slice(at, at + WRITE_BATCH_ROWS);
+    yield* sql`
+      INSERT INTO session_approvals (session_id, request_id, action, detail, requested_at, decision, actor, decided_at)
+      SELECT
+        session_id,
+        request_id,
+        action,
+        detail,
+        requested_at,
+        NULLIF(decision, ''),
+        NULLIF(actor, ''),
+        NULLIF(decided_at, '')::timestamptz
+      FROM unnest(
+        ${batch.map((row) => row.sessionId)}::text[],
+        ${batch.map((row) => row.requestId)}::text[],
+        ${batch.map((row) => row.action)}::text[],
+        ${batch.map((row) => row.detail)}::text[],
+        ${batch.map((row) => row.requestedAt)}::text[]::timestamptz[],
+        ${batch.map((row) => row.decision ?? "")}::text[],
+        ${batch.map((row) => row.actor ?? "")}::text[],
+        ${batch.map((row) => row.decidedAt ?? "")}::text[]
+      ) AS folded(session_id, request_id, action, detail, requested_at, decision, actor, decided_at)
+    `;
+  }
+
   // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links.
   for (const run of taskRuns) {
     yield* sql`
@@ -212,6 +343,39 @@ export const rebuildIndexes: Effect.Effect<
     `;
   }
   yield* sql`DELETE FROM task_runs WHERE session_id NOT IN (SELECT DISTINCT log_id FROM commits)`;
+
+  // Fold the pages into `session_pages`: the delete is one statement over every session the fold
+  // covers, before the inserts, rather than one per write batch. A session's rows are contiguous in
+  // the fold but not aligned to `WRITE_BATCH_ROWS`, so a per-batch delete would clobber another
+  // batch's rows for the same session — a rebuild losing pages its log still holds. That is the
+  // lesson the approvals fold was reviewed into (LOB-147), applied here from the start.
+  yield* sql`DELETE FROM session_pages`;
+  for (let at = 0; at < pages.length; at += WRITE_BATCH_ROWS) {
+    const batch = pages.slice(at, at + WRITE_BATCH_ROWS);
+    yield* sql`
+      INSERT INTO session_pages (session_id, name, kind, content, links, sources)
+      SELECT
+        session_id,
+        name,
+        kind,
+        content,
+        links::jsonb,
+        sources::jsonb
+      FROM unnest(
+        ${batch.map((page) => page.sessionId)}::text[],
+        ${batch.map((page) => page.name)}::text[],
+        ${batch.map((page) => page.kind)}::text[],
+        ${batch.map((page) => page.content)}::text[],
+        ${batch.map((page) => page.links)}::text[],
+        ${batch.map((page) => page.sources)}::text[]
+      ) AS folded(session_id, name, kind, content, links, sources)
+      ON CONFLICT (session_id, name) DO UPDATE SET
+        kind = EXCLUDED.kind,
+        content = EXCLUDED.content,
+        links = EXCLUDED.links,
+        sources = EXCLUDED.sources
+    `;
+  }
 
   // Index rows that can no longer be true: an id that is not a session's, or a log that is gone.
   const present = yield* sql<{ id: string }>`SELECT id FROM sessions`;

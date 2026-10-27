@@ -1,16 +1,38 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import { SquareIcon, XIcon } from "lucide-react";
+import {
+  GitForkIcon,
+  Loader2Icon,
+  Minimize2Icon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
+import type { CompactionSettle, CompactionWindow } from "@/lib/compaction-view";
 import {
+  compactionDelta,
+  compactionRow,
+  formatSpend,
+  requestedCompaction,
+  settleCompaction,
+  settleFor,
+  spendOf,
+  verdictVisible,
+} from "@/lib/compaction-view";
+import {
+  compactSessionAtom,
+  forkSessionAtom,
   sendMessageAtom,
   sessionAtom,
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { forgetSession, recordSession } from "@/lib/atoms/session-registry";
+import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -104,12 +126,25 @@ export const SessionPane = ({
 }) => {
   const [result, attach] = useAtom(sessionAtom);
   const send = useAtomSet(sendMessageAtom);
+  const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
+  const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const record = useAtomSet(recordSession);
   const forget = useAtomSet(forgetSession);
+  const navigate = useNavigate();
   const [draft, setDraft] = useState("");
+  const [forking, setForking] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [compactionWindow, setCompactionWindow] =
+    useState<CompactionWindow | null>(null);
   const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  /**
+   * What the last press of Compact has come to (LOB-224): pending, settled with a summary, or
+   * settled with nothing to cut. The state machine is `settleCompaction`'s; the pane only renders
+   * what it says, so "the spinner never stops" is a case a unit test can fail.
+   */
+  const [settle, setSettle] = useState<CompactionSettle>({ state: "idle" });
 
   useEffect(() => {
     attach(sessionId);
@@ -126,8 +161,101 @@ export const SessionPane = ({
     if (view !== null) record(view.summary);
   }, [record, view]);
 
+  /**
+   * Freeze a compaction's end reading once its spend has landed (LOB-223).
+   *
+   * The summary row and the usage event are separate stream events, so the row can appear before
+   * the summarizer's own spend is written. Waiting for both is why this is an effect rather than a
+   * value computed at press time: the delta is read live until the transcript holds the row *and*
+   * the session has spent more than it had at the press, and from then on it is a fixed number, so
+   * later turns cannot quietly grow it.
+   */
+  useEffect(() => {
+    if (view === null || compactionWindow === null) return;
+    if (compactionWindow.after !== null) return;
+    if (compactionRow(compactionWindow, sessionId, view.entries) === undefined)
+      return;
+    const began = spendOf(compactionWindow.before);
+    const now = spendOf(view.usage);
+    if (began.tokens === now.tokens && began.costTotal === now.costTotal)
+      return;
+    setCompactionWindow({ ...compactionWindow, after: view.usage });
+  }, [compactionWindow, sessionId, view]);
+
   const attaching = AsyncResult.isInitial(result);
   const failure = AsyncResult.isFailure(result) ? result.cause : null;
+
+  /**
+   * The row the current compaction window belongs to (LOB-223). Computed once for the transcript:
+   * "which summary did my press write" is a question about the list, not about a row.
+   */
+  const compactionSummaryRow =
+    view === null
+      ? undefined
+      : compactionRow(compactionWindow, sessionId, view.entries);
+
+  /**
+   * The press as it applies to this route. One pane component serves every session, and a task id
+   * from another session's graph means nothing here.
+   */
+  const settleNow = settleFor(settle, sessionId);
+
+  /**
+   * Read what the press came to on every stream event and after the call answers (LOB-224).
+   *
+   * `settle` is in the dependencies, not just `view`: a compaction with no cut settles inside the
+   * few milliseconds the `compactSession` call takes, so its task-list events can all have been
+   * folded *before* the answer installs `requested`. Without re-running here, the pane would sit on
+   * the pending line forever — the spinner that never stops, one layer down.
+   *
+   * `settleCompaction` returns the state it was given when nothing changed, so the extra runs stop
+   * as soon as the state does.
+   */
+  useEffect(() => {
+    if (view === null) return;
+    setSettle((previous) =>
+      settleCompaction(previous, {
+        sessionId,
+        tasks: view.tasks,
+        entries: view.entries,
+      }),
+    );
+  }, [sessionId, settle, view]);
+
+  /**
+   * Why Compact cannot be pressed right now, or `null` when it can (LOB-223).
+   *
+   * A disabled button that says nothing is a dead control: the same header either has a run in
+   * flight (compact at the next boundary is a different action from compacting now, so this one
+   * waits) or a pane that has not attached. Both reasons are in the DOM — as the button's `title`
+   * and, for a screen reader, as the description it points at.
+   */
+  const compactBlocked =
+    view === null
+      ? failure === null
+        ? "Attaching to the session"
+        : "This session could not be read"
+      : view.live.busy
+        ? "Wait for this run to finish before compacting"
+        : null;
+
+  /**
+   * Whether a compaction is under way: the call is in flight, or its task is still live (LOB-224).
+   *
+   * One press at a time. A second admission while the first task runs would compact against a
+   * context the first one is rewriting, and the pending line is already the answer to "is anything
+   * happening".
+   */
+  const compactRunning = compacting || settleNow.state === "requested";
+
+  /**
+   * Whether the verdict is on screen (LOB-224). The state machine decides what the press came to;
+   * this decides whether it may be said yet, which is not the same thing while a run is in flight.
+   */
+  const showVerdict = verdictVisible(
+    settleNow,
+    view !== null && view.live.busy,
+  );
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -150,6 +278,146 @@ export const SessionPane = ({
               {queued.length} queued
             </Badge>
           ) : null}
+          {/*
+           * The session's own spend, beside the actions that change it (LOB-223). It is a running
+           * total for the whole session, so it is the reading a compaction is measured against —
+           * and it prints no dollar figure when the provider reported none.
+           */}
+          {view === null ? null : (
+            <span
+              data-session-usage
+              className="font-mono text-[10px] text-muted-foreground tabular-nums"
+              title="This session's usage so far"
+            >
+              {formatSpend(spendOf(view.usage))}
+            </span>
+          )}
+          {/*
+           * Compact now (LOB-185's RPC, LOB-222's atom, LOB-223's action, LOB-224's settle). The
+           * call admits a task and answers its id; the summary lands in the transcript over the
+           * stream, or the task settles with nothing to cut — the pending line below says which is
+           * happening, so the button itself carries no spinner.
+           */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label={
+              compactRunning ? "Compacting session" : "Compact session"
+            }
+            data-compaction-state={
+              settleNow.state === "requested"
+                ? "requested"
+                : settleNow.state === "idle"
+                  ? "idle"
+                  : "settled"
+            }
+            title={
+              compactRunning
+                ? "Compacting"
+                : (compactBlocked ?? "Compact this session now")
+            }
+            aria-busy={compactRunning}
+            aria-describedby={
+              compactBlocked === null ? undefined : "compact-blocked"
+            }
+            disabled={compactBlocked !== null || compactRunning}
+            onClick={() => {
+              if (view === null) return;
+              setCompacting(true);
+              // The before reading, and where the transcript ended: the summary the task writes is
+              // the first compaction entry after this one, and its spend is the difference.
+              setCompactionWindow({
+                sessionId,
+                before: view.usage,
+                entriesBefore: view.entries.length,
+                after: null,
+              });
+              void compact({ sessionId })
+                .then(({ taskId }) => {
+                  // The task list as this press saw it, not as it is when the answer arrives: the
+                  // reducer needs the *press-time* projection to tell "the task has not appeared
+                  // yet" from "the task has already settled".
+                  setSettle(
+                    requestedCompaction({
+                      sessionId,
+                      taskId,
+                      entriesBefore: view.entries.length,
+                      tasks: view.tasks,
+                    }),
+                  );
+                })
+                .catch((cause: unknown) => {
+                  // Nothing was admitted, so there is no row to measure and no task to watch; drop
+                  // the readings too, so a later compaction is not charged for this attempt.
+                  setCompactionWindow(null);
+                  setSettle({ state: "idle" });
+                  toast.error("No compaction was started", {
+                    description:
+                      cause instanceof Error ? cause.message : String(cause),
+                  });
+                })
+                .finally(() => setCompacting(false));
+            }}
+          >
+            {compacting ? (
+              <Loader2Icon
+                data-slot="spinner"
+                aria-hidden
+                className="size-4 animate-spin"
+              />
+            ) : (
+              <Minimize2Icon className="size-4" strokeWidth={1.75} />
+            )}
+            {compactRunning ? "Compacting" : "Compact"}
+          </Button>
+          {compactBlocked === null ? null : (
+            <span id="compact-blocked" className="sr-only">
+              {compactBlocked}
+            </span>
+          )}
+          {/*
+           * Fork from here (LOB-182). A text button, not an icon-only one: the header has the room,
+           * and "Fork" beside the status chip says what the live session can become without the
+           * reader hovering to find out. It is disabled until the pane has a view, because the fork
+           * names this session and there is nothing to name while the attach is still in flight.
+           */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Fork from here"
+            title="Fork from here"
+            aria-busy={forking}
+            disabled={view === null || forking}
+            onClick={() => {
+              setForking(true);
+              void fork(sessionId)
+                .then((summary) => {
+                  // The child is recorded before navigating: the registry is what the sidebar
+                  // lists, and the pane the route moves to would record it one render later.
+                  record(summary);
+                  void navigate({
+                    to: "/sessions/$sessionId",
+                    params: { sessionId: summary.id },
+                  });
+                })
+                .catch((cause: unknown) => {
+                  toast.error("No fork was created", {
+                    description:
+                      cause instanceof Error ? cause.message : String(cause),
+                  });
+                })
+                .finally(() => setForking(false));
+            }}
+          >
+            {forking ? (
+              <Spinner className="size-3.5 text-muted-foreground" />
+            ) : (
+              <GitForkIcon className="size-4" strokeWidth={1.75} />
+            )}
+            Fork
+          </Button>
           <Button
             type="button"
             variant="ghost"
@@ -161,6 +429,16 @@ export const SessionPane = ({
           </Button>
         </div>
       </header>
+
+      {/*
+       * What the run is doing right now, before what it said (LOB-184). The list is the stream's
+       * projection of Pi Durable's task graph, so a task that settles leaves the strip as it left
+       * the graph — no reload, no history to keep.
+       */}
+      <TaskPanel
+        tasks={view === null ? [] : view.tasks}
+        attaching={attaching}
+      />
 
       {/*
        * The scroller follows the stream: a live run appends while you read, and
@@ -199,7 +477,15 @@ export const SessionPane = ({
                     messageId={entry.id}
                     scrollAnchor={index === view.entries.length - 1}
                   >
-                    <TranscriptRow entry={entry} />
+                    <TranscriptRow
+                      entry={entry}
+                      spend={
+                        compactionSummaryRow === index &&
+                        compactionWindow !== null
+                          ? compactionDelta(compactionWindow, view.usage)
+                          : undefined
+                      }
+                    />
                   </MessageScrollerItem>
                 ))}
 
@@ -212,6 +498,54 @@ export const SessionPane = ({
                     </EmptyDescription>
                   </Empty>
                 ) : null}
+
+                {/*
+                 * What the last press of Compact came to (LOB-224), in the tail because that is
+                 * where the summary will land: a pending line that is replaced by the row it was
+                 * waiting for, or by the verdict that there is nothing to cut. Both states reserve the
+                 * same height (`min-h-16`: the verdict's heading plus two lines of its copy, which is
+                 * what it needs while the transcript column can hold a sentence), so the verdict
+                 * replaces the spinner without moving the transcript. At a phone width the shell
+                 * leaves the pane a ~60px column and everything there wraps: that squeeze is the
+                 * dashboard's, not this box's, and no reservation here could absorb it.
+                 *
+                 * The region itself is always mounted — `sr-only` while it has nothing to say, so
+                 * it costs no layout and no gap — because a screen reader announces a change
+                 * *inside* the region it already knows, not a region inserted together with its
+                 * text. `data-compaction-status` carries what the press came to, so a drive never
+                 * has to match on copy; whether the verdict is *shown* is `verdictVisible`'s
+                 * question, and that is the difference a busy run makes.
+                 */}
+                <div
+                  role="status"
+                  data-slot="compaction-status"
+                  data-compaction-status={settleNow.state}
+                  className={
+                    settleNow.state === "requested" || showVerdict
+                      ? undefined
+                      : "sr-only"
+                  }
+                >
+                  {settleNow.state === "requested" ? (
+                    <div className="flex min-h-16 items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2Icon
+                        data-slot="spinner"
+                        aria-hidden
+                        className="size-3 animate-spin"
+                      />
+                      Compacting this session…
+                    </div>
+                  ) : null}
+                  {showVerdict ? (
+                    <div className="flex min-h-16 flex-col justify-center gap-1">
+                      <p className="text-sm">Nothing to compact</p>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        This session is too short to cut. Its recent turns stay
+                        verbatim.
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
               </MessageScrollerContent>
             </MessageScrollerViewport>
             <MessageScrollerButton />
@@ -257,6 +591,14 @@ export const SessionPane = ({
             if (draft.trim().length === 0) return;
             send({ sessionId, content: draft });
             setDraft("");
+            // A verdict describes the transcript at the press. The operator's next turn moves the
+            // transcript on, and a line saying the session is too short to cut would then be a
+            // claim about a log that no longer exists (LOB-224).
+            setSettle((previous) =>
+              previous.state === "settled-nothing"
+                ? { state: "idle" }
+                : previous,
+            );
           }}
         >
           <div className="flex items-end gap-2">

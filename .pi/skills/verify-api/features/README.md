@@ -25,17 +25,81 @@ created empty for the run (two sessions, which is the case the paging check used
 **29/29** against the shared `factory_ralph` (2 883 rows in `session_activity`), evidence
 `.verify/evidence/lob-140/`.
 
-| Feature                 | Status  | File                               |
-| ----------------------- | ------- | ---------------------------------- |
-| Create a session        | passing | [create.md](create.md)             |
-| Repo binding            | passing | [repo-binding.md](repo-binding.md) |
-| Session list            | passing | [session-list.md](session-list.md) |
-| Watch a live session    | passing | [live-stream.md](live-stream.md)   |
-| Fold a released session | passing | [fold.md](fold.md)                 |
-| Request limits          | passing | [limits.md](limits.md)             |
-| Probes and readiness    | passing | [probes.md](probes.md)             |
-| Shutdown and recovery   | passing | [lifecycle.md](lifecycle.md)       |
-| Errors over the wire    | passing | [errors.md](errors.md)             |
+The approval checks (LOB-148) were run from the `ralph/LOB-148` branch on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442): `bun drive.ts` with the approval block added, evidence
+`.verify/evidence/lob-148/verify-api/`. `./sigterm.sh` and `./degraded.sh` were not re-run there.
+
+The reset checks (LOB-181) were run from the `ralph/LOB-181` worktree on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442): **32/32**, evidence `.verify/evidence/lob-181/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the reset path.
+
+The compaction checks (LOB-185) were run from the `ralph/LOB-185` worktree on 2026-10-24 (API on
+`:9400`, faux, Postgres on 5442): **33/33**, evidence `.verify/evidence/lob-185/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the compaction path.
+
+The trigger checks (LOB-188) were run from the `ralph/LOB-188` worktree on 2026-10-24 (API on
+`:9400`, faux, Postgres on 5442): **12/12** via `./webhook.sh`, evidence
+`.verify/evidence/lob-188/`. They are a separate drive from `bun drive.ts` — the trigger routes are
+plain HTTP, not RPC — and `./sigterm.sh` and `./degraded.sh` were not re-run there.
+
+The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
+(`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
+`./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver
+builds the seam, the session layer and the adapter in-process, as `./jira.sh` and
+`./github-issues.sh` do — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
+
+The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` worktree on 2026-10-24
+(faux, Postgres on 5442): **19/19** via `./github-issues.sh`, evidence
+`.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
+and the fake listens on the port the run reserves for this surface.
+
+The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
+(`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
+`./docs-run.sh` **13/13**, evidence `.verify/evidence/lob-228/`. Like `./pr-once.sh` it starts no API
+process — the driver builds the service in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh`
+were not part of it.
+
+The docs-trigger checks (LOB-197) were run from the `ralph/LOB-197` worktree on 2026-10-25
+(`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9400`):
+`./docs-trigger.sh` **17/17** (14 driver checks, 3 shell checks), evidence
+`.verify/evidence/lob-197/`. Like `./docs-run.sh` it starts no API process. See `docs-trigger.md`,
+which names the one caller it does not add.
+
+The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
+`:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
+the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
+`./degraded.sh` were not re-run there; neither touches the curation path.
+
+The mission checks (LOB-230) were run from the `ralph/LOB-230` worktree on 2026-10-24 (API on `:9400`,
+faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph`): `bun drive.ts` with the mission block added,
+evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.sh` were not re-run
+there; neither touches the mission path. See `mission.md`, which names what the case does not prove
+(resume across a kill — LOB-231).
+
+| Feature                  | Status  | File                               |
+| ------------------------ | ------- | ---------------------------------- |
+| Create a session         | passing | [create.md](create.md)             |
+| Repo binding             | passing | [repo-binding.md](repo-binding.md) |
+| Session list             | passing | [session-list.md](session-list.md) |
+| Watch a live session     | passing | [live-stream.md](live-stream.md)   |
+| Reset a session          | passing | [reset.md](reset.md)               |
+| Compact on demand        | passing | [compact.md](compact.md)           |
+| Fold a released session  | passing | [fold.md](fold.md)                 |
+| Fork a session           | passing | [fork.md](fork.md)                 |
+| Request limits           | passing | [limits.md](limits.md)             |
+| Probes and readiness     | passing | [probes.md](probes.md)             |
+| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)       |
+| Errors over the wire     | passing | [errors.md](errors.md)             |
+| One PR across a kill     | passing | [pr-once.md](pr-once.md)           |
+| Inbound triggers         | passing | [trigger.md](trigger.md)           |
+| Jira adapter             | passing | [jira.md](jira.md)                 |
+| GitHub issues adapter    | passing | [github.md](github.md)             |
+| Slack adapter            | passing | [slack.md](slack.md)               |
+| Approvals                | passing | [approvals.md](approvals.md)       |
+| Curate a session's pages | passing | [curate.md](curate.md)             |
+| A mission                | passing | [mission.md](mission.md)           |
+| A docs run               | passing | [docs-run.md](docs-run.md)         |
+| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
 
 ## Deliberately absent
 

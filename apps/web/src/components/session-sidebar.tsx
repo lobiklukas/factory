@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
-import { PlusIcon } from "lucide-react";
+import { GitForkIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 import { sessionRegistry } from "@/lib/atoms/session-registry";
@@ -91,6 +91,24 @@ export const SessionSidebar = () => {
                     {session.mode}
                     <span className="truncate">{session.id}</span>
                   </span>
+                  {/*
+                   * Lineage (LOB-182): the row keeps its two lines when a session has no parent,
+                   * so the list does not jump for the one row that does. The parent's id is plain
+                   * text rather than a link: the parent need not be in this browser's registry, and
+                   * a link to a row the reader cannot see would be a dead end.
+                   */}
+                  {session.forkedFrom === undefined ? null : (
+                    <span className="flex min-w-0 items-center gap-1 font-mono text-[10px] text-muted-foreground">
+                      <GitForkIcon
+                        className="size-2.5 shrink-0"
+                        strokeWidth={1.75}
+                        aria-hidden
+                      />
+                      <span className="truncate" title={session.forkedFrom}>
+                        forked from {session.forkedFrom}
+                      </span>
+                    </span>
+                  )}
                 </Link>
               </li>
             ))}

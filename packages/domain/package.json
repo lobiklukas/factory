@@ -18,8 +18,13 @@
   "exports": {
     "./Api": "./src/Api.ts",
     "./Approval": "./src/Approval.ts",
+    "./Ids": "./src/Ids.ts",
+    "./Mission": "./src/Mission.ts",
+    "./Page": "./src/Page.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Session": "./src/Session.ts",
-    "./Task": "./src/Task.ts"
+    "./Task": "./src/Task.ts",
+    "./Skill": "./src/Skill.ts",
+    "./Trigger": "./src/Trigger.ts"
   }
 }

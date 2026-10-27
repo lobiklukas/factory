@@ -20,7 +20,16 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       getSession: (input) => sessions.get(input.sessionId),
       sendMessage: (input) => sessions.send(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
+      forkSession: (input) => sessions.fork(input),
+      replaySession: (input) => sessions.replay(input),
+      resetSession: (input) => sessions.reset(input),
+      compactSession: (input) => sessions.compact(input),
+      // A mission is a session's (LOB-230): the call answers its id, and the phase it reached is read
+      // off `getSession`'s snapshot rather than off a second call.
+      startMission: (input) => sessions.startMission(input),
       listSessions: (input) => sessions.list(input),
+      listPages: (input) => sessions.listPages(input),
+      curateSession: (input) => sessions.curate(input),
       registerRepo: (input) => sessions.registerRepo(input),
       watchSession: (input) => sessions.events(input.sessionId),
     });
