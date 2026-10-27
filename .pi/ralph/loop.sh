@@ -109,10 +109,36 @@ share_state() {
   [ -L "$STATE/research" ] || { rm -rf "$STATE/research"; ln -s "$primary/research" "$STATE/research"; }
 }
 
+# --- the worker session's own lock ------------------------------------------------------------
+# `lock` is the driver's, not the session's: a driver killed mid-iteration frees it (a dead pid is a stale lock) while
+# the `pi` it launched keeps working in $WT, and the next run used to reset the worktree under that session and launch
+# a second one beside it (LOB-120). So `with_timeout` records the session's pid and start time in $SESSION_REC for as
+# long as it runs, and nothing that switches $WT (setup, run, audit) starts while that record names a live process.
+# The start time is what tells the recorded `pi` from a later process that was handed its pid.
+SESSION_REC="$STATE/session"
+proc_started() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# live_session: print the pid of the recorded session and succeed if it still runs; drop a stale record.
+live_session() {
+  [ -f "$SESSION_REC" ] || return 1
+  local pid="" started=""
+  { read -r pid; read -r started; } <"$SESSION_REC" || true
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$(proc_started "$pid")" = "$started" ]; then
+    echo "$pid"; return 0
+  fi
+  log "removing stale session record (pid ${pid:-?})"; rm -f "$SESSION_REC"; return 1
+}
+take_worktree() {
+  local pid
+  if pid="$(live_session)"; then
+    die "$WT has a live worker session from an earlier run (pi pid $pid); wait for it or stop it with: $HERE/loop.sh kill"
+  fi
+}
+
 # --- setup: worktree, dependencies, database ---------------------------------------------------
 cmd_setup() {
   command -v pi >/dev/null || die "pi not on PATH"
   command -v gh >/dev/null || die "gh not on PATH"
+  [ ! -d "$WT" ] || take_worktree
   git -C "$MAIN_ROOT" fetch origin --quiet
   if [ ! -d "$WT" ]; then
     git -C "$MAIN_ROOT" worktree add --detach "$WT" "$RALPH_BASE_REF"
@@ -136,6 +162,9 @@ cmd_setup() {
 }
 
 # --- one pi session ---------------------------------------------------------------------------
+# reset_worktree: commit or stash whatever $WT holds and switch it to $RALPH_BASE_REF. $WT is one checkout that every
+# run, setup and audit of this worker switches, so this is only safe with no session in it: callers take the worktree
+# first (`take_worktree`), and between iterations `with_timeout` has already waited for the last session.
 reset_worktree() {
   cd "$WT"
   local excl; excl="$(git rev-parse --path-format=absolute --git-path info/exclude)"
@@ -179,7 +208,8 @@ CTX
 
 # with_timeout <secs> <cmd...>: hard wall-clock cap, plus a stall watchdog when RALPH_STALL_DIR is set: kill the
 # command once nothing under that directory (session + subagent transcripts) was written for RALPH_STALL seconds.
-# Returns 125 on a stall.
+# Returns 125 on a stall. With RALPH_SESSION_REC set, the command's pid and start time are in that file while it runs
+# (`take_worktree`); a driver killed before the command ends leaves the record behind on purpose.
 newest_mtime() {
   if stat -c %Y / >/dev/null 2>&1; then find "$1" -type f -exec stat -c %Y {} + 2>/dev/null   # GNU
   else find "$1" -type f -exec stat -f %m {} + 2>/dev/null; fi | sort -n | tail -n 1            # BSD/macOS
@@ -188,6 +218,7 @@ with_timeout() {
   local secs="$1"; shift
   local mark; mark="$(mktemp -u "${TMPDIR:-/tmp}/ralph-stall.XXXXXX")"
   "$@" & local pid=$!
+  [ -z "${RALPH_SESSION_REC:-}" ] || printf '%s\n%s\n' "$pid" "$(proc_started "$pid")" >"$RALPH_SESSION_REC"
   # The watcher must not hold our stdout: an orphaned child would keep a surrounding $(...) open.
   (
     start="$(date +%s)"
@@ -206,6 +237,7 @@ with_timeout() {
   pkill -P "$watcher" 2>/dev/null || true
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
+  [ -z "${RALPH_SESSION_REC:-}" ] || rm -f "$RALPH_SESSION_REC"
   if [ -e "$mark" ]; then rm -f "$mark"; return 125; fi
   return "$rc"
 }
@@ -244,7 +276,9 @@ session() {
         RALPH_WORKER RALPH_SHARED RALPH_CLAIM_TTL
       [ -n "$DOCKER_HOST" ] || unset DOCKER_HOST
       local text; text="$(sed "s/{{SPLIT_MAX}}/$RALPH_SPLIT_MAX/g" "$prompt"; run_context "$n" "$mode")"
-      RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
+      # Only a session in $WT holds $WT: the splitter's runs in its own worktree beside a live loop.
+      local rec=""; [ "${SESS_CWD:-$WT}" != "$WT" ] || rec="$SESSION_REC"
+      RALPH_SESSION_REC="$rec" RALPH_STALL_DIR="$STATE/sessions" with_timeout "$RALPH_TIMEOUT" pi -p --approve \
         --model "$m" --thinking "$RALPH_THINKING" \
         --session-dir "$STATE/sessions" --name "ralph-$mode-$n" \
         "$text" </dev/null >"$out" 2>"$err"
@@ -346,7 +380,7 @@ nap() {
 
 cmd_run() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
-  lock; ensure_db
+  lock; take_worktree; ensure_db
   rm -f "$STATE/STOP"
   release_idle_claims
   arm_automerge
@@ -395,7 +429,7 @@ cmd_split() {
 
 cmd_audit() {
   [ -d "$WT" ] || die "no worktree - run: $0 setup"
-  lock; ensure_db; reset_worktree
+  lock; take_worktree; ensure_db; reset_worktree
   local tag; tag="$(session 0 audit)"
   log "audit finished: $tag"
   reset_worktree
@@ -438,6 +472,7 @@ cmd_status() {
   [ -f "$STATE/loop.pid" ] && kill -0 "$(cat "$STATE/loop.pid")" 2>/dev/null && echo "detached loop: ralph-loop pgid $(cat "$STATE/loop.pid")"
   echo "worktree: $WT  model: $RALPH_MODEL  push: $RALPH_PUSH"
   [ -d "$STATE/lock" ] && echo "loop: running (pid $(cat "$STATE/lock/pid" 2>/dev/null))" || echo "loop: idle"
+  local spid; spid="$(live_session 2>/dev/null)" && echo "worker session: pi pid $spid"
   [ -f "$STATE/STOP" ] && echo "STOP requested"
   echo; echo "open ralph PRs:"
   (cd "$WT" && gh pr list --state open --limit 50 --json number,headRefName,autoMergeRequest,mergeStateStatus,labels \
@@ -472,7 +507,13 @@ cmd_kill() {
   else
     pkill -f "ralph-loop" 2>/dev/null && log "killed by name" || log "nothing running"
   fi
-  rm -f "$STATE/loop.pid"; rm -rf "$STATE/lock"
+  # A session can outlive a driver that was not in that group (a foreground `run` whose shell was killed): stop it too.
+  local spid
+  if spid="$(live_session)"; then
+    kill -TERM "$spid" 2>/dev/null || true; sleep 3; kill -KILL "$spid" 2>/dev/null || true
+    log "killed worker session pi pid $spid"
+  fi
+  rm -f "$STATE/loop.pid" "$SESSION_REC"; rm -rf "$STATE/lock"
 }
 
 cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the current iteration"; }
