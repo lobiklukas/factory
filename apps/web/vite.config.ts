@@ -18,6 +18,10 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  // The repository-root `.env` is the one file every app reads (`apps/api` and `apps/cli` load it with
+  // `--env-file=../../.env`), so a `VITE_SERVER_URL` set there reaches the dashboard too. Only
+  // `VITE_`-prefixed values are exposed to the browser bundle; a key beside them stays server-side.
+  envDir: fileURLToPath(new URL("../..", import.meta.url)),
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

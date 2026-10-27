@@ -1,6 +1,15 @@
 import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * The gate must run every suite against the database `DATABASE_URL` names, not against the
@@ -377,4 +386,148 @@ describe("the dev tasks' environment", () => {
       expect(declared(dryRun, DEV_TASK)).not.toContain(name);
     }
   }, 90_000);
+});
+
+/**
+ * `bun run dev` must give the process the repository-root `.env` (LOB-256).
+ *
+ * Turborepo says it "does not load .env files into your task's runtime", and Bun only autoloads one
+ * from its own working directory, which for a workspace task is the package. A key in the root `.env`
+ * therefore never reached `apps/api`, and a README quickstart that said to put it there ran the faux
+ * provider. The scripts name the file themselves with `bun --env-file=../../.env`.
+ *
+ * The cases read each real script out of its `package.json`, lay it into a scratch monorepo (outside
+ * this repository, so a developer's real `.env` is neither read nor written) and run it through
+ * `turbo run dev --filter=...`, with the entry point swapped for one that prints a dummy variable.
+ * Only the script's own flags change: `--watch` is dropped so the probe exits. A script that stops
+ * naming the root file, or names the wrong depth, prints `<unset>` and fails the case.
+ */
+describe("the dev scripts load the repo-root env file (LOB-256)", () => {
+  const PROBE = "FACTORY_ENV_FILE_PROBE";
+  const scratch: string[] = [];
+  afterAll(() => {
+    for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const scriptOf = (pkg: "api" | "cli", name: "dev" | "dev:watch") => {
+    const manifest = JSON.parse(
+      readFileSync(join(REPO_ROOT, "apps", pkg, "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    const script = manifest.scripts[name];
+    if (script === undefined) throw new Error(`apps/${pkg} has no ${name}`);
+    return script;
+  };
+
+  /**
+   * What `turbo run dev` makes of `script` in a monorepo shaped like this one (`apps/<pkg>`, `.env` at
+   * the root): the probe's line, and turbo's exit status.
+   */
+  const probe = (
+    script: string,
+    options: { readonly rootEnv: string | null; readonly shell?: string },
+  ) => {
+    expect(script).toContain("src/index.ts");
+    const root = mkdtempSync(join(tmpdir(), "factory-env-probe-"));
+    scratch.push(root);
+    mkdirSync(join(root, "apps", "app"), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({
+        name: "scratch",
+        private: true,
+        workspaces: ["apps/*"],
+        packageManager: "bun@1.4.2",
+      }),
+    );
+    writeFileSync(
+      join(root, "turbo.json"),
+      JSON.stringify({
+        tasks: { dev: { persistent: true, cache: false, env: [PROBE] } },
+      }),
+    );
+    writeFileSync(
+      join(root, "apps", "app", "package.json"),
+      JSON.stringify({
+        name: "@scratch/app",
+        private: true,
+        scripts: {
+          dev: script
+            .replace("--watch ", "")
+            .replace("src/index.ts", "probe.ts"),
+        },
+      }),
+    );
+    writeFileSync(
+      join(root, "apps", "app", "probe.ts"),
+      `console.log("PROBE=" + (process.env["${PROBE}"] ?? "<unset>"));\n`,
+    );
+    if (options.rootEnv !== null) {
+      writeFileSync(join(root, ".env"), `${PROBE}=${options.rootEnv}\n`);
+    }
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name]) => !name.startsWith("TURBO_") && name !== PROBE,
+      ),
+    );
+    const result = spawnSync(
+      join(REPO_ROOT, "node_modules", ".bin", "turbo"),
+      ["run", "dev", "--filter=@scratch/app", "--ui=stream"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...env,
+          ...(options.shell === undefined ? {} : { [PROBE]: options.shell }),
+          TURBO_TELEMETRY_DISABLED: "1",
+          DO_NOT_TRACK: "1",
+        },
+        timeout: 60_000,
+      },
+    );
+    const line = /PROBE=(\S*)/.exec(result.stdout)?.[1];
+    return { status: result.status, value: line, output: result.stdout };
+  };
+
+  it("hands apps/api's dev script the value in the root .env", () => {
+    const run = probe(scriptOf("api", "dev"), { rootEnv: "from-root-file" });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("hands apps/api's dev:watch script the value in the root .env", () => {
+    const run = probe(scriptOf("api", "dev:watch"), {
+      rootEnv: "from-root-file",
+    });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("hands apps/cli's dev script the value in the root .env", () => {
+    const run = probe(scriptOf("cli", "dev"), { rootEnv: "from-root-file" });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("boots with no root .env at all, the variable unset", () => {
+    for (const script of [
+      scriptOf("api", "dev"),
+      scriptOf("api", "dev:watch"),
+      scriptOf("cli", "dev"),
+    ]) {
+      const run = probe(script, { rootEnv: null });
+      expect(run.status).toBe(0);
+      expect(run.value).toBe("<unset>");
+    }
+  }, 120_000);
+
+  it("lets a value exported in the shell override the root .env", () => {
+    for (const script of [scriptOf("api", "dev"), scriptOf("cli", "dev")]) {
+      const run = probe(script, {
+        rootEnv: "from-root-file",
+        shell: "from-shell",
+      });
+      expect(run.status).toBe(0);
+      expect(run.value).toBe("from-shell");
+    }
+  }, 120_000);
 });

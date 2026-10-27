@@ -6,8 +6,8 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir=dist --target=bun --minify",
     "build:types": "tsc --emitDeclarationOnly",
-    "dev": "bun run src/index.ts",
-    "dev:watch": "bun --watch run src/index.ts",
+    "dev": "bun --env-file=../../.env run src/index.ts",
+    "dev:watch": "bun --watch --env-file=../../.env run src/index.ts",
     "test": "vitest run --passWithNoTests",
     "type-check": "tsc --noEmit",
     "clean": "git clean -xdf .cache .turbo dist node_modules"

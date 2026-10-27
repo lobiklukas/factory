@@ -39,6 +39,7 @@ import {
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
 
@@ -407,6 +408,18 @@ const HttpLive = Effect.gen(function* () {
     Option.isSome(model.apiKey) ? "anthropic" : "faux",
   );
   yield* Effect.logInfo(
+    describeLoadedEnvFiles(
+      yield* loadedEnvFiles({
+        execArgv: process.execArgv,
+        cwd: process.cwd(),
+        // Bun picks its autoloaded files from NODE_ENV, so the boot line reads the same variable.
+        nodeEnv: Option.getOrUndefined(
+          yield* Config.option(Config.String("NODE_ENV")),
+        ),
+      }).pipe(Effect.provide(BunServices.layer)),
+    ),
+  );
+  yield* Effect.logInfo(
     `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
   );
   yield* Effect.logInfo(
@@ -417,8 +430,12 @@ const HttpLive = Effect.gen(function* () {
     }),
   );
   if (backend === "faux") {
+    // A key that is absent and a backend someone chose are different facts: the second is not a
+    // problem to warn about, and the first sends the operator to the env file.
     yield* Effect.logWarning(
-      "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers",
+      Option.isSome(model.backend)
+        ? "sessions run against the faux provider and produce scripted answers (chosen by MODEL_BACKEND=faux)"
+        : "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers",
     );
   }
 
