@@ -108,6 +108,16 @@ export const TriggerDelivery = Schema.Struct({
   /** The source's idempotency key: the dedupe fact, and the session's own request id. */
   requestId: Schema.String,
   event: TriggerEvent,
+  /**
+   * Whether `requestId` names the unit of work (one issue) rather than one delivery of it.
+   *
+   * A sender's own delivery id is answered once: a retry of it after the operator registers the
+   * repo is a replay, and a new delivery is the second chance. An adapter that keys every delivery
+   * about an issue by the issue (LOB-164) has no new delivery to offer, so for it the one refusal
+   * an operator fixes — `unregistered-repo` — stays reclaimable: the next delivery under the same
+   * key is claimed again instead of replaying the old skip.
+   */
+  keyedByWork: Schema.optional(Schema.Boolean),
 });
 export type TriggerDelivery = typeof TriggerDelivery.Type;
 

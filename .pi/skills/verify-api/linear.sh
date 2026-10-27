@@ -10,7 +10,9 @@
 # repo carries a stamp), so the session count the drive asserts is this run's alone, and the API
 # reads the rule once when it boots, which is why it is set here and not in the driver:
 #
-#   TRIGGER_RULES          [{label: "factory", repo: <stamped>, baseRef: "main", prompt: …}]
+#   TRIGGER_RULES          [{label: "factory", repo: <stamped>, baseRef: "main", prompt: …},
+#                           {label: "factory-later", repo: <stamped>-later, …}] — the second repo
+#                           is registered mid-drive, to prove an unregistered-repo skip is reclaimed
 #   LINEAR_WEBHOOK_SECRET  the secret the drive signs `Linear-Signature` with
 #
 # Nothing here reaches Linear: the deliveries are written from Linear's documented payload and
@@ -24,10 +26,11 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-164}"
 RUN_STAMP="${LINEAR_RUN_STAMP:-$(date +%s)}"
 
 export LINEAR_TRIGGER_REPO="${LINEAR_TRIGGER_REPO:-acme/verify-api-linear}-$RUN_STAMP"
+export LINEAR_LATER_REPO="$LINEAR_TRIGGER_REPO-later"
 export LINEAR_WEBHOOK_SECRET="${LINEAR_WEBHOOK_SECRET:-verify-api-linear-secret}"
 TRIGGER_RULES="$(printf \
-  '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Linear issue {{key}}: {{title}}\\n\\n{{body}}"}]' \
-  "$LINEAR_TRIGGER_REPO")"
+  '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Linear issue {{key}}: {{title}}\\n\\n{{body}}"},{"label":"factory-later","repo":"%s","prompt":"{{title}}"}]' \
+  "$LINEAR_TRIGGER_REPO" "$LINEAR_LATER_REPO")"
 export TRIGGER_RULES
 
 mkdir -p "$EVIDENCE_DIR"

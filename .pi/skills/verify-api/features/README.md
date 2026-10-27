@@ -54,7 +54,7 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 and the fake listens on the port the run reserves for this surface.
 
 The Linear adapter checks (LOB-164) were run from the `agent/LOB-164` worktree on 2026-10-27 (API
-on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **11/11**, evidence
+on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**, evidence
 `.verify/evidence/lob-164/`, and `./webhook.sh` re-run there **12/12** because the Linear route it
 also posts to changed. See [linear.md](linear.md).
 

@@ -13,10 +13,12 @@
  *    what protects the delivery store and the session queue, and answering it here is what keeps a
  *    huge body from creating a `webhook_deliveries` row.
  * 2. **Verify the signature.** A wrong or missing one is `401` and writes nothing.
- * 3. **Parse and normalize.** A body that is not JSON, or that has no request id, is `400`. The
- *    adapter names the delivery's idempotency key here and nothing else about it: the generic
- *    sender supplies its own, and the Linear adapter derives one from the issue (LOB-164), because
- *    which deliveries are the same work is a fact about the sender.
+ * 3. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
+ *    cannot address: a generic body with no request id or no label, or a Linear issue body with no
+ *    issue id (any other Linear entity is answered and skipped, id or not). The adapter names the
+ *    delivery's idempotency key here and nothing else about it: the generic sender supplies its
+ *    own, and the Linear adapter derives one from the issue (LOB-164), because which deliveries
+ *    are the same work is a fact about the sender.
  * 4. **Delegate.** Everything about replays, refusals, mapping and sessions is
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip.
  *
@@ -309,7 +311,7 @@ const linearRoute = (rules: ReadonlyArray<TriggerRule>) => {
       secretVariable: "LINEAR_WEBHOOK_SECRET",
       delivery: (payload, header) =>
         deliver(payload, { delivery: header("linear-delivery") }) ?? {
-          refused: "the payload does not name a Linear entity",
+          refused: "the payload does not name a Linear issue",
           code: "bad-payload",
         },
     })),

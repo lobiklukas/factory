@@ -36,6 +36,8 @@ import {
 const runId = randomBytes(6).toString("hex");
 const repo = `acme/linear-${runId}` as RepoSlug;
 const otherRepo = `acme/linear-other-${runId}` as RepoSlug;
+/** Not registered by `withSeam`: the case that needs it registers it mid-test. */
+const laterRepo = `acme/linear-later-${runId}` as RepoSlug;
 
 const rules: ReadonlyArray<TriggerRule> = [
   {
@@ -45,11 +47,13 @@ const rules: ReadonlyArray<TriggerRule> = [
     prompt: "Linear issue {{key}}: {{title}}\n\n{{body}}",
   },
   { label: "factory-other", repo: otherRepo, prompt: "{{title}}" },
+  { label: "factory-later", repo: laterRepo, prompt: "{{title}}" },
 ];
 
 const FACTORY = { id: "lbl-factory", name: "factory", color: "#5e6ad2" };
 const OTHER = { id: "lbl-other", name: "factory-other", color: "#26b5ce" };
 const BUG = { id: "lbl-bug", name: "Bug", color: "#eb5757" };
+const LATER = { id: "lbl-later", name: "factory-later", color: "#f2c94c" };
 
 /** A Linear `Issue` webhook body, as Linear's docs describe the data-change payload. */
 const issuePayload = (over: {
@@ -93,7 +97,9 @@ const issuePayload = (over: {
 
 describe("linearEvent", () => {
   it("normalizes a created issue: its id, its words and its label names", () => {
-    expect(linearEvent(issuePayload({ labels: [FACTORY, BUG] }))).toEqual({
+    expect(
+      linearEvent(issuePayload({ labels: [FACTORY, BUG] }), rules),
+    ).toEqual({
       source: "linear",
       key: `${runId}-issue`,
       action: "create",
@@ -110,6 +116,7 @@ describe("linearEvent", () => {
         labels: [BUG, FACTORY],
         updatedFrom: { labelIds: [BUG.id], updatedAt: "2026-10-27T09:00:00Z" },
       }),
+      rules,
     );
     expect(event?.action).toBe("create");
   });
@@ -121,6 +128,7 @@ describe("linearEvent", () => {
         labels: [FACTORY],
         updatedFrom: { labelIds: [FACTORY.id, BUG.id] },
       }),
+      rules,
     );
     expect(event?.action).toBe("update");
   });
@@ -128,37 +136,86 @@ describe("linearEvent", () => {
   it("keeps Linear's own action for an update that did not touch labels", () => {
     const event = linearEvent(
       issuePayload({ action: "update", updatedFrom: { title: "Old title" } }),
+      rules,
     );
     expect(event?.action).toBe("update");
-    expect(linearEvent(issuePayload({ action: "remove" }))?.action).toBe(
+    expect(linearEvent(issuePayload({ action: "remove" }), rules)?.action).toBe(
       "remove",
     );
   });
 
+  it("starts nothing when the added label is one no rule names, though a mapped one is carried", () => {
+    // An issue that carried `factory` before the webhook or the rule existed: adding `Bug` to it is
+    // not someone triaging it into the factory.
+    const event = linearEvent(
+      issuePayload({
+        action: "update",
+        labels: [FACTORY, BUG],
+        updatedFrom: { labelIds: [FACTORY.id] },
+      }),
+      rules,
+    );
+    expect(event?.action).toBe("update");
+  });
+
   it("answers another entity as an event the filter refuses by name, not as an issue", () => {
+    // Linear's Comment payload carries the issue it was left on as `data.issue`; that is context,
+    // not the subject, so the key and the title are the comment's.
     const comment = {
       action: "create",
       type: "Comment",
-      data: { id: "comment-1", body: "LGTM", issueId: `${runId}-issue` },
+      data: {
+        id: "comment-1",
+        body: "LGTM",
+        issueId: `${runId}-issue`,
+        issue: { id: `${runId}-issue`, title: "The widget wobbles" },
+      },
       webhookTimestamp: 1_761_559_200_000,
     };
-    const event = linearEvent(comment);
+    const event = linearEvent(comment, rules);
     expect(event?.action).toBe("Comment:create");
     expect(event?.key).toBe("Comment:comment-1");
+    expect(event?.title).toBe("");
+    expect(event?.body).toBe("LGTM");
+    expect(linearDelivery(comment, rules, { delivery: "d-1" })?.requestId).toBe(
+      "linear:Comment:comment-1:Comment:create:d-1",
+    );
+  });
+
+  it("answers an entity whose data names no id as an event too, keyed by its delivery", () => {
+    // `IssueSLA` carries its fields in `issueData`; a 400 here is Linear's retry-then-disable path.
+    const sla = {
+      action: "set",
+      type: "IssueSLA",
+      issueData: { id: `${runId}-issue`, title: "The widget wobbles" },
+      webhookTimestamp: 1_761_559_200_000,
+    };
+    const event = linearEvent(sla, rules);
+    expect(event).toMatchObject({
+      key: "IssueSLA:no-id",
+      action: "IssueSLA:set",
+    });
+    const first = linearDelivery(sla, rules, { delivery: "d-1" });
+    const second = linearDelivery(sla, rules, { delivery: "d-2" });
+    expect(first?.requestId).toBe("linear:IssueSLA:no-id:IssueSLA:set:d-1");
+    expect(first?.requestId).not.toBe(second?.requestId);
   });
 
   it("reads a relay's `data.issue` wrapping the same way", () => {
-    const event = linearEvent({
-      action: "create",
-      data: {
-        issue: {
-          id: "wrapped-1",
-          title: "Wrapped",
-          description: "relayed",
-          labels: ["factory"],
+    const event = linearEvent(
+      {
+        action: "create",
+        data: {
+          issue: {
+            id: "wrapped-1",
+            title: "Wrapped",
+            description: "relayed",
+            labels: ["factory"],
+          },
         },
       },
-    });
+      rules,
+    );
     expect(event).toMatchObject({
       key: "wrapped-1",
       action: "create",
@@ -168,11 +225,17 @@ describe("linearEvent", () => {
   });
 
   it("answers undefined for a body that names no entity", () => {
-    expect(linearEvent(null)).toBeUndefined();
-    expect(linearEvent([])).toBeUndefined();
-    expect(linearEvent({ action: "create", data: { title: "no id" } })).toBe(
-      undefined,
-    );
+    expect(linearEvent(null, rules)).toBeUndefined();
+    expect(linearEvent([], rules)).toBeUndefined();
+    expect(
+      linearEvent({ action: "create", data: { title: "no id" } }, rules),
+    ).toBeUndefined();
+    expect(
+      linearEvent(
+        { action: "create", type: "Issue", data: { title: "no id" } },
+        rules,
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -187,6 +250,11 @@ describe("linearRequestId", () => {
     expect(keyOf(issuePayload({}), "delivery-1")).toBe(
       `linear:${runId}-issue:mapped`,
     );
+    // An issue-wide key outlives any one delivery, so the seam is told it names the work.
+    expect(linearDelivery(issuePayload({}), rules)?.keyedByWork).toBe(true);
+    expect(
+      linearDelivery(issuePayload({ labels: [BUG] }), rules)?.keyedByWork,
+    ).toBeUndefined();
   });
 
   it("gives a retry with a fresh header and a fresh timestamp the same id", () => {
@@ -254,7 +322,7 @@ describe("linearRequestId", () => {
       action: "update",
       updatedFrom: { title: "x" },
     });
-    const event = linearEvent(edit);
+    const event = linearEvent(edit, widened);
     expect(event).toBeDefined();
     if (event === undefined) return;
     expect(linearRequestId(event, widened, edit, { delivery: "d-1" })).toBe(
@@ -286,6 +354,7 @@ const withSeam = async <A>(
     }>;
     readonly opened: Array<Opened>;
     readonly skipReason: (requestId: string) => Promise<string | null>;
+    readonly register: (slug: RepoSlug) => Promise<void>;
   }) => Promise<A>,
 ): Promise<A> => {
   const opened: Array<Opened> = [];
@@ -351,6 +420,14 @@ const withSeam = async <A>(
               SELECT skip_reason FROM webhook_deliveries WHERE request_id = ${requestId}
             `;
             return rows[0]?.skipReason ?? null;
+          }),
+        ),
+      register: (slug) =>
+        runtime.runPromise(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient;
+            yield* sql`INSERT INTO repos (slug) VALUES (${slug})
+                       ON CONFLICT (slug) DO NOTHING`;
           }),
         ),
     });
@@ -469,13 +546,59 @@ describe("a Linear issue through the seam", () => {
     });
   }, 60_000);
 
+  it("starts the issue once its rule's repo is registered, though the key names the issue", async () => {
+    await withSeam(async ({ post, opened, register }) => {
+      const id = `${runId}-later`;
+      const refused = await post(issuePayload({ id, labels: [LATER] }), "d-1");
+      expect(refused.status).toBe("skipped");
+      expect(refused.reason).toBe(`repo ${laterRepo} is not registered`);
+      // Before registration the skip is simply the answer again, and still nothing opens.
+      const again = await post(issuePayload({ id, labels: [LATER] }), "d-2");
+      expect(again.status).toBe("skipped");
+      expect(opened).toHaveLength(0);
+
+      await register(laterRepo);
+
+      // The operator removes and re-adds the label; Linear sends it twice at once for good measure.
+      const relabel = issuePayload({
+        id,
+        action: "update",
+        labels: [LATER],
+        updatedFrom: { labelIds: [] },
+      });
+      const outcomes = await Promise.all([
+        post(relabel, "d-3"),
+        post(relabel, "d-4"),
+      ]);
+      expect(outcomes.map((outcome) => outcome.requestId)).toEqual([
+        refused.requestId,
+        refused.requestId,
+      ]);
+      const winners = outcomes.filter((outcome) => !outcome.replayed);
+      expect(winners).toHaveLength(1);
+      expect(winners[0]?.status).toBe("processed");
+      expect(opened).toHaveLength(1);
+      expect(opened[0]?.repo).toBe(laterRepo);
+
+      // Once processed, the issue-wide key is a replay again.
+      const retry = await post(issuePayload({ id, labels: [LATER] }), "d-5");
+      expect(retry).toMatchObject({ status: "processed", replayed: true });
+      expect(opened).toHaveLength(1);
+    });
+  }, 60_000);
+
   it("answers a comment delivery with a skip that names it, rather than a refusal Linear retries", async () => {
     await withSeam(async ({ post, opened }) => {
       const outcome = await post(
         {
           action: "create",
           type: "Comment",
-          data: { id: `${runId}-comment`, body: "LGTM" },
+          data: {
+            id: `${runId}-comment`,
+            body: "LGTM",
+            issueId: `${runId}-created`,
+            issue: { id: `${runId}-created`, title: "The widget wobbles" },
+          },
           webhookTimestamp: 1_761_559_200_000,
         },
         "d-1",

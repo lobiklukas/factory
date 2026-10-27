@@ -7,6 +7,7 @@
 //   EVIDENCE_DIR           default .verify/evidence/latest
 //   LINEAR_TRIGGER_REPO    the rule's repo — linear.sh passes the same value to the API's
 //                          TRIGGER_RULES, so the two cannot disagree
+//   LINEAR_LATER_REPO      the second rule's repo (`factory-later`), registered only mid-drive
 //   LINEAR_WEBHOOK_SECRET  the secret linear.sh booted the API with
 //   LINEAR_RUN_STAMP       makes this run's issue ids new against a reused database
 //
@@ -17,14 +18,19 @@
 //   3. its first message is the rule's prompt rendered from the issue's own title and description
 //   4. Linear's retry of that delivery — a new `Linear-Delivery` header and a later
 //      `webhookTimestamp`, so a new body and a new signature — is a replay
-//   5. an update that adds a second label to the same issue is a replay too
+//   5. an update that adds a second mapped label to the same issue is a replay too
 //   6. an edit of the issue is skipped, naming Linear's action
 //   7. an issue whose labels no rule names is skipped, naming the labels
 //   8. an issue filed unlabelled, then labelled `factory`, starts its session on the label
-//   9. a comment delivery is answered 200 and skipped, not refused (a 4xx makes Linear retry it and
-//      eventually disable the webhook)
-//  10. a wrong `Linear-Signature` is 401
-//  11. the rule's repo has exactly the two sessions the two labeled issues earned
+//   9. a comment delivery — carrying `data.issue`, as Linear's do — is answered 200 and skipped as
+//      the comment, not refused (a 4xx makes Linear retry it and eventually disable the webhook)
+//  10. a delivery whose `data` names no id (`IssueSLA`) is answered 200 and skipped too
+//  11. adding a label no rule names to an issue that already carries a mapped one starts nothing
+//  12. an issue skipped because its rule's repo is unregistered starts its session once the repo is
+//      registered and the label is added again
+//  13. a wrong `Linear-Signature` is 401
+//  14. the rule's repo has exactly the two sessions the two labeled issues earned, and the later
+//      rule's repo the one its issue earned
 //
 // Why HTTP and not the service: `packages/core/src/Linear.test.ts` proves the key and the seam with
 // a counting fake; this adds the route, the signature, the real `SessionService`, and a real session
@@ -43,6 +49,9 @@ const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
 const REPO = RepoSlug.make(
   process.env["LINEAR_TRIGGER_REPO"] ?? "acme/verify-api-linear",
 );
+const LATER_REPO = RepoSlug.make(
+  process.env["LINEAR_LATER_REPO"] ?? "acme/verify-api-linear-later",
+);
 const SECRET = process.env["LINEAR_WEBHOOK_SECRET"] ?? "";
 const STAMP = process.env["LINEAR_RUN_STAMP"] ?? String(Date.now());
 
@@ -59,6 +68,7 @@ const assert = makeChecker(observed);
 const FACTORY = { id: "lbl-factory", name: "factory", color: "#5e6ad2" };
 const BUG = { id: "lbl-bug", name: "Bug", color: "#eb5757" };
 const FRONTEND = { id: "lbl-frontend", name: "Frontend", color: "#26b5ce" };
+const LATER = { id: "lbl-later", name: "factory-later", color: "#f2c94c" };
 
 /** A Linear `Issue` data-change webhook body, shaped from Linear's webhook docs. */
 const issueBody = (over: {
@@ -142,10 +152,12 @@ const program = Effect.gen(function* () {
   // `unregistered-repo` is a separate refusal; the mapping is what this drive is testing.
   yield* client.registerRepo({ repo: REPO, defaultBaseRef: "main" });
 
-  const forRepo = Effect.gen(function* () {
-    const listed = yield* client.listSessions({ limit: 100 });
-    return listed.sessions.filter((entry) => entry.repo === REPO);
-  });
+  const sessionsOn = (repo: RepoSlug) =>
+    Effect.gen(function* () {
+      const listed = yield* client.listSessions({ limit: 100 });
+      return listed.sessions.filter((entry) => entry.repo === repo);
+    });
+  const forRepo = sessionsOn(REPO);
 
   // 1–3: a labeled issue opens one session on the rule's repo, with the issue as its prompt.
   const created = issueBody({
@@ -207,7 +219,7 @@ const program = Effect.gen(function* () {
     `status=${retry.status} body=${JSON.stringify(retry.body)}`,
   );
 
-  // 5: a second label on the same issue.
+  // 5: a second mapped label on the same issue.
   const relabel = yield* Effect.promise(() =>
     deliver(
       "relabel",
@@ -215,13 +227,13 @@ const program = Effect.gen(function* () {
         id: `lin-${STAMP}-created`,
         identifier: `VER-${STAMP}1`,
         action: "update",
-        labels: [BUG, FACTORY, FRONTEND],
+        labels: [BUG, FACTORY, LATER],
         updatedFrom: { labelIds: [BUG.id, FACTORY.id] },
       }),
     ),
   );
   assert(
-    "a label added to the same issue later is a replay, not a second session",
+    "a mapped label added to the same issue later is a replay, not a second session",
     relabel.status === 200 && relabel.body?.["replayed"] === true,
     `status=${relabel.status} body=${JSON.stringify(relabel.body)}`,
   );
@@ -307,6 +319,10 @@ const program = Effect.gen(function* () {
         id: `lin-${STAMP}-comment`,
         body: "LGTM",
         issueId: `lin-${STAMP}-created`,
+        issue: {
+          id: `lin-${STAMP}-created`,
+          title: `Fix the wobble ${STAMP}`,
+        },
       },
       url: `https://linear.app/acme/issue/VER-${STAMP}1#comment`,
       webhookTimestamp: Date.now(),
@@ -321,7 +337,78 @@ const program = Effect.gen(function* () {
     `status=${comment.status} body=${JSON.stringify(comment.body)}`,
   );
 
-  // 10: authentication.
+  // 10: an entity whose `data` names no id.
+  const sla = yield* Effect.promise(() =>
+    deliver("issue-sla", {
+      action: "set",
+      type: "IssueSLA",
+      issueData: { id: `lin-${STAMP}-created`, title: "SLA" },
+      url: `https://linear.app/acme/issue/VER-${STAMP}1`,
+      webhookTimestamp: Date.now(),
+      webhookId: "verify-api-linear-subscription",
+    }),
+  );
+  assert(
+    "a delivery whose data names no id is answered and skipped, not refused",
+    sla.status === 200 &&
+      sla.body?.["status"] === "skipped" &&
+      String(sla.body?.["reason"] ?? "").includes('"IssueSLA:set"'),
+    `status=${sla.status} body=${JSON.stringify(sla.body)}`,
+  );
+
+  // 11: an unrelated label added to an issue that already carries a mapped one.
+  const preLabelled = yield* Effect.promise(() =>
+    deliver(
+      "unrelated-label",
+      issueBody({
+        id: `lin-${STAMP}-prelabelled`,
+        identifier: `VER-${STAMP}5`,
+        action: "update",
+        labels: [FACTORY, BUG],
+        updatedFrom: { labelIds: [FACTORY.id] },
+      }),
+    ),
+  );
+  assert(
+    "adding a label no rule names starts nothing, even on an issue carrying a mapped one",
+    preLabelled.status === 200 &&
+      preLabelled.body?.["status"] === "skipped" &&
+      String(preLabelled.body?.["reason"] ?? "").includes('action "update"'),
+    `status=${preLabelled.status} body=${JSON.stringify(preLabelled.body)}`,
+  );
+
+  // 12: unregistered, then registered — the issue-wide key must not replay the old skip.
+  const laterIssue = {
+    id: `lin-${STAMP}-later`,
+    identifier: `VER-${STAMP}6`,
+    title: `Later ${STAMP}`,
+  };
+  const refused = yield* Effect.promise(() =>
+    deliver("unregistered", issueBody({ ...laterIssue, labels: [LATER] })),
+  );
+  yield* client.registerRepo({ repo: LATER_REPO, defaultBaseRef: "main" });
+  const relabelled = yield* Effect.promise(() =>
+    deliver(
+      "registered-relabel",
+      issueBody({
+        ...laterIssue,
+        action: "update",
+        labels: [LATER],
+        updatedFrom: { labelIds: [] },
+      }),
+    ),
+  );
+  assert(
+    "an unregistered-repo skip is reclaimed once the repo is registered",
+    refused.body?.["status"] === "skipped" &&
+      refused.body?.["reason"] === `repo ${LATER_REPO} is not registered` &&
+      relabelled.status === 200 &&
+      relabelled.body?.["status"] === "processed" &&
+      relabelled.body?.["replayed"] === false,
+    `refused=${JSON.stringify(refused.body)} relabelled=${JSON.stringify(relabelled.body)}`,
+  );
+
+  // 13: authentication.
   const forged = yield* Effect.promise(() =>
     deliver(
       "forged",
@@ -335,12 +422,13 @@ const program = Effect.gen(function* () {
     `status=${forged.status} body=${JSON.stringify(forged.body)}`,
   );
 
-  // 11: the count.
+  // 14: the count.
   const sessions = yield* forRepo;
+  const later = yield* sessionsOn(LATER_REPO);
   assert(
-    "the rule's repo has exactly one session per labeled issue",
-    sessions.length === 2,
-    `sessions=${JSON.stringify(sessions.map((entry) => ({ id: entry.id, title: entry.title })))}`,
+    "each rule's repo has exactly one session per labeled issue",
+    sessions.length === 2 && later.length === 1,
+    `sessions=${JSON.stringify(sessions.map((entry) => ({ id: entry.id, title: entry.title })))} later=${later.length}`,
   );
 });
 
