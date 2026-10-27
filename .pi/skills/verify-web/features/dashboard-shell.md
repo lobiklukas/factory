@@ -3,7 +3,9 @@
 **Status:** passing
 
 The shell is the product's frame: a 48px icon rail, then the route. `/` redirects to `/sessions`,
-which adds the session list beside the pane.
+which adds the session list beside the pane — from `md` (768 px) up. Below it the list and the pane
+take turns (LOB-210): `/sessions` is the list at the full width beside the rail, and a session's
+route is its pane at that width, with a back link (`Show sessions`) at the start of its header.
 
 ## Sub-features
 
@@ -15,6 +17,10 @@ which adds the session list beside the pane.
 - The session sidebar is the server's `listSessions` (LOB-75): its rows are the first page in the
   server's order, and with no sessions it says `No sessions on this control plane yet`
 - The theme toggle sits at the rail's foot and dark is the default
+- At 390 px the session pane spans everything right of the rail, its header's actions (Compact,
+  Fork) end inside the viewport, the composer is a line wide enough to type in, and the header's
+  back link opens the list at the full width (LOB-210, asserted in [fork-lineage.md](fork-lineage.md)'s
+  narrow block)
 - `/sandboxes`, reached by URL only, renders its milestone copy rather than an empty table;
   `/approvals`, reached by URL or from a waiting session's pane, is every run's pending approvals
   (LOB-53, [routing.md](routing.md))
@@ -75,6 +81,11 @@ the transcript, the tool disclosure opening, the running dot pulsing) and the gl
 
 ## Gotchas
 
+- **Below `md`, nothing sits beside the pane.** A fixed `w-64` list beside the rail once left a
+  390 px phone an 86 px pane: the header's Fork ended at 657 px, past the viewport, and the
+  composer's placeholder stood one character per line (22 px wide, 418 px tall). The fix is the
+  shell's breakpoint, not smaller header controls; the header only wraps its actions onto their own
+  row below `md` so the session's name keeps the first one.
 - **The frame is `h-dvh`, not `min-h-dvh`.** Every pane scrolls inside itself. A minimum height lets
   the page grow to its tallest child instead, which pushes the composer off the viewport; the bug is
   invisible until a transcript is longer than the screen.

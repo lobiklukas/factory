@@ -8,6 +8,7 @@ export const Route = createFileRoute("/sessions")({
 /**
  * Every session route renders inside the same two-column frame: the list is
  * persistent, so switching sessions never costs a re-navigation of the list.
+ * Below `md` the two columns take turns instead (LOB-210, `SessionSidebar`).
  */
 function SessionsLayout() {
   return (

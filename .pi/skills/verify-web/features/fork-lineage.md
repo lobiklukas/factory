@@ -29,10 +29,18 @@ focused control's accessible name, and requires **Fork from here** to appear, an
 **Forget this session** control remains (it only ever edited the browser-local list). It then walks focus back to **Fork** and presses Enter, requiring the path
 to become a _different_
 `/sessions/ses_…`. Finally it requires at least two sidebar rows, the child's row to contain
-`forked from <parent id>`, the parent's row to carry no `forked from` text, and the document to fit a
-390 px viewport with the lineage line present — including the lineage line's own box staying inside
-its row, so "readable" is asserted as a box rather than inferred from the page not widening.
-Evidence: `fork-lineage.png`, `fork-lineage-narrow.png` and the recorded `narrowWidth` numbers.
+`forked from <parent id>`, and the parent's row to carry no `forked from` text.
+
+At 390 px (LOB-210) it then requires, on the fork's own route, the pane's header to span from the
+rail's right edge to the viewport's with no list beside it, the **Fork from here** and **Compact
+session** buttons' `getBoundingClientRect()` to end inside the viewport, the composer to be at least
+half the viewport wide and no taller than two of its lines, and the document not to widen. It presses
+the header's **Show sessions** link and requires `/sessions` with the list at the full width beside
+the rail, the document to fit with the lineage line present, and the lineage line's own box to stay
+inside its row, so "readable" is asserted as a box rather than inferred from the page not widening.
+Against the build before LOB-210 the first three fail (pane 86 px, Fork's right edge 657 px,
+composer 22 × 418 px) and the back link does not exist. Evidence: `fork-lineage.png`,
+`session-pane-narrow.png`, `fork-lineage-narrow.png` and the recorded `narrowWidth` numbers.
 
 All of these are required checks; the run exits non-zero without them.
 

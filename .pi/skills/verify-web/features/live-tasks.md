@@ -59,10 +59,9 @@ forces the re-render is state.
 - The empty state is proven on a session whose run has settled, not on a session that never ran: the
   dashboard's only way to create a session also sends its first message. It is the same render branch
   (`tasks` empty), and the strip has no other input.
-- At 390 px the shell itself is the defect (fixed `w-64` sidebar plus rail, LOB-210), and the pane
-  is crushed to ~86 px for every screen in the app. A row clips at its own edge there rather than
-  drawing over its neighbours, but the drive asserts 1280×800 because that is the width the
-  criterion names.
+- The strip's overflow is asserted at 1280×800, the width the criterion names. At 390 px the pane is
+  the width beside the rail (~340 px, since LOB-210's breakpoint) and the shell's own checks run
+  there ([fork-lineage.md](fork-lineage.md)), but no check reads the strip's rows at that width.
 - The task list is a tab stop unconditionally, including when one row fits and nothing scrolls: it is
   the panel's keyboard entry point (criterion: reachable by keyboard), and a region that is only
   sometimes focusable would not be.
