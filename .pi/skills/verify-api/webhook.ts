@@ -8,12 +8,15 @@
 //   TRIGGER_REPO  the repo the rules map to (webhook.sh sets it and passes the same value to the
 //                 API as part of TRIGGER_RULES, so the two cannot disagree)
 //   TRIGGER_SECRET  the shared secret webhook.sh booted the API with
+//   DATABASE_URL  the database the API serves (default `DatabaseConfig`'s), where the stale-claim
+//                 check writes the row a killed process would have left (LOB-216)
 //
 // Why HTTP and not the service: what this adds over `packages/core`'s `TriggerService.test.ts` is
 // the whole path — signature, cap, payload normalization, the seam, a *real* `SessionService`, and
 // a real session whose transcript carries the prompt. The posts are signed exactly the way Linear
 // signs a delivery (`hmac-sha256` over the raw body, hex), so the route cannot be passing by
 // accident.
+import { SQL } from "bun";
 import { createHmac } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +28,10 @@ import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, type CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
+/** The API's own database — `DatabaseConfig`'s default when the run names none. */
+const DATABASE_URL =
+  process.env["DATABASE_URL"] ??
+  "postgres://factory:factory@localhost:5442/factory";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
 const REPO = RepoSlug.make(
   process.env["TRIGGER_REPO"] ?? "acme/verify-api-trigger",
@@ -39,6 +46,7 @@ const observed: {
   repo: RepoSlug;
   checks: Record<string, CheckRecord>;
   deliveries: Array<{ route: string; status: number; answer: unknown }>;
+  reclaimedSessionId?: string | null;
 } = {
   apiUrl: API_URL,
   repo: REPO,
@@ -278,6 +286,38 @@ const program = Effect.gen(function* () {
     "only the two mapped deliveries created sessions",
     afterAll === before + 2,
     `before=${before} after=${afterAll}`,
+  );
+
+  // Feature: a claim whose process died is reclaimed (LOB-216). A `SIGKILL` between the claim and
+  // the outcome runs no release, so it leaves a `received` row nothing will finish. The drive
+  // writes that row the way the killed process left it — claimed an hour ago, far past the seam's
+  // window — into the database the API serves, then delivers the same id: the retry must start the
+  // work, not answer `replayed: true` to work that never started.
+  const orphanId = `${requestId}-orphaned`;
+  yield* Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      await db`
+        INSERT INTO webhook_deliveries (request_id, status, received_at, claimed_at)
+        VALUES (${orphanId}, 'received', now() - interval '1 hour', now() - interval '1 hour')
+      `;
+    } finally {
+      await db.close();
+    }
+  });
+  const reclaimed = yield* Effect.promise(() =>
+    post("/webhooks/generic", generic(orphanId)),
+  );
+  observed.reclaimedSessionId = reclaimed.outcome?.sessionId ?? null;
+  const afterReclaim = yield* countForRepo;
+  assert(
+    "a delivery a killed process left claimed is reclaimed and starts its session",
+    reclaimed.status === 200 &&
+      reclaimed.outcome?.status === "processed" &&
+      reclaimed.outcome?.replayed === false &&
+      reclaimed.outcome?.sessionId !== undefined &&
+      afterReclaim === afterAll + 1,
+    `status=${reclaimed.status} body=${JSON.stringify(reclaimed.body)} sessions ${afterAll}→${afterReclaim}`,
   );
 });
 

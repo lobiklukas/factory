@@ -355,7 +355,12 @@ const rulesFromEnv = (): ReadonlyArray<TriggerRule> => {
  */
 const rules = rulesFromEnv();
 
-const WebhookRoutes = Layer.mergeAll(linearRoute(rules), GenericRoute);
+/**
+ * Both routes, still asking for the seam per request. Exported so a test can serve them with a fake
+ * `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`) are answered before the
+ * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
+ */
+export const WebhookRoutes = Layer.mergeAll(linearRoute(rules), GenericRoute);
 
 export const WebhookLive = WebhookRoutes.pipe(
   HttpRouter.provideRequest(

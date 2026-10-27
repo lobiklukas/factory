@@ -29,7 +29,7 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
+import { Deferred, Duration, Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import {
@@ -113,6 +113,8 @@ const withRuntime = async <A>(
   body: (harness: Harness) => Promise<A>,
   options: {
     readonly registerRepo?: ReadonlyArray<RepoSlug>;
+    /** The seam's reclaim window, when a case needs one other than the default. */
+    readonly reclaimAfter?: Duration.Input;
     /** Fail the first `create` this many times, as a session layer under stress would. */
     readonly failCreateTimes?: number;
     /** Die (a defect, not a typed failure) on the first `create` that many times. */
@@ -215,7 +217,12 @@ const withRuntime = async <A>(
   };
 
   const runtime = ManagedRuntime.make(
-    TriggerServiceLive({ rules }).pipe(
+    TriggerServiceLive({
+      rules,
+      ...(options.reclaimAfter === undefined
+        ? {}
+        : { reclaimAfter: options.reclaimAfter }),
+    }).pipe(
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
@@ -251,6 +258,25 @@ const withRuntime = async <A>(
     await runtime.dispose();
   }
 };
+
+/**
+ * Leave a claim behind the way a killed process does: the row is `received`, and nothing will ever
+ * record its outcome or release it. `age` is how long ago the claim was taken, as a Postgres
+ * interval.
+ */
+const writeOrphanedClaim = (requestId: string, age: string) =>
+  Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          INSERT INTO webhook_deliveries (request_id, status, received_at, claimed_at)
+          VALUES (${requestId}, 'received', now() - ${age}::interval, now() - ${age}::interval)
+        `;
+      }),
+      DatabaseLive,
+    ),
+  );
 
 const deliver = (requestId: string, over: Partial<TriggerEvent> = {}) =>
   ({
@@ -545,6 +571,120 @@ describe("the trigger seam", () => {
         expect(writeBacks).toEqual([created[0]?.id, created[0]?.id]);
       },
       { registerRepo: [repo], failWriteBackTimes: 1 },
+    );
+  }, 60_000);
+
+  it("reclaims a delivery whose process died between its claim and its outcome", async () => {
+    // LOB-216: a `SIGKILL` after the claim runs no release, so the row stays `received`. Before the
+    // reclaim window every retry answered `replayed: true` to work that never started; an hour-old
+    // claim is far past the default window, so the retry is the delivery that does the work.
+    const requestId = `${runId}-orphaned`;
+    await writeOrphanedClaim(requestId, "1 hour");
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const reclaimed = await run(trigger.deliver(deliver(requestId)));
+        expect(reclaimed.replayed).toBe(false);
+        expect(reclaimed.status).toBe("processed");
+        expect(reclaimed.sessionId).toBe(created[0]?.id);
+        expect(created).toHaveLength(1);
+        expect(created[0]?.messages).toEqual([
+          "Work on Fix the widget:\nThe widget wobbles.",
+        ]);
+
+        // The reclaim recorded its outcome on the same row, so the next retry is an honest replay.
+        const again = await run(trigger.deliver(deliver(requestId)));
+        expect(again.replayed).toBe(true);
+        expect(again.status).toBe("processed");
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo] },
+    );
+  }, 60_000);
+
+  it("leaves a claim inside the window alone, and measures the window it was given", async () => {
+    // Two minutes old: inside the default window, so the first process may still be working and
+    // the retry is a replay of work in flight. The same row under a one-minute window is stale.
+    const requestId = `${runId}-young-claim`;
+    await writeOrphanedClaim(requestId, "2 minutes");
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const replay = await run(trigger.deliver(deliver(requestId)));
+        expect(replay.replayed).toBe(true);
+        expect(replay.status).toBe("received");
+        expect(created).toHaveLength(0);
+      },
+      { registerRepo: [repo] },
+    );
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const reclaimed = await run(trigger.deliver(deliver(requestId)));
+        expect(reclaimed.replayed).toBe(false);
+        expect(reclaimed.status).toBe("processed");
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo], reclaimAfter: "1 minute" },
+    );
+  }, 60_000);
+
+  it("renews a reclaimed claim, so a retry that lands while the reclaimer works is a replay", async () => {
+    // The reclaim sets `claimed_at` in the statement that takes the row. Without that the row would
+    // still look stale to the next retry, and every retry inside the reclaimer's own window would
+    // take the work again. The reclaimer parks in `send`; the retry comes from a second runtime —
+    // a second process — so it shares the row and nothing else.
+    const requestId = `${runId}-orphaned-renew`;
+    await writeOrphanedClaim(requestId, "1 hour");
+    const holdInFlight = {
+      arrived: Deferred.makeUnsafe<void>(),
+      release: Deferred.makeUnsafe<void>(),
+    };
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const reclaimer = run(trigger.deliver(deliver(requestId)));
+        try {
+          await Promise.race([
+            run(Deferred.await(holdInFlight.arrived)),
+            reclaimer,
+          ]);
+          const retry = await withRuntime(
+            async (other) => {
+              const outcome = await other.run(
+                other.trigger.deliver(deliver(requestId)),
+              );
+              expect(other.created).toHaveLength(0);
+              return outcome;
+            },
+            { registerRepo: [repo] },
+          );
+          expect(retry.replayed).toBe(true);
+          expect(retry.status).toBe("received");
+        } finally {
+          await run(Deferred.succeed(holdInFlight.release, undefined));
+        }
+
+        const reclaimed = await reclaimer;
+        expect(reclaimed.replayed).toBe(false);
+        expect(reclaimed.status).toBe("processed");
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo], holdInFlight },
+    );
+  }, 60_000);
+
+  it("reclaims a stale claim for a delivery keyed by the work, too", async () => {
+    // A work-keyed delivery (the Linear adapter's issue key) has its own conflict clause — the
+    // unregistered-repo reclaim — and the stale-claim reclaim has to be in that one as well.
+    const requestId = `${runId}-orphaned-keyed`;
+    await writeOrphanedClaim(requestId, "1 hour");
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const reclaimed = await run(
+          trigger.deliver({ ...deliver(requestId), keyedByWork: true }),
+        );
+        expect(reclaimed.replayed).toBe(false);
+        expect(reclaimed.status).toBe("processed");
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo] },
     );
   }, 60_000);
 
