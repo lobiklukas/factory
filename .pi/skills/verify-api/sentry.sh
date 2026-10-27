@@ -9,10 +9,13 @@
 # the Sentry configuration, which has to exist *before* the API boots because the routes read the
 # rules once when they are built:
 #
-#   TRIGGER_RULES               one rule: the `sentry` label → this run's own repo (per run, so
-#                               another run's sessions cannot answer "how many did this open?")
+#   TRIGGER_RULES               two rules: `sentry:project:404` → this run's repo with an
+#                               `-unregistered` suffix, which nobody registers (so the alert burst
+#                               records skips and opens no session), ahead of the catch-all: the
+#                               `sentry` label → this run's own repo (per run, so another run's
+#                               sessions cannot answer "how many did this open?")
 #   SENTRY_CLIENT_SECRET        the integration's client secret the drive signs with
-#   SENTRY_RATE_LIMIT           6 per SENTRY_RATE_WINDOW_SECONDS=60, so a burst of 10 is past it
+#   SENTRY_RATE_LIMIT           6 per SENTRY_RATE_WINDOW_SECONDS=60, so a burst of 10 alerts is past it
 #
 # The two-process shape is `sigterm.sh`'s: phase `first` runs against the first process; `down.sh`
 # stops it with SIGTERM (and SIGKILL if it lingers); phase `after-restart` runs against a fresh
@@ -37,8 +40,8 @@ export SENTRY_CLIENT_SECRET="${SENTRY_CLIENT_SECRET:-verify-api-sentry-secret}"
 export SENTRY_RATE_LIMIT="${SENTRY_RATE_LIMIT:-6}"
 export SENTRY_RATE_WINDOW_SECONDS="${SENTRY_RATE_WINDOW_SECONDS:-60}"
 TRIGGER_RULES="$(printf \
-  '[{"label":"sentry","repo":"%s","baseRef":"main","prompt":"Investigate {{title}} before editing anything:\\n{{body}}"}]' \
-  "$TRIGGER_REPO")"
+  '[{"label":"sentry:project:404","repo":"%s-unregistered","prompt":"{{title}}"},{"label":"sentry","repo":"%s","baseRef":"main","prompt":"Investigate {{title}} before editing anything:\\n{{body}}"}]' \
+  "$TRIGGER_REPO" "$TRIGGER_REPO")"
 export TRIGGER_RULES
 
 mkdir -p "$EVIDENCE_DIR"

@@ -10,8 +10,9 @@
  *   turns a case red.
  * - **The rate cap refuses a burst with a typed `429`**, `Retry-After` and the cap it hit, never a
  *   `500`, and the deliveries inside the cap still reach the seam.
- * - **The cap counts signed deliveries only**, so a caller without the secret cannot spend the
- *   budget an honest alert needs.
+ * - **The cap counts signed deliveries that can start work only**, so a caller without the secret
+ *   cannot spend the budget an honest alert needs, and neither can a firehose of `issue` deliveries
+ *   the seam would only skip — unless a rule opts that action in, when it is work and counts.
  *
  * The seam is a recording fake, as in `Webhook.test.ts`: the question is whether the route let a
  * delivery through. Each case serves the routes afresh, so its rate-cap window starts empty.
@@ -19,7 +20,12 @@
  */
 import { createHmac } from "node:crypto";
 import { sentrySignature, TriggerService } from "@repo/core";
-import type { TriggerDelivery, TriggerOutcome } from "@repo/domain/Trigger";
+import type { RepoSlug } from "@repo/domain/Session";
+import type {
+  TriggerDelivery,
+  TriggerOutcome,
+  TriggerRule,
+} from "@repo/domain/Trigger";
 import { Effect, Layer, Logger } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -57,9 +63,9 @@ const recordingLogger = Logger.make(({ message }) => {
 });
 
 /** The routes over the recording seam, a fresh rate-cap window and the recording logger. */
-const serve = () =>
+const serve = (rules: ReadonlyArray<TriggerRule> = []) =>
   HttpRouter.toWebHandler(
-    webhookRoutesFor([]).pipe(
+    webhookRoutesFor(rules).pipe(
       HttpRouter.provideRequest(
         Layer.mergeAll(
           Layer.succeed(
@@ -99,6 +105,18 @@ const alert = (eventId: string) => ({
   actor: { type: "application", id: "sentry", name: "Sentry" },
 });
 
+/** A new-issue delivery (`Sentry-Hook-Resource: issue`), which starts nothing unless a rule opts in. */
+const newIssue = (issueId: string) => ({
+  action: "created",
+  data: {
+    issue: {
+      id: issueId,
+      title: `Error: ${CANARY}`,
+      project: { id: "1", slug: "web" },
+    },
+  },
+});
+
 type Served = ReturnType<typeof serve>;
 
 const post = async (
@@ -108,6 +126,8 @@ const post = async (
     /** The signature header; `null` sends none. Defaults to the body signed with `SECRET`. */
     readonly signature?: string | null;
     readonly requestId?: string;
+    /** `Sentry-Hook-Resource`; defaults to an issue alert's. */
+    readonly resource?: string;
   } = {},
 ) => {
   const body = JSON.stringify(payload);
@@ -120,7 +140,7 @@ const post = async (
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "sentry-hook-resource": "event_alert",
+        "sentry-hook-resource": options.resource ?? "event_alert",
         "request-id": options.requestId ?? "req-lob-81",
         ...(signature === null ? {} : { "sentry-hook-signature": signature }),
       },
@@ -307,6 +327,67 @@ describe("the Sentry rate cap", () => {
 
     expect([first.status, second.status]).toEqual([200, 200]);
     expect(delivered).toHaveLength(2);
+  });
+
+  it("spends nothing on a delivery that cannot start work: an issue firehose leaves the alerts their budget", async () => {
+    configure({
+      SENTRY_CLIENT_SECRET: SECRET,
+      SENTRY_RATE_LIMIT: "2",
+    });
+    for (let n = 1; n <= 5; n += 1) {
+      const answer = await post(served, newIssue(`firehose-${n}`), {
+        resource: "issue",
+        requestId: `req-firehose-${n}`,
+      });
+      expect(answer.status).toBe(200);
+    }
+    // A signed body the adapter cannot address is a 400 and spends nothing either.
+    expect(
+      (
+        await post(served, {
+          action: "triggered",
+          data: { event: { title: CANARY } },
+        })
+      ).status,
+    ).toBe(400);
+
+    const alerts = [];
+    for (let n = 1; n <= 3; n += 1) {
+      alerts.push((await post(served, alert(`after-firehose-${n}`))).status);
+    }
+    expect(alerts).toEqual([200, 200, 429]);
+    // Every issue delivery still reached the seam, which records each as its skip.
+    expect(delivered.map((delivery) => delivery.event.action)).toEqual([
+      ...Array.from({ length: 5 }, () => "issue:created"),
+      "create",
+      "create",
+    ]);
+  });
+
+  it("counts an action a rule opts in: it is work, so it spends the budget an alert would", async () => {
+    await served.dispose();
+    configure({
+      SENTRY_CLIENT_SECRET: SECRET,
+      SENTRY_RATE_LIMIT: "1",
+    });
+    served = serve([
+      {
+        label: "sentry",
+        repo: "acme/web" as RepoSlug,
+        prompt: "{{title}}",
+        startsWorkFor: ["issue:created"],
+      },
+    ]);
+    const optedIn = await post(served, newIssue("opted-in"), {
+      resource: "issue",
+      requestId: "req-opted-in",
+    });
+    expect(optedIn.status).toBe(200);
+    expect(delivered[0]).toMatchObject({
+      requestId: "sentry:work:issue:opted-in:issue:created",
+      keyedByWork: true,
+    });
+    expect((await post(served, alert("after-opt-in"))).status).toBe(429);
   });
 
   it("caps only the Sentry route: an exhausted Sentry window leaves the generic route uncapped", async () => {

@@ -30,6 +30,8 @@ import {
   sentryEventRequestId,
   sentryProjectLabel,
   sentrySignature,
+  sentryStartsWork,
+  sentryWorkRequestId,
   verifySentrySignature,
 } from "./Sentry";
 import {
@@ -255,6 +257,101 @@ describe("a Sentry delivery's key", () => {
     });
   });
 
+  it("keys an action a rule opts in by its subject and action, not its Request-ID, and by work", () => {
+    const optIn: ReadonlyArray<TriggerRule> = [
+      {
+        label: SENTRY_LABEL,
+        repo: "acme/web" as RepoSlug,
+        prompt: "{{title}}",
+        startsWorkFor: ["issue:created"],
+      },
+    ];
+    const created = {
+      action: "created",
+      data: { issue: { id: "7", title: "t" } },
+    };
+    const first = sentryDelivery(
+      created,
+      { resource: "issue", requestId: "req-a" },
+      optIn,
+    );
+    const second = sentryDelivery(
+      created,
+      { resource: "issue", requestId: "req-b" },
+      optIn,
+    );
+    expect(first).toEqual({
+      requestId: "sentry:work:issue:7:issue:created",
+      event: expect.objectContaining({ key: "issue:7" }),
+      keyedByWork: true,
+    });
+    expect(second).toMatchObject({
+      requestId: "sentry:work:issue:7:issue:created",
+      keyedByWork: true,
+    });
+
+    // Without the opt-in the same delivery starts nothing, so it is one row per delivery.
+    expect(
+      sentryDelivery(created, { resource: "issue", requestId: "req-a" }),
+    ).toEqual({
+      requestId: "sentry:delivery:req-a",
+      event: expect.objectContaining({ key: "issue:7" }),
+    });
+    // An action the rule does not list is not its work either.
+    expect(
+      sentryDelivery(
+        { ...created, action: "resolved" },
+        { resource: "issue", requestId: "req-c" },
+        optIn,
+      ),
+    ).toMatchObject({ requestId: "sentry:delivery:req-c" });
+    // A subject with no id names no work, so it falls back to its Request-ID.
+    expect(
+      sentryDelivery(
+        { action: "created", data: { issue: { title: "no id" } } },
+        { resource: "issue", requestId: "req-d" },
+        optIn,
+      ),
+    ).toEqual({
+      requestId: "sentry:delivery:req-d",
+      event: expect.objectContaining({ key: "issue:no-id" }),
+    });
+  });
+
+  it("asks whether a delivery starts work of the rule that routes it, as the seam's filter does", () => {
+    const issue = sentryEvent(
+      {
+        action: "created",
+        data: { issue: { id: "8", project: { id: "3" } } },
+      },
+      { resource: "issue" },
+    );
+    if (issue === undefined) throw new Error("issue did not normalize");
+    expect(sentryWorkRequestId(issue)).toBe(
+      "sentry:work:issue:8:issue:created",
+    );
+    const catchAll: TriggerRule = {
+      label: SENTRY_LABEL,
+      repo: "acme/web" as RepoSlug,
+      prompt: "{{title}}",
+      startsWorkFor: ["issue:created"],
+    };
+    expect(sentryStartsWork(issue)).toBe(false);
+    expect(sentryStartsWork(issue, [catchAll])).toBe(true);
+    // The project's own rule routes it ahead of the catch-all and admits nothing extra, so the
+    // catch-all's opt-in does not reach an event the seam would map to the project's repo.
+    expect(
+      sentryStartsWork(issue, [
+        {
+          label: sentryProjectLabel("3"),
+          repo: "acme/project" as RepoSlug,
+          prompt: "{{title}}",
+        },
+        catchAll,
+      ]),
+    ).toBe(false);
+  });
+
   it("refuses a payload that names no event as a bad payload", () => {
     expect(sentryDelivery({ nothing: true })).toMatchObject({
       code: "bad-payload",
@@ -282,6 +379,8 @@ const rules: ReadonlyArray<TriggerRule> = [
     repo,
     baseRef: "main",
     prompt: "Investigate {{title}}:\n{{body}}",
+    // The opt-in: a new issue in any project starts work too, keyed by the issue.
+    startsWorkFor: ["issue:created"],
   },
 ];
 
@@ -304,6 +403,7 @@ const withProcess = async <A>(
     post: (
       payload: Record<string, unknown>,
       requestId: string,
+      resource?: string,
     ) => Promise<{
       readonly status: string;
       readonly replayed: boolean;
@@ -347,11 +447,8 @@ const withProcess = async <A>(
         yield* sql`INSERT INTO repos (slug) VALUES (${repo}) ON CONFLICT (slug) DO NOTHING`;
       }),
     );
-    return await body(async (payload, requestId) => {
-      const derived = sentryDelivery(payload, {
-        resource: "event_alert",
-        requestId,
-      });
+    return await body(async (payload, requestId, resource = "event_alert") => {
+      const derived = sentryDelivery(payload, { resource, requestId }, rules);
       if ("refused" in derived) throw new Error(derived.refused);
       return runtime.runPromise(
         Effect.gen(function* () {
@@ -436,6 +533,35 @@ describe("a Sentry alert through the seam", () => {
       `trigger:${sentryEventRequestId(`${runId}-a`)}`,
       `trigger:${sentryEventRequestId(`${runId}-b`)}`,
     ]);
+  });
+
+  it("opens one session for an opted-in action re-sent with a new Request-ID", async () => {
+    const opened: Array<Opened> = [];
+    const created = {
+      action: "created",
+      data: { issue: { id: `${runId}-optin`, title: "Error: a new issue" } },
+    };
+    await withProcess(opened, async (post) => {
+      expect(await post(created, "req-optin-1", "issue")).toMatchObject({
+        status: "processed",
+        replayed: false,
+      });
+      expect(await post(created, "req-optin-2", "issue")).toMatchObject({
+        status: "processed",
+        replayed: true,
+      });
+      // The control: an action the rule did not opt in is still a recorded skip per delivery.
+      expect(
+        await post({ ...created, action: "resolved" }, "req-optin-3", "issue"),
+      ).toMatchObject({
+        status: "skipped",
+        reason: 'action "issue:resolved" is not "create", "issue:created"',
+      });
+    });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.requestId).toBe(
+      `trigger:sentry:work:issue:${runId}-optin:issue:created`,
+    );
   });
 
   it("records an unregistered project's repo as a skip, and starts the next alert once it is registered", async () => {

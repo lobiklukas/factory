@@ -14,13 +14,7 @@
  *    what protects the delivery store and the session queue, and answering it here is what keeps a
  *    huge body from creating a `webhook_deliveries` row.
  * 2. **Verify the signature.** A wrong or missing one is `401` and writes nothing.
- * 3. **Take a token from the route's rate cap**, when the adapter has one (Sentry's: an alert storm
- *    is a burst of *signed* deliveries, each of which may open a session). It is counted after the
- *    signature, so a caller without the secret cannot spend the budget an honest alert needs, and a
- *    delivery past it is `429 rate-limited` with `Retry-After` — typed, never a `500`, and nothing
- *    recorded. The cap is per process (`RateLimiter` over its memory store): it bounds how fast one
- *    process opens work, and unlike the dedupe it is not a fact a restart has to keep.
- * 4. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
+ * 3. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
  *    cannot address: a generic body with no request id or no label, or a Linear issue body with no
  *    issue id (any other Linear entity is answered and skipped, id or not). A generic body that
  *    names a lifecycle action (`push`, `schedule`) is `400` too: its `action` is whatever the
@@ -28,6 +22,16 @@
  *    (LOB-235). The adapter names the delivery's idempotency key here and nothing else about it:
  *    the generic sender supplies its own, and the Linear adapter derives one from the issue
  *    (LOB-164), because which deliveries are the same work is a fact about the sender.
+ * 4. **Take a token from the route's rate cap**, when the adapter has one, for a delivery that can
+ *    start work (Sentry's: an alert storm is a burst of *signed* deliveries, each of which may open
+ *    a session). It is counted after the signature, so a caller without the secret cannot spend the
+ *    budget an honest alert needs, and after normalization, so a delivery that can start nothing (an
+ *    `issue` or `installation` delivery, a malformed body) cannot either: those are cheap skips and
+ *    `400`s, and an `issue` firehose must not starve the alerts. A replay of work already handled
+ *    still counts, because only the seam knows it is one. A delivery past the cap is `429
+ *    rate-limited` with `Retry-After` — typed, never a `500`, and nothing recorded. The cap is per
+ *    process (`RateLimiter` over its memory store): it bounds how fast one process opens work, and
+ *    unlike the dedupe it is not a fact a restart has to keep.
  * 5. **Delegate.** Everything about replays, refusals, mapping and sessions is
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip. The one
  *    outcome the route translates is a replay still `received` — work claimed with no outcome
@@ -59,6 +63,7 @@ import {
   SENTRY_RESOURCE_HEADER,
   SENTRY_SIGNATURE_HEADER,
   sentryDelivery,
+  sentryStartsWork,
   verifySentrySignature,
   TriggerService,
   TriggerServiceLive,
@@ -313,12 +318,15 @@ type Adapter = {
     secret: string,
   ) => SignatureVerdict;
   /**
-   * The route's rate cap: at most `limit` signed deliveries per `windowSeconds` in this process.
-   * Absent is uncapped, which is what the Linear and generic routes are today.
+   * The route's rate cap: at most `limit` signed deliveries that `counts` admits per
+   * `windowSeconds` in this process. Absent is uncapped, which is what the Linear and generic
+   * routes are today. `counts` is "can this delivery start work", asked the seam's way, so a
+   * delivery the seam will only skip spends none of the budget.
    */
   readonly rateCap?: {
     readonly limit: number;
     readonly windowSeconds: number;
+    readonly counts: (delivery: TriggerDelivery) => boolean;
   };
 };
 
@@ -390,10 +398,25 @@ const handle = (adapter: () => Adapter) =>
       );
     }
 
-    // The rate cap, on signed deliveries only. One key per route: the cap bounds how fast this
-    // process lets the route open work, whoever the sender says it is. A token is spent before the
-    // body is parsed, so a burst of malformed-but-signed bodies is capped too.
-    if (config.rateCap !== undefined) {
+    // oxlint-disable-next-line effecttsgo(prefer-schema-over-json)
+    const payload = yield* parseJson(raw);
+    const body = asRecord(payload);
+    if (body === undefined) {
+      return badRequest("the body is not a JSON object", "bad-json");
+    }
+
+    const header: HeaderLookup = (name) =>
+      req.headers[name.toLowerCase()] as string | undefined;
+    const delivery = config.delivery(body, header);
+    if ("refused" in delivery) {
+      return badRequest(delivery.refused, delivery.code);
+    }
+
+    // The rate cap, on signed deliveries that can start work only. One key per route: the cap
+    // bounds how fast this process lets the route open work, whoever the sender says it is. A
+    // delivery the seam would only skip spends no token, so a firehose of them cannot starve an
+    // alert of the budget.
+    if (config.rateCap !== undefined && config.rateCap.counts(delivery)) {
       const { limit: perWindow, windowSeconds } = config.rateCap;
       const admitted = yield* limiter
         .consume({
@@ -455,20 +478,6 @@ const handle = (adapter: () => Adapter) =>
           },
         );
       }
-    }
-
-    // oxlint-disable-next-line effecttsgo(prefer-schema-over-json)
-    const payload = yield* parseJson(raw);
-    const body = asRecord(payload);
-    if (body === undefined) {
-      return badRequest("the body is not a JSON object", "bad-json");
-    }
-
-    const header: HeaderLookup = (name) =>
-      req.headers[name.toLowerCase()] as string | undefined;
-    const delivery = config.delivery(body, header);
-    if ("refused" in delivery) {
-      return badRequest(delivery.refused, delivery.code);
     }
 
     const outcome = yield* triggers.deliver(delivery).pipe(
@@ -575,35 +584,43 @@ const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
 /**
  * The Sentry receiver (`@repo/core/Sentry`, LOB-81): Sentry's own signature header, checked with the
  * integration's Client Secret (`SENTRY_CLIENT_SECRET`); the delivery keyed by the alerted event; and
- * the one rate-capped route — `SENTRY_RATE_LIMIT` signed deliveries per `SENTRY_RATE_WINDOW_SECONDS`
- * (20 per 60 s by default) in this process. An alert storm is the burst the cap exists for: every
- * delivery past it is `429`, and every one inside it is still deduped by its event.
+ * the one rate-capped route — `SENTRY_RATE_LIMIT` signed deliveries that can start work per
+ * `SENTRY_RATE_WINDOW_SECONDS` (20 per 60 s by default) in this process. An alert storm is the burst
+ * the cap exists for: every alert past it is `429`, and every one inside it is still deduped by its
+ * event. A delivery no rule lets start work (`issue`, `comment`, `installation`, …) spends no token;
+ * `rules` is the seam's, so the cap, the key and the filter agree on which those are.
  */
-const sentryRoute = HttpRouter.add(
-  "POST",
-  "/webhooks/sentry",
-  handle(() => ({
-    route: "/webhooks/sentry",
-    deliveryHeader: SENTRY_REQUEST_ID_HEADER,
-    signatureHeader: SENTRY_SIGNATURE_HEADER,
-    secret: process.env["SENTRY_CLIENT_SECRET"],
-    secretVariable: "SENTRY_CLIENT_SECRET",
-    verify: (raw, signature, clientSecret) =>
-      verifySentrySignature({ raw, signature, clientSecret }),
-    rateCap: {
-      limit: positiveFromEnv("SENTRY_RATE_LIMIT", DEFAULT_SENTRY_RATE_LIMIT),
-      windowSeconds: positiveFromEnv(
-        "SENTRY_RATE_WINDOW_SECONDS",
-        DEFAULT_SENTRY_RATE_WINDOW_S,
-      ),
-    },
-    delivery: (payload, header) =>
-      sentryDelivery(payload, {
-        resource: header(SENTRY_RESOURCE_HEADER),
-        requestId: header(SENTRY_REQUEST_ID_HEADER),
-      }),
-  })),
-);
+const sentryRoute = (rules: ReadonlyArray<TriggerRule>) =>
+  HttpRouter.add(
+    "POST",
+    "/webhooks/sentry",
+    handle(() => ({
+      route: "/webhooks/sentry",
+      deliveryHeader: SENTRY_REQUEST_ID_HEADER,
+      signatureHeader: SENTRY_SIGNATURE_HEADER,
+      secret: process.env["SENTRY_CLIENT_SECRET"],
+      secretVariable: "SENTRY_CLIENT_SECRET",
+      verify: (raw, signature, clientSecret) =>
+        verifySentrySignature({ raw, signature, clientSecret }),
+      rateCap: {
+        limit: positiveFromEnv("SENTRY_RATE_LIMIT", DEFAULT_SENTRY_RATE_LIMIT),
+        windowSeconds: positiveFromEnv(
+          "SENTRY_RATE_WINDOW_SECONDS",
+          DEFAULT_SENTRY_RATE_WINDOW_S,
+        ),
+        counts: (delivery) => sentryStartsWork(delivery.event, rules),
+      },
+      delivery: (payload, header) =>
+        sentryDelivery(
+          payload,
+          {
+            resource: header(SENTRY_RESOURCE_HEADER),
+            requestId: header(SENTRY_REQUEST_ID_HEADER),
+          },
+          rules,
+        ),
+    })),
+  );
 
 /**
  * The mapping rules a deployment ships: `TRIGGER_RULES` is a JSON array of `{label, repo,
@@ -630,12 +647,12 @@ const rules = rulesFromEnv();
 
 /**
  * Every route, still asking for the seam and the rate cap per request. Exported so a test can serve
- * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `429`, `400`) are answered before the
+ * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`, `429`) are answered before the
  * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
  * `webhookRoutesFor` takes the rules, so a case can configure the ones the generic adapter reads.
  */
 export const webhookRoutesFor = (rules: ReadonlyArray<TriggerRule>) =>
-  Layer.mergeAll(linearRoute(rules), genericRoute(rules), sentryRoute);
+  Layer.mergeAll(linearRoute(rules), genericRoute(rules), sentryRoute(rules));
 
 export const WebhookRoutes = webhookRoutesFor(rules);
 

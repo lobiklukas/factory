@@ -24,14 +24,18 @@
  * that names what arrived — `issue:created` is every new issue in every project, a firehose rather
  * than an alert — and an operator who does want one opts its rule in with `startsWorkFor`.
  *
- * **One alerted event is one session, so the key names the event, not the delivery.** Two alert
+ * **One piece of work is one session, so the key names the work, not the delivery.** Two alert
  * rules that fire for the same event are two deliveries with two `Request-ID`s and one piece of
  * work, and Sentry's docs do not say whether a re-sent delivery keeps its `Request-ID`. So an issue
  * alert is keyed by `data.event.event_id` (`sentry:event:<id>`) and marked `keyedByWork`: a skip
  * under it for an unregistered repo is reclaimed by the next alert once the operator registers the
- * repo. A delivery that cannot start work is keyed by its `Request-ID`, one row per delivery, and one
- * with no `Request-ID` is refused — it is not something Sentry sends. Binding a *repeat* alert for the
- * same issue (a new event in one fingerprint) to the open session is LOB-82's, not this key's.
+ * repo. An action a rule opts in (`startsWorkFor`, e.g. `issue:created`) is work too, so it is keyed
+ * the same way, by what it is about and what happened to it (`sentry:work:issue:<id>:issue:created`),
+ * whatever `Request-ID` it arrived with; the rules are the seam's own (`sentryDelivery`'s `rules`),
+ * so the key and the filter agree on which deliveries are work, as Linear's do (LOB-164). A delivery
+ * that cannot start work is keyed by its `Request-ID`, one row per delivery, and one with no
+ * `Request-ID` is refused — it is not something Sentry sends. Binding a *repeat* alert for the same
+ * issue (a new event in one fingerprint) to the open session is LOB-82's, not this key's.
  *
  * **The labels are the mapping.** Sentry names no repository, so a rule says which repo an alert
  * means: every delivery carries `sentry`, and one that names its project also carries
@@ -40,9 +44,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Schema } from "effect";
 import {
+  startsWork,
   TRIGGER_ACTION,
   type TriggerDelivery,
   type TriggerEvent,
+  type TriggerRule,
 } from "@repo/domain/Trigger";
 
 /** The headers a Sentry delivery carries, lowercase as an incoming header map has them. */
@@ -218,13 +224,16 @@ export const sentryEvent = (
   const subject = asRecord(data?.[resource]);
   return {
     source: "sentry",
-    key: `${resource}:${idField(subject, "id") ?? "no-id"}`,
+    key: `${resource}:${idField(subject, "id") ?? NO_ID}`,
     action: `${resource}:${action}`,
     title: stringField(subject, "title") ?? "",
     body: stringField(subject, "culprit") ?? "",
     labels: labelsOf(subject),
   };
 };
+
+/** What a resource's key says when its payload names no id: nothing a work key can be made of. */
+const NO_ID = "no-id";
 
 /** The key of the one delivery an alerted event starts work under. */
 export const sentryEventRequestId = (eventId: string): string =>
@@ -244,13 +253,36 @@ export type SentryRefusal = {
   readonly code: "bad-payload" | "missing-request-id";
 };
 
+/** The key of the one delivery an opted-in action on one Sentry subject starts work under. */
+export const sentryWorkRequestId = (event: TriggerEvent): string =>
+  `sentry:work:${event.key}:${event.action}`;
+
+/**
+ * Whether the event can start work: the seam's own question (`startsWork` over the rule the
+ * mapping would route to, the first that claims one of its labels), asked the same way here, so the
+ * key, the route's rate cap and the seam's filter cannot disagree about which deliveries are work.
+ */
+export const sentryStartsWork = (
+  event: TriggerEvent,
+  rules: ReadonlyArray<TriggerRule> = [],
+): boolean => {
+  const routing = rules.find((rule) => event.labels.includes(rule.label));
+  return startsWork(
+    event.action,
+    routing?.startsWorkFor === undefined ? [] : [routing.startsWorkFor],
+  );
+};
+
 /**
  * A payload as the seam takes it: the normalized event, named by its derived delivery id. An issue
- * alert is keyed by its event (`keyedByWork`); anything else by the `Request-ID` it arrived with.
+ * alert is keyed by its event and an action `rules` opt in by its subject and action (both
+ * `keyedByWork`); anything else by the `Request-ID` it arrived with. `rules` must be the ones the
+ * seam maps with, or the key could call a delivery work the filter refuses, or the reverse.
  */
 export const sentryDelivery = (
   payload: unknown,
   headers: SentryDeliveryHeaders = {},
+  rules: ReadonlyArray<TriggerRule> = [],
 ): TriggerDelivery | SentryRefusal => {
   const event = sentryEvent(payload, { resource: headers.resource });
   if (event === undefined) {
@@ -262,6 +294,15 @@ export const sentryDelivery = (
   if (event.action === TRIGGER_ACTION) {
     return {
       requestId: sentryEventRequestId(event.key),
+      event,
+      keyedByWork: true,
+    };
+  }
+  // An opted-in action names its work only when its subject has an id: `issue:no-id` would make
+  // every id-less delivery one piece of work, so that one falls back to its `Request-ID`.
+  if (sentryStartsWork(event, rules) && !event.key.endsWith(`:${NO_ID}`)) {
+    return {
+      requestId: sentryWorkRequestId(event),
       event,
       keyedByWork: true,
     };

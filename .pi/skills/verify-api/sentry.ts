@@ -10,7 +10,8 @@
 //   EVIDENCE_DIR          default .verify/evidence/lob-81
 //   SENTRY_STATE          where `first` writes what `after-restart` checks against
 //   TRIGGER_REPO          the repo the `sentry` rule maps to (sentry.sh passes the same value in
-//                         TRIGGER_RULES, so the two cannot disagree)
+//                         TRIGGER_RULES, so the two cannot disagree); project 404's rule maps to
+//                         `<TRIGGER_REPO>-unregistered`, which nobody registers
 //   SENTRY_CLIENT_SECRET  the secret sentry.sh booted the API with
 //   SENTRY_RATE_LIMIT     the cap sentry.sh booted the API with
 //   DATABASE_URL          the database the API serves, read for the delivery rows
@@ -43,6 +44,9 @@ const REPO = RepoSlug.make(
   process.env["TRIGGER_REPO"] ?? "acme/verify-api-sentry",
 );
 const SECRET = process.env["SENTRY_CLIENT_SECRET"] ?? "";
+/** The project sentry.sh routes to a repo nobody registered, and that repo. */
+const UNREGISTERED_PROJECT = 404;
+const UNREGISTERED_REPO = `${REPO}-unregistered`;
 const RATE_LIMIT = Number(process.env["SENTRY_RATE_LIMIT"] ?? "20");
 
 /** A string that is only ever in a payload: no API log line may contain it. */
@@ -75,8 +79,8 @@ const Refusal = Schema.Struct({
   retryAfterSeconds: Schema.optional(Schema.Finite),
 });
 
-/** Sentry's documented issue-alert example, for one event. */
-const alert = (eventId: string, title: string) => ({
+/** Sentry's documented issue-alert example, for one event in one project. */
+const alert = (eventId: string, title: string, project = 1) => ({
   action: "triggered",
   installation: { uuid: "a8e5d37a-696c-4c54-adb5-b3f28d64c7de" },
   data: {
@@ -86,7 +90,7 @@ const alert = (eventId: string, title: string) => ({
       title,
       level: "error",
       culprit: "?(<anonymous>)",
-      project: 1,
+      project,
       release: null,
       web_url: `https://sentry.example/organizations/acme/issues/1117540176/events/${eventId}/`,
     },
@@ -291,31 +295,65 @@ const program = Effect.gen(function* () {
       `log=${API_LOG ?? "unset"} bytes=${log.length} canary=${log.includes(CANARY)}`,
     );
 
-    // Feature: the rate cap. A burst of signed deliveries well past SENTRY_RATE_LIMIT: the ones
-    // past the cap are 429 rate-limited with Retry-After — typed, never a 500 — and record nothing.
-    // They are `issue` deliveries, which the seam records as skips, so the ones inside the cap
-    // open no session and the burst measures the cap, not the session layer.
-    const burst = RATE_LIMIT + 4;
-    const answers = [];
-    for (let n = 1; n <= burst; n += 1) {
-      const requestId = `req-${runId}-burst-${n}`;
-      answers.push({
+    // Feature: the cap counts only work. A firehose of signed `issue` deliveries well past
+    // SENTRY_RATE_LIMIT — which no rule lets start work — is answered and recorded as skips, none
+    // of them `429`: they spend none of the budget the alerts below need.
+    const firehose = [];
+    for (let n = 1; n <= RATE_LIMIT + 4; n += 1) {
+      const requestId = `req-${runId}-firehose-${n}`;
+      firehose.push({
         requestId,
         answer: yield* Effect.promise(() =>
           post(
             {
               action: "resolved",
-              data: { issue: { id: `${runId}${n}`, title: `burst ${n}` } },
+              data: { issue: { id: `${runId}${n}`, title: `firehose ${n}` } },
             },
             { requestId, resource: "issue" },
           ),
         ),
       });
     }
+    const firehoseRows = yield* deliveryRows(
+      firehose.map((entry) => `sentry:delivery:${entry.requestId}`),
+    );
+    assert(
+      "a firehose of deliveries that start nothing is never rate-limited, and each is its skip",
+      firehose.every(
+        ({ answer }) =>
+          answer.status === 200 &&
+          answer.outcome?.status === "skipped" &&
+          answer.outcome.reason === 'action "issue:resolved" is not "create"',
+      ) &&
+        firehoseRows.length === firehose.length &&
+        firehoseRows.every((row) => row.status === "skipped"),
+      `statuses=${firehose.map((entry) => entry.answer.status).join(",")} rows=${firehoseRows.length}/${firehose.length}`,
+    );
+
+    // Feature: the rate cap. A burst of signed alerts well past SENTRY_RATE_LIMIT: the ones past
+    // the cap are 429 rate-limited with Retry-After — typed, never a 500 — and record nothing.
+    // They name project 404, whose rule routes to a repo nobody registered, so the ones inside the
+    // cap are recorded skips that open no session, and the burst measures the cap, not the
+    // session layer. The two alerts above spent two of this window's tokens already.
+    const burst = RATE_LIMIT + 4;
+    const answers = [];
+    for (let n = 1; n <= burst; n += 1) {
+      const requestId = `req-${runId}-burst-${n}`;
+      const burstEvent = `lob81${runId}burst${n}`;
+      answers.push({
+        requestId,
+        eventId: burstEvent,
+        answer: yield* Effect.promise(() =>
+          post(alert(burstEvent, `burst ${n}`, UNREGISTERED_PROJECT), {
+            requestId,
+          }),
+        ),
+      });
+    }
     const limited = answers.filter((entry) => entry.answer.status === 429);
     const admitted = answers.filter((entry) => entry.answer.status === 200);
     const limitedRows = yield* deliveryRows(
-      limited.map((entry) => `sentry:delivery:${entry.requestId}`),
+      limited.map((entry) => `sentry:event:${entry.eventId}`),
     );
     assert(
       "the burst past the cap is refused 429, and nothing in it is a 5xx",
@@ -340,10 +378,12 @@ const program = Effect.gen(function* () {
     assert(
       "a rate-limited delivery records nothing; one inside the cap is recorded as its skip",
       limitedRows.length === 0 &&
+        admitted.length > 0 &&
         admitted.every(
           ({ answer }) =>
             answer.outcome?.status === "skipped" &&
-            answer.outcome.reason === 'action "issue:resolved" is not "create"',
+            answer.outcome.reason ===
+              `repo ${UNREGISTERED_REPO} is not registered`,
         ),
       `limited rows=${limitedRows.length} admitted=${JSON.stringify(admitted.map(({ answer }) => answer.outcome))}`,
     );
