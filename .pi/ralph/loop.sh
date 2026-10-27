@@ -211,8 +211,15 @@ with_timeout() {
 }
 
 # provider_failed <out> <err>: the run ended on a model provider error (rate limit, overload, quota, outage).
+# One `tail` per file: given two, `tail` prints a `==> <path> <==` header per file, and the path carries the
+# session's HHMMSS stamp, so a clean run started at 18:50:29 matched `502` and read as PROVIDER (LOB-237).
+# The text is read whole before grep sees it: piped into `grep -q` under `pipefail`, a match that made grep exit
+# early killed the writer with SIGPIPE, and the pipeline's 141 read as "no provider error".
+# The newline between the tails keeps an `out` that ends mid-line (`Error: 4`) from running into an `err` that
+# starts with digits (`29`) and spelling a status neither file holds.
 provider_failed() {
-  tail -c 6000 "$1" "$2" 2>/dev/null | grep -qiE '429|rate.?limit|overloaded|quota|insufficient|unavailable|503|502|capacity|too many requests|ECONNRESET|ETIMEDOUT|No (API key|provider)|credit|billing'
+  local tails; tails="$({ tail -c 6000 "$1"; printf '\n'; tail -c 6000 "$2"; } 2>/dev/null || true)"
+  grep -qiE '429|rate.?limit|overloaded|quota|insufficient|unavailable|503|502|capacity|too many requests|ECONNRESET|ETIMEDOUT|No (API key|provider)|credit|billing' <<<"$tails"
 }
 
 # session <iteration> <mode>: run `.pi/ralph/<mode>.prompt.md`; echoes the control tag

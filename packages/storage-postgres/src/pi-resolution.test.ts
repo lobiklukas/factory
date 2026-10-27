@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -39,23 +39,63 @@ import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
-const SKILLS = path.join(REPO_ROOT, ".pi/skills");
-
 /** The workarounds the issue removed, as the acceptance grep spells them. */
 const WORKAROUNDS = ["resolveSync", "apps/api/node_modules"] as const;
 
-/** Every file under `.pi/skills`, as paths relative to the repo root. */
-const skillFiles = (dir: string = SKILLS): ReadonlyArray<string> =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      return entry.name === "node_modules" ? [] : skillFiles(full);
-    }
-    return entry.isFile() ? [path.relative(REPO_ROOT, full)] : [];
-  });
-
 const read = (relative: string): string =>
   readFileSync(path.join(REPO_ROOT, relative), "utf8");
+
+/**
+ * Every file under `.pi/skills` that git tracks or would track (ignored ones excluded), as paths
+ * relative to the repo root, with its text: listed and read once, while the file is collected.
+ *
+ * Two reasons it is not a walk inside a case (LOB-237). The cost is the first read of each file in
+ * the worker, not the walk: warm, the 170 files here take ~10 ms; cold, the same reads took 60 ms to
+ * 1.6 s on an idle-to-busy laptop, and a gate run beside other worktrees' gates once took over 5 s.
+ * The first case used to be the first to open the non-source files, so it paid that cost inside its
+ * budget: a synchronous body blocks vitest's timer, but the runner still compares the elapsed time
+ * with the 5 s default when the body returns. Collection has no per-case budget, so every read is
+ * paid there, once, and the cases below are left with in-memory string work. And the readdir walk
+ * read what git ignores: the `.verify/` evidence a drive leaves under its skill (screenshots,
+ * transcripts), which nobody commits, and whose text (a transcript of a grep, say) could name a
+ * workaround.
+ */
+const SKILL_TEXTS: ReadonlyMap<string, string> = (() => {
+  const listing = spawnSync(
+    "git",
+    [
+      "ls-files",
+      "-z",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "--",
+      ".pi/skills",
+    ],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      // `spawnSync` blocks the thread, so the bound belongs here, as in `unresolvedUnderBun` below.
+      timeout: 30_000,
+    },
+  );
+  if (listing.error !== undefined || listing.status !== 0) {
+    throw new Error(
+      `listing .pi/skills with git failed: ${listing.error?.message ?? listing.stderr}`,
+    );
+  }
+  const files = [...new Set(listing.stdout.split("\0"))]
+    .filter((file) => file !== "")
+    // A tracked file deleted from the working tree is still in the index; it is no driver.
+    .filter((file) => existsSync(path.join(REPO_ROOT, file)))
+    .sort();
+  return new Map(files.map((file) => [file, read(file)] as const));
+})();
+
+const skillFiles = (): ReadonlyArray<string> => [...SKILL_TEXTS.keys()];
+
+/** A listed file's text, from the one read above. */
+const skillText = (file: string): string => SKILL_TEXTS.get(file) ?? "";
 
 /** The `@repo/<name>` packages a source text imports, statically or dynamically. */
 const repoImports = (text: string): ReadonlyArray<string> =>
@@ -71,8 +111,16 @@ describe(".pi drivers resolve workspace packages directly", () => {
     // Mutation: put `Bun.resolveSync(specifier, path.join(ROOT, "apps/api"))` back into
     // `lib/seed-pr.ts`, or the `ln -s "$ROOT/apps/api/node_modules"` back into
     // `verify-api/verify-tool.sh`, and the file is listed here.
+    // The premise: the scan covers both of those files, so an empty listing is a broken scan, not a
+    // pass. Mutation: list `.pi/skill` (singular) in `SKILL_TEXTS` — this reads an empty set.
+    expect(skillFiles()).toEqual(
+      expect.arrayContaining([
+        ".pi/skills/lib/seed-pr.ts",
+        ".pi/skills/verify-api/verify-tool.sh",
+      ]),
+    );
     const offenders = skillFiles().flatMap((file) => {
-      const text = read(file);
+      const text = skillText(file);
       return WORKAROUNDS.filter((needle) => text.includes(needle)).map(
         (needle) => `${file}: ${needle}`,
       );
@@ -99,7 +147,7 @@ describe(".pi drivers resolve workspace packages directly", () => {
     const imported = new Set(
       skillFiles()
         .filter((file) => SOURCE.test(file))
-        .flatMap((file) => repoImports(read(file))),
+        .flatMap((file) => repoImports(skillText(file))),
     );
     // The premise: the drivers really do import workspace packages, so an empty set is a broken
     // scan, not a pass.
@@ -180,7 +228,7 @@ describe(".pi drivers start: every module they import resolves under Bun (LOB-21
   const pairs = skillFiles()
     .filter((file) => SOURCE.test(file))
     .flatMap((file) =>
-      [...new Set(bareImports(read(file)))].map(
+      [...new Set(bareImports(skillText(file)))].map(
         (specifier) => [file, specifier] as const,
       ),
     );

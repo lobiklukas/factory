@@ -582,7 +582,14 @@ describe("the ralph driver's shell contract", () => {
       const scratch = mkScratch();
       await colimaIsRunning(scratch);
       writeFakeDocker(scratch, 1);
-      const worktree = path.join(scratch.root, "worktree");
+      // The worktree's name carries the HTTP statuses `provider_failed` greps for, so this case no
+      // longer depends on the clock: the log paths `session` hands it hold the session's HHMMSS stamp,
+      // and while `provider_failed` read them back through `tail`'s `==> <path> <==` headers, a run
+      // started at 18:50:29 (CI on 33954c0) or 14:29:00 tagged a clean exit PROVIDER (LOB-237).
+      // Mutation: restore `tail -c 6000 "$1" "$2" | grep -q…` — the tag reads PROVIDER on most runs
+      // (5 in 6 locally; the pipe's SIGPIPE race, pinned by the next case, decides the rest), not on
+      // the few seconds a day whose stamp spells a status.
+      const worktree = path.join(scratch.root, "worktree-429-502-503");
       mkdirSync(path.join(worktree, ".pi/ralph"), { recursive: true });
       writeFileSync(
         path.join(worktree, ".pi/ralph/work.prompt.md"),
@@ -614,6 +621,9 @@ describe("the ralph driver's shell contract", () => {
         RALPH_AGENT: "pi",
         RALPH_WORKTREE: worktree,
         RALPH_FALLBACK_MODELS: "",
+        // Not on the tag's path, so load cannot race it: `with_timeout`'s watcher first looks at the
+        // clock 20 s after the shim started (the shim exits at once), and a timeout's exit (124, 137,
+        // 143) tags NONE anyway — only `provider_failed` turns a clean run into PROVIDER.
         RALPH_TIMEOUT: "5",
       });
 
@@ -626,6 +636,122 @@ describe("the ralph driver's shell contract", () => {
       // The file's own rule, applied here too: an explicit socket means `docker_env` does not probe,
       // so the fake saw nothing. Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` — a probe appears,
       // carrying the very socket the case claims the driver never looked away from.
+      expect(dockerCalls(scratch)).toEqual([]);
+    },
+  );
+
+  it(
+    "reads a provider error out of the session's logs, never out of their paths",
+    { timeout: 30_000 },
+    () => {
+      // The defect behind the CI red on 33954c0 (LOB-237): `provider_failed` piped
+      // `tail -c 6000 "$out" "$err"`, and given two files `tail` prefixes each with a
+      // `==> <path> <==` header. `session` names its logs `<YYYYmmdd-HHMMSS>-<mode>-<n>.out`, so every
+      // session started at a second whose stamp contains 429, 502 or 503 (18:50:29, 14:29:00,
+      // 05:03:10, …) was a provider failure before the agent said a word, and `cmd_run` backed off
+      // instead of counting it. The paths here are the stamp the CI run had, plus the statuses in the
+      // directory name, so no clock is involved.
+      // Mutation: restore `tail -c 6000 "$1" "$2"` — `empty` and `no control line` read `provider`.
+      const scratch = mkScratch();
+      writeFakeDocker(scratch, 1);
+      // Every scenario is one pair of logs, and one bash sources the driver once and asks about all of
+      // them: under the gate's load, a bash per question cost this case 13 s of its 30 s budget.
+      const scenarios: ReadonlyArray<{
+        readonly name: string;
+        readonly out: string;
+        readonly err: string;
+        readonly asks: number;
+      }> = [
+        // The flake itself: nothing in either file, so only the paths can match.
+        { name: "empty", out: "", err: "", asks: 1 },
+        {
+          name: "no control line",
+          out: "did the work, no control line\n",
+          err: "",
+          asks: 1,
+        },
+        // The other half, so the fix cannot be "never read the logs": an error in either file still
+        // counts. Mutation: drop either `tail` from the group — one of these reads clean.
+        {
+          name: "429 in err",
+          out: "",
+          err: "Error: 429 Too Many Requests\n",
+          asks: 1,
+        },
+        {
+          name: "overloaded in out",
+          out: "upstream: overloaded\n",
+          err: "",
+          asks: 1,
+        },
+        // An error in `out` with a full `err` behind it, asked 20 times: piped straight into `grep -q`
+        // under `pipefail`, grep exits on the first file's match, the second `tail` dies of SIGPIPE,
+        // and the pipeline's 141 reads as clean. Mutation: pipe the group into `grep -qiE` instead of
+        // reading it whole first — `clean` appears among this scenario's answers (all 20, locally).
+        {
+          name: "503 in out, err full",
+          out: "Error: 503 Service Unavailable\n",
+          err: `${"x".repeat(5000)}\n`,
+          asks: 20,
+        },
+        // The two tails are kept apart: an `out` that ends mid-line in a digit and an `err` that starts
+        // with digits must not join into a status neither file holds (`Error: 4` + `29` is not 429).
+        // Mutation: drop the `printf '\n'` between the tails — this scenario reads `provider`.
+        {
+          name: "tails do not join",
+          out: "Error: 4",
+          err: "29 lines written\n",
+          asks: 1,
+        },
+        // Each file's tail, not the head: an error long scrolled past is not the one the run ended on.
+        {
+          name: "429 scrolled past",
+          out: `429 early\n${"x".repeat(7000)}\n`,
+          err: "",
+          asks: 1,
+        },
+      ];
+      const logs = path.join(scratch.root, "logs-429-502-503");
+      scenarios.forEach(({ out, err, asks }, i) => {
+        const dir = path.join(logs, String(i));
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(path.join(dir, "20261027-185029-work-1.out"), out);
+        writeFileSync(path.join(dir, "20261027-185029-work-1.err"), err);
+        writeFileSync(path.join(dir, "asks"), String(asks));
+      });
+      const asks = bash(
+        scratch,
+        [
+          'source "$LOOP"',
+          'for dir in "$LOGS"/*; do',
+          '  for _ in $(seq "$(cat "$dir/asks")"); do',
+          '    if provider_failed "$dir/20261027-185029-work-1.out" "$dir/20261027-185029-work-1.err"; then',
+          '      echo "${dir##*/} provider"',
+          '    else echo "${dir##*/} clean"; fi',
+          "  done",
+          "done",
+        ].join("\n"),
+        { LOGS: logs },
+      );
+      const answers = new Map<string, Set<string>>();
+      for (const line of asks.trim().split("\n")) {
+        const [index, answer] = line.split(" ");
+        const name =
+          scenarios[Number(index)]?.name ?? `unknown ${String(index)}`;
+        answers.set(name, (answers.get(name) ?? new Set()).add(answer ?? ""));
+      }
+      expect(
+        Object.fromEntries([...answers].map(([name, set]) => [name, [...set]])),
+      ).toEqual({
+        empty: ["clean"],
+        "no control line": ["clean"],
+        "429 in err": ["provider"],
+        "overloaded in out": ["provider"],
+        "503 in out, err full": ["provider"],
+        "tails do not join": ["clean"],
+        "429 scrolled past": ["clean"],
+      });
+      // `provider_failed` is a pure read of two files: it never consults docker.
       expect(dockerCalls(scratch)).toEqual([]);
     },
   );

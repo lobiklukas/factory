@@ -125,6 +125,16 @@ function corpus(): Source[] {
 /** The trees that instruct an agent. `docs/` and `.pi/` are the whole of the shipped instruction set. */
 const CORPUS_DIRS = [".pi", "docs"];
 
+/**
+ * The corpus, read once while the file is collected rather than inside a case (LOB-237). The cost is
+ * the first read of each file in the worker: warm, the walk is milliseconds; cold, during a gate run
+ * beside other worktrees' gates, the same first-case read in `ralph-linear-calls.test.ts` outran
+ * vitest's 5 s default — a synchronous body blocks the timer, but the runner still compares the
+ * elapsed time with the budget when the body returns. Collection has no per-case budget, so the
+ * cases are left with string work. Declared below `CORPUS_DIRS`, which `corpus` reads.
+ */
+const CORPUS: readonly Source[] = corpus();
+
 describe("the instructions' settled-decisions range", () => {
   // Mutation checked: appending a `### D18 —` heading to `docs/design.md` reddens this one —
   // every `D1-D17` range in the corpus (`README.md:114`, `docs/README.md:3,11`) then understates
@@ -135,11 +145,11 @@ describe("the instructions' settled-decisions range", () => {
     const design = readFileSync(path.join(REPO_ROOT, DESIGN_DOC), "utf8");
     const highest = highestDecision(design);
     expect(highest).toBeGreaterThan(0);
-    expect(findings(corpus(), highest)).toEqual([]);
+    expect(findings(CORPUS, highest)).toEqual([]);
     // The tripwire needs a live range to trip: `README.md:114` and `docs/README.md:3,11` say
     // `D1-D17`, so the next appended decision reddens this case. If a future pass makes them
     // range-free too, this assertion is what says the AC2 proof needs a new fixture.
-    expect(findings(corpus(), highest + 1).length).toBeGreaterThan(0);
+    expect(findings(CORPUS, highest + 1).length).toBeGreaterThan(0);
   });
 
   // Mutation checked: raising the highest decision the corpus is compared against — exactly what
@@ -158,7 +168,7 @@ describe("the instructions' settled-decisions range", () => {
   // Mutation checked: pointing `CORPUS_DIRS` at one directory, or dropping `docs/` from it, which
   // would make the case above a check of a hand-picked subtree rather than of every instruction.
   it("scans every tree that instructs an agent", () => {
-    const paths = corpus().map((source) => source.path);
+    const paths = CORPUS.map((source) => source.path);
     for (const path of [
       "AGENTS.md",
       "README.md",

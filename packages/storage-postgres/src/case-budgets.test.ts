@@ -90,17 +90,17 @@ const NOT_GUARDED: Readonly<Record<string, string>> = {
   "mcp-pin.test.ts":
     "reads .mcp.json and docs, asserts on text; no database, no subprocess; 16 ms worst of four gate runs",
   "pi-resolution.test.ts":
-    "walks .pi/skills and reads the root package.json and two docs, asserts on text; no database, no subprocess; 384 ms for all 8 cases in isolation (LOB-236)",
+    "lists and reads .pi/skills once at collection (git ls-files, LOB-237), so its cases assert on in-memory text; its one `bun` spawn budgets itself at 60 s; no database",
   "postgres-up.test.ts":
     "budgeted case by case (LOB-132) and carries its own read-back guard; 29 declarations",
   "ralph-docker-env.test.ts":
-    "budgeted case by case (LOB-128) and carries its own read-back guard; 16 declarations",
+    "budgeted case by case (LOB-128) and carries its own read-back guard; 18 declarations",
   "ralph-ensure-db.test.ts":
     "7 of 8 budgeted; the 8th reads the driver's body and asserts on text; 11 ms worst of four gate runs",
   "ralph-linear-calls.test.ts":
-    "reads the instruction files, asserts on text; no database, no subprocess; 764 ms worst of four gate runs",
+    "reads the instruction files once at collection (LOB-237), so its cases assert on in-memory text; no database, no subprocess. The cold read inside the first case once outran 5 s",
   "ralph-settled-decisions.test.ts":
-    "reads docs/design.md and the instruction files, asserts on text; no database, no subprocess; 791 ms worst of four gate runs",
+    "reads the instruction files once at collection (LOB-237), so its cases assert on in-memory text; no database, no subprocess; 791 ms worst of four gate runs before that",
   "turbo-env.test.ts":
     "every case already budgets itself with a trailing `, 90_000)` or `, 120_000)` (LOB-92)",
 };

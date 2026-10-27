@@ -296,6 +296,15 @@ function corpus(): Source[] {
 }
 
 /**
+ * The corpus, read once while the file is collected rather than inside a case (LOB-237). The cost is
+ * the first read of each file in the worker: warm, the walk is milliseconds; cold, during a gate run
+ * beside other worktrees' gates, the first case paid it inside vitest's 5 s default and went red —
+ * a synchronous body blocks the timer, but the runner still compares the elapsed time with the budget
+ * when the body returns. Collection has no per-case budget, so the cases are left with string work.
+ */
+const CORPUS: readonly Source[] = corpus();
+
+/**
  * Every file that must show the call, and how many call sites it must keep.
  *
  * A count per file rather than a set of files, because the regression that matters is a *partial*
@@ -325,7 +334,7 @@ describe("the loop's save_comment call sites", () => {
   it("names issueId at every call site in the instructions", () => {
     // Mutation checked: deleting `issueId` from any call site in the corpus (the case below does it to
     // `work.prompt.md`) reddens this one and names the file and line.
-    expect(findings(corpus())).toEqual([]);
+    expect(findings(CORPUS)).toEqual([]);
   });
 
   it("reads a corpus that still holds every call site", () => {
@@ -334,7 +343,7 @@ describe("the loop's save_comment call sites", () => {
     // This is the reason the case above cannot pass by finding nothing, and the reason a file that
     // keeps three of its four call sites still reddens.
     const counts = new Map(
-      corpus().map((source) => [source.path, callSites(source).length]),
+      CORPUS.map((source) => [source.path, callSites(source).length]),
     );
     for (const [file, expected] of Object.entries(CALLING_FILES)) {
       expect(counts.get(file) ?? 0, `${file}: save_comment call sites`).toBe(
@@ -459,7 +468,7 @@ describe("the loop's save_comment call sites", () => {
     // Mutation checked: pointing `CORPUS_DIRS` at the calling files only, or dropping a tree from it,
     // which would make the first case a check of a hand-picked list rather than of every tree that
     // instructs an agent.
-    const paths = corpus().map((source) => source.path);
+    const paths = CORPUS.map((source) => source.path);
     expect(paths.length).toBeGreaterThan(Object.keys(CALLING_FILES).length);
     for (const path of [
       "AGENTS.md",
