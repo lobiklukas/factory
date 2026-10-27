@@ -541,11 +541,12 @@ export const GATED_COLUMNS: ReadonlyArray<string> = Object.keys(
  * - `approval` — a run of the card asked to make a gated call and waits on a decision (D11). Listed
  *   whatever the card's column or block, because nothing but a person settles it.
  * - `question` — the card is blocked `needs_input` (B7): a run ended parked on a question, and the
- *   answer is a person's comment. `question` is the newest question in the thread, or the block's
- *   note when the thread has none; absent when neither says anything.
+ *   answer is a person's comment. `question` is the newest question asked since the block began, or
+ *   the block's note when none was; absent when neither says anything.
  * - `gate` — the card is not blocked, it sits in a column whose exit crosses a human gate (B5), it has
- *   a run started in that column, and none of its runs is busy: the run is done, and the next move
- *   is the one only a person can make. `sessionId` is the newest run in the column.
+ *   a run started in that column, and none of its runs is busy or holds an undecided approval: the
+ *   run is idle, and the next move is the one only a person can make. `sessionId` is the newest
+ *   run in the column.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.

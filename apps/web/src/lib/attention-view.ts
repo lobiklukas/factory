@@ -63,7 +63,7 @@ export const attentionReasonText = (item: AttentionItem): string => {
         ? `Blocked: needs input from ${task.blocked?.column ?? task.column}, with no question recorded`
         : `Asked: ${reason.question}`;
     case "gate":
-      return `The ${task.column} run is done; ${task.column} → ${reason.to} is the ${reason.gate}, a person's move`;
+      return `The ${task.column} run is idle; ${task.column} → ${reason.to} is the ${reason.gate}, a person's move`;
   }
 };
 

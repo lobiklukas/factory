@@ -891,6 +891,10 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     const capability = await cardIn(boardId, "blocked, but asked to push", [
       "specifying",
     ]);
+    const planAsks = await cardIn(boardId, "plan run waits on an approval", [
+      "specifying",
+      "planning",
+    ]);
 
     await withService((s) =>
       Effect.gen(function* () {
@@ -929,6 +933,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     const newestPlanRun = newSession();
     const approvalRun = newSession();
     const capabilityRun = newSession();
+    const planAskRun = newSession();
     const [onBoard, everywhere, clean] = await attentionWith(
       {
         runs: [
@@ -963,6 +968,14 @@ describe("TaskService — what needs a person (LOB-77)", () => {
             ago: 20,
             sessionId: capabilityRun,
           },
+          // Parked on an approval is idle (LOB-52), but the run waits on a decision, not a move.
+          {
+            taskId: planAsks.id,
+            column: "planning",
+            status: "idle",
+            ago: 15,
+            sessionId: planAskRun,
+          },
         ],
         approvals: [
           {
@@ -984,6 +997,12 @@ describe("TaskService — what needs a person (LOB-77)", () => {
             action: "open a PR",
             ago: 20,
           },
+          {
+            sessionId: planAskRun,
+            requestId: "plan-push",
+            action: "git push",
+            ago: 5,
+          },
         ],
       },
       [boardId, undefined, await newBoard()],
@@ -992,6 +1011,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     expect(rows(onBoard ?? [])).toEqual([
       ["approval", "blocked, but asked to push"],
       ["approval", "approval pending"],
+      ["approval", "plan run waits on an approval"],
       ["question", "asked twice"],
       ["question", "blocked needs_input by hand"],
       ["gate", "plan waits"],
@@ -1010,21 +1030,30 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       action: "push refs/heads/main",
     });
     // The newest question in the thread, and the block's note when no run asked.
+    // An idle planning run holding an undecided approval is the approval row only, never a gate.
+    expect(
+      (onBoard ?? []).filter((item) => item.task.id === planAsks.id),
+    ).toHaveLength(1);
     expect(reasons[2]).toMatchObject({
-      _tag: "question",
-      question: "And which branch?",
+      _tag: "approval",
+      sessionId: planAskRun,
+      requestId: "plan-push",
     });
     expect(reasons[3]).toMatchObject({
       _tag: "question",
+      question: "And which branch?",
+    });
+    expect(reasons[4]).toMatchObject({
+      _tag: "question",
       question: "Pick a database first.",
     });
-    expect(reasons[4]).toEqual({
+    expect(reasons[5]).toEqual({
       _tag: "gate",
       gate: "plan approval",
       to: "building",
       sessionId: newestPlanRun,
     });
-    expect(reasons[5]).toMatchObject({
+    expect(reasons[6]).toMatchObject({
       _tag: "gate",
       gate: "merge",
       to: "done",
@@ -1061,6 +1090,56 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       }),
     );
     expect(await withService((s) => s.attention(boardId))).toEqual([]);
+
+    // Blocked `needs_input` again by hand: the answered question is the old block's, not this one's.
+    const answered = await withService((s) => s.get(task.id));
+    const reblocked = await withService((s) =>
+      s.block({
+        taskId: task.id,
+        expectedRevision: answered.revision,
+        reason: "needs_input",
+        note: "Pick a database first.",
+        actor: LUKAS,
+      }),
+    );
+    expect(
+      (await withService((s) => s.attention(boardId))).map((i) => i.reason),
+    ).toEqual([
+      {
+        _tag: "question",
+        question: "Pick a database first.",
+        since: reblocked.blocked?.since,
+      },
+    ]);
+
+    // With no note either, the row says nothing was asked rather than repeating the old question.
+    const other = await cardIn(boardId, "asked, answered, blocked bare", [
+      "specifying",
+    ]);
+    const otherParked = await withService((s) =>
+      s.ask({ taskId: other.id, question: "Which branch?", actor: RUN }),
+    );
+    const otherAnswered = await withService((s) =>
+      s.comment({
+        taskId: other.id,
+        expectedRevision: otherParked.revision,
+        body: "main.",
+        actor: LUKAS,
+      }),
+    );
+    await withService((s) =>
+      s.block({
+        taskId: other.id,
+        expectedRevision: otherAnswered.revision,
+        reason: "needs_input",
+        actor: LUKAS,
+      }),
+    );
+    const bare = (await withService((s) => s.attention(boardId))).find(
+      (item) => item.task.id === other.id,
+    );
+    expect(bare?.reason).toMatchObject({ _tag: "question" });
+    expect(bare?.reason).not.toHaveProperty("question");
 
     const missing = await refusal((s) => s.attention(`brd_${hex(13)}`));
     expect(missing._tag).toBe("BoardNotFound");

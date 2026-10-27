@@ -966,19 +966,26 @@ export const TaskServiceLive = Layer.effect(
 
     /**
      * What needs a person (LOB-77): three statements over the rows the board and the approvals
-     * service already keep, and no log fold — the view is polled, so its cost has to be a few
-     * indexed reads whatever the number of cards (R6).
+     * service already keep, and no log fold — the view is polled, so its cost is a fixed number of
+     * row reads, never a fold per card (R6). The approvals read starts from the
+     * `session_approvals_pending` index; the questions and gates reads filter `tasks` by block and
+     * column, which no index covers, so the every-board view scans `tasks` — fine at the MVP's card
+     * count, and a partial index on `blocked_reason` is the fix when it is not.
      *
      * - **Approvals** are `session_approvals` rows with no decision, on a session `task_runs` names
      *   as a run of the card. Every column, every block: only a person settles one.
      * - **Questions** are cards blocked `needs_input` (B7). The question is the newest `question`
-     *   comment in the thread, falling back to the block's note (a person may block a card
-     *   `needs_input` by hand, with no run asking).
+     *   comment asked since the block began (an answered question from an earlier block is not this
+     *   block's), falling back to the block's note (a person may block a card `needs_input` by hand,
+     *   with no run asking).
      * - **Gates** are unblocked cards in a column whose exit crosses a human gate (B5), with a run
-     *   started in that column, and no run of the card busy in `session_activity`. In the MVP a
-     *   person starts and drives every run, so an idle run in a gated column is one whose work is
-     *   handed back: the next step is the person's move. A card with no run there yet is not at the
-     *   gate — the column's work has not been done — and a blocked card is waiting on its block.
+     *   started in that column, no run of the card busy in `session_activity`, and no run of the
+     *   card holding an undecided approval. In the MVP a person starts and drives every run, so an
+     *   idle run in a gated column is one whose work is handed back: the next step is the person's
+     *   move. A run parked on an approval is idle too (LOB-52: the hook never waits), but it is
+     *   waiting on a decision, not handing back — that card is listed as the approval, not the gate.
+     *   A card with no run there yet is not at the gate — the column's work has not been done — and
+     *   a blocked card is waiting on its block.
      */
     const attention = (
       boardId: string | undefined,
@@ -1035,6 +1042,7 @@ export const TaskServiceLive = Layer.effect(
               FROM task_events e
               WHERE e.task_id = t.id AND e.kind = 'commented'
                 AND e.payload->>'kind' = 'question'
+                AND e.created_at >= t.blocked_since
               ORDER BY e.id DESC
               LIMIT 1
             ) q ON true
@@ -1067,6 +1075,12 @@ export const TaskServiceLive = Layer.effect(
                 FROM task_runs busy
                 JOIN session_activity sa ON sa.session_id = busy.session_id
                 WHERE busy.task_id = t.id AND sa.status = 'busy'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM task_runs asking
+                JOIN session_approvals ap ON ap.session_id = asking.session_id
+                WHERE asking.task_id = t.id AND ap.decision IS NULL
               )
               AND (${board}::text IS NULL OR t.board_id = ${board})
             ORDER BY t.updated_at, t.id

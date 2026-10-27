@@ -16,12 +16,14 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   `?run=<the session that asked>`, so the pane's Approvals tab holds the request.
   `li[data-attention-reason=approval]`, text `A run asks to <action>[: <detail>]`.
 - **Answer a run's question** — the card is blocked `needs_input` (B7). The reason is the newest
-  `question` comment in the thread (the ask tool's), or the block's note when a person blocked it by
-  hand. `li[data-attention-reason=question]`, text `Asked: <question>`.
+  `question` comment asked since the block began (the ask tool's), or the block's note when a person
+  blocked it by hand — an answered question from an earlier block never reappears. `li[data-attention-reason=question]`, text `Asked: <question>`.
 - **Make a person's move** — the card is not blocked, its column's exit crosses a human gate
   (`planning → building` plan approval, `review → done` merge; B5), it has a run started in that
-  column, and no run of the card is busy (`session_activity`). `li[data-attention-reason=gate]`, text
-  `The <column> run is done; <column> → <to> is the <gate>, a person's move`.
+  column, no run of the card is busy (`session_activity`), and no run of the card holds an
+  undecided approval (a run parked on one is idle, but is waiting on the decision — it is listed as
+  the approval only). `li[data-attention-reason=gate]`, text
+  `The <column> run is idle; <column> → <to> is the <gate>, a person's move`.
 
 Not listed: a resting card (`intake`), a card in a column with no human gate, a card in a gated
 column with no run there yet or with a run still busy, and a card blocked on a `dependency`,
@@ -73,7 +75,17 @@ Evidence: `attention-empty.png`, `attention.png`, `attention-card.png`, `attenti
 - **The question is asked in-process, not by the faux model.** `FAUX_ASK` is an API-wide setting
   and would make every run in the drive ask; `seed-attention.ts` makes the ask tool's own service
   call instead.
-- **"Done" is "idle".** In the MVP a person starts and drives every run, so an idle run in a gated
-  column has handed its work back. A run created and not yet given a turn is idle too, so a card is
-  at its gate from the moment such a run exists; the drive only reads "not at the gate" while it has
-  seen the run busy.
+- **The gate reads "idle", not "done".** In the MVP a person starts and drives every run, so an
+  idle run in a gated column has handed its work back. A run created and not yet given a turn is
+  idle too, so a card is at its gate from the moment such a run exists — which is why the row says
+  the run _is idle_ rather than claiming it finished; the drive only reads "not at the gate" while it
+  has seen the run busy.
+- **Known gap: a stale `busy`.** "Busy" is the persisted `session_activity.status`, written best
+  effort as turns run and set idle when a session closes gracefully. An API killed mid-turn
+  (SIGKILL) leaves the row `busy`, and nothing at boot resets it, so that card stays off its gate
+  until another turn on the session or a `rebuildIndexes`. `getSession` reads the live in-memory
+  flag instead and is not affected.
+- **Cost (R6).** Three statements and no log fold. The approvals read uses the
+  `session_approvals_pending` partial index; the questions and gates reads filter `tasks` by block
+  and column, which no index covers, so the every-board view scans `tasks`. That is fine at MVP card
+  counts; a partial index on `blocked_reason` is the fix when it is not.

@@ -120,7 +120,7 @@ describe("attentionReasonText", () => {
 
   it("names the gate and the move only a person can make", () => {
     expect(attentionReasonText(item("g", gate))).toBe(
-      "The planning run is done; planning → building is the plan approval, a person's move",
+      "The planning run is idle; planning → building is the plan approval, a person's move",
     );
   });
 });
