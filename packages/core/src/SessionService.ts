@@ -126,6 +126,7 @@ import {
   compactSession,
   curationProposals,
   DECOMPOSITION_SKILL,
+  decompositionInputFault,
   decompositionProposals,
   forkSession,
   modelAccessFor,
@@ -2643,7 +2644,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        *   answer first (LOB-73), and proposals cut from a spec with holes in it would bake the
        *   holes into every child;
        * - a spec with **no acceptance criteria** — every proposal needs acceptance lines, and a
-       *   spec that states none gives the call nothing to ground them in.
+       *   spec that states none gives the call nothing to ground them in;
+       * - a spec **too large to show whole** (`decompositionInputFault`: more than 50 criteria, or a
+       *   goal or criterion over 1 000 characters) — the prompt never cuts a criterion, because the
+       *   criteria are the contract the children are checked against.
        *
        * A refused answer stores nothing, so the proposals an earlier decomposition committed are
        * still what the session reports.
@@ -2676,10 +2680,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `session ${input.sessionId}'s spec declares ${spec.gaps.length} gap(s); a person closes them before it is decomposed`,
             });
           }
-          if (spec.acceptance.length === 0) {
+          const fault = decompositionInputFault(spec);
+          if (fault !== undefined) {
             return yield* new SessionErrorClass({
               code: "invalid_input",
-              message: `session ${input.sessionId}'s spec has no acceptance criteria to decompose against`,
+              message: `session ${input.sessionId}'s spec ${fault}`,
             });
           }
           const skill = yield* skills.get(DECOMPOSITION_SKILL).pipe(

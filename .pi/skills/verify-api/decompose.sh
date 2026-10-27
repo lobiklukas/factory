@@ -2,7 +2,8 @@
 # Prove the decomposition surface (LOB-201): a specifier run's spec becomes proposed child issues
 # through `proposeDecomposition` over the real Effect RPC client, the proposals are committed as one
 # document and read back through `getSession`, and nothing else is written — no session, no card, no
-# event, no tracker request.
+# event, no updated row. That no tracker request is made is the core suite's claim, not this drive's
+# (see decompose.ts's header): this instance holds no tracker credentials.
 #
 # This script owns its own API instance — its own port, session root, log and pid file — because
 # the instance has to run a faux specifier (`FAUX_SPEC`) whose spec declares no gaps, which the
@@ -14,14 +15,14 @@
 # Env: DATABASE_URL (required — it names the *server*, not the database the drive writes),
 # DECOMPOSE_PORT (9423 when unset), EVIDENCE_DIR.
 #
-# The drive counts every table's rows before and after the call, so it cannot share a database
+# The drive fingerprints every table's content before and after the call, so it cannot share a database
 # another process writes: it mints a throwaway database on the same server
 # (`factory_verify_decompose_<random>`), points the API and the driver at it, and drops it on exit,
 # after the API is stopped. A run killed with SIGKILL never reaches its drop; such a database holds
 # only this drive's rows and is safe to drop by hand.
 #
 # Evidence: .verify/evidence/latest/api/decompose.json (every check the driver made, the spec, the
-# proposals, the row counts and the log's new commits), decompose-process.json (this script's checks)
+# proposals, the table fingerprints and the log's new commits), decompose-process.json (this script's checks)
 # and decompose-api.log.
 set -uo pipefail
 

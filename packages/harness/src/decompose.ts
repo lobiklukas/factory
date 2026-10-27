@@ -38,16 +38,43 @@ import type { Spec } from "./spec";
  */
 export const DECOMPOSITION_SKILL = "decompose";
 
-/** How much of the goal and of one acceptance line the prompt carries. */
-const LINE_CHARS = 400;
-/** How many acceptance lines the prompt carries: the input of one bounded call is bounded too. */
-const ACCEPTANCE_LINES = 50;
+/**
+ * The most acceptance criteria a spec may carry into one decomposition. The input of one bounded
+ * call is bounded too — and bounded by refusal, never by cutting: the criteria are the contract the
+ * children are checked against, so a prompt that showed some of them would yield a committed set
+ * grounded in part of the spec while the caller was told nothing.
+ */
+export const MAX_DECOMPOSED_CRITERIA = 50;
+/** The longest goal or acceptance criterion, in characters, a decomposition is given whole. */
+export const MAX_DECOMPOSED_LINE_CHARS = 1_000;
 
-/** One line of the prompt: newlines folded, so the value cannot open a heading of its own. */
-const oneLine = (text: string): string => {
-  const flat = text.replaceAll(/\s+/g, " ").trim();
-  return flat.length > LINE_CHARS ? `${flat.slice(0, LINE_CHARS)}…` : flat;
+/**
+ * Why `spec` cannot be decomposed as it stands, or `undefined` when it can: no criteria at all,
+ * more than `MAX_DECOMPOSED_CRITERIA`, or a goal or criterion longer than
+ * `MAX_DECOMPOSED_LINE_CHARS`. Pure, so the caller refuses before any call is made and a refusal
+ * costs nothing; the prompt then carries every criterion, each whole.
+ */
+export const decompositionInputFault = (spec: Spec): string | undefined => {
+  if (spec.acceptance.length === 0) {
+    return "has no acceptance criteria to decompose against";
+  }
+  if (spec.acceptance.length > MAX_DECOMPOSED_CRITERIA) {
+    return `has ${spec.acceptance.length} acceptance criteria; at most ${MAX_DECOMPOSED_CRITERIA} can be decomposed at once`;
+  }
+  if (spec.goal.length > MAX_DECOMPOSED_LINE_CHARS) {
+    return `has a goal of ${spec.goal.length} characters; at most ${MAX_DECOMPOSED_LINE_CHARS} can be decomposed`;
+  }
+  const long = spec.acceptance.findIndex(
+    (line) => line.length > MAX_DECOMPOSED_LINE_CHARS,
+  );
+  if (long >= 0) {
+    return `has acceptance criterion ${long} of ${spec.acceptance[long]?.length ?? 0} characters; at most ${MAX_DECOMPOSED_LINE_CHARS} can be decomposed`;
+  }
+  return undefined;
 };
+
+/** One line of the prompt: whitespace folded, so the value cannot open a heading of its own. */
+const oneLine = (text: string): string => text.replaceAll(/\s+/g, " ").trim();
 
 export type DecompositionOptions = {
   /** The model the process serves; the one call runs on it. */
@@ -63,22 +90,20 @@ export type DecompositionOptions = {
 /**
  * The one request's user message. The marker opens it, so a scripted model answers a
  * decomposition (`models.ts`); each value is on a line of its own under its heading, so the derived
- * faux answer reads the same spec back that a real model was shown.
+ * faux answer reads the same spec back that a real model was shown. Every criterion is shown whole:
+ * a spec too large for that is refused first (`decompositionInputFault`), not cut here.
  */
 export const decompositionPrompt = (
   options: Pick<DecompositionOptions, "sessionId" | "spec">,
-): string => {
-  const shown = options.spec.acceptance.slice(0, ACCEPTANCE_LINES);
-  const omitted = options.spec.acceptance.length - shown.length;
-  return [
+): string =>
+  [
     `${DECOMPOSITION_PROMPT_PREFIX} session ${options.sessionId}`,
     "",
     DECOMPOSITION_GOAL_HEADING,
     oneLine(options.spec.goal),
     "",
     DECOMPOSITION_ACCEPTANCE_HEADING,
-    ...shown.map((line) => `- ${oneLine(line)}`),
-    ...(omitted > 0 ? [`(${omitted} more not shown)`] : []),
+    ...options.spec.acceptance.map((line) => `- ${oneLine(line)}`),
     "",
     "## your answer",
     "Reply with only a JSON object shaped",
@@ -86,7 +111,6 @@ export const decompositionPrompt = (
     "`blockedBy` names other proposals by their index in this list, and only where the order is real.",
     "Every proposal needs a title no other proposal has and at least one acceptance line.",
   ].join("\n");
-};
 
 /** One call's answer, and what that call cost. */
 export type DecompositionRequest = {
@@ -104,6 +128,15 @@ export const requestDecomposition = (
   options: DecompositionOptions,
 ): Effect.Effect<DecompositionRequest, SessionError> =>
   Effect.gen(function* () {
+    // The caller refuses first (`proposeDecomposition`); refused here too, so no caller can send a
+    // spec the prompt would not carry whole.
+    const fault = decompositionInputFault(options.spec);
+    if (fault !== undefined) {
+      return yield* new SessionError({
+        code: "invalid_input",
+        message: `session ${options.sessionId}'s spec ${fault}`,
+      });
+    }
     const request = options.model.models.getModel(
       options.model.provider,
       options.model.modelId,

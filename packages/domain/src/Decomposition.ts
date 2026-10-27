@@ -32,7 +32,7 @@
  * This module imports `@repo/domain/Ids` and nothing else of this package, as `Mission` does:
  * `Session.ts` imports *this* module for the snapshot's `proposedIssues` field.
  */
-import { Effect, Option, Schema } from "effect";
+import { Effect, Result, Schema } from "effect";
 import { SessionId } from "@repo/domain/Ids";
 
 /** The most proposals one decomposition may commit. */
@@ -261,7 +261,32 @@ const refusal = (faults: readonly ProposalFault[]): ProposalsRefused =>
     message: `proposals refused: ${faults.map((fault) => fault.detail).join("; ")}`,
   });
 
-const decodeShape = Schema.decodeUnknownEffect(ProposalsInput);
+const decodeShape = Schema.decodeUnknownResult(ProposalsInput);
+
+/**
+ * The rules, as a pure function: the normalized `ProposedIssues` when every rule holds, every fault
+ * when one does not. No effect runs here, so the snapshot's read (`projectProposedIssues`) and the
+ * writer's (`decodeProposedIssues`) share one judgement without either running a runtime.
+ */
+export const validateProposedIssues = (
+  input: unknown,
+): Result.Result<ProposedIssues, readonly ProposalFault[]> => {
+  const shape = decodeShape(input, { errors: "all" });
+  if (Result.isFailure(shape)) {
+    return Result.fail([
+      {
+        index: null,
+        reason: "unreadable",
+        detail: `not a {"proposals": [{title, goal, change, acceptance, blockedBy}]} object: ${shape.failure.message}`,
+      },
+    ]);
+  }
+  const proposals = normalized(shape.success);
+  const faults = proposalFaults(proposals);
+  return faults.length === 0
+    ? Result.succeed({ proposals })
+    : Result.fail(faults);
+};
 
 /**
  * Validate an untrusted value as a proposal set: the normalized `ProposedIssues` when every rule
@@ -270,25 +295,12 @@ const decodeShape = Schema.decodeUnknownEffect(ProposalsInput);
  */
 export const decodeProposedIssues = (
   input: unknown,
-): Effect.Effect<ProposedIssues, ProposalsRefused> =>
-  decodeShape(input, { errors: "all" }).pipe(
-    Effect.mapError((error) =>
-      refusal([
-        {
-          index: null,
-          reason: "unreadable",
-          detail: `not a {"proposals": [{title, goal, change, acceptance, blockedBy}]} object: ${error.message}`,
-        },
-      ]),
-    ),
-    Effect.flatMap((shape) => {
-      const proposals = normalized(shape);
-      const faults = proposalFaults(proposals);
-      return faults.length === 0
-        ? Effect.succeed({ proposals })
-        : Effect.fail(refusal(faults));
-    }),
-  );
+): Effect.Effect<ProposedIssues, ProposalsRefused> => {
+  const result = validateProposedIssues(input);
+  return Result.isSuccess(result)
+    ? Effect.succeed(result.success)
+    : Effect.fail(refusal(result.failure));
+};
 
 /**
  * A stored document read as a proposal set, or `undefined` when it is not one — its seed (no
@@ -297,9 +309,7 @@ export const decodeProposedIssues = (
 export const projectProposedIssues = (
   value: unknown,
 ): ProposedIssues | undefined =>
-  Option.getOrUndefined(
-    Effect.runSync(Effect.option(decodeProposedIssues(value))),
-  );
+  Result.getOrUndefined(validateProposedIssues(value));
 
 /** Propose child issues from a session's spec (LOB-201). */
 export const ProposeDecompositionInput = Schema.Struct({

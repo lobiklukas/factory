@@ -30,6 +30,7 @@ import {
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
 import { Effect, Schema } from "effect";
+import { MAX_PROPOSALS } from "@repo/domain/Decomposition";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
@@ -221,7 +222,8 @@ export const DECOMPOSITION_ACCEPTANCE_HEADING = "## acceptance";
 /**
  * What the scripted model answers to a decomposition prompt: one proposal per acceptance criterion
  * of the spec the prompt carries, titled by the criterion, with the spec's goal as its goal and the
- * criterion as its one acceptance line. No edges: the derived answer cannot know an order, and an
+ * criterion as its acceptance line — folded, where one proposal per criterion would break the rules
+ * (a repeated criterion, or more than `MAX_PROPOSALS`), into a proposal already made. No edges: the derived answer cannot know an order, and an
  * edge it made up would be exactly the unreal ordering the decomposition is told not to declare.
  *
  * Derived rather than queued, as the curation answer is, so a drive needs no script to decompose;
@@ -243,17 +245,38 @@ const derivedDecompositionAnswer = (prompt: string): AssistantMessage => {
       acceptance.push(line.slice(2).trim());
     }
   }
-  return fauxAssistantMessage(
-    JSON.stringify({
-      proposals: acceptance.map((criterion) => ({
-        title: criterion,
-        goal,
-        change: `Make this hold: ${criterion}`,
-        acceptance: [criterion],
-        blockedBy: [],
-      })),
-    }),
-  );
+  // The set the validator would accept: a criterion whose title another already has (compared as
+  // the validator compares titles) joins that proposal's acceptance lines, and past
+  // `MAX_PROPOSALS` every further criterion joins the last proposal's. Each criterion is still some
+  // proposal's acceptance line, and no spec the decomposition accepts is refused for its size.
+  const proposals: {
+    title: string;
+    goal: string;
+    change: string;
+    acceptance: string[];
+    blockedBy: number[];
+  }[] = [];
+  const byTitle = new Map<string, number>();
+  for (const criterion of acceptance) {
+    const key = criterion.replaceAll(/\s+/g, " ").trim().toLowerCase();
+    const into =
+      byTitle.get(key) ??
+      (proposals.length >= MAX_PROPOSALS ? proposals.length - 1 : undefined);
+    const existing = into === undefined ? undefined : proposals[into];
+    if (existing !== undefined) {
+      existing.acceptance.push(criterion);
+      continue;
+    }
+    byTitle.set(key, proposals.length);
+    proposals.push({
+      title: criterion,
+      goal,
+      change: `Make this hold: ${criterion}`,
+      acceptance: [criterion],
+      blockedBy: [],
+    });
+  }
+  return fauxAssistantMessage(JSON.stringify({ proposals }));
 };
 
 /**

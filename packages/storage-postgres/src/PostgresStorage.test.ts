@@ -1974,3 +1974,40 @@ describe("the board's DDL, as 0007 writes it", () => {
     },
   );
 });
+
+/**
+ * Every migration has an id of its own, and the ids run 1…N with no gap (LOB-201).
+ *
+ * `PgMigrator.fromFileSystem` keys a migration by its file name's leading number and runs only the
+ * ids above the newest one a database has recorded. Two branches cut from one `main` both take the
+ * next number, and git merges two different file names without a conflict, so after the second
+ * merge two files share an id: a fresh database fails on the migrations table's primary key, and a
+ * database that already recorded the id from the first merge skips the second file silently. The
+ * case reads the directory, so the textual merge that produces either is red in the gate, and the
+ * branch that merged second renumbers.
+ */
+describe("the migrations directory", () => {
+  it(
+    "names each migration id once, contiguously from 1",
+    { timeout: 30_000 },
+    async () => {
+      const { readdirSync } = await import("node:fs");
+      const directory = new URL("./migrations/", import.meta.url);
+      // The loader's own pattern (`effect/sql/Migrator`'s `fromFileSystem`).
+      const ids = readdirSync(directory).flatMap((file) => {
+        const match = /^(\d+)_([^.]+)\.(js|ts|mjs|mts)$/.exec(file);
+        return match === null ? [] : [{ id: Number(match[1]), file }];
+      });
+      const byId = new Map<number, string[]>();
+      for (const { id, file } of ids) {
+        byId.set(id, [...(byId.get(id) ?? []), file]);
+      }
+      const shared = [...byId.entries()].filter(
+        ([, files]) => files.length > 1,
+      );
+      expect(shared).toEqual([]);
+      const sorted = [...byId.keys()].sort((a, b) => a - b);
+      expect(sorted).toEqual(sorted.map((_, index) => index + 1));
+    },
+  );
+});

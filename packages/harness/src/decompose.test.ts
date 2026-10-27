@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import {
+  MAX_PROPOSALS,
   ProposalsRefused,
   type ProposedIssue,
 } from "@repo/domain/Decomposition";
@@ -20,8 +21,11 @@ import { SessionId } from "@repo/domain/Session";
 import { Effect, Exit, Option, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  decompositionInputFault,
   decompositionPrompt,
   decompositionProposals,
+  MAX_DECOMPOSED_CRITERIA,
+  MAX_DECOMPOSED_LINE_CHARS,
   requestDecomposition,
   writeProposedIssues,
 } from "./decompose";
@@ -67,8 +71,8 @@ const ref = (path: string): SessionRef => ({
   workspace: { path, commands: {}, commandsSource: "none" },
 });
 
-/** One decomposition over `SPEC`, on a faux model scripted with `answer` (derived when absent). */
-const decompose = (answer?: string) => {
+/** One decomposition over `spec`, on a faux model scripted with `answer` (derived when absent). */
+const decompose = (answer?: string, spec: Spec = SPEC) => {
   const faux = createFauxModelAccess(
     answer === undefined ? {} : { fauxDecomposition: answer },
   );
@@ -78,7 +82,7 @@ const decompose = (answer?: string) => {
         model: faux.access,
         instructions: "decompose the spec",
         sessionId: SESSION,
-        spec: SPEC,
+        spec,
       });
       const proposals = yield* Effect.exit(decompositionProposals(request));
       return { proposals, calls: faux.faux.state.callCount };
@@ -109,6 +113,23 @@ describe("the decomposition prompt", () => {
     for (const criterion of SPEC.acceptance) {
       expect(lines).toContain(`- ${criterion}`);
     }
+  });
+
+  it("carries every criterion whole, the longest one allowed and the most criteria included", () => {
+    const long = `a criterion ${"x".repeat(MAX_DECOMPOSED_LINE_CHARS - 12)}`;
+    const many = Array.from(
+      { length: MAX_DECOMPOSED_CRITERIA - 1 },
+      (_, index) => `criterion ${index}`,
+    );
+    const spec = { ...SPEC, acceptance: [long, ...many] };
+    expect(decompositionInputFault(spec)).toBeUndefined();
+    const lines = decompositionPrompt({ sessionId: SESSION, spec }).split("\n");
+    expect(long).toHaveLength(MAX_DECOMPOSED_LINE_CHARS);
+    expect(lines).toContain(`- ${long}`);
+    expect(lines.filter((line) => line.startsWith("- "))).toHaveLength(
+      MAX_DECOMPOSED_CRITERIA,
+    );
+    expect(lines.some((line) => line.includes("not shown"))).toBe(false);
   });
 
   it("is answered by the faux as a decomposition, not as a turn", () => {
@@ -149,6 +170,84 @@ describe("one decomposition call", () => {
       expect(proposed.blockedBy).toEqual([]);
     }
   });
+
+  it("folds a repeated criterion, and criteria past MAX_PROPOSALS, into proposals the rules accept", async () => {
+    const acceptance = [
+      "the first criterion",
+      "The  first criterion",
+      ...Array.from(
+        { length: MAX_PROPOSALS + 5 },
+        (_, index) => `criterion ${index}`,
+      ),
+    ];
+    const outcome = await decompose(undefined, { ...SPEC, acceptance });
+    expect(outcome.calls).toBe(1);
+    expect(Exit.isSuccess(outcome.proposals)).toBe(true);
+    if (!Exit.isSuccess(outcome.proposals)) return;
+    const proposals = outcome.proposals.value.proposals;
+    expect(proposals).toHaveLength(MAX_PROPOSALS);
+    // Every criterion is still some proposal's acceptance line, each exactly once (as the prompt
+    // shows it: whitespace folded).
+    expect(proposals.flatMap((p) => p.acceptance).sort()).toEqual(
+      acceptance.map((line) => line.replaceAll(/\s+/g, " ")).sort(),
+    );
+    expect(proposals[0]?.acceptance).toEqual([
+      "the first criterion",
+      "The first criterion",
+    ]);
+  });
+
+  it.each([
+    {
+      name: "no criteria",
+      spec: { ...SPEC, acceptance: [] },
+      fault: /no acceptance criteria/,
+    },
+    {
+      name: "more criteria than one decomposition is shown",
+      spec: {
+        ...SPEC,
+        acceptance: Array.from(
+          { length: MAX_DECOMPOSED_CRITERIA + 1 },
+          (_, index) => `criterion ${index}`,
+        ),
+      },
+      fault: /has 51 acceptance criteria; at most 50/,
+    },
+    {
+      name: "a goal too long to show whole",
+      spec: { ...SPEC, goal: "g".repeat(MAX_DECOMPOSED_LINE_CHARS + 1) },
+      fault: /goal of 1001 characters/,
+    },
+    {
+      name: "a criterion too long to show whole",
+      spec: {
+        ...SPEC,
+        acceptance: ["short", "c".repeat(MAX_DECOMPOSED_LINE_CHARS + 1)],
+      },
+      fault: /criterion 1 of 1001 characters/,
+    },
+  ])(
+    "refuses a spec with $name before the call is made",
+    async ({ spec, fault }) => {
+      expect(decompositionInputFault(spec)).toMatch(fault);
+      const faux = createFauxModelAccess();
+      const exit = await Effect.runPromise(
+        Effect.exit(
+          requestDecomposition({
+            model: faux.access,
+            instructions: "decompose the spec",
+            sessionId: SESSION,
+            spec,
+          }),
+        ),
+      );
+      const error = Option.getOrThrow(Exit.findErrorOption(exit));
+      expect(error.code).toBe("invalid_input");
+      expect(error.message).toMatch(fault);
+      expect(faux.faux.state.callCount).toBe(0);
+    },
+  );
 
   it("accepts a scripted answer fenced in Markdown, edges included", async () => {
     const set = {

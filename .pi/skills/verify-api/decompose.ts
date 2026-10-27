@@ -8,8 +8,14 @@
 //   spec       a card moved into `specifying`, a run started on it, and its `spec` call accepted
 //   propose    `proposeDecomposition` answers one proposal per criterion, each with acceptance lines
 //   read       `getSession` reports the same set as `proposedIssues`
-//   nowhere    every table's row count is as it was, the log of every other session included, the
-//              card did not move, and the session's own log gained one commit of the document
+//   nowhere    every table's content is as it was (a fingerprint, so an UPDATE counts), the log of
+//              every other session included, the card did not move, and the session's own log
+//              gained one commit of the document
+//
+// Not proven here: that no tracker request is made. This API instance holds no tracker credentials,
+// so a request it did not make proves nothing; the proof is the core suite's HTTP ledger
+// (`packages/core/src/SessionService.test.ts`, "proposing child issues from a spec"), which records
+// every request the process could make and asserts it empty.
 //
 // Env: API_URL, EVIDENCE_DIR, EXPECT_SPEC (the spec the shell's faux specifier declares),
 // DATABASE_URL (the scratch database the shell minted).
@@ -63,26 +69,40 @@ const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(RpcApi);
   const sql = yield* SqlClient;
 
-  /** Every table's rows, and the commits of every log but `sessionId`'s. */
-  const rowCounts = (sessionId: SessionId) =>
-    Effect.map(
-      sql<Record<string, number>>`
-        SELECT
-          (SELECT count(*)::int FROM commits WHERE log_id <> ${sessionId}) AS other_commits,
-          (SELECT count(*)::int FROM sessions) AS sessions,
-          (SELECT count(*)::int FROM session_activity) AS session_activity,
-          (SELECT count(*)::int FROM tasks) AS tasks,
-          (SELECT count(*)::int FROM task_events) AS task_events,
-          (SELECT count(*)::int FROM task_runs) AS task_runs,
-          (SELECT count(*)::int FROM board_instances) AS board_instances,
-          (SELECT count(*)::int FROM session_approvals) AS session_approvals,
-          (SELECT count(*)::int FROM session_pages) AS session_pages,
-          (SELECT count(*)::int FROM webhook_deliveries) AS webhook_deliveries,
-          (SELECT count(*)::int FROM repos) AS repos,
-          (SELECT count(*)::int FROM skills) AS skills
-      `,
-      (rows) => rows[0] ?? {},
-    );
+  /**
+   * A content fingerprint of every table in the schema — row count and an `md5` over every row in a
+   * fixed order — but `sessionId`'s own log and activity row, which the decomposition writes by
+   * design. An UPDATE moves a fingerprint where it would leave a row count alone, and the tables are
+   * read from the catalog, so a table a later migration adds is covered too.
+   */
+  const fingerprint = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const tables = yield* sql<{ name: string }>`
+        SELECT table_name AS name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+      `;
+      const own: Record<string, string> = {
+        commits: "log_id",
+        session_activity: "session_id",
+      };
+      const prints: Record<string, string> = {};
+      for (const { name } of tables) {
+        const column = own[name];
+        const rows =
+          column === undefined
+            ? yield* sql<{ print: string }>`
+                SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
+                FROM ${sql(name)} t
+              `
+            : yield* sql<{ print: string }>`
+                SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
+                FROM ${sql(name)} t WHERE ${sql(column)} <> ${sessionId}
+              `;
+        prints[name] = rows[0]?.print ?? "";
+      }
+      return prints;
+    });
   const headSeq = (sessionId: SessionId) =>
     Effect.map(
       sql<{ seq: number }>`
@@ -151,7 +171,7 @@ const program = Effect.gen(function* () {
   const cardBefore = yield* client.getTask({ taskId: card.id });
 
   // --- propose ---------------------------------------------------------------------------------------
-  const rowsBefore = yield* rowCounts(run.id);
+  const rowsBefore = yield* fingerprint(run.id);
   const seq = yield* headSeq(run.id);
   const listedBefore = yield* client.listSessions({ limit: 250 });
   const proposed = yield* client.proposeDecomposition({ sessionId: run.id });
@@ -174,11 +194,12 @@ const program = Effect.gen(function* () {
   );
 
   // --- nowhere else ----------------------------------------------------------------------------------
-  const rowsAfter = yield* rowCounts(run.id);
+  const rowsAfter = yield* fingerprint(run.id);
   observed.rows = { before: rowsBefore, after: rowsAfter };
   assert(
-    "no other row moved: no session, card, event, run, page or delivery, and no other log",
-    JSON.stringify(rowsAfter) === JSON.stringify(rowsBefore),
+    "no other row was inserted, deleted or updated: every table but the session's own log and activity row",
+    Object.keys(rowsBefore).includes("sessions") &&
+      JSON.stringify(rowsAfter) === JSON.stringify(rowsBefore),
     `before=${JSON.stringify(rowsBefore)} after=${JSON.stringify(rowsAfter)}`,
   );
   const listedAfter = yield* client.listSessions({ limit: 250 });

@@ -202,8 +202,8 @@ order you want the evidence to end in.
   the pages at every step (curated, repeated, deleted, rebuilt), the spend after each call, the log's
   page-entry counts, the rebuild's report, and the script's own checks
 - `decompose.json`, `decompose-process.json`, `decompose-api.log` — from `./decompose.sh`: the spec,
-  the proposals, every table's row counts before and after the call, the log's new commits, and the
-  script's own checks
+  the proposals, every table's fingerprint (row count and content `md5`) before and after the call,
+  the log's new commits, and the script's own checks
 - `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
   from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
   checks, and the fake's ledger
