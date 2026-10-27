@@ -6,11 +6,15 @@
 //   WEB_URL       default http://localhost:3100
 //   API_URL       default http://localhost:9100
 //   EVIDENCE_DIR  default .verify/evidence/latest
+//   DATABASE_URL  the API's database, inherited: the PR-link check seeds a session through it
+//                 (LOB-65, `.pi/skills/lib/seed-pr.ts`)
 //
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 
 const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3100";
@@ -267,6 +271,14 @@ assert(
   sessionPath.replace("/sessions/", "") !== "" &&
     headerText.includes(sessionPath.replace("/sessions/", "")),
   `header: ${JSON.stringify(headerText)}`,
+);
+// A session with no PR has no PR anchor (LOB-65): the link is the recorded `prUrl`, and this session
+// never opened one. The seeded case below is the other half.
+const noPrAnchors = await page.locator("[data-pr-link]").count();
+assert(
+  "a session with no PR shows no PR link",
+  noPrAnchors === 0,
+  `${noPrAnchors} PR anchor(s) in the pane`,
 );
 
 // The created session is in the sidebar: the registry records what the stream
@@ -1288,6 +1300,87 @@ assert(
   `body: ${JSON.stringify(badIdCopy.slice(0, 200))}`,
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
+
+// Feature: the session's PR link (LOB-65). No RPC opens a PR, so `seed-pr.ts` is the in-process
+// caller of the real PR step — against a loopback GitHub fake, on this API's database and session
+// root — and it exits before the page attaches, so the anchor below is the API's read of the session.
+// The href is compared with the link the session *recorded*, read back through the API from the page.
+// See features/pr-link.md.
+const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const seedOut = path.join(ROOT, ".verify/run/web-pr-seed.json");
+const seedRun = spawnSync(
+  "bun",
+  [path.join(ROOT, ".pi/skills/lib/seed-pr.ts")],
+  {
+    env: {
+      ...process.env,
+      PR_SEED_OUT: seedOut,
+      SESSION_ROOT: path.join(ROOT, ".verify/run/sessions"),
+      PR_SEED_TITLE: "verify-web pr probe",
+    },
+    encoding: "utf8",
+    timeout: 120_000,
+  },
+);
+await writeFile(
+  path.join(EVIDENCE_DIR, "pr-seed.txt"),
+  `${seedRun.stdout ?? ""}${seedRun.stderr ?? ""}`,
+);
+const seeded = await readFile(seedOut, "utf8")
+  .then((text) => JSON.parse(text))
+  .catch(() => ({ sessionId: "", prUrl: null }));
+assert(
+  "a session with a recorded PR was seeded",
+  seedRun.status === 0 && seeded.sessionId !== "" && seeded.prUrl !== null,
+  `exit=${seedRun.status} id=${seeded.sessionId} prUrl=${seeded.prUrl}`,
+);
+const prRead =
+  seeded.sessionId === ""
+    ? { value: null }
+    : await callRpcOnce("getSession", { sessionId: seeded.sessionId });
+const recordedPrUrl = prRead.value?.session?.prUrl ?? null;
+assert(
+  "the API reads the PR link the session recorded",
+  recordedPrUrl !== null && recordedPrUrl === seeded.prUrl,
+  `getSession prUrl=${recordedPrUrl} seeded=${seeded.prUrl}`,
+);
+const prAnchor = page.locator("header [data-pr-link]");
+let prHref = null;
+let prAnchorText = "";
+let prTarget = null;
+if (seeded.sessionId !== "") {
+  await page.goto(`${WEB_URL}/sessions/${seeded.sessionId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await prAnchor
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .catch(() => undefined);
+  if ((await prAnchor.count()) > 0) {
+    prHref = await prAnchor.first().getAttribute("href");
+    prTarget = await prAnchor.first().getAttribute("target");
+    prAnchorText = (await prAnchor.first().innerText()).trim();
+  }
+  await page.screenshot({ path: path.join(EVIDENCE_DIR, "pr-link.png") });
+}
+observed.prLink = {
+  sessionId: seeded.sessionId,
+  seededPrUrl: seeded.prUrl,
+  recordedPrUrl,
+  href: prHref,
+  target: prTarget,
+  text: prAnchorText,
+};
+assert(
+  "the pane header links the recorded PR",
+  recordedPrUrl !== null && prHref === recordedPrUrl,
+  `href=${prHref} recorded=${recordedPrUrl} text=${JSON.stringify(prAnchorText)}`,
+);
+assert(
+  "and the link opens beside the live pane, not over it",
+  prTarget === "_blank",
+  `target=${prTarget}`,
+);
 
 // Back to the session for the transcript screenshot, with a tool result expanded.
 await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });

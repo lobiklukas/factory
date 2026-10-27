@@ -17,6 +17,7 @@ the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required check
 | Transcript               | passing | [transcript.md](transcript.md)             |
 | Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
 | Compaction from the pane | passing | [compaction.md](compaction.md)             |
+| The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 
 ## Known gaps
 

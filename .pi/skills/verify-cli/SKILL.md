@@ -23,6 +23,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | The run's session is named  | `session ses_…` on stdout, and `workspace <path>`    | the server's own answer, not a client guess        |
 | The tool call is real       | a `[tool:bash]` line carrying the faux tool's output | the transcript can only exist if the tool ran      |
 | `factory ls` (LOB-6)        | the new session is a row, with its title, exit 0     | the list is a server read, not a local registry    |
+| The PR column (LOB-65)      | a seeded PR's URL in its row; `-` for the run's row  | the operator sees the link without a browser       |
 | `factory watch`, live (D8)  | `mode: live`, then the same answer                   | a session this process owns streams                |
 | `factory watch`, historical | `mode: historical` after the idle sweep, same answer | the fold path, and the label that tells them apart |
 | Typed errors                | unknown id → `error: not_found`, non-zero exit       | a script can branch on `code`, not on prose        |
@@ -61,7 +62,10 @@ Two settings exist for the sake of proof, not production:
 ./drive.sh       # requires the instance from ./up.sh
 ```
 
-Environment: `API_URL` (default `http://localhost:9300`), `EVIDENCE_DIR`.
+Environment: `API_URL` (default `http://localhost:9300`), `EVIDENCE_DIR`, and the same
+`DATABASE_URL` `up.sh` ran with — the PR-column check seeds a session through it with
+`.pi/skills/lib/seed-pr.ts`. `PR_SEED_GITHUB_PORT` pins the seed's loopback GitHub fake to a port
+(the default, `0`, lets the OS choose one).
 
 It runs `factory` in a **private tmux server** (`tmux -S .verify/run/cli-tmux.sock`), so it cannot
 touch a tmux session you are using. Each command is typed into the pane and followed by a sentinel
@@ -73,7 +77,8 @@ cleared between commands: an assertion must not be able to match an earlier comm
 
 Written to `.verify/evidence/latest/cli/` (override with `EVIDENCE_DIR`), gitignored:
 
-- `run.txt`, `ls.txt`, `watch-live.txt`, `watch-historical.txt`, `watch-unknown.txt` — the raw panes
+- `run.txt`, `ls.txt`, `ls-pr.txt`, `watch-live.txt`, `watch-historical.txt`, `watch-unknown.txt` —
+  the raw panes; `pr-seed.txt` — what the seed printed
 - `observed.json` — every check with its detail, the session id, the API URL, and the idle window
 
 Proof standards for this app:
