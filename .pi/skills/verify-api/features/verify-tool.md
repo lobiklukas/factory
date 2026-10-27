@@ -20,7 +20,7 @@ exit code, the tail of the output, whether it was cut), `VerifyNoEvidence` (a su
 and no skill, or changed paths outside every package with no declared command — named either way),
 or `VerifyUnrunnable` (spawn failure or timeout, with what it printed). A report with changed paths
 always has a result, so an empty `results` means nothing changed. `readVerifyRecords` decodes them
-out of a log; the PR evidence block (LOB-79) reads them from there.
+out of a log; the PR evidence block (LOB-79, `pr-evidence.md`) reads them from there.
 
 **Isolation.** Each verification runs with `DATABASE_URL` set to `VerifyOptions.databaseUrl`, or else
 to `VERIFY_NO_DATABASE` (`postgres://no-database.invalid:5432/none`, a host that never resolves) —
@@ -85,4 +85,4 @@ session would need the ports and databases those skills assume (and `verify-api`
 tool unless the control plane passes one). Path → surface is a rule, not a
 declared table: in this repo a change under `packages/core` names surface `core`, which has no skill
 and is reported as no evidence rather than mapped onto `verify-api`. And nothing here _gates_ on the
-record yet — the PR evidence block is LOB-79 and the gate is part 3 of LOB-16.
+record yet — the PR body cites it (LOB-79, `pr-evidence.md`), and the gate is part 3 of LOB-16.

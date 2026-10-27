@@ -12,6 +12,7 @@ import type {
   TaskGraph,
 } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
+import { Option, Schema } from "effect";
 import type {
   ImageContent,
   Message,
@@ -19,6 +20,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import { PrEvidence } from "@repo/domain/Session";
 import type {
   ModelUsage,
   QueuedMessage,
@@ -355,15 +357,33 @@ export type PrDocView = {
   readonly base: string;
   readonly head: string;
   readonly openedAt: string;
+  /**
+   * What the PR says was verified (LOB-79). Absent for a PR recorded before evidence existed, and
+   * for a value that does not decode: a document is read defensively, so a stray shape drops out
+   * rather than reaching a reader as evidence.
+   */
+  readonly evidence?: PrEvidence;
 };
 
-export const projectPrDoc = (value: JsonValue | undefined): PrDocView => ({
-  url: stringAt(value, "url") ?? "",
-  number: numberAt(value, "number"),
-  base: stringAt(value, "base") ?? "",
-  head: stringAt(value, "head") ?? "",
-  openedAt: stringAt(value, "openedAt") ?? "",
-});
+const decodeEvidence = Schema.decodeUnknownOption(PrEvidence);
+
+/** The evidence a `factory.pr` document or its `factory.pr.opened` entry carries, if it decodes. */
+export const evidenceAt = (
+  parent: JsonValue | undefined,
+): PrEvidence | undefined =>
+  Option.getOrUndefined(decodeEvidence(asObject(parent)?.["evidence"]));
+
+export const projectPrDoc = (value: JsonValue | undefined): PrDocView => {
+  const evidence = evidenceAt(value);
+  return {
+    url: stringAt(value, "url") ?? "",
+    number: numberAt(value, "number"),
+    base: stringAt(value, "base") ?? "",
+    head: stringAt(value, "head") ?? "",
+    openedAt: stringAt(value, "openedAt") ?? "",
+    ...(evidence === undefined ? {} : { evidence }),
+  };
+};
 
 const ZERO_USAGE: ModelUsage = {
   input: 0,
@@ -559,7 +579,13 @@ export const diffView = (
     // that attaches afterwards reads the link from the session's summary instead.
     if (entry.kind === PR_OPENED_ENTRY_KIND) {
       const prUrl = stringAt(entry.data, "url");
-      if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
+      const evidence = evidenceAt(entry.data);
+      if (prUrl !== undefined)
+        events.push({
+          _tag: "prOpened",
+          prUrl,
+          ...(evidence === undefined ? {} : { evidence }),
+        });
     }
   }
 
