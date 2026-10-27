@@ -55,6 +55,9 @@ under Known gaps.
 - **A session's pages have no pane.** Neither the dashboard nor the CLI calls `listPages` or
   `curateSession`; the surface is driven over RPC by verify-api's `./pages.sh`
   ([pages.md](../../verify-api/features/pages.md)), so nothing here proves how a page renders.
+- **Proposed child issues have no pane.** Nothing in the dashboard calls `proposeDecomposition` or
+  renders a snapshot's `proposedIssues` yet (LOB-201); the surface is driven over RPC by verify-api's
+  `./decompose.sh` ([decompose.md](../../verify-api/features/decompose.md)).
 - The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
   either way, so the day a fold is driven the check is the header string.

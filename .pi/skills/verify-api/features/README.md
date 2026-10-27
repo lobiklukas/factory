@@ -168,6 +168,11 @@ API on `PAGES_PORT=9570`): `./pages.sh` **15/15** (12 driver checks, 3 shell che
 `.verify/evidence/lob-220/api/`, with three mutation runs (no dedupe, a free repeat, no page fold in
 the rebuild) each failing it, in `.verify/evidence/lob-220/mutation/`. See [pages.md](pages.md).
 
+The decomposition checks (LOB-201) were run from the `agent/LOB-201` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_201` on 5442, a scratch database minted on it,
+faux with `FAUX_SPEC`, API on `DECOMPOSE_PORT=9521`): `./decompose.sh` **11/11** (8 driver checks,
+3 shell checks), evidence `.verify/evidence/lob-201/api/`. See [decompose.md](decompose.md).
+
 The replay checks (LOB-215) were added to `bun drive.ts` and run from the `agent/LOB-215` worktree
 on 2026-10-27 (API on `:9550`, faux with `faux/faux-2` published by `up.sh`, the worktree's own
 database on 5442): **58/58** (52 before, 6 replay checks), evidence `.verify/evidence/lob-215/`,
@@ -208,6 +213,7 @@ with the no-replay-document mutation run failing exactly the log check (57/58). 
 | A budget cap             | passing | [budget.md](budget.md)                     |
 | The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
 | The pages surface        | passing | [pages.md](pages.md)                       |
+| Propose child issues     | passing | [decompose.md](decompose.md)               |
 
 ## Deliberately absent
 

@@ -50,6 +50,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A budget cap (LOB-163)             | `budget.sh`: a one-cent cap stops the run after its tool and before the reply, the stop on the stream, the snapshot, the log and `factory run`; a later run stops at once              | a capped session cannot spend past its limit                           |
 | The PR step over RPC (LOB-213)     | `pr-rpc.sh`: `openPullRequest` over the RPC client answers `opened`, a repeat `already-open`, the link read back, one request in the fake's ledger; refusals typed                     | a client opens the PR, not only an in-process caller                   |
 | The pages surface (LOB-220)        | `pages.sh`: `curateSession` writes one page, `listPages` reads it, a repeat writes none for exactly one call's price; deleted rows come back from the log                              | a page is a log fact, and learning nothing is cheap                    |
+| Proposed child issues (LOB-201)    | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, and no other row in the database moves                   | a spec becomes proposals, and nothing else is made                     |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -113,6 +114,7 @@ running, and writes its own evidence:
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
 ./pr-rpc.sh      # api on :9420, fake GitHub on :9421 — openPullRequest over RPC: opened, then already-open, one request (features/pr-rpc.md)
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
+./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: the window it proves is a kill
@@ -201,6 +203,9 @@ order you want the evidence to end in.
 - `pages.json`, `pages-process.json`, `pages-api.log` — from `./pages.sh`: each curation's answer,
   the pages at every step (curated, repeated, deleted, rebuilt), the spend after each call, the log's
   page-entry counts, the rebuild's report, and the script's own checks
+- `decompose.json`, `decompose-process.json`, `decompose-api.log` — from `./decompose.sh`: the spec,
+  the proposals, every table's fingerprint (row count and content `md5`) before and after the call,
+  the log's new commits, and the script's own checks
 - `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
   from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
   checks, and the fake's ledger
