@@ -3,7 +3,10 @@
  * `POST /webhooks/github`: one GitHub webhook, two events, picked by `X-GitHub-Event`.
  *
  * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
- *   merge moves it to done, an unmerged close explains itself.
+ *   merge moves it to done, an unmerged close explains itself — and (LOB-36) starts the reviewer run
+ *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
+ *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
+ *   review under `review`; a failed mirror's status wins, then a failed review's.
  * - `push` (LOB-234) is the docs trigger's: a push to the repository's default branch starts one docs
  *   run on `factory/doc-<push>` (`@repo/core`'s `handleDocsPushWebhook`), a redelivery is a replay,
  *   and a push to any other branch is `400` and starts nothing.
@@ -36,6 +39,7 @@ import {
   GITHUB_SIGNATURE_HEADER,
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
+  handlePullRequestReviewWebhook,
 } from "@repo/core";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
@@ -102,23 +106,45 @@ export const GitHubWebhookLive = HttpRouter.add(
     const secret = process.env["GITHUB_WEBHOOK_SECRET"];
     const signature = req.headers[GITHUB_SIGNATURE_HEADER];
     const event = req.headers[GITHUB_EVENT_HEADER];
-    const answer =
-      event === "push"
-        ? yield* handleDocsPushWebhook({
-            secret,
-            raw,
-            signature,
-            delivery: req.headers[GITHUB_DELIVERY_HEADER],
-          })
-        : yield* handleGitHubPullRequestWebhook({
-            secret,
-            raw,
-            signature,
-            event,
-          });
+    if (event === "push") {
+      const pushed = yield* handleDocsPushWebhook({
+        secret,
+        raw,
+        signature,
+        delivery: req.headers[GITHUB_DELIVERY_HEADER],
+      });
+      return HttpServerResponse.setStatus(
+        HttpServerResponse.jsonUnsafe(pushed.body),
+        pushed.status,
+      );
+    }
+    const mirrored = yield* handleGitHubPullRequestWebhook({
+      secret,
+      raw,
+      signature,
+      event,
+    });
+    // Only a signed `pull_request` the mirror read reaches the review: every refusal before it (no
+    // secret, a bad signature, another event, a payload naming no PR) is the mirror's answer alone.
+    if (event !== "pull_request" || mirrored.status !== 200) {
+      return HttpServerResponse.setStatus(
+        HttpServerResponse.jsonUnsafe(mirrored.body),
+        mirrored.status,
+      );
+    }
+    const reviewed = yield* handlePullRequestReviewWebhook({
+      secret,
+      raw,
+      signature,
+    });
     return HttpServerResponse.setStatus(
-      HttpServerResponse.jsonUnsafe(answer.body),
-      answer.status,
+      HttpServerResponse.jsonUnsafe({
+        ...mirrored.body,
+        review: reviewed.body,
+      }),
+      reviewed.status === 200 || reviewed.status === 400
+        ? 200
+        : reviewed.status,
     );
   }),
 );

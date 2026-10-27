@@ -1,8 +1,12 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import {
+  CredentialConfig,
   CredentialProvider,
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
+  githubReviewPoster,
+  ReviewerCredentialConfig,
+  selectReviewerCredentialProvider,
   runDocsSchedule,
   SessionService,
   SessionServiceLive,
@@ -144,6 +148,19 @@ const ModelConfig = Config.all({
         Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
       ),
       "FAUX_SPEC",
+    ),
+  ),
+  /**
+   * The `review` calls the faux script makes, in order (LOB-36's `fauxReview`): a JSON array of the
+   * tool's arguments, each sent only when the one before it was refused. Unset: the faux never
+   * reviews. A value that is not a JSON array of objects fails the boot.
+   */
+  fauxReview: Config.option(
+    Config.schema(
+      Schema.fromJsonString(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
+      "FAUX_REVIEW",
     ),
   ),
   /**
@@ -423,6 +440,7 @@ const HttpLive = Effect.gen(function* () {
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
     fauxSpec: Option.getOrUndefined(model.fauxSpec),
+    fauxReview: Option.getOrUndefined(model.fauxReview),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
@@ -437,10 +455,25 @@ const HttpLive = Effect.gen(function* () {
       .join(", ")}${declaredRoles.size === 0 ? "" : " (ROLE_MODELS)"}`,
   );
 
+  // The reviewer's identity (LOB-36): its own token or App, never the worker's. One that *is* the
+  // worker's fails the boot here; none at all boots, and each review's post says what is missing.
+  const reviewerConfig = yield* ReviewerCredentialConfig;
+  const reviewerCredentials = yield* selectReviewerCredentialProvider(
+    yield* CredentialConfig,
+    reviewerConfig,
+  ).pipe(Effect.provide(FetchHttpClient.layer));
+  const reviewPoster = yield* githubReviewPoster({
+    credentials: reviewerCredentials,
+  }).pipe(Effect.provide(FetchHttpClient.layer));
+  yield* Effect.logInfo(
+    `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
+  );
+
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
+    reviewPoster,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,

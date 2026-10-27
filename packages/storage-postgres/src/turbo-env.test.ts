@@ -263,6 +263,7 @@ describe("the dev tasks' environment", () => {
     "ROLE_MODELS",
     "FAUX_ASK",
     "FAUX_SPEC",
+    "FAUX_REVIEW",
     "FAUX_VERIFY",
     "FAUX_SLEEP_MS",
     "FAUX_MODEL_SCRIPTS",
@@ -277,6 +278,8 @@ describe("the dev tasks' environment", () => {
     "DEVTOOLS_URL",
     "DOCS_SCHEDULE_MS",
     "DOCS_SCHEDULE_REPO",
+    "GITHUB_REVIEWER_APP_ID",
+    "GITHUB_REVIEWER_APP_INSTALLATION_ID",
   ] as const;
   const WEB_DEV_VARIABLES = [
     "VITE_PORT",
@@ -355,5 +358,23 @@ describe("the dev tasks' environment", () => {
       taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv,
     ).toContain("GITHUB_WEBHOOK_SECRET");
     expect(declared(dryRun, DEV_TASK)).not.toContain("GITHUB_WEBHOOK_SECRET");
+  }, 90_000);
+
+  it("passes the reviewer's secrets through to @repo/api#dev without declaring them (LOB-36)", () => {
+    // The reviewer's own identity: stripped, every review would be recorded and never posted.
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    for (const name of [
+      "GITHUB_REVIEWER_TOKEN",
+      "GITHUB_REVIEWER_APP_PRIVATE_KEY",
+    ]) {
+      expect(
+        taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv,
+      ).toContain(name);
+      expect(declared(dryRun, DEV_TASK)).not.toContain(name);
+    }
   }, 90_000);
 });
