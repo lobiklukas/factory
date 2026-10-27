@@ -102,6 +102,7 @@ import type {
   RunProfile,
   SessionRef,
   SpecOptions,
+  SubmittedMessage,
   ThreadReader,
 } from "@repo/harness";
 import {
@@ -136,8 +137,12 @@ import {
   readLiveSnapshot,
   readVerifyRecords,
   readCurationUsage,
+  compareReplay,
+  readReplayRun,
   readReplaySource,
   replaySession,
+  waitForSubmission,
+  writeReplayComparison,
   requestCuration,
   resetSession,
   snapshotEvent,
@@ -616,6 +621,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const prGate = yield* Semaphore.make(1);
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
+      /**
+       * One comparison per replay whose task has not settled yet (LOB-199), keyed by the replay. In
+       * the layer's scope, like the projections: the wait is this process's, and so is the window a
+       * crash leaves — see `compareReplayOnSettle`.
+       */
+      const comparisons = yield* FiberMap.make<SessionId, void, never>();
 
       const toSessionId = (
         raw: string,
@@ -1797,6 +1808,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // starts it. A failure after the row is written removes the row again — an index row with
           // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
           // fork's does).
+          let started: SubmittedMessage | undefined;
           yield* acquireOwnerWith(
             id,
             row,
@@ -1821,7 +1833,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ...(options.defaultBudget === undefined
                   ? {}
                   : { defaultBudget: options.defaultBudget }),
-              }),
+              }).pipe(
+                Effect.tap((opened) =>
+                  Effect.sync(() => {
+                    started = opened.submission;
+                  }),
+                ),
+              ),
           ).pipe(
             Effect.tapError(() =>
               paper(
@@ -1830,9 +1848,76 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ).pipe(Effect.ignore),
             ),
           );
+          // The prompt is admitted, so the run is under way: the comparison waits for it in the
+          // background and the caller gets the replay now, as it always has.
+          if (started !== undefined) {
+            yield* FiberMap.run(
+              comparisons,
+              id,
+              compareReplayOnSettle({
+                source: input.sessionId,
+                replay: id,
+                submission: started,
+                model: modelKey(target),
+                from: origin.model ?? "",
+              }),
+            );
+          }
           yield* touchActivity(id);
           return yield* describe(id, row);
         });
+
+      /**
+       * Compare a replay with its source once the replay's task settles, and commit the comparison to
+       * both logs (LOB-199).
+       *
+       * Both sides are read through readers *after* the settle, so the replay's numbers are its
+       * finished run's and the source's are its log as it stands then; one reading makes both
+       * comparisons, so their deltas are exact opposites. The replay's side is committed first, then
+       * the source's, each through this process's owner of that session — the source's is opened if
+       * nobody here holds it, as any write to it would be. That is the one write a replay makes to
+       * its source, and it is the `factory.replay` document alone.
+       *
+       * The wait is in this process, so a process that dies between the settle and the commit leaves
+       * no comparison — the same single-process ownership D8's registry has. Whatever re-runs this
+       * later writes the same document: the comparison is keyed by its counterpart. A failure is a
+       * warning in the process's log, not a failed replay: the replay already exists and ran.
+       */
+      const compareReplayOnSettle = (pair: {
+        readonly source: SessionId;
+        readonly replay: SessionId;
+        readonly submission: SubmittedMessage;
+        /** The model the replay ran on, and the one its source recorded (`factory.replay`). */
+        readonly model: string;
+        readonly from: string;
+      }): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          yield* waitForSubmission(pair.submission);
+          const replay = yield* withReader(pair.replay, (storage) =>
+            readReplayRun(storage, pair.replay, pair.model),
+          );
+          const source = yield* withReader(pair.source, (storage) =>
+            readReplayRun(storage, pair.source, pair.from),
+          );
+          const at = DateTime.formatIso(yield* DateTime.now);
+          const compared = compareReplay({ source, replay, at });
+          const replayOwner = yield* acquireOwner(
+            pair.replay,
+            yield* requireSession(pair.replay),
+          );
+          yield* writeReplayComparison(replayOwner.root, compared.replay);
+          const sourceOwner = yield* acquireOwner(
+            pair.source,
+            yield* requireSession(pair.source),
+          );
+          yield* writeReplayComparison(sourceOwner.root, compared.source);
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              `replay ${pair.replay} of ${pair.source} was not compared: ${Cause.pretty(cause)}`,
+            ),
+          ),
+        );
 
       /**
        * A reset starts a new model context (LOB-181). It is committed to the log, not held in this
@@ -2970,6 +3055,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       const closeAll = Effect.gen(function* () {
+        // A comparison still waiting would reopen the owners this is closing (LOB-199): a closed
+        // process compares nothing more, so the waits end first.
+        yield* FiberMap.clear(comparisons);
         const owners = yield* Ref.get(live);
         yield* Ref.set(live, HashMap.empty());
         yield* Effect.forEach(

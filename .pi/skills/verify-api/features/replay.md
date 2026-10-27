@@ -2,7 +2,8 @@
 
 **Status: passing.** `replaySession` over the RPC client answers a new session that runs the
 source's first prompt on the model it was asked for; the source's transcript is unchanged, and the
-replay's own log records the pair and both models.
+replay's own log records the pair and both models. Once the replay's task settles, `getSession`
+reports the comparison of the two runs on both sessions (LOB-199), and each log carries it.
 
 ## What it is
 
@@ -11,6 +12,14 @@ transcript's prefix and the two logs diverge, while a replay takes only the _tas
 first user entry — and runs it in a fresh session at the source's repo and base ref. The link
 between the two is a `factory.replay` document (`source`, `model`, `from`) committed to the
 **replay's** log, never the source's, so replaying a recorded run cannot rewrite it.
+
+The comparison (LOB-199, part 2 of LOB-39) is the one thing a replay adds to its source. When the
+replay's prompt settles, the control plane reads both logs and commits a `ReplayComparison` into each
+session's `factory.replay` document, keyed by the counterpart: `role`, `at`, `self` and
+`counterpart` (session, model, outcome, turns, cost) and `delta` = self minus counterpart, so the
+two deltas are exact opposites. The source's document carries only `comparisons` — its link fields
+stay empty, so the source never reads as a replay — and its transcript, spend and lineage are
+untouched. The snapshot reports them as `replayComparisons`, absent for a session nobody replayed.
 
 ## How a user reaches it
 
@@ -35,7 +44,10 @@ probe replay")` and wait for the faux answer to that prompt
    no migrator runs and no other check needs Postgres). No RPC answers the
    `factory.replay` document, so the drive reads it the way `rebuildIndexes` does — a reader never
    owns the log, so it cannot collide with the API that does
-5. `replaySession` onto `faux/faux-unserved`, and of the drive's scratch session (bound to no repo)
+5. `getSession` on both until each reports its comparison, then the source's log read the same way
+   as the replay's
+6. `getSession` on the drive's scratch session, which nobody replays
+7. `replaySession` onto `faux/faux-unserved`, and of the drive's scratch session (bound to no repo)
 
 ## What proves it
 
@@ -45,6 +57,11 @@ probe replay")` and wait for the faux answer to that prompt
   its own model, which the faux answer alone could not show (both models answer alike)
 - the source's entries after the replay equal its entries before it
 - the replay's log holds `{ source: <source id>, model: "faux/faux-2", from: "faux/faux-1" }`
+- `getSession` reports one comparison on each side: the source's names the replay on
+  `faux/faux-2`, the replay's names the source on `faux/faux-1`, both outcomes `answered`, each
+  side's `self` is the other's `counterpart`, and the deltas add to zero
+- both logs carry exactly what `getSession` reported, and the source's log has no replay link
+- the scratch session, never replayed, reports no `replayComparisons` at all
 - both refusals are `SessionError{code: "invalid_input"}` over the wire, and the session list holds
   the same ids after them as before
 
@@ -62,4 +79,13 @@ untouched` in `packages/core/src/SessionService.test.ts`. Evidence:
 - **A capped source's budget carried to its replay.** `features/budget.md` names it; the unit suite
   covers it.
 - **The replay after a rebuild.** The unit case folds the replay's log after its owner is released;
-  the drive reads the log while the API still owns it.
+  the drive reads the log while the API still owns it. The comparison after a rebuild is the unit
+  case `stores the comparison on both sessions, reports it on either side, and a rebuild reproduces
+it` (`packages/core/src/SessionService.test.ts`): it deletes both sessions' rows, runs
+  `rebuildIndexes`, and reads the same comparisons back from the folds.
+- **A non-zero delta over the wire.** Both faux runs answer the one prompt alike and the faux is
+  free, so the drive's deltas are zero and it checks their sum and their mirroring. The unit cases
+  make them differ: the source takes a follow-up the replay never runs, and
+  `packages/harness/src/replay.test.ts` prices each answer (`fauxCost`) so the costs differ too.
+- **A comparison after a crash.** The comparison waits for the replay's run in the API process; a
+  process that dies before it commits leaves none (the decision on LOB-199 names this window).

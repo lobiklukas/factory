@@ -407,6 +407,44 @@ export type EvidenceNone = typeof EvidenceNone.Type;
 export const PrEvidence = Schema.Union([EvidenceRecorded, EvidenceNone]);
 export type PrEvidence = typeof PrEvidence.Type;
 
+/**
+ * How one side of a replay ran its task (LOB-199): what the comparison measures on each session.
+ *
+ * `model` is the `provider/modelId` the replay's link names for that side — the model the replay
+ * ran on, or the one its source recorded (empty when the source recorded none). `outcome` is how the
+ * session's first prompt settled: `answered`, `unanswered` with Pi Durable's `reason` (an abort, a
+ * failed request), or `open` when it had not settled yet. `turns` counts the assistant entries the
+ * log holds and `cost` is both `pi.usage` buckets — the whole log, at the moment the comparison was
+ * taken, because spend is not split per submission.
+ */
+export const ReplayRun = Schema.Struct({
+  session: SessionId,
+  model: Schema.String,
+  outcome: Schema.Literals(["answered", "unanswered", "open"]),
+  reason: Schema.optionalKey(Schema.String),
+  turns: Schema.Int,
+  cost: Schema.Finite,
+});
+export type ReplayRun = typeof ReplayRun.Type;
+
+/**
+ * A replay and its source, compared (LOB-199, part 2 of LOB-39): committed to *both* logs, so either
+ * session reports the pairing without the other one being read.
+ *
+ * `role` is which side this session is; `self` is this session's run and `counterpart` the other's,
+ * and `delta` is `self` minus `counterpart`. Both sides are written from one reading, so the source's
+ * delta is exactly the replay's with the sign flipped. `at` is when that reading was taken: the
+ * moment the replay's task settled.
+ */
+export const ReplayComparison = Schema.Struct({
+  role: Schema.Literals(["source", "replay"]),
+  at: Timestamp,
+  self: ReplayRun,
+  counterpart: ReplayRun,
+  delta: Schema.Struct({ turns: Schema.Int, cost: Schema.Finite }),
+});
+export type ReplayComparison = typeof ReplayComparison.Type;
+
 export const SessionSnapshotFields = {
   session: SessionSummary,
   workspace: SessionWorkspace,
@@ -435,6 +473,12 @@ export const SessionSnapshotFields = {
    * the transcript carries the same stop as a `budget` entry.
    */
   budget: Schema.optional(SessionBudget),
+  /**
+   * Every replay comparison this session's log holds (LOB-199), oldest first: one per replay of it,
+   * and one naming its source when it is a replay itself. Absent for a session that was never
+   * replayed and is no replay — "no comparison", not an empty one.
+   */
+  replayComparisons: Schema.optional(Schema.Array(ReplayComparison)),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);
@@ -640,9 +684,10 @@ export type SessionIdInput = typeof SessionIdInput.Type;
  * Replay a recorded session against another model (LOB-198).
  *
  * A replay is the same task in a new session: the source's first user entry becomes this session's,
- * run on `model` (a `provider/modelId` name) at the source's repo and base ref. The source is only
- * read, so its log is unchanged; the link between the two is a `factory.replay` document in the
- * replay's own log.
+ * run on `model` (a `provider/modelId` name) at the source's repo and base ref. The source's recorded
+ * run is only read, so its transcript is unchanged; the link between the two is a `factory.replay`
+ * document in the replay's own log. Once the replay's task settles, both logs gain the comparison
+ * (`ReplayComparison`, LOB-199) — the one thing a replay ever adds to its source.
  *
  * `model` absent means the control plane's own model, which is a replay that records the lineage
  * without changing the model — the same task, the same model, a new log. A name the process's model

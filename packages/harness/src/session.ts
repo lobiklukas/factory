@@ -43,6 +43,7 @@ import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
+  ReplayComparison,
   SessionError,
   SessionErrorCode,
   SessionEvent,
@@ -87,6 +88,7 @@ import {
   PageDoc,
   PagePromptDoc,
   PrDoc,
+  ReplayDoc,
   SpecDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
@@ -131,6 +133,7 @@ import {
   projectEntry,
   projectPrDoc,
   projectPages,
+  projectReplayComparisons,
   projectReplayDoc,
   projectTasks,
   projectUsageDoc,
@@ -1117,6 +1120,19 @@ export const submitMessage = (
     };
   });
 
+/**
+ * Wait for a submitted message to settle — answered, or over without an answer. What a step that has
+ * to follow a run's end waits on (LOB-199): the replay's comparison needs its finished numbers.
+ */
+export const waitForSubmission = (
+  submitted: SubmittedMessage,
+): Effect.Effect<void, SessionError> =>
+  Effect.asVoid(
+    attempt("wait for submission", () =>
+      submitted.submission.wait(BACKGROUND_CONTEXT),
+    ),
+  );
+
 export const interrupt = (
   conversation: Conversation,
 ): Effect.Effect<void, SessionError> =>
@@ -1187,6 +1203,34 @@ export const submissionStanding = (
     return record.status === "queued" || record.status === "placed"
       ? "open"
       : "settled";
+  });
+
+/**
+ * How a session's first prompt settled, read from committed storage alone (LOB-199): what a replay
+ * comparison reports as each side's outcome. The first *input* submission of the root conversation
+ * — a passive write is not a prompt. `undefined` for a log that was never prompted.
+ */
+export const readFirstPrompt = (
+  storage: Storage,
+): Effect.Effect<SubmissionRecord | undefined, SessionError> =>
+  Effect.gen(function* () {
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page: Page<SubmissionRecord, Cursor> = yield* attempt(
+        "scan submissions",
+        () =>
+          storage.scanSubmissions(
+            { conversationId: ROOT_CONVERSATION_ID },
+            SUBMISSION_PAGE,
+            cursor,
+            BACKGROUND_CONTEXT,
+          ),
+      );
+      const prompt = page.items.find((record) => record.type === "input");
+      if (prompt !== undefined) return prompt;
+      cursor = page.next;
+      if (cursor === undefined) return undefined;
+    }
   });
 
 /**
@@ -1690,14 +1734,19 @@ export type SessionLog = {
   readonly pages: readonly PageLogRecord[];
   /**
    * The replay this log is, when it is one (LOB-198): the session it replays and the model it ran on,
-   * with the model its source recorded. It is committed to this log alone, which is why replaying a
-   * session leaves the source's log untouched.
+   * with the model its source recorded. The link is committed to this log alone, which is why a
+   * source never reads as a replay; all its `factory.replay` ever gains is `replayComparisons`.
    */
   readonly replay?: {
     readonly source: string;
     readonly model: string;
     readonly from: string;
   };
+  /**
+   * The replay comparisons the log holds (LOB-199), oldest first: on a replay, the one naming its
+   * source; on a source, one per replay of it. Empty for a session that was never compared.
+   */
+  readonly replayComparisons: readonly ReplayComparison[];
 };
 
 /** Read a string field from a document defensively: an unknown shape yields "". */
@@ -1771,9 +1820,8 @@ export const readSessionLog = (
       yield* readDocument(storage, ACTOR_DOC_KIND),
       "actor",
     );
-    const replayDoc = projectReplayDoc(
-      yield* readDocument(storage, REPLAY_DOC_KIND),
-    );
+    const replayValue = yield* readDocument(storage, REPLAY_DOC_KIND);
+    const replayDoc = projectReplayDoc(replayValue);
     const taskId = bindingString(taskDoc, "taskId");
     const spec = projectSpec(specDoc);
     const criteria = bindingString(criteriaDoc, "criteria");
@@ -1783,6 +1831,7 @@ export const readSessionLog = (
       pages,
       usage: projectUsageDoc(usage),
       approvals: projectApprovals(records),
+      replayComparisons: projectReplayComparisons(replayValue),
       binding: {
         repo: bindingString(binding, "repo"),
         baseRef: bindingString(binding, "baseRef"),
@@ -1914,9 +1963,11 @@ const snapshotOf = (
   entries: readonly EntryRecord[],
   mission: MissionSnapshot | undefined,
   budgetDoc: JsonValue | undefined,
+  replayDoc: JsonValue | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
   const budget = projectBudgetDoc(budgetDoc, projection.usage);
+  const replayComparisons = projectReplayComparisons(replayDoc);
   return {
     session: {
       id: ref.id,
@@ -1945,6 +1996,8 @@ const snapshotOf = (
     ...(mission === undefined ? {} : { mission }),
     // Absent for a session with no cap (LOB-163); a stop the cap made is `budget.stopped`.
     ...(budget === undefined ? {} : { budget }),
+    // Absent for a session no replay was ever compared with (LOB-199).
+    ...(replayComparisons.length === 0 ? {} : { replayComparisons }),
   };
 };
 
@@ -1958,6 +2011,19 @@ const readBudgetDoc = (
 ): Effect.Effect<JsonValue | undefined, SessionError> =>
   attempt("read budget", () =>
     harness.snapshot(BudgetDoc, conversation.id, BACKGROUND_CONTEXT),
+  );
+
+/**
+ * The replay document of a session this process owns (LOB-199), as JSON for
+ * `projectReplayComparisons` — the reader the fold uses too, so a live and a folded snapshot report
+ * the same comparisons.
+ */
+const readReplayDoc = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<JsonValue | undefined, SessionError> =>
+  attempt("read replay", () =>
+    harness.snapshot(ReplayDoc, conversation.id, BACKGROUND_CONTEXT),
   );
 
 const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
@@ -2055,7 +2121,16 @@ export const readLiveSnapshot = (
       const entries = yield* readConversationEntries(session.root);
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
-      return snapshotOf(state.value, tasks, ref, entries, mission, budget);
+      const replay = yield* readReplayDoc(session.harness, session.root);
+      return snapshotOf(
+        state.value,
+        tasks,
+        ref,
+        entries,
+        mission,
+        budget,
+        replay,
+      );
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
 
@@ -2124,10 +2199,19 @@ export const liveSessionEvents = (
       // a subscriber that needs the new phase re-reads the snapshot rather than being told twice.
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
+      const replay = yield* readReplayDoc(session.harness, session.root);
       yield* Queue.offer(
         queue,
         snapshotEvent(
-          snapshotOf(state.value, previousTasks, ref, entries, mission, budget),
+          snapshotOf(
+            state.value,
+            previousTasks,
+            ref,
+            entries,
+            mission,
+            budget,
+            replay,
+          ),
         ),
       );
       return Stream.fromQueue(queue);
@@ -2183,6 +2267,10 @@ export const readHistoricalSnapshot = (
       approvals: pendingOf(ref.id, log.approvals),
       // The cap and its last stop are document state (LOB-163): a released session reports both.
       ...(budget === undefined ? {} : { budget }),
+      // So is a replay comparison (LOB-199): both sides report it with nobody owning either.
+      ...(log.replayComparisons.length === 0
+        ? {}
+        : { replayComparisons: log.replayComparisons }),
     };
   });
 

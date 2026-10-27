@@ -5,6 +5,7 @@
  */
 import type { JsonValue } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
+import { REPLAY_DOC_KIND } from "./projection";
 
 export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
@@ -218,4 +219,36 @@ export const MissionBindingDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ taskId: "" }),
+});
+
+/**
+ * The link between a replay and the session it replays (LOB-198), and the comparison of the two
+ * runs once the replay's task settles (LOB-199).
+ *
+ * On the replay's log: `source` is the session the prompt came from; `replay` is this log's own
+ * session id, which the control plane mints before the log exists — so the pair is named by one
+ * document in one place. `from` is the model the source's log records (empty when it recorded none)
+ * and `model` is the one this replay ran on, which is what makes "the same task, a different model"
+ * checkable from the log rather than from the call that asked for it.
+ *
+ * On both logs: `comparisons` holds the encoded `ReplayComparison`s (`@repo/domain/Session`), keyed by
+ * the counterpart's session id, so a source replayed three times carries three and recording one
+ * again rewrites it rather than adding a fourth. A source's document carries only these: its link
+ * fields stay empty, so it never reads as a replay. A document written before comparisons existed
+ * holds none, and its readers project it that way, which is why adding the field needs no version
+ * bump (as `factory.pr` added `evidence`).
+ */
+export const ReplayDoc = defineDoc({
+  kind: REPLAY_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    source: "",
+    replay: "",
+    model: "",
+    from: "",
+    comparisons: {} as { [counterpart: string]: JsonValue },
+  }),
 });

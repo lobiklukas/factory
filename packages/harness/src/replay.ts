@@ -7,32 +7,48 @@
  * run, and the only thing it takes from the source is the task, the repo binding and the recorded
  * model it departed from.
  *
- * The source is read through a reader-mode `Storage` and never written to. That is a claim worth
- * stating as a mechanism rather than as care: `readReplaySource` is the only place this module
- * touches the source, it takes a reader, and the document that links the two sessions is committed
- * to the *replay's* own log.
+ * Opening a replay reads the source through a reader-mode `Storage` and never writes to it. That is
+ * a claim worth stating as a mechanism rather than as care: `readReplaySource` is the only place
+ * `replaySession` touches the source, it takes a reader, and the document that links the two
+ * sessions is committed to the *replay's* own log.
+ *
+ * Once the replay's task settles, the two runs are compared (LOB-199): `readReplayRun` measures each
+ * log through a reader, `compareReplay` turns the two readings into one comparison per side, and
+ * `writeReplayComparison` commits each into its own session's `factory.replay` document. That is the
+ * one write a replay ever makes to its source, and it is a document, not a run: the source's
+ * transcript, spend, binding and lineage stay what they were.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Storage } from "@earendil-works/pi-durable";
-import { defineDoc } from "@earendil-works/pi-durable";
-import { Effect } from "effect";
-import type { SessionError, SessionUsage } from "@repo/domain/Session";
-import { SessionError as SessionErrorClass } from "@repo/domain/Session";
+import { Effect, Schema } from "effect";
+import type {
+  ReplayRun,
+  SessionError,
+  SessionId,
+  SessionUsage,
+} from "@repo/domain/Session";
+import {
+  ReplayComparison,
+  SessionError as SessionErrorClass,
+} from "@repo/domain/Session";
+import { ReplayDoc } from "./docs";
 import type { RunProfile } from "./loader";
 import type { ModelAccess } from "./models";
 import { modelKey } from "./models";
 import type { ApprovalAsker, SessionPolicy } from "./policy";
-import { REPLAY_DOC_KIND } from "./projection";
+import { usageCostTotal } from "./projection";
 import {
   ActorDoc,
   attempt,
   closeHarness,
   openSession,
   readBudgetSource,
+  readFirstPrompt,
   readSessionLog,
   SessionDoc,
   submitMessage,
   TitleEntry,
+  type Conversation,
   type OpenSession,
   type RepoBinding,
   type SubmittedMessage,
@@ -40,23 +56,9 @@ import {
 import type { VerifyOptions } from "./verify";
 import { inheritBudget, setBudget, type BudgetSource } from "./budget";
 
-/**
- * The link between a replay and the session it replays, committed to the replay's own log.
- *
- * `source` is the session the prompt came from; `replay` is this log's own session id, which the
- * control plane mints before the log exists and hands in here — so the pair is named by one document
- * in one place. `from` is the model the source's log records (empty when it recorded none) and
- * `model` is the one this replay ran on, which is what makes "the same task, a different model"
- * checkable from the log rather than from the call that asked for it.
- */
-export const ReplayDoc = defineDoc({
-  kind: REPLAY_DOC_KIND,
-  version: 1,
-  scope: "conversation",
-  history: "latest",
-  fork: "current",
-  initial: () => ({ source: "", replay: "", model: "", from: "" }),
-});
+// The document lives with the other typed tokens (`./docs`), where the snapshot reads it too; it is
+// re-exported here because a replay is what it is about.
+export { ReplayDoc };
 
 /**
  * The model a session's log records it spent most on, as `provider/modelId`.
@@ -254,3 +256,97 @@ export const replaySession = (
     );
     return { ...opened, source: options.source, submission };
   });
+
+/**
+ * One side of a replay, measured from its log (LOB-199): how its first prompt settled, how many
+ * assistant entries the log holds, and what it spent — both `pi.usage` buckets, the total the list
+ * shows. `model` is the caller's, from the replay's link: the log's spend names models, but a run
+ * that never reached a request names none, and the link always says which model a side was.
+ */
+export const readReplayRun = (
+  storage: Storage,
+  session: SessionId,
+  model: string,
+): Effect.Effect<ReplayRun, SessionError> =>
+  Effect.gen(function* () {
+    const log = yield* readSessionLog(storage);
+    const prompt = yield* readFirstPrompt(storage);
+    const outcome =
+      prompt === undefined
+        ? // A replay's source always has a prompt (`readReplaySource` refuses one without), and a
+          // replay is opened with one; a log with none has nothing that settled.
+          { outcome: "unanswered" as const, reason: "no prompt" }
+        : prompt.status === "done"
+          ? { outcome: "answered" as const }
+          : prompt.status === "unanswered"
+            ? { outcome: "unanswered" as const, reason: prompt.reason }
+            : { outcome: "open" as const };
+    return {
+      session,
+      model,
+      ...outcome,
+      turns: log.entries.filter((entry) => entry.kind === "assistant").length,
+      cost: usageCostTotal(log.usage),
+    };
+  });
+
+/**
+ * The two comparisons one reading yields (LOB-199): the replay's, naming its source, and the
+ * source's, naming the replay. Each `delta` is its own side minus the other, computed once per side
+ * from the same two numbers, so the deltas are exact negatives of each other — IEEE subtraction is
+ * antisymmetric, and no rounding happens between them.
+ */
+export const compareReplay = (reading: {
+  readonly source: ReplayRun;
+  readonly replay: ReplayRun;
+  readonly at: string;
+}): {
+  readonly source: ReplayComparison;
+  readonly replay: ReplayComparison;
+} => {
+  const side = (
+    role: ReplayComparison["role"],
+    self: ReplayRun,
+    counterpart: ReplayRun,
+  ): ReplayComparison => ({
+    role,
+    at: reading.at,
+    self,
+    counterpart,
+    delta: {
+      turns: self.turns - counterpart.turns,
+      cost: self.cost - counterpart.cost,
+    },
+  });
+  return {
+    replay: side("replay", reading.replay, reading.source),
+    source: side("source", reading.source, reading.replay),
+  };
+};
+
+const encodeComparison = Schema.encodeSync(ReplayComparison);
+
+/**
+ * Commit one comparison to the session it describes (LOB-199), keyed by its counterpart: the other
+ * comparisons the document holds are kept, and recording the same pair again rewrites its entry
+ * rather than adding one. On a source this is the document's first write, and it leaves the link
+ * fields at their seed — a source compared with a replay is not a replay.
+ */
+export const writeReplayComparison = (
+  conversation: Conversation,
+  comparison: ReplayComparison,
+): Effect.Effect<void, SessionError> =>
+  attempt("write replay comparison", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(ReplayDoc, conversation.id).then((document) => {
+          // Spread rather than assigned into: a document written before comparisons existed has no
+          // `comparisons` object to assign into, and spreading nothing is an empty set.
+          document.comparisons = {
+            ...document.comparisons,
+            [comparison.counterpart.session]: encodeComparison(comparison),
+          };
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );

@@ -1140,9 +1140,9 @@ describe("fork", () => {
  *
  * A replay is the same task in a new session, so these claims are one-directional: exactly one new
  * session exists afterwards, its first user entry is the source's, its model is not — and the source
- * is the log it was, down to its commit count and head. That last part is what makes "replay a
- * recorded run" not a rewrite of it, so it is asserted against `commits` rather than against a
- * projection that could agree with itself.
+ * is the log it was, its entries unchanged and its commits the ones it had plus exactly one: the
+ * comparison (LOB-199). That last part is what makes "replay a recorded run" not a rewrite of it, so
+ * it is asserted against `commits` rather than against a projection that could agree with itself.
  */
 describe("replay", () => {
   /** One log as the database holds it: how many commits, and the newest sequence number. */
@@ -1164,6 +1164,22 @@ describe("replay", () => {
     `;
     return rows[0]?.rows ?? 0;
   });
+
+  /** Wait until a session's snapshot reports `count` replay comparisons (LOB-199). */
+  const comparedOn = (sessionId: SessionId, count: number, label: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* waitUntil(
+        sessions
+          .get(sessionId)
+          .pipe(
+            Effect.map(
+              (snapshot) => (snapshot.replayComparisons ?? []).length >= count,
+            ),
+          ),
+        label,
+      );
+    });
 
   /** The `SessionError` code a refused call failed with, or `"ok"` when it succeeded. */
   const refusalCode = (exit: Exit.Exit<unknown, SessionError>): string => {
@@ -1201,6 +1217,8 @@ describe("replay", () => {
           sessions.get(replay.id).pipe(Effect.map((s) => !s.live.busy)),
           "the replay's turn to settle",
         );
+        // The comparison lands after the turn settles, on the replay first and then the source.
+        yield* comparedOn(source.id, 1, "the source's comparison");
         const replayed = yield* sessions.get(replay.id);
         const sourceAfter = yield* sessions.get(source.id);
         const sourceLogAfter = yield* logState(source.id);
@@ -1251,10 +1269,12 @@ describe("replay", () => {
       "faux/faux-2",
     ]);
 
-    // The source is unchanged: same entries after as before, same commit count, same head.
+    // The source's run is unchanged: same entries after as before, and the commits it had plus one
+    // — the comparison, which is a document and no entry (LOB-199).
     expect(result.sourceAfter.entries).toEqual(result.before.entries);
     expect(result.sourceLog.commits).toBeGreaterThan(0);
-    expect(result.sourceLogAfter).toEqual(result.sourceLog);
+    expect(result.sourceLogAfter.commits).toBe(result.sourceLog.commits + 1);
+    expect(result.sourceAfter.replayComparisons?.length).toBe(1);
 
     // The replay's own log carries the link between both sessions and both models.
     expect(result.log.replay).toEqual({
@@ -1272,6 +1292,142 @@ describe("replay", () => {
     // And a session nobody owns reads the same transcript.
     expect(result.folded.session.mode).toBe("historical");
     expect(result.folded.entries).toEqual(result.replayed.entries);
+  }, 120_000);
+
+  // Mutations checked: dropping the source's `writeReplayComparison` in `SessionService.ts` times
+  // out on "the source's comparison"; computing the source's delta as the replay's (no sign flip)
+  // fails the opposite-sign assertions; dropping `replayComparisons` from `readSessionLog` fails the
+  // folded reads (the readers' and the rebuilt sessions').
+  it("stores the comparison on both sessions, reports it on either side, and a rebuild reproduces it", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "compare me",
+          repo: factoryRepo,
+        });
+        const settled = (id: SessionId, label: string) =>
+          waitUntil(
+            sessions.get(id).pipe(Effect.map((s) => !s.live.busy)),
+            label,
+          );
+        // Two prompts on the source and one on its replay, so the turns differ and the deltas are
+        // not the vacuous zero both sides would share.
+        yield* sessions.send({
+          sessionId: source.id,
+          content: "fix the flaky login test",
+        });
+        yield* settled(source.id, "the source's first turn");
+        yield* sessions.send({
+          sessionId: source.id,
+          content: "and the logout one",
+        });
+        yield* settled(source.id, "the source's follow-up");
+        const unreplayed = yield* sessions.get(source.id);
+
+        const bystander = yield* sessions.create({
+          title: "never replayed",
+          repo: factoryRepo,
+        });
+        yield* sessions.send({ sessionId: bystander.id, content: "hello" });
+        yield* settled(bystander.id, "the bystander's turn");
+
+        const replay = yield* sessions.replay({
+          sessionId: source.id,
+          model: "faux/faux-2",
+        });
+        yield* comparedOn(source.id, 1, "the source's comparison");
+        yield* comparedOn(replay.id, 1, "the replay's comparison");
+        const liveSource = yield* sessions.get(source.id);
+        const liveReplay = yield* sessions.get(replay.id);
+        const liveBystander = yield* sessions.get(bystander.id);
+
+        // Both logs, read the way the fold reads them.
+        const logOf = (id: SessionId) =>
+          Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, id)),
+            readSessionLog,
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+        const sourceLog = yield* logOf(source.id);
+        const replayLog = yield* logOf(replay.id);
+
+        // Drop the derived rows for all three (`session_activity` goes with them), then rebuild:
+        // nobody owns a log afterwards, so every read below is a fold of it.
+        yield* sessions.close;
+        yield* sql`DELETE FROM sessions WHERE id IN (${source.id}, ${replay.id}, ${bystander.id})`;
+        const missing = yield* Effect.exit(sessions.get(source.id));
+        yield* rebuildIndexes;
+        const rebuiltSource = yield* sessions.get(source.id);
+        const rebuiltReplay = yield* sessions.get(replay.id);
+        const rebuiltBystander = yield* sessions.get(bystander.id);
+        return {
+          source: source.id,
+          replay: replay.id,
+          unreplayed,
+          liveSource,
+          liveReplay,
+          liveBystander,
+          sourceLog,
+          replayLog,
+          missing,
+          rebuiltSource,
+          rebuiltReplay,
+          rebuiltBystander,
+        };
+      }),
+    );
+
+    // Each side reports one comparison, naming the other.
+    const [onSource] = result.liveSource.replayComparisons ?? [];
+    const [onReplay] = result.liveReplay.replayComparisons ?? [];
+    if (onSource === undefined || onReplay === undefined)
+      throw new Error("unreachable");
+    expect(result.liveSource.replayComparisons).toHaveLength(1);
+    expect(result.liveReplay.replayComparisons).toHaveLength(1);
+    expect(onSource.role).toBe("source");
+    expect(onSource.self.session).toBe(result.source);
+    expect(onSource.counterpart.session).toBe(result.replay);
+    expect(onReplay.role).toBe("replay");
+    expect(onReplay.self.session).toBe(result.replay);
+    expect(onReplay.counterpart.session).toBe(result.source);
+    // One reading, mirrored: each side's own run is the other's counterpart, at the same moment.
+    expect(onSource.self).toEqual(onReplay.counterpart);
+    expect(onSource.counterpart).toEqual(onReplay.self);
+    expect(onSource.at).toBe(onReplay.at);
+    // Both models, both outcomes, and turns measured from each log.
+    expect(onReplay.self.model).toBe("faux/faux-2");
+    expect(onReplay.counterpart.model).toBe("faux/faux-1");
+    expect(onReplay.self.outcome).toBe("answered");
+    expect(onReplay.counterpart.outcome).toBe("answered");
+    const assistantTurns = (snapshot: SessionSnapshot) =>
+      snapshot.entries.filter((entry) => entry.kind === "assistant").length;
+    expect(onSource.self.turns).toBe(assistantTurns(result.liveSource));
+    expect(onReplay.self.turns).toBe(assistantTurns(result.liveReplay));
+    // Matching deltas, opposite signs: the replay ran one prompt of the source's two.
+    expect(onReplay.delta.turns).toBeLessThan(0);
+    expect(onSource.delta.turns).toBe(-onReplay.delta.turns);
+    expect(onSource.delta.cost + onReplay.delta.cost).toBe(0);
+
+    // The logs are what carry it: a reader's fold reports the same comparisons, and the source's
+    // document holds no link, so it never reads as a replay.
+    expect(result.sourceLog.replayComparisons).toEqual([onSource]);
+    expect(result.replayLog.replayComparisons).toEqual([onReplay]);
+    expect(result.sourceLog.replay).toBeUndefined();
+    expect(result.replayLog.replay?.source).toBe(result.source);
+
+    // Never replayed: no comparison, live or folded — and the source had none before its replay.
+    expect(result.unreplayed.replayComparisons).toBeUndefined();
+    expect(result.liveBystander.replayComparisons).toBeUndefined();
+    expect(result.rebuiltBystander.replayComparisons).toBeUndefined();
+
+    // The derived rows were really gone, and the rebuilt sessions report the same comparison.
+    expect(refusalCode(result.missing)).toBe("not_found");
+    expect(result.rebuiltSource.session.mode).toBe("historical");
+    expect(result.rebuiltReplay.session.mode).toBe("historical");
+    expect(result.rebuiltSource.replayComparisons).toEqual([onSource]);
+    expect(result.rebuiltReplay.replayComparisons).toEqual([onReplay]);
   }, 120_000);
 
   it("refuses an unknown session, a session with no repo, and a model it does not serve", async () => {
