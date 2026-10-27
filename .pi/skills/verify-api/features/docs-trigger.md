@@ -44,17 +44,45 @@ drive in this skill). `.verify/evidence/lob-197/api/`: `docs-trigger.json` (the 
 `branch` from `DocsSessionsFromSessionService` (so the port calls `sessions.create` with no branch)
 makes the run open on `factory/<session-id>` and then fail the PR step, because the head the driver
 asked for is a branch no worktree is on — eight checks fail, the branch pair first.
-`mutation-no-repeat/`: `docsSchedule` returning its first `tick` instead of repeating it on
-`Schedule.spaced(everyMs)` leaves one session where the interval should start several, and "the
+`mutation-no-repeat/`: `docsSchedule` returning its first `tick` instead of repeating it leaves one session where the interval should start several, and "the
 schedule fires once per interval, on a shortened clock" fails with `1 tick(s) in 1200ms`.
 
-**What it does not prove.** (1) The schedule is not started by `apps/api`: this drive runs the clock
-itself, and the daemon that would run it in a deployment is a caller this issue does not add — the
-same "the step has no caller" shape as the PR step's, filed rather than pretended. (2) A failed
+**Its callers (LOB-234).** `apps/api` starts both without a drive script, and
+`./docs-trigger-http.sh` proves it over real HTTP against two booted APIs (`up.sh`'s isolation, port
+9422 by default). The `on` boot sets `DOCS_SCHEDULE_MS=400`, `DOCS_SCHEDULE_REPO` and
+`GITHUB_WEBHOOK_SECRET`: before the repo is registered the daemon starts nothing; once it is,
+`factory/doc-schedule-<interval>` sessions appear, one per interval (distinct intervals, each a
+multiple of 400 ms, no more than the wall clock allows and no fewer than its whole intervals less two —
+the clock sleeps to the next interval boundary rather than `everyMs` after each tick, so a tick's own
+duration does not push the next one past an interval; `DocsTrigger.test.ts` pins it exactly on a test
+clock); a signed `push` to the default branch on
+`POST /webhooks/github` answers `{status: "processed", sessionId}` on `factory/doc-push-…`, GitHub's
+redelivery (a fresh `X-GitHub-Delivery`) answers `replayed: true`, a push to another branch is
+`400 not-default-branch`, the merge commit of a `factory/doc-*` pull request (`Merge pull request #N
+from owner/factory/doc-…`) is `200 skipped` so merging a docs PR does not start the next pass, a push
+to a repo not yet registered is skipped and GitHub's redelivery of it after registering starts its one
+run (a push delivery is `keyedByWork`), a wrong `X-Hub-Signature-256` and the digest without its `sha256=` prefix
+are `401`, a `ping` still reaches the `pull_request` handler (`202`), and the push repo holds exactly
+one session. The `off` boot leaves `DOCS_SCHEDULE_MS` unset with its repo registered: no schedule
+session. Both boots' logs say which they were. The route's handler and the daemon's
+`runDocsSchedule` are also cases in `packages/core/src/DocsTrigger.test.ts`, on the real seam and
+Postgres. Evidence: `.verify/evidence/lob-234/` (`docs-trigger-http-{on,off}.json` and `.log`,
+`api-{on,off}.log`); two mutation runs beside it — `mutation-no-daemon/` (the daemon layer left out
+of the boot: the schedule check and the boot-log check fail) and `mutation-no-push-route/` (the
+route never dispatches `push`: every push answer is the `pull_request` handler's `202`, four checks
+fail).
+
+**What it does not prove.** (1) `./docs-trigger.sh` runs the clock itself; that the API runs it is
+`./docs-trigger-http.sh`'s claim, above. (2) A failed
 delivery is logged and the _next_ interval retries the next tick; the failed interval is not replayed,
 which is the seam's design (a tick is named by its interval) and is not exercised here. (3) The
-GitHub push route is not part of this drive: the delivery is handed to the seam directly, so what is
-proven is the trigger, not the signature check in front of a route — `features/trigger.md` covers the
-route machinery that a future `POST /webhooks/github` would reuse. (4) Nothing here pushes a branch,
+GitHub push route is not part of this drive (the delivery is handed to the seam directly); it is
+`./docs-trigger-http.sh`'s, which in turn opens no PR. (4) Nothing here pushes a branch,
 so "no write to the default branch" is a claim about what the control plane asked GitHub to do, which
-is exactly what the ledger counts.
+is exactly what the ledger counts. (5) A docs PR merged by **squash or rebase** leaves no trace of its
+`factory/doc-*` branch in the pushed commit, so `isDocsRunMerge` does not recognize it and that merge
+starts one more docs pass. Each round still needs a person to merge, so it cannot run away; telling
+those merges apart needs the PR the commit came from (GitHub's commits-to-PRs lookup), which is not
+built. (6) The schedule's guarantee is exact while a tick is shorter than its interval; an interval
+that begins and ends while a slow tick is still running is not delivered (at most once per interval,
+never a backlog of stale passes).

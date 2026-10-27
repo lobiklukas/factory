@@ -273,6 +273,8 @@ describe("the dev tasks' environment", () => {
     "OTEL_SERVICE_NAME",
     "DEVTOOLS",
     "DEVTOOLS_URL",
+    "DOCS_SCHEDULE_MS",
+    "DOCS_SCHEDULE_REPO",
   ] as const;
   const WEB_DEV_VARIABLES = [
     "VITE_PORT",
@@ -337,5 +339,19 @@ describe("the dev tasks' environment", () => {
         entry.startsWith("ANTHROPIC_API_KEY="),
       ),
     ).toBe(false);
+  }, 90_000);
+
+  it("passes GITHUB_WEBHOOK_SECRET through to @repo/api#dev without declaring it (LOB-234)", () => {
+    // `POST /webhooks/github` refuses every delivery without it, so a secret Strict Mode stripped
+    // would turn the docs push into a `503` with nothing in the shell to say why.
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    expect(
+      taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv,
+    ).toContain("GITHUB_WEBHOOK_SECRET");
+    expect(declared(dryRun, DEV_TASK)).not.toContain("GITHUB_WEBHOOK_SECRET");
   }, 90_000);
 });
