@@ -65,7 +65,9 @@ import {
   PageDoc,
   PagePromptDoc,
   PrDoc,
+  SpecDoc,
 } from "./docs";
+import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   autonomyPolicy,
@@ -592,6 +594,52 @@ export const readPullRequestDoc = (
       openedAt: doc.openedAt,
     };
   });
+
+/**
+ * Commit the session's spec (LOB-72), after `decodeSpec` accepts it.
+ *
+ * The input is `unknown` on purpose: a spec arrives from a model's completion call or a request
+ * body, and the validator is the only thing that may say it is one. A refusal commits nothing — the
+ * log keeps whatever spec it held before, so a bad second attempt cannot erase a good first one — and
+ * fails with the `SpecRefused` that names the field, `gaps` when the specifier declared none.
+ *
+ * Every field is written on every commit, empty lists included: a spec that kept an earlier
+ * attempt's gaps after a rewrite would declare gaps the specifier withdrew. Answers the spec as
+ * committed, which is the decoded value rather than the input.
+ */
+export const writeSpec = (
+  conversation: Conversation,
+  input: unknown,
+): Effect.Effect<Spec, SpecRefused | SessionError> =>
+  Effect.gen(function* () {
+    const spec = yield* decodeSpec(input);
+    yield* attempt("write spec", () =>
+      conversation.commit(
+        (tx) =>
+          tx.doc(SpecDoc, conversation.id).then((doc) => {
+            doc.goal = spec.goal;
+            doc.acceptance = [...spec.acceptance];
+            doc.gaps = [...spec.gaps];
+            doc.openQuestions = [...spec.openQuestions];
+          }),
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    return spec;
+  });
+
+/**
+ * The session's spec, read from the committed document. `undefined` when it never committed one:
+ * the document's seed is not a spec (`projectSpec`), so "never specified" and "specified, no gaps"
+ * stay two answers.
+ */
+export const readSpec = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<Spec | undefined, SessionError> =>
+  attempt("read spec", () =>
+    harness.snapshot(SpecDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectSpec));
 
 /**
  * A run that found nothing to publish, announced in the transcript (LOB-196).
@@ -1166,8 +1214,11 @@ export type SessionLog = {
   readonly pr?: PullRequestRecord;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
-  /** The job spec committed to the log, when present. */
-  readonly spec?: string;
+  /**
+   * The spec committed to the log (LOB-72), when the session specified one. Read through the same
+   * validator `writeSpec` applies, so a value the stage would refuse never folds back as a spec.
+   */
+  readonly spec?: Spec;
   /** The acceptance criteria committed to the log, when present. */
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
@@ -1226,7 +1277,7 @@ export const readSessionLog = (
       yield* readDocument(storage, REPLAY_DOC_KIND),
     );
     const taskId = bindingString(taskDoc, "taskId");
-    const spec = bindingString(specDoc, "spec");
+    const spec = projectSpec(specDoc);
     const criteria = bindingString(criteriaDoc, "criteria");
     const forkedFrom = bindingString(forkDoc, "parent");
     return {
@@ -1252,7 +1303,7 @@ export const readSessionLog = (
               openedAt: prDoc.openedAt,
             },
           }),
-      ...(spec === "" ? {} : { spec }),
+      ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
       ...(replayDoc.source === ""
