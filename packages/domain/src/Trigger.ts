@@ -83,7 +83,9 @@ export const TriggerRule = Schema.Struct({
    * is whatever its caller typed, so that adapter refuses a lifecycle action outright (`400
    * lifecycle-action`, LOB-235) before the seam sees it: a signed caller that names a `docs` label
    * and says `push` is told why, nothing is recorded, and no `reason` names a push no push produced.
-   * Only the adapters that observe a push or a tick — the GitHub push route and the schedule daemon
+   * It refuses every other action listed here too (any rule's, not only `push` and `schedule`),
+   * because a string an operator adds is no more observed when the generic caller types it. Only
+   * the adapters that observe a push or a tick — the GitHub push route and the schedule daemon
    * (`@repo/core/DocsTrigger`) — deliver one.
    */
   startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
@@ -235,7 +237,8 @@ export const TRIGGER_ACTION = "create";
  *
  * `create` is unconditional; `push` and `schedule` are not. A rule has to ask for one
  * (`TriggerRule.startsWorkFor`), and an adapter whose `action` comes from its caller — the generic
- * webhook — refuses both before the seam (LOB-235), so it cannot name a push no push produced.
+ * webhook — refuses both, and any other action a rule lists, before the seam (LOB-235), so it
+ * cannot name a push no push produced.
  */
 export const LIFECYCLE_ACTIONS: ReadonlyArray<string> = ["push", "schedule"];
 

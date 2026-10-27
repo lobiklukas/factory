@@ -187,7 +187,9 @@ const program = Effect.gen(function* () {
     "an action that is not a create is skipped with its reason",
     filtered.status === 200 &&
       filtered.outcome?.status === "skipped" &&
-      (filtered.outcome?.reason ?? "").includes('action "update"'),
+      // Exactly what the `factory` rule admits: naming `"push", "schedule"` here would tell a
+      // generic caller those are open to it, and they are `400` (LOB-235).
+      filtered.outcome?.reason === 'action "update" is not "create"',
     `status=${filtered.status} body=${JSON.stringify(filtered.body)}`,
   );
 
@@ -390,6 +392,36 @@ const program = Effect.gen(function* () {
       pushRows.length === 0 &&
       afterPush === afterInFlight,
     `status=${pushed.status} body=${JSON.stringify(pushed.body)} rows=${JSON.stringify(pushRows)} sessions ${afterInFlight}→${afterPush}`,
+  );
+
+  // Not only `push` and `schedule`: a rule's `startsWorkFor` is any string, and webhook.sh's
+  // `release` rule admits `release`. The generic caller cannot name that either (LOB-235 review).
+  const releaseId = `${requestId}-release`;
+  const released = yield* Effect.promise(() =>
+    post(
+      "/webhooks/generic",
+      generic(releaseId, { action: "release", label: "release" }),
+    ),
+  );
+  const releaseRows = yield* Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      const rows: Array<{ status: string }> = await db`
+        SELECT status FROM webhook_deliveries WHERE request_id = ${releaseId}
+      `;
+      return rows;
+    } finally {
+      await db.close();
+    }
+  });
+  const afterRelease = yield* countForRepo;
+  assert(
+    "a generic delivery naming an action a rule admits is 400 lifecycle-action, and records nothing",
+    released.status === 400 &&
+      released.refusal?.code === "lifecycle-action" &&
+      releaseRows.length === 0 &&
+      afterRelease === afterPush,
+    `status=${released.status} body=${JSON.stringify(released.body)} rows=${JSON.stringify(releaseRows)} sessions ${afterPush}→${afterRelease}`,
   );
 
   // The same caller saying `create` on the same label still starts a docs session: the refusal

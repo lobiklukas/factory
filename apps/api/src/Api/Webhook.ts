@@ -49,7 +49,11 @@ import type {
   TriggerEvent,
   TriggerRule,
 } from "@repo/domain/Trigger";
-import { LIFECYCLE_ACTIONS, TriggerRules } from "@repo/domain/Trigger";
+import {
+  LIFECYCLE_ACTIONS,
+  TRIGGER_ACTION,
+  TriggerRules,
+} from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { TriggerWriteBackLive } from "./LinearSync";
 
@@ -133,7 +137,8 @@ const labelNames = (value: unknown): ReadonlyArray<string> => {
 /**
  * The generic payload: `{requestId?, action?, label?, labels?, title?, body?}`. `label` is the one
  * field a sender must supply — it is what a mapping rule matches — and the rest is carried into
- * the prompt. `action` defaults to `create`; a lifecycle action is refused by `genericDelivery`.
+ * the prompt. `action` defaults to `create`; a lifecycle action, or any action a rule admits through
+ * `startsWorkFor`, is refused by `genericDelivery`.
  */
 const genericEvent = (
   payload: Record<string, unknown>,
@@ -163,12 +168,32 @@ type Refusal = { readonly refused: string; readonly code: string };
 type HeaderLookup = (name: string) => string | undefined;
 
 /**
+ * The actions the generic caller may not name: the two lifecycle actions, and any other a rule
+ * admits through `startsWorkFor`. A rule's list is operator config of any string, so a fixed
+ * denylist alone would let a caller name `release` the moment a rule asked for it — and the seam
+ * would record that rule mapping it (LOB-235 review). `create` is the generic caller's own action
+ * and is never in this set.
+ */
+const callerCannotName = (
+  rules: ReadonlyArray<TriggerRule>,
+): ReadonlySet<string> =>
+  new Set(
+    [
+      ...LIFECYCLE_ACTIONS,
+      ...rules.flatMap((rule) => rule.startsWorkFor ?? []),
+    ].filter((action) => action !== TRIGGER_ACTION),
+  );
+
+/**
  * The generic adapter's delivery: the id is the configured header, else the body's own
  * `requestId` — the sender names its delivery, because nothing else can.
  */
-const genericDelivery =
-  (deliveryHeader: string) =>
-  (
+const genericDelivery = (
+  deliveryHeader: string,
+  rules: ReadonlyArray<TriggerRule>,
+) => {
+  const refusedActions = callerCannotName(rules);
+  return (
     payload: Record<string, unknown>,
     header: HeaderLookup,
   ): TriggerDelivery | Refusal => {
@@ -190,10 +215,11 @@ const genericDelivery =
     // The generic caller types its own `action`, so it cannot be the one that says a push or a
     // schedule tick happened: those are facts only the GitHub push route and the schedule daemon
     // observe (LOB-197). Admitting one would let the seam record `rule "docs" mapped it …` about a
-    // delivery no push produced (LOB-235). Refusing it here, before the seam, also writes no
+    // delivery no push produced (LOB-235). The same holds for any action a rule's `startsWorkFor`
+    // admits (`callerCannotName`). Refusing it here, before the seam, also writes no
     // `webhook_deliveries` row, so nothing recorded can claim it. Any other non-`create` action
     // still reaches the seam, whose filter records it `skipped` with its reason.
-    if (LIFECYCLE_ACTIONS.includes(event.action)) {
+    if (refusedActions.has(event.action)) {
       return {
         refused: `the generic webhook cannot name the lifecycle action "${event.action}"; only the adapter that observes it can, so send "create"`,
         code: "lifecycle-action",
@@ -201,6 +227,7 @@ const genericDelivery =
     }
     return { requestId, event };
   };
+};
 
 /** One adapter: how its body is authenticated, and how it becomes a delivery. */
 type Adapter = {
@@ -363,19 +390,25 @@ const linearRoute = (rules: ReadonlyArray<TriggerRule>) => {
   );
 };
 
-const GenericRoute = HttpRouter.add(
-  "POST",
-  "/webhooks/generic",
-  handle(() => ({
-    signatureHeader:
-      process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
-    secret: process.env["TRIGGER_SECRET"],
-    secretVariable: "TRIGGER_SECRET",
-    delivery: genericDelivery(
-      process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
-    ),
-  })),
-);
+/**
+ * The generic adapter. `rules` is the value `TriggerServiceLive` maps with, so the actions it
+ * refuses are exactly the ones a rule would otherwise admit from a caller-typed `action`.
+ */
+const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
+  HttpRouter.add(
+    "POST",
+    "/webhooks/generic",
+    handle(() => ({
+      signatureHeader:
+        process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
+      secret: process.env["TRIGGER_SECRET"],
+      secretVariable: "TRIGGER_SECRET",
+      delivery: genericDelivery(
+        process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
+        rules,
+      ),
+    })),
+  );
 
 /**
  * The mapping rules a deployment ships: `TRIGGER_RULES` is a JSON array of `{label, repo,
@@ -404,8 +437,12 @@ const rules = rulesFromEnv();
  * Both routes, still asking for the seam per request. Exported so a test can serve them with a fake
  * `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`) are answered before the
  * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
+ * `webhookRoutesFor` takes the rules, so a case can configure the ones the generic adapter reads.
  */
-export const WebhookRoutes = Layer.mergeAll(linearRoute(rules), GenericRoute);
+export const webhookRoutesFor = (rules: ReadonlyArray<TriggerRule>) =>
+  Layer.mergeAll(linearRoute(rules), genericRoute(rules));
+
+export const WebhookRoutes = webhookRoutesFor(rules);
 
 export const WebhookLive = WebhookRoutes.pipe(
   HttpRouter.provideRequest(

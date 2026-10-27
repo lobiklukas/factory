@@ -23,15 +23,16 @@ a replay of work still in flight, which is `503 in-progress` so the sender retri
 **How the skill drives it.** `./webhook.sh` boots the skill's own API instance with
 `TRIGGER_RULES` (a `factory` rule, and a `docs` rule that admits `push` and `schedule` as
 `docsTriggerRules` does), `TRIGGER_SECRET`, `LINEAR_WEBHOOK_SECRET` and
-`TRIGGER_MAX_BODY_BYTES=2048`, then runs `bun webhook.ts` — sixteen checks over real HTTP, signed
+`TRIGGER_MAX_BODY_BYTES=2048`, then runs `bun webhook.ts` — seventeen checks over real HTTP, signed
 the way Linear signs a delivery:
 
 1. A signed delivery starts a session, and the answer names it.
 2. The same body again answers `replayed: true` — and the repo's session count went up by one, not
    two.
 3. The session's first message is the rule's rendered template (`{{title}}`, `{{body}}`).
-4. `action: "update"` is `skipped` with `action "update" is not "create", …`, and a replay of
-   that refusal stays skipped.
+4. `action: "update"` is `skipped` with exactly `action "update" is not "create"` — the reason
+   names what the routing rule admits, so it never lists `push` or `schedule` to a caller who is
+   refused them — and a replay of that refusal stays skipped.
 5. A label no rule names is `skipped` with `no rule matches labels [nobody]`.
 6. Neither skip created a session.
 7. A wrong signature is `401`, before parsing.
@@ -46,7 +47,10 @@ the way Linear signs a delivery:
     and why, starts nothing, and leaves no `webhook_deliveries` row — so no recorded `reason` can
     say `rule "docs" mapped it to …` about a push nobody pushed (LOB-235). The drive reads the
     API's database to prove the absent row.
-13. The same caller's `{action: "create", label: "docs"}` still starts a docs session, answered
+13. A `{action: "release", label: "release"}` is `400 lifecycle-action` too, with no row: the
+    `release` rule's `startsWorkFor: ["release"]` is operator config of any string, and the
+    adapter refuses every action a rule admits, not a fixed list (LOB-235 review).
+14. The same caller's `{action: "create", label: "docs"}` still starts a docs session, answered
     `rule "docs" mapped it to <repo>`, whose first message is the docs rule's template.
 
 Every check is required: `webhook.sh` exits non-zero when one fails.
@@ -56,11 +60,11 @@ API at `:9400`, faux model, Postgres on 5442. `packages/core/src/TriggerService.
 half HTTP cannot: the same request id fired twice **concurrently** creates one session. LOB-216's
 re-run is `.verify/evidence/lob-216/webhook/`: 14/14 on `:9540`; the same drive against the seam
 from before LOB-216 fails check 10 with `{"status":"received","replayed":true}`, which is the defect.
-LOB-235's re-run is `.verify/evidence/lob-235/webhook/`: 16/16 on `:9520`; the same drive against
+LOB-235's re-run is `.verify/evidence/lob-235/webhook/`: 17/17 on `:9520`; the same drive against
 the adapter from before LOB-235 fails check 12 with `{"status":"processed","reason":"rule \"docs\"
 mapped it to acme/verify-api-trigger"}` and a `processed` row, which is the defect.
-`apps/api/src/Api/Webhook.test.ts` pins the refusal in-process for `push` and `schedule`, with
-two controls: a `create` on `docs` reaches the seam as a create, and `update` still reaches the
+`apps/api/src/Api/Webhook.test.ts` pins the refusal in-process for `push` and `schedule`, and for
+a rule-admitted `release` (`webhookRoutesFor` serves the routes with that rule), with two controls: a `create` on `docs` reaches the seam as a create, and `update` still reaches the
 seam's filter (a route that refused every non-create would fail it).
 
 **Non-vacuity.** A mutation run of `TriggerService.test.ts`, recorded here rather than kept: with
