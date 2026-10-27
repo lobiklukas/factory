@@ -33,5 +33,6 @@ following `board start` prints the column the declared move put it in.
 
 Nothing about the gates as _refusals_: `planning → building` and `review → done` are only reachable
 after the drive's card has walked there, and the human-gate refusal is proven in `packages/core`'s
-`TaskService` cases. Nor does it prove `requires[]`: gates are checked on exit, and the MVP's
-`requires[]` check is a later board issue.
+`TaskService` cases. Nor does it prove `requires[]`: the drive's card is on definition version 1,
+which declares no checked requirement; `review`'s `verified` (version 3) is `./requires.sh`'s, in
+[requires.md](requires.md).

@@ -225,6 +225,17 @@ describe("moveRefusal", () => {
       title: "Only a person can make this move",
       atRevision: 2,
     });
+    // LOB-80: an unmet exit requirement keeps the service's words, which name the requirement.
+    const unmet =
+      'the move review → done needs "verified" (a passing verification of every surface the card\'s change touched), which is not met: the card has no runs, so nothing verified its change';
+    expect(
+      moveRefusal({ _tag: "RequirementUnmet", message: unmet }, "", 5),
+    ).toEqual({
+      tag: "RequirementUnmet",
+      title: "This column's exit requirement is not met",
+      message: unmet,
+      atRevision: 5,
+    });
   });
 
   it("does not dress a failure that is not a typed refusal up as one", () => {
