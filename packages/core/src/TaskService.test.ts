@@ -1583,6 +1583,8 @@ describe("TaskService — exit requirements", () => {
     readonly command: string;
     readonly column?: string;
     readonly openPr?: boolean;
+    /** The repository's registered `local_path`, when it is not `repoRoot` itself. */
+    readonly localPath?: string;
   }): Promise<string> => {
     const faux = createFauxModelAccess({
       fauxVerify: true,
@@ -1601,7 +1603,7 @@ describe("TaskService — exit requirements", () => {
           yield* service.registerRepo({
             repo,
             url: "https://example.invalid/requires.git",
-            localPath: input.repoRoot,
+            localPath: input.localPath ?? input.repoRoot,
           });
           const created = yield* service.create({
             repo,
@@ -2007,6 +2009,103 @@ describe("TaskService — exit requirements", () => {
       `run ${run}'s branch could not be measured: repository ${repo} has no local checkout registered`,
     );
   }, 60_000);
+
+  it("refuses building → review when the run's branch is gone from its checkout, naming the range it could not measure", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+    });
+    // The checkout no longer holds the run's branch (a re-registered checkout, a pruned ref): git
+    // cannot resolve the range, which is not a measured empty diff and not a pass either.
+    execSync(`git update-ref -d refs/heads/factory/${run}`, {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${run}'s branch could not be measured: the branch's diff could not be measured: git diff main...factory/${run} in ${repoRoot}`,
+    );
+  }, 120_000);
+
+  it("refuses building → review when the card's run has no branch: bound to no repository, or gone from the index", async () => {
+    const task = await inBuilding();
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const run = await sessions
+      .runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const created = yield* service.create({
+            taskId: task.id,
+            taskColumn: "building",
+          });
+          return created.id;
+        }),
+      )
+      .finally(() => sessions.dispose());
+    const unbound = await refusal(toReview(task));
+    expect(unbound).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(unbound.message).toContain(
+      `run ${run}'s branch could not be measured: its session is bound to no repository, so it has no branch`,
+    );
+    // The index row goes (its log stays): the run still names the session, and nothing says where
+    // its branch is.
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM sessions WHERE id = ${run}`;
+      }),
+    );
+    const unindexed = await refusal(toReview(task));
+    expect(unindexed).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(unindexed.message).toContain(
+      `run ${run}'s branch could not be measured: its session is not in the index`,
+    );
+  }, 60_000);
+
+  it("measures the branch from a local_path inside the checkout, as the worktree was cut from it", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({
+      ".pi/skills/verify-web/drive.sh": PASSING,
+      "packages/app/README.md": "# app\n",
+    });
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      localPath: join(repoRoot, "packages", "app"),
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+    });
+    // The branch was found and measured non-empty, so the refusal is the next requirement's.
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: PR_LINK_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `the card's latest run ${run} recorded no PR`,
+    );
+  }, 120_000);
 
   it("passes non_empty_diff on a committed change, refuses on pr_link until the run's PR is recorded, then lets the move through", async () => {
     const task = await inBuilding();

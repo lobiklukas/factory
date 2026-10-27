@@ -61,7 +61,7 @@ import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- the measurement is the local git CLI, the same one `workspace.ts` cuts the worktree with.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- the checkout root is a filesystem fact, not a URL.
 import { existsSync } from "node:fs";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- as above: `.git` is joined onto a directory this module was handed.
@@ -308,44 +308,78 @@ export const diffSize = (input: {
   readonly worktree: string;
   readonly base: string;
   readonly head: string;
-}): Effect.Effect<Option.Option<DiffSize>, PrError> => {
-  if (!existsSync(join(input.worktree, ".git")))
-    return Effect.succeed(Option.none());
-  return Effect.map(
-    Effect.mapError(
-      Effect.try({
-        try: () =>
-          parseDiffSize(
-            execFileSync(
-              "git",
-              [
-                "diff",
-                "--numstat",
-                // As `publishedPaths` does: a range is never read as an option, whoever named it.
-                "--end-of-options",
-                `${input.base}...${input.head}`,
-                "--",
-              ],
-              {
-                cwd: input.worktree,
-                encoding: "utf8",
-                // stderr is swallowed: the failure is the typed error below, not a log line every
-                // session that opens a PR would print.
-                stdio: ["ignore", "pipe", "ignore"],
-              },
-            ),
-          ),
-        catch: () => undefined,
-      }),
-      () =>
-        new PrError({
-          operation: "diffSize",
-          ref: `${input.base}...${input.head}`,
-          message: "the branch's diff could not be measured",
+}): Effect.Effect<Option.Option<DiffSize>, PrError> =>
+  existsSync(join(input.worktree, ".git"))
+    ? Effect.map(
+        branchDiffSize({
+          checkout: input.worktree,
+          base: input.base,
+          head: input.head,
         }),
-    ),
-    Option.some,
-  );
+        Option.some,
+      )
+    : Effect.succeed(Option.none());
+
+/**
+ * How long one `git diff --numstat` may run before it is a `PrError`. The measurement is local (no
+ * network), so a minute is far past any real diff and only bounds a wedged git.
+ */
+const DIFF_TIMEOUT_MS = 60_000;
+
+/**
+ * `diffSize`'s measurement on its own: `git diff --numstat base...head` run in `checkout`, with git's
+ * ordinary repository discovery from that directory. No checkout-root check — the caller has already
+ * decided this directory names a repository: `diffSize` by finding `.git` in it, the board
+ * (`TaskService`, LOB-240) because it is the registered `local_path` that `workspace.ts` cut the
+ * session's worktree from with the same discovery, so the session's branch is a ref of the
+ * repository git finds from there, whether `local_path` is the checkout root or a directory inside
+ * it.
+ *
+ * Asynchronous (`execFile`, not `execFileSync`): the diff runs in a child process while the API's
+ * event loop keeps serving every other request, and a diff that outlives `DIFF_TIMEOUT_MS` (or an
+ * interrupted caller) kills git rather than leaving it running. A ref git cannot resolve, a path
+ * that is not inside a repository, or a git that is gone is the `PrError`.
+ */
+export const branchDiffSize = (input: {
+  readonly checkout: string;
+  readonly base: string;
+  readonly head: string;
+}): Effect.Effect<DiffSize, PrError> => {
+  const refused = new PrError({
+    operation: "diffSize",
+    ref: `${input.base}...${input.head}`,
+    message: "the branch's diff could not be measured",
+  });
+  return Effect.callback<DiffSize, PrError>((resume, signal) => {
+    execFile(
+      "git",
+      [
+        "diff",
+        "--numstat",
+        // As `publishedPaths` does: a range is never read as an option, whoever named it.
+        "--end-of-options",
+        `${input.base}...${input.head}`,
+        "--",
+      ],
+      {
+        cwd: input.checkout,
+        encoding: "utf8",
+        // An interrupted caller (a move abandoned, a PR request gone) kills git rather than leaving it.
+        signal,
+        timeout: DIFF_TIMEOUT_MS,
+        // As `execFileSync`'s default, which this measurement used before it went async.
+        maxBuffer: 1024 * 1024,
+      },
+      // stderr is dropped: the failure is the typed error, not a log line every session that opens
+      // a PR (or every move out of `building`) would print.
+      (error, stdout) =>
+        resume(
+          error === null
+            ? Effect.succeed(parseDiffSize(stdout))
+            : Effect.fail(refused),
+        ),
+    );
+  });
 };
 
 /**

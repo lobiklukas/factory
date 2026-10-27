@@ -20,11 +20,20 @@
  * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own
  * branch, so the latest run's branch is the change the card carries now, and an older run's PR is a
  * PR of a change a later run replaced. `non_empty_diff` is met when that branch has at least one
- * changed file against its base, measured by the PR step's own `diffSize` (`git diff --numstat
- * base...head`, LOB-196), so the board and the step can never disagree about whether there is
- * anything to publish: committed work only, three-dot from the merge base. A branch that could not be
- * measured — a run bound to no repository, a repository with no local checkout, a ref git cannot
- * resolve — is not a pass, as "nothing could check this" is not one for `verified`. `pr_link` is met
+ * changed file against its base, by the PR step's own measurement (`git diff --numstat
+ * base...head`, LOB-196): committed work only, three-dot from the merge base, so a branch the board
+ * measures as empty is one the step would publish as empty. The two do not agree everywhere, by
+ * design. A branch that could not be measured — a run bound to no repository, a repository with no
+ * local checkout, a ref git cannot resolve — is not a pass here, as "nothing could check this" is not
+ * one for `verified`; the PR step, given a session directory that is no checkout of its own, skips
+ * its cap and opens the PR anyway (`diffSize`). And the board measures from the repository's
+ * registered `local_path`, the step from the session's worktree: they read the same refs while the
+ * worktree is a linked worktree of that checkout, but a `local_path` re-registered after the run was
+ * cut, or a run cut before any checkout was registered, leaves the branch unfound from `local_path`,
+ * and the move is refused as unmeasured although the step could open the PR. **A known limit under
+ * D3/D4:** this check reads git refs from a checkout on the control plane's own disk. When the
+ * worktree moves into the sandbox, the measurement has to follow it (or read the recorded PR's own
+ * diff), or `non_empty_diff` refuses every move. `pr_link` is met
  * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
  * commits, not the index's `pr_url` column a rebuild derives from it.
  *

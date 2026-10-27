@@ -29,11 +29,13 @@
  * that is not met refuses the move with `RequirementUnmet`, naming it. Which keys are checked, and
  * against what, is `./requirements`; `verified` reads the `verify` records in the logs of the card's
  * runs, `pr_link` the latest run's `factory.pr` document, and `non_empty_diff` the latest run's
- * branch, measured against its base by the PR step's own `diffSize` in the run's registered checkout
- * (a session's worktree is a linked worktree of it, so the two share every ref). The logs are read,
- * and the branch measured, *before* the card is locked, not inside the transaction: a log fold and a
- * `git diff` are unbounded work off the connection, and holding the row lock (and a pool connection)
- * across them would let a long log or a large diff stall every other move of the card. The evidence
+ * branch, measured against its base by the PR step's own `git diff --numstat` from the run's
+ * registered checkout (a session's worktree is a linked worktree of it, so the two share every ref).
+ * The diff runs in a child process without blocking the event loop (`branchDiffSize`), so a large one
+ * holds up this move only. The logs are read, and the branch measured, *before* the card is locked,
+ * not inside the transaction: a log fold and a `git diff` are unbounded work, and holding the row
+ * lock (and a pool connection) across them would let a long log or a large diff stall every other
+ * move of the card. The evidence
  * is judged only for the revision the caller expected — a card read at any other revision is refused
  * as `StaleRevision` before its logs are read — and the transaction's own revision check then proves
  * the card did not change while they were (every write to a card bumps its revision). A `verify`
@@ -84,7 +86,7 @@ import { SessionId } from "@repo/domain/Session";
 import { readRecordedPullRequest, readVerifyCalls } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import { mintBoardId, mintTaskId } from "./ids";
-import { diffSize } from "./prStep";
+import { branchDiffSize } from "./prStep";
 import {
   type BranchDiff,
   type CardEvidence,
@@ -841,11 +843,15 @@ export const TaskServiceLive = Layer.effect(
 
     /**
      * The latest run's branch against its base, measured the way the PR step measures it
-     * (`./requirements`): the same `diffSize`, over the same `base...head`, with the branches the
-     * step would name — the session's own branch, or `factory/<id>`, and its base ref. Measured in
-     * the run's registered checkout rather than its worktree: the worktree is a linked worktree of
-     * that checkout (`resolveWorkspace`), so the refs are the same refs, and the checkout's path is in
-     * the registry while the worktree's depends on the API's session root.
+     * (`./requirements`): the same `git diff --numstat` (`branchDiffSize`, which `diffSize` runs),
+     * over the same `base...head`, with the branches the step would name — the session's own branch,
+     * or `factory/<id>`, and its base ref. Measured from the repository's registered `local_path`
+     * rather than the run's worktree: the worktree is a linked worktree that `resolveWorkspace` cut
+     * with git's discovery from that same path, so git finds the same refs from it — a `local_path`
+     * inside a checkout included — and the path is in the registry while the worktree's depends on the
+     * API's session root. Where the two can part (a `local_path` re-registered after the run was cut,
+     * a run cut before any checkout was registered) the branch is not found here, which is
+     * `unmeasured` and refused, never a pass (`./requirements`).
      */
     const branchDiff = (run: RunRow): Effect.Effect<BranchDiff> => {
       const { sessionId } = run;
@@ -866,23 +872,14 @@ export const TaskServiceLive = Layer.effect(
         });
       const head = run.branch ?? `factory/${sessionId}`;
       const base = run.baseRef ?? "main";
-      return diffSize({ worktree: run.localPath, base, head }).pipe(
-        Effect.map((size): BranchDiff =>
-          Option.match(size, {
-            onNone: () => ({
-              _tag: "unmeasured",
-              sessionId,
-              reason: `${run.localPath} is not the root of a git checkout`,
-            }),
-            onSome: ({ files }) => ({
-              _tag: "measured",
-              sessionId,
-              base,
-              head,
-              files,
-            }),
-          }),
-        ),
+      return branchDiffSize({ checkout: run.localPath, base, head }).pipe(
+        Effect.map(({ files }): BranchDiff => ({
+          _tag: "measured",
+          sessionId,
+          base,
+          head,
+          files,
+        })),
         Effect.catchTag("PrError", (error) =>
           Effect.succeed<BranchDiff>({
             _tag: "unmeasured",
