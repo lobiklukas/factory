@@ -1,4 +1,5 @@
-import type { BoardColumn, Task } from "@repo/domain/Task";
+import { Link } from "@tanstack/react-router";
+import type { BoardColumn, BoardInstanceId, Task } from "@repo/domain/Task";
 import { cn } from "cn";
 import { blockedLabel, type BoardLanes } from "@/lib/board-view";
 import { Badge } from "@/components/ui/badge";
@@ -11,50 +12,71 @@ import { Badge } from "@/components/ui/badge";
  * the lane cannot say it). The id and revision sit last in mono: they are what `factory board move`
  * takes, and a reader copying them out should not have to open anything.
  *
- * Read-only on purpose. Moves, gates and the run start belong to the card pane (LOB-76), so no
- * control here can change a card.
+ * The card is a link that opens it in the card pane (LOB-76), and nothing more: moves, gates and
+ * the run start are the pane's, so no control in a lane can change a card, and there is no drag —
+ * a drag would offer every lane as a target, and most of them are moves the column does not
+ * declare (B5, B9).
  */
-export const TaskCard = ({ task }: { readonly task: Task }) => {
+export const TaskCard = ({
+  boardId,
+  task,
+  selected,
+}: {
+  readonly boardId: BoardInstanceId;
+  readonly task: Task;
+  readonly selected: boolean;
+}) => {
   const blocked = blockedLabel(task);
   return (
     <li
       data-card={task.id}
       data-card-column={task.column}
-      className={cn(
-        "flex flex-col gap-1.5 border border-border bg-card px-3 py-2.5",
-        blocked !== null && "border-l-2 border-l-destructive",
-      )}
+      data-card-revision={task.revision}
+      className="flex"
     >
-      <span className="text-xs leading-snug font-medium break-words">
-        {task.title}
-      </span>
-      {task.priority === "urgent" || blocked !== null ? (
-        <span className="flex flex-wrap items-center gap-1">
-          {task.priority === "urgent" ? (
-            <Badge
-              variant="outline"
-              className="font-mono text-[10px] tracking-wide uppercase"
-            >
-              urgent
-            </Badge>
-          ) : null}
-          {blocked === null ? null : (
-            <Badge
-              variant="destructive"
-              className="font-mono text-[10px]"
-              title={task.blocked?.note}
-            >
-              {blocked}
-            </Badge>
-          )}
+      <Link
+        to="/boards/$boardId"
+        params={{ boardId }}
+        search={{ card: task.id }}
+        aria-current={selected ? "true" : undefined}
+        aria-label={`Open card ${task.title}`}
+        className={cn(
+          "flex min-w-0 flex-1 flex-col gap-1.5 border border-border bg-card px-3 py-2.5 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring",
+          blocked !== null && "border-l-2 border-l-destructive",
+          selected && "border-ring",
+        )}
+      >
+        <span className="text-xs leading-snug font-medium break-words">
+          {task.title}
         </span>
-      ) : null}
-      <span className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-muted-foreground">
-        <span className="truncate" title={task.id}>
-          {task.id}
+        {task.priority === "urgent" || blocked !== null ? (
+          <span className="flex flex-wrap items-center gap-1">
+            {task.priority === "urgent" ? (
+              <Badge
+                variant="outline"
+                className="font-mono text-[10px] tracking-wide uppercase"
+              >
+                urgent
+              </Badge>
+            ) : null}
+            {blocked === null ? null : (
+              <Badge
+                variant="destructive"
+                className="font-mono text-[10px]"
+                title={task.blocked?.note}
+              >
+                {blocked}
+              </Badge>
+            )}
+          </span>
+        ) : null}
+        <span className="flex min-w-0 items-center gap-2 font-mono text-[10px] text-muted-foreground">
+          <span className="truncate" title={task.id}>
+            {task.id}
+          </span>
+          <span className="shrink-0">r{task.revision}</span>
         </span>
-        <span className="shrink-0">r{task.revision}</span>
-      </span>
+      </Link>
     </li>
   );
 };
@@ -67,11 +89,15 @@ export const TaskCard = ({ task }: { readonly task: Task }) => {
  * rendered like any other: an empty column and a column that does not exist must not look the same.
  */
 export const BoardLane = ({
+  boardId,
   column,
   cards,
+  selected,
 }: {
+  readonly boardId: BoardInstanceId;
   readonly column: BoardColumn;
   readonly cards: ReadonlyArray<Task>;
+  readonly selected: string | undefined;
 }) => (
   <section
     data-lane={column.name}
@@ -101,7 +127,12 @@ export const BoardLane = ({
         className="flex min-h-0 flex-col gap-2 overflow-y-auto p-2"
       >
         {cards.map((task) => (
-          <TaskCard key={task.id} task={task} />
+          <TaskCard
+            key={task.id}
+            boardId={boardId}
+            task={task}
+            selected={task.id === selected}
+          />
         ))}
       </ul>
     )}
@@ -115,7 +146,15 @@ export const BoardLane = ({
  * The strip scrolls sideways inside itself: seven fixed-width lanes are wider than most windows,
  * and a lane that shrank to fit would truncate every title in it.
  */
-export const BoardLanesView = ({ board }: { readonly board: BoardLanes }) => (
+export const BoardLanesView = ({
+  boardId,
+  board,
+  selected,
+}: {
+  readonly boardId: BoardInstanceId;
+  readonly board: BoardLanes;
+  readonly selected: string | undefined;
+}) => (
   <div className="flex min-h-0 flex-1 flex-col">
     <div
       role="group"
@@ -125,8 +164,10 @@ export const BoardLanesView = ({ board }: { readonly board: BoardLanes }) => (
       {board.lanes.map((lane) => (
         <BoardLane
           key={lane.column.name}
+          boardId={boardId}
           column={lane.column}
           cards={lane.cards}
+          selected={selected}
         />
       ))}
     </div>
@@ -141,7 +182,12 @@ export const BoardLanesView = ({ board }: { readonly board: BoardLanes }) => (
         </p>
         <ul className="flex flex-wrap gap-2">
           {board.strays.map((task) => (
-            <TaskCard key={task.id} task={task} />
+            <TaskCard
+              key={task.id}
+              boardId={boardId}
+              task={task}
+              selected={task.id === selected}
+            />
           ))}
         </ul>
       </section>

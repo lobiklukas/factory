@@ -57,9 +57,12 @@ the OS chooses).
 It asserts the shell renders, asserts the browser can reach the API from the page's own origin,
 and clicks **Start a session**, requiring the transcript to reach the answer the agent's `bash`
 tool produced and the card to label its read path. It then seeds its own board and card, opens
-the board, and requires one lane per column in definition order, the card in `intake`, and — after
-a `factory board move` made outside the browser — the card in its new lane on reload and in a fresh
-browser context (`features/board.md`). Exit code is non-zero when a required check fails. Each run
+the board, and requires one lane per column in definition order and the card in `intake`
+(`features/board.md`). It then opens the card pane and requires only the column's declared moves,
+the human gate marked, a stale-revision move refused in the service's words with the card left in
+place, a `factory board move` followed without a reload (and the card's new lane on reload and in a
+fresh browser context), a pane move that `factory board show` prints, and a run started from the
+card (`features/card-pane.md`). Exit code is non-zero when a required check fails. Each run
 seeds a new board, so the drive can be rerun against the same instance; run it with the
 `DATABASE_URL` `./up.sh` started the API with.
 
@@ -77,6 +80,8 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
 - `dashboard.png` — full-page screenshot after the drive
 - `boards.png`, `board.png`, `board-after-move.png` — the boards list and the seeded board before and
   after the CLI move
+- `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png` — the card pane in `intake`, with
+  the stale-revision refusal, and with a run started from it
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
   transcript and mode label, console errors, and HTTP responses ≥ 400
 

@@ -18,12 +18,14 @@ import {
   GetTaskInput,
   HumanGateRequired,
   ListBoardsInput,
+  ListTaskRunsInput,
   ListTasksInput,
   MoveTaskInput,
   NotBlocked,
   StaleRevision,
   Task,
   TaskNotFound,
+  TaskRun,
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
@@ -241,6 +243,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("unblockTask", {
     payload: UnblockTaskInput,
     success: Task,
+    error: TaskErrorSchema,
+  }),
+  // A card's runs, newest first (LOB-76): how the card pane keeps a run started from it in reach.
+  // Starting one is `createSession` with the card named, so this group only reads them.
+  Rpc.make("listTaskRuns", {
+    payload: ListTaskRunsInput,
+    success: Schema.Array(TaskRun),
     error: TaskErrorSchema,
   }),
 ) {}

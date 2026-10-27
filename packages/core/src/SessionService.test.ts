@@ -68,6 +68,7 @@ import {
 import {
   Clock,
   ConfigProvider,
+  Deferred,
   Effect,
   Exit,
   Fiber,
@@ -94,12 +95,20 @@ import {
   readVerifyRecords,
   tailOf,
   usageCostTotal,
+  type VerifyRecord,
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
+import {
+  pullRequestReport,
+  SessionWriteBack,
+  type PullRequestReport,
+  type SessionWriteBackShape,
+} from "./SessionWriteBack";
 import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
@@ -1494,6 +1503,26 @@ describe("repo binding", () => {
  * `docs/testing-third-parties.md`. Every request is recorded, which is how "exactly one POST" is
  * asserted rather than inferred.
  */
+/**
+ * A case's PR, `{number, url}` with `url` the page, as GitHub's REST API answers it: `url` is the
+ * API resource and `html_url` the page (LOB-15). The client must read `html_url`, so a fake that
+ * answered the page as `url` would hide a client that recorded the API resource.
+ */
+const asGitHubAnswer = (body: unknown): unknown => {
+  if (Array.isArray(body)) return body.map(asGitHubAnswer);
+  if (typeof body !== "object" || body === null) return body;
+  const pr = body as Record<string, unknown>;
+  if (typeof pr["number"] !== "number" || typeof pr["url"] !== "string") {
+    return body;
+  }
+  const page = new URL(pr["url"]);
+  return {
+    ...pr,
+    url: `https://api.github.com/repos${page.pathname.replace("/pull/", "/pulls/")}`,
+    html_url: pr["url"],
+  };
+};
+
 const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
   /**
    * What GitHub was asked. The request body is kept because the PR body is one of the things a case
@@ -1525,9 +1554,9 @@ const makeGithubFake = (status: number, body: unknown, delayMs = 0) => {
           // A slow answer is how a case can hold a step inside GitHub's call, which is the window a
           // second caller would otherwise slip through.
           if (delayMs > 0) yield* Effect.sleep(delayMs);
-          const text = yield* Schema.encodeEffect(Json)(body).pipe(
-            Effect.orDie,
-          );
+          const text = yield* Schema.encodeEffect(Json)(
+            asGitHubAnswer(body),
+          ).pipe(Effect.orDie);
           const response = new Response(text, {
             status,
             headers: { "content-type": "application/json" },
@@ -2176,6 +2205,208 @@ describe("the diff cap", () => {
  * fact about a branch: a fake that answered zero would prove only that the step can read a number it
  * was handed.
  */
+/**
+ * The PR step reports its exit to the session layer's write-back (LOB-15), whatever the exit was,
+ * and the report cannot change the step's answer. The tracker is a recording fake: what it does
+ * with a report is `LinearSync.test.ts`'s, and this is only that every exit reaches it.
+ */
+describe("the PR step's write-back", () => {
+  it("reports the PR, the refusal, and the error — and the step answers as it would without it", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/36";
+    const github = makeGithubFake(201, { number: 36, url });
+    const reports: Array<{
+      readonly sessionId: SessionId;
+      readonly report: PullRequestReport;
+      readonly evidence: number;
+    }> = [];
+    const reported = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.map(input.evidence, (records) => {
+                reports.push({
+                  sessionId: input.sessionId,
+                  report: pullRequestReport(input.result),
+                  evidence: records.length,
+                });
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const opened = await reported.runPromise(
+        drive({ title: "a reported PR", files: 1, lines: 2 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      const refused = await reported.runPromise(
+        drive({ title: "a reported refusal", files: 51, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      // GitHub refuses the token: the step's own typed error, reported and then raised as before.
+      const forbidden = makeGithubFake(403, {
+        message: "Resource not accessible",
+      });
+      const failed = await reported.runPromiseExit(
+        drive({ title: "a reported error", files: 1, lines: 2 }).pipe(
+          Effect.provide(forbidden.layer),
+        ),
+      );
+
+      expect(opened.answer).toEqual({ number: 36, url, outcome: "opened" });
+      expect(refused.answer).toMatchObject({ outcome: "over-cap" });
+      expect(Exit.isFailure(failed)).toBe(true);
+      expect(reports).toEqual([
+        {
+          sessionId: opened.sessionId,
+          report: { _tag: "opened", pr: { number: 36, url } },
+          evidence: 0,
+        },
+        {
+          sessionId: refused.sessionId,
+          report: expect.objectContaining({ _tag: "failed", step: "over-cap" }),
+          evidence: 0,
+        },
+        {
+          sessionId: expect.any(String),
+          report: expect.objectContaining({
+            _tag: "failed",
+            step: "pr-error",
+            reason: expect.stringContaining("PrError"),
+          }),
+          evidence: 0,
+        },
+      ]);
+    } finally {
+      await reported.dispose();
+    }
+  }, 120_000);
+});
+
+describe("a slow tracker", () => {
+  it("does not hold up another session's PR step: the report runs outside the PR gate", async () => {
+    const github = makeGithubFake(201, {
+      number: 37,
+      url: "https://github.com/lobiklukas/factory/pull/37",
+    });
+    const arrived = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    let calls = 0;
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            // The first report stalls until released — a tracker that accepted the connection and
+            // has not answered — and every later one returns at once.
+            pullRequest: () =>
+              Effect.suspend(() => {
+                calls += 1;
+                return calls > 1
+                  ? Effect.void
+                  : Deferred.succeed(arrived, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                    );
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const stalled = yield* Effect.forkChild(
+            drive({ title: "a stalled report", files: 1, lines: 1 }).pipe(
+              Effect.provide(github.layer),
+            ),
+          );
+          yield* Deferred.await(arrived);
+          // Session A's report is in flight. Session B's whole PR step completes regardless.
+          const other = yield* drive({
+            title: "a PR behind a stalled report",
+            files: 1,
+            lines: 1,
+          }).pipe(Effect.provide(github.layer), Effect.timeout("60 seconds"));
+          yield* Deferred.succeed(release, undefined);
+          const first = yield* Fiber.join(stalled);
+          return { other, first };
+        }),
+      );
+      expect(result.other.answer).toMatchObject({ outcome: "opened" });
+      expect(result.first.answer).toMatchObject({ outcome: "opened" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+describe("a write-back that breaks its contract", () => {
+  /** A session layer whose tracker reports with `pullRequest`, and a short report budget. */
+  const withTracker = (pullRequest: SessionWriteBackShape["pullRequest"]) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+        writeBackBudget: "200 millis",
+      }).pipe(
+        Layer.provide(Layer.succeed(SessionWriteBack, { pullRequest })),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+
+  it("never answering: the PR step answers once the report's budget is spent", async () => {
+    const github = makeGithubFake(201, {
+      number: 38,
+      url: "https://github.com/lobiklukas/factory/pull/38",
+    });
+    const runtime = withTracker(() => Effect.never);
+    try {
+      const result = await runtime.runPromise(
+        drive({
+          title: "a report that never answers",
+          files: 1,
+          lines: 1,
+        }).pipe(
+          Effect.provide(github.layer),
+          // Far longer than the budget, far shorter than "never": a stall fails the case here.
+          Effect.timeout("30 seconds"),
+        ),
+      );
+      expect(result.answer).toMatchObject({ number: 38, outcome: "opened" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("dying: the defect is logged, and the PR step's answer stands", async () => {
+    const github = makeGithubFake(201, {
+      number: 39,
+      url: "https://github.com/lobiklukas/factory/pull/39",
+    });
+    const runtime = withTracker(() => Effect.die(new Error("tracker bug")));
+    try {
+      const result = await runtime.runPromise(
+        drive({ title: "a report that dies", files: 1, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      expect(result.answer).toMatchObject({ number: 39, outcome: "opened" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
 describe("an empty diff", () => {
   it("answers no-change for two runs on an unchanged checkout, announcing each in the transcript", async () => {
     const github = makeGithubFake(201, {
@@ -6268,6 +6499,97 @@ describe("the verify tool reads the session's workspace", () => {
           ],
         },
       ]);
+    } finally {
+      await verifyRuntime.dispose();
+    }
+  }, 120_000);
+
+  it("hands the session's verify record to the PR step's write-back, and the Linear comment carries it (LOB-15)", async () => {
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      fauxCommand:
+        "mkdir -p apps/api && echo 'export const reported = 1;' > apps/api/reported.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m reported && echo committed",
+    });
+    const url = "https://github.com/lobiklukas/verify-fixture/pull/79";
+    const github = makeGithubFake(201, { number: 79, url });
+    const reported: Array<readonly VerifyRecord[]> = [];
+    const verifyRuntime = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot: verifyRoot }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.map(input.evidence, (records) => {
+                reported.push(records);
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const sessionId = await verifyRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo: verifyRepo,
+            url: "https://github.com/lobiklukas/verify-fixture.git",
+            localPath: verifyRepoRoot,
+          });
+          const created = yield* sessions.create({
+            repo: verifyRepo,
+            baseRef: "main",
+          });
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "make the change, verify it, open the PR",
+          });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            "the run to verify and answer",
+          );
+          yield* sessions
+            .openPullRequest({
+              sessionId: created.id,
+              title: "factory: reported",
+              head: `factory/${created.id}`,
+              base: "main",
+            })
+            .pipe(Effect.provide(github.layer));
+          return created.id;
+        }),
+      );
+
+      expect(reported).toHaveLength(1);
+      const records = reported[0] ?? [];
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        _tag: "VerifyReport",
+        changed: ["apps/api/reported.ts"],
+      });
+      // What a Linear reader sees: the surface, its result, its exit code and the command.
+      const comment = linearPullRequestComment(
+        {
+          apiUrl: "http://linear.test/graphql",
+          apiKey: Redacted.make("unused"),
+          states: DEFAULT_LINEAR_STATES,
+        },
+        { sessionId, pr: { number: 79, url }, evidence: records },
+      );
+      expect(comment).toContain(
+        "Verification (the session's one `verify` call):",
+      );
+      expect(comment).toContain(
+        `- \`.\` passed (exit 0): \`${declared}\` in \`.\``,
+      );
+      expect(comment).not.toContain("No verification was recorded");
     } finally {
       await verifyRuntime.dispose();
     }

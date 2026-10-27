@@ -36,7 +36,6 @@ import { Effect, Layer, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   linearDeliveryFor,
-  NoWriteBack,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -48,6 +47,7 @@ import type {
 } from "@repo/domain/Trigger";
 import { TriggerRules } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { TriggerWriteBackLive } from "./LinearSync";
 
 /** The default cap on a trigger delivery, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 65_536;
@@ -361,7 +361,9 @@ export const WebhookLive = WebhookRoutes.pipe(
   HttpRouter.provideRequest(
     TriggerServiceLive({ rules }).pipe(
       Layer.provide(
-        Layer.mergeAll(TriggerSessionsFromSessionService, NoWriteBack),
+        // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
+        // started state when its session opens. Otherwise none.
+        Layer.mergeAll(TriggerSessionsFromSessionService, TriggerWriteBackLive),
       ),
     ),
   ),

@@ -7,14 +7,16 @@ which adds the session list beside the pane.
 
 ## Sub-features
 
-- The rail renders with `aria-label="Sections"` and one entry per section (Boards, Sessions,
-  Sandboxes, Approvals), each with a tooltip carrying the label the icon replaces; Boards leads
-  (LOB-75), see [board.md](board.md)
+- The rail renders with `aria-label="Sections"` and one entry per section (Boards, Sessions), each
+  with a tooltip carrying the label the icon replaces; Boards leads (LOB-75), see
+  [board.md](board.md). Sandboxes and approvals left the rail for panes of a card's run (LOB-76,
+  [card-pane.md](card-pane.md))
 - `/` lands on `/sessions` (the redirect is the assertion, not the absence of an error)
 - The session sidebar is the server's `listSessions` (LOB-75): its rows are the first page in the
   server's order, and with no sessions it says `No sessions on this control plane yet`
 - The theme toggle sits at the rail's foot and dark is the default
-- `/sandboxes` and `/approvals` render their milestone copy rather than an empty table
+- `/sandboxes` and `/approvals`, reached by URL only, render their milestone copy rather than an
+  empty table
 
 ## How to get to it (user POV)
 

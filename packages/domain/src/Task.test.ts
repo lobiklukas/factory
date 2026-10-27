@@ -25,7 +25,12 @@ import {
   BlockReason,
   ColumnKind,
   ColumnRequirement,
+  DECLARED_TRANSITIONS,
   DefinitionId,
+  declaredTransitions,
+  HUMAN_GATES,
+  humanGate,
+  isDeclaredTransition,
   Task,
   TaskBlocked,
   TaskEvent,
@@ -561,5 +566,41 @@ describe("a card, a run and an event", () => {
     ).toBe(true);
     // And a version the database's `CHECK (version >= 1)` mirrors but the contract does not.
     expect(refuses(BoardDefinition, { ...stored, version: 0 })).toBe(false);
+  });
+});
+
+describe("the declared transitions and human gates (B4, B5)", () => {
+  /**
+   * The table both `TaskService` and the card pane read (LOB-76). These cases pin its shape, so a
+   * pipeline edit that lets a card skip a column — the `intake → done` the card pane must never
+   * offer — fails here before it fails in a browser.
+   */
+  it("is the forward pipeline plus canceled, and no column skips one", () => {
+    expect(declaredTransitions("intake")).toEqual(["specifying", "canceled"]);
+    expect(declaredTransitions("specifying")).toEqual(["planning", "canceled"]);
+    expect(declaredTransitions("planning")).toEqual(["building", "canceled"]);
+    expect(declaredTransitions("building")).toEqual(["review", "canceled"]);
+    expect(declaredTransitions("review")).toEqual(["done", "canceled"]);
+    expect(isDeclaredTransition("intake", "done")).toBe(false);
+    expect(isDeclaredTransition("intake", "building")).toBe(false);
+  });
+
+  it("declares nothing out of a terminal column or one it does not know", () => {
+    expect(declaredTransitions("done")).toEqual([]);
+    expect(declaredTransitions("canceled")).toEqual([]);
+    expect(declaredTransitions("triage")).toEqual([]);
+    expect(Object.keys(DECLARED_TRANSITIONS)).not.toContain("done");
+  });
+
+  it("names exactly the two human gates, and only on declared moves", () => {
+    expect(humanGate("planning", "building")).toBe("plan approval");
+    expect(humanGate("review", "done")).toBe("merge");
+    expect(humanGate("intake", "specifying")).toBeUndefined();
+    expect(humanGate("building", "review")).toBeUndefined();
+    for (const key of Object.keys(HUMAN_GATES)) {
+      const [from = "", to = ""] = key.split("→");
+      expect(isDeclaredTransition(from, to)).toBe(true);
+    }
+    expect(Object.keys(HUMAN_GATES)).toHaveLength(2);
   });
 });
