@@ -225,6 +225,133 @@ export const SessionWorkspace = Schema.Struct({
 });
 export type SessionWorkspace = typeof SessionWorkspace.Type;
 
+/**
+ * One verification a PR cites, as the run's `verify` tool recorded it (LOB-79, part 2 of LOB-16).
+ *
+ * `name` is what ran: the skill directory's name (`verify-api`) when the surface's skill ran, or
+ * `commands.verify` when the repo's declared command did. `excerpt` is a bounded tail of the output
+ * the record holds, cut deterministically (the same record always gives the same excerpt), and
+ * `truncated` says the excerpt is shorter than what the command printed — either because the record
+ * already kept only a tail or because the excerpt cut it further. The output stays the record's: a
+ * PR quotes it, it never paraphrases it.
+ */
+export const VerificationRan = Schema.TaggedStruct("VerificationRan", {
+  surface: Schema.String,
+  name: Schema.String,
+  source: Schema.Literals(["workspace", "skill"]),
+  command: Schema.String,
+  exitCode: Schema.Int,
+  excerpt: Schema.String,
+  truncated: Schema.Boolean,
+});
+export type VerificationRan = typeof VerificationRan.Type;
+
+/** A verification that was found and could not run to an exit code (spawn failure, timeout). */
+export const VerificationUnrunnable = Schema.TaggedStruct(
+  "VerificationUnrunnable",
+  {
+    surface: Schema.String,
+    name: Schema.String,
+    source: Schema.Literals(["workspace", "skill"]),
+    command: Schema.String,
+    /** The execution environment's error code (`timeout`, `spawn_failed`, …). */
+    code: Schema.String,
+    message: Schema.String,
+    excerpt: Schema.String,
+    truncated: Schema.Boolean,
+  },
+);
+export type VerificationUnrunnable = typeof VerificationUnrunnable.Type;
+
+/** A changed surface the repo gives no way to verify: named, so its absence is on the PR. */
+export const VerificationMissing = Schema.TaggedStruct("VerificationMissing", {
+  surface: Schema.String,
+  message: Schema.String,
+});
+export type VerificationMissing = typeof VerificationMissing.Type;
+
+export const Verification = Schema.Union([
+  VerificationRan,
+  VerificationUnrunnable,
+  VerificationMissing,
+]);
+export type Verification = typeof Verification.Type;
+
+/**
+ * Whether the cited `verify` call saw the paths the PR publishes (LOB-79): `published` is how many
+ * the PR's `base...head` diff names, `covered` how many of those the call measured, and `missed` the
+ * first few it did not (sorted; at most `EVIDENCE_MISSED_LIMIT`). A missed path is one the run
+ * changed after it verified, so the verdict predates it. Paths, not contents: a later edit to a path
+ * the call did measure is not seen here.
+ */
+export const EvidenceCoverage = Schema.Struct({
+  published: Schema.Int,
+  covered: Schema.Int,
+  missed: Schema.mutable(Schema.Array(Schema.String)),
+});
+export type EvidenceCoverage = typeof EvidenceCoverage.Type;
+
+/** How many of the PR's paths the cited call missed an `EvidenceCoverage` names. */
+export const EVIDENCE_MISSED_LIMIT = 20;
+
+/**
+ * The run's last recorded `verify` call, as the PR carries it: one row per verification it ran.
+ *
+ * The last call rather than every call, because a later call is the one that saw the change the PR
+ * publishes; `calls` says how many there were (recorded or not), so a reader knows earlier verdicts
+ * exist. `results` is never empty — a call that verified nothing is `EvidenceNone` — and mutable only
+ * so its encoding is a plain JSON value Pi Durable's documents accept.
+ */
+export const EvidenceRecorded = Schema.TaggedStruct("EvidenceRecorded", {
+  calls: Schema.Int,
+  changedCount: Schema.Int,
+  results: Schema.mutable(Schema.Array(Verification)),
+  /**
+   * How many `verify` calls after the cited one left no record (blocked or crashed). Absent means
+   * none: the cited call is the run's last. Otherwise the body says so, because the newest call is
+   * the one that would have seen the latest change, and it has nothing to show.
+   */
+  unrecordedAfter: Schema.optionalKey(Schema.Int),
+  /**
+   * How the cited call's measured paths compare with the paths the PR publishes. Absent when the
+   * PR's paths were not measured (a session directory that is not its own checkout).
+   */
+  coverage: Schema.optionalKey(EvidenceCoverage),
+});
+export type EvidenceRecorded = typeof EvidenceRecorded.Type;
+
+/**
+ * A run with nothing to show: it never called `verify` (`not-verified`), every call it made left no
+ * record because it was blocked or crashed (`unrecorded`), its last recorded call could not measure
+ * what changed (`unmeasured`), or that call found no changed path (`no-changes`). A value rather than
+ * an absent section, so a PR without evidence says so instead of looking like one whose evidence was
+ * left out.
+ */
+export const EvidenceNone = Schema.TaggedStruct("EvidenceNone", {
+  reason: Schema.Literals([
+    "not-verified",
+    "unrecorded",
+    "unmeasured",
+    "no-changes",
+  ]),
+  /** Why, in the factory's words: a sentence the body renders as Markdown. */
+  message: Schema.String,
+  /**
+   * What the tool itself said, when it said something (`unmeasured`: git's stderr, the directory it
+   * could not measure). Tool-authored, so the body quotes it as code rather than as Markdown.
+   */
+  detail: Schema.optionalKey(Schema.String),
+});
+export type EvidenceNone = typeof EvidenceNone.Type;
+
+/**
+ * What a session's PR states was verified (LOB-79), derived from the run's recorded `verify` results
+ * — never from prose the model wrote. Attached to the PR's `factory.pr` document and its `prOpened`
+ * event, and rendered as the PR body's `## Verification` section.
+ */
+export const PrEvidence = Schema.Union([EvidenceRecorded, EvidenceNone]);
+export type PrEvidence = typeof PrEvidence.Type;
+
 export const SessionSnapshotFields = {
   session: SessionSummary,
   workspace: SessionWorkspace,
@@ -273,7 +400,11 @@ export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("status", { status: SessionStatus }),
   Schema.TaggedStruct("queued", { queued: Schema.Array(QueuedMessage) }),
   Schema.TaggedStruct("tasks", { tasks: Schema.Array(SessionTask) }),
-  Schema.TaggedStruct("prOpened", { prUrl: Schema.String }),
+  Schema.TaggedStruct("prOpened", {
+    prUrl: Schema.String,
+    /** What the PR says was verified (LOB-79). Absent on a PR recorded before evidence existed. */
+    evidence: Schema.optional(PrEvidence),
+  }),
 ]);
 export type SessionEvent = typeof SessionEvent.Type;
 
@@ -294,6 +425,32 @@ export const SendMessageResult = Schema.Struct({
   placement: MessagePlacement,
 });
 export type SendMessageResult = typeof SendMessageResult.Type;
+
+/**
+ * What withdrawing a queued message came to (LOB-166). `withdrawn` is the only outcome that changed
+ * anything: the message left the queue and will never reach the transcript. `already_placed` means
+ * a run took it first, `settled` that it is already over — the log moved before the request did.
+ */
+export const WithdrawOutcome = Schema.Literals([
+  "withdrawn",
+  "already_placed",
+  "settled",
+]);
+export type WithdrawOutcome = typeof WithdrawOutcome.Type;
+
+/** Withdraw one queued message, named by the `submissionId` `sendMessage` answered. */
+export const WithdrawMessageInput = Schema.Struct({
+  sessionId: SessionId,
+  submissionId: Schema.String,
+});
+export type WithdrawMessageInput = typeof WithdrawMessageInput.Type;
+
+export const WithdrawMessageResult = Schema.Struct({
+  session: SessionSummary,
+  submissionId: Schema.String,
+  outcome: WithdrawOutcome,
+});
+export type WithdrawMessageResult = typeof WithdrawMessageResult.Type;
 
 export const CreateSessionInput = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -451,7 +608,7 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
 /**
  * A session request that cannot be served. `code` is the part callers branch on.
  *
- * - `not_found` — no such session.
+ * - `not_found` — no such session, or no such message in it to withdraw.
  * - `busy` — the session is running and the caller asked for `whenBusy: "reject"`.
  * - `invalid_input` — the request was well-formed but refused: a message over the length cap, a
  *   malformed repo slug, an unreadable list cursor.

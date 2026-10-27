@@ -72,12 +72,19 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   async fetch(request) {
     const url = new URL(request.url);
-    const ledger = read();
-    ledger.requests.push({
-      method: request.method,
-      path: url.pathname,
-      authorization: request.headers.get("authorization") ?? undefined,
-    });
+    // Recorded before anything is answered, so the ledger holds every request that arrived.
+    const before = read();
+    const ledger: Ledger = {
+      ...before,
+      requests: [
+        ...before.requests,
+        {
+          method: request.method,
+          path: url.pathname,
+          authorization: request.headers.get("authorization") ?? undefined,
+        },
+      ],
+    };
     write(ledger);
 
     const match = commentRoute.exec(url.pathname);

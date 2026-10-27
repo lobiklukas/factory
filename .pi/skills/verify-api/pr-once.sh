@@ -14,7 +14,7 @@
 #   ./pr-once.sh
 #
 # Env: API_PORT (the port the fake uses; 9411 when unset), PR_ONCE_PORT (override), DATABASE_URL,
-# PR_ONCE_REPO, EVIDENCE_DIR. The run's `DATABASE_URL` is what the driver connects with; the session
+# PR_ONCE_REPO (a fresh slug per run when unset), EVIDENCE_DIR. The run's `DATABASE_URL` is what the driver connects with; the session
 # root is a throwaway git repo whose origin is a local bare repository, so no git call can reach a
 # real remote (LOB-94).
 #
@@ -37,7 +37,13 @@ SESSION_ROOT="$RUN_DIR/sessions"
 ORIGIN_DIR="$RUN_DIR/origin.git"
 DRIVER="$ROOT/.pi/skills/verify-api/pr-once.ts"
 FAKE="$ROOT/.pi/skills/verify-api/github-fake.ts"
-REPO="${PR_ONCE_REPO:-lobiklukas/factory}"
+# A repo slug this run owns, as docs-trigger.sh does. The shared default `lobiklukas/factory` is the
+# slug docs-run.sh registers with a real local checkout: on a database that drive already ran
+# against, a session bound to it gets that checkout, the branch has nothing to diff, and the step
+# answers `no-change` instead of opening a PR — every check here then fails for a reason that is not
+# the one under test.
+RUN_ID="$(date +%s)$$"
+REPO="${PR_ONCE_REPO:-lobiklukas/factory-pr-once-$RUN_ID}"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR" "$SESSION_ROOT"
 rm -f "$STATE" "$LEDGER"

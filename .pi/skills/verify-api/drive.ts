@@ -13,9 +13,22 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
+import {
+  RepoSlug,
+  SessionId,
+  type SessionEvent,
+  type SessionSnapshot,
+  type TranscriptEntry,
+} from "@repo/domain/Session";
 import { Effect, Exit, Fiber, Ref, Stream } from "effect";
 import { RpcClient } from "effect/rpc";
-import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
+import {
+  type CheckRecord,
+  makeChecker,
+  probeFor,
+  protocolFor,
+  waitUntil,
+} from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9200";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
@@ -26,7 +39,20 @@ const EXPECTED_ANSWER = `faux-ok (re: ${PROMPT})`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
-const observed = {
+const observed: {
+  apiUrl: string;
+  probes: Record<string, unknown>;
+  checks: Record<string, CheckRecord>;
+  events: ReadonlyArray<unknown>;
+  transcript: ReadonlyArray<{
+    readonly kind: string;
+    readonly text: string;
+    readonly toolName: string | null;
+  }>;
+  fork?: Record<string, unknown>;
+  sessionId?: SessionId | null;
+  consoleErrors?: ReadonlyArray<string>;
+} = {
   apiUrl: API_URL,
   probes: {},
   checks: {},
@@ -42,27 +68,21 @@ const ProtocolLive = protocolFor(API_URL);
  * must answer from a live check of Postgres, the migration ledger, and the tables a session request
  * reads. Both are plain HTTP — the RPC client cannot reach them.
  */
-const probe = async (route) => {
-  const response = await fetch(`${API_URL}${route}`);
-  return {
-    status: response.status,
-    body: await response.json().catch(() => null),
-  };
-};
+const probe = probeFor(API_URL);
 
 const livez = await probe("/livez");
 assert(
   "GET /livez answers 200",
-  livez.status === 200 && livez.body?.status === "ok",
+  livez.status === 200 && livez.answer?.status === "ok",
   `status=${livez.status} body=${JSON.stringify(livez.body)}`,
 );
 
 const readyz = await probe("/readyz");
-const readyzChecks = readyz.body?.checks ?? [];
+const readyzChecks = readyz.answer?.checks ?? [];
 assert(
   "GET /readyz answers 200 with every check ok",
   readyz.status === 200 &&
-    readyz.body?.status === "ok" &&
+    readyz.answer?.status === "ok" &&
     readyzChecks.length > 0 &&
     readyzChecks.every((check) => check.ok),
   `status=${readyz.status} checks=${JSON.stringify(readyzChecks)}`,
@@ -101,15 +121,15 @@ observed.probes = {
   oversizedBodyStatus: capped,
 };
 
-const textOf = (entry) => entry.text;
+const textOf = (entry: TranscriptEntry) => entry.text;
 
 /** Both `pi.usage` buckets, as one number: the total a session has spent on models and tools. */
-const tokensOf = (snapshot) =>
+const tokensOf = (snapshot: SessionSnapshot) =>
   [...snapshot.usage.models, ...snapshot.usage.tools].reduce(
     (total, bucket) => total + bucket.usage.totalTokens,
     0,
   );
-const lastAssistant = (entries) =>
+const lastAssistant = (entries: ReadonlyArray<TranscriptEntry>) =>
   entries.filter((entry) => entry.kind === "assistant").at(-1);
 
 const program = Effect.gen(function* () {
@@ -135,7 +155,7 @@ const program = Effect.gen(function* () {
   // Feature: repo binding (LOB-5). A session names a repo at a base ref, and its snapshot exposes
   // the workspace the server resolved — including the commands the repo declares about itself in
   // `.factory/config`. The registered local path is this skill's fixture.
-  const repoSlug = "lobiklukas/verify-api-fixture";
+  const repoSlug = RepoSlug.make("lobiklukas/verify-api-fixture");
   const repoUrl = "https://github.com/lobiklukas/factory.git";
   const fixture = path.resolve(
     new URL(".", import.meta.url).pathname,
@@ -238,7 +258,7 @@ const program = Effect.gen(function* () {
 
   // Feature: watch a live session. Attach *before* sending, so the first event is the
   // state before the message and everything after it is a real delta.
-  const collected = yield* Ref.make([]);
+  const collected = yield* Ref.make<ReadonlyArray<SessionEvent>>([]);
   const watcher = yield* client.watchSession({ sessionId: created.id }).pipe(
     Stream.tap((event) => Ref.update(collected, (all) => [...all, event])),
     Stream.runDrain,
@@ -296,7 +316,7 @@ const program = Effect.gen(function* () {
     snapshot?._tag === "snapshot" &&
       snapshot.session.mode === "live" &&
       snapshot.entries.length === 0,
-    `first event=${snapshot?._tag} mode=${snapshot?.session?.mode}`,
+    `first event=${snapshot?._tag} mode=${snapshot?._tag === "snapshot" ? snapshot.session.mode : undefined}`,
   );
   // Feature: the live-task list (LOB-183). No durable task is started here — this driver has no
   // RPC that starts one — so the list is present and empty, which is what an idle session's panel
@@ -501,7 +521,9 @@ const program = Effect.gen(function* () {
 
   // Feature: typed errors cross the wire.
   const missing = yield* Effect.exit(
-    client.getSession({ sessionId: "ses_00000000000000000000000000" }),
+    client.getSession({
+      sessionId: SessionId.make("ses_00000000000000000000000000"),
+    }),
   );
   const failure = Exit.findErrorOption(missing);
   assert(
@@ -917,7 +939,7 @@ const program = Effect.gen(function* () {
   return { id: created.id };
 }).pipe(Effect.provide(ProtocolLive), Effect.scoped);
 
-let sessionId = null;
+let sessionId: SessionId | null = null;
 try {
   const result = await Effect.runPromise(program);
   sessionId = result.id;

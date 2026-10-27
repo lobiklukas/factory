@@ -1,4 +1,5 @@
 import type {
+  QueuedMessage,
   SessionEvent,
   SessionId,
   SessionMode,
@@ -18,6 +19,27 @@ export const formatEntry = (entry: TranscriptEntry): string => {
       return `[${entry.kind}] ${entry.text}`;
   }
 };
+
+/**
+ * One queued message as a terminal line: the queue it waits in and its submission id, then its text.
+ *
+ * The id is in the bracket because it is what `factory withdraw` takes (LOB-166): a queued line that
+ * did not name its message would leave nothing to withdraw it by.
+ */
+export const formatQueued = (queued: QueuedMessage): string => {
+  const text =
+    typeof queued.content === "string"
+      ? queued.content
+      : queued.content == null
+        ? ""
+        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
+            queued.content,
+          );
+  return `[queued:${queued.mode}:${queued.id}] ${text}`.trimEnd();
+};
+
+/** What a watcher prints when the queue it was showing drains. */
+export const QUEUE_EMPTY = "[queued] (empty)";
 
 /**
  * Whether the run is over. `live.busy` is the same signal as `status`, and either arriving means
@@ -82,6 +104,8 @@ export const followSession = (
       mode: undefined,
       answer: undefined,
     });
+    // How many messages the last queue reading held, so a drain is told apart from a quiet queue.
+    const queuedCount = yield* Ref.make(0);
 
     yield* client.watchSession({ sessionId }).pipe(
       Stream.takeUntil(isSettled),
@@ -99,18 +123,9 @@ export const followSession = (
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);
               }
+              yield* Ref.set(queuedCount, event.queued.length);
               for (const q of event.queued) {
-                yield* Console.log(
-                  `[queued:${q.mode}] ${
-                    typeof q.content === "string"
-                      ? q.content
-                      : q.content == null
-                        ? q.id
-                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
-                            q.content,
-                          )
-                  }`,
-                );
+                yield* Console.log(formatQueued(q));
               }
               break;
             }
@@ -119,18 +134,17 @@ export const followSession = (
               break;
             }
             case "queued": {
+              // A queue that held messages and now holds none drained — a run took them, or they were
+              // withdrawn — which is worth a line of its own; an empty queue staying empty is not.
+              const before = yield* Ref.getAndSet(
+                queuedCount,
+                event.queued.length,
+              );
+              if (before > 0 && event.queued.length === 0) {
+                yield* Console.log(QUEUE_EMPTY);
+              }
               for (const q of event.queued) {
-                yield* Console.log(
-                  `[queued:${q.mode}] ${
-                    typeof q.content === "string"
-                      ? q.content
-                      : q.content == null
-                        ? q.id
-                        : /* oxlint-disable-next-line effecttsgo/prefer-schema-over-json */ JSON.stringify(
-                            q.content,
-                          )
-                  }`,
-                );
+                yield* Console.log(formatQueued(q));
               }
               break;
             }

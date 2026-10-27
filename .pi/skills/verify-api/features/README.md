@@ -93,6 +93,11 @@ evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API p
 was re-run there too (API on `:9550`, faux): **52/52**, evidence `.verify/evidence/lob-78/verify-api/`
 — every session now has the tool installed, and nothing the drive asserts changed.
 
+The PR evidence checks (LOB-79) were run from the `agent/LOB-79` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_79` on 5442, faux, the fake GitHub on
+`API_PORT=9540`): `./pr-evidence.sh` **10/10**, evidence `.verify/evidence/lob-79/api/`. Like
+`./pr-once.sh` it starts no API process.
+
 The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2026-10-27
 (`DATABASE_URL` the worktree's own `factory_agent_lob_72` on 5442, faux, no port bound): `./spec.sh`
 **9/9** (8 driver checks across two processes, 1 shell check that they were two), evidence
@@ -125,6 +130,7 @@ harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)   |
+| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)   |
 | The spec document        | passing | [spec.md](spec.md)                 |
 
 ## Deliberately absent

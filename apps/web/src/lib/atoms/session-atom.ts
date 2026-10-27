@@ -8,6 +8,7 @@ import type {
   SessionTask,
   SessionUsage,
   TranscriptEntry,
+  WithdrawMessageInput,
 } from "@repo/domain/Session";
 import { Effect, Stream } from "effect";
 import { runtime } from "../atom";
@@ -154,6 +155,20 @@ export const compactSessionAtom = runtime.fn((input: CompactSessionInput) =>
   Effect.gen(function* () {
     const rpc = yield* RpcClient;
     return yield* rpc.client.compactSession(input);
+  }),
+);
+
+/**
+ * Withdraws a queued message before a run places it (LOB-166's RPC).
+ *
+ * The answer's `outcome` is what happened: only `withdrawn` took the message out of the queue; a
+ * run that placed it first, or a message already over, is an answer the pane reports, not a
+ * failure. The queue the pane renders shrinks over the stream either way.
+ */
+export const withdrawMessageAtom = runtime.fn((input: WithdrawMessageInput) =>
+  Effect.gen(function* () {
+    const rpc = yield* RpcClient;
+    return yield* rpc.client.withdrawMessage(input);
   }),
 );
 
