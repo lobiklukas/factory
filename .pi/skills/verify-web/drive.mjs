@@ -54,10 +54,17 @@ const rpcFromDrive = async (tag, payload) => {
       status: response.status,
       exit: envelope?.exit?._tag ?? null,
       value: envelope?.exit?.value ?? null,
+      cause: envelope?.exit?.cause ?? null,
       raw: envelope === undefined ? text.slice(0, 400) : null,
     };
   } catch (error) {
-    return { status: 0, exit: null, value: null, raw: String(error) };
+    return {
+      status: 0,
+      exit: null,
+      value: null,
+      cause: null,
+      raw: String(error),
+    };
   }
 };
 
@@ -1389,10 +1396,9 @@ if ((await sessionLink.count()) > 0) {
 // (`.pi/skills/verify-board/seed.ts`), so the drive can be rerun against the same `./up.sh`
 // instance: the move below changes only this run's card. The oracle for the lane order is
 // `getBoard` asked from this process, so a definition that reorders its columns changes the
-// expectation rather than breaking the check. **The dashboard performs no move here**: the board UI
-// is read-only in LOB-75, every request the board pages send is recorded and asserted to be a read,
-// and the one move this block needs is made the way a person makes it outside the browser —
-// `factory board move` against the API — before the reload that has to show it.
+// expectation rather than breaking the check. The lanes themselves never change a card: every move
+// below is made in the card pane (LOB-76) or by `factory board move`, and every request the board
+// pages send is recorded and checked against what the walk clicked.
 //
 // The seed is evaluated from `apps/api` rather than run by path: bun's isolated linker (bun.lock
 // `configVersion: 1`) links `@repo/core` and `@repo/storage-postgres` only into the workspaces that
@@ -1442,14 +1448,19 @@ const definitionOrder = (truth.value?.definition?.columns ?? []).map(
 );
 boardObserved.definitionOrder = definitionOrder;
 
-// Every RPC tag the board pages send, read off the requests themselves. Reads only: a write here
-// would be a move (or a create) this child's UI must not be able to make. `listSessions` is the
-// sidebar of the sessions page the walk starts from.
+// Every RPC tag the board pages send, read off the requests themselves. These are the reads; the
+// card pane's writes (LOB-76) are counted against what the walk clicks, at the end of the block.
+// `listSessions` is the sidebar of the sessions page the walk starts from, and the session reads are
+// the run pane the walk opens.
 const BOARD_READS = new Set([
   "listBoards",
   "getBoard",
   "listTasks",
   "listSessions",
+  "listTaskRuns",
+  "getSession",
+  "watchSession",
+  "listApprovals",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
@@ -1576,38 +1587,328 @@ assert(
   `localStorage ${JSON.stringify(storageBefore.local)}, sessionStorage ${JSON.stringify(storageBefore.session)}`,
 );
 
-// The server-side move, outside the browser: the real CLI over the API, at the seeded revision.
-const move = spawnSync(
-  "bun",
-  [
-    "run",
-    path.join(ROOT, "apps/cli/src/index.ts"),
-    "board",
-    "move",
-    "--task",
-    cardId,
-    "--to",
-    "specifying",
-    "--expect-revision",
-    String(boardSeed?.revision ?? 1),
-    "--api",
-    API_URL,
-  ],
-  { cwd: ROOT, encoding: "utf8", timeout: 60_000 },
-);
-boardObserved.move = {
-  status: move.status,
-  stdout: (move.stdout ?? "").trim().slice(0, 300),
-  stderr: (move.stderr ?? "").trim().slice(0, 300),
+// Feature: the card pane's write path (LOB-76). See features/card-pane.md.
+//
+// The card pane is where a person acts: it offers only the moves the card's column declares, marks
+// the ones that cross a human gate, surfaces the service's own refusal for a stale move without
+// moving the card, follows a move made in the CLI without a reload, and starts a run from the card.
+// Every move the walk needs outside the browser is made the way a person makes it there —
+// `factory board move` — and the oracle for each state is the API's `getTask`, asked from here.
+
+/** `factory <args>` — the real CLI over the API, run from the drive process. */
+const factory = (args) => {
+  const run = spawnSync(
+    "bun",
+    [
+      "run",
+      path.join(ROOT, "apps/cli/src/index.ts"),
+      ...args,
+      "--api",
+      API_URL,
+    ],
+    { cwd: ROOT, encoding: "utf8", timeout: 60_000 },
+  );
+  return {
+    status: run.status,
+    stdout: (run.stdout ?? "").trim().slice(0, 600),
+    stderr: (run.stderr ?? "").trim().slice(0, 600),
+  };
 };
-const moved = await rpcFromDrive("getTask", { taskId: cardId });
-boardObserved.movedTask = moved.value;
+
+/**
+ * The transitions the shared table declares out of `column` (`@repo/domain/Task`), which is what
+ * `TaskService` refuses against. Read through bun because the table is TypeScript; the server half
+ * of the claim — a move the table does not list is refused — is asserted against the API below.
+ */
+const declaredOutOf = (column) => {
+  const run = spawnSync(
+    "bun",
+    [
+      "-e",
+      `import { declaredTransitions } from "@repo/domain/Task"; console.log(JSON.stringify(declaredTransitions(${JSON.stringify(column)})));`,
+    ],
+    { cwd: ROOT, encoding: "utf8", timeout: 60_000 },
+  );
+  try {
+    return JSON.parse((run.stdout ?? "").trim());
+  } catch {
+    return null;
+  }
+};
+
+/** The open card pane as the page renders it: which card, its column and revision, its moves. */
+const readPane = (target) =>
+  target.evaluate(() => {
+    const pane = document.querySelector("aside[data-card-pane]");
+    if (pane === null) return null;
+    const start = pane.querySelector("[data-start-run]");
+    return {
+      card: pane.getAttribute("data-card-pane"),
+      column: pane.getAttribute("data-card-pane-column"),
+      revision: Number(pane.getAttribute("data-card-pane-revision")),
+      moves: Array.from(pane.querySelectorAll("[data-move-to]")).map(
+        (button) => ({
+          to: button.getAttribute("data-move-to"),
+          gate: button.getAttribute("data-human-gate"),
+          label: button.getAttribute("aria-label"),
+          text: (button.textContent ?? "").replace(/\s+/g, " ").trim(),
+        }),
+      ),
+      refusal: (() => {
+        const alert = pane.querySelector("[data-move-refusal]");
+        return alert === null
+          ? null
+          : {
+              tag: alert.getAttribute("data-move-refusal"),
+              text: (alert.textContent ?? "").replace(/\s+/g, " ").trim(),
+            };
+      })(),
+      startRun:
+        start === null
+          ? null
+          : {
+              disabled: start.hasAttribute("disabled"),
+              title: start.getAttribute("title"),
+            },
+      runs: Array.from(pane.querySelectorAll("li[data-run]")).map((row) =>
+        row.getAttribute("data-run"),
+      ),
+    };
+  });
+
+/** Wait until the seeded card sits in `lane`; `true` when it does within the timeout. */
+const waitForCardIn = (target, lane, timeout = 15_000) =>
+  target
+    .waitForFunction(
+      ({ id, lane }) =>
+        document
+          .querySelector(`li[data-card='${id}']`)
+          ?.closest("section[data-lane]")
+          ?.getAttribute("data-lane") === lane,
+      { id: cardId, lane },
+      { timeout },
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+
+const paneObserved = {};
+
+// Open the card: the card in its lane is a link, and the pane opens beside the lanes with the URL
+// naming the card, so a link to it opens the same pane anywhere.
+let paneOpened = false;
+try {
+  await page.locator(`li[data-card='${cardId}'] a`).click();
+  await page.waitForSelector(`aside[data-card-pane='${cardId}']`, {
+    timeout: 10_000,
+  });
+  paneOpened = new URL(page.url()).searchParams.get("card") === cardId;
+} catch (error) {
+  paneObserved.openError = String(error).slice(0, 300);
+}
+assert(
+  "the card opens in the card pane, named in the URL",
+  paneOpened,
+  paneOpened
+    ? `opened ${cardId} at ${new URL(page.url()).search}`
+    : `${paneObserved.openError ?? ""} (at ${page.url()})`,
+);
+
+// Declared transitions only: the intake card is offered exactly what the column declares, and
+// never `done`. The API is asked the same question from here — a direct move to `done` — and must
+// refuse it as undeclared, without changing the card.
+const declaredIntake = declaredOutOf("intake");
+const inIntake = await readPane(page);
+paneObserved.intake = inIntake;
+paneObserved.declaredIntake = declaredIntake;
+const offeredIntake = (inIntake?.moves ?? []).map((move) => move.to);
+assert(
+  "a card in intake is offered exactly its column's declared transitions",
+  Array.isArray(declaredIntake) &&
+    declaredIntake.length > 0 &&
+    JSON.stringify(offeredIntake) === JSON.stringify(declaredIntake),
+  `offered ${JSON.stringify(offeredIntake)} vs declared ${JSON.stringify(declaredIntake)}`,
+);
+const directToDone = await rpcFromDrive("moveTask", {
+  taskId: cardId,
+  expectedRevision: 1,
+  to: "done",
+  actor: "drive",
+});
+const afterDone = await rpcFromDrive("getTask", { taskId: cardId });
+paneObserved.directToDone = { exit: directToDone, after: afterDone.value };
+assert(
+  "intake is not offered done, and the API refuses that move",
+  !offeredIntake.includes("done") &&
+    directToDone.exit === "Failure" &&
+    JSON.stringify(directToDone.cause).includes("UndeclaredTransition") &&
+    afterDone.value?.column === "intake" &&
+    afterDone.value?.revision === 1,
+  `offered done: ${offeredIntake.includes("done")}; API ${String(directToDone.exit)} ${JSON.stringify(directToDone.cause).slice(0, 160)}; card ${String(afterDone.value?.column)} r${String(afterDone.value?.revision)}`,
+);
+assert(
+  "intake offers no gated move and no run start, and says why",
+  (inIntake?.moves ?? []).every((move) => move.gate === null) &&
+    inIntake?.startRun?.disabled === true &&
+    (inIntake?.startRun?.title ?? "").includes("resting"),
+  `gates ${JSON.stringify((inIntake?.moves ?? []).map((move) => move.gate))}; start ${JSON.stringify(inIntake?.startRun)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "card-pane-intake.png"),
+});
+
+// A stale-revision move. The page's board reads are held at the network while the card changes
+// underneath it — a block and an unblock through the API, which bump the revision without moving
+// the card — so the pane still shows revision 1 when the person clicks. The move is sent at r1 and
+// the service refuses it; the pane must print the service's own words and leave the card where it
+// is, before and after the held reads are let through.
+const held = [];
+let freezeReads = true;
+const holdBoardReads = async (route) => {
+  const body = route.request().postData() ?? "";
+  if (
+    freezeReads &&
+    (body.includes('"tag":"getBoard"') || body.includes('"tag":"listTasks"'))
+  ) {
+    held.push(route);
+    return;
+  }
+  await route.continue().catch(() => undefined);
+};
+await page.route(/\/rpc\/?$/, holdBoardReads);
+const blockedOut = await rpcFromDrive("blockTask", {
+  taskId: cardId,
+  expectedRevision: 1,
+  reason: "transient",
+  actor: "drive",
+});
+const unblockedOut = await rpcFromDrive("unblockTask", {
+  taskId: cardId,
+  expectedRevision: 2,
+  actor: "drive",
+});
+const beforeClick = await readPane(page);
+let refusalShown = false;
+try {
+  await page
+    .locator("aside[data-card-pane] [data-move-to='specifying']")
+    .click();
+  await page.waitForSelector("aside[data-card-pane] [data-move-refusal]", {
+    timeout: 10_000,
+  });
+  refusalShown = true;
+} catch (error) {
+  paneObserved.staleError = String(error).slice(0, 300);
+}
+const staleLanes = await readLanes(page);
+const stalePane = await readPane(page);
+const staleTruth = await rpcFromDrive("getTask", { taskId: cardId });
+paneObserved.stale = {
+  block: blockedOut.exit,
+  unblock: unblockedOut.exit,
+  beforeClick: beforeClick?.revision,
+  pane: stalePane,
+  lanes: staleLanes.cardLanes,
+  truth: staleTruth.value,
+};
+assert(
+  "a stale-revision move surfaces the service's refusal in the pane",
+  blockedOut.exit === "Success" &&
+    unblockedOut.exit === "Success" &&
+    beforeClick?.revision === 1 &&
+    refusalShown &&
+    stalePane?.refusal?.tag === "StaleRevision" &&
+    (stalePane?.refusal?.text ?? "").includes("is at revision 3, not 1"),
+  `block ${String(blockedOut.exit)}, unblock ${String(unblockedOut.exit)}, clicked at r${String(beforeClick?.revision)}; refusal ${JSON.stringify(stalePane?.refusal ?? paneObserved.staleError ?? null)}`,
+);
+assert(
+  "and the refused card does not visually move",
+  JSON.stringify(staleLanes.cardLanes) === JSON.stringify(["intake"]) &&
+    stalePane?.column === "intake" &&
+    staleTruth.value?.column === "intake" &&
+    staleTruth.value?.revision === 3,
+  `lane ${JSON.stringify(staleLanes.cardLanes)}, pane ${String(stalePane?.column)}, server ${String(staleTruth.value?.column)} r${String(staleTruth.value?.revision)}`,
+);
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "card-pane-stale.png") });
+freezeReads = false;
+for (const route of held.splice(0))
+  await route.continue().catch(() => undefined);
+await page.unroute(/\/rpc\/?$/, holdBoardReads);
+const caughtUp = await page
+  .waitForSelector(
+    `aside[data-card-pane='${cardId}'][data-card-pane-revision='3']`,
+    { timeout: 10_000 },
+  )
+  .then(
+    () => true,
+    () => false,
+  );
+const afterRelease = await readLanes(page);
+paneObserved.afterRelease = { caughtUp, lanes: afterRelease.cardLanes };
+assert(
+  "once the reads land the pane holds the server's revision, and the card is still in intake",
+  caughtUp &&
+    JSON.stringify(afterRelease.cardLanes) === JSON.stringify(["intake"]),
+  `pane at r3: ${caughtUp}; lane ${JSON.stringify(afterRelease.cardLanes)}`,
+);
+
+// A move made in `factory board move` appears in the browser without a reload. The marker on
+// `window` is lost on any navigation or reload, so its survival is the proof that none happened.
+await page.evaluate(() => {
+  window.__driveNoReload = "kept";
+});
+const cliMove = factory([
+  "board",
+  "move",
+  "--task",
+  cardId,
+  "--to",
+  "specifying",
+  "--expect-revision",
+  "3",
+]);
+const cliMoved = await rpcFromDrive("getTask", { taskId: cardId });
+const followed = await waitForCardIn(page, "specifying");
+const stayedPut = await page.evaluate(() => window.__driveNoReload === "kept");
+const followedPane = await readPane(page);
+paneObserved.cliToBrowser = {
+  cli: cliMove,
+  truth: cliMoved.value,
+  followed,
+  noReload: stayedPut,
+  pane: followedPane,
+};
 assert(
   "factory board move moved the card on the server",
-  move.status === 0 &&
-    moved.value?.column === "specifying" &&
-    moved.value?.revision === (boardSeed?.revision ?? 1) + 1,
-  `exit ${String(move.status)}, server says ${JSON.stringify(moved.value?.column ?? null)} r${String(moved.value?.revision ?? null)}; ${boardObserved.move.stderr || boardObserved.move.stdout}`,
+  cliMove.status === 0 &&
+    cliMoved.value?.column === "specifying" &&
+    cliMoved.value?.revision === 4,
+  `exit ${String(cliMove.status)}, server says ${JSON.stringify(cliMoved.value?.column ?? null)} r${String(cliMoved.value?.revision ?? null)}; ${cliMove.stderr || cliMove.stdout}`,
+);
+assert(
+  "the CLI's move appears in the browser without a reload",
+  followed &&
+    stayedPut &&
+    followedPane?.column === "specifying" &&
+    followedPane?.revision === 4,
+  `card in specifying: ${followed}, no reload: ${stayedPut}, pane ${String(followedPane?.column)} r${String(followedPane?.revision)}`,
+);
+// The stale refusal described revision 3; the card is at 4 now, so the pane no longer shows it
+// over the new column's moves.
+assert(
+  "the stale refusal is dropped once the card moves on",
+  followedPane !== null && followedPane.refusal === null,
+  `refusal after the CLI move ${JSON.stringify(followedPane?.refusal ?? null)}`,
+);
+// The pane re-offers from the new column, still exactly what that column declares.
+const declaredSpecifying = declaredOutOf("specifying");
+assert(
+  "the pane re-offers the new column's declared transitions",
+  Array.isArray(declaredSpecifying) &&
+    JSON.stringify((followedPane?.moves ?? []).map((move) => move.to)) ===
+      JSON.stringify(declaredSpecifying),
+  `offered ${JSON.stringify((followedPane?.moves ?? []).map((move) => move.to))} vs declared ${JSON.stringify(declaredSpecifying)}`,
 );
 
 // A reload is a fresh read of both halves: the card is in `specifying` and nowhere else.
@@ -1649,20 +1950,236 @@ await freshPage.screenshot({
 });
 await freshContext.close();
 
-// Read-only: no control in the lanes can act on a card, and nothing the board pages sent was a
-// write. The tags are the requests' own, so a move wired to any element would be caught here even
-// if it rendered as something other than a button.
+// And the reverse: a move made in the browser is what `factory board show` prints.
+await page.waitForSelector(`aside[data-card-pane='${cardId}']`, {
+  timeout: 10_000,
+});
+let browserMoved = false;
+try {
+  await page.locator("aside[data-card-pane] [data-move-to='planning']").click();
+  browserMoved = await waitForCardIn(page, "planning");
+} catch (error) {
+  paneObserved.browserMoveError = String(error).slice(0, 300);
+}
+const cliShow = factory(["board", "show", "--task", cardId]);
+paneObserved.browserToCli = { browserMoved, show: cliShow };
+assert(
+  "a move made in the browser is what factory board show prints",
+  browserMoved &&
+    cliShow.status === 0 &&
+    /^column\s+planning$/m.test(cliShow.stdout) &&
+    /^revision\s+5$/m.test(cliShow.stdout),
+  `browser moved: ${browserMoved}; show exit ${String(cliShow.status)}: ${JSON.stringify(cliShow.stdout.split("\n").slice(0, 4))}`,
+);
+
+// Human gates are marked. Out of `planning` the move to `building` is the plan approval (B5): it is
+// offered to a person, and marked as a person's move; `canceled` beside it is not marked.
+const inPlanning = await readPane(page);
+paneObserved.planning = inPlanning;
+const toBuilding = (inPlanning?.moves ?? []).find(
+  (move) => move.to === "building",
+);
+const toCanceled = (inPlanning?.moves ?? []).find(
+  (move) => move.to === "canceled",
+);
+assert(
+  "the human-required move is visibly marked, and only it",
+  toBuilding?.gate === "plan approval" &&
+    (toBuilding?.text ?? "").includes("person · plan approval") &&
+    (toBuilding?.label ?? "").includes("a person's move") &&
+    toCanceled !== undefined &&
+    toCanceled.gate === null,
+  `building ${JSON.stringify(toBuilding ?? null)}; canceled ${JSON.stringify(toCanceled ?? null)}`,
+);
+
+// Run start: `planning` is a working column, so the pane offers a run; the click is
+// `createSession` with the card named, and the run is listed on the card and opened beside it.
+let runId = null;
+try {
+  await page.locator("aside[data-card-pane] [data-start-run]").click();
+  await page.waitForFunction(
+    () => new URL(window.location.href).searchParams.get("run") !== null,
+    null,
+    { timeout: 20_000 },
+  );
+  runId = new URL(page.url()).searchParams.get("run");
+  await page.waitForSelector(`aside[data-card-pane] li[data-run='${runId}']`, {
+    timeout: 15_000,
+  });
+  await page.waitForSelector(`[data-run-pane='${runId}']`, { timeout: 15_000 });
+} catch (error) {
+  paneObserved.runError = String(error).slice(0, 300);
+}
+const runs = await rpcFromDrive("listTaskRuns", { taskId: cardId });
+const runPaneText =
+  runId === null
+    ? ""
+    : (
+        (await page
+          .locator(`[data-run-pane='${runId}']`)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).slice(0, 300);
+paneObserved.run = { runId, runs: runs.value, runPaneText };
+assert(
+  "a run is started from the card, listed on it, and opened beside it",
+  typeof runId === "string" &&
+    runId.startsWith("ses_") &&
+    runs.exit === "Success" &&
+    (runs.value ?? []).some(
+      (run) => run.sessionId === runId && run.column === "planning",
+    ) &&
+    runPaneText.includes(runId),
+  `run ${String(runId)}; listTaskRuns ${JSON.stringify((runs.value ?? []).map((run) => [run.sessionId, run.column]))}; pane ${JSON.stringify(runPaneText.slice(0, 80))}`,
+);
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "card-pane-run.png") });
+
+// `/sandboxes` and `/approvals` left the rail: they are panes of a card's run now.
+const rail = await page.evaluate(() =>
+  Array.from(document.querySelectorAll("nav[aria-label='Sections'] a")).map(
+    (anchor) => anchor.getAttribute("href"),
+  ),
+);
+const runTabs = await page.evaluate(() =>
+  Array.from(
+    document.querySelectorAll("aside[data-card-pane] [role='tab']"),
+  ).map((tab) => (tab.textContent ?? "").trim()),
+);
+paneObserved.rail = rail;
+paneObserved.runTabs = runTabs;
+assert(
+  "sandboxes and approvals left the rail for panes inside the card",
+  !rail.includes("/sandboxes") &&
+    !rail.includes("/approvals") &&
+    rail.includes("/boards") &&
+    JSON.stringify(runTabs) ===
+      JSON.stringify(["Transcript", "Approvals", "Sandbox"]),
+  `rail ${JSON.stringify(rail)}; run tabs ${JSON.stringify(runTabs)}`,
+);
+
+// The run's Approvals pane is a write path: a pending approval is listed with Approve/Deny, and the
+// click is `decideApproval` as a person (`dashboard`). The request is made from the drive through
+// the API's own `requestApproval` — what a gated action does — and the oracle for the decision is
+// the API's `listApprovals`, asked from here, not the page.
+const approvalRequestId = `verify-web-approval-${Date.now()}`;
+const decidePayloads = [];
+const recordDecide = (request) => {
+  if (!/\/rpc\/?$/.test(request.url()) || request.method() !== "POST") return;
+  for (const line of (request.postData() ?? "").split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (message?._tag === "Request" && message.tag === "decideApproval")
+        decidePayloads.push(message.payload);
+    } catch {
+      // Not an envelope line.
+    }
+  }
+};
+page.on("request", recordDecide);
+const asked =
+  runId === null
+    ? { exit: null }
+    : await rpcFromDrive("requestApproval", {
+        sessionId: runId,
+        requestId: approvalRequestId,
+        action: "verify-web: push the branch",
+        detail: "seeded by the drive",
+      });
+let approvalListed = false;
+let approvalCleared = false;
+try {
+  await page
+    .locator("aside[data-card-pane] [role='tab']", { hasText: "Approvals" })
+    .click();
+  await page.waitForSelector(
+    `aside[data-card-pane] [data-approval='${approvalRequestId}']`,
+    { timeout: 15_000 },
+  );
+  approvalListed = true;
+  await page
+    .locator(
+      `aside[data-card-pane] [data-approval='${approvalRequestId}'] [data-decide='approved']`,
+    )
+    .click();
+  await page.waitForSelector("aside[data-card-pane] [data-no-approvals]", {
+    timeout: 15_000,
+  });
+  approvalCleared = true;
+} catch (error) {
+  paneObserved.approvalError = String(error).slice(0, 300);
+}
+page.off("request", recordDecide);
+const pendingAfter =
+  runId === null
+    ? { exit: null, value: null }
+    : await rpcFromDrive("listApprovals", { sessionId: runId });
+paneObserved.approvals = {
+  asked: asked.exit,
+  listed: approvalListed,
+  cleared: approvalCleared,
+  decide: decidePayloads,
+  pendingAfter: pendingAfter.value,
+};
+assert(
+  "a run's pending approval is decided from the card's Approvals pane",
+  asked.exit === "Success" &&
+    approvalListed &&
+    approvalCleared &&
+    decidePayloads.length === 1 &&
+    decidePayloads[0]?.requestId === approvalRequestId &&
+    decidePayloads[0]?.decision === "approved" &&
+    decidePayloads[0]?.actor === "dashboard" &&
+    pendingAfter.exit === "Success" &&
+    (pendingAfter.value?.approvals ?? []).length === 0,
+  `requested ${String(asked.exit)}; listed ${approvalListed}, cleared ${approvalCleared}; sent ${JSON.stringify(decidePayloads)}; API pending ${JSON.stringify(pendingAfter.value?.approvals ?? null)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "card-pane-approvals.png"),
+});
+
+// The lanes still hold no control that can change a card, and the only writes the board pages sent
+// are the two moves the walk clicked (the refused one and the accepted one) and the run start. The
+// tags are the requests' own, so a write wired to any other element would be caught here.
 page.off("request", recordRpcTags);
+const BOARD_WRITES = new Set(["moveTask", "createSession", "decideApproval"]);
 const boardWrites = boardRpcTags.filter((tag) => !BOARD_READS.has(tag));
 boardObserved.rpcTags = boardRpcTags;
 assert(
-  "the board is read-only: no move control, and only reads sent",
+  "the lanes hold no move control, and the pages wrote only what was clicked",
   before.controls === 0 &&
     afterReload.controls === 0 &&
-    boardRpcTags.length > 0 &&
-    boardWrites.length === 0,
-  `controls ${before.controls}/${afterReload.controls}; tags ${JSON.stringify(boardRpcTags)}`,
+    boardWrites.every((tag) => BOARD_WRITES.has(tag)) &&
+    boardWrites.filter((tag) => tag === "moveTask").length === 2 &&
+    boardWrites.filter((tag) => tag === "createSession").length === 1 &&
+    boardWrites.filter((tag) => tag === "decideApproval").length === 1,
+  `controls ${before.controls}/${afterReload.controls}; writes ${JSON.stringify(boardWrites)}`,
 );
+
+// `?run=` opens only a run of the selected card: a well-formed session id that is not one of its
+// runs is named as such, and no transcript, composer or approvals are opened under the card.
+const foreignRun = "ses_0123456789abcdefghjkmnpqrs";
+await page.goto(
+  `${WEB_URL}/boards/${boardId}?card=${cardId}&run=${foreignRun}`,
+  { waitUntil: "domcontentloaded" },
+);
+const foreignShown = await page
+  .waitForSelector(`aside[data-card-pane] [data-run-foreign='${foreignRun}']`, {
+    timeout: 15_000,
+  })
+  .then(
+    () => true,
+    () => false,
+  );
+const foreignPanes = await page.evaluate(
+  () => document.querySelectorAll("aside[data-card-pane] [role='tab']").length,
+);
+paneObserved.foreignRun = { shown: foreignShown, tabs: foreignPanes };
+assert(
+  "a run that is not the card's is not opened in its pane",
+  foreignShown && foreignPanes === 0,
+  `foreign note shown: ${foreignShown}; run tabs ${foreignPanes}`,
+);
+observed.cardPane = paneObserved;
 
 // A bad board id is refused by the route's decode, as a bad session id is.
 await page.goto(`${WEB_URL}/boards/not-a-board`, {

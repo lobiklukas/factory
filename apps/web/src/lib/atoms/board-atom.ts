@@ -1,8 +1,37 @@
-import type { BoardInstanceId } from "@repo/domain/Task";
-import { Effect } from "effect";
+import type {
+  BoardInstanceId,
+  MoveTaskInput,
+  Task,
+  TaskId,
+} from "@repo/domain/Task";
+import type { DecideApprovalInput } from "@repo/domain/Approval";
+import type { SessionId } from "@repo/domain/Session";
+import { Duration, Effect } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
+import { SESSIONS_KEY } from "./session-list";
+
+/** The reactivity key a move invalidates: every board read re-runs once a move lands. */
+export const BOARD_KEY = "board";
+
+/** The reactivity key a run start invalidates: the card pane's run list re-reads. */
+export const RUNS_KEY = "task-runs";
+
+/** The reactivity key an approval decision invalidates. */
+export const APPROVALS_KEY = "approvals";
+
+/**
+ * How often an open board re-reads the server (LOB-76): a move made anywhere else — `factory board
+ * move`, another browser, a run — reaches this page within one interval, without a reload.
+ *
+ * A poll rather than a push on purpose. Cards are rows, not a log (docs/board.md B3), so there is no
+ * commit stream to follow the way a session's transcript does, and a change feed over `tasks`
+ * (`LISTEN`/`NOTIFY`, or a `task_events` cursor) is a server mechanism this read does not need yet:
+ * a board is two small reads, and a refresh keeps the last answer on screen while the next one is in
+ * flight, so a person never sees the lanes blink.
+ */
+export const BOARD_POLL = Duration.seconds(2);
 
 /**
  * The boards this control plane holds (LOB-75), newest first: what `/boards` offers to open.
@@ -24,16 +53,98 @@ export const boardsAtom = runtime.atom(
  * is the pinned version's (B2); `listTasks` answers every card on the board in the server's order
  * (B9). A failure of either fails the read, rather than showing lanes with no cards — an empty lane
  * and a lane whose cards failed to load must not look the same.
+ *
+ * Re-read every `BOARD_POLL` while the board is open, and at once when a move from this page lands
+ * (`BOARD_KEY`), so the lanes follow the server rather than this page's last answer (LOB-76).
  */
 export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
-  runtime.atom(
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        const [view, tasks] = yield* Effect.all(
+          [rpc.client.getBoard({ boardId }), rpc.client.listTasks({ boardId })],
+          { concurrency: 2 },
+        );
+        return { ...view, tasks };
+      }),
+    )
+    .pipe(Atom.withReactivity([BOARD_KEY]), Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
+ * Moves a card along a declared transition, at the revision the pane rendered (LOB-76).
+ *
+ * The expected revision is the one on screen, never a fresh read: a stale view is exactly the case
+ * the revision exists to refuse (B3), and reading first would turn "someone moved it while you
+ * looked" into a silent overwrite. The answer is the server's card or its typed refusal; the pane
+ * renders either, and does not move the card itself.
+ */
+export const moveTaskAtom = runtime.fn(
+  (input: MoveTaskInput) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
-      const [view, tasks] = yield* Effect.all(
-        [rpc.client.getBoard({ boardId }), rpc.client.listTasks({ boardId })],
-        { concurrency: 2 },
-      );
-      return { ...view, tasks };
+      return yield* rpc.client.moveTask(input);
     }),
-  ),
+  { reactivityKeys: [BOARD_KEY] },
+);
+
+/**
+ * A card's runs, newest first (LOB-76): the sessions started against it, from `task_runs`.
+ *
+ * Polled with the board, because a run can be started from the CLI (`factory board start`) as well
+ * as from this pane, and the pane should list it either way.
+ */
+export const taskRunsAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.listTaskRuns({ taskId });
+      }),
+    )
+    .pipe(Atom.withReactivity([RUNS_KEY]), Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
+ * Starts a run against a card: `createSession` with the card named, exactly as `factory board
+ * start` does (LOB-61), so a run is one Pi Durable session (B1) and its row lands in `task_runs`.
+ *
+ * The run starts from the card's own column, which is the column whose `requires[]` it must satisfy
+ * on exit. The card is not moved: the lane a run works in is where the card already sits.
+ */
+export const startRunAtom = runtime.fn(
+  (task: Task) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.createSession({
+        title: task.title,
+        taskId: task.id,
+        taskColumn: task.column,
+        ...(task.repo === undefined ? {} : { repo: task.repo }),
+      });
+    }),
+  { reactivityKeys: [RUNS_KEY, SESSIONS_KEY] },
+);
+
+/** The approvals a run is waiting on, oldest first: the card pane's approvals pane (LOB-76). */
+export const approvalsAtom = Atom.family((sessionId: SessionId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.listApprovals({ sessionId });
+      }),
+    )
+    .pipe(Atom.withReactivity([APPROVALS_KEY]), Atom.withRefresh(BOARD_POLL)),
+);
+
+/** Settles one pending approval; the pending list re-reads once the decision is committed. */
+export const decideApprovalAtom = runtime.fn(
+  (input: DecideApprovalInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.decideApproval(input);
+    }),
+  { reactivityKeys: [APPROVALS_KEY] },
 );

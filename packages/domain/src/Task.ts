@@ -89,6 +89,43 @@ export const BoardColumn = Schema.Struct({
 export type BoardColumn = typeof BoardColumn.Type;
 
 /**
+ * The moves each column of the default definition declares (B4, B5): the forward pipeline, plus
+ * `canceled` from any column that is not terminal. A move to anything else is an undeclared
+ * transition, and a terminal column declares none.
+ *
+ * Here rather than in `packages/core` because two readers must agree on it exactly: `TaskService`
+ * refuses what it does not list, and the dashboard's card pane offers only what it lists (LOB-76),
+ * so a move the API would refuse is never offered. `BoardColumn` carries no transitions field yet;
+ * when a definition declares its own, this table is what it replaces, for both readers at once.
+ */
+export const DECLARED_TRANSITIONS: Readonly<
+  Record<string, ReadonlyArray<string>>
+> = {
+  intake: ["specifying", "canceled"],
+  specifying: ["planning", "canceled"],
+  planning: ["building", "canceled"],
+  building: ["review", "canceled"],
+  review: ["done", "canceled"],
+};
+
+/** B5's two human gates, keyed by `from→to`, with the name a refusal (and the card pane) gives them. */
+export const HUMAN_GATES: Readonly<Record<string, string>> = {
+  "planning→building": "plan approval",
+  "review→done": "merge",
+};
+
+/** The columns a card in `from` may move to, in the order the pipeline declares them. */
+export const declaredTransitions = (from: string): ReadonlyArray<string> =>
+  DECLARED_TRANSITIONS[from] ?? [];
+
+export const isDeclaredTransition = (from: string, to: string): boolean =>
+  declaredTransitions(from).includes(to);
+
+/** The human gate the move `from → to` crosses, or `undefined` when a run may make it too. */
+export const humanGate = (from: string, to: string): string | undefined =>
+  HUMAN_GATES[`${from}→${to}`];
+
+/**
  * A versioned board definition: the column set a board instance binds to (B2).
  *
  * `id` + `version` identify one row. A new version is a new row, never an update, so a task that
@@ -298,6 +335,14 @@ export const TaskRun = Schema.Struct({
   finishedAt: Schema.optional(Timestamp),
 });
 export type TaskRun = typeof TaskRun.Type;
+
+/**
+ * A card's runs (LOB-76): what the card pane lists, newest first, so a run started from the card
+ * stays reachable from it. Read from `task_runs`, the index `createSession` writes when it is
+ * given a task and `rebuildIndexes` refolds from each run's `factory.task` document.
+ */
+export const ListTaskRunsInput = Schema.Struct({ taskId: TaskId });
+export type ListTaskRunsInput = typeof ListTaskRunsInput.Type;
 
 export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   "TaskNotFound",
