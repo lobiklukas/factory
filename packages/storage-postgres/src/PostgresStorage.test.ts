@@ -1127,6 +1127,54 @@ describe("the skills table and its seeds", () => {
       }
     },
   );
+
+  // The `decompose` skill 0021 seeds (LOB-201): what a decomposition call is told. Mutation checked
+  // the way the `docs` cases above are — deleting 0021's INSERT fails both cases.
+  it(
+    "seeds the decompose skill with the rules the proposal validator holds a decomposition to",
+    { timeout: 30_000 },
+    async () => {
+      const [row] = (await skills()).filter(
+        (skill) => skill.name === "decompose",
+      );
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+
+      const decompose = decode(row);
+      expect(decompose.version).toBe("1");
+      expect(decompose.description.length).toBeGreaterThan(0);
+      // The body has to say the rules `decodeProposedIssues` refuses on, or the model is held to
+      // rules it was never told: a unique title, an acceptance line, edges only where real.
+      const body = decompose.body.toLowerCase();
+      expect(body).toContain("acceptance line");
+      expect(body).toContain("title no other proposal has");
+      expect(body).toContain("blockedby");
+      expect(body).toContain("create nothing");
+      expect(decompose.attachments).toEqual([]);
+    },
+  );
+
+  it(
+    "adds the decompose row once, and rewrites no other skill row",
+    { timeout: 30_000 },
+    async () => {
+      // Only the rows no test writes: core's SkillService suite adds and drops `test-skill-*` rows
+      // in the same database while this file runs.
+      const shipped = async () =>
+        (await skills()).filter((skill) => !skill.name.startsWith("test-"));
+      const before = await shipped();
+      const migration = (await import("./migrations/0021_seed_decompose_skill"))
+        .default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      const after = await shipped();
+      expect(after.filter((skill) => skill.name === "decompose")).toHaveLength(
+        1,
+      );
+      expect(after).toEqual(before);
+    },
+  );
 });
 
 /**

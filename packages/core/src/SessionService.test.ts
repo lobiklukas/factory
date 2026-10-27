@@ -47,6 +47,7 @@ import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import type { ApprovalRequest } from "@repo/domain/Approval";
+import { ProposalsRefused } from "@repo/domain/Decomposition";
 import type {
   ListSessionsInput,
   ListSessionsOutput,
@@ -5167,6 +5168,336 @@ describe("the curator pass over a finished session", () => {
       // Exactly the turn's own two calls: the refused curation added none.
       expect(outcome.calls).toBe(2);
       expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * Proposing child issues from a session's spec (LOB-201, part 1 of LOB-43).
+ *
+ * The spec is the one a real specifier run declares: a card in `specifying`, a run on it, and the
+ * faux script's `spec` call (`fauxSpec`), so the decomposition reads what the stage wrote rather than
+ * a document this suite planted. The cases are the issue's criteria in order:
+ *
+ * - the spec yields proposals, each with acceptance lines, committed as one document and read back
+ *   through `getSession`;
+ * - an answer with an empty acceptance list or a duplicate title is refused rather than stored;
+ * - the pass creates no tracker issue and no session: every HTTP request the process could make
+ *   lands in a ledger that stays empty, the PR write-back is never told anything, and the only rows
+ *   that move are the session's own log and its activity row.
+ *
+ * This suite's database is its own (`runDatabaseName`), and its cases run one at a time, so a
+ * table-wide row count is a statement about this pass alone.
+ */
+describe("proposing child issues from a spec", () => {
+  const decomposeRoot = mkdtempSync(join(tmpdir(), "factory-core-decompose-"));
+  const PERSON = "person:lukas";
+  const SPEC = {
+    goal: "Propose child issues from a spec document",
+    acceptance: [
+      "a spec yields proposals readable through getSession",
+      "a refused proposal set is never stored",
+    ],
+    gaps: [] as string[],
+    openQuestions: [] as string[],
+  };
+
+  /** Every request the process makes over HTTP — a tracker's API included — and its answer: none. */
+  const httpLedger = () => {
+    const requests: string[] = [];
+    const layer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) =>
+        Effect.sync(() => {
+          requests.push(`${request.method} ${url.toString()}`);
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response("{}", { status: 500 }),
+          );
+        }),
+      ),
+    );
+    return { requests, layer };
+  };
+
+  /** A service whose faux specs `spec` and answers a decomposition with `decomposition`. */
+  const withDecomposition = (options: {
+    readonly spec?: typeof SPEC;
+    readonly decomposition?: string;
+  }) => {
+    const faux = createFauxModelAccess({
+      fauxSpec: [options.spec ?? SPEC],
+      ...(options.decomposition === undefined
+        ? {}
+        : { fauxDecomposition: options.decomposition }),
+    });
+    const http = httpLedger();
+    const reports: PullRequestReport[] = [];
+    const runtime = ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: faux.access, sessionRoot: decomposeRoot }),
+        TaskServiceLive,
+      ).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.sync(() => {
+                reports.push(pullRequestReport(input.result));
+              }),
+          }),
+        ),
+        Layer.provideMerge(http.layer),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    return { faux, http, reports, runtime };
+  };
+
+  /** A specifier run on a card of its own, settled, with its spec committed. */
+  const specified = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const tasks = yield* TaskService;
+    const sessions = yield* SessionService;
+    const boardId = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+    `;
+    const created = yield* tasks.create({
+      boardId,
+      title: "a card to decompose",
+      actor: PERSON,
+    });
+    const card = yield* tasks.move({
+      taskId: created.id,
+      expectedRevision: created.revision,
+      to: "specifying",
+      actor: PERSON,
+    });
+    const run = yield* sessions.create({
+      title: card.title,
+      taskId: card.id,
+      taskColumn: card.column,
+    });
+    yield* sessions.send({ sessionId: run.id, content: "specify it" });
+    yield* waitUntil(
+      Effect.map(
+        sessions.get(run.id),
+        (snapshot) =>
+          !snapshot.live.busy &&
+          snapshot.entries.some(
+            (entry) =>
+              entry.kind === "toolResult" &&
+              entry.toolName === "spec" &&
+              entry.isError !== true,
+          ),
+      ),
+      "the specifying run to declare its spec and settle",
+    );
+    return { card: yield* tasks.get(card.id), runId: run.id };
+  });
+
+  /** Row counts of every table but the session's own log and the activity index derived from it. */
+  const otherRows = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const [row] = yield* sql<{ readonly [table: string]: number }>`
+        SELECT
+          (SELECT count(*)::int FROM commits WHERE log_id <> ${sessionId}) AS other_commits,
+          (SELECT count(*)::int FROM sessions) AS sessions,
+          (SELECT count(*)::int FROM tasks) AS tasks,
+          (SELECT count(*)::int FROM task_events) AS task_events,
+          (SELECT count(*)::int FROM task_runs) AS task_runs,
+          (SELECT count(*)::int FROM board_instances) AS board_instances,
+          (SELECT count(*)::int FROM session_approvals) AS session_approvals,
+          (SELECT count(*)::int FROM session_pages) AS session_pages,
+          (SELECT count(*)::int FROM webhook_deliveries) AS webhook_deliveries,
+          (SELECT count(*)::int FROM repos) AS repos
+      `;
+      return row;
+    });
+
+  /** What the session's own log gained after commit `seq`, as each commit's writes. */
+  const logWritesAfter = (sessionId: SessionId, seq: number) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ readonly writes: string }>`
+        SELECT writes::text AS writes FROM commits
+        WHERE log_id = ${sessionId} AND seq > ${seq} ORDER BY seq
+      `;
+      return rows.map((row) => row.writes);
+    });
+
+  const headSeq = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const [row] = yield* sql<{ readonly seq: number }>`
+        SELECT coalesce(max(seq), 0)::int AS seq FROM commits WHERE log_id = ${sessionId}
+      `;
+      return row?.seq ?? 0;
+    });
+
+  it("commits one proposal per criterion as one document, readable through getSession, and writes nowhere else", async () => {
+    const { faux, http, reports, runtime } = withDecomposition({});
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const { card, runId } = yield* specified;
+          const rowsBefore = yield* otherRows(runId);
+          const seq = yield* headSeq(runId);
+          const calls = faux.faux.state.callCount;
+          const proposed = yield* sessions.proposeDecomposition({
+            sessionId: runId,
+          });
+          return {
+            proposed,
+            calls: faux.faux.state.callCount - calls,
+            snapshot: yield* sessions.get(runId),
+            cardAfter: yield* tasks.get(card.id),
+            card,
+            rowsBefore,
+            rowsAfter: yield* otherRows(runId),
+            writes: yield* logWritesAfter(runId, seq),
+          };
+        }),
+      );
+
+      // At least one proposal, each with acceptance lines: here one per criterion of the spec.
+      expect(outcome.proposed.proposals.map((p) => p.title)).toEqual(
+        SPEC.acceptance,
+      );
+      for (const proposal of outcome.proposed.proposals) {
+        expect(proposal.acceptance.length).toBeGreaterThan(0);
+        expect(proposal.goal).toBe(SPEC.goal);
+      }
+      expect(outcome.calls).toBe(1);
+      // Readable back through `getSession`, as the value committed.
+      expect(outcome.snapshot.proposedIssues).toEqual(outcome.proposed);
+      // One document: of the log's new commits exactly one writes `factory.proposedIssues`.
+      expect(
+        outcome.writes.filter((writes) =>
+          writes.includes("factory.proposedIssues"),
+        ),
+      ).toHaveLength(1);
+      // No tracker issue: nothing was asked of any HTTP API, and the write-back heard nothing.
+      expect(http.requests).toEqual([]);
+      expect(reports).toEqual([]);
+      // No child session, no card, no event, no run: every other table is as it was.
+      expect(outcome.rowsAfter).toEqual(outcome.rowsBefore);
+      expect(outcome.cardAfter.revision).toBe(outcome.card.revision);
+      expect(outcome.cardAfter.column).toBe("specifying");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it.each([
+    {
+      name: "an empty acceptance list",
+      proposals: [
+        { title: "A", goal: "g", change: "c", acceptance: ["a"] },
+        { title: "B", goal: "g", change: "c", acceptance: [] },
+      ],
+      faults: [[1, "no_acceptance"]],
+    },
+    {
+      name: "a duplicate title",
+      proposals: [
+        { title: "Same", goal: "g", change: "c", acceptance: ["a"] },
+        { title: "same", goal: "g", change: "c", acceptance: ["b"] },
+      ],
+      faults: [[1, "duplicate_title"]],
+    },
+  ])(
+    "refuses $name rather than storing it",
+    async ({ proposals, faults }) => {
+      const { http, runtime } = withDecomposition({
+        decomposition: JSON.stringify({ proposals }),
+      });
+      try {
+        const outcome = await runtime.runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const { runId } = yield* specified;
+            const seq = yield* headSeq(runId);
+            const refused = yield* Effect.exit(
+              sessions.proposeDecomposition({ sessionId: runId }),
+            );
+            return {
+              refused,
+              snapshot: yield* sessions.get(runId),
+              writes: yield* logWritesAfter(runId, seq),
+            };
+          }),
+        );
+
+        const error = Option.getOrThrow(Exit.findErrorOption(outcome.refused));
+        expect(Schema.is(ProposalsRefused)(error)).toBe(true);
+        if (!Schema.is(ProposalsRefused)(error)) return;
+        expect(
+          error.faults.map((fault) => [fault.index, fault.reason]),
+        ).toEqual(faults);
+        // Nothing stored: the snapshot reports no proposals and no commit wrote the document. The
+        // call itself was made, and its spend is the one thing the log gained.
+        expect(outcome.snapshot.proposedIssues).toBeUndefined();
+        expect(
+          outcome.writes.some((writes) =>
+            writes.includes("factory.proposedIssues"),
+          ),
+        ).toBe(false);
+        expect(http.requests).toEqual([]);
+      } finally {
+        await runtime.dispose();
+      }
+    },
+    120_000,
+  );
+
+  it("refuses a session with no spec, and a spec that still declares gaps, without a call", async () => {
+    const { faux, runtime } = withDecomposition({
+      spec: {
+        ...SPEC,
+        gaps: ["which tracker the children go to"],
+        openQuestions: ["Linear or Jira?"],
+      },
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const scratch = yield* sessions.create({ title: "no spec here" });
+          const { runId } = yield* specified;
+          const calls = faux.faux.state.callCount;
+          const noSpec = yield* Effect.exit(
+            sessions.proposeDecomposition({ sessionId: scratch.id }),
+          );
+          const gaps = yield* Effect.exit(
+            sessions.proposeDecomposition({ sessionId: runId }),
+          );
+          return {
+            noSpec,
+            gaps,
+            calls: faux.faux.state.callCount - calls,
+            snapshot: yield* sessions.get(runId),
+          };
+        }),
+      );
+
+      const codeOf = (exit: typeof outcome.noSpec) => {
+        const error = Option.getOrThrow(Exit.findErrorOption(exit));
+        return error._tag === "SessionError"
+          ? `${error.code}: ${error.message}`
+          : error._tag;
+      };
+      expect(codeOf(outcome.noSpec)).toMatch(/^invalid_input: .*no spec/);
+      expect(codeOf(outcome.gaps)).toMatch(/^invalid_input: .*declares 1 gap/);
+      // Both refused before the model was asked anything.
+      expect(outcome.calls).toBe(0);
+      expect(outcome.snapshot.proposedIssues).toBeUndefined();
     } finally {
       await runtime.dispose();
     }

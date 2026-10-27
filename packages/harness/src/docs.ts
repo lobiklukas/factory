@@ -14,6 +14,7 @@ export const PAGE_DOC_KIND = "factory.page";
 export const PAGE_PROMPT_DOC_KIND = "factory.pages.prompt";
 export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
+export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -218,4 +219,34 @@ export const MissionBindingDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ taskId: "" }),
+});
+
+/** One stored proposal: `ProposedIssue` (`@repo/domain/Decomposition`) as a mutable document value. */
+type StoredProposal = {
+  title: string;
+  goal: string;
+  change: string;
+  acceptance: string[];
+  blockedBy: number[];
+};
+
+/**
+ * The child issues a decomposition proposed from this session's spec (LOB-201, part 1 of LOB-43).
+ *
+ * The shape and its rules are `@repo/domain/Decomposition`'s; this token is only where the value is
+ * stored. Its one writer, `commitProposedIssues` (`./decompose`), takes a value `decodeProposedIssues`
+ * already accepted, and the snapshot reads it back through the same decoder, so a set the rules
+ * refuse is never stored and never reported.
+ *
+ * `history: "latest"` because a decomposition replaces the one before it: the proposals are a
+ * draft a person reviews, not an append-only record. The seed holds no proposals, which the
+ * validator refuses, so a session that never decomposed reads as none rather than as an empty set.
+ */
+export const ProposedIssuesDoc = defineDoc({
+  kind: PROPOSED_ISSUES_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ proposals: [] as StoredProposal[] }),
 });

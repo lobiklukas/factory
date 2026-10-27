@@ -125,6 +125,8 @@ import {
   clampCurationPages,
   compactSession,
   curationProposals,
+  DECOMPOSITION_SKILL,
+  decompositionProposals,
   forkSession,
   modelAccessFor,
   modelKey,
@@ -137,8 +139,10 @@ import {
   readVerifyRecords,
   readCurationUsage,
   readReplaySource,
+  readSpec,
   replaySession,
   requestCuration,
+  requestDecomposition,
   resetSession,
   snapshotEvent,
   submissionStanding,
@@ -151,6 +155,7 @@ import {
   writeActor,
   writeBudget,
   writeCurationUsage,
+  writeProposedIssues,
   writeRepoBinding,
   writeTaskBinding,
   writePage,
@@ -169,6 +174,11 @@ import type {
   RecordPageInput,
 } from "@repo/domain/Page";
 import { PageStrings } from "@repo/domain/Page";
+import type {
+  ProposalsRefused,
+  ProposeDecompositionInput,
+  ProposeDecompositionResult,
+} from "@repo/domain/Decomposition";
 import { isSafeBranchName } from "./git";
 import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
@@ -341,6 +351,21 @@ export type SessionServiceShape = {
   readonly curate: (
     input: CurateSessionInput,
   ) => Effect.Effect<CurateSessionResult, SessionError>;
+  /**
+   * Decompose the session's spec into proposed child issues (LOB-201, part 1 of LOB-43).
+   *
+   * One model call — the `decompose` skill over the session's `factory.spec` — whose answer is
+   * committed as the session's `factory.proposedIssues` document when the proposal validator accepts
+   * it, and refused as `ProposalsRefused`, storing nothing, when it does not. It creates no tracker
+   * issue and opens no session: the log is what it writes. The call's spend is charged to the
+   * session's own ledger, as a curation's is.
+   */
+  readonly proposeDecomposition: (
+    input: ProposeDecompositionInput,
+  ) => Effect.Effect<
+    ProposeDecompositionResult,
+    SessionError | ProposalsRefused
+  >;
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
    *
@@ -2604,6 +2629,90 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * One decomposition of a session's spec (LOB-201, part 1 of LOB-43).
+       *
+       * The shape is the curator's (`curate` above): one call, no session of its own, the spend
+       * charged to the session before the answer is judged. What it reads is the spec, not the
+       * transcript, and what it may commit is decided by `decodeProposedIssues` alone.
+       *
+       * Refused before any call is made, so a refusal costs nothing:
+       *
+       * - a **running** session — its specifier may be rewriting the spec the call would read;
+       * - a session with **no spec** — there is nothing to decompose;
+       * - a spec that still **declares gaps** — a gap is the stage's evidence that a person has to
+       *   answer first (LOB-73), and proposals cut from a spec with holes in it would bake the
+       *   holes into every child;
+       * - a spec with **no acceptance criteria** — every proposal needs acceptance lines, and a
+       *   spec that states none gives the call nothing to ground them in.
+       *
+       * A refused answer stores nothing, so the proposals an earlier decomposition committed are
+       * still what the session reports.
+       */
+      const proposeDecomposition = (
+        input: ProposeDecompositionInput,
+      ): Effect.Effect<
+        ProposeDecompositionResult,
+        SessionError | ProposalsRefused
+      > =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row);
+          if (yield* isBusy(owner.harness, owner.root)) {
+            return yield* new SessionErrorClass({
+              code: "busy",
+              message: `session ${input.sessionId} is running; a decomposition reads a settled spec`,
+            });
+          }
+          const spec = yield* readSpec(owner.harness, owner.root);
+          if (spec === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `session ${input.sessionId} has no spec to decompose`,
+            });
+          }
+          if (spec.gaps.length > 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `session ${input.sessionId}'s spec declares ${spec.gaps.length} gap(s); a person closes them before it is decomposed`,
+            });
+          }
+          if (spec.acceptance.length === 0) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `session ${input.sessionId}'s spec has no acceptance criteria to decompose against`,
+            });
+          }
+          const skill = yield* skills.get(DECOMPOSITION_SKILL).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `read the ${DECOMPOSITION_SKILL} skill: ${cause.message}`,
+                }),
+            ),
+          );
+          const request = yield* requestDecomposition({
+            model: options.model,
+            instructions: skill.body,
+            sessionId: input.sessionId,
+            spec,
+          });
+          // Charged before the answer is judged, as a curation is: a refused answer was still a
+          // billed call, and the activity row is derived from the ledger read after the charge.
+          yield* writeCurationUsage(
+            owner.root,
+            modelKey(options.model),
+            request.usage,
+          );
+          const ledger = yield* readCurationUsage(owner.harness, owner.root);
+          yield* setActivityCost(input.sessionId, costOf(ledger));
+          const proposed = yield* decompositionProposals(request);
+          const committed = yield* writeProposedIssues(owner.root, proposed);
+          yield* touchActivity(input.sessionId);
+          return committed;
+        });
+
+      /**
        * One page of the session list, newest activity first.
        *
        * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
@@ -3035,6 +3144,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         recordPage,
         listPages,
         curate,
+        proposeDecomposition,
         openPullRequest: openPr,
         close: closeAll,
       });

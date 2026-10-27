@@ -25,9 +25,10 @@ import {
   CredentialProvider,
   SessionServiceLive,
 } from "@repo/core";
-import { SessionRpc } from "@repo/domain/Rpc";
+import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
-import { createModelAccess } from "@repo/harness";
+import { DefinitionId } from "@repo/domain/Task";
+import { createFauxModelAccess } from "@repo/harness";
 import {
   DatabaseConfig,
   DatabaseLive,
@@ -131,6 +132,24 @@ const forge = HttpClient.make((request, url) =>
   }),
 );
 
+/**
+ * The spec a specifier run on this file's cards declares, and the decomposition its faux answers:
+ * two proposals under one title, which the validator refuses (LOB-201). Neither script reaches the
+ * PR cases above — a scratch session is never offered the `spec` tool and never decomposes.
+ */
+const WIRE_SPEC = {
+  goal: "Carry a refused decomposition across the wire",
+  acceptance: ["ProposalsRefused arrives tagged, with its faults"],
+  gaps: [],
+  openQuestions: [],
+};
+const DUPLICATE_TITLES = JSON.stringify({
+  proposals: [
+    { title: "Same", goal: "g", change: "c", acceptance: ["a"] },
+    { title: "same", goal: "g", change: "c", acceptance: ["b"] },
+  ],
+});
+
 const credentials = CredentialProvider.of({
   source: "static-token",
   tokenFor: (asked) =>
@@ -155,7 +174,10 @@ const { handler, dispose } = HttpRouter.toWebHandler(
     ),
     Layer.provideMerge(
       SessionServiceLive({
-        model: createModelAccess("faux"),
+        model: createFauxModelAccess({
+          fauxSpec: [WIRE_SPEC],
+          fauxDecomposition: DUPLICATE_TITLES,
+        }).access,
         sessionRoot,
       }),
     ),
@@ -345,5 +367,83 @@ describe("openPullRequest over RPC (LOB-213)", () => {
       repo: noToken,
       code: "missing",
     });
+  }, 120_000);
+});
+
+/** `call`, over the whole API group: the decomposition case needs a board and a card first. */
+const callApi = <A, E>(
+  body: (
+    client: RpcClient.FromGroup<typeof RpcApi, RpcClientError>,
+  ) => Effect.Effect<A, E>,
+) =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* RpcClient.make(RpcApi);
+        return yield* body(client);
+      }),
+    ).pipe(Effect.provide(ClientProtocol)),
+  );
+
+describe("proposeDecomposition over RPC (LOB-201)", () => {
+  it("carries a session without a spec, and a refused proposal set, across the wire with their own tags", async () => {
+    const outcome = await callApi((client) =>
+      Effect.gen(function* () {
+        const scratch = yield* client.createSession({ title: "no spec" });
+        const noSpec = yield* failureOf(
+          client.proposeDecomposition({ sessionId: scratch.id }),
+        );
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`acme/rpc-decompose-${run}`),
+          definitionId: DefinitionId.make("default"),
+        });
+        const created = yield* client.createTask({
+          boardId: board.id,
+          title: "a card to decompose",
+          actor: "person:rpc",
+        });
+        const card = yield* client.moveTask({
+          taskId: created.id,
+          expectedRevision: created.revision,
+          to: "specifying",
+          actor: "person:rpc",
+        });
+        const specifier = yield* client.createSession({
+          title: card.title,
+          taskId: card.id,
+          taskColumn: card.column,
+        });
+        yield* client.sendMessage({
+          sessionId: specifier.id,
+          content: "specify it",
+        });
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const snapshot = yield* client.getSession({
+            sessionId: specifier.id,
+          });
+          const specced = snapshot.entries.some(
+            (entry) => entry.toolName === "spec" && entry.isError !== true,
+          );
+          if (specced && !snapshot.live.busy) break;
+          yield* Effect.sleep(50);
+        }
+        const refused = yield* failureOf(
+          client.proposeDecomposition({ sessionId: specifier.id }),
+        );
+        const after = yield* client.getSession({ sessionId: specifier.id });
+        return { noSpec, refused, after };
+      }),
+    );
+
+    expect(outcome.noSpec).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(outcome.refused).toMatchObject({
+      _tag: "ProposalsRefused",
+      faults: [{ index: 1, reason: "duplicate_title" }],
+    });
+    // Refused is not stored: the session the client reads back holds no proposals.
+    expect(outcome.after.proposedIssues).toBeUndefined();
   }, 120_000);
 });
