@@ -89,6 +89,8 @@ const GUARDED = [
 const NOT_GUARDED: Readonly<Record<string, string>> = {
   "mcp-pin.test.ts":
     "reads .mcp.json and docs, asserts on text; no database, no subprocess; 16 ms worst of four gate runs",
+  "pi-resolution.test.ts":
+    "walks .pi/skills and reads the root package.json and two docs, asserts on text; no database, no subprocess; 384 ms for all 8 cases in isolation (LOB-236)",
   "postgres-up.test.ts":
     "budgeted case by case (LOB-132) and carries its own read-back guard; 29 declarations",
   "ralph-docker-env.test.ts":
