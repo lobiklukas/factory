@@ -512,15 +512,37 @@ const currentDatabase = Effect.gen(function* () {
 });
 
 /**
- * The ids the *configured* database held before a single case ran.
+ * The ids the *configured* database held before a single case ran, and had held for longer than a
+ * run lasts.
  *
  * A witness for the isolation, not the isolation itself: the case below asks whether they are all
  * still there, and `sessions` is the table the rebuild case empties. Read before anything runs, so
  * another suite adding rows while this file runs is not this file's harm — only a *deletion* of one
  * of these ids is.
+ *
+ * Only the settled ones, because a fresh row may be another suite's, in flight, in the same gate:
+ * `LinearSync.test.ts` seeds `ses_lws_*` rows into the configured database and deletes them in its
+ * `afterAll`, so when this file started while they existed and that suite finished first, the case
+ * below read them as this suite's deletions (LOB-237; red under the gate's parallel load, green on
+ * the rerun). An hour is the same age the sweep above grants a run before it calls it abandoned,
+ * and it is read on the database's own clock, which is the one that wrote `created_at`.
  */
+const settledSessionIds = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const table = yield* sql<{ present: string | null }>`
+    SELECT to_regclass('public.sessions')::text AS present
+  `;
+  if (table[0]?.present === null) return [];
+  const rows = yield* sql<{ id: string }>`
+    SELECT id FROM sessions
+    WHERE created_at < now() - make_interval(secs => ${STALE_RUN_AFTER_MS / 1000})
+    ORDER BY id
+  `;
+  return rows.map((row) => row.id);
+});
+
 const configuredSessionIdsAtStart = await maintenance.runPromise(
-  sessionIds.pipe(Effect.orDie),
+  settledSessionIds.pipe(Effect.orDie),
 );
 
 afterAll(async () => {
@@ -3925,11 +3947,18 @@ describe("session list", () => {
           url: "https://github.com/lobiklukas/factory.git",
           localPath: repoRoot,
         });
+        // The database's own clock, read outside any transaction: `created_at` and `committed_at`
+        // are both its `now()`, so the window they must fall in is measured on that same clock.
+        const databaseNow = sql<{ readonly now: string }>`
+          SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS now
+        `.pipe(Effect.map((rows) => rows[0]?.now ?? ""));
+        const createStarted = yield* databaseNow;
         const created = yield* sessions.create({
           repo: factoryRepo,
           baseRef: "main",
           title: "rebuild me",
         });
+        const createReturned = yield* databaseNow;
         yield* sessions.send({ sessionId: created.id, content: "say hello" });
         yield* waitUntil(
           sessions
@@ -3963,7 +3992,16 @@ describe("session list", () => {
         }>`
           SELECT slug, url, default_base_ref FROM repos WHERE slug = ${factoryRepo}
         `;
-        return { before, corrupted, empty, report, after, repos };
+        return {
+          before,
+          corrupted,
+          empty,
+          report,
+          after,
+          repos,
+          createStarted,
+          createReturned,
+        };
       }),
     );
 
@@ -3980,13 +4018,20 @@ describe("session list", () => {
     expect(result.after.baseRef).toBe("main");
     expect(result.after.costTotal).toEqual(result.before.costTotal);
     // Two clocks describe the same moment: the index row is written when the session is created,
-    // the rebuilt one when its first commit landed. Milliseconds apart, not a different session.
-    expect(
-      Math.abs(
-        Date.parse(result.before.createdAt) -
-          Date.parse(result.after.createdAt),
-      ),
-    ).toBeLessThan(1000);
+    // the rebuilt one when its first commit landed: both inside the one `create` call, not a
+    // different session. The bound is that call's own window on the database's clock, not a fixed
+    // gap: during a gate run beside other worktrees' gates the two were 1 449 ms apart and a
+    // `< 1000` ms bound went red (LOB-237). Mutation: have the fold take `max(committed_at)`
+    // instead of `min` — the turn's commits land after `create` returned, and the rebuilt moment
+    // leaves the window.
+    for (const createdAt of [result.before.createdAt, result.after.createdAt]) {
+      expect(Date.parse(createdAt)).toBeGreaterThanOrEqual(
+        Date.parse(result.createStarted),
+      );
+      expect(Date.parse(createdAt)).toBeLessThanOrEqual(
+        Date.parse(result.createReturned),
+      );
+    }
     // A slug the log names is back with no URL; an operator's URL survives.
     expect(result.repos[0]?.slug).toBe("lobiklukas/factory");
     expect(result.repos[0]?.url).toBe(
@@ -6079,8 +6124,8 @@ describe("the pagination case's budget", () => {
  * be (a refold raises the count again and hides the loss).
  * Do not apply it against the run-context database: that is the harm, live. Seed a scratch
  * database that already holds a session with no commits —
- * `INSERT INTO sessions (id, title) VALUES ('ses_seed_aaa', 'seeded')` — and point `DATABASE_URL`
- * at it.
+ * `INSERT INTO sessions (id, title, created_at) VALUES ('ses_seed_aaa', 'seeded', now() - interval
+ * '2 hours')`, old enough to count as settled — and point `DATABASE_URL` at it.
  */
 describe("this suite's database", () => {
   it("is one of its own, not the one DATABASE_URL names", async () => {
