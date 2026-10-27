@@ -9,11 +9,13 @@
  * how much of a delivery is allowed to reach a session.
  *
  * **Dedupe is the row, not a memo.** `webhook_deliveries` (LOB-168) has `request_id` as its
- * primary key, and the claim is a single `INSERT … ON CONFLICT DO NOTHING RETURNING`: the caller
- * that gets no row back is the replay, whoever it is and however many processes there are. Two
- * simultaneous deliveries of one id therefore cannot both create a session, which a
- * read-then-insert cannot promise (and which is why `api.memo` is not used here — it dedupes
- * within one task invocation and this is not a task; see LOB-178's record).
+ * primary key, and the claim is a single `INSERT … ON CONFLICT … RETURNING`: the caller that gets no
+ * row back is the replay, whoever it is and however many processes there are. Two simultaneous
+ * deliveries of one id therefore cannot both create a session, which a read-then-insert cannot
+ * promise (and which is why `api.memo` is not used here — it dedupes within one task invocation and
+ * this is not a task; see LOB-178's record). The conflict only updates — and so only hands the claim
+ * over — for a row that is no longer anybody's: a claim older than the reclaim window, whose process
+ * died before it recorded an outcome (LOB-216).
  *
  * **The session is created by a port, not by `SessionService`.** The seam's job is to decide
  * *whether* work starts; opening a harness, a worktree and a log is the session layer's. So the
@@ -24,7 +26,7 @@
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
  */
-import { Context, Effect, Exit, Layer } from "effect";
+import { Context, Duration, Effect, Exit, Layer } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import type {
@@ -190,6 +192,29 @@ export type TriggerServiceOptions = {
    * so a specific label placed before a catch-all is how one repo takes precedence.
    */
   readonly rules: ReadonlyArray<TriggerRule>;
+  /**
+   * How old a claim with no recorded outcome must be before another delivery of the same id may
+   * take it (default `TRIGGER_RECLAIM_AFTER`). Inside the window a replay answers `received`,
+   * because the first process may still be working; past it, that process is presumed dead.
+   */
+  readonly reclaimAfter?: Duration.Input;
+};
+
+/**
+ * The default reclaim window. It has to outlast the slowest honest claim — opening a session can
+ * clone a repo — and it can afford to, because guessing wrong is harmless: a reclaim of a claim
+ * that was still alive re-runs `create` and `send`, and both dedupe on the delivery's own key
+ * (`sessions.request_id`, and Pi Durable's submission id), so the session still gets one prompt.
+ */
+export const TRIGGER_RECLAIM_AFTER: Duration.Input = "10 minutes";
+
+/**
+ * What a won claim returns: the row's key, and the `claimed_at` it set, as Postgres text so the
+ * release can match it exactly (a `Date` would drop the microseconds).
+ */
+type ClaimRow = {
+  readonly requestId: string;
+  readonly claim: string;
 };
 
 /** One `webhook_deliveries` row as the replay read returns it. */
@@ -216,6 +241,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
     TriggerService,
     Effect.gen(function* () {
       const sql = yield* SqlClient;
+      const reclaimSeconds = Duration.toSeconds(
+        Duration.fromInputUnsafe(options.reclaimAfter ?? TRIGGER_RECLAIM_AFTER),
+      );
       const sessions = yield* TriggerSessions;
       const writeBack = yield* TriggerWriteBack;
 
@@ -287,26 +315,39 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // unregistered-repo skip: the conditional `DO UPDATE` flips that row back to `received`
           // in the same statement, so the delivery after the operator registers the repo starts the
           // session, and two such deliveries still cannot both win (the second sees `received`).
+          //
+          // Any delivery also wins over a *stale* claim: a row still `received` whose claim is older
+          // than `reclaimAfter` belongs to a process that died between its claim and its outcome
+          // (a `SIGKILL` runs no release), and answering it `replayed` would be a success to work
+          // that never started (LOB-216). The reclaim is the same conditional `DO UPDATE`, and it
+          // renews `claimed_at`, so of two retries that race for a stale row only the first wins —
+          // the second re-reads a fresh claim and is the replay.
           const claimed = yield* storage(
             "claim delivery",
             delivery.keyedByWork === true
-              ? sql<{ requestId: string }>`
+              ? sql<ClaimRow>`
                   INSERT INTO webhook_deliveries (request_id, status)
                   VALUES (${requestId}, 'received')
                   ON CONFLICT (request_id) DO UPDATE
-                    SET status = 'received', skip_reason = NULL
-                    WHERE webhook_deliveries.status = 'skipped'
-                      AND webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
-                  RETURNING request_id
+                    SET status = 'received', skip_reason = NULL, claimed_at = now()
+                    WHERE (webhook_deliveries.status = 'skipped'
+                        AND webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN})
+                      OR (webhook_deliveries.status = 'received'
+                        AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
+                  RETURNING request_id, claimed_at::text AS claim
                 `
-              : sql<{ requestId: string }>`
+              : sql<ClaimRow>`
                   INSERT INTO webhook_deliveries (request_id, status)
                   VALUES (${requestId}, 'received')
-                  ON CONFLICT (request_id) DO NOTHING
-                  RETURNING request_id
+                  ON CONFLICT (request_id) DO UPDATE
+                    SET claimed_at = now()
+                    WHERE webhook_deliveries.status = 'received'
+                      AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
+                  RETURNING request_id, claimed_at::text AS claim
                 `,
           );
-          if (claimed.length === 0) {
+          const claim = claimed[0]?.claim;
+          if (claim === undefined) {
             return yield* replay(requestId);
           }
 
@@ -409,10 +450,18 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // session layer (a driver error, a `die`) and an interrupt both leave the row in
           // `received`, and both would otherwise turn the sender's retry into a `replayed: true`
           // answer about work that never happened. `Effect.exit` is what sees all three, and the
-          // release is uninterruptible so a cancelled request cannot skip its own cleanup.
+          // release is uninterruptible so a cancelled request cannot skip its own cleanup. What it
+          // cannot cover is a process that runs no cleanup at all (`SIGKILL`); the claim's
+          // `claimed_at` and the reclaim window above are what recover that row. The release is
+          // scoped to this attempt's own claim (`claimed_at` as the claim returned it, as text so
+          // its microseconds survive the round trip): a process slow enough to have been reclaimed
+          // meanwhile must not delete the reclaimer's row, or a third retry would claim it afresh
+          // and run `create` and `send` beside the reclaimer that is still working.
           const releaseClaim = storage(
             "release an unclaimed delivery",
-            sql`DELETE FROM webhook_deliveries WHERE request_id = ${requestId}`,
+            sql`DELETE FROM webhook_deliveries
+                WHERE request_id = ${requestId}
+                  AND claimed_at = ${claim}::timestamptz`,
           ).pipe(
             // The original failure is what the caller needs; a failed release must not mask it.
             // The next attempt re-claims the row if this one did land.
