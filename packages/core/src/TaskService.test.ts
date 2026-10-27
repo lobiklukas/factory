@@ -17,6 +17,8 @@ import { DatabaseLive } from "@repo/storage-postgres";
 import { RepoSlug } from "@repo/domain/Session";
 import {
   declaredTransitions,
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
   humanGate,
   LIST_BOARDS_LIMIT,
   type AttentionItem,
@@ -67,19 +69,21 @@ const refusal = (
 
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 
-/** A board instance bound to a fresh repository, over the seeded default definition. */
+/** A fresh repository slug, so no two boards a case makes share one by accident. */
+const newRepo = () => RepoSlug.make(`factory-test/${hex(6)}`);
+
+/**
+ * A board instance bound to a fresh repository, over the seeded default definition — made by the
+ * service's own `createBoard` (LOB-208), so every case below reads a board the way a real one is made.
+ */
 const newBoard = (version = 1): Promise<string> =>
-  runtime.runPromise(
-    Effect.gen(function* () {
-      const sql = yield* SqlClient;
-      const id = `brd_${hex(13)}`;
-      yield* sql`
-        INSERT INTO board_instances (id, repo, definition_id, definition_version)
-        VALUES (${id}, ${`factory-test/${hex(6)}`}, 'default', ${version})
-      `;
-      return id;
+  withService((s) =>
+    s.createBoard({
+      repo: newRepo(),
+      definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+      definitionVersion: version,
     }),
-  );
+  ).then((board) => board.id);
 
 /** How many `task_events` rows a card has. A refused mutation must leave this unchanged. */
 const eventCount = (taskId: string): Promise<number> =>
@@ -505,6 +509,137 @@ describe("TaskService", () => {
  * way — each refusal checked against the event count, because a refused ask that left a comment
  * behind would be a question nobody can tell was never asked.
  */
+describe("TaskService — creating a board (LOB-208)", () => {
+  /**
+   * A definition of the case's own, with `versions` rows carrying the default pipeline's version-1
+   * columns. "The newest version" is only a claim about the code when the case controls which
+   * versions exist: the seeded `default` grows a version whenever a migration adds one.
+   */
+  const newDefinition = (versions: ReadonlyArray<number>) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const id = `def${hex(4)}`;
+        for (const version of versions) {
+          yield* sql`
+            INSERT INTO board_definitions (id, version, name, columns)
+            SELECT ${id}, ${version}, ${`Pipeline v${version}`}, columns
+            FROM board_definitions WHERE id = 'default' AND version = 1
+          `;
+        }
+        return DefinitionId.make(id);
+      }),
+    );
+
+  /** How many boards bind `repo`: a refused creation must leave this at zero. */
+  const boardsOver = (repo: string): Promise<number> =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ n: number }>`
+          SELECT count(*)::int AS n FROM board_instances WHERE repo = ${repo}
+        `;
+        return rows[0]?.n ?? -1;
+      }),
+    );
+
+  /**
+   * Mutation: order the versions ascending, or drop the `ORDER BY` — the first board pins version 1.
+   * Mutation: read the newest once and cache it — the board made after version 3 lands pins 2.
+   */
+  it("pins the definition's newest version by default, and a later version only reaches the next board", async () => {
+    const definitionId = await newDefinition([1, 2]);
+    const repo = newRepo();
+    const first = await withService((s) =>
+      s.createBoard({ repo, definitionId }),
+    );
+    expect(first.definitionId).toBe(definitionId);
+    expect(first.definitionVersion).toBe(2);
+    expect(first.repo).toBe(repo);
+    expect(first.id).toMatch(/^brd_[0-9abcdefghjkmnpqrstvwxyz]{26}$/);
+
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns)
+          SELECT ${definitionId}, 3, 'Pipeline v3', columns
+          FROM board_definitions WHERE id = ${definitionId} AND version = 2
+        `;
+      }),
+    );
+    const second = await withService((s) =>
+      s.createBoard({ repo, definitionId }),
+    );
+    // Two boards over one repository stay two boards (B2), each on the version it was made under.
+    expect(second.id).not.toBe(first.id);
+    expect(second.definitionVersion).toBe(3);
+    const reread = await withService((s) => s.getBoard(first.id));
+    expect(reread.instance.definitionVersion).toBe(2);
+    expect(reread.definition.name).toBe("Pipeline v2");
+  });
+
+  /**
+   * The acceptance case: a board no SQL wrote is the one `create`, `getBoard` and `listBoards` read.
+   * Mutation: insert the instance with the definition's oldest version instead of the one named —
+   * the card pins 1, not 2.
+   */
+  it("makes a board that getBoard, listBoards and create read back, over the version named", async () => {
+    const board = await withService((s) =>
+      s.createBoard({
+        repo: newRepo(),
+        definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        definitionVersion: 2,
+      }),
+    );
+    const view = await withService((s) => s.getBoard(board.id));
+    expect(view.instance).toEqual(board);
+    expect(view.definition.version).toBe(2);
+    expect(view.definition.columns.map((column) => column.name)).toContain(
+      "specifying",
+    );
+
+    const listed = await withService((s) => s.listBoards);
+    expect(listed.find((row) => row.id === board.id)).toEqual(board);
+
+    const card = await withService((s) =>
+      s.create({ boardId: board.id, title: "on a made board", actor: LUKAS }),
+    );
+    expect(card.boardId).toBe(board.id);
+    expect(card.definitionVersion).toBe(2);
+    expect(card.column).toBe("intake");
+  });
+
+  it("refuses a definition the factory does not hold, naming it, and makes no board", async () => {
+    const repo = newRepo();
+    const definitionId = DefinitionId.make(`missing${hex(4)}`);
+    const err = await refusal((s) => s.createBoard({ repo, definitionId }));
+    expect(err._tag).toBe("DefinitionNotFound");
+    if (err._tag !== "DefinitionNotFound") throw new Error("unreachable");
+    expect(err.definitionId).toBe(definitionId);
+    expect(err.version).toBeUndefined();
+    expect(err.message).toBe(`no board definition ${definitionId}`);
+    expect(await boardsOver(repo)).toBe(0);
+  });
+
+  /** Mutation: fall back to the newest when the named version is missing — this case gets a board. */
+  it("refuses a version the definition does not have, naming both, and makes no board", async () => {
+    const definitionId = await newDefinition([1]);
+    const repo = newRepo();
+    const err = await refusal((s) =>
+      s.createBoard({ repo, definitionId, definitionVersion: 2 }),
+    );
+    expect(err._tag).toBe("DefinitionNotFound");
+    if (err._tag !== "DefinitionNotFound") throw new Error("unreachable");
+    expect(err.definitionId).toBe(definitionId);
+    expect(err.version).toBe(2);
+    expect(err.message).toBe(
+      `board definition ${definitionId} has no version 2`,
+    );
+    expect(await boardsOver(repo)).toBe(0);
+  });
+});
+
 describe("TaskService — the ask and the thread", () => {
   /** The `kind` column of every event a card has, in write order. */
   const eventKinds = (taskId: string): Promise<ReadonlyArray<string>> =>

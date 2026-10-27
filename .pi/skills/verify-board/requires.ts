@@ -24,6 +24,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { TaskService, TaskServiceLive } from "@repo/core";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
+import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { readVerifyRecords } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { makeChecker, protocolFor } from "../verify-api/harness.ts";
@@ -41,13 +42,8 @@ const EVIDENCE_DIR =
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 
 const seed = Effect.gen(function* () {
-  const sql = yield* SqlClient;
   const tasks = yield* TaskService;
   const client = yield* RpcClient.make(RpcApi);
-  const newest = yield* sql<{ version: number }>`
-    SELECT max(version)::int AS version FROM board_definitions WHERE id = 'default'
-  `;
-  const version = newest[0]?.version ?? 1;
   const repo = RepoSlug.make(`verify-board/requires-${hex(4)}`);
   // Registered through the API, so the run `board start` opens is a worktree of the fixture.
   yield* client.registerRepo({
@@ -55,11 +51,13 @@ const seed = Effect.gen(function* () {
     url: "https://example.invalid/verify-board/requires.git",
     localPath: REPO_ROOT,
   });
-  const boardId = `brd_${hex(13)}`;
-  yield* sql`
-    INSERT INTO board_instances (id, repo, definition_id, definition_version)
-    VALUES (${boardId}, ${repo}, 'default', ${version})
-  `;
+  // The newest version of the default pipeline, which is `createBoard`'s default (LOB-208).
+  const made = yield* tasks.createBoard({
+    repo,
+    definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+  });
+  const boardId = made.id;
+  const version = made.definitionVersion;
   const task = yield* tasks.create({
     boardId,
     title: "verify-board requires card",

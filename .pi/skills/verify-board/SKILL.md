@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a card, move it, and assert the three refusals (undeclared transition, stale revision, a run crossing a human gate) through `factory board ls|show|move|comment|start` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a board and a card, move it, and assert the three refusals (undeclared transition, stale revision, a run crossing a human gate) through `factory board create|ls|show|move|comment|start` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -20,6 +20,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 | Feature                          | Check in the driver                                                                   | Why it matters                                                       |
 | -------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals  | a board is a real operation, not a row a test inserts                |
 | create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it              | a trigger's card is a real row the board reads back                  |
 | `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                       | the lane order is the definition's, not the DB's                     |
 | a card in its lane               | the created card is the row under `intake`                                            | lanes and cards come from one read, so they agree                    |
@@ -34,8 +35,8 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt           | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through | a refusal names the requirement; evidence is a condition of the move |
 
-Every check is required: `drive.sh`, `ask.sh` and `requires.sh` each exit non-zero when one
-fails, and `drive.sh` folds `create.ts`'s and `web.mjs`'s exit codes into its own.
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh` and `board-create.sh` each exit
+non-zero when one fails, and `drive.sh` folds `create.ts`'s and `web.mjs`'s exit codes into its own.
 
 ## Launch
 
@@ -51,8 +52,9 @@ directory it runs in and a ralph worktree asking for 5442 a second time fights t
 (LOB-57). It waits for **`/readyz`**, not `GET /`: the API binds its server before its migrations are
 applied (LOB-21), so `/` answers a moment before a card can be read.
 
-`seed.ts` writes the board: one `board_instances` row over the seeded `default` definition version 1
-(`SEED_CARD=0`, so no card). It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
+`seed.ts` makes the board through `TaskService.createBoard` (LOB-208) — the writer `factory board
+create` reaches — over the seeded `default` definition, pinned to version 1 (`SEED_CARD=0`, so no
+card). It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
 and `drive.sh` read. The drive's card is its own, created by `create.ts` over the API at the start of
 every drive, so the drive can run twice against one instance — even after a drive that failed
 part-way, because the checks find the drive's card by id in its lane rather than as the lane's only
@@ -82,7 +84,14 @@ runs the real script against a closed port and an answering one.
 ./drive.sh       # requires the instance from ./up.sh
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
 ./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402), three runs on one card
+./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ```
+
+`board-create.sh` (LOB-208) makes boards with `factory board create` and reads them back: the
+default definition's newest version unless `--version` names one, `board ls` on the made board, a
+card and a run on it whose prompt carries the `specifying` column's skill, and the two
+`definition_not_found` refusals plus a malformed `--repo`. `board-create.ts` reads the newest version
+straight from the database (the oracle) and the run's prompt from its log. See `features/boards.md`.
 
 `requires.sh` (LOB-80) walks a card on the newest `default` definition into `review` and proves the
 column's `verified` requirement from the terminal: refused with no evidence, refused again when the
@@ -128,6 +137,8 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   its probes' facts, the CLI outputs and both processes' log
 - `requires-observed.json`, `requires-{web,api-unverified,api-verified}.json`, `requires-*.txt`,
   `requires-api.log` — `requires.sh`'s checks, each run's decoded `verify` record, the CLI outputs
+- `create-board.json`, `create-board-*.txt`, `create-board-prompt.json` — `board-create.sh`'s checks,
+  each command with its output, and the run's prompt sections
 
 Proof standards for this surface:
 

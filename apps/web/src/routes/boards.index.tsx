@@ -49,7 +49,7 @@ function BoardsRoute() {
     <EmptyPane
       icon={<KanbanSquareIcon strokeWidth={1.75} />}
       title="No boards yet"
-      detail="A board binds one repository to a definition version. None exists on this control plane yet, so there are no lanes to show."
+      detail="A board binds one repository to a definition version. None exists on this control plane yet; make one with factory board create --repo owner/name."
       visible={boards.length === 0}
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">

@@ -193,6 +193,25 @@ export type ListBoardsInput = typeof ListBoardsInput.Type;
 /** The server answers at most this many instances; the MVP has one board per repository (B2). */
 export const LIST_BOARDS_LIMIT = 100;
 
+/** The definition the default pipeline ships under (0007, versioned by 0010 and 0018). */
+export const DEFAULT_DEFINITION_ID = "default";
+
+/**
+ * A new board (B2, LOB-208): one repository bound to a version of a named definition.
+ *
+ * `definitionVersion` is optional and defaults to the definition's **newest** version, read when the
+ * board is created and pinned from then on — a board made today gets today's pipeline, and a version
+ * a later migration adds reaches the next board, never this one. Naming a version is for a caller
+ * that needs an older pipeline on purpose (a drive pinned to version 1's exits, say). Two boards
+ * over one repository are allowed: B2 binds an instance to a repo, it does not make the repo a key.
+ */
+export const CreateBoardInput = Schema.Struct({
+  repo: RepoSlug,
+  definitionId: DefinitionId,
+  definitionVersion: Schema.optional(Schema.Int),
+});
+export type CreateBoardInput = typeof CreateBoardInput.Type;
+
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);
 export type TaskPriority = typeof TaskPriority.Type;
@@ -400,6 +419,19 @@ export class BoardNotFound extends Schema.TaggedError<BoardNotFound>()(
   { boardId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A board was asked for over a definition the factory does not hold (LOB-208): no row with that id,
+ * or — when the caller named one — no such version of it. `version` is absent for the first.
+ */
+export class DefinitionNotFound extends Schema.TaggedError<DefinitionNotFound>()(
+  "DefinitionNotFound",
+  {
+    definitionId: Schema.String,
+    version: Schema.optional(Schema.Int),
+    message: Schema.String,
+  },
+) {}
+
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
   {
@@ -466,6 +498,7 @@ export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
+  | DefinitionNotFound
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired

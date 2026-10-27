@@ -8,6 +8,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
     return TasksRpc.of({
       getBoard: (input) => tasks.getBoard(input.boardId),
       listBoards: () => tasks.listBoards,
+      createBoard: (input) => tasks.createBoard(input),
       createTask: (input) => tasks.create(input as any),
       getTask: (input) => tasks.get(input.taskId),
       listTasks: (input) => tasks.list(input as any),
