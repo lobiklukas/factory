@@ -264,6 +264,7 @@ describe("the dev tasks' environment", () => {
     "FAUX_ASK",
     "FAUX_VERIFY",
     "FAUX_SLEEP_MS",
+    "FAUX_MODEL_SCRIPTS",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
     "PR_CAP_MAX_FILES",

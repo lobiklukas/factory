@@ -267,7 +267,13 @@ describe("parseFauxModelScripts", () => {
   });
 
   it("refuses a table that is not one", () => {
-    for (const text of ['["builder"]', '{"builder": {"verify": "yes"}}', "{"]) {
+    for (const text of [
+      '["builder"]',
+      '{"builder": {"verify": "yes"}}',
+      '{"builder": {"cmd": "x"}}',
+      '{"builder": {"command": "git commit", "verfy": true}}',
+      "{",
+    ]) {
       const parsed = parse(text);
       expect(Exit.isFailure(parsed)).toBe(true);
       expect(JSON.stringify(parsed)).toContain("faux model scripts are not a");

@@ -47,16 +47,17 @@ approval gate, which only a person can make`, matched with its code.
 
 ## What it does not prove
 
-A person crossing a gate: the drive leaves the card in `planning`, so the dashboard phase reads a
-card whose next move is the gate the run was refused, and a person crossing both gates is
-`packages/core`'s `TaskService` case. Nor does it prove the merge gate (`review → done`) from a
-terminal: it is the same `humanGate` table and the same refusal, and reaching `review` needs a
-building run's evidence.
+A person crossing a gate, or the merge gate (`review → done`), in this phase: the move phase leaves
+the card in `planning`, so the dashboard phase reads a card whose next move is the gate the run was
+refused. The drive's later phases take the same card on — a person's `planning → building`, then a
+run refused `review → done` and a person's merge going through — in [build.md](build.md).
 
 That the run exists: the service treats any well-formed `ses_…` id as a run actor (TaskService's
 `isRunActor`) and does not look the session up. The drive uses the id `board start` printed so it
 does not invent one, not because the refusal depends on it.
 
-Nor does it prove `requires[]`: the drive's card is on definition version 1, which declares no
-checked requirement; `review`'s `verified` (version 3) is `./requires.sh`'s, in
-[requires.md](requires.md).
+Nor does it prove `requires[]` refusals: the drive's card is on the default pipeline's newest
+version (v3, `./up.sh` seeds it with `SEED_DEFINITION_VERSION=newest`), whose `review` requires
+`verified`, but none of this phase's moves leaves a column that declares a checked requirement. The
+refusal is `./requires.sh`'s, in [requires.md](requires.md); the drive's build phase
+([build.md](build.md)) satisfies `verified` and crosses it.

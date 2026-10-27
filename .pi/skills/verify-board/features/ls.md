@@ -16,7 +16,7 @@ factory board ls --board brd_0123456789abcdefghjkmnpqrs
 ```
 
 ```
-Default pipeline  verify-board/ab12cd  v1
+Default pipeline  verify-board/ab12cd  v3
 intake  resting  1
   tsk_…  normal  verify-board card
 specifying  working  0
@@ -37,5 +37,5 @@ canceled` — the seeded definition's order;
 ## What it does not prove
 
 Nothing about a board _definition_ the seed did not ship: `getBoard` returns whatever the instance
-binds, and the drive reads version 1. Moving a card between boards, or a definition edited in place,
+binds, and the drive reads the newest version (v3), the one `./up.sh` seeds. Moving a card between boards, or a definition edited in place,
 is not reachable through the CLI at all — a definition version is a new row (B2).

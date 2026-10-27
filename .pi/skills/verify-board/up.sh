@@ -7,7 +7,10 @@
 # .verify/run/web.pid): the drive's last phase reads the board back in a browser (LOB-84).
 #
 # MODEL_BACKEND=faux keeps `board start` offline: opening a run is real (a session, a worktree, a
-# `factory.task` document), only the model behind it is scripted.
+# `factory.task` document), only the model behind it is scripted. It is pinned, as ask.sh and
+# requires.sh pin it, not taken from the caller: every phase of the drive depends on a scripted
+# model, and ROLE_MODELS below names `faux/builder`, which no other backend serves — the API would
+# refuse to boot on InvalidRoleModels.
 #
 # The script is the one the drive's specify phase needs (LOB-85): FAUX_COMMAND sleeps, so a run is
 # provably busy before it asks, as sigterm.sh and ask.sh hold a turn open; FAUX_ASK is the question
@@ -148,7 +151,7 @@ echo "$BOARD_GITHUB" > "$RUN_DIR/github-mode"
     PORT="$API_PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT,http://localhost:$WEB_PORT" \
-    MODEL_BACKEND="${MODEL_BACKEND:-faux}" \
+    MODEL_BACKEND=faux \
     FAUX_COMMAND="$FAUX_COMMAND" \
     FAUX_ASK="$FAUX_ASK" \
     ROLE_MODELS="$ROLE_MODELS" \

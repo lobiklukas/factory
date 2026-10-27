@@ -22,7 +22,7 @@ Three things are new beside the drive:
   own model (`ROLE_MODELS=builder=faux/builder`, LOB-207) whose script writes
   `apps/web/src/card.ts`, commits it and calls `verify`, while every other run keeps `FAUX_COMMAND`
   (the read-only specifier's sleep). A row for a model the faux backend does not publish fails the
-  boot.
+  boot, as does a row with a field other than `command` / `verify`.
 - **A forge and a checkout for `./up.sh`'s instance.** The loopback GitHub fake
   (`.pi/skills/verify-api/github-fake.ts`) on `GITHUB_PORT` (9403 by default), ledger in
   `.verify/run/github-ledger.json`, with `GITHUB_API_URL` and a fake `GITHUB_TOKEN` handed to the
@@ -61,7 +61,9 @@ After the dashboard phase, in the same tmux pane, each command followed by the e
    `## Verification` section says ``### `verify-web`: exit 0`` and `- Exit code: 0`; `getSession`
    reads the same link back. `factory ls` shows it in the run's row.
 5. **Review.** The run's own `building → review` (no gate on it), then a person's verdict as a note on
-   the card, read back by `board show` under `[note] person:reviewer`.
+   the card, read back by `board show` under `[note] person:reviewer`. The verdict is read off the
+   evidence: `approve <link>` only when there is a PR and both `build.ts` probes passed, otherwise
+   `request changes` naming what is missing — and a check that the verdict approves fails on it.
 6. **The merge gate.** The run's `review → done` is refused with
    `human_gate_required: the move review → done crosses the merge gate, which only a person can make`
    and a non-zero exit; the person's move at the same revision goes through, and `board show` says
@@ -74,7 +76,7 @@ its own rather than being skipped. No check accepts a link the ledger does not h
 
 ## What proves it works
 
-`.verify/evidence/lob-86/pass/board/`: `observed.json` (**42/42**, the drive's second run against one
+`.verify/evidence/lob-86/pass/board/`: `observed.json` (**43/43**, the drive's second run against one
 `./up.sh` instance), `build-built.json` (3/3), `build-pr.json` (8/8), `pr-body.md` (the body as the
 fake received it), `build-diff.txt`, and the panes `move-building.txt`, `start-build.txt`, `pr.txt`,
 `ls-pr.txt`, `move-review.txt`, `verdict.txt`, `show-verdict.txt`, `move-merge-run.txt`,
@@ -85,15 +87,20 @@ the API no credential (and a closed loopback port as its forge). The same drive 
 (`.verify/evidence/lob-86/github-off/`): `factory pr` prints
 `error: credential_error: no GITHUB_TOKEN configured; cannot resolve a token for verify-board/…` and
 exits 1, the drive prints that reason, `observed.json`'s `prUrl` is `""`, and every ledger, body,
-`getSession` and `factory ls` check fails naming why.
+`getSession` and `factory ls` check fails naming why, and the reviewer's verdict is
+`request changes (no PR)`, which fails the verdict check.
 
-Unit coverage: `apps/cli/src/commands/pr.test.ts` (which answers count as a PR, and the refusals'
-words), `packages/harness/src/models.test.ts` ("a faux model's own script", `parseFauxModelScripts`).
+Unit coverage: `apps/cli/src/commands/pr.test.ts` — `prAnswer` (which answers count as a PR, and the
+`no_change` / `over_cap` refusals' words) and `reportFailures`, the handler the command runs under
+(`CredentialError` / `PrError` printed as `credential_error` / `pr_error`, exit 1); that the command
+itself exits non-zero on a refusal is the `BOARD_GITHUB=off` drive's. `packages/harness/src/models.test.ts`
+("a faux model's own script", `parseFauxModelScripts`, including a misspelt model id or field).
 
 ## What it does not prove
 
 - That GitHub accepts the request as the fake does (`packages/core/src/pr.test.ts` asserts the shape).
 - That `building`'s `pr_link` and `non_empty_diff` requirements are **checked** by the service: they
   are not yet (`packages/core/src/requirements.ts`), so a card can leave `building` without a PR — the
-  drive asserts both, the board does not. The `verified` gate on `review` is checked.
+  drive asserts both, the board does not. The `verified` gate on `review` is checked. Tracked as
+  [LOB-240](https://linear.app/lobiklukas/issue/LOB-240).
 - A reviewer _run_: the verdict is a person's note. No recorded artifact backs `review_verdict` yet.

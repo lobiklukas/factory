@@ -5,7 +5,7 @@ reaches it, how the skill drives it, and what observable end state proves it wor
 
 Status reflects the last verified runs: **2026-10-27**, `agent/LOB-86`, `MODEL_BACKEND=faux` —
 `./drive.sh` with its build, PR, review and merge phases, API on `:9500`, web on `:3500`, the GitHub
-fake on `:9503`, **42/42** required drive checks passed, with `build.ts`'s **3/3** (`build-built.json`)
+fake on `:9503`, **43/43** required drive checks passed, with `build.ts`'s **3/3** (`build-built.json`)
 and **8/8** (`build-pr.json`) folded in, twice against one `./up.sh` instance, and exit 1 naming
 `credential_error` under `BOARD_GITHUB=off` ([build.md](build.md)). Before it, `agent/LOB-85` —
 `./drive.sh` in tmux, API on `:9500`, web on `:3500`, **30/30** required drive checks passed

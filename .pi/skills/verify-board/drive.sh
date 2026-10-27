@@ -378,7 +378,8 @@ build_probe() { # mode, extra env...
   return "$rc"
 }
 build_probe built
-check "the build run committed a change and verified it (build.ts)" "$?" "see build-built.json"
+BUILT_RC=$?
+check "the build run committed a change and verified it (build.ts)" "$BUILT_RC" "see build-built.json"
 
 # The diff, from git itself rather than from anything the factory reports: the run's branch against
 # the `main` it was cut from, in the fixture checkout the worktree is linked into.
@@ -402,7 +403,8 @@ if [ -z "$PR_URL" ]; then
   echo "drive: the PR path is missing — ${PR_REASON:-factory pr printed no link}" >&2
 fi
 build_probe pr PR_URL="$PR_URL" LEDGER="$LEDGER" REPO="$BOARD_REPO_SLUG"
-check "the forge holds that PR, with the diff and the evidence in its body (build.ts)" "$?" \
+PR_PROBE_RC=$?
+check "the forge holds that PR, with the diff and the evidence in its body (build.ts)" "$PR_PROBE_RC" \
   "see build-pr.json and pr-body.md"
 
 fresh
@@ -423,7 +425,19 @@ check "the build run moves its card on to review (no gate on that move)" \
   "$([ "$(exit_code review)" = "0" ] && [ -n "$REVIEW_REVISION" ] && echo 0 || echo 1)" \
   "exit=$(exit_code review), revision=${REVIEW_REVISION:-none}"
 
-VERDICT="verdict: approve ${PR_URL:-(no PR)} — verify-web exit 0"
+# The verdict is read off the evidence the reviewer was shown, not written in advance: approve only
+# when there is a PR, the run's verify record passed (build-built.json) and the forge's PR carries
+# that evidence (build-pr.json). Anything else is a request for changes naming what is missing, and
+# the check below fails on it, so a review with no PR to review is a failed step, not a pass.
+if [ -z "$PR_URL" ]; then
+  VERDICT="verdict: request changes (no PR) — there is no pull request to review"
+elif [ "$BUILT_RC" != "0" ]; then
+  VERDICT="verdict: request changes $PR_URL — the run's verify record did not pass (build-built.json)"
+elif [ "$PR_PROBE_RC" != "0" ]; then
+  VERDICT="verdict: request changes $PR_URL — the PR does not carry the diff and evidence (build-pr.json)"
+else
+  VERDICT="verdict: approve $PR_URL — verify-web exit 0, evidence in the PR body"
+fi
 fresh
 run_cmd verdict "$FACTORY board comment --task $TASK_ID --expect-revision ${REVIEW_REVISION:-0} --body '$VERDICT' --actor person:reviewer --api $API_URL" || true
 capture verdict.txt
@@ -436,6 +450,9 @@ capture show-verdict.txt
 check "a person's verdict is recorded on the card's thread" \
   "$([ "$VERDICT_EXIT" = "0" ] && [ -n "$VERDICT_REVISION" ] && grep -qF "  [note] person:reviewer (revision $REVIEW_REVISION)" "$EVIDENCE_DIR/show-verdict.txt" && grep -qxF "    $VERDICT" "$EVIDENCE_DIR/show-verdict.txt" && echo 0 || echo 1)" \
   "exit=${VERDICT_EXIT:-none}, revision=${VERDICT_REVISION:-none}"
+check "the verdict, read off the PR and its evidence, approves" \
+  "$(case "$VERDICT" in "verdict: approve "*) echo 0 ;; *) echo 1 ;; esac)" \
+  "$VERDICT"
 
 # --- merge: the run is refused at the merge gate; the person's move reaches done -------------------
 fresh

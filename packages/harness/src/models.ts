@@ -358,7 +358,11 @@ export const parseFauxModelScripts = (
 ): Effect.Effect<FauxModelScripts, InvalidFauxModelScripts> =>
   Effect.gen(function* () {
     if (text.trim().length === 0) return new Map();
-    const table = yield* Schema.decodeEffect(FauxModelScriptsJson)(text).pipe(
+    // A misspelt field (`verfy`) is as much a typo as a misspelt model id: it must fail, not be
+    // stripped, or the row it was meant for runs without it.
+    const table = yield* Schema.decodeEffect(FauxModelScriptsJson)(text, {
+      onExcessProperty: "error",
+    }).pipe(
       Effect.mapError(
         (cause) =>
           new InvalidFauxModelScripts({

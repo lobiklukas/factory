@@ -70,7 +70,8 @@ part-way, because the checks find the drive's card by id in its lane rather than
 card; `ask.sh` calls `seed.ts` without
 `SEED_CARD=0` and gets a board and a card from the service (so `task_events` gets its `created` row).
 `MODEL_BACKEND=faux` keeps `board start` offline: the session, its worktree and its `factory.task`
-document are real; only the model behind it is scripted. The script is the specify phase's
+document are real; only the model behind it is scripted. It is pinned, not read from the caller:
+`ROLE_MODELS=builder=faux/builder` names a model only the faux backend serves. The script is the specify phase's
 (LOB-85): `FAUX_COMMAND="sleep 8; echo faux-ok"` holds a run's turn open so it is provably busy, and
 `FAUX_ASK` is the question a run asks when its prompt carries no task thread yet, recorded in
 `.verify/run/faux-ask` for `drive.sh`. `FAUX_ASK` can be overridden; `FAUX_COMMAND` is fixed, and an
