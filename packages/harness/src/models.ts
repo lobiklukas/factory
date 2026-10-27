@@ -40,7 +40,7 @@ export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
  * The id pi-ai's faux provider publishes its model under, so a session can name it before the
  * provider is registered (`fauxProvider` defaults to it).
  */
-const FAUX_MODEL_ID = "faux-1";
+export const FAUX_MODEL_ID = "faux-1";
 
 /** The command the faux script runs unless a caller scripts another one. */
 export const FAUX_COMMAND = "echo faux-ok";

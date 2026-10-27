@@ -260,6 +260,7 @@ describe("the dev tasks' environment", () => {
     "FAUX_COMMAND",
     "FAUX_EVERY_TURN",
     "APPROVAL_REQUIRED",
+    "ROLE_MODELS",
     "FAUX_ASK",
     "FAUX_VERIFY",
     "FAUX_SLEEP_MS",

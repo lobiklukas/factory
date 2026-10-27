@@ -13,11 +13,12 @@
  * - `skillsExtension` turns those records into one prompt section each, rendered in the order the
  *   column names them.
  *
- * - The column's `role` is carried through as declared, unresolved. B6 gives the role the model and
- *   the tool policy; the one piece of that with a source of truth today is the read-only stage
- *   (`./policy`'s `READ_ONLY_ROLES`, LOB-74), which `openSession` composes into the session's
- *   policy from this profile. The model is still the deployment's (one per process, `./models`),
- *   and the rest of the role → model and tool-policy mapping is LOB-207.
+ * - The column's `role` is carried through as declared, and `resolveRole` is where it becomes what
+ *   B6 says a role is: the model the run talks to and the tools it is offered (LOB-207). Both halves
+ *   are read here and nowhere else, so changing a role's model is one edit to the deployment's
+ *   table (`RoleModels`, read from `ROLE_MODELS` at boot) and changing what a role may use is one
+ *   edit to `./policy`'s `READ_ONLY_ROLES` (LOB-74). `openSession` takes the model, the withheld
+ *   tools and the read-only stage from that one answer.
  */
 import type { Extension } from "@earendil-works/pi-durable";
 import {
@@ -26,6 +27,12 @@ import {
   type PromptSection,
 } from "@earendil-works/pi-durable";
 import { Effect, Schema } from "effect";
+import { modelAccessFor, type ModelAccess } from "./models";
+import {
+  readOnlyStageOf,
+  STAGE_REFUSED_TOOLS,
+  type ReadOnlyStage,
+} from "./policy";
 
 /** A column names a skill the factory does not hold. */
 export class MissingSkill extends Schema.TaggedError<MissingSkill>()(
@@ -65,8 +72,9 @@ export type RunProfile = {
   /** The column the run started in; absent for a session with no card. */
   readonly column?: string;
   /**
-   * The role that column declares (B6), which is what selects a read-only stage's policy at
-   * `openSession` (LOB-74). Absent for a session with no card and for a column with no role.
+   * The role that column declares (B6), which is what `resolveRole` turns into the run's model and
+   * its tool policy at `openSession` (LOB-74, LOB-207). Absent for a session with no card and for a
+   * column with no role.
    */
   readonly role?: string;
   readonly skills: readonly RunSkill[];
@@ -139,4 +147,125 @@ export const skillsExtension = (skills: readonly RunSkill[]): Extension => {
     ),
   );
   return defineExtension({ name: SKILLS_EXTENSION, sections });
+};
+
+// ---------------------------------------------------------------------------------------------
+// The role: its model and its tools (B6, LOB-207)
+// ---------------------------------------------------------------------------------------------
+
+/** The deployment's role → model table is malformed, or names a model this process cannot serve. */
+export class InvalidRoleModels extends Schema.TaggedError<InvalidRoleModels>()(
+  "InvalidRoleModels",
+  { message: Schema.String },
+) {}
+
+/**
+ * The deployment's role → model table (B6), resolved against the model catalog the process serves:
+ * one row per role that runs something other than the deployment's own model. A role with no row —
+ * and a run with no role, and a session with no card — runs the deployment's model.
+ *
+ * It is deployment configuration rather than a column of the board definition because a model id is
+ * a fact about a deployment (`faux/*` here, `anthropic/*` there), and a board is not: the same board
+ * runs under both. A `Map` rather than an object literal, because a role is free text in a board
+ * definition and `constructor` must not find `Object.prototype`'s.
+ */
+export type RoleModels = ReadonlyMap<string, ModelAccess>;
+
+/** A deployment that names no role models: every run talks to the deployment's model. */
+export const NO_ROLE_MODELS: RoleModels = new Map();
+
+/**
+ * Read the role → model table as a deployment writes it (`ROLE_MODELS`): a comma-separated list of
+ * `role=provider/modelId`, in the shape `APPROVAL_REQUIRED` already uses. Blank entries are skipped,
+ * so an empty value is an empty table. A row with no `=`, an empty side, or a role named twice is
+ * refused rather than guessed at: two rows for one role would make "which model" depend on order.
+ */
+export const parseRoleModels = (
+  text: string,
+): Effect.Effect<ReadonlyMap<string, string>, InvalidRoleModels> =>
+  Effect.gen(function* () {
+    const table = new Map<string, string>();
+    for (const raw of text.split(",")) {
+      const entry = raw.trim();
+      if (entry.length === 0) continue;
+      const equals = entry.indexOf("=");
+      const role = equals < 0 ? "" : entry.slice(0, equals).trim();
+      const model = equals < 0 ? "" : entry.slice(equals + 1).trim();
+      if (role.length === 0 || model.length === 0) {
+        return yield* new InvalidRoleModels({
+          message: `role model "${entry}" is not role=provider/modelId`,
+        });
+      }
+      if (table.has(role)) {
+        return yield* new InvalidRoleModels({
+          message: `role ${role} is given a model twice`,
+        });
+      }
+      table.set(role, model);
+    }
+    return table;
+  });
+
+/**
+ * Resolve each row's `provider/modelId` against the catalog `deployment` was built with — the
+ * lookup a replay does (`modelAccessFor`, LOB-198), done once, at boot. A row naming a model the
+ * process cannot serve is refused, never quietly served by the deployment's model: a role that was
+ * configured onto a model and silently runs another is the failure this check exists to make loud.
+ */
+export const resolveRoleModels = (
+  deployment: ModelAccess,
+  declared: ReadonlyMap<string, string>,
+): Effect.Effect<RoleModels, InvalidRoleModels> =>
+  Effect.gen(function* () {
+    const resolved = new Map<string, ModelAccess>();
+    for (const [role, key] of declared) {
+      const access = modelAccessFor(deployment, key);
+      if (access === undefined) {
+        return yield* new InvalidRoleModels({
+          message: `role ${role} names model ${key}, which this process does not serve`,
+        });
+      }
+      resolved.set(role, access);
+    }
+    return resolved;
+  });
+
+/** What a run's role resolves to (B6): the model it talks to and the tools it is not offered. */
+export type RoleResolution = {
+  /** The role's model, or the deployment's when the role has no row (or there is no role). */
+  readonly model: ModelAccess;
+  /**
+   * Tool names the run is not offered at all. `openSession` removes them from the run's tool list
+   * (`AgentChange.tools`), so the model never sees them; a call it makes anyway is answered
+   * `tool_unavailable` by Pi Durable. The stage's hook refusal is what holds on a root whose tool
+   * list still offers them (pinned before the filter, or configured since).
+   */
+  readonly withheldTools: ReadonlySet<string>;
+  /** The read-only stage the role makes the run (LOB-74), when it is one. */
+  readonly stage?: ReadOnlyStage;
+};
+
+const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
+
+/**
+ * Resolve the run's role to its model and its tool policy — the one place B6 says that happens.
+ *
+ * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is
+ * the read-only stage's (`READ_ONLY_ROLES`): a read-only role is not offered the tools the stage
+ * refuses (`STAGE_REFUSED_TOOLS`), and every other role is offered every tool. Pure, so the whole
+ * mapping is a table in a test.
+ */
+export const resolveRole = (
+  run: RunProfile | undefined,
+  deployment: ModelAccess,
+  roles: RoleModels = NO_ROLE_MODELS,
+): RoleResolution => {
+  const model = run?.role === undefined ? undefined : roles.get(run.role);
+  const stage = readOnlyStageOf(run);
+  return {
+    model: model ?? deployment,
+    withheldTools:
+      stage === undefined ? NO_TOOLS_WITHHELD : STAGE_REFUSED_TOOLS,
+    ...(stage === undefined ? {} : { stage }),
+  };
 };

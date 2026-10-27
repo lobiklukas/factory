@@ -99,6 +99,7 @@ import {
   readPromptSections,
   readSessionLog,
   readVerifyRecords,
+  resolveRoleModels,
   tailOf,
   usageCostTotal,
   type VerifyRecord,
@@ -5415,6 +5416,74 @@ describe("a run's prompt comes from its column", () => {
     expect(outcome.building.result?.isError).toBe(false);
     expect(outcome.building.result?.text).toContain(`wrote ${STAGE_PROBE}`);
     expect(outcome.building.wrote).toBe(true);
+  }, 120_000);
+
+  /**
+   * One deployment whose role table gives the specifier its own model (LOB-207): the faux backend
+   * publishing two models, and the table resolved against it the way `apps/api` resolves
+   * `ROLE_MODELS` at boot. Every other role has no row.
+   */
+  const roleRoot = mkdtempSync(join(tmpdir(), "factory-core-roles-"));
+  const roleAccess = createFauxModelAccess({
+    fauxModels: ["faux-1", "faux-spec"],
+  }).access;
+  const roleRuntime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: roleAccess,
+      roleModels: Effect.runSync(
+        resolveRoleModels(
+          roleAccess,
+          new Map([["specifier", "faux/faux-spec"]]),
+        ),
+      ),
+      sessionRoot: roleRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await roleRuntime.dispose();
+  });
+
+  it("runs each card's run on its column's role's model, and an unconfigured role on the deployment's", async () => {
+    const models = await roleRuntime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const boardId = yield* newBoard;
+        const ran = (column: string) =>
+          Effect.gen(function* () {
+            const sessionId = yield* startRun(
+              yield* newCard(boardId, column),
+              column,
+            );
+            const snapshot = yield* sessions.get(sessionId);
+            return snapshot.usage.models.map((entry) => entry.key);
+          });
+        return {
+          specifying: yield* ran("specifying"),
+          building: yield* ran("building"),
+          review: yield* ran("review"),
+          // A session with no card has no role at all.
+          scratch: yield* Effect.gen(function* () {
+            const created = yield* sessions.create({ title: "no card" });
+            yield* sessions.send({ sessionId: created.id, content: "hello" });
+            yield* waitUntil(
+              sessions
+                .get(created.id)
+                .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+              "the scratch run to settle",
+            );
+            const snapshot = yield* sessions.get(created.id);
+            return snapshot.usage.models.map((entry) => entry.key);
+          }),
+        };
+      }),
+    );
+
+    // `specifying` declares `specifier`, which has a row; `building` (`builder`) and `review`
+    // (`reviewer`) have none, so they run the deployment's model, as a session with no card does.
+    expect(models.specifying).toEqual(["faux/faux-spec"]);
+    expect(models.building).toEqual(["faux/faux-1"]);
+    expect(models.review).toEqual(["faux/faux-1"]);
+    expect(models.scratch).toEqual(["faux/faux-1"]);
   }, 120_000);
 });
 

@@ -94,6 +94,7 @@ import type {
   Harness,
   ModelAccess,
   OpenSession,
+  RoleModels,
   RunColumn,
   RunProfile,
   SessionRef,
@@ -377,7 +378,15 @@ export class SessionService extends Context.Service<
 >()("@repo/core/SessionService") {}
 
 export type SessionServiceOptions = {
+  /** The deployment's model: what every session talks to unless its run's role has its own. */
   readonly model: ModelAccess;
+  /**
+   * The deployment's role → model table (B6, LOB-207): a run whose column declares a role with a
+   * row here talks to that row's model. Resolved against `model`'s catalog by whoever builds the
+   * layer (`@repo/harness`'s `resolveRoleModels`), so a row naming a model the process cannot serve
+   * fails the boot rather than a run. Absent: every run talks to `model`.
+   */
+  readonly roleModels?: RoleModels;
   /** Where a session's working directory is created, one directory per session. */
   readonly sessionRoot: string;
   /**
@@ -1159,6 +1168,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             openSession({
               storage,
               model: options.model,
+              // The run's role picks its model from the deployment's table (LOB-207); a session
+              // with no card has no role, so it talks to the deployment's model.
+              ...(options.roleModels === undefined
+                ? {}
+                : { roles: options.roleModels }),
               cwd,
               pages,
               verify,

@@ -30,8 +30,14 @@ CASES=(
   "allow:echo faux-ok"
   # LOB-74: one drive, two runs — a card in `specifying` and one in `building` call `bash` with the
   # same write into their own worktree; refused in the first, landed in the second (`stage.ts`).
+  # LOB-207: the same instance boots with a role table (`STAGE_ROLE_MODELS`), so the drive also
+  # proves each run talked to its role's model and was offered its role's tools.
   "stage:echo stage > stage-probe.txt && echo wrote stage-probe.txt"
 )
+
+# The stage case's role table (LOB-207): the specifier on a second faux model, every other role on
+# the backend's default. `apps/api` publishes every `faux/<id>` the table names.
+STAGE_ROLE_MODELS="specifier=faux/faux-spec"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 rm -f "$PROBE_PATH"
@@ -46,7 +52,10 @@ for index in "${!CASES[@]}"; do
   port=$((BASE_PORT + index))
 
   echo "=== $case_name: $command"
-  if ! API_PORT="$port" FAUX_COMMAND="$command" "$ROOT/.pi/skills/verify-policy/up.sh"; then
+  role_models=""
+  [ "$case_name" = "stage" ] && role_models="$STAGE_ROLE_MODELS"
+  if ! API_PORT="$port" FAUX_COMMAND="$command" ROLE_MODELS="$role_models" \
+       "$ROOT/.pi/skills/verify-policy/up.sh"; then
     echo "FAIL  $case_name  (the api did not start)" >&2
     failed=1
     continue
@@ -59,7 +68,7 @@ for index in "${!CASES[@]}"; do
   driver="drive.ts"
   [ "$case_name" = "stage" ] && driver="stage.ts"
   if ! CASE="$case_name" API_URL="http://localhost:$port" PROBE_PATH="$PROBE_PATH" \
-       FAUX_COMMAND="$command" bun "$ROOT/.pi/skills/verify-policy/$driver"; then
+       FAUX_COMMAND="$command" ROLE_MODELS="$role_models" bun "$ROOT/.pi/skills/verify-policy/$driver"; then
     failed=1
   fi
 

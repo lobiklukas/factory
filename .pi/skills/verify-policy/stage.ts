@@ -7,6 +7,7 @@
 //   API_URL       default http://localhost:9600
 //   DATABASE_URL  the database the API runs on (the cards are seeded there, and the logs read back)
 //   EVIDENCE_DIR  default .verify/evidence/latest
+//   ROLE_MODELS   the role table the API booted with (refusals.sh: specifier=faux/faux-spec)
 //
 // One drive, two runs, the same tool call: a card in `specifying` and a card in `building` on one
 // board, each started as a run through `createSession`, and the faux script calls `bash` with the
@@ -14,6 +15,13 @@
 // policy must refuse it in the stage's words and the file must not exist; in `building` it must run
 // and the file must be there. A policy that refused the write everywhere fails the second half, and
 // one that refused it nowhere fails the first: the rule is the stage's, not the session's.
+//
+// LOB-207: the role half of B6. `refusals.sh` boots this case with `ROLE_MODELS=specifier=faux/faux-spec`,
+// so the same two runs also prove each one talked to its role's model — the specifying run to
+// `faux/faux-spec`, the building run (`builder`, no row) to the deployment's `faux/faux-1`, read from
+// each run's billed usage — and was offered its role's tools: no `write`, `edit` or `verify` for the
+// specifier, all three for the builder, read from the system messages in the run's log. Without
+// `ROLE_MODELS` (the manual path) both runs expect the deployment's model and the tool half still holds.
 //
 // The cards are seeded with SQL, as `.pi/skills/verify-board/seed.ts` seeds its board: a card is
 // created by a trigger (B2), and walking one through `planning`'s human gate is not what this
@@ -23,7 +31,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
-import { readSessionLog } from "@repo/harness";
+import {
+  parseRoleModels,
+  readOfferedTools,
+  readSessionLog,
+} from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -33,6 +45,12 @@ import { SqlClient } from "effect/sql/SqlClient";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9600";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
 const CASE = "stage";
+/** The role table the API under test booted with, so the drive knows which model each run expects. */
+const ROLE_MODELS = process.env["ROLE_MODELS"] ?? "";
+/** The faux backend's own model: what a role with no row runs. */
+const DEPLOYMENT_MODEL = "faux/faux-1";
+/** What a read-only role is not offered (`STAGE_REFUSED_TOOLS`). */
+const WITHHELD = ["write", "edit", "verify"] as const;
 /** The file the scripted command writes, relative to the run's worktree. */
 const PROBE = "stage-probe.txt";
 
@@ -54,6 +72,7 @@ const observed: Record<string, unknown> = {
   case: CASE,
   apiUrl: API_URL,
   fauxCommand: process.env["FAUX_COMMAND"],
+  roleModels: ROLE_MODELS,
   probe: PROBE,
 };
 
@@ -152,9 +171,10 @@ const runIn = (column: string, taskId: string) =>
     const storage = yield* Effect.promise(() =>
       PostgresStorage.reader(sql, created.id),
     );
-    const log = yield* readSessionLog(storage).pipe(
-      Effect.ensuring(Effect.promise(() => storage.dispose())),
-    );
+    const { log, offered } = yield* Effect.all({
+      log: readSessionLog(storage),
+      offered: readOfferedTools(storage),
+    }).pipe(Effect.ensuring(Effect.promise(() => storage.dispose())));
 
     const probePath = join(worktree, PROBE);
     const run = (yield* sql<{ column: string }>`
@@ -166,6 +186,9 @@ const runIn = (column: string, taskId: string) =>
       worktree,
       prompt,
       runColumn: run?.column,
+      // Which model each of the run's requests went to, as the API reports the run's spend.
+      models: snapshot.usage.models.map((entry) => entry.key),
+      offered,
       result: snapshot.entries.find((entry) => entry.kind === "toolResult"),
       logged: log.entries.find((entry) => entry.kind === "toolResult"),
       answer: snapshot.entries
@@ -198,6 +221,46 @@ const program = Effect.gen(function* () {
       `placement=${run.placement} session=${run.sessionId} column=${String(run.runColumn)}`,
     );
   }
+
+  // The role half (LOB-207): each run's model is its role's row, or the deployment's without one,
+  // and a read-only role is never offered a tool that writes.
+  const declared = yield* parseRoleModels(ROLE_MODELS);
+  const expected = {
+    specifying: declared.get("specifier") ?? DEPLOYMENT_MODEL,
+    building: declared.get("builder") ?? DEPLOYMENT_MODEL,
+  };
+  assert(
+    "the specifying run talked to the specifier's model",
+    specifying.models.length > 0 &&
+      specifying.models.every((key) => key === expected.specifying),
+    `models=${JSON.stringify(specifying.models)} expected=${expected.specifying}`,
+  );
+  assert(
+    "the building run talked to the deployment's model (builder has no row)",
+    building.models.length > 0 &&
+      building.models.every((key) => key === expected.building),
+    `models=${JSON.stringify(building.models)} expected=${expected.building}`,
+  );
+  if (declared.size > 0) {
+    assert(
+      "the two roles ran two different models in one deployment",
+      expected.specifying !== expected.building &&
+        specifying.models[0] !== building.models[0],
+      `specifying=${JSON.stringify(specifying.models)} building=${JSON.stringify(building.models)}`,
+    );
+  }
+  assert(
+    "the specifying run was offered no tool that writes",
+    WITHHELD.every((tool) => !specifying.offered.includes(tool)) &&
+      specifying.offered.includes("bash") &&
+      specifying.offered.includes("read"),
+    `offered=${JSON.stringify(specifying.offered)}`,
+  );
+  assert(
+    "the building run was offered every tool the specifier was not",
+    WITHHELD.every((tool) => building.offered.includes(tool)),
+    `offered=${JSON.stringify(building.offered)}`,
+  );
 
   // The specifying half: refused, in the stage's words, recorded in the log, and nothing written.
   const refusal = specifying.result?.text ?? "";

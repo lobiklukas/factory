@@ -12,6 +12,10 @@ import {
   createModelAccess,
   DEFAULT_AUTONOMY,
   FAUX_COMMAND,
+  FAUX_MODEL_ID,
+  modelKey,
+  parseRoleModels,
+  resolveRoleModels,
   type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
@@ -154,6 +158,27 @@ const ModelConfig = Config.all({
 });
 
 /**
+ * Which model each board role runs (docs/board.md B6, LOB-207).
+ *
+ * `ROLE_MODELS` is a comma-separated list of `role=provider/modelId` —
+ * `specifier=anthropic/claude-haiku-4-5,reviewer=anthropic/claude-opus-4-5` — and a role with no
+ * row, like a session with no card, runs the backend's own model. It is resolved against the
+ * backend's catalog at boot (`resolveRoleModels`), so a malformed row or a model the process cannot
+ * serve fails the boot rather than a run. Under the faux backend every `faux/<id>` it names is
+ * published beside the default, which is how two roles run two models with no key — and only those,
+ * so under faux a row dropped while a run is pinned to it strands that run (docs/board.md B6).
+ */
+const RoleModelsConfig = Config.String("ROLE_MODELS").pipe(
+  Config.withDefault(""),
+);
+
+/** The faux model ids a role table names, which the faux backend has to publish to serve them. */
+const fauxRoleModels = (declared: ReadonlyMap<string, string>): string[] =>
+  [...declared.values()]
+    .filter((key) => key.startsWith("faux/"))
+    .map((key) => key.slice("faux/".length));
+
+/**
  * The spend ceiling a session gets when its create names none (LOB-163), in US dollars — and a fork
  * or a replay of an uncapped session, which names none either (a capped one's keeps its source's
  * cap). Unset: no default, so only a create that asks for a cap, or a fork or replay of a capped
@@ -283,6 +308,7 @@ const HttpLive = Effect.gen(function* () {
   const prCap = yield* PrCapConfig;
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
+  const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -304,18 +330,31 @@ const HttpLive = Effect.gen(function* () {
     );
   }
 
+  // The model every session talks to, and the one a run's role picks instead (LOB-207).
+  const modelAccess = createModelAccess(backend, {
+    fauxCommand: model.fauxCommand,
+    fauxEveryTurn: model.fauxEveryTurn,
+    fauxAsk: Option.getOrUndefined(model.fauxAsk),
+    fauxCost: model.fauxCost,
+    fauxVerify: model.fauxVerify,
+    fauxSleepMs: model.fauxSleepMs,
+    // The default first, so a run with no role row still talks to it (LOB-207).
+    fauxModels: [...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)])],
+  });
+  const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
+  yield* Effect.logInfo(
+    `role models: ${[...roleModels]
+      .map(([role, access]) => `${role} → ${modelKey(access)}`)
+      .concat(`any other role → ${modelKey(modelAccess)}`)
+      .join(", ")}${declaredRoles.size === 0 ? "" : " (ROLE_MODELS)"}`,
+  );
+
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
-    model: createModelAccess(backend, {
-      fauxCommand: model.fauxCommand,
-      fauxEveryTurn: model.fauxEveryTurn,
-      fauxAsk: Option.getOrUndefined(model.fauxAsk),
-      fauxCost: model.fauxCost,
-      fauxVerify: model.fauxVerify,
-      fauxSleepMs: model.fauxSleepMs,
-    }),
+    model: modelAccess,
+    roleModels,
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,
