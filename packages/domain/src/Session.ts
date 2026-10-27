@@ -120,6 +120,8 @@ export type ToolCallRef = typeof ToolCallRef.Type;
 /**
  * One transcript entry, projected from a Pi Durable `EntryRecord` (`packages/harness` maps the
  * kinds). `text` is the model-facing text, flattened; `toolName` is set on tool results.
+ * `inherited` is a line a fork copied from the session it was forked from that is history, not
+ * its own (LOB-211): the parent's PR, which the fork does not have.
  */
 export const TranscriptEntryKind = Schema.Literals([
   "user",
@@ -130,6 +132,7 @@ export const TranscriptEntryKind = Schema.Literals([
   "compaction",
   "title",
   "budget",
+  "inherited",
   "other",
 ]);
 export type TranscriptEntryKind = typeof TranscriptEntryKind.Type;
