@@ -33,7 +33,7 @@ No CLI or dashboard surface yet: approving proposals into tracker issues is LOB-
 
 ## What proves it
 
-`./decompose.sh` — its own API on `DECOMPOSE_PORT` (9423 when unset), a faux specifier
+`./decompose.sh` — its own API on `DECOMPOSE_PORT` (9424 when unset), a faux specifier
 (`FAUX_SPEC`) whose spec has two criteria and no gaps, and its own database minted on the server
 `DATABASE_URL` names and dropped on exit (the drive fingerprints every table, so nothing else may
 write them). It runs `decompose.ts`, a client of `RpcApi` exactly as the CLI and the dashboard are,

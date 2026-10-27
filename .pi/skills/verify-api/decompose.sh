@@ -13,7 +13,7 @@
 #   DATABASE_URL=… DECOMPOSE_PORT=9521 ./decompose.sh     # another port
 #
 # Env: DATABASE_URL (required — it names the *server*, not the database the drive writes),
-# DECOMPOSE_PORT (9423 when unset), EVIDENCE_DIR.
+# DECOMPOSE_PORT (9424 when unset), EVIDENCE_DIR.
 #
 # The drive fingerprints every table's content before and after the call, so it cannot share a database
 # another process writes: it mints a throwaway database on the same server
@@ -27,7 +27,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${DECOMPOSE_PORT:-9423}"
+PORT="${DECOMPOSE_PORT:-9424}"
 API_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/decompose"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
