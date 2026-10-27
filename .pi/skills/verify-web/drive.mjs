@@ -556,20 +556,129 @@ if (childId !== "") {
       `${JSON.stringify(indexParent?.forkedFrom ?? null)}`,
   );
 
-  // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
-  // this proves is that the new third line truncates inside the row instead of pushing the document
-  // wider. The header's own clipping at 390 px is pre-existing (the header's last button is cut
-  // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
-  // `.ralph/polish.md` and the ticket filed for it.
+  // Narrow width (LOB-210). At 390 px the session list and the pane take turns instead of sharing
+  // the width: a fixed 16rem list beside the rail once left the pane 86 px, so the header's actions
+  // were cut off past the viewport and the composer's placeholder wrapped one character per line.
+  // These checks are the shell's, measured on the fork's own route: the pane spans everything right
+  // of the rail, every header action's box ends inside the viewport, and the composer is a line
+  // wide enough to type in. Each of them failed on the build before LOB-210 (fork right edge 657 px,
+  // composer 22 px wide), which is what makes them a regression test rather than a description.
   await page.setViewportSize({ width: 390, height: 844 });
-  observed.narrowWidth = await page.evaluate((child) => {
-    const fork = Array.from(document.querySelectorAll("header button")).find(
-      (button) => button.getAttribute("aria-label") === "Fork from here",
+  await page.waitForTimeout(300);
+  const narrowBoxes = () =>
+    page.evaluate(() => {
+      const rect = (element) => {
+        if (!(element instanceof Element)) return null;
+        const box = element.getBoundingClientRect();
+        return {
+          left: Math.round(box.left),
+          right: Math.round(box.right),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        };
+      };
+      const action = (label) =>
+        Array.from(document.querySelectorAll("header button")).find(
+          (button) => button.getAttribute("aria-label") === label,
+        );
+      // The pane's own overflow, not the document's: the root frame is `h-dvh overflow-hidden`,
+      // so a pane whose content runs past its box is clipped there and never widens the document.
+      // The pane is the header's parent (SessionPane's root column).
+      const pane = document.querySelector("header")?.parentElement ?? null;
+      return {
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        paneScrollWidth: pane === null ? null : pane.scrollWidth,
+        paneClientWidth: pane === null ? null : pane.clientWidth,
+        headerScrollWidth:
+          document.querySelector("header")?.scrollWidth ?? null,
+        headerClientWidth:
+          document.querySelector("header")?.clientWidth ?? null,
+        rail: rect(document.querySelector("nav[aria-label='Sections']")),
+        header: rect(document.querySelector("header")),
+        aside: rect(document.querySelector("aside")),
+        forkBox: rect(action("Fork from here")),
+        compactBox: rect(
+          action("Compact session") ?? action("Compacting session"),
+        ),
+        composer: rect(document.querySelector("textarea")),
+      };
+    });
+  observed.narrowWidth = await narrowBoxes();
+  const narrowBox = observed.narrowWidth;
+  assert(
+    "the session pane spans the width beside the rail at 390px",
+    narrowBox.rail !== null &&
+      narrowBox.header !== null &&
+      narrowBox.header.left <= narrowBox.rail.right + 1 &&
+      narrowBox.header.right >= narrowBox.clientWidth - 1 &&
+      (narrowBox.aside === null || narrowBox.aside.width === 0),
+    `rail ${JSON.stringify(narrowBox.rail)}, header ${JSON.stringify(narrowBox.header)}, ` +
+      `list ${JSON.stringify(narrowBox.aside)}, viewport ${narrowBox.clientWidth}`,
+  );
+  const insideViewport = (box) =>
+    box !== null &&
+    box.width > 0 &&
+    box.left >= 0 &&
+    box.right <= narrowBox.clientWidth;
+  assert(
+    "the header's actions stay inside the viewport at 390px",
+    insideViewport(narrowBox.forkBox) && insideViewport(narrowBox.compactBox),
+    `Fork ${JSON.stringify(narrowBox.forkBox)}, Compact ${JSON.stringify(narrowBox.compactBox)}, ` +
+      `viewport ${narrowBox.clientWidth}`,
+  );
+  // "Not one character per line", measured: half the viewport is a placeholder's line, and a
+  // composer that grew past two lines of its own height is one that is wrapping its placeholder.
+  assert(
+    "the composer is a line wide enough to type in at 390px",
+    narrowBox.composer !== null &&
+      narrowBox.composer.width >= narrowBox.clientWidth / 2 &&
+      narrowBox.composer.height <= 64,
+    `composer ${JSON.stringify(narrowBox.composer)}, viewport ${narrowBox.clientWidth}`,
+  );
+  // Measured on the pane and its header rather than the document (review of LOB-210): the frame
+  // clips, so the document's scrollWidth stayed 390 on the build before LOB-210 while the header's
+  // actions ran ~570 px past its 86 px box. A box with `overflow: visible` still reports the width
+  // its content needs as scrollWidth, which is what this compares.
+  assert(
+    "the pane's content fits its own width at 390px",
+    narrowBox.paneScrollWidth !== null &&
+      narrowBox.paneScrollWidth <= narrowBox.paneClientWidth + 1 &&
+      narrowBox.headerScrollWidth !== null &&
+      narrowBox.headerScrollWidth <= narrowBox.headerClientWidth + 1,
+    `pane scrollWidth ${narrowBox.paneScrollWidth} vs clientWidth ${narrowBox.paneClientWidth}, ` +
+      `header scrollWidth ${narrowBox.headerScrollWidth} vs clientWidth ${narrowBox.headerClientWidth}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-pane-narrow.png"),
+    fullPage: true,
+  });
+
+  // The list is one link away: the header's back link opens `/sessions`, where the list is the
+  // whole width. The lineage line is read there, so the fork's third line is proven to truncate
+  // inside its row (a `truncate`d span that broke out of the row would be the same defect as
+  // widening the page, one level down) and still have a box tall enough to be read.
+  let listOpened = false;
+  try {
+    await page
+      .locator("header a[aria-label='Show sessions']")
+      .click({ timeout: 10_000 });
+    await page.waitForFunction(
+      (child) =>
+        window.location.pathname === "/sessions" &&
+        document.querySelector(`aside a[href='/sessions/${child}']`) !== null,
+      childId,
+      { timeout: 10_000 },
     );
-    const box = fork?.getBoundingClientRect();
-    // Readability, not just layout: the lineage line has to sit inside its own row (a `truncate`d
-    // span that broke out of the row would be the same defect as widening the page, one level
-    // down) and still have a box tall enough to be read.
+    listOpened = true;
+  } catch {
+    listOpened = false;
+  }
+  const listNarrow = await page.evaluate((child) => {
+    const aside = document.querySelector("aside")?.getBoundingClientRect();
+    const rail = document
+      .querySelector("nav[aria-label='Sections']")
+      ?.getBoundingClientRect();
     const row = document.querySelector(`aside a[href='/sessions/${child}']`);
     const lineage = Array.from(row?.querySelectorAll("span") ?? []).find(
       (span) => (span.textContent ?? "").startsWith("forked from "),
@@ -577,12 +686,13 @@ if (childId !== "") {
     const rowBox = row?.getBoundingClientRect();
     const lineageBox = lineage?.getBoundingClientRect();
     return {
+      path: window.location.pathname,
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
-      forkBox:
-        box === undefined
+      list:
+        aside === undefined || rail === undefined
           ? null
-          : { left: box.left, right: box.right, width: box.width },
+          : { left: aside.left, right: aside.right, railRight: rail.right },
       lineageBox:
         lineageBox === undefined || rowBox === undefined
           ? null
@@ -595,12 +705,21 @@ if (childId !== "") {
             },
     };
   }, childId);
+  observed.narrowWidth.list = listNarrow;
+  assert(
+    "the header's back link opens the full-width session list at 390px",
+    listOpened &&
+      listNarrow.list !== null &&
+      listNarrow.list.left <= listNarrow.list.railRight + 1 &&
+      listNarrow.list.right >= listNarrow.clientWidth - 1,
+    `opened ${listOpened} at ${JSON.stringify(listNarrow.path)}, list ${JSON.stringify(listNarrow.list)}`,
+  );
   assert(
     "the lineage line does not widen the page at 390px",
-    observed.narrowWidth.scrollWidth <= observed.narrowWidth.clientWidth,
-    `scrollWidth ${observed.narrowWidth.scrollWidth} vs clientWidth ${observed.narrowWidth.clientWidth}`,
+    listNarrow.scrollWidth <= listNarrow.clientWidth,
+    `scrollWidth ${listNarrow.scrollWidth} vs clientWidth ${listNarrow.clientWidth}`,
   );
-  const lineageBox = observed.narrowWidth.lineageBox;
+  const lineageBox = listNarrow.lineageBox;
   assert(
     "the lineage line stays readable inside its row at 390px",
     lineageBox !== null &&
@@ -672,6 +791,48 @@ const usageChip = page.locator("[data-session-usage]");
 const spendLine = page.locator("[data-compaction-spend]");
 
 /**
+ * What a screen reader is handed for an element, from Chrome's own accessibility tree (LOB-232):
+ * its computed name, description, and whether it is disabled and focusable. The DOM says which
+ * attributes are set; this says what they add up to, which is what "announced" means.
+ */
+const announcedAt = async (locator) => {
+  // CDP finds nodes by selector, not by Playwright handle, so the element is marked for the lookup.
+  await locator.evaluate((element) =>
+    element.setAttribute("data-announced-probe", ""),
+  );
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+    const { nodeId } = await cdp.send("DOM.querySelector", {
+      nodeId: root.nodeId,
+      selector: "[data-announced-probe]",
+    });
+    const { nodes } = await cdp.send("Accessibility.getPartialAXTree", {
+      nodeId,
+      fetchRelatives: false,
+    });
+    const node = nodes[0];
+    const property = (name) =>
+      node?.properties?.find((candidate) => candidate.name === name)?.value
+        ?.value ?? null;
+    return {
+      role: node?.role?.value ?? null,
+      name: node?.name?.value ?? null,
+      description: node?.description?.value ?? null,
+      disabled: property("disabled") === true,
+      focusable: property("focusable") === true,
+    };
+  } catch (error) {
+    return { error: String(error).slice(0, 300) };
+  } finally {
+    await cdp.detach();
+    await locator
+      .evaluate((element) => element.removeAttribute("data-announced-probe"))
+      .catch(() => {});
+  }
+};
+
+/**
  * Record every render of the pane's compaction status until asked to stop (LOB-224).
  *
  * A compaction task can settle in a few hundred milliseconds, and a poll would miss the pending
@@ -679,14 +840,28 @@ const spendLine = page.locator("[data-compaction-spend]");
  * that the pending state really replaced, and was replaced by, the verdict — and each sample keeps
  * whether the "Nothing to compact" text was on screen at that moment and how tall the status box
  * was, which is what the premature-verdict and layout checks need.
+ *
+ * Each sample also keeps where keyboard focus was (LOB-232) and whether the button said it was busy.
+ * A focus move is not a DOM mutation, so the observer alone would never see focus fall to `body`;
+ * a per-frame sample beside it does.
  */
 const watchCompactionStatus = () =>
   page.evaluate(() => {
     window.__compactionSamples = [];
     const snap = () => {
       const element = document.querySelector("[data-compaction-status]");
+      const button = document.querySelector("button[data-compaction-state]");
+      const active = document.activeElement;
       const sample = {
         state: element?.getAttribute("data-compaction-status") ?? null,
+        // `compact`, `status`, or the tag focus fell to (`BODY` is the defect).
+        focus:
+          active !== null && active === button
+            ? "compact"
+            : active !== null && active === element
+              ? "status"
+              : (active?.tagName ?? null),
+        pending: button?.getAttribute("aria-busy") === "true",
         verdictVisible: document.body.innerText.includes("Nothing to compact"),
         // Whether a run is in flight: the header chip is the pane's own word for it.
         busy: document.body.innerText.includes("BUSY"),
@@ -701,10 +876,17 @@ const watchCompactionStatus = () =>
         last.state !== sample.state ||
         last.verdictVisible !== sample.verdictVisible ||
         last.busy !== sample.busy ||
-        last.height !== sample.height
+        last.height !== sample.height ||
+        last.focus !== sample.focus ||
+        last.pending !== sample.pending
       )
         window.__compactionSamples.push(sample);
     };
+    const everyFrame = () => {
+      snap();
+      window.__compactionFrame = requestAnimationFrame(everyFrame);
+    };
+    window.__compactionFrame = requestAnimationFrame(everyFrame);
     window.__compactionObserver = new MutationObserver(snap);
     window.__compactionObserver.observe(document.body, {
       subtree: true,
@@ -719,6 +901,8 @@ const watchCompactionStatus = () =>
 const readCompactionStatus = () =>
   page.evaluate(() => {
     window.__compactionObserver?.disconnect();
+    if (window.__compactionFrame !== undefined)
+      cancelAnimationFrame(window.__compactionFrame);
     return window.__compactionSamples ?? [];
   });
 const SUMMARY = "Summary: the session ran its tools and kept working.";
@@ -758,16 +942,21 @@ if (longSessionId !== "") {
 // A busy session cannot be compacted on demand: the run is using the same context. The state has to
 // say why, in the DOM, or a disabled button is a dead control. The faux script's command sleeps, so
 // the run stays busy long enough to read the reason twice.
+//
+// Unavailable is `aria-disabled`, never the native `disabled` (LOB-232): a focused button that turns
+// `disabled` drops focus to `body`, and a natively disabled one is skipped by Tab, so its reason was
+// never heard. So the check also takes focus to the button and asks Chrome's accessibility tree
+// what it would announce there: the name, that it is disabled, and the reason as its description.
 const busyCompact = {};
 try {
-  // Wait for the *busy* reason rather than for "disabled": the pane is disabled while it attaches
-  // too, and attaching is not the state this check is about.
+  // Wait for the *busy* reason rather than for "unavailable": the pane is unavailable while it
+  // attaches too, and attaching is not the state this check is about.
   await page.waitForFunction(
     () => {
       const button = document.querySelector("button[data-compaction-state]");
       return (
         button !== null &&
-        button.disabled &&
+        button.getAttribute("aria-disabled") === "true" &&
         (button.getAttribute("title") ?? "").includes(
           "Wait for this run to finish",
         )
@@ -777,6 +966,14 @@ try {
     { timeout: 20_000 },
   );
   busyCompact.disabled = await compactButton.isDisabled();
+  busyCompact.nativeDisabled = await compactButton.evaluate(
+    (button) => button.disabled,
+  );
+  await compactButton.focus();
+  busyCompact.focused = await compactButton.evaluate(
+    (button) => document.activeElement === button,
+  );
+  busyCompact.announced = await announcedAt(compactButton);
   busyCompact.title = await compactButton.getAttribute("title");
   busyCompact.describedBy = await page.evaluate(() => {
     const button = document.querySelector("button[data-compaction-state]");
@@ -799,6 +996,17 @@ assert(
     ),
   `disabled=${String(busyCompact.disabled)} title=${JSON.stringify(busyCompact.title ?? null)} describedby=${JSON.stringify(busyCompact.describedBy ?? null)}`,
 );
+assert(
+  "the busy Compact stays focusable and announces its reason (LOB-232)",
+  busyCompact.nativeDisabled === false &&
+    busyCompact.focused === true &&
+    busyCompact.announced?.focusable === true &&
+    busyCompact.announced?.disabled === true &&
+    (busyCompact.announced?.description ?? "").includes(
+      "Wait for this run to finish before compacting",
+    ),
+  `nativeDisabled=${String(busyCompact.nativeDisabled)} focused=${String(busyCompact.focused)} announced=${JSON.stringify(busyCompact.announced ?? null)}`,
+);
 
 // The run has to settle before the compaction: a summary admitted while the turn was still writing
 // its entries would have nothing to cut.
@@ -807,7 +1015,11 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector("button[data-compaction-state]");
-      return button !== null && !button.disabled;
+      return (
+        button !== null &&
+        !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true"
+      );
     },
     null,
     { timeout: 90_000 },
@@ -833,10 +1045,13 @@ assert(
   `header said ${JSON.stringify(observed.compactSpend.usageBefore)}, text ${JSON.stringify(await usageChip.innerText().catch(() => ""))}`,
 );
 
+// Pressed from the keyboard (LOB-232): focus is taken to the button and Enter admits the press, so
+// the samples below can say where focus was for as long as the press was pending.
 let compacted = false;
+await compactButton.focus();
 await watchCompactionStatus();
 try {
-  await compactButton.click();
+  await page.keyboard.press("Enter");
   await page.waitForFunction(
     (summary) => document.body.innerText.includes(summary),
     SUMMARY,
@@ -921,6 +1136,29 @@ assert(
     longState === "settled-compacted",
   `states ${JSON.stringify(longStates)} final ${JSON.stringify(longState)}`,
 );
+
+// Where the keyboard press left focus (LOB-232). The press makes the button unavailable in the same
+// tick, and a focused `<button>` that turns `disabled` drops focus to `body` — measured on the
+// old pane: `BODY` for every frame of a `requested` state. Every sample taken while the press was
+// pending must have focus on the button or the status region, and once it settles the button —
+// available again — must still hold it, so the operator can press again without hunting for it.
+const pendingFocus = longStates.filter(
+  (sample) => sample.pending || sample.state === "requested",
+);
+const focusAfter = await compactButton.evaluate(
+  (button) => document.activeElement === button,
+);
+observed.compactFocus = { pending: pendingFocus, after: focusAfter };
+assert(
+  "a keyboard press of Compact keeps focus on the button while it is pending (LOB-232)",
+  compacted &&
+    pendingFocus.length > 0 &&
+    pendingFocus.every(
+      (sample) => sample.focus === "compact" || sample.focus === "status",
+    ) &&
+    focusAfter,
+  `pending samples ${JSON.stringify(pendingFocus)}, focused after settle=${String(focusAfter)}`,
+);
 await page.screenshot({
   path: path.join(EVIDENCE_DIR, "compaction.png"),
   fullPage: true,
@@ -982,6 +1220,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         button.getAttribute("aria-busy") === "false"
       );
     },
@@ -1047,6 +1286,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         document.body.innerText.includes("IDLE")
       );
     },
@@ -1144,10 +1384,10 @@ assert(
 );
 
 // No horizontal overflow with the verdict on screen at a phone width. The *height* is deliberately
-// not asserted here: at 390px the dashboard's own three-column shell leaves the transcript a ~60px
-// column (measured, see `compaction-nothing-to-compact-narrow.png`), so the verdict's copy stacks one
-// word per line and no reserved height on this box could keep the tail from growing. That squeeze is
-// the shell's, not this control's; the reservation is proven above, at the drive's own widths.
+// not asserted here: the verdict's copy reflows at 390px (the pane is the width beside the rail
+// since LOB-210, ~340px, where it was a ~60px column before), and the reservation is a claim about
+// two states sharing one box, which is proven above, at the drive's own widths, where both are
+// sampled. The narrow height is recorded in `observed.shortNarrow`.
 await page.setViewportSize({ width: 390, height: 844 });
 await page.waitForTimeout(300);
 const narrow = await page.evaluate(() => {
@@ -1236,6 +1476,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         document.body.innerText.includes("IDLE")
       );
     },
@@ -1258,8 +1499,9 @@ await watchCompactionStatus();
 // since Compact is disabled while a run is in flight.
 //
 // The click comes first for a reason: `requestSubmit` dispatches a submit event, React flushes that
-// event's state before the next dispatch, and the button is `disabled` by then, so a click after the
-// send is a no-op on a disabled element and the drive records no press at all. Measured, not assumed.
+// event's state before the next dispatch, and the button is unavailable by then (`aria-disabled`
+// since LOB-232), so a click after the send is swallowed and the drive records no press at all.
+// Measured, not assumed.
 await page
   .locator("textarea")
   .first()
@@ -1545,6 +1787,36 @@ assert(
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
 
+// Below `md` a session's route hides the list whatever its id decodes to (LOB-210), so the refused
+// pane carries the same `Show sessions` link as a session's header: without it a phone's only way
+// back is the rail. At 390 px the link is visible and opens `/sessions`; from `md` up it is hidden.
+const badIdBack = { wideVisible: null, narrowVisible: null, path: null };
+badIdBack.wideVisible = await page
+  .locator("a[aria-label='Show sessions']")
+  .isVisible();
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(300);
+const badIdBackLink = page.locator("a[aria-label='Show sessions']");
+badIdBack.narrowVisible = await badIdBackLink.isVisible();
+if (badIdBack.narrowVisible) {
+  await badIdBackLink.click({ timeout: 10_000 }).catch(() => undefined);
+  await page
+    .waitForFunction(() => window.location.pathname === "/sessions", null, {
+      timeout: 10_000,
+    })
+    .catch(() => undefined);
+}
+badIdBack.path = await page.evaluate(() => window.location.pathname);
+await page.setViewportSize({ width: 1440, height: 900 });
+observed.badIdBack = badIdBack;
+assert(
+  "a bad session id's pane links back to the list at 390px",
+  badIdBack.wideVisible === false &&
+    badIdBack.narrowVisible === true &&
+    badIdBack.path === "/sessions",
+  JSON.stringify(badIdBack),
+);
+
 // Back to the session for the transcript screenshot, with a tool result expanded.
 await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
 const sessionLink = page.locator("aside a[href^='/sessions/']").first();
@@ -1626,6 +1898,9 @@ const BOARD_READS = new Set([
   // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
   // this block makes, so a comment sent from here would show as an unexpected write below.
   "listTaskComments",
+  // The card pane's spec document (LOB-238): a read the pane makes on opening a card, so the
+  // write check below would otherwise count it as a write nobody clicked.
+  "getTaskSpec",
   "getSession",
   "watchSession",
   "listApprovals",

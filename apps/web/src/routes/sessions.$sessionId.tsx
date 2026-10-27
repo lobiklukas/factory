@@ -5,6 +5,7 @@ import { SessionId } from "@repo/domain/Session";
 import { SessionApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
 import { EmptyPane } from "@/components/empty-pane";
+import { SessionsBackLink } from "@/components/sessions-back-link";
 
 export const Route = createFileRoute("/sessions/$sessionId")({
   component: SessionRoute,
@@ -17,20 +18,30 @@ function SessionRoute() {
   // user cannot act on.
   const parsed = Schema.decodeUnknownOption(SessionId)(sessionId);
 
+  if (parsed._tag === "None") {
+    // Below `md` this route hides the list whatever the id decodes to (LOB-210), so the refused
+    // pane carries the same back link as a session's header rather than leaving the rail as the
+    // only way back. From `md` up the bar is `display: none` and the list is beside the pane.
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex h-12 shrink-0 items-center border-b border-border px-2 md:hidden">
+          <SessionsBackLink />
+        </div>
+        <EmptyPane
+          icon={<TerminalIcon strokeWidth={1.75} />}
+          title="Not a session id this control plane mints"
+          detail="A session id is ses_ followed by Crockford base32. A link carrying anything else cannot resolve, so it is refused here instead of reaching the API as a not-found you cannot act on."
+          visible
+        />
+      </div>
+    );
+  }
+
   return (
-    <EmptyPane
-      icon={<TerminalIcon strokeWidth={1.75} />}
-      title="Not a session id this control plane mints"
-      detail="A session id is ses_ followed by Crockford base32. A link carrying anything else cannot resolve, so it is refused here instead of reaching the API as a not-found you cannot act on."
-      visible={parsed._tag === "None"}
-    >
-      {parsed._tag === "Some" ? (
-        <>
-          {/* A run parked on an approval says so above its transcript (LOB-53). */}
-          <SessionApprovals sessionId={parsed.value} />
-          <SessionPane sessionId={parsed.value} />
-        </>
-      ) : null}
-    </EmptyPane>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* A run parked on an approval says so above its transcript (LOB-53). */}
+      <SessionApprovals sessionId={parsed.value} />
+      <SessionPane sessionId={parsed.value} />
+    </div>
   );
 }

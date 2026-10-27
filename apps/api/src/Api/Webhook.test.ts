@@ -20,11 +20,16 @@
  */
 import { createHmac } from "node:crypto";
 import { TriggerService } from "@repo/core";
-import type { TriggerDelivery, TriggerOutcome } from "@repo/domain/Trigger";
+import type { RepoSlug } from "@repo/domain/Session";
+import type {
+  TriggerDelivery,
+  TriggerOutcome,
+  TriggerRule,
+} from "@repo/domain/Trigger";
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebhookRoutes } from "./Webhook";
+import { WebhookRoutes, webhookRoutesFor } from "./Webhook";
 
 const SECRETS = ["TRIGGER_SECRET", "LINEAR_WEBHOOK_SECRET"] as const;
 const saved = new Map(SECRETS.map((name) => [name, process.env[name]]));
@@ -40,23 +45,42 @@ const SKIPPED: TriggerOutcome = {
 };
 let answer: TriggerOutcome = SKIPPED;
 
-const { handler, dispose } = HttpRouter.toWebHandler(
-  WebhookRoutes.pipe(
-    HttpRouter.provideRequest(
-      Layer.succeed(
-        TriggerService,
-        TriggerService.of({
-          deliver: (delivery) =>
-            Effect.sync(() => {
-              delivered.push(delivery);
-              return answer;
-            }),
-        }),
+/** The routes served over the recording fake seam. */
+const serve = (routes: typeof WebhookRoutes) =>
+  HttpRouter.toWebHandler(
+    routes.pipe(
+      HttpRouter.provideRequest(
+        Layer.succeed(
+          TriggerService,
+          TriggerService.of({
+            deliver: (delivery) =>
+              Effect.sync(() => {
+                delivered.push(delivery);
+                return answer;
+              }),
+          }),
+        ),
       ),
     ),
-  ),
-  { disableLogger: true },
-);
+    { disableLogger: true },
+  );
+
+const { handler, dispose } = serve(WebhookRoutes);
+
+/**
+ * A deployment whose rule admits an action that is not one of the two lifecycle actions: a
+ * `startsWorkFor` entry is any string, so the generic adapter has to refuse what the rules admit,
+ * not only a fixed list (LOB-235 review).
+ */
+const widenedRules: ReadonlyArray<TriggerRule> = [
+  {
+    label: "release",
+    repo: "acme/lob-235" as RepoSlug,
+    prompt: "{{title}}",
+    startsWorkFor: ["release", "create"],
+  },
+];
+const widened = serve(webhookRoutesFor(widenedRules));
 
 const sign = (body: string, secret: string): string =>
   createHmac("sha256", secret).update(body).digest("hex");
@@ -65,13 +89,14 @@ const post = async (
   path: "/webhooks/generic" | "/webhooks/linear",
   payload: unknown,
   secret: string,
+  serveWith: typeof handler = handler,
 ): Promise<{
   readonly status: number;
   readonly body: unknown;
   readonly retryAfter: string | null;
 }> => {
   const body = JSON.stringify(payload);
-  const response = await handler(
+  const response = await serveWith(
     new Request(`http://factory.test${path}`, {
       method: "POST",
       headers: {
@@ -124,6 +149,7 @@ afterEach(() => {
 
 afterAll(async () => {
   await dispose();
+  await widened.dispose();
 });
 
 describe("a trigger route with no secret", () => {
@@ -234,5 +260,113 @@ describe("a replay of a delivery still in flight", () => {
     expect(
       (await post("/webhooks/linear", linear, "linear-secret")).status,
     ).toBe(200);
+  });
+});
+
+describe("a generic delivery that names a lifecycle action", () => {
+  // LOB-235: the generic caller types its own `action`, so it cannot be the one that says a push or
+  // a schedule tick happened. Before the refusal, `{action: "push", label: "docs"}` reached the seam,
+  // whose docs rule admits `push` (`startsWorkFor`), and the recorded outcome named a push no push
+  // produced. The route now answers `400 lifecycle-action` and hands the seam nothing; removing the
+  // refusal turns these red with `expected 200 to be 400`, because the fake seam answers `200`.
+  beforeEach(() => {
+    configure({ TRIGGER_SECRET: "generic-secret" });
+  });
+
+  for (const action of ["push", "schedule"]) {
+    it(`refuses "${action}" with 400, naming why, and records nothing`, async () => {
+      const refused = await post(
+        "/webhooks/generic",
+        { requestId: `lob-235-${action}`, action, label: "docs" },
+        "generic-secret",
+      );
+
+      expect(refused.status).toBe(400);
+      expect(refused.body).toMatchObject({
+        ok: false,
+        code: "lifecycle-action",
+      });
+      const error = (refused.body as { readonly error?: unknown }).error;
+      expect(typeof error).toBe("string");
+      // It names the action it refused and why, and claims nothing about a delivery that happened.
+      expect(error).toContain(`lifecycle action "${action}"`);
+      expect(error).toContain("generic webhook cannot name");
+      expect(refused.body).not.toHaveProperty("status");
+      expect(refused.body).not.toHaveProperty("reason");
+      expect(delivered).toHaveLength(0);
+    });
+  }
+
+  it("still hands a create on the docs label to the seam, as a create", async () => {
+    answer = { status: "processed", replayed: false };
+    const created = await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-create", action: "create", label: "docs" },
+      "generic-secret",
+    );
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({ ok: true, status: "processed" });
+    expect(delivered.map((delivery) => delivery.event)).toMatchObject([
+      { source: "generic", action: "create", labels: ["docs"] },
+    ]);
+  });
+
+  it("refuses any action a rule admits, not only push and schedule", async () => {
+    // A rule's `startsWorkFor` is any string. With `release` admitted, a fixed denylist would hand
+    // `{action: "release"}` to the seam, which would record the rule mapping it — the same claim
+    // about a delivery the caller only typed. Removing `callerCannotName`'s rule half turns this
+    // red with `expected 200 to be 400`.
+    const refused = await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-release", action: "release", label: "release" },
+      "generic-secret",
+      widened.handler,
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ ok: false, code: "lifecycle-action" });
+    expect((refused.body as { readonly error?: unknown }).error).toContain(
+      'lifecycle action "release"',
+    );
+
+    // `push` is refused there too, though no rule lists it, and `create` — which the rule also
+    // lists — is still the caller's own action and reaches the seam.
+    const push = await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-release-push", action: "push", label: "release" },
+      "generic-secret",
+      widened.handler,
+    );
+    expect(push.status).toBe(400);
+    const created = await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-release-create", label: "release" },
+      "generic-secret",
+      widened.handler,
+    );
+    expect(created.status).toBe(200);
+    expect(delivered.map((delivery) => delivery.event.action)).toEqual([
+      "create",
+    ]);
+  });
+
+  it("refuses only the lifecycle actions: any other action still reaches the seam's filter", async () => {
+    // The control: `update` is the seam's to refuse (`skipped`, with its reason — `webhook.sh`'s
+    // check 4), so a route that refused every non-create would fail here.
+    await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-update", action: "update", label: "docs" },
+      "generic-secret",
+    );
+    await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-default", label: "docs" },
+      "generic-secret",
+    );
+
+    expect(delivered.map((delivery) => delivery.event.action)).toEqual([
+      "update",
+      "create",
+    ]);
   });
 });

@@ -7,7 +7,6 @@ import {
   GitForkIcon,
   GitPullRequestIcon,
   Loader2Icon,
-  Minimize2Icon,
   SquareIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,6 +33,8 @@ import {
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { prLink } from "@/lib/pr-link";
+import { SessionsBackLink } from "@/components/sessions-back-link";
+import { CompactButton } from "@/components/compact-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -288,8 +289,15 @@ export const SessionPane = ({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-border px-4">
-        <div className="flex min-w-0 items-center gap-3">
+      {/*
+       * Below `md` the header wraps (LOB-210): the pane is the whole width beside the rail there,
+       * but a 390 px phone still has no room for the session's name *and* its actions on one line,
+       * and one of them would be cut off. The name keeps the first row, so the reader knows which
+       * session the actions act on; the readings and the actions wrap below it, inside the pane.
+       */}
+      <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-2 md:h-12 md:flex-nowrap md:py-0">
+        <div className="flex min-w-0 items-center gap-3 max-md:basis-full">
+          <SessionsBackLink className="-ml-2" />
           <h1 className="truncate text-sm font-medium">
             {view?.summary.title ?? "Session"}
           </h1>
@@ -298,7 +306,7 @@ export const SessionPane = ({
           </span>
           <PrAnchor prUrl={view?.summary.prUrl} />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:flex-nowrap">
           {attaching ? (
             <Spinner className="size-3.5 text-muted-foreground" />
           ) : null}
@@ -323,36 +331,28 @@ export const SessionPane = ({
             </span>
           )}
           {/*
+           * Below `md` the readings and the actions wrap onto rows of their own (LOB-210), so the
+           * two buttons stay together rather than one of them landing alone on a third row.
+           */}
+          <span aria-hidden className="basis-full md:hidden" />
+          {/*
            * Compact now (LOB-185's RPC, LOB-222's atom, LOB-223's action, LOB-224's settle). The
            * call admits a task and answers its id; the summary lands in the transcript over the
            * stream, or the task settles with nothing to cut — the pending line below says which is
            * happening, so the button itself carries no spinner.
            */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-label={
-              compactRunning ? "Compacting session" : "Compact session"
-            }
-            data-compaction-state={
+          <CompactButton
+            blocked={compactBlocked}
+            running={compactRunning}
+            calling={compacting}
+            state={
               settleNow.state === "requested"
                 ? "requested"
                 : settleNow.state === "idle"
                   ? "idle"
                   : "settled"
             }
-            title={
-              compactRunning
-                ? "Compacting"
-                : (compactBlocked ?? "Compact this session now")
-            }
-            aria-busy={compactRunning}
-            aria-describedby={
-              compactBlocked === null ? undefined : "compact-blocked"
-            }
-            disabled={compactBlocked !== null || compactRunning}
-            onClick={() => {
+            onPress={() => {
               if (view === null) return;
               setCompacting(true);
               // The before reading, and where the transcript ended: the summary the task writes is
@@ -389,23 +389,7 @@ export const SessionPane = ({
                 })
                 .finally(() => setCompacting(false));
             }}
-          >
-            {compacting ? (
-              <Loader2Icon
-                data-slot="spinner"
-                aria-hidden
-                className="size-4 animate-spin"
-              />
-            ) : (
-              <Minimize2Icon className="size-4" strokeWidth={1.75} />
-            )}
-            {compactRunning ? "Compacting" : "Compact"}
-          </Button>
-          {compactBlocked === null ? null : (
-            <span id="compact-blocked" className="sr-only">
-              {compactBlocked}
-            </span>
-          )}
+          />
           {/*
            * Fork from here (LOB-182). A text button, not an icon-only one: the header has the room,
            * and "Fork" beside the status chip says what the live session can become without the

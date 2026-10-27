@@ -34,7 +34,9 @@ this session's usage (`46,120 tokens`), **Compact**, and **Fork**. Press Compact
 
 - While the pane is attaching, or the session is running, the button is disabled and its `title` and
   `aria-describedby` target say why: `Attaching to the session`, `Wait for this run to finish before
-compacting`, `This session could not be read`.
+compacting`, `This session could not be read`. Disabled here is `aria-disabled`, not the native
+  attribute (LOB-232, below): the button stays in the Tab order, so the reason is announced when
+  focus reaches it.
 - A refused call shows `toast.error("No compaction was started", <cause>)` and leaves the button
   usable — it is the admission that failed, so nothing was written.
 - A session too short to have a cut writes no summary: the task settles, no row appears, and the tail
@@ -75,6 +77,23 @@ Two wrinkles are the whole reason this is not a boolean:
 The verdict describes the transcript at the press, so the operator's next turn clears it. A press of
 Compact while a compaction is under way is disabled: one admission at a time.
 
+## Keyboard focus (LOB-232)
+
+The press makes the button unavailable in the same tick as the click, and a focused `<button>` that
+turns `disabled` drops focus to `body` in Chromium and WebKit: a keyboard operator who pressed
+Compact was put back at the top of the page, for the whole of the task's life (`compactRunning`).
+Measured on the old pane: `document.activeElement` was `BODY` for every frame of `requested`.
+
+So the control is never natively `disabled`. `CompactButton` (`apps/web/src/components/compact-button.tsx`)
+passes Base UI's `focusableWhenDisabled`, which renders `aria-disabled="true"` with `tabindex="0"`
+and swallows the click and the Enter/Space keydown itself; the component's own handler returns
+early too, so the rule does not depend on the primitive alone. The shared `Button` dims
+`aria-disabled` exactly as it dims `disabled`. The same holds when a run starts under a focused
+button, and while the session is busy, which is what lets the busy reason be heard: a natively
+disabled button is skipped by Tab, so its description was only reachable with a virtual cursor.
+`compact-button.test.tsx` pins the markup (no `disabled`, `aria-disabled`, the reason as
+`aria-describedby`) and the swallowed press.
+
 **What the state is and what the pane says are two questions.** `settleCompaction` decides; the
 pane asks `verdictVisible(settle, busy)` whether it may speak yet. A verdict is held — not shown, not
 discarded — while the session is busy, because an outcome announced under work still in flight reads
@@ -89,16 +108,24 @@ characters**, then opens it in the browser: Pi Durable summarizes an old prefix 
 `keepRecentTokens` (20k here) verbatim, so a shorter transcript has nothing to cut and the summary
 would never appear. It then asserts, in order:
 
-1. while that run is in flight, Compact is `disabled` and `Wait for this run to finish before
-compacting` is both its `title` and its `aria-describedby` text;
+1. while that run is in flight, Compact is disabled (Playwright's `isDisabled`, which reads
+   `aria-disabled`) and `Wait for this run to finish before compacting` is both its `title` and its
+   `aria-describedby` text; it is _not_ natively `disabled`, it takes focus, and Chrome's
+   accessibility tree (`Accessibility.getPartialAXTree` over CDP) gives it the name `Compact session`,
+   `disabled: true`, `focusable: true` and that reason as its description — what a screen reader
+   is handed;
 2. the header's `[data-session-usage]` reading is non-zero and prints no `$` (faux reports tokens,
    never cost);
-3. pressing Compact puts `Summary: the session ran its tools and kept working.` on screen, the row's
+3. pressing Compact **from the keyboard** (focus, then Enter) puts
+   `Summary: the session ran its tools and kept working.` on screen, the row's
    `[data-compaction-spend]` line reads `N tokens to compact`, and the header reading is still
    non-zero — measured 92,050 → 114,925 tokens on the recorded run;
 4. the pane's compaction status went `idle → requested → settled-compacted` (`MutationObserver` on
    `[data-compaction-status]`, sampled per DOM change rather than polled), and it never said
-   `settled-nothing` while the task was live;
+   `settled-nothing` while the task was live; every sample taken while the press was pending
+   (`aria-busy="true"` or `requested`, sampled per frame too, because a focus move is not a DOM
+   mutation) has `document.activeElement` on the Compact button or the status region, and the
+   button still holds focus once the press has settled (`observed.json`'s `compactFocus`);
 5. a `compactSession` that the network layer answers with 500 shows the failure toast and leaves the
    button enabled with `aria-busy="false"`, after which a second press re-enables it with no new
    failure toast;
@@ -116,7 +143,7 @@ compacting` is both its `title` and its `aria-describedby` text;
 
 Evidence: `.verify/evidence/<id>/verify-web/` — `compaction.png`,
 `compaction-nothing-to-compact.png`, `compaction-nothing-to-compact-narrow.png` plus `observed.json`'s
-`compactBusy`, `compactSpend`, `compactSettle`, `compactFailure`, `compactRetry` and
+`compactBusy`, `compactSpend`, `compactSettle`, `compactFocus`, `compactFailure`, `compactRetry` and
 `verdictCleared` blocks.
 
 ## What it does not prove
@@ -144,7 +171,7 @@ alone when a reading reports no cost, and the drive asserts the absence of`$` ra
   run-busy session cannot start a press; the drive therefore presses on an idle session and sends a
   turn in the same script task, which is the one way both are true at once. **The click must come
   first**: `requestSubmit` dispatches a submit event, React flushes that event's state before the next
-  dispatch, and a click after the send lands on a `disabled` button and does nothing — measured, and
+  dispatch, and a click after the send lands on an unavailable button and does nothing — measured, and
   the reason an earlier draft of this drive recorded no press at all. What is proven is that the
   verdict never appears under work still in flight; not that a run-busy session can be compacted at
   all, which it cannot. And the busy session is a long one, so it settles `settled-compacted`: the
@@ -158,11 +185,12 @@ alone when a reading reports no cost, and the drive asserts the absence of`$` ra
   nothing new, and the admission revision is always published. There is no clock in the reducer to
   bound it, though — a future change could replace the identity comparison with "the task was seen at
   least once", at the cost of hanging whenever the whole task life fits between two folded events.
-- **The reserved height is a desktop-and-tablet guarantee.** At 390px the dashboard's three-column
-  shell leaves the pane a ~60px transcript column, so the verdict's copy stacks nearly a word per line
-  and the tail grows no matter what this box reserves. The drive still asserts no horizontal overflow
-  there, and records the measured height rather than asserting it (`observed.shortNarrow`). The
-  squeeze is the shell's and predates this control.
+- **The reserved height is a desktop-and-tablet guarantee.** It is a claim about the pending state
+  and the verdict sharing one box, and both are sampled only at the drive's own widths. At 390px the
+  pane is the width beside the rail (~340 px since LOB-210; it was a ~60px column before, where the
+  verdict stacked nearly a word per line), the verdict's copy reflows, and the drive asserts no
+  horizontal overflow there and records the measured height rather than asserting it
+  (`observed.shortNarrow`: 64 px on 2026-10-27, 264 px before LOB-210).
 - The drive's console-error list carries one expected entry: the injected 500
   (`Failed to load resource: … 500`). It is the scenario, not a defect.
 - Nothing here is a compaction _policy_: automatic compaction at a threshold is the harness's
