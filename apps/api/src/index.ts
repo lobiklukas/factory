@@ -20,7 +20,7 @@ import {
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
 import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
-import { HttpRouter, HttpServer } from "effect/http";
+import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { WebhookLive } from "./Api/Webhook";
@@ -270,6 +270,17 @@ const CredentialSelectionLog = Layer.effectDiscard(
   }),
 ).pipe(Layer.provide(CredentialProviderLive));
 
+/**
+ * What the PR step's RPC member hands `openPullRequest` (LOB-213): the forge client and the
+ * credential provider. The provider is the same `CredentialProviderLive` the boot log reports — one
+ * layer, so one provider (and one App-token cache) answers both — and the client reaches
+ * `GITHUB_API_URL`, which a drive points at a loopback fake.
+ */
+const PullRequestStepDeps = Layer.mergeAll(
+  CredentialProviderLive,
+  FetchHttpClient.layer,
+);
+
 // HTTP API Router
 const ApiRouter = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(HealthGroupLive),
@@ -367,6 +378,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    PullRequestStepDeps,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance
     // (`./Api/LinearSync`): a layer first built inside `serve` would be the routes' private copy.

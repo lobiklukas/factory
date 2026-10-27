@@ -106,6 +106,11 @@ import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { TaskService, TaskServiceLive } from "./TaskService";
+import {
+  sessionRequestIdOf,
+  TriggerSessions,
+  TriggerSessionsFromSessionService,
+} from "./TriggerService";
 import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
   pullRequestReport,
@@ -2200,6 +2205,79 @@ describe("the diff cap", () => {
     expect(error?.operation).toBe("diffSize");
     expect(error?.ref).toBe(`no-such-base...${result.head}`);
     expect(github.requests).toEqual([]);
+  }, 120_000);
+
+  it("defaults to the session's own branch and base, and refuses a ref that reads as an option (LOB-213)", async () => {
+    const github = makeGithubFake(201, {
+      number: 37,
+      url: "https://github.com/lobiklukas/factory/pull/37",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "the branches are the session's",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: snapshot.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        // A name git would read as `--output=<file>`: before the check, `git diff --numstat` in the
+        // session's checkout created that file and measured nothing.
+        const planted = join(snapshot.workspace.path, "planted");
+        const refused = yield* Effect.flip(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: an option for a base",
+            base: `--output=${planted}`,
+          }),
+        );
+        const refusedHead = yield* Effect.flip(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: an option for a head",
+            head: "-p",
+          }),
+        );
+        const opened = yield* sessions.openPullRequest({
+          sessionId: created.id,
+          title: "factory: the session's own branches",
+        });
+        return {
+          refused,
+          refusedHead,
+          opened,
+          planted: existsSync(`${planted}...factory/${created.id}`),
+          head: `factory/${created.id}`,
+        };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(result.refused).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(result.refusedHead).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(result.planted).toBe(false);
+    expect(result.opened).toMatchObject({ number: 37, outcome: "opened" });
+    // One request, and it published the session's own branch onto the base it was cut from.
+    expect(github.requests).toHaveLength(1);
+    expect(github.requests[0]?.body).toMatchObject({
+      head: result.head,
+      base: "main",
+    });
   }, 120_000);
 });
 
@@ -7958,4 +8036,64 @@ describe("the budget cap", () => {
       await runtime.dispose();
     }
   }, 120_000);
+});
+
+/**
+ * The trigger seam's production session port (LOB-218): its `send` carries the delivery's key to
+ * Pi Durable's submission dedupe, so a delivery the seam retries after a failed write-back leaves
+ * one user message. `TriggerService.test.ts` proves the seam passes the key; this proves the port
+ * does not drop it on the way to the real session.
+ */
+describe("the trigger port's send", () => {
+  it("admits one message per delivery, however many times the seam sends it", async () => {
+    const requestId = sessionRequestIdOf(
+      `lob-218-${randomBytes(4).toString("hex")}`,
+    );
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const port = yield* TriggerSessions;
+        const created = yield* sessions.create({ title: "triggered" });
+        const prompt = {
+          sessionId: created.id,
+          content: "fix the widget",
+          requestId,
+        };
+        yield* port.send(prompt);
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the trigger's turn to settle",
+        );
+        // The retry: same delivery, same key, after the first send's run has finished.
+        yield* port.send(prompt);
+        // A different delivery to the same session is a different message.
+        yield* port.send({
+          ...prompt,
+          content: "and the gadget",
+          requestId: `${requestId}-other`,
+        });
+        // Idle with an empty inbox: a message sent while a run is busy waits there as a follow-up,
+        // not in the transcript, so a read before that would undercount a duplicate.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy && snapshot.queued.length === 0,
+              ),
+            ),
+          "the second turn to settle",
+        );
+        return yield* sessions.get(created.id);
+      }).pipe(Effect.provide(TriggerSessionsFromSessionService)),
+    );
+    expect(
+      outcome.entries
+        .filter((entry) => entry.kind === "user")
+        .map((entry) => entry.text),
+    ).toEqual(["fix the widget", "and the gadget"]);
+  }, 60_000);
 });

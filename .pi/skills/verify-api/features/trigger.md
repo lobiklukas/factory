@@ -57,7 +57,11 @@ cannot be created (or the write-back fails) the row is deleted before the failur
 the sender's retry runs the work instead of being answered `replayed: true` to work that never
 started. The release runs on _any_ unsuccessful exit — a typed `TriggerError`, a defect, or an
 interrupt — because `Effect.exit` sees all three and `Effect.uninterruptible` keeps a cancelled
-request from skipping its own cleanup; `Effect.tapError` alone would miss a defect.
+request from skipping its own cleanup; `Effect.tapError` alone would miss a defect. A retry after a
+failure _past_ the send (a write-back) runs `create` and `send` again: `create` reuses the session
+(`sessions.request_id` is `trigger:<delivery id>`) and `send` carries that same key to Pi Durable's
+submission dedupe, so the session still holds one prompt (LOB-218; `TriggerService.test.ts` and
+[jira.md](jira.md)'s check 15).
 `packages/core/src/TriggerService.test.ts` has both cases ("gives the claim back when the session
 cannot be created" and "…even when the session layer dies rather than failing"), and reverting the
 release to `Effect.tapError` turns the second one red. Safe because `sessions.create` dedupes on
