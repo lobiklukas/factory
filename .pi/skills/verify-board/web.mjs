@@ -9,6 +9,8 @@
 //   BOARD_ID      the board `./up.sh` seeded
 //   TASK_ID       the card `drive.sh` created and walked
 //   EXPECT_COLUMN the column the refusals must have left the card in (default planning)
+//   EXPECT_REVISION the revision the last accepted move returned (required): the server and the
+//                 pane must both still hold it, so a refusal that wrote a revision is caught
 //   EVIDENCE_DIR  default .verify/evidence/latest/board
 //
 // Writes `web.json` (the checks, the lanes and the pane as the page rendered them, and the
@@ -26,6 +28,7 @@ const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
 const BOARD_ID = process.env["BOARD_ID"] ?? "";
 const TASK_ID = process.env["TASK_ID"] ?? "";
 const EXPECT_COLUMN = process.env["EXPECT_COLUMN"] ?? "planning";
+const EXPECT_REVISION = Number(process.env["EXPECT_REVISION"] ?? "");
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/board";
 
@@ -63,6 +66,8 @@ const observed = {
   apiUrl: API_URL,
   boardId: BOARD_ID,
   taskId: TASK_ID,
+  expectColumn: EXPECT_COLUMN,
+  expectRevision: EXPECT_REVISION,
   checks: {},
 };
 const check = (name, condition, detail) => {
@@ -72,8 +77,11 @@ const check = (name, condition, detail) => {
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
-const browser = await chromium.launch({ channel: "chrome", headless: true });
+// Launched inside the try, so a browser that cannot start is a failed check in `web.json`, not a
+// crash that leaves no evidence.
+let browser;
 try {
+  browser = await chromium.launch({ channel: "chrome", headless: true });
   const page = await browser.newPage({
     viewport: { width: 1440, height: 900 },
   });
@@ -141,12 +149,15 @@ try {
     `lane ${String(view.cardLane)}, server ${String(truth.value?.column)} (${String(truth.exit)}), expected ${EXPECT_COLUMN}`,
   );
   check(
-    "the card pane holds the server's revision: no refusal wrote one",
-    view.pane !== null &&
+    "the card pane and the server hold the last accepted revision: no refusal wrote one",
+    Number.isInteger(EXPECT_REVISION) &&
+      EXPECT_REVISION > 0 &&
+      view.pane !== null &&
       view.pane.card === TASK_ID &&
       view.pane.column === truth.value?.column &&
-      view.pane.revision === truth.value?.revision,
-    `pane ${String(view.pane?.column)} r${String(view.pane?.revision)}, server r${String(truth.value?.revision)}`,
+      truth.value?.revision === EXPECT_REVISION &&
+      view.pane.revision === EXPECT_REVISION,
+    `pane ${String(view.pane?.column)} r${String(view.pane?.revision)}, server r${String(truth.value?.revision)}, expected r${String(EXPECT_REVISION)}`,
   );
   const toBuilding = (view.pane?.moves ?? []).find(
     (move) => move.to === "building",
@@ -160,7 +171,7 @@ try {
 } catch (error) {
   check("the dashboard phase ran", false, String(error).slice(0, 300));
 } finally {
-  await browser.close();
+  await browser?.close();
 }
 
 await writeFile(

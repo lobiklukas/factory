@@ -2,7 +2,8 @@
 # Read-only check: is this instance worth driving?
 #
 # Four things have to hold before a drive means anything: the database it reads is up, our API is
-# the process on our port and says it is ready, and our dashboard answers on its port. The database
+# the process on our port and says it is ready, and our dashboard is the process on its port and
+# answers. The database
 # check is **loud on purpose** (LOB-61, LOB-84 acceptance): Postgres on host port 5442 is the cards
 # themselves, so a drive that quietly skipped it would report a board it never read. It runs first
 # and unconditionally — a missing API is never a reason to stop before saying the database is down.
@@ -54,13 +55,33 @@ fi
 readyz="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$API_PORT/readyz" || echo 000)"
 if [ "$readyz" = "200" ]; then note "GET /readyz:" "200"; else note "GET /readyz:" "$readyz"; fail=1; fi
 
-# `bun run dev` starts Vite as a child, so the listener is usually a descendant of the recorded pid;
-# the dashboard is checked by its pid being alive and its port answering.
+# `bun run dev` starts Vite as a child, so the listener is usually a descendant of the recorded pid
+# rather than the pid itself: walk the port owner's parents, to a bounded depth, looking for ours
+# (as verify-web's doctor does). A port answering 200 is not enough — Vite runs with strictPort, so
+# when a stranger holds WEB_PORT ours exits and the stranger's dashboard, pointed at some other API,
+# keeps answering.
+is_ours() { # candidate pid, ancestor pid
+  local candidate="$1" ancestor="$2" i=0
+  while [ -n "$candidate" ] && [ "$candidate" != "0" ] && [ "$candidate" != "1" ] && [ "$i" -lt 10 ]; do
+    [ "$candidate" = "$ancestor" ] && return 0
+    candidate="$(ps -o ppid= -p "$candidate" 2>/dev/null | tr -d ' ')"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 web_pid="$(cat "$RUN_DIR/web.pid" 2>/dev/null || true)"
 if [ -n "$web_pid" ] && kill -0 "$web_pid" 2>/dev/null; then
   note "web pid:" "$web_pid alive"
 else
   note "web pid:" "${web_pid:-MISSING} — run ./up.sh"
+  fail=1
+fi
+web_owner="$(lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $2}')"
+if [ -n "$web_pid" ] && is_ours "$web_owner" "$web_pid"; then
+  note "web port $WEB_PORT:" "owned by us ($web_owner)"
+else
+  note "web port $WEB_PORT:" "owned by ${web_owner:-nobody}, not under ${web_pid:-a recorded pid}"
   fail=1
 fi
 webcode="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$WEB_PORT/" || echo 000)"

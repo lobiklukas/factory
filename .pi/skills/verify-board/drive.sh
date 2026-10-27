@@ -13,7 +13,8 @@
 #
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
 # .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
-# the drive can run twice against one instance.
+# the drive can run twice against one instance — after a failed drive too: the checks find this
+# drive's card by id, not by being the only card in its lane.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -105,7 +106,10 @@ if ! curl -sf -m 2 "$API_URL/readyz" >/dev/null 2>&1; then
 fi
 
 # --- create: a card through `createTask`, the door a trigger uses ---------------------------------
-rm -f "$RUN_DIR/card.json"
+# A phase that dies before it writes its evidence must not leave an earlier run's passing file
+# beside this run's failing `observed.json`.
+rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
+  "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json"
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -130,18 +134,27 @@ fresh
 run_cmd ls "$FACTORY board ls --board $BOARD_ID --api $API_URL" || true
 capture ls.txt
 OBSERVED_LANES="$(grep -E '^[a-z]+  (resting|working|terminal)  [0-9]+$' "$EVIDENCE_DIR/ls.txt" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//')"
-# Earlier drives' cards on the same board have walked on to `planning`, so the drive's card is the
-# one card in `intake`.
+# The lane a card line sits under: the indented lines after a lane line, up to the next lane line.
+# The board is shared by every drive against this instance, and a drive that stopped before its
+# first move leaves its card in `intake`, so the check finds *this* card under `intake` whatever the
+# lane's count is, rather than assuming it is the only one there.
+lane_of() { # task id, ls capture
+  awk -v id="$1" '
+    /^[a-z]+  (resting|working|terminal)  [0-9]+$/ { lane = $1; next }
+    /^  / && lane != "" && index($0, id) > 0 { print lane; exit }
+  ' "$2"
+}
+CARD_LANE="$(lane_of "$TASK_ID" "$EVIDENCE_DIR/ls.txt")"
 check "the created card is at revision 1 in intake" \
-  "$([ "$REVISION" = "1" ] && grep -q '^intake  resting  1$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
-  "revision=$REVISION, lane=intake"
+  "$([ "$REVISION" = "1" ] && [ "$CARD_LANE" = "intake" ] && echo 0 || echo 1)" \
+  "revision=$REVISION, lane=${CARD_LANE:-none}"
 check "board ls exits 0" "$([ "$(exit_code ls)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code ls)"
 check "ls prints every lane in definition order" \
   "$([ "$OBSERVED_LANES" = "$LANES" ] && echo 0 || echo 1)" \
   "lanes=[${OBSERVED_LANES}]"
 check "the card sits in its own lane" \
-  "$(awk -v id="$TASK_ID" '$1 == "intake" && $3 == "1" { getline; if (index($0, id) > 0) found = 1 } END { print (found ? 0 : 1) }' "$EVIDENCE_DIR/ls.txt")" \
-  "$TASK_ID under intake"
+  "$([ "$CARD_LANE" = "intake" ] && echo 0 || echo 1)" \
+  "$TASK_ID under ${CARD_LANE:-no lane}"
 
 # --- show: one card, as the server has it ----------------------------------------------------------
 fresh
@@ -207,8 +220,9 @@ check "a person moves the card on to planning" \
   "exit=$(exit_code planning), revision=${PLANNING_REVISION:-none}"
 
 # --- move: the run crossing a human gate is refused, naming the gate -------------------------------
-# The actor is the session `board start` opened, so the refusal is about a real run, not a string
-# that only looks like one. `planning → building` is B5's plan approval gate.
+# The actor is the session `board start` opened, so the drive does not invent an id. The service
+# only checks that the actor is a well-formed session id (TaskService's `isRunActor`), not that the
+# session exists. `planning → building` is B5's plan approval gate.
 fresh
 run_cmd gate "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor ${SESSION_ID:-ses_missing} --api $API_URL" || true
 capture move-gate.txt
@@ -229,8 +243,10 @@ check "after the refusals the card is where the last accepted move put it" \
   "planning at revision ${PLANNING_REVISION:-none}"
 
 # --- web: the dashboard reads the same card -------------------------------------------------------
+# EXPECT_REVISION is the revision the last accepted move returned, so a refusal that bumped the
+# revision reddens the web phase too, not only the `show` above.
 WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" EXPECT_COLUMN=planning \
-  EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/web.mjs" > "$RUN_DIR/web-phase.log" 2>&1
+  EXPECT_REVISION="${PLANNING_REVISION:-}" EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/web.mjs" > "$RUN_DIR/web-phase.log" 2>&1
 WEB_RC=$?
 cat "$RUN_DIR/web-phase.log"
 check "the dashboard agrees with the server after the refusals (web.mjs)" \

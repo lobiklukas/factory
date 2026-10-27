@@ -89,7 +89,10 @@ const writeExecutable = (file: string, body: string): void => {
  * `./up.sh` leaves it: recorded api and web pids that are alive (this test process), an `lsof` that
  * names the api pid as the port's owner, a `curl` that reads 200, a `tmux`, and a seeded board.
  */
-const stage = (healthy: boolean): { root: string; bin: string } => {
+const stage = (
+  healthy: boolean,
+  options: { readonly webPortOwner?: string } = {},
+): { root: string; bin: string } => {
   const root = mkdtempSync(path.join(tmpdir(), "factory-verify-board-doctor-"));
   created.push(root);
   const staged = path.join(root, DOCTOR);
@@ -104,9 +107,17 @@ const stage = (healthy: boolean): { root: string; bin: string } => {
     writeFileSync(path.join(run, "api.pid"), pid);
     writeFileSync(path.join(run, "web.pid"), pid);
     writeFileSync(path.join(run, "board.json"), '{"boardId":"brd_scratch"}\n');
+    // The dashboard's port (3400: the test unsets WEB_PORT and stages no `web-port`) can be
+    // answered by a different owner than the API's, standing in for a stranger holding it.
+    const webOwner = options.webPortOwner ?? pid;
     writeExecutable(
       path.join(bin, "lsof"),
-      `printf 'COMMAND PID\\nbun ${pid}\\n'`,
+      [
+        `case "$*" in`,
+        `  *TCP:3400*) printf 'COMMAND PID\\nnode ${webOwner}\\n' ;;`,
+        `  *) printf 'COMMAND PID\\nbun ${pid}\\n' ;;`,
+        `esac`,
+      ].join("\n"),
     );
     writeExecutable(path.join(bin, "curl"), "printf 200");
     writeExecutable(path.join(bin, "tmux"), "echo 'tmux 3.4'");
@@ -176,6 +187,27 @@ describe("verify-board's doctor and the database", () => {
       );
       expect(result.stdout).not.toContain("doctor: OK");
       expect(result.status).toBe(1);
+    },
+  );
+
+  it(
+    "fails when a stranger owns the dashboard's port, even though it answers",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation checked: dropping the `is_ours` check on WEB_PORT — leaving only "the web pid is
+      // alive and the port answers 200" — makes the doctor say OK here, because the recorded web
+      // pid is alive (this test process) and the fake `curl` answers 200; only the owner is wrong.
+      // pid 1 is never a descendant of the recorded pid, so it stands in for the stranger.
+      const { root, bin } = stage(true, { webPortOwner: "1" });
+      const database = await answeringPort();
+      try {
+        const result = runDoctor(bin, root, database.port);
+        expect(result.stdout).toMatch(/web port 3400:\s+owned by 1, not under/);
+        expect(result.stdout).not.toContain("doctor: OK");
+        expect(result.status).toBe(1);
+      } finally {
+        await database.close();
+      }
     },
   );
 

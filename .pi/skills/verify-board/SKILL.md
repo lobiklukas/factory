@@ -53,7 +53,9 @@ applied (LOB-21), so `/` answers a moment before a card can be read.
 `seed.ts` writes the board: one `board_instances` row over the seeded `default` definition version 1
 (`SEED_CARD=0`, so no card). It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
 and `drive.sh` read. The drive's card is its own, created by `create.ts` over the API at the start of
-every drive, so the drive can run twice against one instance; `ask.sh` calls `seed.ts` without
+every drive, so the drive can run twice against one instance — even after a drive that failed
+part-way, because the checks find the drive's card by id in its lane rather than as the lane's only
+card; `ask.sh` calls `seed.ts` without
 `SEED_CARD=0` and gets a board and a card from the service (so `task_events` gets its `created` row).
 `MODEL_BACKEND=faux` keeps `board start` offline: the session, its worktree and its `factory.task`
 document are real; only the model behind it is scripted.
@@ -62,6 +64,11 @@ The dashboard (`apps/web`'s `bun run dev`, pid in `.verify/run/web.pid`) points 
 `ALLOWED_ORIGINS` names the web origin. `up.sh` waits for both. Override the ports with `API_PORT` and
 `WEB_PORT` (and pass the same values to `doctor.sh` and `drive.sh`; `drive.sh` reads the web port
 `up.sh` recorded in `.verify/run/web-port` when `WEB_PORT` is unset).
+
+`up.sh` refuses to start when `API_PORT` or `WEB_PORT` is already held, and its readiness loop
+requires both recorded pids alive: Vite runs with `strictPort`, so on a held port ours exits while
+the holder keeps answering. `doctor.sh` likewise checks that the API's port and the dashboard's port
+are owned by the recorded pid or a descendant of it (Vite is a child of `bun run dev`).
 
 `doctor.sh` checks the database **first and unconditionally**, from the port in `DATABASE_URL`: a
 missing API is never a reason to stop before saying Postgres is down, and a down Postgres is a
@@ -105,7 +112,9 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   `move-planning.txt`, `move-gate.txt`, `show-after.txt` — raw panes, one per phase
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
-- `observed.json` — every check with its detail, the board id, the card id and the session id
+- `observed.json` — every check with its detail, the board id, the card id and the session id.
+  `drive.sh` deletes `create.json`, `web.json`, `web-board.png` and `observed.json` before it starts,
+  so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
 
@@ -122,8 +131,9 @@ Proof standards for this surface:
 moved it first`; `human_gate_required: the move planning → building crosses the plan approval
 gate, which only a person can make`), so a command that swallowed the refusal and printed its own
   prose fails. The pane runs under a UTF-8 locale (`tmux -u`) because the gate's message carries `→`.
-- **The gate's actor is a real run.** The human-gate move is made with the session id `board start`
-  printed, not an invented `ses_…`: the refusal is about a run that exists on this board.
+- **The gate's actor is the run's id.** The human-gate move is made with the session id `board start`
+  printed, not an invented `ses_…`. The service only asks that the actor be a well-formed session id
+  (`isRunActor`); it does not look the session up.
 - **Exit codes are part of the contract.** A refused move must exit non-zero, or a script cannot
   branch on it.
 - **A green unit test is not evidence for a command line.** `packages/core`'s `TaskService` cases
@@ -146,8 +156,8 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
 - **The actor decides the gates.** `--actor` defaults to `cli`, a person. A session id is a run, and
   a run cannot cross `planning → building` or `review → done` (B5) — that is a different refusal
   (`human_gate_required`), not a bug. The drive proves it with the run's own id and does not cross
-  the gate as a person afterwards: that half is `packages/core`'s `TaskService` case, and leaving
-  `planning` is where later board issues add their own refusals (`requires[]`, LOB-80).
+  the gate as a person afterwards: that half is `packages/core`'s `TaskService` case, and stopping
+  in `planning` leaves the dashboard phase a card whose next move is the gate the run was refused.
 - **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; `ask.sh`
   passes one so the run takes a turn.
 - **The faux asks only once per card.** `FAUX_ASK` makes the script call `ask` when the run was

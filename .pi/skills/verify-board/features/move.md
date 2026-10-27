@@ -45,8 +45,12 @@ approval gate, which only a person can make`, matched with its code.
 
 ## What it does not prove
 
-A person crossing a gate: the drive leaves the card in `planning`, because what happens on the way
-out of `planning` is where later board issues add their own refusals (`requires[]`, LOB-80), and a
-person crossing both gates is `packages/core`'s `TaskService` case. Nor does it prove the merge gate
-(`review → done`) from a terminal: it is the same `humanGate` table and the same refusal, and reaching
-`review` needs a building run's evidence.
+A person crossing a gate: the drive leaves the card in `planning`, so the dashboard phase reads a
+card whose next move is the gate the run was refused, and a person crossing both gates is
+`packages/core`'s `TaskService` case. Nor does it prove the merge gate (`review → done`) from a
+terminal: it is the same `humanGate` table and the same refusal, and reaching `review` needs a
+building run's evidence.
+
+That the run exists: the service treats any well-formed `ses_…` id as a run actor (TaskService's
+`isRunActor`) and does not look the session up. The drive uses the id `board start` printed so it
+does not invent one, not because the refusal depends on it.

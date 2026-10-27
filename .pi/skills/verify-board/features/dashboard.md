@@ -18,8 +18,9 @@ Open the board in the browser and click the card; the URL names it, so a link op
 port and compares what the page renders with the server's `getTask`, asked from the drive process:
 
 - the card's lane (`section[data-lane]` around `li[data-card]`) is `planning`, as the server says;
-- the card pane's column and revision (`data-card-pane-*`) are the server's — none of the three
-  refusals wrote a revision;
+- the card pane's column is the server's, and both the pane's revision (`data-card-pane-*`) and the
+  server's are the revision the last accepted move returned (`EXPECT_REVISION`, from `drive.sh`) —
+  none of the three refusals wrote a revision;
 - the pane offers `building` with `data-human-gate="plan approval"`: the move a run was refused is a
   person's move here, and it is marked.
 

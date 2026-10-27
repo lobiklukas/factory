@@ -24,6 +24,16 @@ if [ -f "$RUN_DIR/api.pid" ] && kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null;
   exit 1
 fi
 
+# Both ports must be free before anything starts: Vite runs with strictPort, so on a held WEB_PORT
+# ours exits while the holder keeps answering 200, and the readiness loop below would call a
+# stranger's dashboard ready.
+for port in "$API_PORT" "$WEB_PORT"; do
+  if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "port $port is already held: $(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" pid "$2}') — pick another API_PORT/WEB_PORT" >&2
+    exit 1
+  fi
+done
+
 # Postgres holds the cards themselves, so a drive without it proves nothing. The shared check asks
 # the port before it asks compose (LOB-57): compose derives its project name from the directory it
 # runs in, and a ralph worktree asking for 5442 a second time fights the human's container.
@@ -68,7 +78,10 @@ echo $! > "$RUN_DIR/web.pid"
 # are applied (LOB-21), so `/` is true a moment before a card can be read.
 ready=0
 for _ in $(seq 1 60); do
-  if curl -sf -m 1 "http://localhost:$API_PORT/readyz" >/dev/null 2>&1 &&
+  # Our processes must still be alive: a port answering is not proof that ours is the one answering.
+  if kill -0 "$(cat "$RUN_DIR/api.pid")" 2>/dev/null &&
+     kill -0 "$(cat "$RUN_DIR/web.pid")" 2>/dev/null &&
+     curl -sf -m 1 "http://localhost:$API_PORT/readyz" >/dev/null 2>&1 &&
      curl -sf -m 1 "http://localhost:$WEB_PORT/" >/dev/null 2>&1; then
     ready=1
     break
