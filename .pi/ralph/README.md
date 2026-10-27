@@ -71,8 +71,13 @@ when no container does. Every session it starts gets `COMPOSE_PROJECT_NAME=facto
 worktree through your checkout's git directory, and copies your `.env` into a worktree that has none. It never
 writes the `factory` database: its one statement there is `ensure_db`'s read of `pg_database`, asking whether
 `RALPH_DB` exists, and sessions get `DATABASE_URL` for `RALPH_DB`. It never writes `main`: the driver commits and
-pushes only `ralph/*` branches, the worker's rules forbid pushing `main`, and its work reaches `main` only through
-a PR's GitHub auto-merge.
+pushes only `ralph/*` branches, the worker's rules forbid pushing `main`, and its work reaches `main` only by
+merging a PR: GitHub auto-merge, or a human for a PR labelled `needs-human-merge`. It also writes `.ralph/` (and
+`.ralph` for `split`) into your checkout's `.git/info/exclude` (a linked worktree's `info/exclude` is the shared
+one), adds a second worktree `${RALPH_WORKTREE}-split` through your checkout for `split`, and leaves
+`ralph-setup-*` and `ralph-leftover-*` entries in the shared stash, so they show in your `git stash list`. After a
+compose start that leaves nothing answering 5442 it removes only your checkout's project's `Created` postgres
+container, never a running one.
 
 ## Repository settings (once)
 
