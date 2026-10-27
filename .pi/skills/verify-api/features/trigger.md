@@ -75,6 +75,15 @@ single `INSERT … ON CONFLICT … DO UPDATE … WHERE … RETURNING` — a cond
 claim, or a work-keyed delivery's own unregistered-repo skip, hands the row over, and in the one
 statement — so two processes still cannot both win it.
 
+The race case only kills a read-then-insert because it forces the interleaving that loses: it holds
+the request id in an uncommitted insert until both deliveries are queued on it, so each has read "no
+row" before either can insert (LOB-219). Without the hold, the first delivery's read and insert land
+before the second's read, and a `SELECT`-then-`INSERT` claim passed the race 20/20. With it, 20/20
+red for each of: `SELECT` then plain `INSERT` (the loser's insert fails `claim delivery`), `SELECT`
+then `INSERT … ON CONFLICT DO NOTHING` treated as a win, and no claim at all (two write-backs, two
+non-replay answers). The correct claim passes it 20/20 alone, in the whole file, and beside a full
+`bun run test`. Evidence: `.verify/evidence/lob-219/`.
+
 **A route with no secret refuses everything.** An unset secret used to mean "accept"; now that a
 delivery can _start a session_, accepting unsigned ones would let anyone who can reach the port open
 an agent. Both routes answer `503 not-configured`, naming the variable to set, until

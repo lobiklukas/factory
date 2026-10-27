@@ -1,11 +1,13 @@
 /**
  * The trigger seam against the real delivery store (LOB-188).
  *
- * What only a database can prove: two deliveries with one request id create one session, and the
- * loser says `replayed`. A read-then-insert would pass a single-threaded case and fail the
+ * What only a database can prove: two deliveries with one request id start one piece of work, and
+ * the loser says `replayed`. A read-then-insert would pass a single-threaded case and fail the
  * concurrent one, so the case below fires both at once — the claim is `INSERT … ON CONFLICT …
- * RETURNING`, and a mutation that removes it (or that replaces it with a `SELECT` first)
- * turns "exactly one session" red.
+ * RETURNING`. Firing them at once is not enough on its own: the first delivery's read and insert
+ * usually land before the second's read, so the case holds the key in an uncommitted insert until
+ * both deliveries are queued on it (`holdKeyUntilContended`, LOB-219). A mutation that removes the
+ * claim, or that replaces it with a `SELECT` first, then turns "exactly one winner" red every run.
  *
  * What a race *cannot* prove is which of two honest answers the loser gives: it reads the row the
  * winner claimed, and whether the winner has recorded its outcome by then is a scheduling fact
@@ -29,7 +31,15 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Deferred, Duration, Effect, Layer, ManagedRuntime } from "effect";
+import {
+  Deferred,
+  Duration,
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Schedule,
+  Schema,
+} from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import {
@@ -308,6 +318,71 @@ const deliveryStatus = (requestId: string) =>
     ),
   );
 
+/** How the key holder below ends its transaction: failing with this rolls its row back. */
+class ReleaseKey extends Schema.TaggedError<ReleaseKey>()("ReleaseKey", {}) {}
+
+/**
+ * Hold `requestId`'s key in an uncommitted insert until `contenders` other backends are queued
+ * behind it, then roll it back. Postgres makes an insert of a key that an open transaction already
+ * inserted wait for that transaction, while a `SELECT` cannot see the uncommitted row: so by the
+ * time any contender can land its row, every one of them has read "no delivery yet" and reached its
+ * own insert. That is the interleaving a read-then-insert loses, made the only one the race case
+ * runs. Left to the scheduler, the first delivery's read and insert finish before the second's read
+ * starts, and a read-then-insert passes the race 20 times out of 20 (LOB-219).
+ *
+ * `held` fires once the row is in, so the deliveries start after it. The wait is bounded: a seam
+ * that never inserts the key fails the case with this message instead of hanging it. Only this key
+ * is held, so suites sharing the database never queue behind it.
+ */
+const holdKeyUntilContended = (
+  requestId: string,
+  options: {
+    readonly held: Deferred.Deferred<void>;
+    readonly contenders: number;
+  },
+) =>
+  Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`
+                INSERT INTO webhook_deliveries (request_id, status)
+                VALUES (${requestId}, 'received')
+              `;
+              yield* Deferred.succeed(options.held, undefined);
+              // `pg_locks`, not `pg_stat_activity`: a backend reads the activity view from one
+              // snapshot for the life of its transaction, and this transaction stays open.
+              yield* sql<{ waiting: number }>`
+                SELECT count(DISTINCT pid)::int AS waiting FROM pg_locks
+                WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))
+              `.pipe(
+                Effect.map((rows) => rows[0]?.waiting ?? 0),
+                Effect.repeat({
+                  until: (waiting) => waiting >= options.contenders,
+                  schedule: Schedule.spaced(Duration.millis(10)),
+                }),
+                Effect.timeoutOrElse({
+                  duration: Duration.seconds(20),
+                  orElse: () =>
+                    Effect.die(
+                      new Error(
+                        `fewer than ${options.contenders} deliveries ever waited on the claim of ${requestId}`,
+                      ),
+                    ),
+                }),
+              );
+              return yield* new ReleaseKey();
+            }),
+          )
+          .pipe(Effect.catchTag("ReleaseKey", () => Effect.void));
+      }),
+      DatabaseLive,
+    ),
+  );
+
 const deliver = (requestId: string, over: Partial<TriggerEvent> = {}) =>
   ({
     requestId,
@@ -317,19 +392,33 @@ const deliver = (requestId: string, over: Partial<TriggerEvent> = {}) =>
 describe("the trigger seam", () => {
   it("creates exactly one session when two deliveries race, and the loser says replayed", async () => {
     await withRuntime(
-      async ({ run, trigger, created }) => {
+      async ({ run, trigger, created, writeBacks }) => {
         const requestId = `${runId}-race`;
-        const outcomes = await run(
-          Effect.all(
-            [
-              trigger.deliver(deliver(requestId)),
-              trigger.deliver(deliver(requestId)),
-            ],
-            { concurrency: "unbounded" },
+        const held = Deferred.makeUnsafe<void>();
+        const holding = holdKeyUntilContended(requestId, {
+          held,
+          contenders: 2,
+        });
+        // Raced against the holder, so a holder that fails before its row is in fails the case.
+        await Promise.race([run(Deferred.await(held)), holding]);
+        const [outcomes] = await Promise.all([
+          run(
+            Effect.all(
+              [
+                trigger.deliver(deliver(requestId)),
+                trigger.deliver(deliver(requestId)),
+              ],
+              { concurrency: "unbounded" },
+            ),
           ),
-        );
+          holding,
+        ]);
 
         expect(created).toHaveLength(1);
+        // The fake dedupes `create` on the session request id, as `SessionService` does, so two
+        // winners would still count one session; the second tracker comment is what they cannot
+        // hide, and it is what the sender's issue would show.
+        expect(writeBacks).toHaveLength(1);
         const first = outcomes.filter((outcome) => !outcome.replayed);
         const replays = outcomes.filter((outcome) => outcome.replayed);
         expect(first).toHaveLength(1);
