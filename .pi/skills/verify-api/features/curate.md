@@ -43,6 +43,10 @@ they survive the owner being released.
 The first answer, the held pages, the repeat, and the token counts before and after are in
 `observed.json` under `curation`.
 
+That the repeat still costs exactly one call, and that the pages a curation wrote come back from the
+log after their rows are deleted, is `./pages.sh` — a priced faux and a database connection, which
+this drive's instance does not have. See [pages.md](pages.md).
+
 What this drive does **not** cover, because it is a property of the code rather than of the wire:
 
 - **The cap above one.** The faux answer proposes one page for the one tool the probe session runs, so

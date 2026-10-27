@@ -51,6 +51,9 @@ before it failed only the busy-compaction race named under Known gaps.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
   other, and a change to `packages/domain` or `packages/core` deserves both.
+- **A session's pages have no pane.** Neither the dashboard nor the CLI calls `listPages` or
+  `curateSession`; the surface is driven over RPC by verify-api's `./pages.sh`
+  ([pages.md](../../verify-api/features/pages.md)), so nothing here proves how a page renders.
 - The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
   either way, so the day a fold is driven the check is the header string.
