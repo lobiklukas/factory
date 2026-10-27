@@ -87,7 +87,8 @@ export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
  * What a fork's copy of its parent's `factory.pr.opened` becomes (LOB-211): the same data under a
  * kind nothing announces. A fork does not inherit the parent's PR — it runs on a branch of its own
  * (D10), and a `factory.pr` it inherited would be the record its own PR step reads back instead of
- * opening one — so its transcript keeps the line, as history, but never yields a `prOpened`.
+ * opening one — so its transcript keeps the line, as history, but never yields a `prOpened`. It
+ * projects as transcript kind `inherited`, so a client draws it as a marker, not as agent prose.
  *
  * Rewritten rather than skipped because a fork's copy is the parent's transcript entry for entry:
  * a compaction's head can name any kept entry, and a skipped one leaves a marker with nothing to
@@ -327,6 +328,8 @@ const entryKind = (kind: string): TranscriptEntryKind => {
       return "title";
     case BUDGET_STOPPED_ENTRY_KIND:
       return "budget";
+    case PR_INHERITED_ENTRY_KIND:
+      return "inherited";
     default:
       return "other";
   }

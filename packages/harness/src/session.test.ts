@@ -1041,16 +1041,28 @@ describe("the PR a session opened", () => {
     expect(forked.before.record).toBeUndefined();
     expect(forked.before.log.pr).toBeUndefined();
     expect(forked.before.events).toEqual([]);
-    // The transcript is still the parent's entry for entry, the PR line kept as whose it was.
-    expect(forked.before.log.entries.map((entry) => entry.text)).toEqual(
-      parent.log.entries.map((entry) =>
-        entry.kind === "other" && entry.text === ""
-          ? inheritedPrText(parentUrl)
-          : entry.text,
+    // The transcript is still the parent's entry for entry, in order, the PR line kept as whose it
+    // was. The parent's announcement is its last entry — `writePullRequestDoc` wrote it after the
+    // turn — so that index, and only that one, reads differently in the fork: as an inherited line,
+    // not as the agent speaking.
+    const prIndex = parent.log.entries.length - 1;
+    expect(parent.log.entries[prIndex]).toMatchObject({
+      kind: "other",
+      text: "",
+    });
+    const shape = (entry: {
+      readonly kind: string;
+      readonly text: string;
+    }) => ({
+      kind: entry.kind,
+      text: entry.text,
+    });
+    expect(forked.before.log.entries.map(shape)).toEqual(
+      parent.log.entries.map((entry, index) =>
+        index === prIndex
+          ? { kind: "inherited", text: inheritedPrText(parentUrl) }
+          : shape(entry),
       ),
-    );
-    expect(forked.before.log.entries).toContainEqual(
-      expect.objectContaining({ text: inheritedPrText(parentUrl) }),
     );
 
     // After it opens its own, both answers name that one PR, and only that one: one `prOpened`, not
