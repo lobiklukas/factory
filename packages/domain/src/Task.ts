@@ -448,13 +448,20 @@ export const UnblockTaskInput = Schema.Struct({
 export type UnblockTaskInput = typeof UnblockTaskInput.Type;
 
 /**
+ * The longest comment a card takes, in characters (LOB-73). Every comment is quoted verbatim into
+ * the prompt of every run on the card, so its size is a prompt budget, not only a storage one; a log
+ * longer than this belongs in a file the run reads, not in the thread.
+ */
+export const MAX_COMMENT_CHARS = 16_000;
+
+/**
  * A comment on a card (B7, LOB-73). A person's comment on a card blocked `needs_input` is the answer,
  * and lifts the block in the same transaction; any other comment is a note.
  */
 export const CommentTaskInput = Schema.Struct({
   taskId: TaskId,
   expectedRevision: Schema.Int,
-  body: Schema.String,
+  body: Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_COMMENT_CHARS))),
   actor: Schema.String,
 });
 export type CommentTaskInput = typeof CommentTaskInput.Type;

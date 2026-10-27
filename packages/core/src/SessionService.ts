@@ -90,6 +90,7 @@ import type {
   RunColumn,
   RunProfile,
   SessionRef,
+  ThreadReader,
 } from "@repo/harness";
 import {
   EMPTY_RUN_PROFILE,
@@ -138,7 +139,6 @@ import {
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
-import type { TaskComment } from "@repo/domain/Task";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import type {
   CurateSessionInput,
@@ -684,24 +684,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         ).pipe(Effect.map((rows) => rows[0]?.taskId));
 
       /**
-       * The card's thread, as the run's prompt carries it (B7, LOB-73). Read on every owner
-       * acquisition, as the skills and the pages are: a run reopened after a person answered is told
-       * the answer, not the thread as it stood when the run first opened.
+       * An effect of this service as the Promise a harness callback returns: run with the services
+       * the layer was built with, and rejected with the service's own message on failure — which is
+       * what the model reads as the tool's error, or what fails the request a section was read for.
        */
-      const threadFor = (
-        taskId: string | undefined,
-      ): Effect.Effect<readonly TaskComment[], SessionError> =>
-        taskId === undefined
-          ? Effect.succeed([])
-          : tasks.comments(taskId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new SessionErrorClass({
-                    code: "storage",
-                    message: `read the thread of ${taskId}: ${cause.message}`,
-                  }),
-              ),
-            );
+      const forHarness = <A, E extends { readonly message: string }>(
+        effect: Effect.Effect<A, E>,
+      ): Promise<A> =>
+        Effect.runPromiseExitWith(context)(effect).then((exit) => {
+          if (Exit.isSuccess(exit)) return exit.value;
+          const failure = Cause.findErrorOption(exit.cause);
+          throw new Error(
+            Option.isSome(failure)
+              ? failure.value.message
+              : Cause.pretty(exit.cause),
+          );
+        });
+
+      /**
+       * How the run's prompt reads its card's thread (B7, LOB-73). The harness calls it before every
+       * request rather than once per owner acquisition: a person who answers a parked run and then
+       * messages that same session — its owner still live — reaches the run with the answer, not with
+       * the thread as it stood when the owner opened.
+       */
+      const threadFor =
+        (taskId: string): ThreadReader =>
+        () =>
+          forHarness(tasks.comments(taskId));
 
       /**
        * How a run asks (B7, LOB-73): a `question` comment and a `needs_input` block on its card, made
@@ -713,29 +722,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const askFor = (sessionId: SessionId, taskId: string): AskOptions => ({
         ask: ({ question, callId }) =>
-          Effect.runPromiseExitWith(context)(
+          forHarness(
             tasks.ask({
               taskId,
               question,
               actor: sessionId,
               askId: `${sessionId}:${callId}`,
             }),
-          ).then((exit) => {
-            if (Exit.isSuccess(exit)) {
-              const card = exit.value;
-              return {
-                taskId: card.id,
-                column: card.blocked?.column ?? card.column,
-                revision: card.revision,
-              };
-            }
-            const failure = Cause.findErrorOption(exit.cause);
-            throw new Error(
-              Option.isSome(failure)
-                ? failure.value.message
-                : Cause.pretty(exit.cause),
-            );
-          }),
+          ).then((card) => ({
+            taskId: card.id,
+            column: card.blocked?.column ?? card.column,
+            revision: card.revision,
+          })),
       });
 
       /**
@@ -957,8 +955,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly verify: VerifyOptions;
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
-        /** The card's thread (LOB-73), oldest first; empty for a session with no card. */
-        readonly thread: readonly TaskComment[];
+        /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
+        readonly thread?: ThreadReader;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -1007,7 +1005,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
-            const thread = yield* threadFor(card);
             const opened = yield* open({
               storage,
               cwd: workspace.path,
@@ -1018,8 +1015,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 command: workspace.commands.verify,
                 baseRef: workspace.baseRef,
               },
-              thread,
-              ...(card === undefined ? {} : { ask: askFor(id, card) }),
+              ...(card === undefined
+                ? {}
+                : { ask: askFor(id, card), thread: threadFor(card) }),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -1070,8 +1068,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               cwd,
               pages,
               verify,
-              thread,
               ...(ask === undefined ? {} : { ask }),
+              ...(thread === undefined ? {} : { thread }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],

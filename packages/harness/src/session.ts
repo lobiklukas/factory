@@ -70,8 +70,12 @@ import {
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import { verifyExtension, type VerifyOptions } from "./verify";
-import { askExtension, threadExtension, type AskOptions } from "./ask";
-import type { TaskComment } from "@repo/domain/Task";
+import {
+  askExtension,
+  threadExtension,
+  type AskOptions,
+  type ThreadReader,
+} from "./ask";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -266,10 +270,12 @@ export type OpenSessionOptions = {
    */
   readonly ask?: AskOptions;
   /**
-   * The card's thread (LOB-73), read by the control plane at open: every comment, oldest first,
-   * rendered verbatim as the `task_thread` section. Absent or empty: no section.
+   * How to read the card's thread (LOB-73): called before every request, its comments rendered
+   * verbatim, oldest first, as the `task_thread` section — so an answer that lands while this harness
+   * is open reaches the next request. Absent (a session with no card), or a thread with no comments:
+   * no section.
    */
-  readonly thread?: readonly TaskComment[];
+  readonly thread?: ThreadReader;
 };
 
 export type OpenSession = {
@@ -316,8 +322,9 @@ export const openSession = (
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
     // The card's thread beside them (B7, LOB-73): what earlier runs asked and what a person answered,
     // so a run that follows a parked one starts from the answer rather than from the bare card.
-    const thread = options.thread ?? [];
-    if (thread.length > 0) registry.install(threadExtension(thread));
+    if (options.thread !== undefined) {
+      registry.install(threadExtension(options.thread));
+    }
     registry.install(CodingTools);
     // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
     // its own surface rather than prose about it.

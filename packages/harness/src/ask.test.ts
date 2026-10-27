@@ -11,16 +11,24 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
 import type { TaskComment } from "@repo/domain/Task";
 import { TaskId } from "@repo/domain/Task";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MAX_COMMENT_CHARS } from "@repo/domain/Task";
 import {
   ASK_TOOL,
   describeAsk,
+  describeCrowdedAsk,
+  omittedMarker,
   renderThread,
+  THREAD_CHAR_CAP,
   THREAD_SECTION_KEY,
   type AskOptions,
   type AskReceipt,
@@ -76,6 +84,7 @@ const runOnce = (options: {
   runtime.runPromise(
     Effect.gen(function* () {
       const faux = createFauxModelAccess({ fauxAsk: QUESTION });
+      const thread = options.thread ?? [];
       const storage = yield* Effect.promise(() =>
         PostgresStorage.owner(sql, freshLogId()),
       );
@@ -84,7 +93,9 @@ const runOnce = (options: {
         model: faux.access,
         cwd: workdir,
         ...(options.ask === undefined ? {} : { ask: options.ask }),
-        ...(options.thread === undefined ? {} : { thread: options.thread }),
+        ...(options.thread === undefined
+          ? {}
+          : { thread: () => Promise.resolve(thread) }),
       });
       const submitted = yield* submitMessage(root, { content: "specify it" });
       yield* Effect.promise(() =>
@@ -120,6 +131,29 @@ describe("renderThread", () => {
 
   it("is no section at all for a card with no comments", () => {
     expect(renderThread([])).toBeUndefined();
+  });
+
+  it("drops the oldest comments past its budget, says how many, and keeps the newest two whole", () => {
+    const long = (fill: string) => fill.repeat(MAX_COMMENT_CHARS);
+    const thread = [
+      comment("note", "person:lukas", "the oldest note", 1),
+      comment("note", "person:lukas", long("n"), 2),
+      comment("question", "ses_run", long("q"), 3),
+      comment("answer", "person:lukas", long("a"), 4),
+    ];
+    const text = renderThread(thread) ?? "";
+    expect(text).toContain(omittedMarker(2));
+    expect(text).not.toContain("the oldest note");
+    expect(text).toContain(`\n${long("q")}\n\n[answer]`);
+    expect(text.endsWith(`\n${long("a")}`)).toBe(true);
+    // Within budget, nothing is dropped and no marker stands in.
+    const short = renderThread(thread.slice(0, 1)) ?? "";
+    expect(short).toContain("the oldest note");
+    expect(short).not.toContain("omitted");
+    // The two newest stay even when they alone are over a smaller budget.
+    const tight = renderThread(thread, 10) ?? "";
+    expect(tight).toContain(omittedMarker(2));
+    expect(tight.length).toBeGreaterThan(THREAD_CHAR_CAP / 2);
   });
 });
 
@@ -172,6 +206,73 @@ describe("the ask tool in a run", () => {
     expect(outcome.busy).toBe(false);
   }, 120_000);
 
+  it("refuses an ask that shares its round, so the card is never blocked under a run that goes on", async () => {
+    // Pi Durable ends a run only when every call of the round asks to: an `ask` beside a `bash`
+    // would block the card and the run would make another request anyway. Scripted here: the
+    // crowded round, then the model's retry with `ask` alone, then a reply nobody should reach.
+    const calls: string[] = [];
+    const faux = createFauxModelAccess({});
+    const script = [
+      fauxAssistantMessage(
+        [
+          fauxToolCall("bash", { command: "echo crowded" }),
+          fauxToolCall(ASK_TOOL, { question: QUESTION }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(fauxToolCall(ASK_TOOL, { question: QUESTION }), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("kept going after the ask"),
+    ];
+    faux.faux.setResponses(script);
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, freshLogId()),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model: faux.access,
+          cwd: workdir,
+          ask: {
+            ask: (request) => {
+              calls.push(request.callId);
+              return Promise.resolve({
+                taskId: TASK,
+                column: "specifying",
+                revision: 3,
+              });
+            },
+          },
+        });
+        const submitted = yield* submitMessage(root, { content: "go" });
+        yield* Effect.promise(() =>
+          submitted.submission.wait(BACKGROUND_CONTEXT),
+        );
+        const busy = yield* isBusy(harness, root);
+        const log = yield* readSessionLog(storage);
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return { busy, entries: log.entries };
+      }),
+    );
+
+    const asks = outcome.entries.filter(
+      (entry) => entry.kind === "toolResult" && entry.toolName === ASK_TOOL,
+    );
+    // The crowded ask recorded nothing and told the model why; the lone one parked the run.
+    expect(asks).toHaveLength(2);
+    expect(asks[0]?.isError).toBe(true);
+    expect(asks[0]?.text).toContain(describeCrowdedAsk(2));
+    expect(calls).toHaveLength(1);
+    expect(asks[1]?.isError).toBeFalsy();
+    // Two requests and no third: the run ended on the lone ask's result, not on a reply.
+    expect(faux.faux.state.callCount).toBe(2);
+    expect(outcome.entries.at(-1)).toBe(asks[1]);
+    expect(outcome.busy).toBe(false);
+  }, 120_000);
+
   it("is not offered to a session opened without an ask", async () => {
     const outcome = await runOnce({});
     expect(outcome.entries.some((entry) => entry.toolName === ASK_TOOL)).toBe(
@@ -209,6 +310,46 @@ describe("the thread in a run's prompt", () => {
     // Holding the thread, the scripted run does not ask again.
     expect(asked).toBe(0);
     expect(outcome.entries.at(-1)?.text).toBe("faux-ok (re: specify it)");
+  }, 120_000);
+
+  it("reads the thread before every request, so a live harness is told an answer that lands later", async () => {
+    // The parked run's owner stays open; a person answers, then messages that same session.
+    let thread: readonly TaskComment[] = [];
+    const answer = "Postgres 16.";
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const faux = createFauxModelAccess({});
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, freshLogId()),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model: faux.access,
+          cwd: workdir,
+          thread: () => Promise.resolve(thread),
+        });
+        const send = (content: string) =>
+          Effect.gen(function* () {
+            const submitted = yield* submitMessage(root, { content });
+            yield* Effect.promise(() =>
+              submitted.submission.wait(BACKGROUND_CONTEXT),
+            );
+            return yield* readPromptSections(storage);
+          });
+        const before = yield* send("first");
+        thread = [
+          comment("question", "ses_run", QUESTION, 2),
+          comment("answer", "person:lukas", answer, 4),
+        ];
+        const after = yield* send("go on");
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        return { before, after };
+      }),
+    );
+
+    expect(outcome.before[THREAD_SECTION_KEY]).toBeUndefined();
+    expect(outcome.after[THREAD_SECTION_KEY]).toContain(`\n${answer}\n`);
   }, 120_000);
 
   it("carries no section for a run with no thread", async () => {

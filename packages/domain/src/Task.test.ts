@@ -26,7 +26,9 @@ import {
   ColumnKind,
   ColumnRequirement,
   CommentKind,
+  CommentTaskInput,
   DefinitionId,
+  MAX_COMMENT_CHARS,
   Task,
   TaskComment,
   TaskBlocked,
@@ -620,5 +622,25 @@ describe("a card's thread", () => {
     expect(refuses(TaskComment, { ...comment, taskId: A_SESSION_ID })).toBe(
       true,
     );
+  });
+
+  it("bounds a comment's body, since every run on the card is prompted with it", () => {
+    const input = {
+      taskId: A_TASK_ID,
+      expectedRevision: 3,
+      actor: "person:lukas",
+    };
+    expect(
+      refuses(CommentTaskInput, {
+        ...input,
+        body: "x".repeat(MAX_COMMENT_CHARS),
+      }),
+    ).toBe(false);
+    expect(
+      refuses(CommentTaskInput, {
+        ...input,
+        body: "x".repeat(MAX_COMMENT_CHARS + 1),
+      }),
+    ).toBe(true);
   });
 });

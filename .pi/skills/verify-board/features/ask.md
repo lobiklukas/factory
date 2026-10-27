@@ -10,11 +10,20 @@ card, and the next run reads the card's whole thread as context (LOB-73, part 2 
 - A run bound to a card is offered the `ask` tool (`packages/harness/src/ask.ts`). Calling it records a
   `question` comment and a `needs_input` block — the typed reason plus the column the card blocked
   from — in one transaction (`TaskService.ask`), and the tool result carries
-  `control: { terminate: true }`, so the run ends without another model request.
+  `control: { terminate: true }`, so the run ends without another model request. Pi Durable ends a
+  run only when every call of the round asks to, so an `ask` that shares its round with any other
+  call is refused as a tool error before anything is recorded, and the model is told to call it
+  alone (`ask.test.ts` scripts `[bash, ask]` in one response).
 - A person's comment on a card blocked `needs_input` is the **answer**: `factory board comment`
   appends it and lifts the block in the same transaction.
-- Every run opened on the card is told the thread: a `task_thread` prompt section quoting each
-  comment verbatim, oldest first. The run's committed `pi.system` entry is the record of it.
+- Every run on the card is told the thread: a `task_thread` prompt section quoting each comment
+  verbatim, oldest first. The section reads the thread before every request, so the parked run's
+  own live owner is told an answer too, if a person messages that session rather than starting a
+  new run. The run's committed `pi.system` entry is the record of it.
+- The thread is bounded twice: a comment's body is at most `MAX_COMMENT_CHARS` (16,000) characters
+  at the RPC, and the section at most `THREAD_CHAR_CAP` (40,000), dropping whole comments oldest
+  first behind an "N older comments omitted" marker — the two newest always stay, so the latest
+  question and its answer are never cut.
 
 The thread is stored in `task_events` as `commented` events (B3: cards are rows), not in a table of
 its own and not in a session log — see the header of `packages/core/src/TaskService.ts`.

@@ -840,6 +840,7 @@ export const TaskServiceLive = Layer.effect(
           }
           // Event order is write order (`id` is an identity), which is the thread's order: a question
           // and the answer to it are never reordered by a clock that ticked twice in one millisecond.
+          // Ordered by the column, not the `id` text alias, which would sort "100" before "99".
           const rows = yield* sql<{
             id: string;
             payload: string;
@@ -848,7 +849,7 @@ export const TaskServiceLive = Layer.effect(
             SELECT id::text AS id, payload::text AS payload, created_at
             FROM task_events
             WHERE task_id = ${taskId} AND kind = 'commented'
-            ORDER BY id
+            ORDER BY task_events.id
           `;
           return yield* Effect.forEach(rows, (row) =>
             Effect.gen(function* () {

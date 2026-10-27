@@ -583,6 +583,37 @@ describe("TaskService — the ask and the thread", () => {
     expect(await kinds(plain.id)).toEqual(["note"]);
   });
 
+  it("reads the thread in event-id order, not in the text order of the ids", async () => {
+    const task = await inSpecifying();
+    // Two comments whose ids sort one way as numbers and the other as text: -…9 is written first
+    // (it is the smaller number) but "-…9" sorts after "-…8". Negative ids are below anything the
+    // identity hands out, and the run's random stem keeps them unique across runs of this suite.
+    const stem = Number.parseInt(hex(5), 16) + 1;
+    const ids = [-(stem * 10 + 9), -(stem * 10 + 8)];
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        for (const [index, id] of ids.entries()) {
+          const payload = JSON.stringify({
+            _tag: "commented",
+            taskId: task.id,
+            actor: LUKAS,
+            body: index === 0 ? "first" : "second",
+            revision: task.revision,
+            kind: "note",
+          });
+          yield* sql`
+            INSERT INTO task_events (id, task_id, kind, actor, revision, payload)
+            OVERRIDING SYSTEM VALUE
+            VALUES (${id}, ${task.id}, 'commented', ${LUKAS}, ${task.revision}, ${payload}::jsonb)
+          `;
+        }
+      }),
+    );
+    const thread = await withService((s) => s.comments(task.id));
+    expect(thread.map((c) => c.body)).toEqual(["first", "second"]);
+  });
+
   it("refuses a stale comment and an empty one, writing nothing, and a thread of no card", async () => {
     const task = await inSpecifying();
     const stale = await refusal((s) =>
