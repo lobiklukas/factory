@@ -30,35 +30,22 @@
 //                        so a fixed slug would hand every run the same URL, and an anchor showing
 //                        another session's link would still compare equal
 //   PR_SEED_TITLE        the session's title (default "verify pr link probe")
+import { BunServices } from "@effect/platform-bun";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-
-const ROOT = path.resolve(import.meta.dir, "../../..");
-
-/**
- * The control plane's own modules, resolved from `apps/api` rather than from this file.
- *
- * The workspace is installed with Bun's isolated linker, so the repo root's `node_modules` holds
- * only what the root package names (`@repo/domain`, `effect`) and a bare `@repo/core` from `.pi/`
- * does not resolve. Resolving from the API's package is also the honest choice: the seed runs the
- * same `SessionService`, storage and `effect` instance the API it seeds for runs.
- */
-const fromApi = (specifier: string): Promise<any> =>
-  import(Bun.resolveSync(specifier, path.join(ROOT, "apps/api")));
-
-const { BunServices } = await fromApi("@effect/platform-bun");
-const { Effect, Layer, ManagedRuntime, Option, Redacted } =
-  await fromApi("effect");
-const { FetchHttpClient } = await fromApi("effect/http");
-const { RepoSlug: RepoSlugSchema } = await fromApi("@repo/domain/Session");
-const { createModelAccess } = await fromApi("@repo/harness");
-const { DatabaseLive } = await fromApi("@repo/storage-postgres");
-const {
+import { Effect, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import { FetchHttpClient } from "effect/http";
+import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
+import { createModelAccess } from "@repo/harness";
+import { DatabaseLive } from "@repo/storage-postgres";
+import {
   CredentialProvider,
   SessionService,
   SessionServiceLive,
   staticTokenProvider,
-} = await fromApi("@repo/core");
+} from "@repo/core";
+
+const ROOT = path.resolve(import.meta.dir, "../../..");
 
 const OUT =
   process.env["PR_SEED_OUT"] ?? path.join(ROOT, ".verify/run/pr-seed.json");

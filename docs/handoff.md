@@ -121,9 +121,11 @@ passes ten.
 - **Postgres:** `docker compose up -d --wait postgres` (host port **5442**, user/password/db all
   `factory`). `bun run test` needs it and **fails loudly rather than skipping** when it is down.
   `DATABASE_URL` defaults to `postgres://factory:factory@localhost:5442/factory`.
-- **Docker on this machine:** the active docker context is Docker Desktop, which is not running;
-  Colima is. Use `export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` rather than
-  changing the global context. Port 5432 is held by an unrelated `ssh` tunnel, hence 5442.
+- **Docker on this machine:** Docker Desktop and Colima can both be running, each with its own
+  `factory-postgres-1`; only the one that publishes 5442 is the one tests reach. Check
+  `lsof -nP -iTCP:5442 -sTCP:LISTEN` rather than assuming a Docker context, and create databases
+  over TCP (`docs/parallel-work.md`), not with `docker exec`. Port 5432 is held by an unrelated `ssh`
+  tunnel, hence 5442.
 - **Model key:** `ANTHROPIC_API_KEY` in the repo-root `.env` (gitignored). `bun run m0` loads it
   from the root whether run from the root or from `packages/harness`.
 - **Browser verification:** `.pi/skills/verify-web/up.sh`, then `node drive.mjs`, then `down.sh`.

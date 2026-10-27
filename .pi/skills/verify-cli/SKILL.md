@@ -17,17 +17,19 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 
 ## What it proves
 
-| Feature                      | Check in the driver                                                     | Why it matters                                     |
-| ---------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------- |
-| `factory run` (D9)           | creates, streams, and prints the answer, exit 0                         | the whole write path in one command                |
-| The run's session is named   | `session ses_…` on stdout, and `workspace <path>`                       | the server's own answer, not a client guess        |
-| The tool call is real        | a `[tool:bash]` line carrying the faux tool's output                    | the transcript can only exist if the tool ran      |
-| `factory ls` (LOB-6)         | the new session is a row, with its title, exit 0                        | the list is a server read, not a local registry    |
-| The PR column (LOB-65)       | a seeded PR's URL in its row; `-` for the run's row                     | the operator sees the link without a browser       |
-| `factory watch`, live (D8)   | `mode: live`, then the same answer                                      | a session this process owns streams                |
-| `factory watch`, historical  | `mode: historical` after the idle sweep, same answer                    | the fold path, and the label that tells them apart |
-| Typed errors                 | unknown id → `error: not_found`, non-zero exit                          | a script can branch on `code`, not on prose        |
-| `factory withdraw` (LOB-166) | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript | withdrawing is a write, not a hidden row           |
+| Feature                        | Check in the driver                                                     | Why it matters                                     |
+| ------------------------------ | ----------------------------------------------------------------------- | -------------------------------------------------- |
+| `factory run` (D9)             | creates, streams, and prints the answer, exit 0                         | the whole write path in one command                |
+| The run's session is named     | `session ses_…` on stdout, and `workspace <path>`                       | the server's own answer, not a client guess        |
+| The tool call is real          | a `[tool:bash]` line carrying the faux tool's output                    | the transcript can only exist if the tool ran      |
+| `factory ls` (LOB-6)           | the new session is a row, with its title, exit 0                        | the list is a server read, not a local registry    |
+| The PR column (LOB-65)         | a seeded PR's URL in its row; `-` for the run's row                     | the operator sees the link without a browser       |
+| `factory watch`, live (D8)     | `mode: live`, then the same answer                                      | a session this process owns streams                |
+| `factory watch`, historical    | `mode: historical` after the idle sweep, same answer                    | the fold path, and the label that tells them apart |
+| Typed errors                   | unknown id → `error: not_found`, non-zero exit                          | a script can branch on `code`, not on prose        |
+| `factory withdraw` (LOB-166)   | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript | withdrawing is a write, not a hidden row           |
+| `--when-busy steer` (LOB-167)  | `./steer.sh`: the steer joins the running run, which answers it once    | a steer is not a follow-up with a different label  |
+| `--when-busy reject` (LOB-167) | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`     | a script can refuse to queue behind a running run  |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -38,12 +40,18 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./doctor.sh      # read-only; exits non-zero when the instance is not worth driving
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
 ./withdraw.sh    # self-contained: its own API on :9310 (WITHDRAW_PORT) with a sleeping faux turn
+./steer.sh       # self-contained: its own API on :9320 (STEER_PORT) with the sleeping faux script
 ```
 
 `withdraw.sh` is separate from `drive.sh` because a message only queues behind a run in flight: it
 boots its own API with `FAUX_COMMAND="sleep 15 && echo faux-ok"` (`WITHDRAW_SLEEP_S`), its own
 session root and tmux server under `.verify/run/cli-withdraw/`, and stops all of it on exit. See
 `features/withdraw.md`.
+
+`steer.sh` is separate for the same reason, and boots its API with the sleeping faux script instead
+of a sleeping command: `FAUX_SLEEP_MS=8000` (`STEER_SLEEP_MS`) makes the model nap before each step
+of a turn, so the steer and the refused reject both land before the tool round, whatever the tool
+does. Its state is under `.verify/run/cli-steer/`. See `features/steer.md`.
 
 `up.sh` needs Postgres on host port 5442 — the session log _is_ Postgres. It does not start one
 blindly: the shared `.pi/skills/lib/postgres.sh` asks the port first and runs `docker compose up -d

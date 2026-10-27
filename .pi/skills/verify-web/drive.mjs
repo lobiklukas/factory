@@ -1400,21 +1400,16 @@ if ((await sessionLink.count()) > 0) {
 // below is made in the card pane (LOB-76) or by `factory board move`, and every request the board
 // pages send is recorded and checked against what the walk clicked.
 //
-// The seed is evaluated from `apps/api` rather than run by path: bun's isolated linker (bun.lock
-// `configVersion: 1`) links `@repo/core` and `@repo/storage-postgres` only into the workspaces that
-// depend on them, and a file under `.pi/` resolves bare imports from its own directory upwards,
-// where the root `node_modules` holds neither. The seed has no relative imports, so its text runs
-// as-is. It writes to this process's `DATABASE_URL`, which must be the one the API was started
-// with; a mismatch is caught below, because the API then does not hold the board.
+// The seed runs by path, as `verify-board/up.sh` runs it: the root declares the workspace packages
+// it imports (`@repo/core`, `@repo/storage-postgres`), so they resolve from `.pi/`. It writes to
+// this process's `DATABASE_URL`, which must be the one the API was started with; a mismatch is
+// caught below, because the API then does not hold the board.
 const boardObserved = {};
 let boardSeed = null;
 const seed = spawnSync(
   "bun",
-  [
-    "-e",
-    await readFile(path.join(ROOT, ".pi/skills/verify-board/seed.ts"), "utf8"),
-  ],
-  { cwd: path.join(ROOT, "apps/api"), encoding: "utf8", timeout: 60_000 },
+  ["run", path.join(ROOT, ".pi/skills/verify-board/seed.ts")],
+  { encoding: "utf8", timeout: 60_000 },
 );
 boardObserved.seed = {
   status: seed.status,
