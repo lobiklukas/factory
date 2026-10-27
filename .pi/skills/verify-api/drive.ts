@@ -5,6 +5,11 @@
 // Env:
 //   API_URL       default http://localhost:9200
 //   EVIDENCE_DIR  default .verify/evidence/latest
+//   DATABASE_URL  required: the database the API writes. The replay check reads the replay's log
+//                 there, as a reader (no migrator, no owner), because no RPC answers the link it
+//                 records. Never defaulted, so a drive cannot read the shared `factory` database.
+//   REPLAY_MODEL  default faux/faux-2, the second model up.sh publishes for the replay check (up.sh
+//                 reads the same variable, so set it for both)
 //
 // Why a client and not curl: curl proves a route is mounted. This uses the same
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
@@ -20,8 +25,11 @@ import {
   type SessionSnapshot,
   type TranscriptEntry,
 } from "@repo/domain/Session";
+import { readSessionLog } from "@repo/harness";
+import { PostgresLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Exit, Fiber, Ref, Stream } from "effect";
 import { RpcClient } from "effect/rpc";
+import { SqlClient } from "effect/sql/SqlClient";
 import {
   type CheckRecord,
   makeChecker,
@@ -36,6 +44,18 @@ const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
 /** Distinctive, so the answer can only have come from this prompt. */
 const PROMPT = "verify-api probe";
 const EXPECTED_ANSWER = `faux-ok (re: ${PROMPT})`;
+/** The replay check's prompt: its own, so the replay's first entry can only be this source's. */
+const REPLAY_PROMPT = `${PROMPT} replay`;
+/** The model every session on the instance runs on (`FAUX_MODEL_ID`), and the one a replay picks. */
+const DEPLOYMENT_MODEL = "faux/faux-1";
+const REPLAY_MODEL = process.env["REPLAY_MODEL"] ?? "faux/faux-2";
+
+if (!process.env["DATABASE_URL"]) {
+  console.error(
+    "drive.ts needs DATABASE_URL: the database the API from ./up.sh writes",
+  );
+  process.exit(2);
+}
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
@@ -50,6 +70,7 @@ const observed: {
     readonly toolName: string | null;
   }>;
   fork?: Record<string, unknown>;
+  replay?: Record<string, unknown>;
   sessionId?: SessionId | null;
   consoleErrors?: ReadonlyArray<string>;
 } = {
@@ -131,6 +152,40 @@ const tokensOf = (snapshot: SessionSnapshot) =>
   );
 const lastAssistant = (entries: ReadonlyArray<TranscriptEntry>) =>
   entries.filter((entry) => entry.kind === "assistant").at(-1);
+const firstUser = (entries: ReadonlyArray<TranscriptEntry>) =>
+  entries.find((entry) => entry.kind === "user")?.text;
+/** The models a session's usage is keyed by: the ones it really sent requests to. */
+const modelKeys = (snapshot: SessionSnapshot) =>
+  snapshot.usage.models.map((model) => model.key);
+/** A replay check's run has settled on the faux answer to its prompt, not merely gone idle. */
+const answered = (snapshot: SessionSnapshot) =>
+  !snapshot.live.busy &&
+  lastAssistant(snapshot.entries)?.text === `faux-ok (re: ${REPLAY_PROMPT})`;
+/** The `SessionError` code a refused call failed with, `"ok"` when it succeeded. */
+const refusalCode = (exit: Exit.Exit<unknown, { readonly _tag: string }>) => {
+  if (Exit.isSuccess(exit)) return "ok";
+  const failure = Exit.findErrorOption(exit);
+  if (failure._tag === "None") return "defect";
+  return failure.value._tag === "SessionError" && "code" in failure.value
+    ? String(failure.value.code)
+    : failure.value._tag;
+};
+
+/**
+ * A replay's own log as a rebuild folds it, read through a reader-mode storage: it never owns the
+ * log, so it cannot collide with the API that does (two owners of one log poison each other). The
+ * client is `PostgresLive`, provided here and nowhere else: no migrator runs against the API's
+ * database, and no other check depends on reaching Postgres.
+ */
+const replayLink = (sessionId: SessionId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    return yield* Effect.acquireUseRelease(
+      Effect.promise(() => PostgresStorage.reader(sql, sessionId)),
+      readSessionLog,
+      (storage) => Effect.promise(() => storage.dispose()),
+    );
+  }).pipe(Effect.provide(PostgresLive));
 
 const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(SessionRpc);
@@ -499,6 +554,120 @@ const program = Effect.gen(function* () {
     prefixEntries: forkPrefix.entries.length,
     divergedEntries: forkSettled.entries.length,
     foreignRefusal: foreignEntry,
+  };
+
+  // Feature: replay (LOB-198, driven here by LOB-215). A replay is the same task in a new session on
+  // another model: the source's first prompt is the replay's, its usage is keyed by the model it was
+  // replayed onto, and the source's log is only read. `up.sh` publishes `REPLAY_MODEL` beside the
+  // deployment's model, so the difference is one this drive can make with no key.
+  //
+  // The link between the two sessions is a `factory.replay` document in the replay's own log, and no
+  // RPC answers it: it is read here the way a rebuild reads it, through a reader-mode storage over
+  // the database the API writes. A replay that wrote everything else but not that document would
+  // pass every wire check above it and fail this one.
+  const replaySource = yield* client.createSession({
+    repo: repoSlug,
+    baseRef: "main",
+    title: "replay probe",
+  });
+  yield* client.sendMessage({
+    sessionId: replaySource.id,
+    content: REPLAY_PROMPT,
+  });
+  const sourceRan = yield* waitUntil(
+    client
+      .getSession({ sessionId: replaySource.id })
+      .pipe(Effect.map((state) => (answered(state) ? state : undefined))),
+    "the replay source's answer",
+  );
+  const replay = yield* client.replaySession({
+    sessionId: replaySource.id,
+    model: REPLAY_MODEL,
+  });
+  assert(
+    "replaySession answers a new session at the source's repo and base ref",
+    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(replay.id) &&
+      replay.id !== replaySource.id &&
+      replay.repo === repoSlug &&
+      replay.baseRef === "main" &&
+      replay.title === replaySource.title &&
+      // A replay is not a fork: nothing of the source's transcript is copied into it.
+      replay.forkedFrom === undefined,
+    `id=${replay.id} source=${replaySource.id} repo=${replay.repo} baseRef=${replay.baseRef} title=${JSON.stringify(replay.title)} forkedFrom=${replay.forkedFrom}`,
+  );
+  const replayRan = yield* waitUntil(
+    client
+      .getSession({ sessionId: replay.id })
+      .pipe(Effect.map((state) => (answered(state) ? state : undefined))),
+    "the replay's answer",
+  );
+  const sourcePrompt = firstUser(sourceRan.entries);
+  const replayPrompt = firstUser(replayRan.entries);
+  assert(
+    "the replay's first user entry is the source's, text for text",
+    sourcePrompt === REPLAY_PROMPT && replayPrompt === sourcePrompt,
+    `source=${JSON.stringify(sourcePrompt ?? null)} replay=${JSON.stringify(replayPrompt ?? null)}`,
+  );
+  const sourceModels = modelKeys(sourceRan);
+  const replayModels = modelKeys(replayRan);
+  assert(
+    "the replay ran on the model it was replayed onto, the source on its own",
+    sourceModels.join(",") === DEPLOYMENT_MODEL &&
+      replayModels.join(",") === REPLAY_MODEL,
+    `source=${sourceModels.join(",") || "none"} replay=${replayModels.join(",") || "none"}`,
+  );
+  const sourceAfter = yield* client.getSession({ sessionId: replaySource.id });
+  assert(
+    "the replayed session's transcript is unchanged",
+    JSON.stringify(sourceAfter.entries) === JSON.stringify(sourceRan.entries),
+    `${sourceRan.entries.length} entries before, ${sourceAfter.entries.length} after`,
+  );
+  const replayLog = yield* replayLink(replay.id);
+  assert(
+    "the replay's own log records the source and both models",
+    replayLog.replay?.source === replaySource.id &&
+      replayLog.replay.model === REPLAY_MODEL &&
+      replayLog.replay.from === DEPLOYMENT_MODEL,
+    `replay=${JSON.stringify(replayLog.replay ?? null)}`,
+  );
+
+  // The refusals, typed over the wire: a model this process does not serve, and a session bound to
+  // no repo (the scratch session this drive opened first). Neither may leave a session behind.
+  const listedIds = client
+    .listSessions({ limit: 250 })
+    .pipe(
+      Effect.map((listing) => listing.sessions.map((session) => session.id)),
+    );
+  const idsBefore = yield* listedIds;
+  const unservedModel = yield* Effect.exit(
+    client.replaySession({
+      sessionId: replaySource.id,
+      model: "faux/faux-unserved",
+    }),
+  );
+  const noRepo = yield* Effect.exit(
+    client.replaySession({ sessionId: created.id }),
+  );
+  const idsAfter = yield* listedIds;
+  const refusals = {
+    unservedModel: refusalCode(unservedModel),
+    noRepo: refusalCode(noRepo),
+  };
+  assert(
+    "a replay onto an unserved model, or of a session with no repo, is refused as invalid_input",
+    refusals.unservedModel === "invalid_input" &&
+      refusals.noRepo === "invalid_input" &&
+      idsAfter.length === idsBefore.length &&
+      idsAfter.every((id) => idsBefore.includes(id)),
+    `${JSON.stringify(refusals)} sessions=${idsBefore.length}->${idsAfter.length}`,
+  );
+  observed.replay = {
+    source: replaySource.id,
+    replay: replay.id,
+    prompts: { source: sourcePrompt ?? null, replay: replayPrompt ?? null },
+    models: { source: sourceModels, replay: replayModels },
+    log: replayLog.replay ?? null,
+    refusals,
   };
 
   // Feature: request limits. An oversized message is refused with a typed error rather than
@@ -967,6 +1136,8 @@ console.log(`\nevidence: ${path.resolve(EVIDENCE_DIR)}`);
 const failed = Object.entries(observed.checks).filter(
   ([, check]) => !check.passed,
 );
+const total = Object.keys(observed.checks).length;
+console.log(`${total - failed.length}/${total} checks passed`);
 if (failed.length > 0) {
   console.error(`\n${failed.length} required check(s) failed`);
   process.exitCode = 1;
