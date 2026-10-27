@@ -35,6 +35,7 @@ import {
   type RepoBinding,
   type SubmittedMessage,
 } from "./session";
+import type { VerifyOptions } from "./verify";
 
 /**
  * The link between a replay and the session it replays, committed to the replay's own log.
@@ -145,6 +146,8 @@ export type ReplaySessionOptions = {
   readonly cwd: string;
   readonly policy?: SessionPolicy;
   readonly run?: RunProfile;
+  /** What the replay's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
+  readonly verify?: VerifyOptions;
 };
 
 export type ReplayedSession = OpenSession & {
@@ -172,6 +175,7 @@ export const replaySession = (
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
       ...(options.run === undefined ? {} : { run: options.run }),
+      ...(options.verify === undefined ? {} : { verify: options.verify }),
     });
     // A failure that leaves the harness open would leave a lease nobody releases: close it where the
     // failure is, as the fork's copy does.

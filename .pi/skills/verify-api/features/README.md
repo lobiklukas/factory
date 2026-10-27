@@ -76,6 +76,12 @@ evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.
 there; neither touches the mission path. See `mission.md`, which names what the case does not prove
 (resume across a kill — LOB-231).
 
+The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
+(`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **10/10**,
+evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
+was re-run there too (API on `:9550`, faux): **52/52**, evidence `.verify/evidence/lob-78/verify-api/`
+— every session now has the tool installed, and nothing the drive asserts changed.
+
 | Feature                  | Status  | File                               |
 | ------------------------ | ------- | ---------------------------------- |
 | Create a session         | passing | [create.md](create.md)             |
@@ -100,6 +106,7 @@ there; neither touches the mission path. See `mission.md`, which names what the 
 | A mission                | passing | [mission.md](mission.md)           |
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
+| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)   |
 
 ## Deliberately absent
 

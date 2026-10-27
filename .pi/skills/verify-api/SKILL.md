@@ -38,6 +38,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Approvals (LOB-50)             | `requestApproval` → pending, a retry is one row, survives the fold → `decideApproval` empties it                                    | a gated action waits for a person, durably           |
 | A mission (LOB-230)            | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                | a mission's phase is the session's state, not a call |
 | A docs trigger (LOB-197)       | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main | a docs run starts without a person, off the trunk    |
+| The `verify` tool (LOB-78)     | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first        | a run's verification is a record, not prose          |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -85,6 +86,7 @@ running, and writes its own evidence:
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ./docs-trigger.sh  # fake GitHub on :9410 — a push and a schedule start docs runs on factory/doc-<id>
+./verify-tool.sh # no port — the `verify` tool over four fixture repos (features/verify-tool.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the
