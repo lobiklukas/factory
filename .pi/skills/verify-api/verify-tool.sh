@@ -24,23 +24,16 @@ source "$ROOT/.pi/skills/lib/postgres.sh"
 ensure_postgres || exit 1
 
 rm -rf "$RUN_DIR"
-mkdir -p "$RUN_DIR/sessions" "$RUN_DIR/repos" "$RUN_DIR/driver" "$EVIDENCE_DIR"
+mkdir -p "$RUN_DIR/sessions" "$RUN_DIR/repos" "$EVIDENCE_DIR"
 
-# The driver imports `@repo/core`, `@repo/harness` and `@repo/storage-postgres`, which the root's
-# `node_modules` does not link (bun's isolated linker links a workspace package only into the
-# packages that depend on it; the root depends on `@repo/domain` alone). `apps/api` depends on all
-# of them, so the driver runs from a copy beside a link to that package's `node_modules` — resolution
-# walks up from the file, finds the workspace packages there, and the rest at the root as usual.
-cp "$ROOT/.pi/skills/verify-api/verify-tool.ts" "$ROOT/.pi/skills/verify-api/harness.ts" \
-  "$RUN_DIR/driver/"
-ln -s "$ROOT/apps/api/node_modules" "$RUN_DIR/driver/node_modules"
-
+# The driver runs from its own directory: the root declares the workspace packages it imports
+# (`@repo/core`, `@repo/harness`, `@repo/storage-postgres`), so they resolve from `.pi/`.
 env \
   DATABASE_URL="${DATABASE_URL:?verify-tool needs DATABASE_URL from the run}" \
   SESSION_ROOT="$RUN_DIR/sessions" \
   VERIFY_TOOL_REPOS="$RUN_DIR/repos" \
   EVIDENCE_DIR="$EVIDENCE_DIR" \
-  bun "$RUN_DIR/driver/verify-tool.ts" 2>&1 | tee "$RUN_DIR/driver.log"
+  bun "$ROOT/.pi/skills/verify-api/verify-tool.ts" 2>&1 | tee "$RUN_DIR/driver.log"
 RC=${PIPESTATUS[0]}
 cp "$RUN_DIR/driver.log" "$EVIDENCE_DIR/verify-tool.log" 2>/dev/null || true
 exit "$RC"

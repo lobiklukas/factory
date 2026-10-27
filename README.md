@@ -83,11 +83,13 @@ bun run dev
   `MODEL_BACKEND` falls back to pi-ai's deterministic faux provider and sessions still run offline
   with scripted answers.
 
-**Docker caveat, because it bites on this machine.** The active docker context may be a stopped
-Docker Desktop while Colima is running. Export the host rather than changing the global context:
+**Docker caveat, because it bites on this machine.** Docker Desktop and Colima can both be running,
+each with its own `factory-postgres-1`, and only one publishes host port 5442. Ask the port which
+one answers rather than assuming a Docker context, and create or inspect databases over TCP on it
+(see `docs/parallel-work.md`), not with `docker exec`:
 
 ```sh
-export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
+lsof -nP -iTCP:5442 -sTCP:LISTEN
 ```
 
 ## The gate

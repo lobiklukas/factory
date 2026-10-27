@@ -73,10 +73,18 @@ These are the reasons a naive `N agents in N worktrees` plan goes wrong here.
    (`compose.yaml`), migrations run when `apps/api` boots, and `packages/storage-postgres`,
    `packages/harness` and `packages/core` deliberately opt out of turbo caching, so they hit that
    database on every run. Two worktrees running `bun run test` concurrently race on migrations and
-   share tables. **Give each parallel worktree its own database** —
-   `docker compose exec postgres createdb factory_<slug>`, then
-   `DATABASE_URL=postgres://factory:factory@localhost:5442/factory_<slug> bun run test` — or run the
-   test suites one at a time.
+   share tables. **Give each parallel worktree its own database**, created over TCP on the port the
+   tests use — `PGPASSWORD=factory createdb -h localhost -p 5442 -U factory factory_<slug>`, or,
+   with no Postgres client installed, the same statement through Bun's SQL client:
+
+   ```sh
+   bun -e 'import { SQL } from "bun"; const sql = new SQL("postgres://factory:factory@localhost:5442/factory"); await sql.unsafe(`CREATE DATABASE "factory_<slug>"`); await sql.close()'
+   ```
+
+   then `DATABASE_URL=postgres://factory:factory@localhost:5442/factory_<slug> bun run test` — or
+   run the test suites one at a time. Do not create it with `docker exec` or `docker compose exec`:
+   see 7.
+
 2. **Ports and one run directory.** `.pi/skills/verify-api` uses port 9200; `.pi/skills/verify-web`
    uses 9100 (API) and 3100 (web). Both write `api.pid` into `.verify/run/`, so **one drive per
    checkout at a time**; pass `API_PORT` / `WEB_PORT` to run two, and do it from separate worktrees.
@@ -94,8 +102,13 @@ These are the reasons a naive `N agents in N worktrees` plan goes wrong here.
 6. **`.pi/` and `.omp/` are shared tooling.** A skill or agent added inside a worktree does not exist
    anywhere else until it is committed and merged. The same is true of `.omp/config.yml` — it is
    committed on purpose.
-7. **Docker context.** The active context may be a stopped Docker Desktop while Colima runs:
-   `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
+7. **Docker context is not the database.** This machine can run Docker Desktop and Colima at once,
+   each with its own `factory-postgres-1`, and only one of them publishes host port 5442. A
+   `docker exec` into the other creates databases on a server nothing connects to, and the tests
+   then fail with `database "…" does not exist`. Ask the port, not a context:
+   `lsof -nP -iTCP:5442 -sTCP:LISTEN` names the process that answers (`com.docke…` is Docker
+   Desktop; a Colima forward is a different process), and every database operation goes over
+   that TCP port, as in 1.
 
 ## 4. Recipe: fan out N slices
 

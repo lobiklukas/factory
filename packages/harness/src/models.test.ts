@@ -8,7 +8,12 @@
  */
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { compactionPolicyFor, createModelAccess, fauxAnswer } from "./models";
+import {
+  compactionPolicyFor,
+  createModelAccess,
+  fauxAnswer,
+  isFauxTurnStep,
+} from "./models";
 
 /** pi-durable's pinned defaults, which a large window must keep to the token. */
 const PINNED = {
@@ -114,4 +119,70 @@ describe("the faux script's turns", () => {
     expect(callsBash(answered)).toBe(false);
     expect(answered.content).toEqual([{ type: "text", text: "ran (re: two)" }]);
   });
+});
+
+describe("the sleeping faux script", () => {
+  const user = (text: string): Message => ({
+    role: "user",
+    content: text,
+    timestamp: 0,
+  });
+  const ask = (
+    access: ReturnType<typeof createModelAccess>,
+    text: string,
+    signal?: AbortSignal,
+  ) => {
+    const model = access.models.getModel(access.provider, access.modelId);
+    if (model === undefined) throw new Error("the faux model is not served");
+    return access.models.completeSimple(
+      model,
+      { messages: [{ role: "user", content: text, timestamp: 0 }] },
+      signal === undefined ? undefined : { signal },
+    );
+  };
+  const timed = async <A>(work: () => Promise<A>) => {
+    const started = performance.now();
+    const value = await work();
+    return { value, ms: performance.now() - started };
+  };
+
+  it("naps before a turn's step, and still takes the step", async () => {
+    const sleeping = createModelAccess("faux", { fauxSleepMs: 400 });
+    const { value, ms } = await timed(() => ask(sleeping, "take your time"));
+    expect(ms).toBeGreaterThanOrEqual(390);
+    // The nap delays the script; it does not replace it: the first step still calls bash.
+    expect(value.stopReason).toBe("toolUse");
+    expect(value.content.some((part) => part.type === "toolCall")).toBe(true);
+  });
+
+  it("answers at once without fauxSleepMs", async () => {
+    const { ms } = await timed(() =>
+      ask(createModelAccess("faux"), "be quick"),
+    );
+    expect(ms).toBeLessThan(390);
+  });
+
+  it("stops napping when the request is aborted", async () => {
+    // A nap the test could never wait out: only the abort can end it inside the test's timeout.
+    const sleeping = createModelAccess("faux", { fauxSleepMs: 600_000 });
+    const { value, ms } = await timed(() =>
+      ask(sleeping, "never mind", AbortSignal.timeout(50)),
+    );
+    expect(value.stopReason).toBe("aborted");
+    expect(ms).toBeLessThan(5_000);
+  }, 10_000);
+
+  it("does not nap over a compaction's summary or a curation", async () => {
+    const sleeping = createModelAccess("faux", { fauxSleepMs: 600_000 });
+    const summary = await timed(() =>
+      ask(sleeping, "<conversation>user: hi</conversation>"),
+    );
+    expect(summary.ms).toBeLessThan(5_000);
+    expect(summary.value.stopReason).toBe("stop");
+    const curation = await timed(() => ask(sleeping, "<curate>nothing ran"));
+    expect(curation.ms).toBeLessThan(5_000);
+    expect(isFauxTurnStep([user("<curate>x")])).toBe(false);
+    expect(isFauxTurnStep([user("  <conversation>x")])).toBe(false);
+    expect(isFauxTurnStep([user("fix the bug")])).toBe(true);
+  }, 10_000);
 });

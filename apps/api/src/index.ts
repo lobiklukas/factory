@@ -131,6 +131,12 @@ const ModelConfig = Config.all({
    * a column's `verified` requirement checks (LOB-80).
    */
   fauxVerify: Config.Boolean("FAUX_VERIFY").pipe(Config.withDefault(false)),
+  /**
+   * How long the sleeping faux script naps before each step of a turn, in milliseconds (LOB-167): a
+   * run that is busy long enough for a steer, a follow-up, or a refused `whenBusy: "reject"` to
+   * arrive while it is in flight (`.pi/skills/verify-cli/steer.sh`). `0`: the script answers at once.
+   */
+  fauxSleepMs: Config.Int("FAUX_SLEEP_MS").pipe(Config.withDefault(0)),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -270,6 +276,7 @@ const HttpLive = Effect.gen(function* () {
       fauxEveryTurn: model.fauxEveryTurn,
       fauxAsk: Option.getOrUndefined(model.fauxAsk),
       fauxVerify: model.fauxVerify,
+      fauxSleepMs: model.fauxSleepMs,
     }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
