@@ -34,6 +34,7 @@ import {
   Option,
   Path,
   Ref,
+  Schedule,
   Schema,
   Semaphore,
   Stream,
@@ -60,6 +61,7 @@ import type {
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReplayComparison,
   ReplaySessionInput,
   RepoSummary,
   ResetSessionInput,
@@ -139,9 +141,16 @@ import {
   readLiveSnapshot,
   readVerifyRecords,
   readCurationUsage,
+  compareReplay,
+  mirrorComparison,
+  readPromptSubmission,
+  readReplayDocument,
+  readReplayRun,
   readReplaySource,
   readSpec,
   replaySession,
+  waitForPrompt,
+  writeReplayComparison,
   requestCuration,
   requestDecomposition,
   resetSession,
@@ -642,6 +651,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const prGate = yield* Semaphore.make(1);
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
+      /**
+       * One comparison in progress per replay (LOB-199), keyed by the replay: `reconcileReplay`, armed
+       * whenever this process opens an owner or serves a fold. In the layer's scope, like the
+       * projections; what owes a comparison is read off the logs, so a wait this process loses (a
+       * close, a restart) is armed again by the next owner or fold of that replay.
+       */
+      const comparisons = yield* FiberMap.make<SessionId, void, never>();
 
       const toSessionId = (
         raw: string,
@@ -1223,6 +1239,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               lastUsedAt: now,
             };
             yield* Ref.update(live, HashMap.set(id, owner));
+            // Published first, so a replay's comparison finds the owner whose run it waits for. An
+            // owner opened on a replay is either its first open or the one that resumes its run, and
+            // either way the comparison is owed from here (LOB-199); on any other log it is one
+            // document read that finds nothing to do.
+            yield* armComparison(id);
             return owner;
           }),
         );
@@ -1407,6 +1428,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             );
           }
           const workspace = yield* workspaceFor(row);
+          // A fold is also where a replay whose run settled with no comparison written (the process
+          // stopped first) is noticed: nobody may open its owner again (LOB-199).
+          yield* armComparison(sessionId);
           return yield* withReader(sessionId, (storage) =>
             readHistoricalSnapshot(storage, refOf(sessionId, row, workspace)),
           );
@@ -1856,9 +1880,120 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ).pipe(Effect.ignore),
             ),
           );
+          // The prompt is admitted, so the run is under way: opening the owner armed the comparison
+          // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
+          // now, as it always has.
           yield* touchActivity(id);
           return yield* describe(id, row);
         });
+
+      /**
+       * Bring one replay's comparison up to date with its logs (LOB-199): what is owed is read off
+       * the two `factory.replay` documents, never held in this process, so the same step serves the
+       * replay's first open, an owner reopened after a restart, and a fold of a replay whose
+       * comparison a process that stopped never wrote.
+       *
+       * - Not a replay, or its own log already names its source: nothing is owed. The replay's side
+       *   is written last, so it holding one means both do.
+       * - The source holds the comparison and the replay does not (a write cut short): the replay
+       *   gets the mirror of the source's, so the two still come from one reading.
+       * - Neither does: once the replay's task has settled, both runs are read *after* the settle and
+       *   compared once, and the source's side is committed, then the replay's. A task still running
+       *   is waited for when this process owns the replay, and otherwise left: nothing runs a task
+       *   without an owner, and the owner that resumes it arms this again.
+       *
+       * Each write goes through this process's owner of that session, opened if nobody here holds
+       * it, as any write to a log is — the source's included, which reopens its workspace and counts
+       * as activity on it, the same as any other write to a released session. What it writes is the
+       * `factory.replay` document alone. A failure is a warning in the process's log, not a failed
+       * replay; the next owner or fold of the replay tries again.
+       */
+      const reconcileReplay = (replay: SessionId): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const document = yield* withReader(replay, readReplayDocument);
+          const link = document.link;
+          if (link === undefined || !Schema.is(SessionIdSchema)(link.source))
+            return;
+          const source = link.source;
+          if (
+            document.comparisons.some(
+              (comparison) => comparison.counterpart.session === source,
+            )
+          )
+            return;
+          const onSource = (yield* withReader(
+            source,
+            readReplayDocument,
+          )).comparisons.find(
+            (comparison) => comparison.counterpart.session === replay,
+          );
+          if (onSource !== undefined) {
+            yield* commitComparison(replay, mirrorComparison(onSource));
+            return;
+          }
+          const owner = HashMap.get(yield* Ref.get(live), replay);
+          if (Option.isSome(owner)) {
+            const prompt = yield* withReader(replay, (storage) =>
+              readPromptSubmission(storage, undefined),
+            );
+            if (prompt !== undefined) {
+              yield* waitForPrompt(owner.value.harness, prompt);
+            }
+          }
+          const replayRun = yield* withReader(replay, (storage) =>
+            readReplayRun(storage, replay, link.model),
+          );
+          if (replayRun.outcome === "open") return;
+          const sourceRun = yield* withReader(source, (storage) =>
+            readReplayRun(storage, source, link.from),
+          );
+          const at = DateTime.formatIso(yield* DateTime.now);
+          const compared = compareReplay({
+            source: sourceRun,
+            replay: replayRun,
+            at,
+          });
+          yield* commitComparison(source, compared.source);
+          yield* commitComparison(replay, compared.replay);
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logWarning(
+                  `replay ${replay} was not compared: ${Cause.pretty(cause)}`,
+                ),
+          ),
+        );
+
+      /**
+       * Commit one side's comparison through this process's owner of that session. A short bounded
+       * retry, because the write is keyed by its counterpart and so safe to repeat, and a transient
+       * failure would otherwise wait for the next owner or fold of the replay to be repaired.
+       */
+      const commitComparison = (
+        sessionId: SessionId,
+        comparison: ReplayComparison,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const owner = yield* acquireOwner(
+            sessionId,
+            yield* requireSession(sessionId),
+          );
+          yield* writeReplayComparison(owner.root, comparison);
+        }).pipe(
+          Effect.retry({
+            schedule: Schedule.exponential("100 millis"),
+            times: 2,
+          }),
+        );
+
+      /** Start `reconcileReplay` for a session unless one is already running for it. */
+      const armComparison = (sessionId: SessionId): Effect.Effect<void> =>
+        Effect.asVoid(
+          FiberMap.run(comparisons, sessionId, reconcileReplay(sessionId), {
+            onlyIfMissing: true,
+          }),
+        );
 
       /**
        * A reset starts a new model context (LOB-181). It is committed to the log, not held in this
@@ -3021,6 +3156,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // Nobody owns it: fold once, send the snapshot, and end the stream, so a client can
             // tell a completed fold from a dropped connection (D8).
             const workspace = yield* workspaceFor(row);
+            // As `get` does: a fold notices a replay still owed its comparison (LOB-199).
+            yield* armComparison(sessionId);
             const snapshot = yield* withReader(sessionId, (storage) =>
               readHistoricalSnapshot(storage, refOf(sessionId, row, workspace)),
             );
@@ -3084,6 +3221,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       const closeAll = Effect.gen(function* () {
+        // A comparison still waiting would reopen the owners this is closing (LOB-199), so the waits
+        // end first. Nothing is lost: what is owed is in the logs, and the next owner or fold of
+        // each replay arms its comparison again.
+        yield* FiberMap.clear(comparisons);
         const owners = yield* Ref.get(live);
         yield* Ref.set(live, HashMap.empty());
         yield* Effect.forEach(
@@ -3104,7 +3245,19 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             Effect.orElseSucceed(() => true),
           );
           if (busy) continue;
-          yield* Ref.update(live, HashMap.remove(sessionId));
+          // Removed only if it is still the owner the snapshot read: a caller that acquired it while
+          // `isBusy` was answering touched it (a new value), and is about to use the harness this
+          // would otherwise close under it — a replay's comparison commit among them (LOB-199).
+          const removed = yield* Ref.modify(live, (current) =>
+            Option.match(HashMap.get(current, sessionId), {
+              onNone: () => [false, current] as const,
+              onSome: (still) =>
+                still === owner
+                  ? ([true, HashMap.remove(current, sessionId)] as const)
+                  : ([false, current] as const),
+            }),
+          );
+          if (!removed) continue;
           yield* releaseOwner(sessionId, owner);
         }
       });

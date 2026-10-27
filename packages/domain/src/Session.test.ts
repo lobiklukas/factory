@@ -90,3 +90,85 @@ describe("a snapshot's budget", () => {
     ).toBeUndefined();
   });
 });
+
+describe("a snapshot's replay comparisons", () => {
+  const base = {
+    session: {
+      id: `ses_${"0".repeat(26)}`,
+      title: "",
+      status: "idle",
+      mode: "historical",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    workspace: { path: "/w", commands: {}, commandsSource: "none" },
+    entries: [],
+    live: { busy: false, tools: [] },
+    usage: { models: [], tools: [] },
+    queued: [],
+    tasks: [],
+    approvals: [],
+  };
+  const run = (id: string, turns: number) => ({
+    session: `ses_${id.repeat(26)}`,
+    model: "faux/faux-1",
+    outcome: "answered",
+    turns,
+    cost: 0,
+  });
+
+  it("crosses the wire on a session that has one, and is absent on one that has none", () => {
+    const comparison = {
+      role: "source",
+      at: "2026-01-01T00:00:01.000Z",
+      self: run("0", 3),
+      counterpart: {
+        ...run("1", 1),
+        outcome: "unanswered",
+        reason: "aborted",
+      },
+      delta: { turns: 2, cost: 0 },
+    };
+    const decoded = Schema.decodeUnknownSync(SessionSnapshot)({
+      ...base,
+      replayComparisons: [comparison],
+    });
+    expect(decoded.replayComparisons).toEqual([comparison]);
+    expect(
+      Schema.decodeUnknownSync(SessionSnapshot)(base).replayComparisons,
+    ).toBeUndefined();
+  });
+
+  it("refuses a side that is not a session, or an outcome it does not name", () => {
+    const decode = Schema.decodeUnknownExit(SessionSnapshot);
+    const comparison = {
+      role: "replay",
+      at: "2026-01-01T00:00:01.000Z",
+      self: run("0", 1),
+      counterpart: run("1", 3),
+      delta: { turns: -2, cost: 0 },
+    };
+    expect(
+      Exit.isSuccess(decode({ ...base, replayComparisons: [comparison] })),
+    ).toBe(true);
+    expect(
+      Exit.isFailure(
+        decode({
+          ...base,
+          replayComparisons: [
+            { ...comparison, counterpart: { ...run("1", 3), session: "x" } },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Exit.isFailure(
+        decode({
+          ...base,
+          replayComparisons: [
+            { ...comparison, self: { ...run("0", 1), outcome: "won" } },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+});

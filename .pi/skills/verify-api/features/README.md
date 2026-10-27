@@ -179,6 +179,17 @@ database on 5442): **58/58** (52 before, 6 replay checks), evidence `.verify/evi
 with the no-replay-document mutation run failing exactly the log check (57/58). See
 [replay.md](replay.md).
 
+The replay comparison checks (LOB-199) were added to the same block and run from the
+`agent/LOB-199` worktree on 2026-10-27 (API on `:9540`, the worktree's own database on 5442):
+**61/61** (3 comparison checks), evidence `.verify/evidence/lob-199/`. With the source's comparison
+write removed, the drive times out on "the source's replay comparison" (36/37), in
+`.verify/evidence/lob-199/mutation/`. Under heavy machine load the four live-stream checks can see a
+`historical` first snapshot: `SESSION_IDLE_TIMEOUT_MS=2000` releases the session before the watch
+attaches. That happens on clean `main` too (2 of 3 fresh runs failed there that day). After the review fixes (the comparison is now recovered from the logs and forks are measured by
+the task they copied), the drive was rerun on `:9540`: **61/61**, evidence
+`.verify/evidence/lob-199/review/`. A first rerun at load average 88 failed only those four
+live-stream checks.
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
