@@ -3,9 +3,9 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9500` / web `:3500` —
-the worktree's port block, not the usual 9100/3100; `drive.mjs` 49/49 required checks passed, from
-the `agent/LOB-65` worktree with the human's `factory-postgres-1` holding 5442).
+Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9540` / web `:3540` —
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 59/59 required checks passed,
+from the `agent/LOB-75` worktree after merging LOB-65, against its own database on 5442).
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
@@ -17,14 +17,19 @@ the `agent/LOB-65` worktree with the human's `factory-postgres-1` holding 5442).
 | Transcript               | passing | [transcript.md](transcript.md)             |
 | Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
 | Compaction from the pane | passing | [compaction.md](compaction.md)             |
+| Board lanes (read-only)  | passing | [board.md](board.md)                       |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 
 ## Known gaps
 
-- **The session list is browser-local.** `sessionStorage` through `KeyValueStore`, because the
-  control plane has no list endpoint (docs/handoff.md task 8). A reload keeps the list; a different
-  browser does not have it. The sidebar's empty state says so rather than claiming the account has no
-  sessions. `listSessions` has since shipped, so this is one read away from being real.
+- **The board is read-only, and it does not follow moves live.** LOB-75 renders lanes and cards from
+  the server; a move made elsewhere appears on the next load, not in place. Moves, gates and run
+  start from the card pane are LOB-76, and the attention view is LOB-77.
+- **The busy-compaction check is timing-sensitive.** "a busy session shows the pending state, never
+  the verdict" needs the run to turn busy while the compaction is still `requested`; on 2026-10-27 it
+  failed once (the summary settled before the run started) and passed on the next run, with no
+  change between them. A failure there with `busyStarted=true` and no `requested`+`busy` sample is
+  the race, not a regression.
 - **`/sandboxes` and `/approvals` are honest gaps, not features.** No RPC group backs either, so both
   name the milestone (M4, M3) that will. `drive.mjs` asserts the copy, so a table appearing without a
   source behind it fails the run.

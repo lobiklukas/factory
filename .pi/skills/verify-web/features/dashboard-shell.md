@@ -7,11 +7,12 @@ which adds the session list beside the pane.
 
 ## Sub-features
 
-- The rail renders with `aria-label="Sections"` and one entry per section (Sessions, Sandboxes,
-  Approvals), each with a tooltip carrying the label the icon replaces
+- The rail renders with `aria-label="Sections"` and one entry per section (Boards, Sessions,
+  Sandboxes, Approvals), each with a tooltip carrying the label the icon replaces; Boards leads
+  (LOB-75), see [board.md](board.md)
 - `/` lands on `/sessions` (the redirect is the assertion, not the absence of an error)
-- The session sidebar shows `No sessions in this browser yet` before anything is opened, and names
-  task 8 as the reason
+- The session sidebar is the server's `listSessions` (LOB-75): its rows are the first page in the
+  server's order, and with no sessions it says `No sessions on this control plane yet`
 - The theme toggle sits at the rail's foot and dark is the default
 - `/sandboxes` and `/approvals` render their milestone copy rather than an empty table
 
@@ -84,5 +85,7 @@ the transcript, the tool disclosure opening, the running dot pulsing) and the gl
   the dev server fails outright instead of moving. Always launch through `up.sh`.
 - `src/routeTree.gen.ts` is generated but committed: `tsc` reads it, so a fresh clone type-checks
   without a build first. `**/*.gen.ts` is excluded from `format:check` and `.tanstack/` is ignored.
-- The session list is browser-local (`sessionStorage`, via `KeyValueStore`), not a server read. The
-  control plane has no list endpoint yet. Do not describe it as the account's sessions.
+- The session list is a server read (`sessionListAtom` over `listSessions`), re-read when a create
+  or a fork lands (`SESSIONS_KEY`) and when the open pane's status changes. The dashboard keeps no
+  board or session state in the browser; the theme preference (`factory.theme`) is the one storage
+  key, and the board drive asserts that.

@@ -74,7 +74,7 @@ than the products rather than a worse copy of them — see §5.
 | M2 `SessionBus`       | **not built** | `packages/bus` absent; handoff task 7                                                                                                                                      |
 | M3 local deps         | **partial**   | `compose.yaml` only; no sandbox image, no `CredentialProvider`, no policy service                                                                                          |
 | M4 k8s tier           | not started   | `packages/sandbox*`, `infra` absent                                                                                                                                        |
-| M5 dashboard          | **partial**   | routed cockpit (TanStack Router: sessions, approvals, sandboxes), 10/10 in `verify-web`; `listSessions` exists but the sidebar reads a browser-local registry until LOB-22 |
+| M5 dashboard          | **partial**   | routed cockpit (TanStack Router: sessions, boards, approvals, sandboxes), 10/10 in `verify-web`; the sidebar reads `listSessions`; the board lanes are read-only (LOB-75). |
 | M6 git/PR path        | not started   | no worktree, branch, credential, or PR code anywhere                                                                                                                       |
 | M7 GKE                | not started   | gated on explicit approval                                                                                                                                                 |
 

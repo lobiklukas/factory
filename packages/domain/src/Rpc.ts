@@ -10,12 +10,14 @@ import {
 import {
   AlreadyBlocked,
   BlockTaskInput,
+  BoardInstance,
   BoardNotFound,
   BoardView,
   CreateTaskInput,
   GetBoardInput,
   GetTaskInput,
   HumanGateRequired,
+  ListBoardsInput,
   ListTasksInput,
   MoveTaskInput,
   NotBlocked,
@@ -193,6 +195,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getBoard", {
     payload: GetBoardInput,
     success: BoardView,
+    error: TaskErrorSchema,
+  }),
+  // Which boards exist, newest first (LOB-75): how the dashboard's `/boards` route offers a board
+  // to open. An instance list, not views — the columns are `getBoard`'s answer for the one picked.
+  Rpc.make("listBoards", {
+    payload: ListBoardsInput,
+    success: Schema.Array(BoardInstance),
     error: TaskErrorSchema,
   }),
   Rpc.make("createTask", {

@@ -135,6 +135,19 @@ export type BoardView = typeof BoardView.Type;
 export const GetBoardInput = Schema.Struct({ boardId: BoardInstanceId });
 export type GetBoardInput = typeof GetBoardInput.Type;
 
+/**
+ * Which boards exist (LOB-75): the instances a client can open, newest first.
+ *
+ * An instance, not a `BoardView`: the list is how a reader picks a board, and the definition's
+ * columns are what `getBoard` answers for the one they pick. The dashboard's `/boards` route is the
+ * first reader — without it a board is reachable only by an id typed into the address bar.
+ */
+export const ListBoardsInput = Schema.Struct({});
+export type ListBoardsInput = typeof ListBoardsInput.Type;
+
+/** The server answers at most this many instances; the MVP has one board per repository (B2). */
+export const LIST_BOARDS_LIMIT = 100;
+
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);
 export type TaskPriority = typeof TaskPriority.Type;

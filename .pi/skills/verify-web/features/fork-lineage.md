@@ -5,15 +5,15 @@ a fork came from — on the fork's row only (LOB-182, over LOB-180's `forkSessio
 
 ## Sub-features
 
-- The pane header carries a **Fork** button (`aria-label` "Fork from here"), beside the status chip
-  and left of **Forget**. It calls `forkSession({ sessionId })` — the fork is taken at the session's
+- The pane header carries a **Fork** button (`aria-label` "Fork from here"), beside the status chip,
+  as the header's last control. It calls `forkSession({ sessionId })` — the fork is taken at the session's
   last entry — then navigates to the child's route.
-- The child is recorded in the sidebar registry before the route moves, so the list is not one render
-  behind the pane.
+- `forkSessionAtom` carries `SESSIONS_KEY`, so the sidebar re-reads the server's list once the child
+  exists (LOB-75 deleted the browser-local registry that used to record it).
 - A sidebar row whose session has a parent reads `forked from ses_…` as a third line, in the same
   `font-mono text-[10px] text-muted-foreground` as the meta line. A session that was not forked has
   no lineage line and keeps its two-line height.
-- The parent's id is plain text, not a link: the parent need not be in this browser's registry.
+- The parent's id is plain text, not a link: the parent need not be on the list's first page.
 - A refused fork raises the `No fork was created` toast and stays on the current route.
 
 ## How to get to it (user POV)
@@ -25,8 +25,8 @@ becomes a new `/sessions/ses_…`, and the sidebar gains a row above the parent 
 ## Driving it with drive.mjs
 
 After the session-stream checks, the drive blurs the document, tabs up to 30 times recording each
-focused control's accessible name, and requires **Fork from here** to appear — and to come before
-**Forget this session**. It then walks focus back to **Fork** and presses Enter, requiring the path
+focused control's accessible name, and requires **Fork from here** to appear, and requires that no
+**Forget this session** control remains (it only ever edited the browser-local list). It then walks focus back to **Fork** and presses Enter, requiring the path
 to become a _different_
 `/sessions/ses_…`. Finally it requires at least two sidebar rows, the child's row to contain
 `forked from <parent id>`, the parent's row to carry no `forked from` text, and the document to fit a
@@ -41,11 +41,11 @@ All of these are required checks; the run exits non-zero without them.
 `SessionListEntry.forkedFrom` reaches a screen by two routes, and the drive used to prove only the
 first:
 
-- **The summary path.** The fork RPC answers the child's `SessionSummary`, the pane records it in the
-  browser-local registry, and the sidebar renders it. Proved by the sidebar row checks above.
-- **The index fold.** `listSessions` folds `sessions.forked_from` into each `SessionListEntry`. The
-  dashboard does not call `listSessions` yet (see the gap in `features/README.md`), so the drive asks
-  the control plane directly: it posts the NDJSON request envelope that
+- **The sidebar.** Since LOB-75 the sidebar _is_ `listSessions`, so the row checks above already read
+  the index fold. (Before it, the fork RPC's `SessionSummary` was recorded in a browser-local
+  registry, and only that summary path was proven.)
+- **The wire.** `listSessions` folds `sessions.forked_from` into each `SessionListEntry`, and the
+  drive also asks the control plane directly: it posts the NDJSON request envelope that
   `apps/web/src/lib/rpc-client.ts` writes for `listSessions` **from inside the page**, which makes the
   check cover the RPC, the `SessionListEntry` schema and the browser's CORS path at once. It requires
   `forkedFrom` on the child's entry and its absence on the parent's.

@@ -1,25 +1,32 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { Cause } from "effect";
 import { GitForkIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
-import { sessionRegistry } from "@/lib/atoms/session-registry";
+import { sessionListAtom } from "@/lib/atoms/session-list";
 import { startSessionAtom } from "@/lib/atoms/session-atom";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const PROMPT = "Run echo faux-ok and tell me what it printed.";
 
 /**
  * The session list, and the only navigation the transcript needs.
  *
- * Content comes from `sessionRegistry`, which is browser-local today: the
- * control plane has no list endpoint yet (docs/handoff.md task 8). The empty
- * state says exactly that rather than implying the account has no sessions,
- * because that is the difference between a user fixing a bug and a user filing
- * one.
+ * Content is the control plane's own `listSessions` (LOB-6), newest activity
+ * first — never anything this browser remembers (LOB-75 deleted the registry
+ * that stood in for it), so a reload or a second browser shows the same list.
+ * A list that failed to load says so instead of passing for an empty one.
  */
 export const SessionSidebar = () => {
-  const sessions = useAtomValue(sessionRegistry);
+  const result = useAtomValue(sessionListAtom);
+  const sessions = AsyncResult.isSuccess(result) ? result.value.sessions : [];
+  const failure = AsyncResult.isFailure(result) ? result.cause : null;
+  // A next page means the count is a floor, and the footer says so rather than a total it does not know.
+  const more =
+    AsyncResult.isSuccess(result) && result.value.nextCursor !== undefined;
   const { sessionId } = useParams({ strict: false });
   const navigate = useNavigate();
   const start = useAtomSet(startSessionAtom, { mode: "promise" });
@@ -30,8 +37,8 @@ export const SessionSidebar = () => {
           className="w-full justify-start"
           variant="outline"
           onClick={() => {
-            // Navigating on the created id rather than waiting for the registry
-            // to update: the pane attaches on the route, so the route is what has
+            // Navigating on the created id rather than waiting for the list to
+            // re-read: the pane attaches on the route, so the route is what has
             // to move. A refusal says so out loud instead of leaving the user on
             // the list with an error they cannot see: there is no session id to
             // navigate to, and silence is indistinguishable from a dead button.
@@ -56,10 +63,23 @@ export const SessionSidebar = () => {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {sessions.length === 0 ? (
+        {AsyncResult.isInitial(result) ? (
+          <div role="status" className="flex flex-col gap-2 px-2 py-3">
+            <span className="sr-only">Loading sessions</span>
+            <Skeleton className="h-3 w-3/4" aria-hidden />
+            <Skeleton className="h-3 w-1/2" aria-hidden />
+          </div>
+        ) : failure !== null ? (
+          <p
+            role="alert"
+            className="px-2 py-3 text-xs leading-relaxed break-words text-destructive"
+          >
+            The session list did not load: {Cause.pretty(failure)}
+          </p>
+        ) : sessions.length === 0 ? (
           <p className="px-2 py-3 text-xs leading-relaxed text-muted-foreground">
-            No sessions in this browser yet. The ones you open appear here and
-            survive a reload; the server-side list arrives with task 8.
+            No sessions on this control plane yet. Start one and it is listed
+            here, for every browser.
           </p>
         ) : (
           <ul className="flex flex-col gap-0.5">
@@ -87,14 +107,13 @@ export const SessionSidebar = () => {
                       )}
                       aria-hidden
                     />
-                    {session.status === "busy" ? "busy" : "idle"} ·{" "}
-                    {session.mode}
+                    {session.status === "busy" ? "busy" : "idle"}
                     <span className="truncate">{session.id}</span>
                   </span>
                   {/*
                    * Lineage (LOB-182): the row keeps its two lines when a session has no parent,
                    * so the list does not jump for the one row that does. The parent's id is plain
-                   * text rather than a link: the parent need not be in this browser's registry, and
+                   * text rather than a link: the parent need not be on this page of the list, and
                    * a link to a row the reader cannot see would be a dead end.
                    */}
                   {session.forkedFrom === undefined ? null : (
@@ -117,7 +136,8 @@ export const SessionSidebar = () => {
       </div>
 
       <div className="border-t border-border p-3 font-mono text-[10px] text-muted-foreground">
-        {sessions.length} in this browser
+        {sessions.length}
+        {more ? "+" : ""} on the server
       </div>
     </aside>
   );
