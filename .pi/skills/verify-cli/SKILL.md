@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` in apps/cli) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` in apps/cli) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -17,16 +17,17 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 
 ## What it proves
 
-| Feature                     | Check in the driver                                  | Why it matters                                     |
-| --------------------------- | ---------------------------------------------------- | -------------------------------------------------- |
-| `factory run` (D9)          | creates, streams, and prints the answer, exit 0      | the whole write path in one command                |
-| The run's session is named  | `session ses_…` on stdout, and `workspace <path>`    | the server's own answer, not a client guess        |
-| The tool call is real       | a `[tool:bash]` line carrying the faux tool's output | the transcript can only exist if the tool ran      |
-| `factory ls` (LOB-6)        | the new session is a row, with its title, exit 0     | the list is a server read, not a local registry    |
-| The PR column (LOB-65)      | a seeded PR's URL in its row; `-` for the run's row  | the operator sees the link without a browser       |
-| `factory watch`, live (D8)  | `mode: live`, then the same answer                   | a session this process owns streams                |
-| `factory watch`, historical | `mode: historical` after the idle sweep, same answer | the fold path, and the label that tells them apart |
-| Typed errors                | unknown id → `error: not_found`, non-zero exit       | a script can branch on `code`, not on prose        |
+| Feature                      | Check in the driver                                                     | Why it matters                                     |
+| ---------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------- |
+| `factory run` (D9)           | creates, streams, and prints the answer, exit 0                         | the whole write path in one command                |
+| The run's session is named   | `session ses_…` on stdout, and `workspace <path>`                       | the server's own answer, not a client guess        |
+| The tool call is real        | a `[tool:bash]` line carrying the faux tool's output                    | the transcript can only exist if the tool ran      |
+| `factory ls` (LOB-6)         | the new session is a row, with its title, exit 0                        | the list is a server read, not a local registry    |
+| The PR column (LOB-65)       | a seeded PR's URL in its row; `-` for the run's row                     | the operator sees the link without a browser       |
+| `factory watch`, live (D8)   | `mode: live`, then the same answer                                      | a session this process owns streams                |
+| `factory watch`, historical  | `mode: historical` after the idle sweep, same answer                    | the fold path, and the label that tells them apart |
+| Typed errors                 | unknown id → `error: not_found`, non-zero exit                          | a script can branch on `code`, not on prose        |
+| `factory withdraw` (LOB-166) | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript | withdrawing is a write, not a hidden row           |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -36,7 +37,13 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./up.sh          # api on :9300, pid in .verify/run/, model backend faux
 ./doctor.sh      # read-only; exits non-zero when the instance is not worth driving
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
+./withdraw.sh    # self-contained: its own API on :9310 (WITHDRAW_PORT) with a sleeping faux turn
 ```
+
+`withdraw.sh` is separate from `drive.sh` because a message only queues behind a run in flight: it
+boots its own API with `FAUX_COMMAND="sleep 15 && echo faux-ok"` (`WITHDRAW_SLEEP_S`), its own
+session root and tmux server under `.verify/run/cli-withdraw/`, and stops all of it on exit. See
+`features/withdraw.md`.
 
 `up.sh` needs Postgres on host port 5442 — the session log _is_ Postgres. It does not start one
 blindly: the shared `.pi/skills/lib/postgres.sh` asks the port first and runs `docker compose up -d

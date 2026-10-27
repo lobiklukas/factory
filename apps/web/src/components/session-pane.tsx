@@ -29,6 +29,7 @@ import {
   forkSessionAtom,
   sendMessageAtom,
   sessionAtom,
+  withdrawMessageAtom,
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
@@ -155,6 +156,7 @@ export const SessionPane = ({
   const send = useAtomSet(sendMessageAtom);
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
+  const withdraw = useAtomSet(withdrawMessageAtom, { mode: "promise" });
   const refreshList = useAtomRefresh(sessionListAtom);
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
@@ -590,9 +592,33 @@ export const SessionPane = ({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() =>
-                    setWithdrawn((prev) => new Set([...prev, q.id]))
-                  }
+                  onClick={() => {
+                    // Hidden while the call is in flight; the server's queue is what keeps it gone
+                    // (LOB-166). A refused withdrawal puts the row back, because the message is
+                    // still queued and will still run.
+                    setWithdrawn((prev) => new Set([...prev, q.id]));
+                    void withdraw({ sessionId, submissionId: q.id })
+                      .then((answer) => {
+                        if (answer.outcome === "already_placed") {
+                          toast.info("Too late to withdraw", {
+                            description: "A run already took this message.",
+                          });
+                        }
+                      })
+                      .catch((cause: unknown) => {
+                        setWithdrawn((prev) => {
+                          const next = new Set(prev);
+                          next.delete(q.id);
+                          return next;
+                        });
+                        toast.error("The message was not withdrawn", {
+                          description:
+                            cause instanceof Error
+                              ? cause.message
+                              : String(cause),
+                        });
+                      });
+                  }}
                 >
                   Withdraw
                 </Button>

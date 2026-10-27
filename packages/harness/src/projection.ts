@@ -501,7 +501,13 @@ export type SessionProjection = {
   readonly queued: readonly QueuedMessage[];
 };
 
-/** `pi.inbox` → queued messages. */
+/**
+ * `pi.inbox` → queued messages.
+ *
+ * An item's id is its submission's: a branded number in the document, sent as the opaque string
+ * `sendMessage` answers (LOB-166). Reading it only as a string dropped every real item, and a queued
+ * message a client cannot name is one it cannot withdraw.
+ */
 export const projectInbox = (
   docs: Readonly<Record<string, JsonValue>>,
 ): readonly QueuedMessage[] => {
@@ -510,7 +516,13 @@ export const projectInbox = (
   return items.flatMap((item) => {
     const obj = asObject(item);
     if (obj === undefined) return [];
-    const id = stringAt(obj, "id");
+    const raw = obj["id"];
+    const id =
+      typeof raw === "number"
+        ? String(raw)
+        : typeof raw === "string"
+          ? raw
+          : undefined;
     if (id === undefined) return [];
     const modeRaw = stringAt(obj, "mode");
     const mode =
@@ -577,6 +589,16 @@ export const diffView = (
     }
   }
 
+  // The queue before liveness: a follower stops at the first event that says the run settled
+  // (`factory run`/`watch`), so a queue reading committed beside it must already be out, or the
+  // drain it reports is never seen (LOB-166).
+  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
+    events.push({
+      _tag: "queued",
+      queued: projectInbox(next.docs),
+    });
+  }
+
   if (previous.docs[LIVE_DOC] !== next.docs[LIVE_DOC]) {
     const before = projectLive(previous.docs);
     const live = projectLive(next.docs);
@@ -590,13 +612,6 @@ export const diffView = (
     events.push({
       _tag: "usage",
       usage: projectUsageDoc(next.docs[USAGE_DOC]),
-    });
-  }
-
-  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
-    events.push({
-      _tag: "queued",
-      queued: projectInbox(next.docs),
     });
   }
 

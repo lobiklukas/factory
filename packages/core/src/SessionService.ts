@@ -69,6 +69,8 @@ import type {
   SessionSummary,
   SessionUsage,
   SessionWorkspace,
+  WithdrawMessageInput,
+  WithdrawMessageResult,
 } from "@repo/domain/Session";
 import {
   RepoSlug,
@@ -122,8 +124,10 @@ import {
   requestCuration,
   resetSession,
   snapshotEvent,
+  submissionStanding,
   submitMessage,
   usageCostTotal,
+  withdrawMessage,
   writeApprovalDecided,
   writeApprovalRequested,
   writeCurationUsage,
@@ -180,6 +184,13 @@ export type SessionServiceShape = {
   readonly interrupt: (
     sessionId: SessionId,
   ) => Effect.Effect<SessionSummary, SessionError>;
+  /**
+   * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
+   * message a run already took, or one already over, is an outcome rather than a failure.
+   */
+  readonly withdraw: (
+    input: WithdrawMessageInput,
+  ) => Effect.Effect<WithdrawMessageResult, SessionError>;
   /**
    * Fork a session at one of its entries: a new session whose transcript is the parent's prefix
    * (LOB-180). The fork's log is its own, so neither transcript can reach the other.
@@ -1160,6 +1171,48 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* interruptConversation(owner.root);
           yield* touchActivity(sessionId);
           return yield* describe(sessionId, row);
+        });
+
+      const withdraw = (
+        input: WithdrawMessageInput,
+      ): Effect.Effect<WithdrawMessageResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Only an owner can commit the withdrawal, but one need not be live: `pi.inbox` is
+          // durable, so a queue outlives an API restart or the idle sweep's release. When none is,
+          // the committed log answers an unknown or finished id first, so a withdraw that changes
+          // nothing does not open a workspace, take the log, and start a projector to say so.
+          const owners = yield* Ref.get(live);
+          if (Option.isNone(HashMap.get(owners, input.sessionId))) {
+            const standing = yield* withReader(input.sessionId, (storage) =>
+              submissionStanding(storage, input.submissionId),
+            );
+            if (standing === undefined) {
+              return yield* new SessionErrorClass({
+                code: "not_found",
+                message: `submission ${input.submissionId} is not in this session`,
+              });
+            }
+            if (standing === "settled") {
+              return {
+                session: yield* describe(input.sessionId, row),
+                submissionId: input.submissionId,
+                outcome: "settled" as const,
+              };
+            }
+          }
+          const owner = yield* acquireOwner(input.sessionId, row);
+          const outcome = yield* withdrawMessage(
+            owner,
+            owner.storage,
+            input.submissionId,
+          );
+          yield* touchActivity(input.sessionId);
+          return {
+            session: yield* describe(input.sessionId, row),
+            submissionId: input.submissionId,
+            outcome,
+          };
         });
 
       /**
@@ -2298,6 +2351,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         get,
         send,
         interrupt,
+        withdraw,
         fork,
         replay,
         reset,

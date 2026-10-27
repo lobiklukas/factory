@@ -4836,6 +4836,268 @@ describe("a run's prompt comes from its column", () => {
   }, 120_000);
 });
 
+describe("withdrawing a queued message", () => {
+  // A turn that sleeps, so a second and third message arrive while the first run is still in
+  // flight and genuinely queue (LOB-166). The faux model's own turn is too fast to queue behind.
+  const withdrawRoot = mkdtempSync(join(tmpdir(), "factory-core-withdraw-"));
+  const slow = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createFauxModelAccess({ fauxCommand: "sleep 3 && echo faux-ok" })
+        .access,
+      sessionRoot: withdrawRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await slow.dispose();
+  });
+
+  const userTexts = (snapshot: SessionSnapshot): readonly string[] =>
+    snapshot.entries
+      .filter((entry) => entry.kind === "user")
+      .map((entry) => entry.text);
+
+  it("takes a queued message out of the queue, and only that one reaches no transcript", async () => {
+    const outcome = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a queue to edit" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the first turn to start",
+        );
+        const dropped = yield* sessions.send({
+          sessionId: created.id,
+          content: "drop me",
+          whenBusy: "followUp",
+        });
+        const kept = yield* sessions.send({
+          sessionId: created.id,
+          content: "keep me",
+          whenBusy: "followUp",
+        });
+        const queuedBefore = (yield* sessions.get(created.id)).queued;
+
+        const withdrawn = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: dropped.submissionId,
+        });
+        const queuedAfter = (yield* sessions.get(created.id)).queued;
+        // The run owns the first message: it is an answer, not a withdrawal.
+        const placed = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: first.submissionId,
+        });
+        // Withdrawing twice is not withdrawing twice: the second answers that it is over.
+        const again = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: dropped.submissionId,
+        });
+        const unknown = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: created.id,
+            submissionId: "999999",
+          }),
+        );
+        const malformed = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: created.id,
+            submissionId: "not-a-submission",
+          }),
+        );
+        const unknownSession = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: SessionIdSchema.make("ses_00000000000000000000000000"),
+            submissionId: dropped.submissionId,
+          }),
+        );
+
+        // Both runs settle: the first, then the follow-up the withdrawal left in the queue.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy &&
+                  snapshot.queued.length === 0 &&
+                  userTexts(snapshot).includes("keep me") &&
+                  snapshot.entries.at(-1)?.kind === "assistant",
+              ),
+            ),
+          "the follow-up run to settle",
+        );
+        const settled = yield* sessions.get(created.id);
+        return {
+          dropped,
+          kept,
+          queuedBefore,
+          withdrawn,
+          queuedAfter,
+          placed,
+          again,
+          unknown,
+          malformed,
+          unknownSession,
+          settled,
+        };
+      }),
+    );
+
+    expect(outcome.dropped.placement).toBe("followUp");
+    expect(outcome.queuedBefore.map((q) => q.id)).toEqual([
+      outcome.dropped.submissionId,
+      outcome.kept.submissionId,
+    ]);
+    expect(outcome.queuedBefore[0]?.content).toBe("drop me");
+
+    expect(outcome.withdrawn.outcome).toBe("withdrawn");
+    expect(outcome.withdrawn.submissionId).toBe(outcome.dropped.submissionId);
+    expect(outcome.queuedAfter.map((q) => q.id)).toEqual([
+      outcome.kept.submissionId,
+    ]);
+    expect(outcome.placed.outcome).toBe("already_placed");
+    expect(outcome.again.outcome).toBe("settled");
+
+    for (const refused of [
+      outcome.unknown,
+      outcome.malformed,
+      outcome.unknownSession,
+    ]) {
+      const failure = Exit.findErrorOption(refused);
+      expect(Option.isSome(failure)).toBe(true);
+      expect(Option.getOrThrow(failure).code).toBe("not_found");
+    }
+
+    // The message left before any run took it, so it never reached the transcript; the one left in
+    // the queue did.
+    const texts = userTexts(outcome.settled);
+    expect(texts).toContain("take your time");
+    expect(texts).toContain("keep me");
+    expect(texts).not.toContain("drop me");
+  }, 120_000);
+
+  it("streams the queue shrinking to a watcher, and the steer never lands", async () => {
+    const seen = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a watched queue" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the turn to start",
+        );
+        const queued = yield* sessions.send({
+          sessionId: created.id,
+          content: "drop me",
+          whenBusy: "steer",
+        });
+        const readings = yield* Ref.make<ReadonlyArray<readonly string[]>>([]);
+        // Every user entry the watcher is sent. A steer the withdrawal missed would drain the queue
+        // too — placed at the next tool boundary — so the drain alone does not tell the two apart.
+        const userEntries = yield* Ref.make<readonly string[]>([]);
+        const watcher = yield* sessions.events(created.id).pipe(
+          Stream.runForEach((event) =>
+            event._tag === "snapshot" || event._tag === "queued"
+              ? Ref.update(readings, (all) => [
+                  ...all,
+                  event.queued.map((q) => q.id),
+                ])
+              : event._tag === "entry" && event.entry.kind === "user"
+                ? Ref.update(userEntries, (all) => [...all, event.entry.text])
+                : Effect.void,
+          ),
+          Effect.forkChild,
+        );
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.length > 0)),
+          "the watcher's snapshot",
+        );
+        yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: queued.submissionId,
+        });
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.at(-1)?.length === 0)),
+          "the watcher to see the queue drain",
+        );
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn to settle",
+        );
+        yield* Fiber.interrupt(watcher);
+        return {
+          id: queued.submissionId,
+          readings: yield* Ref.get(readings),
+          userEntries: yield* Ref.get(userEntries),
+          settled: yield* sessions.get(created.id),
+        };
+      }),
+    );
+
+    expect(seen.readings[0]).toEqual([seen.id]);
+    expect(seen.readings.at(-1)).toEqual([]);
+    expect(seen.userEntries).not.toContain("drop me");
+    expect(userTexts(seen.settled)).toEqual(["take your time"]);
+  }, 120_000);
+
+  it("answers a withdraw on a session nobody owns from the log, without opening an owner", async () => {
+    const outcome = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "an idle session" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "quick one",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy &&
+                  snapshot.entries.at(-1)?.kind === "assistant",
+              ),
+            ),
+          "the turn to settle",
+        );
+        // Released, as an API restart or the idle sweep would leave it.
+        yield* sessions.close;
+
+        const settled = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: first.submissionId,
+        });
+        const unknown = yield* Effect.exit(
+          sessions.withdraw({ sessionId: created.id, submissionId: "999999" }),
+        );
+        // Still historical: neither answer took the log or opened the workspace.
+        const after = yield* sessions.get(created.id);
+        return { settled, unknown, mode: after.session.mode };
+      }),
+    );
+
+    expect(outcome.settled.outcome).toBe("settled");
+    const failure = Exit.findErrorOption(outcome.unknown);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.getOrThrow(failure).code).toBe("not_found");
+    expect(outcome.mode).toBe("historical");
+  }, 120_000);
+});
+
 describe("request limits", () => {
   it("refuses a message over the length cap with a typed error", async () => {
     const outcome = await program(
