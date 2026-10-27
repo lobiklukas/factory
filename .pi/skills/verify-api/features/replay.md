@@ -26,11 +26,13 @@ on this instance runs the `replay-target` role, so the row changes the catalog a
 
 1. `createSession` bound to the registered fixture repo at `main`, then `sendMessage("verify-api
 probe replay")` and wait for the faux answer to that prompt
-2. `replaySession({ sessionId, model: "faux/faux-2" })` (`REPLAY_MODEL` overrides the model), then
+2. `replaySession({ sessionId, model: "faux/faux-2" })` (`REPLAY_MODEL` overrides the model, for
+   `up.sh` and the drive alike), then
    wait for the replay's own answer
 3. `getSession` on both
 4. the replay's log read through `PostgresStorage.reader` + `readSessionLog` against the database
-   the API writes (`DATABASE_URL`, the API's default when unset). No RPC answers the
+   the API writes (`DATABASE_URL`, required; the drive provides `PostgresLive` to this read only, so
+   no migrator runs and no other check needs Postgres). No RPC answers the
    `factory.replay` document, so the drive reads it the way `rebuildIndexes` does — a reader never
    owns the log, so it cannot collide with the API that does
 5. `replaySession` onto `faux/faux-unserved`, and of the drive's scratch session (bound to no repo)

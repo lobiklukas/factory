@@ -5,9 +5,11 @@
 // Env:
 //   API_URL       default http://localhost:9200
 //   EVIDENCE_DIR  default .verify/evidence/latest
-//   DATABASE_URL  the database the API writes (its default when unset): the replay check reads the
-//                 replay's log there, as a reader, because no RPC answers the link it records
-//   REPLAY_MODEL  default faux/faux-2, the second model up.sh publishes for the replay check
+//   DATABASE_URL  required: the database the API writes. The replay check reads the replay's log
+//                 there, as a reader (no migrator, no owner), because no RPC answers the link it
+//                 records. Never defaulted, so a drive cannot read the shared `factory` database.
+//   REPLAY_MODEL  default faux/faux-2, the second model up.sh publishes for the replay check (up.sh
+//                 reads the same variable, so set it for both)
 //
 // Why a client and not curl: curl proves a route is mounted. This uses the same
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
@@ -24,8 +26,8 @@ import {
   type TranscriptEntry,
 } from "@repo/domain/Session";
 import { readSessionLog } from "@repo/harness";
-import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Exit, Fiber, Layer, Ref, Stream } from "effect";
+import { PostgresLive, PostgresStorage } from "@repo/storage-postgres";
+import { Effect, Exit, Fiber, Ref, Stream } from "effect";
 import { RpcClient } from "effect/rpc";
 import { SqlClient } from "effect/sql/SqlClient";
 import {
@@ -47,6 +49,13 @@ const REPLAY_PROMPT = `${PROMPT} replay`;
 /** The model every session on the instance runs on (`FAUX_MODEL_ID`), and the one a replay picks. */
 const DEPLOYMENT_MODEL = "faux/faux-1";
 const REPLAY_MODEL = process.env["REPLAY_MODEL"] ?? "faux/faux-2";
+
+if (!process.env["DATABASE_URL"]) {
+  console.error(
+    "drive.ts needs DATABASE_URL: the database the API from ./up.sh writes",
+  );
+  process.exit(2);
+}
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
@@ -164,7 +173,9 @@ const refusalCode = (exit: Exit.Exit<unknown, { readonly _tag: string }>) => {
 
 /**
  * A replay's own log as a rebuild folds it, read through a reader-mode storage: it never owns the
- * log, so it cannot collide with the API that does (two owners of one log poison each other).
+ * log, so it cannot collide with the API that does (two owners of one log poison each other). The
+ * client is `PostgresLive`, provided here and nowhere else: no migrator runs against the API's
+ * database, and no other check depends on reaching Postgres.
  */
 const replayLink = (sessionId: SessionId) =>
   Effect.gen(function* () {
@@ -174,7 +185,7 @@ const replayLink = (sessionId: SessionId) =>
       readSessionLog,
       (storage) => Effect.promise(() => storage.dispose()),
     );
-  });
+  }).pipe(Effect.provide(PostgresLive));
 
 const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(SessionRpc);
@@ -1095,10 +1106,7 @@ const program = Effect.gen(function* () {
   });
 
   return { id: created.id };
-}).pipe(
-  Effect.provide(Layer.mergeAll(ProtocolLive, DatabaseLive)),
-  Effect.scoped,
-);
+}).pipe(Effect.provide(ProtocolLive), Effect.scoped);
 
 let sessionId: SessionId | null = null;
 try {

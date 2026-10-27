@@ -47,8 +47,10 @@ fi
 # different model with no key. The role table is the one lever a deployment has to publish a faux
 # model beside `faux/faux-1` (apps/api's ROLE_MODELS: every `faux/<id>` it names is served), and
 # `replay-target` is a role no session on this instance runs, so the row changes the catalog and
-# nothing else.
-ROLE_MODELS="replay-target=faux/faux-2"
+# nothing else. `REPLAY_MODEL` is the same knob drive.ts reads, so an override reaches both, and the
+# row is appended to any `ROLE_MODELS` the caller set rather than replacing it.
+REPLAY_MODEL="${REPLAY_MODEL:-faux/faux-2}"
+ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
 
 ( cd "$ROOT/apps/api" && exec env \
     PORT="$API_PORT" \

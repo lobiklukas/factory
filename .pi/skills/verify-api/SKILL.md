@@ -80,9 +80,11 @@ Four settings in `up.sh` exist for the sake of proof, not for production:
   deployment default (15 minutes) you would wait 15 minutes to prove D8's other half.
 - `MAX_REQUEST_BODY_BYTES=1048576` — the transport cap `drive.ts` proves by sending 2 MiB. The
   default is the same 1 MiB; setting it here ties the check to a value this script owns.
-- `ROLE_MODELS=replay-target=faux/faux-2` — a second faux model for the replay check (LOB-215). The
-  role table is the only lever that publishes a `faux/<id>` beside `faux/faux-1`, and no session on
-  this instance runs the `replay-target` role, so the row changes the catalog and nothing else.
+- `ROLE_MODELS=replay-target=$REPLAY_MODEL` (`faux/faux-2` when unset) — a second faux model for
+  the replay check (LOB-215). The role table is the only lever that publishes a `faux/<id>` beside
+  `faux/faux-1`, and no session on this instance runs the `replay-target` role, so the row changes
+  the catalog and nothing else. It is appended to a `ROLE_MODELS` the caller set, not replacing it,
+  and `REPLAY_MODEL` is the variable `drive.ts` reads too, so one override reaches both.
 
 ### Lifecycle and degradation — their own scripts
 
@@ -157,8 +159,9 @@ bun drive.ts     # requires the instance from ./up.sh
 
 Environment: `API_URL` (default `http://localhost:9200`), `EVIDENCE_DIR`, `DATABASE_URL` (the
 database the API writes — the replay check reads the replay's log there through a reader-mode
-storage, because no RPC answers the link it records; the API's own default when unset) and
-`REPLAY_MODEL` (default `faux/faux-2`, the model `up.sh` publishes for it). The last line it prints
+storage, because no RPC answers the link it records; required, and never defaulted, so a drive
+cannot read the shared `factory` database; no migrator runs from the drive) and `REPLAY_MODEL`
+(default `faux/faux-2`; `up.sh` reads the same variable, so set it for both). The last line it prints
 is the run count, `N/N checks passed`.
 
 The driver runs in two phases and needs no restart in between: it drives a session while the API
