@@ -33,6 +33,12 @@
 # BOARD_GITHUB=off) `factory pr` fails, the drive prints that reason and exits non-zero, and the
 # phases after it run on with the link empty rather than one the drive made up.
 #
+# The CLI and the browser are one board (LOB-87): around the move to `planning` a browser page holds
+# the card open (`both-ways.mjs`), follows the terminal's move without a reload and shows nothing of
+# the run's refused one; the plan approval is then a person's click in that page, and the terminal's
+# `factory board show` prints it. `./equivalence.sh` runs this drive after verify-cli's and
+# verify-web's own, so the cross-check here does not repeat them.
+#
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
 # .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
 # the drive can run twice against one instance — after a failed drive too: the checks find this
@@ -162,7 +168,8 @@ rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" 
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
   "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
   "$EVIDENCE_DIR/pr-body.md" \
-  "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png}
+  "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
+  "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -356,6 +363,44 @@ check "the card pane shows the card's spec (spec-pane.mjs)" \
   "$([ "$SPEC_PANE_RC" = "0" ] && echo 0 || echo 1)" \
   "exit=$SPEC_PANE_RC, see spec-pane.json"
 
+# --- both ways: one page holds the card through the terminal's moves (LOB-87) ---------------------
+# The CLI and the browser are one board. `both-ways.mjs` opens the card's pane in a browser page now,
+# and keeps that page — never reloaded — while the terminal moves the card to `planning` and a run is
+# refused the plan approval; the page must follow the move and show nothing from the refusal. Then
+# the person's plan approval is made *in that page*, and `factory board show` in the pane below must
+# print it. The halves take turns through signal files (see both-ways.mjs); a half that is gone or
+# late is a failed check here, never a hang.
+BOTH_DIR="$RUN_DIR/both-ways"
+rm -rf "$BOTH_DIR"
+mkdir -p "$BOTH_DIR"
+WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" \
+  OPEN_COLUMN=specifying OPEN_REVISION="${SPECIFIED_REVISION:-}" SIGNAL_DIR="$BOTH_DIR" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/both-ways.mjs" > "$RUN_DIR/both-ways.log" 2>&1 &
+BOTH_PID=$!
+trap 'kill "$BOTH_PID" 2>/dev/null || true' EXIT
+both_signal() { # name, body: written beside, then renamed, so the page never reads half of it
+  printf '%s\n' "$2" > "$BOTH_DIR/$1.tmp" && mv "$BOTH_DIR/$1.tmp" "$BOTH_DIR/$1"
+}
+both_await() { # name, seconds: prints the page's signal; non-zero once the page is gone or late
+  local _
+  for _ in $(seq 1 $(($2 * 10))); do
+    if [ -s "$BOTH_DIR/$1" ]; then
+      cat "$BOTH_DIR/$1"
+      return 0
+    fi
+    if ! kill -0 "$BOTH_PID" 2>/dev/null; then
+      [ -s "$BOTH_DIR/$1" ] && cat "$BOTH_DIR/$1"
+      return 1
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+BOTH_OPENED="$(both_await opened 60)"
+check "a browser page holds the card before the terminal moves it" \
+  "$([ "$BOTH_OPENED" = "specifying ${SPECIFIED_REVISION:-?}" ] && echo 0 || echo 1)" \
+  "page: ${BOTH_OPENED:-never opened, see both-ways.log}"
+
 # --- move: a person moves the card on to `planning`, the column before the plan approval gate -----
 fresh
 run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision ${SPECIFIED_REVISION:-0} --api $API_URL" || true
@@ -364,6 +409,11 @@ PLANNING_REVISION="$(sed -n "s/^moved $TASK_ID to planning (revision \([0-9]*\))
 check "a person moves the card on to planning" \
   "$([ "$(exit_code planning)" = "0" ] && [ -n "$PLANNING_REVISION" ] && echo 0 || echo 1)" \
   "exit=$(exit_code planning), revision=${PLANNING_REVISION:-none}"
+both_signal cli-moved "planning ${PLANNING_REVISION:-}"
+BOTH_FOLLOWED="$(both_await cli-followed 30)"
+check "the terminal's move reaches the open page without a reload" \
+  "$([ "$BOTH_FOLLOWED" = "pass" ] && echo 0 || echo 1)" \
+  "page: ${BOTH_FOLLOWED:-no answer}, see both-ways.json"
 
 # --- move: the run crossing a human gate is refused, naming the gate -------------------------------
 # The actor is the session `board start` opened, so the drive does not invent an id. The service
@@ -400,13 +450,33 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
   "exit=$WEB_RC, see web.json"
 
 # --- build: a person approves the plan, and a run in `building` makes the change (LOB-86) ---------
+# The approval is the both-ways phase's browser half: the page that followed the terminal makes it,
+# and the terminal reads it back (LOB-87).
+both_signal browser-move "${PLANNING_REVISION:-0}"
+BROWSER_MOVED="$(both_await browser-moved 60)"
+wait "$BOTH_PID"
+BOTH_RC=$?
+trap - EXIT
+cat "$RUN_DIR/both-ways.log"
 fresh
-run_cmd building "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor person:verify-board --api $API_URL" || true
-capture move-building.txt
-BUILDING_REVISION="$(sed -n "s/^moved $TASK_ID to building (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-building.txt")"
-check "a person approves the plan: planning → building" \
-  "$([ "$(exit_code building)" = "0" ] && [ -n "$BUILDING_REVISION" ] && echo 0 || echo 1)" \
-  "exit=$(exit_code building), revision=${BUILDING_REVISION:-none}"
+run_cmd building "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-building.txt
+BUILDING_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-building.txt")"
+check "a person approves the plan in the browser, and factory board show prints it" \
+  "$([ "$(exit_code building)" = "0" ] && grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt" && [ -n "$PLANNING_REVISION" ] && [ "${BUILDING_REVISION:-}" = "$((PLANNING_REVISION + 1))" ] && [ "${BROWSER_MOVED:-}" = "building $BUILDING_REVISION" ] && echo 0 || echo 1)" \
+  "page: ${BROWSER_MOVED:-no answer}; show: $(grep -m1 '^column' "$EVIDENCE_DIR/show-building.txt" 2>/dev/null), revision ${BUILDING_REVISION:-none}"
+check "the both-ways phase's browser checks pass (both-ways.mjs)" \
+  "$([ "$BOTH_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$BOTH_RC, see both-ways.json"
+# A browser that did not approve the plan has already failed the drive; the person approves it from
+# the terminal instead, so the phases after this one still prove what they prove.
+if ! grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt"; then
+  echo "drive: the browser did not approve the plan — approving it from the terminal" >&2
+  fresh
+  run_cmd building-cli "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor person:verify-board --api $API_URL" || true
+  capture move-building.txt
+  BUILDING_REVISION="$(sed -n "s/^moved $TASK_ID to building (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-building.txt")"
+fi
 
 fresh
 run_cmd build "$FACTORY board start --task $TASK_ID --prompt 'build this card' --api $API_URL" || true

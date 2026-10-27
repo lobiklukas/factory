@@ -49,7 +49,8 @@ approval gate, which only a person can make`, matched with its code.
 
 A person crossing a gate, or the merge gate (`review → done`), in this phase: the move phase leaves
 the card in `planning`, so the dashboard phase reads a card whose next move is the gate the run was
-refused. The drive's later phases take the same card on — a person's `planning → building`, then a
+refused. The drive's later phases take the same card on — a person's `planning → building` (in the
+browser, [equivalence.md](equivalence.md)), then a
 run refused `review → done` and a person's merge going through — in [build.md](build.md).
 
 That the run exists: the service treats any well-formed `ses_…` id as a run actor (TaskService's

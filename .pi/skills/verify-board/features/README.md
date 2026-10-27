@@ -3,7 +3,11 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: **2026-10-27**, `agent/LOB-86`, `MODEL_BACKEND=faux` —
+Status reflects the last verified runs: the both-ways phase and `./equivalence.sh` (LOB-87,
+2026-10-27, `agent/LOB-87`), API on `:9500`, web on `:3500`, verify-cli's gated API on `:9501`, the
+GitHub fake on `:9503`: `./equivalence.sh` exit 0, its nine steps green — verify-cli's drive (with
+`approve.sh`), verify-web's `drive.mjs` (**91/91**), then `./drive.sh` **51/51** with `both-ways.mjs`'s
+**6/6** (`both-ways.json`) folded in; see [equivalence.md](equivalence.md). Before it, **2026-10-27**, `agent/LOB-86`, `MODEL_BACKEND=faux` —
 `./drive.sh` with its build, PR, review and merge phases, API on `:9500`, web on `:3500`, the GitHub
 fake on `:9503`, **43/43** required drive checks passed, with `build.ts`'s **3/3** (`build-built.json`)
 and **8/8** (`build-pr.json`) folded in, twice against one `./up.sh` instance, and exit 1 naming
@@ -21,20 +25,21 @@ The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`,
 (`requires-observed.json`). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
 `:9510`, **18/18** checks passed (`create-board.json`). Evidence: `.verify/evidence/latest/board/`.
 
-| Feature                         | Status  | File                         |
-| ------------------------------- | ------- | ---------------------------- |
-| `factory board create`          | passing | [boards.md](boards.md)       |
-| create a card (`createTask`)    | passing | [create.md](create.md)       |
-| `factory board ls`              | passing | [ls.md](ls.md)               |
-| `factory board show`            | passing | [show.md](show.md)           |
-| `factory board move` + refusals | passing | [move.md](move.md)           |
-| `factory board start`           | passing | [start.md](start.md)         |
-| the board read back in the web  | passing | [dashboard.md](dashboard.md) |
-| specify, ask, answer (the card) | passing | [specify.md](specify.md)     |
-| build, PR + evidence, merge     | passing | [build.md](build.md)         |
-| the specifying run's spec       | passing | [specify.md](specify.md)     |
-| the ask on the task             | passing | [ask.md](ask.md)             |
-| `requires[]` on exit            | passing | [requires.md](requires.md)   |
+| Feature                         | Status  | File                             |
+| ------------------------------- | ------- | -------------------------------- |
+| `factory board create`          | passing | [boards.md](boards.md)           |
+| create a card (`createTask`)    | passing | [create.md](create.md)           |
+| `factory board ls`              | passing | [ls.md](ls.md)                   |
+| `factory board show`            | passing | [show.md](show.md)               |
+| `factory board move` + refusals | passing | [move.md](move.md)               |
+| `factory board start`           | passing | [start.md](start.md)             |
+| the board read back in the web  | passing | [dashboard.md](dashboard.md)     |
+| specify, ask, answer (the card) | passing | [specify.md](specify.md)         |
+| build, PR + evidence, merge     | passing | [build.md](build.md)             |
+| the specifying run's spec       | passing | [specify.md](specify.md)         |
+| the ask on the task             | passing | [ask.md](ask.md)                 |
+| `requires[]` on exit            | passing | [requires.md](requires.md)       |
+| CLI ⇄ browser, one board        | passing | [equivalence.md](equivalence.md) |
 
 ## Deliberately absent
 
@@ -47,7 +52,9 @@ The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`,
   person's `board comment` — is driven by `drive.sh`'s specify phase ([specify.md](specify.md)) and,
   across a restart, by `ask.sh` ([ask.md](ask.md)).
 - **The card pane's own walk.** The dashboard phase only reads what the CLI's refusals left behind
-  ([dashboard.md](dashboard.md)); the pane's declared moves, its stale refusal and a move followed
-  without a reload are `.pi/skills/verify-web`'s (`features/card-pane.md`).
+  ([dashboard.md](dashboard.md)), and the both-ways phase moves the drive's card once each way
+  ([equivalence.md](equivalence.md)); the pane's declared moves, its stale refusal, a fresh context
+  and a run start are `.pi/skills/verify-web`'s (`features/card-pane.md`), which `./equivalence.sh`
+  runs.
 - **Definition editing.** A definition version is a new row, never an update (B2); nothing in the CLI
   writes `board_definitions`, and the seed ships the default pipeline.

@@ -29,5 +29,6 @@ Evidence: `web.json` (the checks, the rendered lanes and pane, the server's answ
 
 ## What it does not prove
 
-Clicking a move, or a refusal shown in the pane — that walk is `.pi/skills/verify-web`'s
-`features/card-pane.md`.
+A refusal shown in the pane — that walk is `.pi/skills/verify-web`'s `features/card-pane.md`. A move
+clicked in the pane, and a terminal's move followed by a page left open, are the both-ways phase's
+([equivalence.md](equivalence.md)); this phase opens a fresh page and only reads.
