@@ -48,10 +48,13 @@ import { Context, DateTime, Effect, Layer, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
+  AttentionItem,
   BoardColumn,
   BoardInstance,
   BoardInstanceId,
   BoardView,
+  GATED_COLUMNS,
+  gatedExit,
   LIST_BOARDS_LIMIT,
   humanGate,
   isDeclaredTransition,
@@ -252,6 +255,14 @@ export type TaskServiceShape = {
   readonly listRuns: (
     taskId: string,
   ) => Effect.Effect<ReadonlyArray<TaskRun>, TaskError>;
+  /**
+   * What needs a person (LOB-77), on one board or every board: pending approvals on a card's runs,
+   * cards blocked `needs_input`, and cards whose done run waits at a human gate. An unknown board is
+   * `BoardNotFound`.
+   */
+  readonly attention: (
+    boardId: string | undefined,
+  ) => Effect.Effect<ReadonlyArray<AttentionItem>, TaskError>;
 };
 
 export class TaskService extends Context.Service<
@@ -278,7 +289,7 @@ type TaskRow = {
 };
 
 /** The column list, spelled out once so every read returns the same shape. */
-const TASK_COLUMNS = [
+const TASK_COLUMN_NAMES = [
   "id",
   "board_id",
   "title",
@@ -293,7 +304,11 @@ const TASK_COLUMNS = [
   "blocked_since",
   "created_at",
   "updated_at",
-].join(", ");
+];
+const TASK_COLUMNS = TASK_COLUMN_NAMES.join(", ");
+
+/** The same list qualified by `t.`, for a read that joins `tasks` to tables sharing column names. */
+const TASK_COLUMNS_T = TASK_COLUMN_NAMES.map((name) => `t.${name}`).join(", ");
 
 /**
  * What `move` judged about the card's exit before locking it, at the caller's expected revision: the
@@ -1102,6 +1117,183 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const decodeAttention = Schema.decodeUnknownEffect(AttentionItem);
+
+    /** One attention row from a task row, its board's repo and the reason; a bad row is a storage fault. */
+    const toAttention = (
+      row: TaskRow & { readonly boardRepo: string },
+      reason: unknown,
+    ): Effect.Effect<AttentionItem, TaskStorageError> =>
+      Effect.gen(function* () {
+        const task = yield* toTask(row);
+        return yield* decodeAttention({
+          task,
+          repo: row.boardRepo,
+          reason,
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TaskStorageError({
+                message: `task ${row.id} does not read as an attention row: ${String(cause)}`,
+              }),
+          ),
+        );
+      });
+
+    /**
+     * What needs a person (LOB-77): three statements over the rows the board and the approvals
+     * service already keep, and no log fold — the view is polled, so its cost is a fixed number of
+     * row reads, never a fold per card (R6). The approvals read starts from the
+     * `session_approvals_pending` index; the questions and gates reads filter `tasks` by block and
+     * column, which no index covers, so the every-board view scans `tasks` — fine at the MVP's card
+     * count, and a partial index on `blocked_reason` is the fix when it is not.
+     *
+     * - **Approvals** are `session_approvals` rows with no decision, on a session `task_runs` names
+     *   as a run of the card. Every column, every block: only a person settles one.
+     * - **Questions** are cards blocked `needs_input` (B7). The question is the newest `question`
+     *   comment asked since the block began (an answered question from an earlier block is not this
+     *   block's), falling back to the block's note (a person may block a card `needs_input` by hand,
+     *   with no run asking).
+     * - **Gates** are unblocked cards in a column whose exit crosses a human gate (B5), with a run
+     *   started in that column, no run of the card busy in `session_activity`, and no run of the
+     *   card holding an undecided approval. In the MVP a person starts and drives every run, so an
+     *   idle run in a gated column is one whose work is handed back: the next step is the person's
+     *   move. A run parked on an approval is idle too (LOB-52: the hook never waits), but it is
+     *   waiting on a decision, not handing back — that card is listed as the approval, not the gate.
+     *   A card with no run there yet is not at the gate — the column's work has not been done — and
+     *   a blocked card is waiting on its block.
+     */
+    const attention = (
+      boardId: string | undefined,
+    ): Effect.Effect<ReadonlyArray<AttentionItem>, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const board = boardId ?? null;
+          if (board !== null) {
+            const found = yield* sql<{ id: string }>`
+              SELECT id FROM board_instances WHERE id = ${board}
+            `;
+            if (found[0] === undefined) {
+              return yield* new BoardNotFound({
+                boardId: board,
+                message: `no board ${board}`,
+              });
+            }
+          }
+
+          const approvals = yield* sql<
+            TaskRow & {
+              readonly boardRepo: string;
+              readonly approvalSession: string;
+              readonly requestId: string;
+              readonly action: string;
+              readonly detail: string;
+              readonly requestedAt: Date | string;
+            }
+          >`
+            SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
+                   sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
+                   sa.requested_at
+            FROM session_approvals sa
+            JOIN task_runs tr ON tr.session_id = sa.session_id
+            JOIN tasks t ON t.id = tr.task_id
+            JOIN board_instances bi ON bi.id = t.board_id
+            WHERE sa.decision IS NULL
+              AND (${board}::text IS NULL OR t.board_id = ${board})
+            ORDER BY sa.requested_at, sa.session_id, sa.request_id
+          `;
+
+          const questions = yield* sql<
+            TaskRow & {
+              readonly boardRepo: string;
+              readonly question: string | null;
+            }
+          >`
+            SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
+                   COALESCE(q.body, t.blocked_note) AS question
+            FROM tasks t
+            JOIN board_instances bi ON bi.id = t.board_id
+            LEFT JOIN LATERAL (
+              SELECT e.payload->>'body' AS body
+              FROM task_events e
+              WHERE e.task_id = t.id AND e.kind = 'commented'
+                AND e.payload->>'kind' = 'question'
+                AND e.created_at >= t.blocked_since
+              ORDER BY e.id DESC
+              LIMIT 1
+            ) q ON true
+            WHERE t.blocked_reason = 'needs_input'
+              AND (${board}::text IS NULL OR t.board_id = ${board})
+            ORDER BY t.blocked_since, t.id
+          `;
+
+          const gates = yield* sql<
+            TaskRow & {
+              readonly boardRepo: string;
+              readonly runSession: string;
+            }
+          >`
+            SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
+                   r.session_id AS run_session
+            FROM tasks t
+            JOIN board_instances bi ON bi.id = t.board_id
+            JOIN LATERAL (
+              SELECT tr.session_id
+              FROM task_runs tr
+              WHERE tr.task_id = t.id AND tr."column" = t."column"
+              ORDER BY tr.started_at DESC, tr.id DESC
+              LIMIT 1
+            ) r ON true
+            WHERE t.blocked_reason IS NULL
+              AND t."column" = ANY(${GATED_COLUMNS}::text[])
+              AND NOT EXISTS (
+                SELECT 1
+                FROM task_runs busy
+                JOIN session_activity sa ON sa.session_id = busy.session_id
+                WHERE busy.task_id = t.id AND sa.status = 'busy'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM task_runs asking
+                JOIN session_approvals ap ON ap.session_id = asking.session_id
+                WHERE asking.task_id = t.id AND ap.decision IS NULL
+              )
+              AND (${board}::text IS NULL OR t.board_id = ${board})
+            ORDER BY t.updated_at, t.id
+          `;
+
+          const approvalItems = yield* Effect.forEach(approvals, (row) =>
+            toAttention(row, {
+              _tag: "approval",
+              sessionId: row.approvalSession,
+              requestId: row.requestId,
+              action: row.action,
+              detail: row.detail,
+              requestedAt: iso(row.requestedAt),
+            }),
+          );
+          const questionItems = yield* Effect.forEach(questions, (row) =>
+            toAttention(row, {
+              _tag: "question",
+              since: iso(row.blockedSince ?? row.updatedAt),
+              ...(row.question === null || row.question.trim() === ""
+                ? {}
+                : { question: row.question }),
+            }),
+          );
+          const gateItems = yield* Effect.forEach(gates, (row) => {
+            const exit = gatedExit(row.column);
+            return toAttention(row, {
+              _tag: "gate",
+              gate: exit?.gate,
+              to: exit?.to,
+              sessionId: row.runSession,
+            });
+          });
+          return [...approvalItems, ...questionItems, ...gateItems];
+        }),
+      );
+
     return {
       getBoard,
       listBoards,
@@ -1115,6 +1307,7 @@ export const TaskServiceLive = Layer.effect(
       comment,
       comments,
       listRuns,
+      attention,
     } satisfies TaskServiceShape;
   }),
 );

@@ -539,3 +539,81 @@ export type CommentTaskInput = typeof CommentTaskInput.Type;
 /** A card's thread, oldest first (B7, LOB-73). */
 export const ListTaskCommentsInput = Schema.Struct({ taskId: TaskId });
 export type ListTaskCommentsInput = typeof ListTaskCommentsInput.Type;
+
+/**
+ * The column a card moves to out of `from` across a human gate, and the gate's name, or `undefined`
+ * when every move out of `from` is one a run may make too (B5). In the default pipeline that is
+ * `planning → building` (plan approval) and `review → done` (merge).
+ */
+export const gatedExit = (
+  from: string,
+): { readonly to: string; readonly gate: string } | undefined => {
+  for (const to of declaredTransitions(from)) {
+    const gate = humanGate(from, to);
+    if (gate !== undefined) return { to, gate };
+  }
+  return undefined;
+};
+
+/** Every column whose declared exits include a human gate, in pipeline order. */
+export const GATED_COLUMNS: ReadonlyArray<string> = Object.keys(
+  DECLARED_TRANSITIONS,
+).filter((column) => gatedExit(column) !== undefined);
+
+/**
+ * Why a card needs a person (LOB-77): the three things the attention view lists.
+ *
+ * - `approval` — a run of the card asked to make a gated call and waits on a decision (D11). Listed
+ *   whatever the card's column or block, because nothing but a person settles it.
+ * - `question` — the card is blocked `needs_input` (B7): a run ended parked on a question, and the
+ *   answer is a person's comment. `question` is the newest question asked since the block began, or
+ *   the block's note when none was; absent when neither says anything.
+ * - `gate` — the card is not blocked, it sits in a column whose exit crosses a human gate (B5), it has
+ *   a run started in that column, and none of its runs is busy or holds an undecided approval: the
+ *   run is idle, and the next move is the one only a person can make. `sessionId` is the newest
+ *   run in the column.
+ *
+ * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
+ * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
+ */
+export const AttentionReason = Schema.TaggedUnion({
+  approval: {
+    sessionId: SessionId,
+    requestId: Schema.String,
+    action: Schema.String,
+    detail: Schema.String,
+    requestedAt: Timestamp,
+  },
+  question: {
+    question: Schema.optional(Schema.String),
+    since: Timestamp,
+  },
+  gate: {
+    gate: Schema.String,
+    to: Schema.String,
+    sessionId: SessionId,
+  },
+});
+export type AttentionReason = typeof AttentionReason.Type;
+
+/**
+ * One row of the attention view (LOB-77): a card, the repository its board binds (so a row from any
+ * board says where it is), and one reason it needs a person. A card with two reasons is two rows.
+ */
+export const AttentionItem = Schema.Struct({
+  task: Task,
+  repo: RepoSlug,
+  reason: AttentionReason,
+});
+export type AttentionItem = typeof AttentionItem.Type;
+
+/**
+ * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
+ * first (oldest request first), then questions (oldest block first), then gates (least recently
+ * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
+ * must not be what a board that does not exist says.
+ */
+export const ListAttentionInput = Schema.Struct({
+  boardId: Schema.optional(BoardInstanceId),
+});
+export type ListAttentionInput = typeof ListAttentionInput.Type;

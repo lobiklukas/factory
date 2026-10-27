@@ -128,7 +128,15 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
               Reconnecting: showing the last answer the server gave
             </span>
           )}
-          <span className="ml-auto text-[11px] text-muted-foreground">
+          <Link
+            to="/attention"
+            search={{ board: boardId }}
+            data-board-attention
+            className="ml-auto text-xs text-muted-foreground hover:text-foreground"
+          >
+            Needs a person
+          </Link>
+          <span className="text-[11px] text-muted-foreground">
             {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
             to move it or start a run
           </span>

@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { KanbanSquareIcon, TerminalIcon } from "lucide-react";
+import { BellIcon, KanbanSquareIcon, TerminalIcon } from "lucide-react";
 import { cn } from "cn";
 import { FactoryMark } from "@/components/factory-mark";
 import {
@@ -22,6 +22,8 @@ const SECTIONS = [
   // question. Their routes stay: `/sandboxes` says what it used to, and `/approvals` is every run's
   // pending approvals (LOB-53), linked from a session parked on one rather than from the rail.
   { to: "/boards", label: "Boards", icon: KanbanSquareIcon },
+  // What needs a person, across every board (LOB-77): the question the board exists to answer.
+  { to: "/attention", label: "Needs a person", icon: BellIcon },
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
 ] as const;
 

@@ -19,6 +19,7 @@ import {
   declaredTransitions,
   humanGate,
   LIST_BOARDS_LIMIT,
+  type AttentionItem,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
@@ -733,6 +734,424 @@ describe("TaskService — the ask and the thread", () => {
     expect(await eventCount(task.id)).toBe(2);
     const none = await refusal((s) => s.comments(`tsk_${hex(13)}`));
     expect(none._tag).toBe("TaskNotFound");
+  });
+});
+
+describe("TaskService — what needs a person (LOB-77)", () => {
+  /** A card walked by a person from `intake` along `path`, one declared move at a time. */
+  const cardIn = async (
+    boardId: string,
+    title: string,
+    path: ReadonlyArray<string>,
+  ) => {
+    let task = await withService((s) =>
+      s.create({ boardId, title, actor: LUKAS }),
+    );
+    for (const to of path) {
+      const at = task;
+      task = await withService((s) =>
+        s.move({
+          taskId: at.id,
+          expectedRevision: at.revision,
+          to,
+          actor: LUKAS,
+        }),
+      );
+    }
+    return task;
+  };
+
+  const newSession = () => `ses_${hex(13)}`;
+
+  /** The failure that rolls a seeded transaction back, carrying the reads made inside it. */
+  class Rollback {
+    constructor(
+      readonly answers: ReadonlyArray<ReadonlyArray<AttentionItem>>,
+    ) {}
+  }
+
+  type Seed = {
+    readonly runs: ReadonlyArray<{
+      readonly taskId: string;
+      readonly column: string;
+      readonly status: "idle" | "busy";
+      /** Seconds before now the run started, so "newest in the column" is decided by the seed. */
+      readonly ago: number;
+      readonly sessionId?: string;
+    }>;
+    readonly approvals: ReadonlyArray<{
+      readonly sessionId: string;
+      readonly requestId: string;
+      readonly action: string;
+      readonly ago: number;
+      readonly decided?: boolean;
+    }>;
+  };
+
+  /**
+   * Seeds sessions, their activity, the card runs and the approvals, then reads `attention` in the
+   * same transaction. These sessions have no commits, and a concurrent `rebuildIndexes`
+   * (SessionService.test.ts shares this database) deletes index rows of a session with none — but
+   * it cannot see rows this transaction has not committed. The transaction is rolled back, so the
+   * rows never outlive the case.
+   */
+  const attentionWith = (
+    seed: Seed,
+    boards: ReadonlyArray<string | undefined>,
+  ) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const service = yield* TaskService;
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              for (const run of seed.runs) {
+                const id = run.sessionId ?? newSession();
+                yield* sql`INSERT INTO sessions (id) VALUES (${id})`;
+                yield* sql`
+                  INSERT INTO session_activity (session_id, status) VALUES (${id}, ${run.status})
+                `;
+                yield* sql`
+                  INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+                  VALUES (${id}, ${run.taskId}, ${id}, ${run.column},
+                          now() - make_interval(secs => ${run.ago}))
+                `;
+              }
+              for (const approval of seed.approvals) {
+                yield* approval.decided === true
+                  ? sql`
+                      INSERT INTO session_approvals
+                        (session_id, request_id, action, requested_at, decision, actor, decided_at)
+                      VALUES (${approval.sessionId}, ${approval.requestId}, ${approval.action},
+                              now() - make_interval(secs => ${approval.ago}),
+                              'approved', ${LUKAS}, now())
+                    `
+                  : sql`
+                      INSERT INTO session_approvals (session_id, request_id, action, requested_at)
+                      VALUES (${approval.sessionId}, ${approval.requestId}, ${approval.action},
+                              now() - make_interval(secs => ${approval.ago}))
+                    `;
+              }
+              const answers: Array<ReadonlyArray<AttentionItem>> = [];
+              for (const board of boards) {
+                answers.push(yield* service.attention(board));
+              }
+              // Roll the seed back: the case's rows exist only for the reads above.
+              return yield* Effect.fail(new Rollback(answers));
+            }),
+          )
+          .pipe(
+            Effect.catchIf(
+              (failure): failure is Rollback => failure instanceof Rollback,
+              (rollback) => Effect.succeed(rollback.answers),
+            ),
+          );
+      }),
+    );
+
+  /** `[reason, card title]` per row, in the order the service answered. */
+  const rows = (
+    items: ReadonlyArray<{
+      readonly task: { readonly title: string };
+      readonly reason: { readonly _tag: string };
+    }>,
+  ) => items.map((item) => [item.reason._tag, item.task.title]);
+
+  it("lists approvals, then questions, then done runs at a human gate — and nothing else", async () => {
+    const boardId = await newBoard();
+    const resting = await cardIn(boardId, "resting in intake", []);
+    const gated = await cardIn(boardId, "plan waits", [
+      "specifying",
+      "planning",
+    ]);
+    const merge = await cardIn(boardId, "merge waits", [
+      "specifying",
+      "planning",
+      "building",
+      "review",
+    ]);
+    const busy = await cardIn(boardId, "run still busy", [
+      "specifying",
+      "planning",
+    ]);
+    const noRun = await cardIn(boardId, "no run in planning yet", [
+      "specifying",
+      "planning",
+    ]);
+    const waiting = await cardIn(boardId, "blocked on a dependency", [
+      "specifying",
+      "planning",
+    ]);
+    const building = await cardIn(boardId, "idle in building", [
+      "specifying",
+      "planning",
+      "building",
+    ]);
+    const asked = await cardIn(boardId, "asked twice", ["specifying"]);
+    const byHand = await cardIn(boardId, "blocked needs_input by hand", [
+      "specifying",
+    ]);
+    const approval = await cardIn(boardId, "approval pending", [
+      "specifying",
+      "planning",
+      "building",
+    ]);
+    const capability = await cardIn(boardId, "blocked, but asked to push", [
+      "specifying",
+    ]);
+    const planAsks = await cardIn(boardId, "plan run waits on an approval", [
+      "specifying",
+      "planning",
+    ]);
+
+    await withService((s) =>
+      Effect.gen(function* () {
+        yield* s.block({
+          taskId: waiting.id,
+          expectedRevision: waiting.revision,
+          reason: "dependency",
+          actor: LUKAS,
+        });
+        yield* s.block({
+          taskId: capability.id,
+          expectedRevision: capability.revision,
+          reason: "capability",
+          actor: LUKAS,
+        });
+        yield* s.ask({
+          taskId: asked.id,
+          question: "Which repo?",
+          actor: RUN,
+        });
+        yield* s.ask({
+          taskId: asked.id,
+          question: "And which branch?",
+          actor: RUN,
+        });
+        yield* s.block({
+          taskId: byHand.id,
+          expectedRevision: byHand.revision,
+          reason: "needs_input",
+          note: "Pick a database first.",
+          actor: LUKAS,
+        });
+      }),
+    );
+
+    const newestPlanRun = newSession();
+    const approvalRun = newSession();
+    const capabilityRun = newSession();
+    const planAskRun = newSession();
+    const [onBoard, everywhere, clean] = await attentionWith(
+      {
+        runs: [
+          // The newest run of the card is in `specifying`; the gate names the newest *planning* run.
+          { taskId: gated.id, column: "planning", status: "idle", ago: 300 },
+          {
+            taskId: gated.id,
+            column: "planning",
+            status: "idle",
+            ago: 200,
+            sessionId: newestPlanRun,
+          },
+          { taskId: gated.id, column: "specifying", status: "idle", ago: 100 },
+          { taskId: merge.id, column: "review", status: "idle", ago: 50 },
+          // Busy anywhere keeps the card off the gate, even with an idle run in the column.
+          { taskId: busy.id, column: "planning", status: "idle", ago: 90 },
+          { taskId: busy.id, column: "specifying", status: "busy", ago: 80 },
+          { taskId: noRun.id, column: "specifying", status: "idle", ago: 70 },
+          { taskId: waiting.id, column: "planning", status: "idle", ago: 60 },
+          { taskId: building.id, column: "building", status: "idle", ago: 40 },
+          {
+            taskId: approval.id,
+            column: "building",
+            status: "busy",
+            ago: 30,
+            sessionId: approvalRun,
+          },
+          {
+            taskId: capability.id,
+            column: "specifying",
+            status: "idle",
+            ago: 20,
+            sessionId: capabilityRun,
+          },
+          // Parked on an approval is idle (LOB-52), but the run waits on a decision, not a move.
+          {
+            taskId: planAsks.id,
+            column: "planning",
+            status: "idle",
+            ago: 15,
+            sessionId: planAskRun,
+          },
+        ],
+        approvals: [
+          {
+            sessionId: approvalRun,
+            requestId: "push",
+            action: "push refs/heads/main",
+            ago: 10,
+          },
+          {
+            sessionId: approvalRun,
+            requestId: "settled",
+            action: "push refs/heads/old",
+            ago: 30,
+            decided: true,
+          },
+          {
+            sessionId: capabilityRun,
+            requestId: "first",
+            action: "open a PR",
+            ago: 20,
+          },
+          {
+            sessionId: planAskRun,
+            requestId: "plan-push",
+            action: "git push",
+            ago: 5,
+          },
+        ],
+      },
+      [boardId, undefined, await newBoard()],
+    );
+
+    expect(rows(onBoard ?? [])).toEqual([
+      ["approval", "blocked, but asked to push"],
+      ["approval", "approval pending"],
+      ["approval", "plan run waits on an approval"],
+      ["question", "asked twice"],
+      ["question", "blocked needs_input by hand"],
+      ["gate", "plan waits"],
+      ["gate", "merge waits"],
+    ]);
+    const listed = new Set((onBoard ?? []).map((item) => item.task.id));
+    for (const absent of [resting, busy, noRun, waiting, building]) {
+      expect(listed.has(absent.id)).toBe(false);
+    }
+
+    const reasons = (onBoard ?? []).map((item) => item.reason);
+    expect(reasons[1]).toMatchObject({
+      _tag: "approval",
+      sessionId: approvalRun,
+      requestId: "push",
+      action: "push refs/heads/main",
+    });
+    // The newest question in the thread, and the block's note when no run asked.
+    // An idle planning run holding an undecided approval is the approval row only, never a gate.
+    expect(
+      (onBoard ?? []).filter((item) => item.task.id === planAsks.id),
+    ).toHaveLength(1);
+    expect(reasons[2]).toMatchObject({
+      _tag: "approval",
+      sessionId: planAskRun,
+      requestId: "plan-push",
+    });
+    expect(reasons[3]).toMatchObject({
+      _tag: "question",
+      question: "And which branch?",
+    });
+    expect(reasons[4]).toMatchObject({
+      _tag: "question",
+      question: "Pick a database first.",
+    });
+    expect(reasons[5]).toEqual({
+      _tag: "gate",
+      gate: "plan approval",
+      to: "building",
+      sessionId: newestPlanRun,
+    });
+    expect(reasons[6]).toMatchObject({
+      _tag: "gate",
+      gate: "merge",
+      to: "done",
+    });
+    expect(
+      (onBoard ?? []).every(
+        (item) => item.task.boardId === boardId && item.repo.length > 0,
+      ),
+    ).toBe(true);
+
+    // Every board: this board's rows are all there, in the same order.
+    expect(
+      rows((everywhere ?? []).filter((item) => item.task.boardId === boardId)),
+    ).toEqual(rows(onBoard ?? []));
+    // A board where nothing needs a person answers an empty list, not an error.
+    expect(clean).toEqual([]);
+  });
+
+  it("drops a question once a person answers it, and refuses a board that does not exist", async () => {
+    const boardId = await newBoard();
+    const task = await cardIn(boardId, "answer me", ["specifying"]);
+    const parked = await withService((s) =>
+      s.ask({ taskId: task.id, question: "Which repo?", actor: RUN }),
+    );
+    expect(rows(await withService((s) => s.attention(boardId)))).toEqual([
+      ["question", "answer me"],
+    ]);
+    await withService((s) =>
+      s.comment({
+        taskId: task.id,
+        expectedRevision: parked.revision,
+        body: "factory.",
+        actor: LUKAS,
+      }),
+    );
+    expect(await withService((s) => s.attention(boardId))).toEqual([]);
+
+    // Blocked `needs_input` again by hand: the answered question is the old block's, not this one's.
+    const answered = await withService((s) => s.get(task.id));
+    const reblocked = await withService((s) =>
+      s.block({
+        taskId: task.id,
+        expectedRevision: answered.revision,
+        reason: "needs_input",
+        note: "Pick a database first.",
+        actor: LUKAS,
+      }),
+    );
+    expect(
+      (await withService((s) => s.attention(boardId))).map((i) => i.reason),
+    ).toEqual([
+      {
+        _tag: "question",
+        question: "Pick a database first.",
+        since: reblocked.blocked?.since,
+      },
+    ]);
+
+    // With no note either, the row says nothing was asked rather than repeating the old question.
+    const other = await cardIn(boardId, "asked, answered, blocked bare", [
+      "specifying",
+    ]);
+    const otherParked = await withService((s) =>
+      s.ask({ taskId: other.id, question: "Which branch?", actor: RUN }),
+    );
+    const otherAnswered = await withService((s) =>
+      s.comment({
+        taskId: other.id,
+        expectedRevision: otherParked.revision,
+        body: "main.",
+        actor: LUKAS,
+      }),
+    );
+    await withService((s) =>
+      s.block({
+        taskId: other.id,
+        expectedRevision: otherAnswered.revision,
+        reason: "needs_input",
+        actor: LUKAS,
+      }),
+    );
+    const bare = (await withService((s) => s.attention(boardId))).find(
+      (item) => item.task.id === other.id,
+    );
+    expect(bare?.reason).toMatchObject({ _tag: "question" });
+    expect(bare?.reason).not.toHaveProperty("question");
+
+    const missing = await refusal((s) => s.attention(`brd_${hex(13)}`));
+    expect(missing._tag).toBe("BoardNotFound");
   });
 });
 

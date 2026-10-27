@@ -29,6 +29,8 @@ import {
   CommentTaskInput,
   DECLARED_TRANSITIONS,
   DefinitionId,
+  GATED_COLUMNS,
+  gatedExit,
   MAX_COMMENT_CHARS,
   declaredTransitions,
   HUMAN_GATES,
@@ -683,5 +685,17 @@ describe("the declared transitions and human gates (B4, B5)", () => {
       expect(isDeclaredTransition(from, to)).toBe(true);
     }
     expect(Object.keys(HUMAN_GATES)).toHaveLength(2);
+  });
+
+  it("finds each gated column's exit, and only the gated ones (LOB-77)", () => {
+    expect(GATED_COLUMNS).toEqual(["planning", "review"]);
+    expect(gatedExit("planning")).toEqual({
+      to: "building",
+      gate: "plan approval",
+    });
+    expect(gatedExit("review")).toEqual({ to: "done", gate: "merge" });
+    for (const column of ["intake", "specifying", "building", "done", "x"]) {
+      expect(gatedExit(column)).toBeUndefined();
+    }
   });
 });

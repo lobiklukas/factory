@@ -11,6 +11,7 @@ import {
 } from "@repo/domain/Approval";
 import {
   AlreadyBlocked,
+  AttentionItem,
   BlockTaskInput,
   BoardInstance,
   BoardNotFound,
@@ -21,6 +22,7 @@ import {
   GetBoardInput,
   GetTaskInput,
   HumanGateRequired,
+  ListAttentionInput,
   ListBoardsInput,
   ListTaskCommentsInput,
   ListTaskRunsInput,
@@ -279,6 +281,14 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("listTaskRuns", {
     payload: ListTaskRunsInput,
     success: Schema.Array(TaskRun),
+    error: TaskErrorSchema,
+  }),
+  // What needs a person (LOB-77): cards with a pending approval, an unanswered question, or a done
+  // run at a human gate, on one board or every board. One read over the indexes, so the attention
+  // view never walks cards, runs and approvals from the browser.
+  Rpc.make("listAttention", {
+    payload: ListAttentionInput,
+    success: Schema.Array(AttentionItem),
     error: TaskErrorSchema,
   }),
 ) {}
