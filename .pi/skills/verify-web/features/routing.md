@@ -16,14 +16,20 @@ than sent to the API.
 - `/sandboxes` renders an honest empty state naming the milestone (M4) that will back it, not a
   table with no source
 - `/approvals` is every run's pending approvals (LOB-53): `listPendingApprovals`, polled every 2 s
-  and re-read when a decision lands, one block per asking session (a link to `/sessions/<id>`), each
+  and re-read when a decision lands, newest ask first (so a run that just parked is on the page
+  however many stale asks wait), counted from the server's `total` — a cut page says "Showing the
+  newest N" — one block per asking session (a link to `/sessions/<id>`), each
   request an `li[data-approval=<request id>][data-approval-session=<session id>]` with
   `[data-decide=approved|denied]`. A click is `decideApproval` as `dashboard` with `resume: true`, so
-  the parked run wakes with the answer; with nothing pending it says `No approvals pending` and how a
+  the parked run wakes with the answer; a decision recorded whose resume failed (`resumeFailed`) is a
+  toast saying so, with a "Retry resume" action and the `factory approve … --id …` retry, never
+  "not recorded"; with nothing pending it says `No approvals pending` and how a
   run comes to wait (`APPROVAL_REQUIRED`). Both routes are off the rail since LOB-76; `/approvals` is
   linked from a session pane that is waiting on one
 - `/sessions/<id>` shows `[data-session-approvals=<id>]` above the transcript while the session has a
-  pending approval, with the same Approve / Deny, and nothing when it has none
+  pending approval, with the same Approve / Deny, and nothing visible when it has none — a hidden
+  `[data-session-approvals-empty=<id>]` marks a loaded, empty list, so "no strip" can be told from
+  "not loaded yet"
 - `/sessions/not-a-real-id` is refused by the route's `Schema.decodeUnknownOption(SessionId)`, so the
   pane says what a session id is instead of surfacing a `not_found` the user cannot act on
 - Every route renders inside the same frame: a 48px icon rail, then the route
@@ -49,7 +55,9 @@ then asserts:
    the API's list no longer holds it;
 3. **the decided approval resumed its session** — `getSession` from the drive holds the follow-up
    ``Approved: `verify-web: publish the package` … approved by dashboard.`` and an answer to it;
-4. **the session pane drops the decided approval** — no `[data-session-approvals]` on reload.
+4. **the session pane drops the decided approval** — on reload the pane's loaded-and-empty marker
+   `[data-session-approvals-empty]` appears, and only then is `[data-session-approvals]` counted (0),
+   so a read that is slow or failed cannot pass for an empty one.
 
 Screenshots: `session-approval.png`, `approvals.png`, `approvals-decided.png`; the block's facts are in
 `observed.approvalsInbox`.

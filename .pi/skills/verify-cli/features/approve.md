@@ -9,7 +9,8 @@ wakes and a denied one is carried on without. The command then follows the sessi
 
 **How a user reaches it.**
 
-- `factory approvals` — every session's pending requests, oldest first, as
+- `factory approvals` — every session's pending requests, newest first (one page of at most 100; a
+  cut page adds `showing the newest N of M pending approvals…` on stderr), as
   `request  session  requested  action` rows (the action last, because it may contain spaces);
   `factory approvals --session ses_…` — one session's. `no approvals pending` when there are none.
 - `factory approve ses_… [--id <request id>] [--actor <who>]` — prints
@@ -22,7 +23,10 @@ approval id the session never asked for, an unknown session, and a bare `approve
 pending. `error: invalid_input` for a bare `approve` with more than one pending — it names the ids to
 pass as `--id` rather than guessing which question the person read. A second, different decision on
 a settled request is the service's `invalid_input`; repeating the same decision is the same decision
-and resumes once (the follow-up is deduplicated on `approval-resume:<request id>`).
+and resumes once (the follow-up is deduplicated on `approval-resume:<request id>`). A decision that
+is recorded but whose follow-up could not be sent (`resumeFailed`) prints the decision, then
+`error: <code>: the decision is recorded, but <session> was not resumed (…); retry with: factory
+approve <session> --id <request>` and exits non-zero — `--id`, because nothing is pending any more.
 
 **How the skill drives it.** `./approve.sh` owns its own API (`APPROVE_PORT`, default `:9320`) with
 `MODEL_BACKEND=faux`, `APPROVAL_REQUIRED=sleep`, `FAUX_COMMAND="sleep 1 && echo gated-ran"` and

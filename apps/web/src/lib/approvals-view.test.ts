@@ -8,7 +8,13 @@
 import { Schema } from "effect";
 import { ApprovalRequest } from "@repo/domain/Approval";
 import { describe, expect, it } from "vitest";
-import { DASHBOARD_ACTOR, bySession, decisionFor } from "./approvals-view";
+import {
+  DASHBOARD_ACTOR,
+  bySession,
+  decisionFor,
+  inboxSummary,
+  resumeRetryCommand,
+} from "./approvals-view";
 
 const ONE = "ses_01m5yvfya2tsyn56ycr5jj3pvs";
 const TWO = "ses_01m5yvfya2tsyn56ycr5jj3pvt";
@@ -49,5 +55,29 @@ describe("bySession", () => {
       { sessionId: TWO, requests: [b] },
     ]);
     expect(bySession([])).toEqual([]);
+  });
+});
+
+describe("inboxSummary", () => {
+  it("reads the total, not the page length", () => {
+    expect(inboxSummary(1, 1)).toBe("1 request is waiting for a person.");
+    expect(inboxSummary(3, 3)).toBe("3 requests are waiting for a person.");
+  });
+
+  it("says the page was cut when more are pending than shown", () => {
+    const summary = inboxSummary(100, 140);
+    expect(summary).toContain("140 requests are waiting");
+    expect(summary).toContain("Showing the newest 100");
+  });
+});
+
+describe("resumeRetryCommand", () => {
+  it("names the request, because nothing is pending once the decision is on file", () => {
+    expect(resumeRetryCommand(request(ONE, "ask-1"), "approved")).toBe(
+      `factory approve ${ONE} --id ask-1`,
+    );
+    expect(resumeRetryCommand(request(TWO, "ask-2"), "denied")).toBe(
+      `factory deny ${TWO} --id ask-2`,
+    );
   });
 });

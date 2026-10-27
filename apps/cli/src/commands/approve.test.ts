@@ -10,7 +10,13 @@ import { Result, Schema } from "effect";
 import { ApprovalRequest } from "@repo/domain/Approval";
 import { SessionId } from "@repo/domain/Session";
 import { describe, expect, it } from "vitest";
-import { APPROVALS_HEADER, approvalRow, pickPending } from "./approve";
+import {
+  APPROVALS_HEADER,
+  approvalRow,
+  pickPending,
+  resumeFailedMessage,
+  truncationNote,
+} from "./approve";
 
 const SESSION = Schema.decodeSync(SessionId)("ses_01m5yvfya2tsyn56ycr5jj3pvs");
 
@@ -57,5 +63,29 @@ describe("approvalRow", () => {
     expect(header.at(-1)).toBe("action");
     // An action with a space cannot shift the fields before it.
     expect(row.endsWith("  npm publish")).toBe(true);
+  });
+});
+
+describe("truncationNote", () => {
+  it("says nothing when the page is the whole list", () => {
+    expect(truncationNote(3, 3)).toBeUndefined();
+  });
+
+  it("names the real count when the server cut the page", () => {
+    expect(truncationNote(100, 140)).toContain("100 of 140");
+  });
+});
+
+describe("resumeFailedMessage", () => {
+  it("says the decision stands and gives the retry by request id", () => {
+    const message = resumeFailedMessage(
+      "approve",
+      SESSION,
+      "ask-bash-1",
+      "busy",
+    );
+    expect(message).toContain("the decision is recorded");
+    expect(message).toContain(`${SESSION} was not resumed`);
+    expect(message).toContain(`factory approve ${SESSION} --id ask-bash-1`);
   });
 });

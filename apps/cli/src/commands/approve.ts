@@ -38,6 +38,32 @@ export const approvalRow = (request: ApprovalRequest): string =>
     request.action,
   ].join("  ");
 
+/**
+ * The line `factory approvals` prints under a page the server cut (LOB-53): the page is the newest
+ * `shown` of `total` pending, so the count a person reads is the real one. `undefined` when nothing
+ * was cut.
+ */
+export const truncationNote = (
+  shown: number,
+  total: number,
+): string | undefined =>
+  total > shown
+    ? `showing the newest ${shown} of ${total} pending approvals; decide or narrow with --session to see the rest`
+    : undefined;
+
+/**
+ * What `factory approve` / `deny` says when the decision is recorded but the session was not handed
+ * it (LOB-53): the decision stands, the run is still parked, and the retry is the same decision by
+ * request id — `--id`, because a bare `approve` finds nothing pending once the decision is on file.
+ */
+export const resumeFailedMessage = (
+  verb: string,
+  sessionId: string,
+  requestId: string,
+  reason: string,
+): string =>
+  `the decision is recorded, but ${sessionId} was not resumed (${reason}); retry with: factory ${verb} ${sessionId} --id ${requestId}`;
+
 /** Why `--id` had to be named, in the code and the words `reportFailure` prints. */
 export type PickRefusal = {
   readonly code: "not_found" | "invalid_input";
@@ -75,8 +101,9 @@ export const pickPending = (
 };
 
 /**
- * `factory approvals [--session <id>]` — what is waiting for a person, oldest first: every session's
- * pending requests, or one session's.
+ * `factory approvals [--session <id>]` — what is waiting for a person: every session's pending
+ * requests, newest first and at most one page (a note under the rows says when more are waiting), or
+ * one session's, oldest first.
  */
 export const approvalsCommand = Command.make(
   "approvals",
@@ -93,9 +120,15 @@ export const approvalsCommand = Command.make(
 
     const program = Effect.gen(function* () {
       const { client } = yield* BoardClient;
-      const { approvals } = yield* Option.match(session, {
+      const { approvals, total } = yield* Option.match(session, {
         onNone: () => client.listPendingApprovals({}),
-        onSome: (sessionId) => client.listApprovals({ sessionId }),
+        onSome: (sessionId) =>
+          client.listApprovals({ sessionId }).pipe(
+            Effect.map(({ approvals }) => ({
+              approvals,
+              total: approvals.length,
+            })),
+          ),
       });
       if (approvals.length === 0) {
         yield* Console.log("no approvals pending");
@@ -105,6 +138,9 @@ export const approvalsCommand = Command.make(
       for (const request of approvals) {
         yield* Console.log(approvalRow(request));
       }
+      const note = truncationNote(approvals.length, total);
+      // On stderr, so a script splitting stdout into rows never reads the note as one.
+      if (note !== undefined) yield* Console.error(note);
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -184,6 +220,18 @@ const decideCommand = (decision: ApprovalVerdict) =>
         yield* Console.log(
           `${decided.decision} ${decided.requestId} by ${decided.actor}`,
         );
+        if (decided.resumeFailed !== undefined) {
+          // Not "the decision failed": it is on file, and a retry by id resends the follow-up.
+          return yield* reportFailure(
+            decided.resumeFailed.code,
+            resumeFailedMessage(
+              VERB[decision],
+              sessionId,
+              requestId,
+              decided.resumeFailed.message,
+            ),
+          );
+        }
         if (decided.resumedWith !== undefined) {
           yield* Console.log(
             `resumed ${sessionId} with submission ${decided.resumedWith}`,

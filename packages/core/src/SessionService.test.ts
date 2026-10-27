@@ -4159,7 +4159,7 @@ describe("approvals", () => {
  * pending in the same database, so each assertion is about this case's sessions.
  */
 describe("every session's pending approvals", () => {
-  it("lists the pending requests of every session, oldest first, and drops a decided one", async () => {
+  it("lists the pending requests of every session, newest first, and drops a decided one", async () => {
     const outcome = await program(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
@@ -4199,12 +4199,22 @@ describe("every session's pending approvals", () => {
         return { a, b, c, before, after, clamped, capped };
       }),
     );
-    // Across sessions, in the order they were asked — not grouped by session.
-    expect(outcome.before).toEqual([outcome.a, outcome.b, outcome.c]);
-    expect(outcome.after).toEqual([outcome.a, outcome.c]);
+    // Across sessions, newest ask first — not grouped by session.
+    expect(outcome.before).toEqual([outcome.c, outcome.b, outcome.a]);
+    expect(outcome.after).toEqual([outcome.c, outcome.a]);
     // A page is at least one row and at most the service's page cap.
     expect(outcome.clamped.approvals).toHaveLength(1);
     expect(outcome.capped.approvals.length).toBeLessThanOrEqual(MAX_PAGE_SIZE);
+    // A page of one is the newest ask: stale requests cannot push a run that just parked off it.
+    expect(outcome.clamped.approvals[0]).toEqual(outcome.c);
+    // `total` counts every pending request, so a cut page says it was cut.
+    expect(outcome.clamped.total).toBeGreaterThanOrEqual(2);
+    expect(outcome.clamped.total).toBeGreaterThan(
+      outcome.clamped.approvals.length,
+    );
+    expect(outcome.capped.total).toBeGreaterThanOrEqual(
+      outcome.capped.approvals.length,
+    );
   });
 
   it("decides without touching the session when the caller does not ask to resume it", async () => {
@@ -4228,6 +4238,54 @@ describe("every session's pending approvals", () => {
       }),
     );
     expect(outcome.decision.resumedWith).toBeUndefined();
+    expect(outcome.decision.resumeFailed).toBeUndefined();
+    expect(
+      outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+  });
+
+  it("answers a recorded decision whose resume failed with resumeFailed, not a failure", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "resume fails" });
+        // An action long enough that the follow-up naming it is over the message limit, so the
+        // send after the commit is refused.
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "unsendable",
+          action: "x".repeat(MAX_MESSAGE_CHARS),
+        });
+        const decide = sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "unsendable",
+          decision: "approved",
+          actor: "ops",
+          resume: true,
+        });
+        const decision = yield* decide;
+        // The retry a caller is told to make: the same decision again, idempotent.
+        const again = yield* decide;
+        return {
+          decision,
+          again,
+          pending: yield* sessions.listApprovals(created.id),
+          snapshot: yield* sessions.get(created.id),
+        };
+      }),
+    );
+    // The decision is on file and no longer pending...
+    expect(outcome.decision).toMatchObject({
+      requestId: "unsendable",
+      decision: "approved",
+      actor: "ops",
+    });
+    expect(outcome.pending.approvals).toEqual([]);
+    // ...and the answer says the session was not resumed, with the send's own code.
+    expect(outcome.decision.resumedWith).toBeUndefined();
+    expect(outcome.decision.resumeFailed?.code).toBe("invalid_input");
+    expect(outcome.again.decidedAt).toBe(outcome.decision.decidedAt);
+    expect(outcome.again.resumeFailed?.code).toBe("invalid_input");
     expect(
       outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
     ).toEqual([]);

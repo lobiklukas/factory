@@ -1,10 +1,11 @@
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import {
-  ApprovalDecision,
   DecideApprovalInput,
+  DecideApprovalOutput,
   ListApprovalsOutput,
   ListPendingApprovalsInput,
+  ListPendingApprovalsOutput,
   RequestApprovalInput,
   ApprovalRequest,
 } from "@repo/domain/Approval";
@@ -184,7 +185,7 @@ export class ApprovalsRpc extends RpcGroup.make(
   }),
   Rpc.make("decideApproval", {
     payload: DecideApprovalInput,
-    success: ApprovalDecision,
+    success: DecideApprovalOutput,
     error: SessionError,
   }),
   Rpc.make("listApprovals", {
@@ -195,7 +196,7 @@ export class ApprovalsRpc extends RpcGroup.make(
   // Every session's pending requests (LOB-53): the operator's inbox, read from the same index.
   Rpc.make("listPendingApprovals", {
     payload: ListPendingApprovalsInput,
-    success: ListApprovalsOutput,
+    success: ListPendingApprovalsOutput,
     error: SessionError,
   }),
 ) {}

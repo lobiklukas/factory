@@ -4,7 +4,7 @@ import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
 import { CheckSquareIcon } from "lucide-react";
 import { pendingApprovalsAtom } from "@/lib/atoms/board-atom";
-import { bySession } from "@/lib/approvals-view";
+import { bySession, inboxSummary } from "@/lib/approvals-view";
 import { ApprovalItem } from "@/components/approvals";
 import { EmptyPane } from "@/components/empty-pane";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +18,9 @@ export const Route = createFileRoute("/approvals")({
  *
  * A server read and nothing else — `listPendingApprovals`, the same index each run's Approvals pane
  * reads, without the session filter — polled, and re-read at once when a decision from this page
- * lands. One block per run, oldest ask first, each naming the session it parks and linking to it.
+ * lands. One block per run, newest ask first — so a run that parked just now is on the page however
+ * many stale asks wait — each naming the session it parks and linking to it. The count is the
+ * server's `total`, and says so when the page was cut.
  * An approval still belongs to a run (LOB-76): the card's Approvals pane is where a person working a
  * card answers it, and this pane is where someone who is not working any card finds what waits.
  *
@@ -50,7 +52,7 @@ function ApprovalsRoute() {
     );
   }
 
-  const { approvals } = result.value;
+  const { approvals, total } = result.value;
   return (
     <EmptyPane
       icon={<CheckSquareIcon strokeWidth={1.75} />}
@@ -64,10 +66,8 @@ function ApprovalsRoute() {
       >
         <h1 className="mb-1 text-sm font-medium">Approvals</h1>
         <p className="mb-4 max-w-xl text-xs text-muted-foreground">
-          {approvals.length === 1
-            ? "1 request is waiting for a person."
-            : `${approvals.length} requests are waiting for a person.`}{" "}
-          A decision resumes the run that asked.
+          {inboxSummary(approvals.length, total)} A decision resumes the run
+          that asked.
         </p>
         <div className="flex max-w-xl flex-col gap-4">
           {bySession(approvals).map(({ sessionId, requests }) => (

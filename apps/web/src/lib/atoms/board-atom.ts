@@ -140,7 +140,7 @@ export const approvalsAtom = Atom.family((sessionId: SessionId) =>
 );
 
 /**
- * Every session's pending approvals, oldest first (LOB-53): the `/approvals` pane, the operator's
+ * Every session's pending approvals, newest first, with the total pending (LOB-53): the `/approvals` pane, the operator's
  * inbox. Polled like a board, and re-read at once when a decision from this page lands.
  */
 export const pendingApprovalsAtom = runtime

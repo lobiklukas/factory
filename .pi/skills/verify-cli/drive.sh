@@ -219,8 +219,10 @@ check "and the command exits non-zero" \
 # `APPROVAL_REQUIRED` set (`./approve.sh`, `APPROVE_PORT`, default :9320); this instance stays
 # ungated so the run above is the plain faux turn. Its checks are in approve.json; the drive fails
 # when any of them does.
+# approve.sh scopes its evidence to `<dir>/cli` as this script does, so it is handed the parent of
+# this script's `$EVIDENCE_DIR` — an exported EVIDENCE_DIR would otherwise nest it at `cli/cli`.
 APPROVE_LOG="$RUN_DIR/cli-approve.log"
-"$ROOT/.pi/skills/verify-cli/approve.sh" > "$APPROVE_LOG" 2>&1
+EVIDENCE_DIR="${EVIDENCE_DIR%/cli}" "$ROOT/.pi/skills/verify-cli/approve.sh" > "$APPROVE_LOG" 2>&1
 APPROVE_RC=$?
 cat "$APPROVE_LOG"
 check "approve.sh decides a parked approval and the session resumes" \

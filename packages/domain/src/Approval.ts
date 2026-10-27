@@ -32,11 +32,6 @@ export const ApprovalDecision = Schema.Struct({
   decision: ApprovalVerdict,
   actor: Schema.String,
   decidedAt: Timestamp,
-  /**
-   * The follow-up message that handed the session this decision (LOB-53): the submission id the
-   * session's queue knows it by. Present only when the caller asked to `resume` the session.
-   */
-  resumedWith: Schema.optional(Schema.String),
 });
 export type ApprovalDecision = typeof ApprovalDecision.Type;
 
@@ -64,8 +59,38 @@ export const DecideApprovalInput = Schema.Struct({
 export type DecideApprovalInput = typeof DecideApprovalInput.Type;
 
 /**
+ * Why a recorded decision did not resume its session (LOB-53): the follow-up `send` failed after the
+ * decision was committed. `code` is the `SessionError` code the send failed with.
+ */
+export const ApprovalResumeFailure = Schema.Struct({
+  code: Schema.String,
+  message: Schema.String,
+});
+export type ApprovalResumeFailure = typeof ApprovalResumeFailure.Type;
+
+/**
+ * What `decideApproval` answers: the decision on file, and — when the caller asked to `resume` — what
+ * became of the follow-up. Only this answer carries the resume; the saved decision is
+ * `ApprovalDecision`, which every other read returns.
+ *
+ * A decision is committed before the follow-up is sent, so a failed send is not a failed decision:
+ * the call succeeds with `resumeFailed` and no `resumedWith`. Repeating the same decision with
+ * `resume` is idempotent and sends the follow-up again under the same request id.
+ */
+export const DecideApprovalOutput = Schema.Struct({
+  ...ApprovalDecision.fields,
+  /** The follow-up's submission id, the one the session's queue knows it by. */
+  resumedWith: Schema.optional(Schema.String),
+  /** The decision is recorded, but the follow-up was not sent: the session is still parked. */
+  resumeFailed: Schema.optional(ApprovalResumeFailure),
+});
+export type DecideApprovalOutput = typeof DecideApprovalOutput.Type;
+
+/**
  * Every session's pending requests (LOB-53): what the dashboard's `/approvals` pane and
- * `factory approvals` list. A page of at most `limit` (the server clamps it), oldest first.
+ * `factory approvals` list. A page of at most `limit` (the server clamps it), newest first — a
+ * request nobody will answer (its session abandoned) never expires, so newest first is what keeps a
+ * run that parked just now on the page however many stale ones have piled up.
  */
 export const ListPendingApprovalsInput = Schema.Struct({
   limit: Schema.optional(Schema.Int),
@@ -77,3 +102,14 @@ export const ListApprovalsOutput = Schema.Struct({
   approvals: Schema.Array(ApprovalRequest),
 });
 export type ListApprovalsOutput = typeof ListApprovalsOutput.Type;
+
+/**
+ * One page of every session's pending requests, newest first, and how many are pending in all: when
+ * `total` exceeds `approvals.length` the page was cut, and a reader says so rather than reading the
+ * page's length as the count.
+ */
+export const ListPendingApprovalsOutput = Schema.Struct({
+  approvals: Schema.Array(ApprovalRequest),
+  total: Schema.Int,
+});
+export type ListPendingApprovalsOutput = typeof ListPendingApprovalsOutput.Type;

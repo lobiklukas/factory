@@ -1510,15 +1510,24 @@ assert(
 await page.goto(`${WEB_URL}/sessions/${inboxSessionId}`, {
   waitUntil: "domcontentloaded",
 });
-await page.waitForSelector("header h1", { timeout: 15_000 }).catch(() => {});
-await page.waitForTimeout(2_500);
+// The strip renders nothing while its read loads or fails, so "no strip" alone proves nothing: the
+// pane's hidden loaded-and-empty marker is waited for first, and only then is the strip counted.
+inbox.sessionLoadedEmpty = await page
+  .waitForSelector(`[data-session-approvals-empty='${inboxSessionId}']`, {
+    state: "attached",
+    timeout: 15_000,
+  })
+  .then(
+    () => true,
+    () => false,
+  );
 inbox.sessionStripAfter = await page
   .locator(`[data-session-approvals='${inboxSessionId}']`)
   .count();
 assert(
   "the session pane drops the decided approval",
-  inbox.sessionStripAfter === 0,
-  `strip elements after the decision: ${inbox.sessionStripAfter}`,
+  inbox.sessionLoadedEmpty && inbox.sessionStripAfter === 0,
+  `loaded and empty ${inbox.sessionLoadedEmpty}; strip elements after the decision: ${inbox.sessionStripAfter}`,
 );
 observed.approvalsInbox = inbox;
 

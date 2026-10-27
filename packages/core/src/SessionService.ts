@@ -46,8 +46,10 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   DecideApprovalInput,
+  DecideApprovalOutput,
   ListApprovalsOutput,
   ListPendingApprovalsInput,
+  ListPendingApprovalsOutput,
   RequestApprovalInput,
 } from "@repo/domain/Approval";
 import type {
@@ -281,18 +283,25 @@ export type SessionServiceShape = {
   readonly requestApproval: (
     input: RequestApprovalInput,
   ) => Effect.Effect<ApprovalRequest, SessionError>;
-  /** Settle a pending request. Repeating the same decision and actor returns it unchanged. */
+  /**
+   * Settle a pending request. Repeating the same decision and actor returns it unchanged. With
+   * `resume`, the session is then handed the decision; a failed hand-off is `resumeFailed` on the
+   * answer, not a failure, because the decision is already on file (LOB-53).
+   */
   readonly decideApproval: (
     input: DecideApprovalInput,
-  ) => Effect.Effect<ApprovalDecision, SessionError>;
+  ) => Effect.Effect<DecideApprovalOutput, SessionError>;
   /** The requests of one session still waiting for a decision, oldest first. */
   readonly listApprovals: (
     sessionId: SessionId,
   ) => Effect.Effect<ListApprovalsOutput, SessionError>;
-  /** Every session's requests still waiting for a decision, oldest first, one page (LOB-53). */
+  /**
+   * Every session's requests still waiting for a decision, newest first, one page, with how many
+   * are pending in all (LOB-53).
+   */
   readonly listPendingApprovals: (
     input: ListPendingApprovalsInput,
-  ) => Effect.Effect<ListApprovalsOutput, SessionError>;
+  ) => Effect.Effect<ListPendingApprovalsOutput, SessionError>;
   /**
    * Record (or replace) one cited knowledge page (LOB-204).
    *
@@ -2018,7 +2027,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       const decideApproval = (
         input: DecideApprovalInput,
-      ): Effect.Effect<ApprovalDecision, SessionError> =>
+      ): Effect.Effect<DecideApprovalOutput, SessionError> =>
         Effect.gen(function* () {
           yield* requireRequestId(input.requestId);
           if (input.actor.trim().length === 0) {
@@ -2083,17 +2092,35 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
           if (input.resume !== true) return settled.decision;
           // Outside the permit: the run this wakes may hit the same gate, and its ask takes it.
-          // The decision is already committed, so a failed send fails the call with the decision
-          // on file — repeating it is idempotent and resends under the same request id.
+          // The decision is already committed, so a failed send is not a failed decision: the call
+          // answers the decision with `resumeFailed`, and the caller says "recorded, not resumed".
+          // Repeating the decision is idempotent and resends under the same request id.
           const sent = yield* send({
             sessionId: input.sessionId,
             content: approvalResumeMessage(settled.request, settled.decision),
             requestId: approvalResumeRequestId(input.requestId),
-          });
-          yield* Effect.logInfo(
-            `approval ${input.requestId} ${settled.decision.decision}; session resumed with submission ${sent.submissionId} (${sent.placement})`,
+          }).pipe(
+            Effect.map((result) => ({ ok: true as const, result })),
+            Effect.catch((error: SessionError) =>
+              Effect.succeed({ ok: false as const, error }),
+            ),
           );
-          return { ...settled.decision, resumedWith: sent.submissionId };
+          if (!sent.ok) {
+            yield* Effect.logWarning(
+              `approval ${input.requestId} ${settled.decision.decision} is recorded, but the session was not resumed: ${sent.error.code}: ${sent.error.message}`,
+            );
+            return {
+              ...settled.decision,
+              resumeFailed: {
+                code: sent.error.code,
+                message: sent.error.message,
+              },
+            };
+          }
+          yield* Effect.logInfo(
+            `approval ${input.requestId} ${settled.decision.decision}; session resumed with submission ${sent.result.submissionId} (${sent.result.placement})`,
+          );
+          return { ...settled.decision, resumedWith: sent.result.submissionId };
         });
 
       /**
@@ -2135,11 +2162,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /**
        * Every session's pending requests (LOB-53): the same index `listApprovals` reads, without the
        * session filter, so the operator's inbox is one statement however many sessions are waiting.
-       * Oldest first, then by session and request id, which is a total order a page can stop at.
+       *
+       * Newest first, then by session and request id, which is a total order a page can stop at. A
+       * pending row never expires — an abandoned session's ask waits forever — so oldest first would
+       * let enough stale asks push a run that parked just now off the page. `total` is the window
+       * count over every pending row (computed before the `LIMIT`), so a reader can tell a cut page
+       * from the whole list.
        */
       const listPendingApprovals = (
         input: ListPendingApprovalsInput,
-      ): Effect.Effect<ListApprovalsOutput, SessionError> =>
+      ): Effect.Effect<ListPendingApprovalsOutput, SessionError> =>
         Effect.gen(function* () {
           const limit = Math.min(
             Math.max(input.limit ?? MAX_PAGE_SIZE, 1),
@@ -2147,8 +2179,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
           const rows = yield* paper(
             "list pending approvals",
-            sql<ApprovalRow & { readonly sessionId: string }>`
+            sql<
+              ApprovalRow & {
+                readonly sessionId: string;
+                readonly total: number | string;
+              }
+            >`
               SELECT
+                COUNT(*) OVER () AS total,
                 session_id,
                 request_id,
                 action,
@@ -2160,7 +2198,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 to_char(used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS used_at
               FROM session_approvals
               WHERE decision IS NULL
-              ORDER BY requested_at, session_id, request_id
+              ORDER BY requested_at DESC, session_id DESC, request_id DESC
               LIMIT ${limit}
             `,
           );
@@ -2169,7 +2207,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const sessionId = yield* toSessionId(row.sessionId);
             approvals.push(toApprovalRecord(sessionId, row).request);
           }
-          return { approvals };
+          // `COUNT(*)` is a bigint, which the driver may hand back as a string.
+          return { approvals, total: Number(rows[0]?.total ?? 0) };
         });
 
       const recordActivity = (

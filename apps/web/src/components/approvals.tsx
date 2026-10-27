@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import type { SessionId } from "@repo/domain/Session";
 import { approvalsAtom, decideApprovalAtom } from "@/lib/atoms/board-atom";
-import { decisionFor } from "@/lib/approvals-view";
+import { decisionFor, resumeRetryCommand } from "@/lib/approvals-view";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
@@ -38,6 +38,20 @@ export const ApprovalItem = ({
         if (Exit.isFailure(exit)) {
           toast.error("The decision was not recorded", {
             description: Cause.pretty(exit.cause),
+          });
+          return;
+        }
+        // Recorded, but the session was not handed it: the row is gone from every pending list,
+        // so the toast is where the retry lives. The same decision again is idempotent and resends.
+        const failed = exit.value.resumeFailed;
+        if (failed !== undefined) {
+          toast.error("The decision is recorded, but the run was not resumed", {
+            description: `${failed.code}: ${failed.message}. Retry here, or run: ${resumeRetryCommand(request, decision)}`,
+            duration: Infinity,
+            action: {
+              label: "Retry resume",
+              onClick: () => onDecide(decision),
+            },
           });
         }
       })
@@ -118,8 +132,10 @@ export const RunApprovals = ({
 
 /**
  * The session pane's notice (LOB-53): a run parked on an approval says so above its transcript, with
- * the decision in reach. Nothing at all while the list loads or is empty — a session that is not
+ * the decision in reach. Nothing visible while the list loads or is empty — a session that is not
  * waiting has nothing to announce, and a strip that blinked in and out on every poll would be noise.
+ * A loaded, empty list leaves a hidden `data-session-approvals-empty` marker, so "no strip" can be
+ * told apart from "not loaded yet" (or "failed to load") by anything that checks the pane.
  */
 export const SessionApprovals = ({
   sessionId,
@@ -129,7 +145,9 @@ export const SessionApprovals = ({
   const pending = useAtomValue(approvalsAtom(sessionId));
   if (!AsyncResult.isSuccess(pending)) return null;
   const { approvals } = pending.value;
-  if (approvals.length === 0) return null;
+  if (approvals.length === 0) {
+    return <span hidden data-session-approvals-empty={sessionId} />;
+  }
   return (
     <section
       aria-label="Waiting for approval"
