@@ -1,9 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -23,7 +25,8 @@ import { afterAll, describe, expect, it } from "vitest";
  * The next run then reset the worktree under that session — switched its branch, committed its
  * half-done work as WIP — and launched a second session beside it. The driver now records the
  * session's pid and start time in `$STATE/session` while it runs (`with_timeout`), and
- * `take_worktree` refuses `run`, `setup` and `audit` while that record names a live process.
+ * `take_worktree` refuses `run`, `start`, `setup` and `audit` while that record names a live
+ * process, and `kill` stops the session's whole tree before it drops the record.
  *
  * No model, network or database. `pi` is a fake first on `PATH` that logs each call and either
  * answers `<promise>NEXT</promise>` or plays a live session: it checks out a `ralph/*` branch, leaves
@@ -197,15 +200,31 @@ const alive = (pid: number): boolean => {
   }
 };
 
-/** Wait until `ok` holds, attempt-counted like `ralph-ensure-db.test.ts`'s `waitFor` (20 s at most). */
-const until = async (what: string, ok: () => boolean): Promise<void> => {
-  for (let attempt = 0; attempt < 400; attempt += 1) {
+/**
+ * Wait until `ok` holds, attempt-counted like `ralph-ensure-db.test.ts`'s `waitFor` (20 s at most
+ * by default). `why` is read on a timeout, so a red run says what the waited-on process printed.
+ */
+const until = async (
+  what: string,
+  ok: () => boolean,
+  {
+    attempts = 400,
+    why = () => "",
+  }: { attempts?: number; why?: () => string } = {},
+): Promise<void> => {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (ok()) return;
     // `node:timers/promises`: the lint denies a bare `setTimeout` and `new Promise`.
     await delay(50);
   }
-  throw new Error(`timed out waiting for ${what}`);
+  const detail = why();
+  throw new Error(
+    `timed out waiting for ${what}${detail ? `\n${detail}` : ""}`,
+  );
 };
+
+const readIfAny = (file: string): string =>
+  existsSync(file) ? readFileSync(file, "utf8") : "";
 
 /** A process of our own in a group of its own, standing in for a session or a loop. */
 const sleeper = (): number => {
@@ -217,10 +236,20 @@ const sleeper = (): number => {
   return pid;
 };
 
+/** A process's start time the way the driver records it: in UTC and the C locale. */
 const startedAt = (pid: number): string =>
   spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
+    env: { ...cleanEnv(), LC_ALL: "C", TZ: "UTC" },
   }).stdout.trim();
+
+/** The pid a fixture process wrote to `file`, once it has. */
+const pidIn = async (file: string): Promise<number> => {
+  await until(file, () => readIfAny(file).trim() !== "");
+  const pid = Number(readIfAny(file).trim());
+  spawned.push(pid);
+  return pid;
+};
 
 const record = (scratch: Scratch): string =>
   path.join(scratch.wt, ".ralph/session");
@@ -241,22 +270,30 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // `with_timeout` — the record outlives run 3's session and the last assertion reddens.
   it(
     "refuses to start while the session is alive, naming its pid, and takes over once it is gone",
-    { timeout: 60_000 },
+    { timeout: 90_000 },
     async () => {
       const scratch = mkScratch();
       const ready = path.join(scratch.root, "pi-ready");
 
-      // Run 1: its session checks out ralph/LOB-1, starts working, and outlives its driver.
+      // Run 1: its session checks out ralph/LOB-1, starts working, and outlives its driver. Its
+      // output goes to a file, so a run 1 that never gets its session in place says why.
+      const firstLog = path.join(scratch.root, "run-1.log");
+      const out = openSync(firstLog, "w");
       const first = spawn("bash", ["-c", RUN], {
         cwd: scratch.root,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", out, out],
         env: env(scratch, { FAKE_PI_HOLD: ready }),
       });
+      closeSync(out);
       const driver = first.pid;
       if (driver === undefined) throw new Error("could not spawn run 1");
       spawned.push(driver);
-      await until("run 1's session", () => existsSync(ready));
+      // A loaded machine (sibling gates) has taken run 1 past 20 s to get here, so 60 s.
+      await until("run 1's session", () => existsSync(ready), {
+        attempts: 1_200,
+        why: () => `run 1's output:\n${readIfAny(firstLog)}`,
+      });
       const session = Number(piCalls(scratch)[0]?.split(" ")[0]);
       spawned.push(session);
       process.kill(-driver, "SIGKILL");
@@ -388,6 +425,99 @@ describe("a ralph run and the worker session a previous run left behind", () => 
       );
       await until("the session to end", () => !alive(session));
       await until("the loop to end", () => !alive(loop));
+      expect(existsSync(record(scratch))).toBe(false);
+    },
+  );
+  // Mutation: drop `LC_ALL=C TZ=UTC` from `proc_started` — the record written under one time zone
+  // reads as a reused pid under another, the record is dropped and the run takes the worktree.
+  it(
+    "reads a live session as live from a run in another time zone than the one that recorded it",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      const session = sleeper();
+      const written = sh(
+        scratch,
+        `source "$LOOP"; proc_started ${String(session)}`,
+        { TZ: "Asia/Tokyo" },
+      );
+      expect(written.status, written.stderr).toBe(0);
+      expect(written.stdout.trim()).toBe(startedAt(session));
+      writeRecord(scratch, session, written.stdout.trim());
+      const run = sh(scratch, RUN, { TZ: "America/Los_Angeles" });
+      expect(run.status, run.stderr).toBe(1);
+      expect(run.stderr).toContain(`pi pid ${String(session)}`);
+      expect(run.stderr).not.toContain("stale session record");
+      expect(existsSync(record(scratch))).toBe(true);
+      expect(piCalls(scratch)).toEqual([]);
+    },
+  );
+
+  // Mutation: drop `take_worktree` from `cmd_start` — `start` prints "started" and exits 0, and the
+  // refusal lands only in the detached run's `loop.log`.
+  it(
+    "refuses start in the caller's terminal, before detaching anything",
+    { timeout: 30_000 },
+    () => {
+      const scratch = mkScratch();
+      const session = sleeper();
+      writeRecord(scratch, session, startedAt(session));
+      const run = sh(scratch, 'source "$LOOP"; cmd_start --max 1');
+      const pidFile = path.join(scratch.wt, ".ralph/loop.pid");
+      if (existsSync(pidFile)) spawned.push(Number(readIfAny(pidFile).trim()));
+      expect(run.status, run.stderr).toBe(1);
+      expect(run.stderr).toContain(`pi pid ${String(session)}`);
+      expect(run.stderr).not.toContain("started:");
+      expect(existsSync(pidFile)).toBe(false);
+    },
+  );
+
+  // The orphan `kill` exists for: a driver killed alone, its group's leader dead, the session still
+  // in that group with a child of its own in another group and an orphan left in the group by a
+  // child that already exited. Mutation: signal only the recorded pid — both survive. Mutation:
+  // drop the descendant walk from `stop_session` — the child in its own group survives. Mutation:
+  // drop the group signal — the orphan, no longer anyone's descendant, survives.
+  it(
+    "stops the session's whole tree and its dead driver's group on kill",
+    { timeout: 30_000 },
+    async () => {
+      const scratch = mkScratch();
+      const file = (name: string) => path.join(scratch.root, name);
+      const sessionScript = [
+        `(sleep 60 & echo $! > ${file("orphan")})`,
+        `perl -MPOSIX -e 'POSIX::setsid(); exec "sleep", "60"' & echo $! > ${file("kid")}`,
+        "wait",
+      ].join("\n");
+      const driver = spawn(
+        "bash",
+        [
+          "-c",
+          `bash -c "$1" & echo $! > ${file("session")}; wait`,
+          "driver",
+          sessionScript,
+        ],
+        { detached: true, stdio: "ignore" },
+      );
+      if (driver.pid === undefined)
+        throw new Error("could not spawn the driver");
+      spawned.push(driver.pid);
+      const session = await pidIn(file("session"));
+      const kid = await pidIn(file("kid"));
+      const orphan = await pidIn(file("orphan"));
+      process.kill(driver.pid, "SIGKILL");
+      const leader = driver.pid;
+      await until("the driver to die", () => !alive(leader));
+      expect([session, kid, orphan].map(alive)).toEqual([true, true, true]);
+      writeRecord(scratch, session, startedAt(session));
+
+      const run = sh(scratch, 'source "$LOOP"; cmd_kill');
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stderr).toContain(
+        `killed worker session pi pid ${String(session)}`,
+      );
+      await until("the session's tree to end", () =>
+        [session, kid, orphan].every((pid) => !alive(pid)),
+      );
       expect(existsSync(record(scratch))).toBe(false);
     },
   );

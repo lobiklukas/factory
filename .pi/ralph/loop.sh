@@ -114,15 +114,56 @@ share_state() {
 # the `pi` it launched keeps working in $WT, and the next run used to reset the worktree under that session and launch
 # a second one beside it (LOB-120). So `with_timeout` records the session's pid and start time in $SESSION_REC for as
 # long as it runs, and nothing that switches $WT (setup, run, audit) starts while that record names a live process.
-# The start time is what tells the recorded `pi` from a later process that was handed its pid.
+# The start time is what tells the recorded `pi` from a later process that was handed its pid. `ps` prints it in the
+# caller's time zone and locale, and the run that writes the record and the one that reads it need not share either
+# (a detached `start` from one shell, `run`, `status` or `kill` from another), so both sides pin them: unpinned, a live
+# session reads as a reused pid and the guard fails open.
 SESSION_REC="$STATE/session"
-proc_started() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+proc_started() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+# running <pid>: the process exists and is not a zombie, which `kill -0` alone counts as alive until its parent reaps it.
+running() { kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" 2>/dev/null | grep -q Z; }
+# session_tree <pid>: the pid and every descendant of it still running, parents first.
+session_tree() {
+  local queue="$1" next p kids
+  while [ -n "$queue" ]; do
+    next=""
+    for p in $queue; do
+      echo "$p"
+      kids="$(pgrep -P "$p" 2>/dev/null || true)"
+      [ -z "$kids" ] || next="$next $kids"
+    done
+    queue="${next# }"
+  done
+}
+# stop_session <pid>: TERM, then KILL, every descendant of the session, so nothing it started (a gate, a subagent `pi`,
+# git) keeps writing in $WT. Its process group goes too when that group's leader is dead, which is the orphan this is
+# for: the group of a driver that was killed alone, where a child whose parent already died is no longer a descendant.
+# A group whose leader lives is left alone: it is a running driver (`kill` signalled that one above) or whatever
+# started the driver, which can be the caller's own shell or an agent's. Succeeds once the session's tree is gone.
+stop_session() {
+  local spid="$1" pg own tree="" sig p i left
+  pg="$(ps -o pgid= -p "$spid" 2>/dev/null | tr -d ' ' || true)"
+  own="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  for sig in TERM KILL; do
+    # Walk the tree again before each signal (a child may have forked) and keep what the last walk found: a child
+    # whose parent died is no longer under the session, but it is still the session's.
+    tree="$(printf '%s\n' $tree $(session_tree "$spid") | sort -u)"
+    [ -z "$pg" ] || [ "$pg" = "$own" ] || running "$pg" || kill -"$sig" -- "-$pg" 2>/dev/null || true
+    for p in $tree; do kill -"$sig" "$p" 2>/dev/null || true; done
+    for i in 1 2 3 4 5 6; do
+      left=""; for p in $tree; do ! running "$p" || left="$left $p"; done
+      [ -n "$left" ] || return 0
+      sleep 0.5
+    done
+  done
+  ! running "$spid"
+}
 # live_session: print the pid of the recorded session and succeed if it still runs; drop a stale record.
 live_session() {
   [ -f "$SESSION_REC" ] || return 1
   local pid="" started=""
   { read -r pid; read -r started; } <"$SESSION_REC" || true
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$(proc_started "$pid")" = "$started" ]; then
+  if [ -n "$pid" ] && running "$pid" && [ "$(proc_started "$pid")" = "$started" ]; then
     echo "$pid"; return 0
   fi
   log "removing stale session record (pid ${pid:-?})"; rm -f "$SESSION_REC"; return 1
@@ -489,6 +530,8 @@ cmd_start() {
   if [ -f "$STATE/loop.pid" ] && kill -0 "$(cat "$STATE/loop.pid")" 2>/dev/null; then
     die "already running (pgid $(cat "$STATE/loop.pid")); use: $0 kill"
   fi
+  # Refuse here, in the caller's terminal, rather than in the detached run's log after printing "started".
+  take_worktree
   local self="$HERE/loop.sh"
   RALPH_WORKTREE="$WT" nohup perl -MPOSIX -e 'POSIX::setsid(); exec { "bash" } "ralph-loop", @ARGV' \
     "$self" run "$@" >>"$STATE/loop.log" 2>&1 </dev/null &
@@ -508,12 +551,16 @@ cmd_kill() {
     pkill -f "ralph-loop" 2>/dev/null && log "killed by name" || log "nothing running"
   fi
   # A session can outlive a driver that was not in that group (a foreground `run` whose shell was killed): stop it too.
+  # Its whole tree goes, not just the `pi`: what it started would otherwise keep writing in $WT once the record is gone.
   local spid
   if spid="$(live_session)"; then
-    kill -TERM "$spid" 2>/dev/null || true; sleep 3; kill -KILL "$spid" 2>/dev/null || true
-    log "killed worker session pi pid $spid"
+    if stop_session "$spid"; then
+      log "killed worker session pi pid $spid"; rm -f "$SESSION_REC"
+    else
+      log "error: worker session pi pid $spid survived SIGKILL; keeping $SESSION_REC"
+    fi
   fi
-  rm -f "$STATE/loop.pid" "$SESSION_REC"; rm -rf "$STATE/lock"
+  rm -f "$STATE/loop.pid"; rm -rf "$STATE/lock"
 }
 
 cmd_stop() { mkdir -p "$STATE"; touch "$STATE/STOP"; log "will stop after the current iteration"; }
