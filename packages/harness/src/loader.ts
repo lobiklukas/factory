@@ -79,6 +79,12 @@ export type RunProfile = {
    */
   readonly role?: string;
   readonly skills: readonly RunSkill[];
+  /**
+   * Whether the run reviews a pull request (LOB-36): its session was opened with a review target.
+   * A review run is the read-only reviewing stage whatever its column, and is the one run offered
+   * the `review` tool. Its model is still its column's role's.
+   */
+  readonly reviewing?: boolean;
 };
 
 /** A run with no card, or in a column that names no skills: nothing is injected. */
@@ -249,6 +255,11 @@ export type RoleResolution = {
    * declares the card's spec, and no other role is offered a way to.
    */
   readonly writesSpec: boolean;
+  /**
+   * Whether the run is offered the `review` tool (LOB-36, `./review`): a review run records and
+   * posts its verdict, and no other run is offered a way to.
+   */
+  readonly writesReview: boolean;
 };
 
 const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
@@ -259,7 +270,8 @@ const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
  * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is
  * the read-only stage's (`READ_ONLY_ROLES`): a read-only role is not offered the tools the stage
  * refuses (`STAGE_REFUSED_TOOLS`), and every other role is offered every tool — except `spec`, which
- * only a role in `SPEC_ROLES` is offered (LOB-238). Pure, so the whole mapping is a table in a test.
+ * only a role in `SPEC_ROLES` is offered (LOB-238), and `review`, which only a review run is (LOB-36).
+ * A review run is read-only whatever its role. Pure, so the whole mapping is a table in a test.
  */
 export const resolveRole = (
   run: RunProfile | undefined,
@@ -277,5 +289,6 @@ export const resolveRole = (
       run?.column !== undefined &&
       run.role !== undefined &&
       SPEC_ROLES.has(run.role),
+    writesReview: run?.reviewing === true,
   };
 };

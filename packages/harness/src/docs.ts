@@ -16,6 +16,7 @@ export const PAGE_PROMPT_DOC_KIND = "factory.pages.prompt";
 export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
+export const REVIEW_DOC_KIND = "factory.review";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -282,4 +283,39 @@ export const ProposedIssuesDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ proposals: [] as StoredProposal[] }),
+});
+
+/**
+ * A reviewer run's pull request and its verdict (LOB-36, `./review`).
+ *
+ * Two writers, in order. The control plane writes the **target** when it creates the run — the PR
+ * (`repo`, `number`, `url`), the ref it merges into (`base`) and the commit under review (`head`) — so
+ * what the run reviews is a fact in its log before the model says anything. The `review` tool writes
+ * the **verdict**: the call that made it (`callId`), `pass` or `fail`, the summary, the four dimensions
+ * as the tool's own encoding, and where the call left the PR (`outcome`: `unposted` until the post
+ * answers, then `clean`, `posted` with the comment's link, `stale` with the head the PR moved to, or
+ * `withheld` with why this deployment can never post it).
+ *
+ * An empty `head` is "this run was opened for no pull request", and an empty `verdict` is "not reviewed
+ * yet", which is what the seed says for both.
+ */
+export const ReviewDoc = defineDoc({
+  kind: REVIEW_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    repo: "",
+    number: 0,
+    url: "",
+    base: "",
+    head: "",
+    callId: "",
+    verdict: "",
+    summary: "",
+    dimensions: null as JsonValue,
+    outcome: "",
+    outcomeDetail: "",
+  }),
 });

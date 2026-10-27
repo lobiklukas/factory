@@ -15,7 +15,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { RepoSlug } from "@repo/domain/Session";
+import { BranchName, RepoSlug } from "@repo/domain/Session";
 import {
   declaredTransitions,
   DEFAULT_DEFINITION_ID,
@@ -2140,6 +2140,75 @@ describe("TaskService — exit requirements", () => {
     const review = await withService(toReview(withPr));
     expect(review.column).toBe("review");
     expect(review.revision).toBe(withPr.revision + 1);
+  }, 180_000);
+
+  it("lets building → review through after the PR's review run started on the card (LOB-36)", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const builder = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/reviewed.ts"),
+      openPr: true,
+    });
+    // What the review trigger creates once the PR's `opened` lands, while the card is still in
+    // building: a run of the reviewer column, cut at the head, on a branch with nothing of its own.
+    const reviewer = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ repo: string; branch: string | null }>`
+          SELECT repo, branch FROM sessions WHERE id = ${builder}
+        `;
+        const bound = rows[0];
+        if (bound === undefined)
+          return yield* Effect.die(new Error(`${builder} has no index row`));
+        const head = execSync(
+          `git rev-parse ${bound.branch ?? `factory/${builder}`}`,
+          {
+            cwd: repoRoot,
+            encoding: "utf8",
+          },
+        ).trim();
+        const sessions = ManagedRuntime.make(
+          SessionServiceLive({
+            model: createFauxModelAccess({}).access,
+            sessionRoot,
+          }).pipe(
+            Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+          ),
+        );
+        return yield* Effect.promise(() =>
+          sessions
+            .runPromise(
+              Effect.gen(function* () {
+                const service = yield* SessionService;
+                const created = yield* service.create({
+                  repo: RepoSlug.make(bound.repo),
+                  baseRef: head,
+                  branch: BranchName.make(
+                    `factory/review-7-${head.slice(0, 12)}`,
+                  ),
+                  taskId: task.id,
+                  taskColumn: "review",
+                  review: {
+                    number: 7,
+                    url: "https://github.com/factory-test/requires/pull/7",
+                    base: "main",
+                    head,
+                  },
+                });
+                return created.id;
+              }),
+            )
+            .finally(() => sessions.dispose()),
+        );
+      }),
+    );
+    expect(reviewer).not.toBe(builder);
+    // The review run is the newest task_runs row, and it is not what building's exit reads.
+    const review = await withService(toReview(task));
+    expect(review.column).toBe("review");
   }, 180_000);
 
   it("reads the latest run only: an older run's PR does not carry a newer run's branch", async () => {

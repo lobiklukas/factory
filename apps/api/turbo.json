@@ -22,6 +22,7 @@
         "APPROVAL_REQUIRED",
         "FAUX_ASK",
         "FAUX_SPEC",
+        "FAUX_REVIEW",
         "FAUX_COST",
         "SESSION_BUDGET",
         "ROLE_MODELS",
@@ -39,6 +40,8 @@
         "DEVTOOLS_URL",
         "GITHUB_APP_ID",
         "GITHUB_APP_INSTALLATION_ID",
+        "GITHUB_REVIEWER_APP_ID",
+        "GITHUB_REVIEWER_APP_INSTALLATION_ID",
         "GITHUB_API_URL",
         "DOCS_SCHEDULE_MS",
         "DOCS_SCHEDULE_REPO"
@@ -48,6 +51,8 @@
         "ANTHROPIC_API_KEY",
         "GITHUB_TOKEN",
         "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_REVIEWER_TOKEN",
+        "GITHUB_REVIEWER_APP_PRIVATE_KEY",
         "GITHUB_WEBHOOK_SECRET"
       ]
     }

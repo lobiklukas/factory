@@ -51,6 +51,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A budget cap (LOB-163)             | `budget.sh`: a one-cent cap stops the run after its tool and before the reply, the stop on the stream, the snapshot, the log and `factory run`; a later run stops at once                               | a capped session cannot spend past its limit                           |
 | The PR step over RPC (LOB-213)     | `pr-rpc.sh`: `openPullRequest` over the RPC client answers `opened`, a repeat `already-open`, the link read back, one request in the fake's ledger; refusals typed                                      | a client opens the PR, not only an in-process caller                   |
 | The pages surface (LOB-220)        | `pages.sh`: `curateSession` writes one page, `listPages` reads it, a repeat writes none for exactly one call's price; deleted rows come back from the log                                               | a page is a log fact, and learning nothing is cheap                    |
+| The review agent (LOB-36)          | `review.sh`: a signed `pull_request` starts a read-only reviewer at the head, on its own model; one `COMMENT` naming the bug, as its own token; a redelivery none; a push a second                      | a PR is reviewed once per head, not as its author                      |
 | Proposed child issues (LOB-201)    | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, and no other row in the database moves                                    | a spec becomes proposals, and nothing else is made                     |
 
 Every check is required: the driver exits non-zero when one fails.
@@ -115,6 +116,7 @@ running, and writes its own evidence:
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
 ./pr-rpc.sh      # api on :9420, fake GitHub on :9421 — openPullRequest over RPC: opened, then already-open, one request (features/pr-rpc.md)
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
+./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
 ```
 

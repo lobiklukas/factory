@@ -102,6 +102,7 @@ import type {
   OpenSession,
   RoleModels,
   RunColumn,
+  ReviewOptions,
   RunProfile,
   SessionRef,
   SpecOptions,
@@ -140,6 +141,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readRecordedReview,
   readVerifyRecords,
   readCurationUsage,
   compareReplay,
@@ -168,12 +170,14 @@ import {
   writeCurationUsage,
   writeProposedIssues,
   writeRepoBinding,
+  writeReviewTarget,
   writeTaskBinding,
   writePage,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
+import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import { BoardColumn } from "@repo/domain/Task";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import type {
@@ -462,6 +466,13 @@ export type SessionServiceOptions = {
    * session is capped only when its create asks for one or its source had one.
    */
   readonly defaultBudget?: number;
+  /**
+   * How a reviewer run's comment reaches its pull request (LOB-36, `./GitHubReview`), under the
+   * reviewer's own identity. Absent: a reviewer still reviews and its verdict is committed to its log,
+   * but nothing is posted — the post fails naming the missing identity, never falling back to the
+   * worker's.
+   */
+  readonly reviewPoster?: ReviewPoster;
 };
 
 type SessionRow = {
@@ -924,6 +935,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       });
 
       /**
+       * How a reviewer run posts its review (LOB-36): the deployment's poster, under the reviewer's
+       * own identity. Handed only to a review run — a session whose log records a review target —
+       * whatever its role: the role is not what grants the tool, and the tool reads what it reviews
+       * from the run's own log.
+       */
+      const reviewFor = (): ReviewOptions => ({
+        post: (request) =>
+          forHarness(
+            // No poster is no reviewer identity: settled as withheld, not a failure the model retries.
+            options.reviewPoster === undefined
+              ? Effect.succeed({
+                  _tag: "withheld",
+                  reason: NO_REVIEWER_IDENTITY,
+                } as const)
+              : options.reviewPoster(request),
+          ),
+      });
+
+      /**
        * One `session_pages` row as the domain's page, or a storage error naming the page whose JSON
        * text does not decode. Shared by the page reads so a row is decoded one way.
        */
@@ -1152,6 +1182,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly thread?: ThreadReader;
         /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
         readonly spec?: SpecOptions;
+        /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
+        readonly review?: ReviewOptions;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -1160,11 +1192,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Opening means: resolve the workspace, create its directory, take the single-writer log, and
        * start the activity projection that keeps the list index current from the log. `open` is how
        * a fork opens the log it has just created rather than an empty one.
+       *
+       * `reviewing` says the session is a review run before its log can (LOB-36): `create` opens the
+       * owner before it commits the review target, and the run's read-only stage and tool filter are
+       * pinned at that first open. Every later acquisition reads it from the log's `factory.review`.
        */
       const acquireOwnerWith = (
         id: SessionId,
         row: SessionRow,
         open: OwnerOpening,
+        reviewing = false,
       ): Effect.Effect<LiveOwner, SessionError> =>
         gate.withPermits(1)(
           Effect.gen(function* () {
@@ -1191,7 +1228,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // resumed session re-reads the skill bodies as they are *now*, so an edit made between
             // two runs of one session reaches the next run too. Pinning a body to the run that
             // started under it is B6's "per-run version pinning", which is wave 2.
-            const run = yield* runProfileFor(id);
+            const column = yield* runProfileFor(id);
+            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
+            const reviews =
+              reviewing ||
+              (yield* readRecordedReview(storage).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
+              )) !== undefined;
+            const run: RunProfile = reviews
+              ? { ...column, reviewing: true }
+              : column;
             // The knowledge the prompt carries is read the same way, and for the same reason: a page
             // curated since this session last ran reaches its next run, and a page deleted from
             // `session_pages` stops being told. A session with none passes none, so its prompt has no
@@ -1217,6 +1263,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     thread: threadFor(card),
                     spec: specFor(id, card, run.column),
                   }),
+              ...(reviews ? { review: reviewFor() } : {}),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -1252,6 +1299,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const acquireOwner = (
         id: SessionId,
         row: SessionRow,
+        reviewing = false,
       ): Effect.Effect<LiveOwner, SessionError> =>
         acquireOwnerWith(
           id,
@@ -1266,6 +1314,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ask,
             thread,
             spec,
+            review,
           }) =>
             openSession({
               storage,
@@ -1284,6 +1333,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(ask === undefined ? {} : { ask }),
               ...(thread === undefined ? {} : { thread }),
               ...(spec === undefined ? {} : { spec }),
+              ...(review === undefined ? {} : { review }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230). Its
               // workers are tasks of their own kind, installed with it (LOB-193).
@@ -1293,6 +1343,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               policy: sessionPolicy,
               run,
             }),
+          reviewing,
         );
 
       const describe = (
@@ -1318,6 +1369,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           sql`UPDATE sessions SET title = ${title} WHERE id = ${sessionId}`,
         );
 
+      /**
+       * A retried review create (LOB-36) finds its session by request id; if the first attempt died
+       * between the owner's open and the review target's commit, the log names no target, and every
+       * later open would read the run as an ordinary one with write tools. The retry commits the
+       * target it was given, so the prompt that follows reaches the read-only stage.
+       */
+      const ensureReviewTarget = (
+        id: SessionId,
+        row: SessionRow,
+        review: NonNullable<CreateSessionInput["review"]>,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (row.repo === null) return;
+          const owner = yield* acquireOwner(id, row, true);
+          const recorded = yield* readRecordedReview(owner.storage);
+          if (recorded !== undefined) return;
+          yield* writeReviewTarget(owner.root, { repo: row.repo, ...review });
+        });
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -1331,9 +1401,19 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 );
           const already = requested?.[0];
           if (already !== undefined) {
-            return yield* describe(yield* toSessionId(already.id), already);
+            const sessionId = yield* toSessionId(already.id);
+            if (input.review !== undefined)
+              yield* ensureReviewTarget(sessionId, already, input.review);
+            return yield* describe(sessionId, already);
           }
 
+          if (input.review !== undefined && input.repo === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message:
+                "a session that reviews a pull request names the repo the pull request is in",
+            });
+          }
           const binding = yield* resolveBinding(input);
           const id = yield* mintSessionId;
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
@@ -1377,7 +1457,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   ON CONFLICT (session_id) DO NOTHING`,
             );
           }
-          const owner = yield* acquireOwner(id, row);
+          const owner = yield* acquireOwner(
+            id,
+            row,
+            input.review !== undefined,
+          );
+          if (input.review !== undefined && binding.repo !== undefined) {
+            // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
+            // it is the first: a reopen reads the read-only stage from it alone, so no other write
+            // may sit between the owner's open and it. A create that died before it is repaired by
+            // its retry (`ensureReviewTarget`).
+            yield* writeReviewTarget(owner.root, {
+              repo: binding.repo,
+              ...input.review,
+            });
+          }
           if (title.length > 0) {
             // The log keeps the title too, so rebuilding the index does not lose it.
             yield* writeTitle(owner.root, title);

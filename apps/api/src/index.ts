@@ -1,8 +1,12 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import {
+  CredentialConfig,
   CredentialProvider,
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
+  githubReviewPoster,
+  ReviewerCredentialConfig,
+  selectReviewerCredentialProvider,
   runDocsSchedule,
   SessionService,
   SessionServiceLive,
@@ -18,6 +22,7 @@ import {
   parseFauxModelScripts,
   parseRoleModels,
   resolveRoleModels,
+  REVIEW_ROLES,
   type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
@@ -144,6 +149,19 @@ const ModelConfig = Config.all({
         Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
       ),
       "FAUX_SPEC",
+    ),
+  ),
+  /**
+   * The `review` calls the faux script makes, in order (LOB-36's `fauxReview`): a JSON array of the
+   * tool's arguments, each sent only when the one before it was refused. Unset: the faux never
+   * reviews. A value that is not a JSON array of objects fails the boot.
+   */
+  fauxReview: Config.option(
+    Config.schema(
+      Schema.fromJsonString(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
+      "FAUX_REVIEW",
     ),
   ),
   /**
@@ -423,6 +441,7 @@ const HttpLive = Effect.gen(function* () {
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
     fauxSpec: Option.getOrUndefined(model.fauxSpec),
+    fauxReview: Option.getOrUndefined(model.fauxReview),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
@@ -436,11 +455,50 @@ const HttpLive = Effect.gen(function* () {
       .concat(`any other role → ${modelKey(modelAccess)}`)
       .join(", ")}${declaredRoles.size === 0 ? "" : " (ROLE_MODELS)"}`,
   );
+  // A review run's model is its role's row (LOB-36); with none, every PR head the review trigger
+  // reviews runs on the deployment's model, which is the one the builders need and rarely the cheap one.
+  const webhookSecret = yield* Config.String("GITHUB_WEBHOOK_SECRET").pipe(
+    Config.withDefault(""),
+  );
+  if (
+    webhookSecret !== "" &&
+    ![...REVIEW_ROLES].some((role) => roleModels.has(role))
+  ) {
+    yield* Effect.logWarning(
+      `review runs: ROLE_MODELS has no row for ${[...REVIEW_ROLES].join(" or ")}, so every pull request review runs on the deployment's model (${modelKey(modelAccess)}); set ROLE_MODELS=reviewer=<provider>/<model> to review on a cheaper one`,
+    );
+  }
+
+  // The reviewer's identity (LOB-36): its own token or App, never the worker's. One that *is* the
+  // worker's fails the boot here; none at all boots, and each review's post says what is missing.
+  const reviewerConfig = yield* ReviewerCredentialConfig;
+  const reviewerCredentials = yield* selectReviewerCredentialProvider(
+    yield* CredentialConfig,
+    reviewerConfig,
+  ).pipe(Effect.provide(FetchHttpClient.layer));
+  const reviewerAppId = Option.filter(reviewerConfig.appId, (id) => id !== "");
+  const reviewPoster = yield* githubReviewPoster({
+    credentials: reviewerCredentials,
+    // An App reviewer asks `GET /app` which bot is its own, so another App's marked review is not.
+    ...(Option.isSome(reviewerAppId) &&
+    Option.isSome(reviewerConfig.appPrivateKey)
+      ? {
+          app: {
+            appId: reviewerAppId.value,
+            privateKey: reviewerConfig.appPrivateKey.value,
+          },
+        }
+      : {}),
+  }).pipe(Effect.provide(FetchHttpClient.layer));
+  yield* Effect.logInfo(
+    `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
+  );
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
+    reviewPoster,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,
