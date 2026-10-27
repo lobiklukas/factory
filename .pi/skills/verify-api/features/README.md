@@ -53,6 +53,11 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
 and the fake listens on the port the run reserves for this surface.
 
+The Linear adapter checks (LOB-164) were run from the `agent/LOB-164` worktree on 2026-10-27 (API
+on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**, evidence
+`.verify/evidence/lob-164/`, and `./webhook.sh` re-run there **12/12** because the Linear route it
+also posts to changed. See [linear.md](linear.md).
+
 The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
 (`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
 `./docs-run.sh` **13/13**, evidence `.verify/evidence/lob-228/`. Like `./pr-once.sh` it starts no API
@@ -101,6 +106,7 @@ harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not
 | Jira adapter             | passing | [jira.md](jira.md)                 |
 | GitHub issues adapter    | passing | [github.md](github.md)             |
 | Slack adapter            | passing | [slack.md](slack.md)               |
+| Linear adapter           | passing | [linear.md](linear.md)             |
 | Approvals                | passing | [approvals.md](approvals.md)       |
 | Curate a session's pages | passing | [curate.md](curate.md)             |
 | A mission                | passing | [mission.md](mission.md)           |
