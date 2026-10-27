@@ -616,7 +616,48 @@ const program = Effect.gen(function* () {
       replayModels.join(",") === REPLAY_MODEL,
     `source=${sourceModels.join(",") || "none"} replay=${replayModels.join(",") || "none"}`,
   );
-  const sourceAfter = yield* client.getSession({ sessionId: replaySource.id });
+  // The comparison (LOB-199) lands on both sessions once the replay's task settles, so the source
+  // is read after its comparison does: what it gained is that document, and its transcript is not.
+  const comparedSource = yield* waitUntil(
+    client
+      .getSession({ sessionId: replaySource.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          (snapshot.replayComparisons ?? []).length > 0 ? snapshot : false,
+        ),
+      ),
+    "the source's replay comparison",
+  );
+  const comparedReplay = yield* waitUntil(
+    client
+      .getSession({ sessionId: replay.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          (snapshot.replayComparisons ?? []).length > 0 ? snapshot : false,
+        ),
+      ),
+    "the replay's comparison",
+  );
+  const onSource = comparedSource.replayComparisons?.[0];
+  const onReplay = comparedReplay.replayComparisons?.[0];
+  assert(
+    "getSession reports the comparison on both sides, each naming the other with opposite deltas",
+    comparedSource.replayComparisons?.length === 1 &&
+      comparedReplay.replayComparisons?.length === 1 &&
+      onSource?.role === "source" &&
+      onSource.counterpart.session === replay.id &&
+      onSource.counterpart.model === REPLAY_MODEL &&
+      onReplay?.role === "replay" &&
+      onReplay.counterpart.session === replaySource.id &&
+      onReplay.counterpart.model === DEPLOYMENT_MODEL &&
+      onReplay.self.outcome === "answered" &&
+      onReplay.counterpart.outcome === "answered" &&
+      JSON.stringify(onSource.self) === JSON.stringify(onReplay.counterpart) &&
+      onSource.delta.turns + onReplay.delta.turns === 0 &&
+      onSource.delta.cost + onReplay.delta.cost === 0,
+    `source=${JSON.stringify(onSource ?? null)} replay=${JSON.stringify(onReplay ?? null)}`,
+  );
+  const sourceAfter = comparedSource;
   assert(
     "the replayed session's transcript is unchanged",
     JSON.stringify(sourceAfter.entries) === JSON.stringify(sourceRan.entries),
@@ -629,6 +670,25 @@ const program = Effect.gen(function* () {
       replayLog.replay.model === REPLAY_MODEL &&
       replayLog.replay.from === DEPLOYMENT_MODEL,
     `replay=${JSON.stringify(replayLog.replay ?? null)}`,
+  );
+  // Both comparisons are in the logs, not only in the API's answer: a fold of each reports the
+  // same one, and the source's document names no source of its own, so it never reads as a replay.
+  const sourceLog = yield* replayLink(replaySource.id);
+  assert(
+    "both logs carry the comparison, and the source is no replay",
+    JSON.stringify(sourceLog.replayComparisons) ===
+      JSON.stringify(comparedSource.replayComparisons) &&
+      JSON.stringify(replayLog.replayComparisons) ===
+        JSON.stringify(comparedReplay.replayComparisons) &&
+      sourceLog.replay === undefined,
+    `source=${sourceLog.replayComparisons.length} replay=${replayLog.replayComparisons.length} sourceLink=${JSON.stringify(sourceLog.replay ?? null)}`,
+  );
+  // A session nobody replayed reports no comparison: the drive's scratch session.
+  const unreplayed = yield* client.getSession({ sessionId: created.id });
+  assert(
+    "a session that was never replayed reports no comparison",
+    unreplayed.replayComparisons === undefined,
+    `replayComparisons=${JSON.stringify(unreplayed.replayComparisons ?? null)}`,
   );
 
   // The refusals, typed over the wire: a model this process does not serve, and a session bound to
@@ -667,6 +727,7 @@ const program = Effect.gen(function* () {
     prompts: { source: sourcePrompt ?? null, replay: replayPrompt ?? null },
     models: { source: sourceModels, replay: replayModels },
     log: replayLog.replay ?? null,
+    comparisons: { source: onSource ?? null, replay: onReplay ?? null },
     refusals,
   };
 
