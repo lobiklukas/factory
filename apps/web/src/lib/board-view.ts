@@ -4,6 +4,7 @@ import type {
   BoardDefinition,
   Task,
 } from "@repo/domain/Task";
+import { declaredTransitions, humanGate } from "@repo/domain/Task";
 
 /**
  * The board as lanes (LOB-75): what `/boards/$boardId` renders, computed from two server reads.
@@ -59,3 +60,111 @@ export const blockedLabel = (task: Task): string | null =>
   task.blocked === undefined
     ? null
     : `blocked · ${BLOCK_WORDS[task.blocked.reason]}`;
+
+/**
+ * One move the card pane offers (LOB-76): a column the card's own column declares a transition to,
+ * and the human gate it crosses, if any (B5).
+ *
+ * `gate` is what the pane marks: the dashboard's actor is a person, so a gated move *is* offered
+ * here — it is the move B5 keeps for a person — but it is never offered unmarked, because the click
+ * is the recorded approval (the plan approval, the merge), not an ordinary step along the pipeline.
+ */
+export type OfferedMove = {
+  readonly to: string;
+  readonly gate: string | undefined;
+  /** The target's kind in this definition; `undefined` when the definition does not declare it. */
+  readonly kind: BoardColumn["kind"] | undefined;
+};
+
+/**
+ * The moves a card is offered: exactly the transitions its column declares, in the order the
+ * pipeline declares them (docs/board.md B5), and nothing else.
+ *
+ * The list is `declaredTransitions` — the table `TaskService` refuses against — so a move the API
+ * would refuse as undeclared is never offered: a card in `intake` is offered `specifying` and
+ * `canceled`, never `done`. A target the definition does not declare is still listed with no kind
+ * rather than dropped, so a table that disagrees with the definition shows up instead of hiding.
+ */
+export const offeredMoves = (
+  task: Task,
+  definition: BoardDefinition,
+): ReadonlyArray<OfferedMove> =>
+  declaredTransitions(task.column).map((to) => ({
+    to,
+    gate: humanGate(task.column, to),
+    kind: definition.columns.find((column) => column.name === to)?.kind,
+  }));
+
+/**
+ * Whether the card pane offers a run start, and why not when it does not (LOB-76).
+ *
+ * B4: a `working` column is where a run may be started; `intake` is resting (nothing runs until a
+ * person moves the card on) and the terminal columns are finished. The reason travels with the
+ * refusal so a disabled control can say why it is disabled.
+ */
+export type RunStart =
+  | { readonly allowed: true; readonly column: string }
+  | { readonly allowed: false; readonly reason: string };
+
+export const runStart = (task: Task, definition: BoardDefinition): RunStart => {
+  const column = definition.columns.find((c) => c.name === task.column);
+  if (column === undefined) {
+    return {
+      allowed: false,
+      reason: `${task.column} is not a column of ${definition.name} v${definition.version}`,
+    };
+  }
+  switch (column.kind) {
+    case "working":
+      return { allowed: true, column: column.name };
+    case "resting":
+      return {
+        allowed: false,
+        reason: `${column.name} is a resting column: nothing runs until a person moves the card on`,
+      };
+    case "terminal":
+      return {
+        allowed: false,
+        reason: `${column.name} is terminal: the card is finished`,
+      };
+  }
+};
+
+/**
+ * What the card pane says when the API refuses a move (LOB-76).
+ *
+ * The body is the service's own message, verbatim (B5: "a refusal names the failing requirement" —
+ * `StaleRevision` names the revision it found, `HumanGateRequired` the gate), so the pane and
+ * `factory board move` print the same words. Only the heading is the pane's, and it says what to
+ * do next. Anything that is not one of the board's typed refusals — a transport failure, a defect —
+ * keeps its tag and the text it came with rather than being dressed up as one.
+ */
+export type MoveRefusal = {
+  readonly tag: string;
+  readonly title: string;
+  readonly message: string;
+};
+
+const REFUSAL_TITLES: Readonly<Record<string, string>> = {
+  StaleRevision: "Someone changed this card first",
+  UndeclaredTransition: "This column does not declare that move",
+  HumanGateRequired: "Only a person can make this move",
+  TaskNotFound: "This card no longer exists",
+  TaskStorageError: "The board could not record the move",
+};
+
+export const moveRefusal = (
+  error: { readonly _tag: string; readonly message: string } | undefined,
+  fallback: string,
+): MoveRefusal =>
+  error === undefined
+    ? {
+        tag: "Unknown",
+        title: "The move did not go through",
+        message: fallback,
+      }
+    : {
+        tag: error._tag,
+        title: REFUSAL_TITLES[error._tag] ?? "The move did not go through",
+        message: error.message.length > 0 ? error.message : fallback,
+      };
