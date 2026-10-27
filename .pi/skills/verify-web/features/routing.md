@@ -10,9 +10,12 @@ than sent to the API.
   beats an empty first impression
 - `/sessions` renders the list beside the pane; `/sessions/<id>` attaches to that session
 - `/boards` lists the boards and `/boards/<id>` renders one board's lanes (LOB-75, [board.md](board.md));
-  `/boards/not-a-board` is refused by `Schema.decodeUnknownOption(BoardInstanceId)` the same way
+  `/boards/not-a-board` is refused by `Schema.decodeUnknownOption(BoardInstanceId)` the same way.
+  `?card=<task id>` opens the card pane and `?run=<session id>` one of its runs (LOB-76,
+  [card-pane.md](card-pane.md)); a value that does not decode as that id is dropped, not sent
 - `/sandboxes` and `/approvals` render an honest empty state naming the milestone (M4, M3) that will
-  back them, not a table with no source
+  back them, not a table with no source. They are off the rail since LOB-76 (panes of a card's run
+  now) and reachable by URL only
 - `/sessions/not-a-real-id` is refused by the route's `Schema.decodeUnknownOption(SessionId)`, so the
   pane says what a session id is instead of surfacing a `not_found` the user cannot act on
 - Every route renders inside the same frame: a 48px icon rail, then the route

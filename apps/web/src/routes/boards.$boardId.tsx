@@ -3,14 +3,38 @@ import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause, Option, Schema } from "effect";
 import { KanbanSquareIcon } from "lucide-react";
-import { BoardInstanceId } from "@repo/domain/Task";
+import { SessionId } from "@repo/domain/Session";
+import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import { boardAtom } from "@/lib/atoms/board-atom";
 import { boardLanes } from "@/lib/board-view";
 import { BoardLanesView } from "@/components/board-lanes";
+import { CardPane } from "@/components/card-pane";
 import { EmptyPane } from "@/components/empty-pane";
 import { Skeleton } from "@/components/ui/skeleton";
 
+/**
+ * Which card the pane shows, and which of its runs (LOB-76). In the URL rather than in this
+ * browser, so a link to a card opens the same pane anywhere and a reload keeps it open. Each is
+ * kept only when it decodes as the id it names; anything else reads as no selection.
+ */
+type BoardSearch = {
+  readonly card?: TaskId | undefined;
+  readonly run?: SessionId | undefined;
+};
+
+const decodeTaskId = Schema.decodeUnknownOption(TaskId);
+const decodeSessionId = Schema.decodeUnknownOption(SessionId);
+
 export const Route = createFileRoute("/boards/$boardId")({
+  validateSearch: (search: Record<string, unknown>): BoardSearch => {
+    const card = Option.getOrUndefined(decodeTaskId(search["card"]));
+    const run = Option.getOrUndefined(decodeSessionId(search["run"]));
+    return card === undefined
+      ? {}
+      : run === undefined
+        ? { card }
+        : { card, run };
+  },
   component: BoardRoute,
 });
 
@@ -34,10 +58,12 @@ function BoardRoute() {
 
 /**
  * One board's lanes (LOB-75): columns from the definition version the board binds, cards from the
- * server's list, and no client state between them — a reload is a fresh read of both.
+ * server's list, and no client state between them — a reload is a fresh read of both. The card
+ * pane (LOB-76) opens beside the lanes for the card the URL names, from the same answer.
  */
 const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
   const result = useAtomValue(boardAtom(boardId));
+  const { card, run } = Route.useSearch();
 
   if (AsyncResult.isInitial(result)) {
     return (
@@ -50,10 +76,15 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
     );
   }
 
-  if (AsyncResult.isFailure(result)) {
-    const error = Cause.findErrorOption(result.cause);
-    const missing =
-      Option.isSome(error) && error.value._tag === "BoardNotFound";
+  // A failed poll keeps the last good board on screen, with a marker, rather than tearing down the
+  // lanes and the open card pane (its transcript stream, composer draft, refusal). Only a first read
+  // that fails, or a board the server says is gone, replaces the page with the error.
+  const error = AsyncResult.isFailure(result)
+    ? Cause.findErrorOption(result.cause)
+    : Option.none();
+  const missing = Option.isSome(error) && error.value._tag === "BoardNotFound";
+  const last = Option.getOrUndefined(AsyncResult.value(result));
+  if (AsyncResult.isFailure(result) && (missing || last === undefined)) {
     return (
       <EmptyPane
         icon={<KanbanSquareIcon strokeWidth={1.75} />}
@@ -68,26 +99,66 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
     );
   }
 
-  const { instance, definition, tasks } = result.value;
+  if (last === undefined) return null;
+  const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
+  const { instance, definition, tasks } = last;
+  const selected =
+    card === undefined ? undefined : tasks.find((task) => task.id === card);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-4 py-3">
-        <Link
-          to="/boards"
-          className="text-xs text-muted-foreground hover:text-foreground"
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-4 py-3">
+          <Link
+            to="/boards"
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Boards
+          </Link>
+          <h1 className="text-sm font-medium">{instance.repo}</h1>
+          <span className="font-mono text-[10px] text-muted-foreground">
+            {definition.name} v{definition.version} · {instance.id}
+          </span>
+          {stale === undefined ? null : (
+            <span
+              role="status"
+              data-board-stale
+              title={Cause.pretty(stale)}
+              className="text-[11px] text-destructive"
+            >
+              Reconnecting: showing the last answer the server gave
+            </span>
+          )}
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
+            to move it or start a run
+          </span>
+        </header>
+        <BoardLanesView
+          boardId={boardId}
+          board={boardLanes(definition, tasks)}
+          selected={card}
+        />
+      </div>
+      {card === undefined ? null : selected === undefined ? (
+        <aside
+          aria-label="Card"
+          data-card-pane-missing={card}
+          className="flex w-80 shrink-0 flex-col gap-1 border-l border-border p-4 text-xs"
         >
-          Boards
-        </Link>
-        <h1 className="text-sm font-medium">{instance.repo}</h1>
-        <span className="font-mono text-[10px] text-muted-foreground">
-          {definition.name} v{definition.version} · {instance.id}
-        </span>
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          {tasks.length} {tasks.length === 1 ? "card" : "cards"} · read-only
-          here; move a card with factory board move
-        </span>
-      </header>
-      <BoardLanesView board={boardLanes(definition, tasks)} />
+          <span className="font-medium">No such card on this board</span>
+          <span className="text-muted-foreground">
+            {card} is not one of this board&apos;s cards.
+          </span>
+        </aside>
+      ) : (
+        <CardPane
+          key={selected.id}
+          boardId={boardId}
+          task={selected}
+          definition={definition}
+          run={run}
+        />
+      )}
     </div>
   );
 };

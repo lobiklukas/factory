@@ -10,14 +10,16 @@
  * Refusals are typed values (`TaskRefusal`-family, below), each naming what failed. They are not
  * booleans, and a caller branches on `_tag`.
  *
- * Two rules live here because the board decisions name them but the definition does not carry them
- * yet (`BoardColumn` has no transitions field):
+ * Two rules are checked here that the board decisions name but the definition does not carry yet
+ * (`BoardColumn` has no transitions field). Their tables live in `@repo/domain/Task`, because the
+ * dashboard's card pane offers exactly what this service accepts (LOB-76):
  *
- * - **Declared transitions** are the forward pipeline of the default definition, plus `canceled`
- *   from any non-terminal column. Anything else is an undeclared transition.
- * - **Human gates** are `planning → building` (plan approval) and `review → done` (merge). A run is
- *   one Pi Durable session, so a run's actor is its session id; any actor that is a session id is a
- *   run and cannot cross a gate. Every other actor is a person.
+ * - **Declared transitions** (`DECLARED_TRANSITIONS`) are the forward pipeline of the default
+ *   definition, plus `canceled` from any non-terminal column. Anything else is an undeclared
+ *   transition.
+ * - **Human gates** (`HUMAN_GATES`) are `planning → building` (plan approval) and `review → done`
+ *   (merge). A run is one Pi Durable session, so a run's actor is its session id; any actor that is
+ *   a session id is a run and cannot cross a gate. Every other actor is a person.
  *
  * **The thread is `task_events`, not a table of its own (LOB-73).** A comment is a `commented` event:
  * B3 makes a card rows plus an append-only history, and a comment is exactly that — input a person
@@ -39,9 +41,12 @@ import {
   BoardInstanceId,
   BoardView,
   LIST_BOARDS_LIMIT,
+  humanGate,
+  isDeclaredTransition,
   Task,
   TaskEvent,
   TaskId,
+  TaskRun,
 } from "@repo/domain/Task";
 import { TaskComment } from "@repo/domain/Task";
 import type {
@@ -55,24 +60,6 @@ import { mintTaskId } from "./ids";
 
 /** Every new card starts in the default definition's first column (B4). */
 export const INITIAL_COLUMN = "intake";
-
-/** The forward pipeline of the default definition, B4. `canceled` is reachable from any working column. */
-const DECLARED: Readonly<Record<string, ReadonlyArray<string>>> = {
-  intake: ["specifying", "canceled"],
-  specifying: ["planning", "canceled"],
-  planning: ["building", "canceled"],
-  building: ["review", "canceled"],
-  review: ["done", "canceled"],
-};
-
-/** B5's two human gates, keyed by `from → to`, with the name a refusal gives them. */
-const HUMAN_GATES: Readonly<Record<string, string>> = {
-  "planning→building": "plan approval",
-  "review→done": "merge",
-};
-
-export const isDeclaredTransition = (from: string, to: string): boolean =>
-  (DECLARED[from] ?? []).includes(to);
 
 /** A run's actor is its session id (B1: a run is exactly one session). Any other actor is a person. */
 export const isRunActor = (actor: Actor): boolean =>
@@ -226,6 +213,10 @@ export type TaskServiceShape = {
   readonly comments: (
     taskId: string,
   ) => Effect.Effect<ReadonlyArray<TaskComment>, TaskError>;
+  /** A card's runs, newest first (LOB-76). An unknown card is `TaskNotFound`, not an empty list. */
+  readonly listRuns: (
+    taskId: string,
+  ) => Effect.Effect<ReadonlyArray<TaskRun>, TaskError>;
 };
 
 export class TaskService extends Context.Service<
@@ -582,7 +573,7 @@ export const TaskServiceLive = Layer.effect(
                 message: `column "${from}" declares no transition to "${input.to}"`,
               });
             }
-            const gate = HUMAN_GATES[`${from}→${input.to}`];
+            const gate = humanGate(from, input.to);
             if (gate !== undefined && isRunActor(input.actor)) {
               return yield* new HumanGateRequired({
                 gate,
@@ -879,6 +870,62 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const decodeRun = Schema.decodeUnknownEffect(TaskRun);
+
+    /**
+     * A card's runs, newest first (LOB-76). The card is looked up first so an unknown id is a
+     * refusal naming it: an empty list is the true answer for a card no run was started against,
+     * and the two must not look the same. The id breaks a tie on `started_at`, as `listBoards` does.
+     */
+    const listRuns = (
+      taskId: string,
+    ): Effect.Effect<ReadonlyArray<TaskRun>, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const found = yield* sql<{ id: string }>`
+            SELECT id FROM tasks WHERE id = ${taskId}
+          `;
+          if (found[0] === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          const rows = yield* sql<{
+            id: string;
+            taskId: string;
+            sessionId: string;
+            column: string;
+            startedAt: Date | string;
+            finishedAt: Date | string | null;
+          }>`
+            SELECT id, task_id, session_id, "column", started_at, finished_at
+            FROM task_runs
+            WHERE task_id = ${taskId}
+            ORDER BY started_at DESC, id DESC
+          `;
+          return yield* Effect.forEach(rows, (row) =>
+            decodeRun({
+              id: row.id,
+              taskId: row.taskId,
+              sessionId: row.sessionId,
+              column: row.column,
+              startedAt: iso(row.startedAt),
+              ...(row.finishedAt === null
+                ? {}
+                : { finishedAt: iso(row.finishedAt) }),
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TaskStorageError({
+                    message: `the task_runs table holds an invalid row ${row.id}: ${String(cause)}`,
+                  }),
+              ),
+            ),
+          );
+        }),
+      );
+
     return {
       getBoard,
       listBoards,
@@ -891,6 +938,7 @@ export const TaskServiceLive = Layer.effect(
       ask,
       comment,
       comments,
+      listRuns,
     } satisfies TaskServiceShape;
   }),
 );

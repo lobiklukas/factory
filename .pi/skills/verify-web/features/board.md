@@ -1,4 +1,4 @@
-# Board lanes (read-only)
+# Board lanes
 
 **Status: passing.** `/boards` lists the boards this control plane holds, and `/boards/<id>` renders
 one board as lanes: one lane per column of the definition version the board binds, in definition
@@ -17,8 +17,9 @@ order, with the cards the server lists in each (LOB-75, part 1 of LOB-22).
   blocked (B4 — blocked is a card state, so the card says it), then the id and revision a
   `factory board move` needs.
 - A card in a column the definition does not declare is listed apart, never dropped.
-- Read-only: no control in the lanes acts on a card. The header says moves go through
-  `factory board move` until the card pane lands (LOB-76).
+- No control in the lanes acts on a card: a card is a link that opens the card pane (LOB-76,
+  [card-pane.md](card-pane.md)), which is where moves, gates and the run start live.
+- An open board re-reads the server every 2 s, so a move made elsewhere arrives without a reload.
 - Nothing is kept in the browser. There is no storage layer in the atom runtime; the theme toggle's
   `factory.theme` is the only key the page may hold.
 - `/boards/not-a-board` is refused by the route's decode; a well-formed id the server does not hold
@@ -41,20 +42,20 @@ drive process rather than the page. It requires:
 3. the rendered lane names, left to right, to equal the definition's column names exactly;
 4. the seeded card to be in `intake` and nowhere else, carrying its title;
 5. `sessionStorage` empty and `localStorage` holding nothing but `factory.theme`;
-6. `factory board move --to specifying --expect-revision 1` (the real CLI over the API, run from the
-   drive process) to exit 0, and `getTask` to say `specifying` at revision 2;
+6. the card pane's walk ([card-pane.md](card-pane.md)), which includes a `factory board move` to
+   `specifying` (the real CLI over the API, run from the drive process) and `getTask` agreeing;
 7. a reload to show the card in `specifying` only, and a **fresh browser context** — no storage, no
    cache — to show the same;
-8. no button, role-button or draggable in the lanes, and every RPC the board pages sent to be a read
-   (`listBoards`, `getBoard`, `listTasks`, `listSessions`); the tags are read off the requests;
+8. no button, role-button or draggable in the lanes, and the page's only writes to be the card
+   pane's clicked moves and run start; the tags are read off the requests;
 9. `/boards/not-a-board` to be refused locally.
 
 Evidence: `boards.png`, `board.png`, `board-after-move.png`, and `observed.board`.
 
 ## Gotchas
 
-- **The drive performs no move through the dashboard.** The one move it needs is the CLI's, made
-  outside the browser; the read-only check would fail if the page sent a write.
+- **The lanes never write.** The moves the drive makes in the page are the card pane's
+  ([card-pane.md](card-pane.md)); the final check counts the page's writes against what was clicked.
 - **The drive evaluates the seed from `apps/api`.** bun's isolated linker links `@repo/core` only into
   the workspaces that depend on it, so `bun run .pi/skills/verify-board/seed.ts` cannot resolve it from
   `.pi/`. The seed has no relative imports, so `bun -e "$(cat seed.ts)"` with `apps/api` as the
