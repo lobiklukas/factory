@@ -446,6 +446,24 @@ type ExitJudgement = {
 const iso = (value: Date | string): string =>
   DateTime.formatIso(DateTime.makeUnsafe(value));
 
+/**
+ * The attention view's approval order: oldest request first, then session, then request id — the
+ * order `session_approvals` rows are read in, so a card's and a card-less session's approvals merge
+ * into one list. Anything else sorts equal, and the sort is stable.
+ */
+const byRequest = (left: AttentionItem, right: AttentionItem): number => {
+  if (left.reason._tag !== "approval" || right.reason._tag !== "approval") {
+    return 0;
+  }
+  const a = left.reason;
+  const b = right.reason;
+  return (
+    a.requestedAt.localeCompare(b.requestedAt) ||
+    a.sessionId.localeCompare(b.sessionId) ||
+    a.requestId.localeCompare(b.requestId)
+  );
+};
+
 export const TaskServiceLive = Layer.effect(
   TaskService,
   Effect.gen(function* () {
@@ -1536,6 +1554,28 @@ export const TaskServiceLive = Layer.effect(
         );
       });
 
+    /** One attention row for an approval of a session no card owns (LOB-271); a bad row is a storage fault. */
+    const toSessionAttention = (
+      row: {
+        readonly approvalSession: string;
+        readonly sessionTitle: string;
+        readonly sessionRepo: string | null;
+      },
+      reason: unknown,
+    ): Effect.Effect<AttentionItem, TaskStorageError> =>
+      decodeAttention({
+        sessionTitle: row.sessionTitle,
+        ...(row.sessionRepo === null ? {} : { repo: row.sessionRepo }),
+        reason,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TaskStorageError({
+              message: `session ${row.approvalSession} does not read as an attention row: ${String(cause)}`,
+            }),
+        ),
+      );
+
     /**
      * What needs a person (LOB-77): three statements over the rows the board and the approvals
      * service already keep, and no log fold — the view is polled, so its cost is a fixed number of
@@ -1545,7 +1585,11 @@ export const TaskServiceLive = Layer.effect(
      * count, and a partial index on `blocked_reason` is the fix when it is not.
      *
      * - **Approvals** are `session_approvals` rows with no decision, on a session `task_runs` names
-     *   as a run of the card. Every column, every block: only a person settles one.
+     *   as a run of the card. Every column, every block: only a person settles one. On the every-board
+     *   read they also include the undecided rows of sessions `task_runs` names nowhere (LOB-271): a
+     *   scratch session gated by `APPROVAL_REQUIRED` waits on a person as much as a run does, and the
+     *   view is the one place that person looks. They carry no card, only the session; a board's own
+     *   view lists the board's cards, so it leaves them out. Both kinds share one order, oldest first.
      * - **Questions** are cards blocked `needs_input` (B7). The question is the newest `question`
      *   comment asked since the block began (an answered question from an earlier block is not this
      *   block's), falling back to the block's note (a person may block a card `needs_input` by hand,
@@ -1598,6 +1642,31 @@ export const TaskServiceLive = Layer.effect(
               AND (${board}::text IS NULL OR t.board_id = ${board})
             ORDER BY sa.requested_at, sa.session_id, sa.request_id
           `;
+
+          // A session no card owns. `task_runs.session_id` is unique, so the anti-join is one index probe
+          // per pending row, and the pending rows come from `session_approvals_pending`.
+          const sessionApprovals =
+            board !== null
+              ? []
+              : yield* sql<{
+                  readonly approvalSession: string;
+                  readonly requestId: string;
+                  readonly action: string;
+                  readonly detail: string;
+                  readonly requestedAt: Date | string;
+                  readonly sessionTitle: string;
+                  readonly sessionRepo: string | null;
+                }>`
+                  SELECT sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
+                         sa.requested_at, s.title AS session_title, s.repo AS session_repo
+                  FROM session_approvals sa
+                  JOIN sessions s ON s.id = sa.session_id
+                  WHERE sa.decision IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM task_runs tr WHERE tr.session_id = sa.session_id
+                    )
+                  ORDER BY sa.requested_at, sa.session_id, sa.request_id
+                `;
 
           const questions = yield* sql<
             TaskRow & {
@@ -1668,6 +1737,18 @@ export const TaskServiceLive = Layer.effect(
               requestedAt: iso(row.requestedAt),
             }),
           );
+          const sessionApprovalItems = yield* Effect.forEach(
+            sessionApprovals,
+            (row) =>
+              toSessionAttention(row, {
+                _tag: "approval",
+                sessionId: row.approvalSession,
+                requestId: row.requestId,
+                action: row.action,
+                detail: row.detail,
+                requestedAt: iso(row.requestedAt),
+              }),
+          );
           const questionItems = yield* Effect.forEach(questions, (row) =>
             toAttention(row, {
               _tag: "question",
@@ -1686,7 +1767,11 @@ export const TaskServiceLive = Layer.effect(
               sessionId: row.runSession,
             });
           });
-          return [...approvalItems, ...questionItems, ...gateItems];
+          return [
+            ...[...approvalItems, ...sessionApprovalItems].sort(byRequest),
+            ...questionItems,
+            ...gateItems,
+          ];
         }),
       );
 

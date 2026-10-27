@@ -55,44 +55,90 @@ export const attentionGroups = (
 export const attentionReasonText = (item: AttentionItem): string => {
   const { reason, task } = item;
   switch (reason._tag) {
-    case "approval":
+    case "approval": {
+      // A session no card owns is not a card's run (LOB-271): the row says "session".
+      const asker = task === undefined ? "A session" : "A run";
       return reason.detail.trim() === ""
-        ? `A run asks to ${reason.action}`
-        : `A run asks to ${reason.action}: ${reason.detail}`;
+        ? `${asker} asks to ${reason.action}`
+        : `${asker} asks to ${reason.action}: ${reason.detail}`;
+    }
     case "question":
-      return reason.question === undefined
-        ? `Blocked: needs input from ${task.blocked?.column ?? task.column}, with no question recorded`
-        : `Asked: ${reason.question}`;
+      return task === undefined
+        ? `Asked: ${reason.question ?? "no question recorded"}`
+        : reason.question === undefined
+          ? `Blocked: needs input from ${task.blocked?.column ?? task.column}, with no question recorded`
+          : `Asked: ${reason.question}`;
     case "gate":
-      return `The ${task.column} run is idle; ${task.column} → ${reason.to} is the ${reason.gate}, a person's move`;
+      return task === undefined
+        ? `Idle at the ${reason.gate}, a person's move`
+        : `The ${task.column} run is idle; ${task.column} → ${reason.to} is the ${reason.gate}, a person's move`;
   }
 };
 
 /**
- * Where a row's link goes: the card's own pane on its board; for an approval, the run that asked, so
- * the pane opens on the session whose Approvals tab holds the request; and for a question, the
- * card's thread (`#thread`, LOB-239), where the question is read and answered.
+ * What names the row: the card's title, or for a session no card owns (LOB-271) the session's title,
+ * falling back to its id when the session was never titled.
  */
-export const attentionLink = (
-  item: AttentionItem,
-): {
-  readonly boardId: BoardInstanceId;
-  readonly search: { readonly card: TaskId; readonly run?: SessionId };
-  readonly hash?: typeof THREAD_ANCHOR;
-} => {
+export const attentionTitle = (item: AttentionItem): string =>
+  item.task?.title ??
+  (item.sessionTitle === undefined || item.sessionTitle.trim() === ""
+    ? item.reason._tag === "approval"
+      ? item.reason.sessionId
+      : "Untitled session"
+    : item.sessionTitle);
+
+/**
+ * The rail's count (LOB-271): the number of rows the view lists, so the badge and the page cannot
+ * disagree. Nothing for none, and capped, because a badge four characters wide does not fit a 32px
+ * rail button.
+ */
+export const attentionBadge = (count: number): string | undefined =>
+  count <= 0 ? undefined : count > 99 ? "99+" : String(count);
+
+export type AttentionLink =
+  | {
+      readonly kind: "card";
+      readonly boardId: BoardInstanceId;
+      readonly search: { readonly card: TaskId; readonly run?: SessionId };
+      readonly hash?: typeof THREAD_ANCHOR;
+    }
+  | { readonly kind: "session"; readonly sessionId: SessionId }
+  | { readonly kind: "sessions" };
+
+/**
+ * Where a row's link goes: the card's own pane on its board; for an approval, the run that asked, so
+ * the pane opens on the session whose Approvals tab holds the request; for a question, the card's
+ * thread (`#thread`, LOB-239), where the question is read and answered; and for a row with no card
+ * (LOB-271), the session itself, whose page holds the approval. The server lists only approvals
+ * without a card, so a card-less question (which names no session) falls back to the sessions list
+ * rather than to a link that goes nowhere.
+ */
+export const attentionLink = (item: AttentionItem): AttentionLink => {
+  const { task } = item;
+  if (task === undefined) {
+    return item.reason._tag === "question"
+      ? { kind: "sessions" }
+      : { kind: "session", sessionId: item.reason.sessionId };
+  }
   switch (item.reason._tag) {
     case "approval":
       return {
-        boardId: item.task.boardId,
-        search: { card: item.task.id, run: item.reason.sessionId },
+        kind: "card",
+        boardId: task.boardId,
+        search: { card: task.id, run: item.reason.sessionId },
       };
     case "question":
       return {
-        boardId: item.task.boardId,
-        search: { card: item.task.id },
+        kind: "card",
+        boardId: task.boardId,
+        search: { card: task.id },
         hash: THREAD_ANCHOR,
       };
     case "gate":
-      return { boardId: item.task.boardId, search: { card: item.task.id } };
+      return {
+        kind: "card",
+        boardId: task.boardId,
+        search: { card: task.id },
+      };
   }
 };

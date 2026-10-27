@@ -46,9 +46,10 @@ under Known gaps.
   on one — not from the rail, where the attention view (LOB-77) is the place for "a person is
   needed". The dashboard seeds its approvals through `requestApproval` (its API is ungated); the
   gated run that parks and resumes is driven by `verify-cli/approve.sh`.
-- **The rail has no attention count.** The rail links the attention view (LOB-77), and
-  `listAttention` now backs the number, but a badge would poll on every page; it is left out until a
-  push exists or the count is wanted badly enough to pay for the poll.
+- **The rail's attention badge polls on every page.** The bell shows the length of
+  `listAttention` (LOB-271), read through the same atom `/attention` uses, so it adds one 2 s poll
+  to every page and none on `/attention`. `drive.mjs` counts `listAttention` among the reads for
+  that reason. A push would replace the poll.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
   other, and a change to `packages/domain` or `packages/core` deserves both.

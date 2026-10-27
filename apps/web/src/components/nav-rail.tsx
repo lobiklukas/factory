@@ -1,4 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { useAtomValue } from "@effect/atom-react";
+import { Option } from "effect";
+import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
   CoinsIcon,
@@ -13,6 +16,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { ALL_BOARDS, attentionAtom } from "@/lib/atoms/attention-atom";
+import { attentionBadge } from "@/lib/attention-view";
 
 /**
  * The narrow rail. Vercel's dashboard pattern: sections are icons because there
@@ -34,10 +39,23 @@ const SECTIONS = [
   { to: "/spend", label: "Spend", icon: CoinsIcon },
 ] as const;
 
+/**
+ * What waits on a person, across every board (LOB-271): the length of the same `listAttention`
+ * answer `/attention` renders from the same atom, so the badge is the page's own count and the rail
+ * adds no second poll while that page is open. A failed poll keeps the last answer, as the page
+ * does; before a first answer there is nothing to count.
+ */
+const useAttentionCount = (): number =>
+  Option.match(AsyncResult.value(useAtomValue(attentionAtom(ALL_BOARDS))), {
+    onNone: () => 0,
+    onSome: (items) => items.length,
+  });
+
 export const NavRail = () => {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const waiting = attentionBadge(useAttentionCount());
 
   return (
     <nav
@@ -59,7 +77,7 @@ export const NavRail = () => {
             <TooltipTrigger
               aria-current={active ? "page" : undefined}
               className={cn(
-                "grid size-8 place-items-center text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                "relative grid size-8 place-items-center text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
                 active && "bg-sidebar-accent text-sidebar-accent-foreground",
               )}
               render={
@@ -68,6 +86,15 @@ export const NavRail = () => {
             >
               <Icon className="size-4" strokeWidth={1.75} />
               <span className="sr-only">{label}</span>
+              {to === "/attention" && waiting !== undefined ? (
+                <span
+                  data-attention-badge={waiting}
+                  className="absolute top-0 right-0 grid min-w-3.5 place-items-center bg-destructive px-0.5 font-mono text-[9px] leading-3.5 text-white"
+                >
+                  {waiting}
+                  <span className="sr-only"> waiting on a person</span>
+                </span>
+              ) : null}
             </TooltipTrigger>
             <TooltipContent side="right">{label}</TooltipContent>
           </Tooltip>

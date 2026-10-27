@@ -1904,6 +1904,8 @@ const BOARD_READS = new Set([
   "getSession",
   "watchSession",
   "listApprovals",
+  // The rail's "Needs a person" count (LOB-271) polls it from every page.
+  "listAttention",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
@@ -3057,6 +3059,131 @@ assert(
     everywhereGate.all.includes(att.repo) &&
     everywhere.rows.every((row) => row.card !== att.waiting),
   `rail ${railOpened}; ${everywhere.rows.length} row(s); gate row ${JSON.stringify(everywhereGate?.all ?? null)}`,
+);
+
+// A session no card owns that waits on an approval (LOB-271). The API is ungated, so
+// `requestApproval` is what a gated command would write; `createSession` names no card, so this is a
+// scratch session. The every-board view lists it as one row linking to the session, the rail's count
+// is the page's own count, a board's view leaves it out, and the card-bound rows are as before.
+const scratchTitle = `attention scratch ${Date.now()}`;
+const scratchCreated = await rpcFromDrive("createSession", {
+  title: scratchTitle,
+});
+const scratchId =
+  typeof scratchCreated.value?.id === "string" ? scratchCreated.value.id : "";
+const SCRATCH_ACTION = "git push origin scratch";
+const scratchAsked = await rpcFromDrive("requestApproval", {
+  sessionId: scratchId,
+  requestId: `verify-web-scratch-${Date.now()}`,
+  action: SCRATCH_ACTION,
+  detail: "no card owns this session",
+});
+const scratchShown = await waitForAttention(
+  (session) =>
+    document.querySelector(
+      `li[data-attention='${session}'][data-attention-session]`,
+    ) !== null,
+  scratchId,
+  20_000,
+);
+const badgeMatches = await waitForAttention(
+  () => {
+    const rows = document.querySelectorAll("li[data-attention]").length;
+    const badge = document
+      .querySelector("[data-attention-badge]")
+      ?.getAttribute("data-attention-badge");
+    const count = document
+      .querySelector("[data-attention-count]")
+      ?.getAttribute("data-attention-count");
+    return rows > 0 && badge === String(rows) && count === String(rows);
+  },
+  null,
+  20_000,
+);
+const withScratch = await readAttention(page);
+const scratchRow = rowFor(withScratch, scratchId, "approval");
+const railBadge = await page
+  .locator("[data-attention-badge]")
+  .first()
+  .getAttribute("data-attention-badge")
+  .catch(() => null);
+const scratchTruth = await rpcFromDrive("listAttention", {});
+const scratchItems = (scratchTruth.value ?? []).filter(
+  (item) => item.task === undefined,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "attention-scratch.png"),
+});
+attentionObserved.scratch = {
+  sessionId: scratchId,
+  row: scratchRow ?? null,
+  rows: withScratch.rows.length,
+  railBadge,
+  server: (scratchTruth.value ?? []).length,
+};
+assert(
+  "a gated scratch session is one row on the every-board view, linking to the session",
+  scratchCreated.exit === "Success" &&
+    scratchAsked.exit === "Success" &&
+    scratchShown &&
+    scratchRow !== undefined &&
+    scratchRow.group === "approval" &&
+    scratchRow.href === `/sessions/${scratchId}` &&
+    scratchRow.text ===
+      `A session asks to ${SCRATCH_ACTION}: no card owns this session` &&
+    scratchRow.all.includes(scratchTitle) &&
+    withScratch.rows.filter((row) => row.card === scratchId).length === 1 &&
+    withScratch.empty === false &&
+    scratchItems.some(
+      (item) =>
+        item.reason.sessionId === scratchId &&
+        item.sessionTitle === scratchTitle,
+    ),
+  `row ${JSON.stringify(scratchRow ?? null)}; empty ${withScratch.empty}`,
+);
+assert(
+  "the rail's count is the number of rows, and the card-bound rows are still there",
+  badgeMatches &&
+    railBadge === String(withScratch.rows.length) &&
+    withScratch.rows.length === (scratchTruth.value ?? []).length &&
+    rowFor(withScratch, att.gated, "gate") !== undefined &&
+    rowFor(withScratch, att.approval, "approval") !== undefined,
+  `badge ${String(railBadge)}; rows ${withScratch.rows.length}; listAttention ${(scratchTruth.value ?? []).length}`,
+);
+await page.goto(`${WEB_URL}/attention?board=${attBoard}`, {
+  waitUntil: "domcontentloaded",
+});
+await waitForAttention(
+  () => document.querySelector("li[data-attention]") !== null,
+  null,
+  15_000,
+);
+const scopedView = await readAttention(page);
+assert(
+  "a board's own view leaves the card-less session out",
+  scopedView.rows.length > 0 &&
+    scopedView.rows.every((row) => row.card !== scratchId),
+  `rows ${JSON.stringify(scopedView.rows.map((row) => row.card))}`,
+);
+let scratchLinkOpened = false;
+try {
+  await page.getByRole("link", { name: "Needs a person" }).first().click();
+  await page
+    .locator(`li[data-attention='${scratchId}'][data-attention-session] a`)
+    .click();
+  await page.waitForFunction(
+    (session) => window.location.pathname === `/sessions/${session}`,
+    scratchId,
+    { timeout: 15_000 },
+  );
+  scratchLinkOpened = true;
+} catch {
+  // Recorded below.
+}
+assert(
+  "the scratch row's link opens the session",
+  scratchLinkOpened,
+  `at ${new URL(page.url()).pathname}`,
 );
 
 // A board the server does not hold is named as missing, not shown as "nothing needs a person".

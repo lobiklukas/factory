@@ -15,6 +15,13 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   `task_runs` names as a run of the card. Any column, any block. The row's link opens the card with
   `?run=<the session that asked>`, so the pane's Approvals tab holds the request.
   `li[data-attention-reason=approval]`, text `A run asks to <action>[: <detail>]`.
+- **An approval of a session no card owns** (LOB-271) — the same `session_approvals` row on a session
+  `task_runs` names nowhere: a scratch session gated by `APPROVAL_REQUIRED`. The item has no `task`;
+  it carries `sessionTitle` (and `repo` when the session has one), and the row, marked
+  `li[data-attention-session]`, is titled by the session and links to `/sessions/<id>`. Text
+  `A session asks to <action>[: <detail>]`. It sits in the same group and the same oldest-first
+  order as the card-bound approvals. Only the every-board view lists it: a board's view (`?board=`)
+  lists that board's cards.
 - **Answer a run's question** — the card is blocked `needs_input` (B7). The reason is the newest
   `question` comment asked since the block began (the ask tool's), or the block's note when a person
   blocked it by hand — an answered question from an earlier block never reappears. `li[data-attention-reason=question]`, text `Asked: <question>`. Its link opens the card at `#thread`,
@@ -38,7 +45,10 @@ without a reload.
 
 ## How to get to it (user POV)
 
-Click the bell (**Needs a person**) in the rail, or **Needs a person** in a board's header.
+Click the bell (**Needs a person**) in the rail, or **Needs a person** in a board's header. The
+bell carries a count badge (`[data-attention-badge]`) of everything the every-board view lists, a
+scratch session's approval included — the number of rows on `/attention`, from the same atom, so
+it is never a second answer. It is absent when nothing waits.
 
 ## Driving it with drive.mjs
 
@@ -65,9 +75,14 @@ resting card, a card blocked `dependency` in `planning`, and cards in `planning`
    header's **Needs a person** to lead back; a click on the approval row to open the run's tabs;
 7. a `commentTask` from the drive (the answer) to drop the question row without a reload;
 8. the rail's section to open the every-board view, whose gate row names the board's repository;
-9. `?board=<an id the server does not hold>` to say **No such board**.
+9. a scratch session (`createSession` with no card) given a `requestApproval` to be exactly one row
+   on the every-board view, linking to `/sessions/<id>` and reading `A session asks to <action>`,
+   with the empty state gone; the rail badge, the header count and the number of rows to be the same
+   number, equal to `listAttention`'s length; the card-bound rows to be still listed; a board's
+   `?board=` view to leave the session out; and a click on the row to open the session;
+10. `?board=<an id the server does not hold>` to say **No such board**.
 
-Evidence: `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png`, and
+Evidence: `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png`, `attention-scratch.png`, and
 `observed.attention`.
 
 ## Gotchas
@@ -87,7 +102,8 @@ Evidence: `attention-empty.png`, `attention.png`, `attention-card.png`, `attenti
   (SIGKILL) leaves the row `busy`, and nothing at boot resets it, so that card stays off its gate
   until another turn on the session or a `rebuildIndexes`. `getSession` reads the live in-memory
   flag instead and is not affected.
-- **Cost (R6).** Three statements and no log fold. The approvals read uses the
+- **Cost (R6).** Three statements (four on the every-board read: the card-less approvals) and no log
+  fold. The approvals reads use the
   `session_approvals_pending` partial index; the questions and gates reads filter `tasks` by block
   and column, which no index covers, so the every-board view scans `tasks`. That is fine at MVP card
   counts; a partial index on `blocked_reason` is the fix when it is not.
