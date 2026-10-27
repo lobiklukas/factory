@@ -13,16 +13,23 @@
  *   errored — one comment says why. The state does not move: the task is not done and not in
  *   review, and a comment is how "never silently" reaches someone watching the issue.
  * - **When the PR merges** the issue moves to *done*. A PR closed without merging is a failure
- *   comment, like any other run that ended without a change landing.
+ *   comment, like any other run that ended without a change landing. GitHub says which happened
+ *   through a signed `pull_request` webhook (`handleGitHubPullRequestWebhook`, served at
+ *   `POST /webhooks/github` by `apps/api`).
  *
  * **The issue's state is the task's, never the review's.** Mastra Factory keeps a PR's review as
  * its own item with its own completion rules, and LOB-15 keeps that separation: there is no
  * "approved" or "changes requested" state in the map, nothing here records a review verdict on the
  * issue, and a new commit on the PR (`synchronize`) changes nothing on it — so there is no stale
- * approval on the issue for a new commit to leave behind. The review itself is GitHub's (D16), and
- * the review *item* with its re-review rule is LOB-36's. The merge is the one PR event that moves
+ * approval on the issue for a new commit to leave behind. The merge is the one PR event that moves
  * the issue, because the merge is the task's completion gate (B4: `review → done` is "a human
  * merge"), not a review verdict.
+ *
+ * **What this does not do: re-review.** The other half of that separation — a review recorded as
+ * its own item, invalidated by a new commit so a stale approval forces a re-review — needs a review
+ * record, and the factory keeps none yet (the review itself is GitHub's, D16). It is not built here;
+ * it belongs with the review item (LOB-36), and until that lands LOB-15's review criterion is met
+ * only in the half above.
  *
  * **Every write is idempotent, so a retry is always safe.** That is what makes "no duplicate
  * comments on retry" a property rather than a hope, and it is the same rule Jira, GitHub and Slack
@@ -39,9 +46,14 @@
  *   does not drag the issue back to In Progress, and an issue a person closed is not reopened by a
  *   mirror. `nextLinearState` is that rule, pure.
  *
- * Operations in one process are serialized (one permit), so two reports for one issue cannot both
- * read "no comment yet". Across processes the read and the write are not atomic — the window is two
- * reports landing in the same instant, which `docs/testing-third-parties.md` records.
+ * Operations on one issue are serialized within one `LinearIssueSyncLive` (one permit per issue),
+ * so two reports for one issue cannot both read "no comment yet"; `apps/api` builds that layer once
+ * and hands it to every consumer. Across processes the read and the write are not atomic — the
+ * window is two reports landing in the same instant, which `docs/testing-third-parties.md` records.
+ *
+ * **Every request is bounded** (`requestTimeout`), because both callers wait on it: the PR step
+ * reports before it answers, and the trigger seam moves the issue before it answers Linear's
+ * webhook. A Linear that never answers is a transient failure after a few seconds, not a stall.
  *
  * **Auth is a Linear API key**, sent verbatim as `Authorization` — Linear's documented form for a
  * personal key; an OAuth token is sent as `Bearer <token>`, so a deployment holding one sets the
@@ -49,8 +61,10 @@
  * `undefined`), exactly as an unconfigured Jira or Slack adapter: "no tracker" is a state the
  * process can be in.
  */
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   Context,
+  Duration,
   Effect,
   Layer,
   Redacted,
@@ -61,7 +75,6 @@ import {
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SessionId } from "@repo/domain/Session";
-import { TriggerError } from "@repo/domain/Trigger";
 import type { VerifyRecord } from "@repo/harness";
 import { linearIssueOfDelivery } from "./Linear";
 import { pullRequestReport, SessionWriteBack } from "./SessionWriteBack";
@@ -91,7 +104,16 @@ export type LinearConfig = {
   readonly states: LinearStates;
   /** Where a reader finds a session, so the comment links it. Absent: the id alone. */
   readonly sessionUrlBase?: string;
+  /**
+   * How long one GraphQL request may take before it counts as a transient failure
+   * (`LINEAR_REQUEST_TIMEOUT`, 5 seconds; a test shortens it). Without it a Linear that accepts the connection and
+   * never answers would hold the caller for as long as `fetch` waits, which is forever.
+   */
+  readonly requestTimeout?: Duration.Input;
 };
+
+/** The default bound on one Linear request. */
+export const LINEAR_REQUEST_TIMEOUT: Duration.Input = "5 seconds";
 
 /** The environment a deployment configures the write-back with. */
 export type LinearEnv = {
@@ -175,9 +197,30 @@ const MutationResult = Schema.Struct({ success: Schema.Boolean });
 const Envelope = Schema.Struct({
   data: Schema.optional(Schema.NullOr(Schema.Unknown)),
   errors: Schema.optional(
-    Schema.Array(Schema.Struct({ message: Schema.String })),
+    Schema.Array(
+      Schema.Struct({
+        message: Schema.String,
+        extensions: Schema.optional(
+          Schema.Struct({ code: Schema.optional(Schema.String) }),
+        ),
+      }),
+    ),
   ),
 });
+type Envelope = typeof Envelope.Type;
+
+/**
+ * Linear's rate-limit signal. It is not `429`: "with GraphQL requests, response http status code
+ * will be 400, but you can catch these by inspecting the errors in the response body containing the
+ * RATELIMITED error code" (Linear's rate-limiting docs). So the body of a non-2xx answer is read
+ * too, and an error carrying this code is transient whatever the status says.
+ */
+export const LINEAR_RATE_LIMITED = "RATELIMITED";
+
+const rateLimited = (envelope: Envelope | undefined): boolean =>
+  (envelope?.errors ?? []).some(
+    (error) => error.extensions?.code === LINEAR_RATE_LIMITED,
+  );
 
 /**
  * The one read every operation starts with: everything a write needs to decide whether it is
@@ -268,6 +311,15 @@ export const nextLinearState = (input: {
 export const linearMarker = (sessionId: SessionId, kind: string): string =>
   `factory:${sessionId}:${kind}`;
 
+/**
+ * A failure comment's marker kind: the step, and a short digest of the reason. An exact retry of
+ * the same failure finds its comment and posts nothing; a *different* failure of the same step —
+ * a 403 fixed and then a 422, an over-cap retry with other numbers — is a new reason and explains
+ * itself, which a kind of the step alone would have swallowed.
+ */
+export const linearFailureKind = (step: string, reason: string): string =>
+  `failed:${step}:${createHash("sha256").update(reason).digest("hex").slice(0, 8)}`;
+
 const sessionRef = (config: LinearConfig, sessionId: SessionId): string =>
   config.sessionUrlBase === undefined
     ? `\`${sessionId}\``
@@ -345,7 +397,12 @@ export const linearFailureComment = (
     "",
     `Session: ${sessionRef(config, input.sessionId)}`,
     "",
-    code(linearMarker(input.sessionId, `failed:${input.step}`)),
+    code(
+      linearMarker(
+        input.sessionId,
+        linearFailureKind(input.step, input.reason),
+      ),
+    ),
   ].join("\n");
 
 type PullRequestLink = { readonly number: number; readonly url: string };
@@ -363,7 +420,7 @@ export type LinearIssueSyncShape = {
     readonly pr: PullRequestLink;
     readonly evidence: readonly VerifyRecord[];
   }) => Effect.Effect<void, LinearSyncError>;
-  /** The run ended without a PR: one comment naming why. `step` is what the comment dedupes by. */
+  /** The run ended without a PR: one comment naming why, deduped by the step and its reason. */
   readonly failed: (input: {
     readonly issueId: string;
     readonly sessionId: SessionId;
@@ -396,13 +453,26 @@ type Writes = {
  */
 const RETRY = { schedule: Schedule.exponential("100 millis"), times: 2 };
 
+/** An answer's body as GraphQL's envelope, or `undefined` when it is not one. */
+const readEnvelope = (
+  response: HttpClientResponse.HttpClientResponse,
+): Effect.Effect<Envelope | undefined> =>
+  HttpClientResponse.schemaBodyJson(Envelope)(response).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+
 /**
  * The sync over Linear's GraphQL API, through the Effect `HttpClient` every control-plane client
  * uses, so a test fakes it with no interception library.
  *
  * GraphQL answers a refused operation with HTTP `200` and an `errors` list, and a mutation that did
- * not apply with `success: false`; both are failures here, as is any non-2xx. A transport error,
- * `429` and `5xx` are transient; a refusal is not, and is not retried.
+ * not apply with `success: false`; both are failures here, as is any non-2xx. A transport error, a
+ * request that outlives `requestTimeout`, `429`, `5xx` and Linear's `RATELIMITED` (on a `400`) are
+ * transient; a refusal is not, and is not retried.
+ *
+ * Operations on one issue are serialized (one permit per issue), so two reports for one issue
+ * cannot both read "no comment yet"; operations on different issues do not wait on each other, so
+ * one slow issue cannot hold up another's write.
  */
 export const LinearIssueSyncLive = (
   config: LinearConfig,
@@ -411,7 +481,16 @@ export const LinearIssueSyncLive = (
     LinearIssueSync,
     Effect.gen(function* () {
       const http = yield* HttpClient.HttpClient;
-      const lock = yield* Semaphore.make(1);
+      /** One permit per issue; an issue's lock lives as long as the layer. */
+      const locks = new Map<string, Semaphore.Semaphore>();
+      const lockOf = (issueId: string): Semaphore.Semaphore => {
+        const existing = locks.get(issueId);
+        if (existing !== undefined) return existing;
+        const created = Semaphore.makeUnsafe(1);
+        locks.set(issueId, created);
+        return created;
+      };
+      const timeout = config.requestTimeout ?? LINEAR_REQUEST_TIMEOUT;
       const headers = {
         authorization: Redacted.value(config.apiKey),
         accept: "application/json",
@@ -432,30 +511,51 @@ export const LinearIssueSyncLive = (
             HttpClientRequest.bodyJson({ query, variables }),
             Effect.mapError(() => fail("the request could not be encoded")),
           );
-          const response = yield* http
-            .execute(request)
-            .pipe(
+          // The whole exchange is bounded, the body included: a Linear that sends headers and then
+          // stalls is as stuck as one that never answers.
+          const exchange = Effect.gen(function* () {
+            const response = yield* http
+              .execute(request)
+              .pipe(
+                Effect.mapError(() =>
+                  fail(`Linear could not be reached for ${operation}`, true),
+                ),
+              );
+            if (response.status < 200 || response.status > 299) {
+              const refused = yield* readEnvelope(response);
+              const limited = rateLimited(refused);
+              return yield* fail(
+                limited
+                  ? `Linear rate-limited ${operation} (HTTP ${response.status}, ${LINEAR_RATE_LIMITED})`
+                  : `Linear answered HTTP ${response.status} for ${operation}`,
+                limited || response.status === 429 || response.status >= 500,
+              );
+            }
+            return yield* HttpClientResponse.schemaBodyJson(Envelope)(
+              response,
+            ).pipe(
               Effect.mapError(() =>
-                fail(`Linear could not be reached for ${operation}`, true),
+                fail(`Linear's answer to ${operation} could not be read`),
               ),
             );
-          if (response.status < 200 || response.status > 299) {
-            return yield* fail(
-              `Linear answered HTTP ${response.status} for ${operation}`,
-              response.status === 429 || response.status >= 500,
-            );
-          }
-          const envelope = yield* HttpClientResponse.schemaBodyJson(Envelope)(
-            response,
-          ).pipe(
-            Effect.mapError(() =>
-              fail(`Linear's answer to ${operation} could not be read`),
-            ),
+          });
+          const envelope = yield* exchange.pipe(
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(
+                  fail(
+                    `Linear did not answer ${operation} within ${Duration.toMillis(timeout)}ms`,
+                    true,
+                  ),
+                ),
+            }),
           );
           const errors = envelope.errors ?? [];
           if (errors.length > 0) {
             return yield* fail(
               `Linear refused ${operation}: ${errors.map((error) => error.message).join("; ")}`,
+              rateLimited(envelope),
             );
           }
           return envelope.data;
@@ -530,7 +630,7 @@ export const LinearIssueSyncLive = (
         issueId: string,
         writes: Writes,
       ): Effect.Effect<void, LinearSyncError> =>
-        lock
+        lockOf(issueId)
           .withPermits(1)(
             Effect.gen(function* () {
               const issue = yield* readIssue(issueId);
@@ -621,7 +721,10 @@ export const LinearIssueSyncLive = (
         failed: (input) =>
           apply("failed", input.issueId, {
             comment: {
-              marker: linearMarker(input.sessionId, `failed:${input.step}`),
+              marker: linearMarker(
+                input.sessionId,
+                linearFailureKind(input.step, input.reason),
+              ),
               body: linearFailureComment(config, input),
             },
           }),
@@ -631,13 +734,24 @@ export const LinearIssueSyncLive = (
   );
 
 /**
+ * How long the trigger seam waits for the *started* move before it answers anyway. Linear expects a
+ * webhook answered within seconds, and the move is a mirror: an answer that waited longer than this
+ * would be a redelivery of a session that already exists.
+ */
+export const LINEAR_STARTED_BUDGET: Duration.Input = "4 seconds";
+
+/**
  * The trigger seam's write-back, filled by the sync: a Linear delivery that opened a session moves
  * its issue to the started state. Any other source is not this adapter's to answer, so it passes —
  * the Linear and generic routes share one seam (`apps/api`'s `Webhook.ts`).
  *
- * A failed write fails the delivery (`write-back`), as on Jira: the claim is given back, Linear
- * retries, and the retry reuses the session the first attempt opened and finds the state already
- * moved if the move landed.
+ * **Best effort: a failed or slow move is logged, never the delivery's failure.** The seam calls the
+ * write-back after it has created the session and sent it the rule's prompt, and a failed delivery
+ * gives its claim back so the sender retries — which would send the prompt to the same session
+ * again on every redelivery, and a permanent failure (a state the team lacks, a key without write
+ * scope) would make that every time. The started state is a mirror, not the product: the session
+ * runs either way, and the PR step's own report moves the issue past *started* (forward only), so a
+ * move missed here is converged by the next one rather than retried by a redelivery.
  */
 export const LinearTriggerWriteBack: Layer.Layer<
   TriggerWriteBack,
@@ -654,15 +768,34 @@ export const LinearTriggerWriteBack: Layer.Layer<
           : sync
               .started({ issueId: input.event.key, sessionId: input.sessionId })
               .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new TriggerError({
-                      code: "write-back",
-                      message: cause.message,
-                    }),
+                Effect.timeoutOrElse({
+                  duration: LINEAR_STARTED_BUDGET,
+                  orElse: () =>
+                    Effect.logWarning(
+                      `linear: ${input.event.key} was not moved to started within ${Duration.toMillis(LINEAR_STARTED_BUDGET)}ms; the session runs, and the PR step's report moves it on`,
+                    ),
+                }),
+                Effect.catchTag("LinearSyncError", (error) =>
+                  Effect.logError(
+                    `linear: could not move ${error.issueId} to started for ${input.sessionId} (${error.operation}): ${error.message}`,
+                  ),
                 ),
               ),
     });
+  }),
+);
+
+/**
+ * The sync of a deployment with no Linear key: every operation writes nothing. It is what lets the
+ * consumers be wired the same way whether or not a key is set (`apps/api`'s `LinearSync.ts`).
+ */
+export const NoLinearIssueSync = Layer.succeed(
+  LinearIssueSync,
+  LinearIssueSync.of({
+    started: () => Effect.void,
+    pullRequestOpened: () => Effect.void,
+    failed: () => Effect.void,
+    merged: () => Effect.void,
   }),
 );
 
@@ -819,4 +952,111 @@ export const syncPullRequestLifecycle = (
       synced += 1;
     }
     return synced;
+  });
+
+/** The header GitHub signs a webhook body into: `sha256=<hex HMAC-SHA256 of the raw body>`. */
+export const GITHUB_SIGNATURE_HEADER = "x-hub-signature-256";
+
+/** The header naming which event a GitHub delivery is (`pull_request`, `ping`, …). */
+export const GITHUB_EVENT_HEADER = "x-github-event";
+
+/** Whether `signature` is GitHub's `X-Hub-Signature-256` for `raw` under `secret`. */
+export const verifyGitHubSignature = (
+  raw: string,
+  signature: string | undefined,
+  secret: string,
+): boolean => {
+  if (signature === undefined || !signature.startsWith("sha256=")) return false;
+  const expected = createHmac("sha256", secret).update(raw).digest();
+  const given = Buffer.from(signature.slice("sha256=".length), "hex");
+  return given.length === expected.length && timingSafeEqual(given, expected);
+};
+
+/** A webhook's answer: the status and the JSON body a route sends. */
+export type GitHubWebhookAnswer = {
+  readonly status: number;
+  readonly body: Readonly<Record<string, unknown>>;
+};
+
+const JsonBody = Schema.fromJsonString(Schema.Unknown);
+
+/**
+ * One GitHub webhook delivery, taken as far as the Linear mirror needs: the PR's merge moves its
+ * issue to done, an unmerged close explains itself, and every other event or action writes nothing.
+ * This is what `POST /webhooks/github` runs (`apps/api`), kept here so a test and the drive run the
+ * same code the route does.
+ *
+ * In the order each step refuses more, as the trigger routes do: no secret configured is `503`
+ * (an unsigned route would let anyone who can reach the port move issues to done), a wrong or
+ * missing `X-Hub-Signature-256` is `401`, an event other than `pull_request` is `202` and ignored
+ * (`ping` included), and a body that names no pull request is `400`.
+ *
+ * Every write is idempotent (module comment), so GitHub's redelivery of an event — by hand, from the
+ * delivery log — is safe. A failed sync is `500` and logged, so the delivery log shows it.
+ */
+export const handleGitHubPullRequestWebhook = (input: {
+  readonly secret: string | undefined;
+  readonly raw: string;
+  readonly signature: string | undefined;
+  readonly event: string | undefined;
+}): Effect.Effect<GitHubWebhookAnswer, never, LinearIssueSync | SqlClient> =>
+  Effect.gen(function* () {
+    const secret = input.secret ?? "";
+    if (secret === "") {
+      return {
+        status: 503,
+        body: {
+          ok: false,
+          error:
+            "this route has no secret configured (GITHUB_WEBHOOK_SECRET); it accepts nothing until one is set",
+          code: "not-configured",
+        },
+      };
+    }
+    if (!verifyGitHubSignature(input.raw, input.signature, secret)) {
+      return { status: 401, body: { ok: false, error: "bad signature" } };
+    }
+    if (input.event !== "pull_request") {
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          ignored: `event "${input.event ?? ""}" is not pull_request`,
+        },
+      };
+    }
+    const payload = yield* Schema.decodeEffect(JsonBody)(input.raw).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    const lifecycle = githubPullRequestLifecycle(payload);
+    if (lifecycle === undefined) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          error: "the payload does not name a pull request",
+          code: "bad-payload",
+        },
+      };
+    }
+    return yield* syncPullRequestLifecycle(lifecycle).pipe(
+      Effect.map((synced): GitHubWebhookAnswer => ({
+        status: 200,
+        body: {
+          ok: true,
+          event: lifecycle._tag === "other" ? lifecycle.action : lifecycle._tag,
+          synced,
+        },
+      })),
+      Effect.catchTag("LinearSyncError", (error) =>
+        Effect.logError(
+          `linear: could not mirror a pull_request event on ${error.issueId} (${error.operation}): ${error.message}`,
+        ).pipe(
+          Effect.as<GitHubWebhookAnswer>({
+            status: 500,
+            body: { ok: false, error: error.message, code: "write-back" },
+          }),
+        ),
+      ),
+    );
   });

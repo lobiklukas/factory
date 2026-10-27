@@ -68,6 +68,7 @@ import {
 import {
   Clock,
   ConfigProvider,
+  Deferred,
   Effect,
   Exit,
   Fiber,
@@ -91,12 +92,14 @@ import {
   readSessionLog,
   readVerifyRecords,
   usageCostTotal,
+  type VerifyRecord,
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
   pullRequestReport,
   SessionWriteBack,
@@ -2259,6 +2262,66 @@ describe("the PR step's write-back", () => {
       ]);
     } finally {
       await reported.dispose();
+    }
+  }, 120_000);
+});
+
+describe("a slow tracker", () => {
+  it("does not hold up another session's PR step: the report runs outside the PR gate", async () => {
+    const github = makeGithubFake(201, {
+      number: 37,
+      url: "https://github.com/lobiklukas/factory/pull/37",
+    });
+    const arrived = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    let calls = 0;
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            // The first report stalls until released — a tracker that accepted the connection and
+            // has not answered — and every later one returns at once.
+            pullRequest: () =>
+              Effect.suspend(() => {
+                calls += 1;
+                return calls > 1
+                  ? Effect.void
+                  : Deferred.succeed(arrived, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                    );
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const stalled = yield* Effect.forkChild(
+            drive({ title: "a stalled report", files: 1, lines: 1 }).pipe(
+              Effect.provide(github.layer),
+            ),
+          );
+          yield* Deferred.await(arrived);
+          // Session A's report is in flight. Session B's whole PR step completes regardless.
+          const other = yield* drive({
+            title: "a PR behind a stalled report",
+            files: 1,
+            lines: 1,
+          }).pipe(Effect.provide(github.layer), Effect.timeout("60 seconds"));
+          yield* Deferred.succeed(release, undefined);
+          const first = yield* Fiber.join(stalled);
+          return { other, first };
+        }),
+      );
+      expect(result.other.answer).toMatchObject({ outcome: "opened" });
+      expect(result.first.answer).toMatchObject({ outcome: "opened" });
+    } finally {
+      await runtime.dispose();
     }
   }, 120_000);
 });
@@ -5872,6 +5935,97 @@ describe("the verify tool reads the session's workspace", () => {
           ],
         },
       ]);
+    } finally {
+      await verifyRuntime.dispose();
+    }
+  }, 120_000);
+
+  it("hands the session's verify record to the PR step's write-back, and the Linear comment carries it (LOB-15)", async () => {
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      fauxCommand:
+        "mkdir -p apps/api && echo 'export const reported = 1;' > apps/api/reported.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m reported && echo committed",
+    });
+    const url = "https://github.com/lobiklukas/verify-fixture/pull/79";
+    const github = makeGithubFake(201, { number: 79, url });
+    const reported: Array<readonly VerifyRecord[]> = [];
+    const verifyRuntime = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot: verifyRoot }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.map(input.evidence, (records) => {
+                reported.push(records);
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const sessionId = await verifyRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo: verifyRepo,
+            url: "https://github.com/lobiklukas/verify-fixture.git",
+            localPath: verifyRepoRoot,
+          });
+          const created = yield* sessions.create({
+            repo: verifyRepo,
+            baseRef: "main",
+          });
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "make the change, verify it, open the PR",
+          });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            "the run to verify and answer",
+          );
+          yield* sessions
+            .openPullRequest({
+              sessionId: created.id,
+              title: "factory: reported",
+              head: `factory/${created.id}`,
+              base: "main",
+            })
+            .pipe(Effect.provide(github.layer));
+          return created.id;
+        }),
+      );
+
+      expect(reported).toHaveLength(1);
+      const records = reported[0] ?? [];
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        _tag: "VerifyReport",
+        changed: ["apps/api/reported.ts"],
+      });
+      // What a Linear reader sees: the surface, its result, its exit code and the command.
+      const comment = linearPullRequestComment(
+        {
+          apiUrl: "http://linear.test/graphql",
+          apiKey: Redacted.make("unused"),
+          states: DEFAULT_LINEAR_STATES,
+        },
+        { sessionId, pr: { number: 79, url }, evidence: records },
+      );
+      expect(comment).toContain(
+        "Verification (the session's one `verify` call):",
+      );
+      expect(comment).toContain(
+        `- \`.\` passed (exit 0): \`${declared}\` in \`.\``,
+      );
+      expect(comment).not.toContain("No verification was recorded");
     } finally {
       await verifyRuntime.dispose();
     }

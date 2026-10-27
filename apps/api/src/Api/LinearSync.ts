@@ -1,11 +1,14 @@
 /* oxlint-disable effecttsgo/process-env */
 /**
- * The Linear write-back's deployment wiring (LOB-15): one config, one sync, two consumers.
+ * The Linear write-back's deployment wiring (LOB-15): one config, one sync, three consumers.
  *
- * The trigger seam moves a delegated issue to *started* when its session opens (`Webhook.ts`), and
- * the session layer mirrors the PR step on it (`index.ts`). Both are fed by the same
- * `LinearIssueSync` layer value, so the process builds one client and one write lock rather than a
- * copy per consumer.
+ * The trigger seam moves a delegated issue to *started* when its session opens (`Webhook.ts`), the
+ * session layer mirrors the PR step on it (`index.ts`), and the GitHub webhook moves it to *done*
+ * when its PR merges (`GitHubWebhook.ts`). All three read the one `LinearIssueSync` that
+ * `LinearIssueSyncLayer` builds, and `index.ts` provides it beside Postgres — outside
+ * `HttpRouter.serve`, whose forked `MemoMap` would otherwise build a private copy for the routes. So
+ * the process holds one client and one set of per-issue write locks, which is what the sync's
+ * read-then-write idempotency leans on.
  *
  * The config is read from the environment once, when the module loads, the way `Webhook.ts` reads
  * its rules — so whether the write-back is on is decided before any layer is built:
@@ -19,12 +22,16 @@
  */
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
+import type { SqlClient } from "effect/sql/SqlClient";
 import {
+  type LinearIssueSync,
   LinearIssueSyncLive,
   LinearSessionWriteBack,
   LinearTriggerWriteBack,
   linearConfigFromEnv,
+  NoLinearIssueSync,
   NoWriteBack,
+  type TriggerWriteBack,
 } from "@repo/core";
 
 export const linearConfig = linearConfigFromEnv({
@@ -36,30 +43,36 @@ export const linearConfig = linearConfigFromEnv({
   sessionUrlBase: process.env["LINEAR_SESSION_URL_BASE"],
 });
 
-const LinearSync =
+/** The process's one sync: Linear's when a key is configured, otherwise one that writes nothing. */
+export const LinearIssueSyncLayer: Layer.Layer<LinearIssueSync> =
   linearConfig === undefined
-    ? undefined
+    ? NoLinearIssueSync
     : LinearIssueSyncLive(linearConfig).pipe(
         Layer.provide(FetchHttpClient.layer),
       );
 
 /** The trigger seam's write-back: Linear's when a key is configured, otherwise none. */
-export const TriggerWriteBackLive =
-  LinearSync === undefined
-    ? NoWriteBack
-    : LinearTriggerWriteBack.pipe(Layer.provide(LinearSync));
+export const TriggerWriteBackLive: Layer.Layer<
+  TriggerWriteBack,
+  never,
+  LinearIssueSync
+> = linearConfig === undefined ? NoWriteBack : LinearTriggerWriteBack;
 
-/** The session layer's write-back. Without a key nothing is provided, and the default is a no-op. */
-export const SessionWriteBackLive =
-  LinearSync === undefined
-    ? Layer.empty
-    : LinearSessionWriteBack.pipe(Layer.provide(LinearSync));
+/**
+ * The session layer's write-back. Without a key nothing is provided, and the default is a no-op —
+ * so a PR step in a deployment with no tracker does not even look up which issue it belongs to.
+ */
+export const SessionWriteBackLive: Layer.Layer<
+  never,
+  never,
+  LinearIssueSync | SqlClient
+> = linearConfig === undefined ? Layer.empty : LinearSessionWriteBack;
 
 /** Say at boot whether the loop closes in Linear, and through which states. */
 export const LinearSyncLog = Layer.effectDiscard(
   linearConfig === undefined
     ? Effect.logInfo("linear write-back: off (no LINEAR_API_KEY)")
     : Effect.logInfo(
-        `linear write-back: on — started → ${linearConfig.states.started}, PR opened → ${linearConfig.states.inReview}, merged → ${linearConfig.states.done}`,
+        `linear write-back: on — started → ${linearConfig.states.started}, PR opened → ${linearConfig.states.inReview}, merged → ${linearConfig.states.done} (POST /webhooks/github, GITHUB_WEBHOOK_SECRET)`,
       ),
 );

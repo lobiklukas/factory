@@ -18,7 +18,12 @@ import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { WebhookLive } from "./Api/Webhook";
-import { LinearSyncLog, SessionWriteBackLive } from "./Api/LinearSync";
+import { GitHubWebhookLive } from "./Api/GitHubWebhook";
+import {
+  LinearIssueSyncLayer,
+  LinearSyncLog,
+  SessionWriteBackLive,
+} from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
@@ -182,6 +187,7 @@ const AllRouters = Layer.mergeAll(
   SessionRpcLive,
   ProbesLive,
   WebhookLive,
+  GitHubWebhookLive,
 );
 
 // NOTE: Modules append additional server layers here through Layer.mergeAll.
@@ -232,7 +238,13 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
-  ).pipe(Layer.provideMerge(Layer.mergeAll(PostgresLive, BunServices.layer)));
+  ).pipe(
+    // The Linear sync sits beside Postgres so the session layer and the routes share one instance
+    // (`./Api/LinearSync`): a layer first built inside `serve` would be the routes' private copy.
+    Layer.provideMerge(
+      Layer.mergeAll(PostgresLive, BunServices.layer, LinearIssueSyncLayer),
+    ),
+  );
 
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   yield* Effect.logInfo("Starting server with:");

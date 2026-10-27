@@ -24,6 +24,7 @@ import {
   Context,
   DateTime,
   Effect,
+  Exit,
   FiberMap,
   FileSystem,
   HashMap,
@@ -1174,14 +1175,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * did rather than from the caller: the model that spent the most, and the total. The owner's
        * workspace is what the step measures the branch in, and the configured cap is passed with it
        * (LOB-227).
+       *
+       * The step runs inside the PR gate and answers its exit with the owner's log; `openPr` reports
+       * that exit once the gate is released (LOB-15).
        */
-      const openPr = (
-        input: OpenPullRequestArgs,
-      ): Effect.Effect<
-        PullRequestStep,
-        SessionError | PrError | CredentialError,
-        CredentialProvider | HttpClient.HttpClient
-      > =>
+      const stepPr = (input: OpenPullRequestArgs) =>
         prGate.withPermits(1)(
           Effect.gen(function* () {
             const row = yield* requireSession(input.sessionId);
@@ -1231,20 +1229,41 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               Effect.provideService(SqlClient, sql),
               Effect.exit,
             );
-            // Every exit is reported — the PR, a refusal, an error — so a tracker can mirror it
-            // (LOB-15). The report cannot fail: the step's own answer is what returns below.
-            yield* writeBack.pullRequest({
-              sessionId: input.sessionId,
-              result: stepped,
-              evidence: readVerifyRecords(owner.storage).pipe(
-                Effect.orElseSucceed(() => []),
-              ),
-            });
-            const opened = yield* stepped;
-            yield* touchActivity(input.sessionId);
-            return opened;
+            if (Exit.isSuccess(stepped)) yield* touchActivity(input.sessionId);
+            return { stepped, storage: owner.storage };
           }),
         );
+
+      /**
+       * The PR step, and its exit reported to the write-back. Every exit is reported — the PR, a
+       * refusal, an error — so a tracker can mirror it (LOB-15). The report runs outside the gate:
+       * the gate is every session's, and a tracker slow to answer must not hold up another session's
+       * PR. It cannot fail; the step's own answer is what returns.
+       */
+      const openPr = (
+        input: OpenPullRequestArgs,
+      ): Effect.Effect<
+        PullRequestStep,
+        SessionError | PrError | CredentialError,
+        CredentialProvider | HttpClient.HttpClient
+      > =>
+        Effect.gen(function* () {
+          const { stepped, storage } = yield* stepPr(input);
+          yield* writeBack.pullRequest({
+            sessionId: input.sessionId,
+            result: stepped,
+            evidence: readVerifyRecords(storage).pipe(
+              // A log that cannot be read is said, not passed off as "no verification recorded".
+              Effect.tapError((error) =>
+                Effect.logWarning(
+                  `session ${input.sessionId}: could not read its verify records for the write-back: ${error.message}`,
+                ),
+              ),
+              Effect.orElseSucceed(() => []),
+            ),
+          });
+          return yield* stepped;
+        });
 
       /**
        * Fork a session at one of its entries (LOB-180, D7).

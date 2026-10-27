@@ -27,11 +27,16 @@
 //   9. a new commit on the PR (`synchronize`) writes nothing to the issue: its state is the task's,
 //      not the review's
 //  10. the PR's merge moves the issue to Done
+//
+// 9 and 10 arrive as GitHub sends them: a signed `pull_request` webhook body, through
+// `handleGitHubPullRequestWebhook` — the code `POST /webhooks/github` runs — and a delivery with a
+// wrong signature is refused without a write.
 //  11. every request carried the configured key, verbatim
 //
 // Env: DATABASE_URL (via DatabaseLive), SESSION_ROOT, REPO_DIR, LINEAR_FAKE_URL, LINEAR_FAKE_LEDGER,
 // LINEAR_RUN_STAMP, LINEAR_LOSE_ACK_ISSUE, GITHUB_API_URL (read by the PR client), EVIDENCE_DIR.
 import { execSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { readFileSync, writeFileSync as writeSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -44,7 +49,7 @@ import type { TriggerRule } from "@repo/domain/Trigger";
 import {
   CredentialProvider,
   DEFAULT_LINEAR_STATES,
-  githubPullRequestLifecycle,
+  handleGitHubPullRequestWebhook,
   linearDelivery,
   LinearIssueSyncLive,
   LinearSessionWriteBack,
@@ -52,7 +57,6 @@ import {
   SessionService,
   SessionServiceLive,
   staticTokenProvider,
-  syncPullRequestLifecycle,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -217,6 +221,19 @@ const openPr = (sessionId: SessionId) =>
       .pipe(Effect.provide(github));
   });
 
+const GITHUB_WEBHOOK_SECRET = "linear-writeback-gh-webhook-secret";
+
+/** One `pull_request` delivery, signed as GitHub signs it, through the route's handler. */
+const githubHook = (payload: unknown, key = GITHUB_WEBHOOK_SECRET) => {
+  const raw = JSON.stringify(payload);
+  return handleGitHubPullRequestWebhook({
+    secret: GITHUB_WEBHOOK_SECRET,
+    raw,
+    signature: `sha256=${createHmac("sha256", key).update(raw).digest("hex")}`,
+    event: "pull_request",
+  });
+};
+
 const commitChange = (worktree: string) => {
   writeSync(
     path.join(worktree, "CHANGE.md"),
@@ -349,32 +366,36 @@ const run = Effect.gen(function* () {
     `lostAcks=${JSON.stringify(ledger().lostAcks)} comments=${issue(LOSE_ACK_ISSUE)?.comments.length} commentCreate calls so far=${posted}`,
   );
 
-  // 9–10: the PR's life after it opened, as GitHub's `pull_request` events say it.
+  // 9–10: the PR's life after it opened, as GitHub's signed `pull_request` webhooks say it.
   const number = observed.pr?.number ?? 0;
   const before = writesTo(DELIVERED);
-  const pushed = githubPullRequestLifecycle({
+  const pushed = yield* githubHook({
     action: "synchronize",
     pull_request: { number, html_url: prUrl, merged: false },
   });
-  const pushedCount =
-    pushed === undefined ? -1 : yield* syncPullRequestLifecycle(pushed);
   assert(
     "a new commit on the PR writes nothing to the issue: its state is the task's, not the review's",
-    pushedCount === 0 &&
+    pushed.status === 200 &&
+      pushed.body["synced"] === 0 &&
       writesTo(DELIVERED) === before &&
       issue(DELIVERED)?.state.name === "In Review",
-    `synced=${pushedCount} state=${String(issue(DELIVERED)?.state.name)}`,
+    `answer=${JSON.stringify(pushed)} state=${String(issue(DELIVERED)?.state.name)}`,
   );
-  const merged = githubPullRequestLifecycle({
+  const mergedBody = {
     action: "closed",
     pull_request: { number, html_url: prUrl, merged: true },
-  });
-  const mergedCount =
-    merged === undefined ? -1 : yield* syncPullRequestLifecycle(merged);
+  };
+  const forged = yield* githubHook(mergedBody, "not-the-secret");
+  const stillInReview = issue(DELIVERED)?.state.name === "In Review";
+  const merged = yield* githubHook(mergedBody);
   assert(
-    "the PR's merge moves the issue to Done",
-    mergedCount === 1 && issue(DELIVERED)?.state.name === "Done",
-    `synced=${mergedCount} state=${String(issue(DELIVERED)?.state.name)}`,
+    "the PR's merge moves the issue to Done (a forged merge event is refused first)",
+    forged.status === 401 &&
+      stillInReview &&
+      merged.status === 200 &&
+      merged.body["synced"] === 1 &&
+      issue(DELIVERED)?.state.name === "Done",
+    `forged=${forged.status} merged=${JSON.stringify(merged)} state=${String(issue(DELIVERED)?.state.name)}`,
   );
 
   // 11

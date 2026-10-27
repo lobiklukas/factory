@@ -11,23 +11,26 @@
  *
  * Needs Postgres for the last block: `docker compose up -d --wait postgres`.
  */
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
+import { BunServices } from "@effect/platform-bun";
 import { Effect, Exit, Layer, ManagedRuntime, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
-import type { SessionId } from "@repo/domain/Session";
+import type { RepoSlug, SessionId } from "@repo/domain/Session";
 import { SessionError } from "@repo/domain/Session";
-import type { TriggerEvent } from "@repo/domain/Trigger";
+import type { TriggerEvent, TriggerRule } from "@repo/domain/Trigger";
 import type { VerifyRecord } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { linearDelivery, linearIssueOfDelivery } from "./Linear";
 import {
   DEFAULT_LINEAR_STATES,
   githubPullRequestLifecycle,
+  handleGitHubPullRequestWebhook,
   type LinearConfig,
   linearConfigFromEnv,
   linearEvidenceLines,
+  linearFailureKind,
   LinearIssueSync,
   LinearIssueSyncLive,
   type LinearIssueSyncShape,
@@ -36,6 +39,7 @@ import {
   type LinearWorkflowState,
   nextLinearState,
   syncPullRequestLifecycle,
+  verifyGitHubSignature,
 } from "./LinearSync";
 import { PrError } from "./pr";
 import {
@@ -46,6 +50,9 @@ import {
 import {
   deliveryIdOfSession,
   sessionRequestIdOf,
+  TriggerService,
+  TriggerServiceLive,
+  TriggerSessions,
   TriggerWriteBack,
 } from "./TriggerService";
 
@@ -340,6 +347,10 @@ type FakeOptions = {
   readonly refuse?: string;
   /** Answer this mutation with `success: false`. */
   readonly unsuccessful?: string;
+  /** Answer this operation the way Linear rate-limits: HTTP 400, `RATELIMITED`, this many times. */
+  readonly rateLimit?: { readonly operation: string; readonly times: number };
+  /** Never answer this operation, this many times (`Infinity`: never at all). */
+  readonly hang?: { readonly operation: string; readonly times: number };
 };
 
 const Json = Schema.fromJsonString(Schema.Unknown);
@@ -357,7 +368,10 @@ const asRecord = (value: unknown): Record<string, unknown> =>
 const makeLinear = (options: FakeOptions = {}) => {
   const states = options.states ?? TEAM;
   const issue = {
-    id: "iss-uuid-1",
+    id:
+      options.identifier === undefined
+        ? "iss-uuid-1"
+        : `iss-${options.identifier}`,
     identifier: options.identifier ?? "ENG-42",
     state: options.start ?? TODO,
     comments: [...(options.comments ?? [])],
@@ -365,6 +379,8 @@ const makeLinear = (options: FakeOptions = {}) => {
   };
   const seen: Seen[] = [];
   const lost = new Set<string>();
+  let limitsLeft = options.rateLimit?.times ?? 0;
+  let hangsLeft = options.hang?.times ?? 0;
 
   const operationOf = (query: string): string =>
     query.includes("commentCreate")
@@ -413,67 +429,82 @@ const makeLinear = (options: FakeOptions = {}) => {
     }
   };
 
-  const layer = Layer.succeed(
-    HttpClient.HttpClient,
-    HttpClient.make((request) =>
-      Effect.gen(function* () {
-        const raw =
-          request.body._tag === "Uint8Array"
-            ? new TextDecoder().decode(request.body.body)
-            : "{}";
-        const body = yield* Schema.decodeEffect(
-          Schema.fromJsonString(RequestBody),
-        )(raw);
-        const operation = operationOf(body.query);
-        seen.push({
-          operation,
-          variables: body.variables,
-          authorization: request.headers["authorization"],
-        });
-        const reply = (status: number, payload: unknown) =>
-          Schema.encodeEffect(Json)(payload).pipe(
-            Effect.map((text) =>
-              HttpClientResponse.fromWeb(
-                request,
-                new Response(text, {
-                  status,
-                  headers: { "content-type": "application/json" },
-                }),
-              ),
+  const client = HttpClient.make((request) =>
+    Effect.gen(function* () {
+      const raw =
+        request.body._tag === "Uint8Array"
+          ? new TextDecoder().decode(request.body.body)
+          : "{}";
+      const body = yield* Schema.decodeEffect(
+        Schema.fromJsonString(RequestBody),
+      )(raw);
+      const operation = operationOf(body.query);
+      seen.push({
+        operation,
+        variables: body.variables,
+        authorization: request.headers["authorization"],
+      });
+      const reply = (status: number, payload: unknown) =>
+        Schema.encodeEffect(Json)(payload).pipe(
+          Effect.map((text) =>
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(text, {
+                status,
+                headers: { "content-type": "application/json" },
+              }),
             ),
-          );
-        if (options.refuse === operation) {
-          return yield* reply(200, {
-            data: null,
-            errors: [{ message: "Entity not found" }],
-          });
-        }
-        if (options.unsuccessful === operation) {
-          return yield* reply(200, {
-            data: { [operation]: { success: false } },
-          });
-        }
-        const data = answer(operation, body.variables);
-        if (options.loseAckOnce === operation && !lost.has(operation)) {
-          lost.add(operation);
-          return yield* reply(500, { error: "upstream timeout" });
-        }
-        return yield* reply(200, { data });
-      }).pipe(Effect.orDie),
-    ),
+          ),
+        );
+      if (options.hang?.operation === operation && hangsLeft > 0) {
+        hangsLeft -= 1;
+        return yield* Effect.never;
+      }
+      if (options.rateLimit?.operation === operation && limitsLeft > 0) {
+        limitsLeft -= 1;
+        return yield* reply(400, {
+          data: null,
+          errors: [
+            {
+              message: "Rate limit exceeded",
+              extensions: { code: "RATELIMITED" },
+            },
+          ],
+        });
+      }
+      if (options.refuse === operation) {
+        return yield* reply(200, {
+          data: null,
+          errors: [{ message: "Entity not found" }],
+        });
+      }
+      if (options.unsuccessful === operation) {
+        return yield* reply(200, {
+          data: { [operation]: { success: false } },
+        });
+      }
+      const data = answer(operation, body.variables);
+      if (options.loseAckOnce === operation && !lost.has(operation)) {
+        lost.add(operation);
+        return yield* reply(500, { error: "upstream timeout" });
+      }
+      return yield* reply(200, { data });
+    }).pipe(Effect.orDie),
   );
+  const layer = Layer.succeed(HttpClient.HttpClient, client);
   const writes = (operation?: string) =>
     seen.filter((s) =>
       operation === undefined
         ? s.operation !== "issue"
         : s.operation === operation,
     );
-  return { issue, seen, writes, layer };
+  return { issue, seen, writes, client, layer };
 };
 
 const withSync = <A, E>(
   fake: ReturnType<typeof makeLinear>,
   body: (sync: LinearIssueSyncShape) => Effect.Effect<A, E>,
+  over: Partial<LinearConfig> = {},
 ) =>
   Effect.runPromiseExit(
     Effect.gen(function* () {
@@ -481,7 +512,9 @@ const withSync = <A, E>(
       return yield* body(sync);
     }).pipe(
       Effect.provide(
-        LinearIssueSyncLive(config).pipe(Layer.provide(fake.layer)),
+        LinearIssueSyncLive({ ...config, ...over }).pipe(
+          Layer.provide(fake.layer),
+        ),
       ),
     ),
   );
@@ -597,11 +630,24 @@ describe("LinearIssueSyncLive", () => {
       "did not produce a pull request: the run changed no file against its base branch.",
     );
     expect(fake.issue.comments[0]).toContain(
-      `factory:${sessionId}:failed:no-change`,
+      `factory:${sessionId}:${linearFailureKind("no-change", "the run changed no file against its base branch")}`,
     );
     // The task is neither done nor in review: a failure moves no state.
     expect(fake.issue.state).toEqual(PROGRESS);
     expect(fake.writes("issueUpdate")).toEqual([]);
+  });
+
+  it("a different failure of the same step still explains itself; the same one again does not", async () => {
+    const fake = makeLinear({ start: PROGRESS });
+    const fail = (reason: string) =>
+      withSync(fake, (sync) =>
+        sync.failed({ issueId: "ENG-42", sessionId, step: "pr-error", reason }),
+      );
+    await fail("the pull request step failed (PrError): GitHub answered 403");
+    await fail("the pull request step failed (PrError): GitHub answered 422");
+    await fail("the pull request step failed (PrError): GitHub answered 422");
+    expect(fake.issue.comments).toHaveLength(2);
+    expect(fake.issue.comments[1]).toContain("GitHub answered 422");
   });
 
   it("a different failure of the same session still explains itself", async () => {
@@ -654,6 +700,82 @@ describe("LinearIssueSyncLive", () => {
     );
     // The link still landed: the state is the last write, and a retry finds the comment.
     expect(fake.issue.comments).toHaveLength(1);
+  });
+
+  it("Linear's rate limit (HTTP 400, RATELIMITED) is transient: retried, and the write lands", async () => {
+    const fake = makeLinear({ rateLimit: { operation: "issue", times: 1 } });
+    const exit = await withSync(fake, (sync) =>
+      sync.started({ issueId: "ENG-42", sessionId }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(fake.seen.filter((s) => s.operation === "issue")).toHaveLength(2);
+    expect(fake.issue.state).toEqual(PROGRESS);
+  });
+
+  it("a rate limit that outlasts the retries says so", async () => {
+    const fake = makeLinear({ rateLimit: { operation: "issue", times: 9 } });
+    const exit = await withSync(fake, (sync) =>
+      sync.started({ issueId: "ENG-42", sessionId }),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(JSON.stringify(exit)).toContain("RATELIMITED");
+    // Two retries, then the answer.
+    expect(fake.seen).toHaveLength(3);
+  });
+
+  it("a request Linear never answers times out as transient, and the retry lands", async () => {
+    const fake = makeLinear({ hang: { operation: "issueUpdate", times: 1 } });
+    const exit = await withSync(
+      fake,
+      (sync) => sync.started({ issueId: "ENG-42", sessionId }),
+      { requestTimeout: "50 millis" },
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(fake.issue.state).toEqual(PROGRESS);
+  });
+
+  it("a Linear that never answers fails within its bound rather than stalling the caller", async () => {
+    const fake = makeLinear({ hang: { operation: "issue", times: Infinity } });
+    const exit = await withSync(
+      fake,
+      (sync) => sync.started({ issueId: "ENG-42", sessionId }),
+      { requestTimeout: "50 millis" },
+    );
+    // Three attempts of 50ms each, then the answer — the case's own timeout is the stall check.
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(JSON.stringify(exit)).toContain("did not answer issue within 50ms");
+    expect(fake.seen).toHaveLength(3);
+  }, 5_000);
+
+  it("one issue's stalled write does not hold up another issue's", async () => {
+    const fake = makeLinear({ hang: { operation: "issue", times: Infinity } });
+    const other = makeLinear({ identifier: "ENG-43" });
+    // One Linear, two issues: a request is the stalled issue's unless it names the other one.
+    const both = HttpClient.make((request) =>
+      (request.body._tag === "Uint8Array" &&
+      new TextDecoder().decode(request.body.body).includes("ENG-43")
+        ? other.client
+        : fake.client
+      ).execute(request),
+    );
+    const exit = await Effect.runPromiseExit(
+      Effect.gen(function* () {
+        const sync = yield* LinearIssueSync;
+        // The stalled issue is in flight, holding its own lock, when the other one writes.
+        yield* Effect.forkChild(sync.started({ issueId: "ENG-42", sessionId }));
+        yield* Effect.sleep("20 millis");
+        return yield* sync.started({ issueId: "ENG-43", sessionId });
+      }).pipe(
+        Effect.provide(
+          LinearIssueSyncLive({ ...config, requestTimeout: "30 seconds" }).pipe(
+            Layer.provide(Layer.succeed(HttpClient.HttpClient, both)),
+          ),
+        ),
+        Effect.timeout("2 seconds"),
+      ),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(other.issue.state).toEqual(PROGRESS);
   });
 
   it("a GraphQL refusal on HTTP 200 is a failure, and is not retried", async () => {
@@ -719,10 +841,11 @@ describe("LinearTriggerWriteBack", () => {
     expect(fake.issue.state).toEqual(PROGRESS);
   });
 
-  it("fails the delivery as a write-back when Linear refuses, so the claim is given back", async () => {
+  it("does not fail the delivery when Linear refuses: the move is a mirror, and it is logged", async () => {
     const fake = makeLinear({ refuse: "issue" });
     const exit = await write(fake, "linear");
-    expect(JSON.stringify(exit)).toContain('"code":"write-back"');
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(fake.seen).toHaveLength(1);
   });
 });
 
@@ -884,5 +1007,163 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
     );
     expect(Exit.isSuccess(exit) ? exit.value : -1).toBe(0);
     expect(fake.seen).toEqual([]);
+  });
+  it("a refused started move does not make Linear's redelivery prompt the session again", async () => {
+    // The seam, on the real delivery store, with a counting session layer and Linear refusing every
+    // read: before the move was best effort, the refusal failed the delivery, gave its claim back,
+    // and every redelivery sent the rule's prompt to the same session once more.
+    const slug = `acme/linear-trigger-${runId}` as RepoSlug;
+    const rules: ReadonlyArray<TriggerRule> = [
+      { label: "factory", repo: slug, prompt: "{{key}}: {{title}}" },
+    ];
+    const sent: string[] = [];
+    const created: SessionId[] = [];
+    const fake = makeLinear({ identifier: `TRG-${runId}`, refuse: "issue" });
+    const seam = ManagedRuntime.make(
+      TriggerServiceLive({ rules }).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(
+              TriggerSessions,
+              TriggerSessions.of({
+                create: () =>
+                  Effect.sync(() => {
+                    // The real layer dedupes on the request id; one session is all a retry can get.
+                    if (created.length === 0) {
+                      created.push(`ses_${"1".padStart(26, "0")}` as SessionId);
+                    }
+                    return { id: created[0] as SessionId };
+                  }),
+                send: (input) =>
+                  Effect.sync(() => {
+                    sent.push(input.content);
+                  }),
+              }),
+            ),
+            LinearTriggerWriteBack.pipe(
+              Layer.provide(LinearIssueSyncLive(config)),
+              Layer.provide(fake.layer),
+            ),
+          ),
+        ),
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      const delivered = await seam.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`INSERT INTO repos (slug) VALUES (${slug}) ON CONFLICT (slug) DO NOTHING`;
+          const trigger = yield* TriggerService;
+          const delivery = {
+            requestId: `linear:TRG-${runId}:mapped`,
+            event: {
+              source: "linear",
+              key: `TRG-${runId}`,
+              action: "create",
+              title: "Close the loop",
+              body: "",
+              labels: ["factory"],
+            },
+          } as const;
+          const first = yield* trigger.deliver(delivery);
+          const again = yield* trigger.deliver(delivery);
+          return { first, again };
+        }),
+      );
+      expect(delivered.first).toMatchObject({
+        status: "processed",
+        replayed: false,
+      });
+      expect(delivered.again.replayed).toBe(true);
+      expect(sent).toEqual([`TRG-${runId}: Close the loop`]);
+      // The move was tried once, refused, and not retried by a redelivery.
+      expect(fake.seen).toHaveLength(1);
+    } finally {
+      await seam.dispose();
+    }
+  });
+
+  describe("POST /webhooks/github (handleGitHubPullRequestWebhook)", () => {
+    const secret = "gh-webhook-secret";
+    const sign = (raw: string, key = secret) =>
+      `sha256=${createHmac("sha256", key).update(raw).digest("hex")}`;
+    const body = (action: string, merged: boolean, url: string) =>
+      JSON.stringify({
+        action,
+        pull_request: { number: 7, html_url: url, merged },
+      });
+    const hook = (
+      fake: ReturnType<typeof makeLinear>,
+      input: Partial<Parameters<typeof handleGitHubPullRequestWebhook>[0]> & {
+        readonly raw: string;
+      },
+    ) =>
+      run(
+        fake,
+        handleGitHubPullRequestWebhook({
+          secret,
+          signature: sign(input.raw),
+          event: "pull_request",
+          ...input,
+        }),
+      ).then((exit) => (Exit.isSuccess(exit) ? exit.value : undefined));
+
+    it("verifies GitHub's X-Hub-Signature-256", () => {
+      const raw = body("closed", true, pr.url);
+      expect(verifyGitHubSignature(raw, sign(raw), secret)).toBe(true);
+      expect(verifyGitHubSignature(raw, sign(raw, "other"), secret)).toBe(
+        false,
+      );
+      expect(
+        verifyGitHubSignature(raw, sign(raw).replace("sha256=", ""), secret),
+      ).toBe(false);
+      expect(verifyGitHubSignature(raw, undefined, secret)).toBe(false);
+      expect(verifyGitHubSignature(raw, "sha256=zz", secret)).toBe(false);
+    });
+
+    it("refuses with no secret, a bad signature, and a body with no PR; ignores other events", async () => {
+      const fake = makeLinear({ start: REVIEW });
+      const raw = body("closed", true, pr.url);
+      expect((await hook(fake, { raw, secret: undefined }))?.status).toBe(503);
+      expect(
+        (await hook(fake, { raw, signature: sign(raw, "wrong") }))?.status,
+      ).toBe(401);
+      expect((await hook(fake, { raw, event: "ping" }))?.status).toBe(202);
+      expect((await hook(fake, { raw: "{}" }))?.status).toBe(400);
+      expect((await hook(fake, { raw: "not json" }))?.status).toBe(400);
+      expect(fake.seen).toEqual([]);
+    });
+
+    it("a merged PR's event moves its issue to Done; a new commit's writes nothing", async () => {
+      const url = `${pr.url}-gh-${runId}`;
+      const id = `ses_lws_gh_${runId}`;
+      await seedSession(id, `trigger:linear:${key(id)}:mapped`, url);
+      const fake = makeLinear({ identifier: key(id), start: REVIEW });
+
+      const pushed = await hook(fake, { raw: body("synchronize", false, url) });
+      expect(pushed).toEqual({
+        status: 200,
+        body: { ok: true, event: "synchronize", synced: 0 },
+      });
+      expect(fake.seen).toEqual([]);
+
+      const merged = await hook(fake, { raw: body("closed", true, url) });
+      expect(merged).toEqual({
+        status: 200,
+        body: { ok: true, event: "merged", synced: 1 },
+      });
+      expect(fake.issue.state).toEqual(DONE);
+    });
+
+    it("a sync Linear refuses is a 500 the delivery log shows", async () => {
+      const url = `${pr.url}-gh500-${runId}`;
+      const id = `ses_lws_gh500_${runId}`;
+      await seedSession(id, `trigger:linear:${key(id)}:mapped`, url);
+      const fake = makeLinear({ identifier: key(id), refuse: "issue" });
+      const answer = await hook(fake, { raw: body("closed", true, url) });
+      expect(answer?.status).toBe(500);
+      expect(answer?.body).toMatchObject({ ok: false, code: "write-back" });
+    });
   });
 });
