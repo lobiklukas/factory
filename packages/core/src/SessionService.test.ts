@@ -89,6 +89,7 @@ import {
   createModelAccess,
   readPromptSections,
   readSessionLog,
+  readVerifyRecords,
   usageCostTotal,
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
@@ -5666,5 +5667,123 @@ describe("a mission on a session", () => {
         : undefined,
     ).toContain("feature");
     expect(outcome.snapshot.mission).toBeUndefined();
+  }, 120_000);
+});
+
+/**
+ * The `verify` tool is given the workspace the service resolved (LOB-78): the repo's declared
+ * `verify` command, and the base ref the branch's changes are measured against.
+ *
+ * The repo declares a command *and* holds a verify skill for the same surface, and the two disagree
+ * (the skill exits 9), so only the declared command reaching the tool can make this pass. The run's
+ * change is committed on the session's branch by its own `bash` turn, so it is in the branch's diff
+ * against `main` and in nothing uncommitted: only the base reaching the tool lets it see the change
+ * at all. The record is read back out of the session's own log, the way part 2 (LOB-79) will.
+ */
+describe("the verify tool reads the session's workspace", () => {
+  const verifyRoot = mkdtempSync(join(tmpdir(), "factory-core-verify-"));
+  const verifyRepoRoot = mkdtempSync(join(tmpdir(), "factory-repo-verify-"));
+  const verifyRepo = RepoSlugSchema.make("lobiklukas/verify-fixture");
+  const declared =
+    'echo "declared verify for $FACTORY_VERIFY_SURFACE covering $FACTORY_VERIFY_SURFACES"';
+
+  beforeAll(() => {
+    const git = (command: string) =>
+      execSync(command, { cwd: verifyRepoRoot, stdio: "ignore" });
+    git("git init -b main");
+    git("git config user.email t@t.com");
+    git("git config user.name t");
+    mkdirSync(join(verifyRepoRoot, ".factory"), { recursive: true });
+    writeFileSync(
+      join(verifyRepoRoot, ".factory", "config"),
+      JSON.stringify({ verify: declared }),
+    );
+    mkdirSync(join(verifyRepoRoot, ".pi", "skills", "verify-api"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(verifyRepoRoot, ".pi", "skills", "verify-api", "drive.sh"),
+      'echo "the skill ran"\nexit 9\n',
+    );
+    git("git add -A");
+    git("git commit -m base");
+  });
+
+  it("runs the declared command, not the skill, over the change committed on the branch", async () => {
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      // The run's change, committed in its own worktree: a branch diff against `main`, nothing else.
+      fauxCommand:
+        "mkdir -p apps/api && echo 'export const feature = 1;' > apps/api/feature.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m feature && echo committed",
+    });
+    const verifyRuntime = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot: verifyRoot }).pipe(
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const result = await verifyRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo: verifyRepo,
+            url: "https://github.com/lobiklukas/verify-fixture.git",
+            localPath: verifyRepoRoot,
+          });
+          const created = yield* sessions.create({
+            repo: verifyRepo,
+            baseRef: "main",
+          });
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "make the change and verify it",
+          });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            "the run to verify and answer",
+          );
+          const snapshot = yield* sessions.get(created.id);
+          const sql = yield* SqlClient;
+          const records = yield* Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+            (storage) => readVerifyRecords(storage),
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+          return { snapshot, records };
+        }),
+      );
+
+      expect(result.snapshot.workspace.commands.verify).toBe(declared);
+      expect(result.records).toEqual([
+        {
+          _tag: "VerifyReport",
+          changed: ["apps/api/feature.ts"],
+          changedCount: 1,
+          results: [
+            {
+              _tag: "VerifyRan",
+              // A declared command verifies the repo once, told which surfaces it covers.
+              surface: ".",
+              source: "workspace",
+              directory: ".",
+              command: declared,
+              exitCode: 0,
+              output: "declared verify for . covering api\n",
+              truncated: false,
+            },
+          ],
+        },
+      ]);
+    } finally {
+      await verifyRuntime.dispose();
+    }
   }, 120_000);
 });

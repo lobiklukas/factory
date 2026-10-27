@@ -69,6 +69,7 @@ import {
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
+import { verifyExtension, type VerifyOptions } from "./verify";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -249,6 +250,13 @@ export type OpenSessionOptions = {
    * that a prompt section could enumerate.
    */
   readonly pages?: readonly CitedPage[];
+  /**
+   * What the `verify` tool runs (LOB-78, `./verify`): the repo's declared `verify` command and the
+   * base its changes are measured against, from the workspace the control plane resolved. Absent:
+   * no declared command and no base, so the tool falls back on the worktree's verify skills and
+   * measures only uncommitted work.
+   */
+  readonly verify?: VerifyOptions;
 };
 
 export type OpenSession = {
@@ -294,6 +302,9 @@ export const openSession = (
     const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
     registry.install(CodingTools);
+    // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
+    // its own surface rather than prose about it.
+    registry.install(verifyExtension(options.verify));
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
     const tasks = options.tasks ?? [];
@@ -1156,6 +1167,8 @@ export type ForkSessionOptions = {
    * prompt section could enumerate).
    */
   readonly pages?: readonly CitedPage[];
+  /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
+  readonly verify?: VerifyOptions;
 };
 
 export type ForkedSession = OpenSession & {
@@ -1183,6 +1196,7 @@ export const forkSession = (
       ...(options.policy === undefined ? {} : { policy: options.policy }),
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.pages === undefined ? {} : { pages: options.pages }),
+      ...(options.verify === undefined ? {} : { verify: options.verify }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",

@@ -100,6 +100,7 @@ import {
   startMission as beginMission,
   type AutonomyConfig,
   type SessionPolicy,
+  type VerifyOptions,
 } from "@repo/harness";
 import {
   closeHarness,
@@ -871,6 +872,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly run: RunProfile;
         /** The cited pages the session's prompt carries (LOB-205), read at every acquisition. */
         readonly pages: readonly Page[];
+        /**
+         * What the session's `verify` tool runs (LOB-78): the repo's declared command and the base
+         * its changes are measured against, from the workspace resolved for this acquisition.
+         */
+        readonly verify: VerifyOptions;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -922,6 +928,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               policy: policy.forWorktree(workspace.path, id),
               run,
               pages,
+              verify: {
+                command: workspace.commands.verify,
+                baseRef: workspace.baseRef,
+              },
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -956,12 +966,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquireOwnerWith(
           id,
           row,
-          ({ storage, cwd, policy: sessionPolicy, run, pages }) =>
+          ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
             openSession({
               storage,
               model: options.model,
               cwd,
               pages,
+              verify,
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -1278,7 +1289,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, pages }) =>
+            ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
                 (parentStorage) =>
@@ -1289,6 +1300,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     lineage: input.sessionId,
                     run,
                     pages,
+                    verify,
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
                       ? {}
@@ -1375,7 +1387,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run }) =>
+            ({ storage, cwd, policy: sessionPolicy, run, verify }) =>
               replaySession({
                 source: origin,
                 sourceId: input.sessionId,
@@ -1386,6 +1398,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 cwd,
                 policy: sessionPolicy,
                 run,
+                verify,
               }),
           ).pipe(
             Effect.tapError(() =>

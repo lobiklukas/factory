@@ -19,6 +19,7 @@ import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
+import { VERIFY_TOOL } from "./verify";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -126,11 +127,16 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  *
  * `command` is scriptable so a verification run can hold a turn open deliberately — a command
  * that sleeps is the only way to observe a session that is genuinely busy (`FAUX_COMMAND`).
+ *
+ * `verify` adds a step between the two (LOB-78): after the `bash` result the script calls the
+ * `verify` tool, and the reply is what that tool reported — the shape of a run that makes a change,
+ * verifies it, and says what the verification found.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
   command: string = FAUX_COMMAND,
   curation?: string,
+  verify = false,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -154,6 +160,17 @@ export const fauxAnswer = (
       stopReason: "toolUse",
     });
   }
+  if (verify) {
+    const verified = toolResultText(messages, VERIFY_TOOL);
+    if (verified === undefined) {
+      return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
+        stopReason: "toolUse",
+      });
+    }
+    return fauxAssistantMessage(
+      `${verified.trim()} (re: ${lastUserText(messages).trim()})`,
+    );
+  }
   return fauxAssistantMessage(
     `${output.trim()} (re: ${lastUserText(messages).trim()})`,
   );
@@ -162,6 +179,8 @@ export const fauxAnswer = (
 export type ModelAccessOptions = {
   /** The command the faux script runs, for a run that needs a turn to take a known time. */
   readonly fauxCommand?: string | undefined;
+  /** Whether the faux script calls `verify` after its `bash` turn (LOB-78, `fauxAnswer`). */
+  readonly fauxVerify?: boolean | undefined;
   /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
@@ -253,7 +272,12 @@ export const createFauxModelAccess = (
   // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
   const repeat: FauxResponseFactory = (context) => {
     faux.appendResponses([repeat]);
-    return fauxAnswer(context.messages, fauxCommand, options.fauxCuration);
+    return fauxAnswer(
+      context.messages,
+      fauxCommand,
+      options.fauxCuration,
+      options.fauxVerify ?? false,
+    );
   };
   faux.setResponses([repeat]);
   const modelId = faux.models[0].id;

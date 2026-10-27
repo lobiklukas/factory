@@ -81,6 +81,12 @@ evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.
 there; neither touches the mission path. See `mission.md`, which names what the case does not prove
 (resume across a kill — LOB-231).
 
+The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
+(`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
+evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
+was re-run there too (API on `:9550`, faux): **52/52**, evidence `.verify/evidence/lob-78/verify-api/`
+— every session now has the tool installed, and nothing the drive asserts changed.
+
 The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2026-10-27
 (`DATABASE_URL` the worktree's own `factory_agent_lob_72` on 5442, faux, no port bound): `./spec.sh`
 **9/9** (8 driver checks across two processes, 1 shell check that they were two), evidence
@@ -112,6 +118,7 @@ harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not
 | A mission                | passing | [mission.md](mission.md)           |
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
+| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)   |
 | The spec document        | passing | [spec.md](spec.md)                 |
 
 ## Deliberately absent
