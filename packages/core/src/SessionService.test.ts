@@ -94,9 +94,20 @@ import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  closeHarness,
+  compareReplay,
   createFauxModelAccess,
   createModelAccess,
   DEFAULT_AUTONOMY,
+  mirrorComparison,
+  modelAccessFor,
+  openSession,
+  readPromptSubmission,
+  readReplayRun,
+  readReplaySource,
+  replaySession,
+  waitForPrompt,
+  writeReplayComparison,
   PR_EVIDENCE_EXCERPT,
   readPromptSections,
   readSessionLog,
@@ -106,6 +117,7 @@ import {
   usageCostTotal,
   type VerifyRecord,
 } from "@repo/harness";
+import { mintSessionId } from "./ids";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
@@ -1428,6 +1440,139 @@ describe("replay", () => {
     expect(result.rebuiltReplay.session.mode).toBe("historical");
     expect(result.rebuiltSource.replayComparisons).toEqual([onSource]);
     expect(result.rebuiltReplay.replayComparisons).toEqual([onReplay]);
+  }, 120_000);
+
+  // Mutations checked: dropping `armComparison` from `get`'s fold times out on "the bare replay's
+  // comparison"; repairing the halfway pair by a fresh reading instead of `mirrorComparison` fails
+  // the halfway assertion (a new `at` and a new reading).
+  it("writes the comparison a stopped process left owing, on the next fold, from the logs alone", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const source = yield* sessions.create({
+          title: "replayed by a process that stopped",
+          repo: factoryRepo,
+        });
+        yield* sessions.send({
+          sessionId: source.id,
+          content: "fix the flaky login test",
+        });
+        yield* waitUntil(
+          sessions.get(source.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the source's turn to settle",
+        );
+        // Release every owner, as a process that stops does: what follows is that process's work,
+        // done straight on the logs, up to the point it stopped.
+        yield* sessions.close;
+        const reader = <A>(
+          id: string,
+          use: (storage: PostgresStorage) => Effect.Effect<A, SessionError>,
+        ) =>
+          Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, id)),
+            use,
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+        const access = createModelAccess("faux", {
+          fauxModels: ["faux-1", "faux-2"],
+        });
+        const target = modelAccessFor(access, "faux/faux-2");
+        if (target === undefined) throw new Error("unreachable");
+        const origin = yield* reader(source.id, readReplaySource);
+        const cwd = mkdtempSync(join(tmpdir(), "factory-replay-stopped-"));
+        /** A replay whose run settled and whose comparison was never written. */
+        const replayed = Effect.gen(function* () {
+          const id = yield* mintSessionId;
+          const opened = yield* replaySession({
+            source: origin,
+            sourceId: source.id,
+            replayId: id,
+            target: yield* Effect.promise(() => PostgresStorage.owner(sql, id)),
+            model: target,
+            cwd,
+          });
+          const prompt = yield* reader(id, (storage) =>
+            readPromptSubmission(storage, undefined),
+          );
+          if (prompt === undefined) throw new Error("unreachable");
+          yield* waitForPrompt(opened.harness, prompt);
+          yield* closeHarness(opened.harness);
+          return id;
+        });
+        // `bare` stopped before either side was written; `halfway` after the source's side alone.
+        const bare = yield* replayed;
+        const halfway = yield* replayed;
+        const halfwayCompared = compareReplay({
+          source: yield* reader(source.id, (storage) =>
+            readReplayRun(storage, source.id, "faux/faux-1"),
+          ),
+          replay: yield* reader(halfway, (storage) =>
+            readReplayRun(storage, halfway, "faux/faux-2"),
+          ),
+          at: "2026-01-01T00:00:00.000Z",
+        });
+        const sourceOwner = yield* openSession({
+          storage: yield* Effect.promise(() =>
+            PostgresStorage.owner(sql, source.id),
+          ),
+          model: access,
+          cwd,
+        });
+        yield* writeReplayComparison(sourceOwner.root, halfwayCompared.source);
+        yield* closeHarness(sourceOwner.harness);
+
+        // The next process: its index learns the replays from their logs, and a fold of each is
+        // what notices the comparison it is owed.
+        yield* rebuildIndexes;
+        yield* sessions.get(bare);
+        yield* sessions.get(halfway);
+        yield* comparedOn(bare, 1, "the bare replay's comparison");
+        yield* comparedOn(halfway, 1, "the halfway replay's comparison");
+        yield* comparedOn(source.id, 2, "the source's two comparisons");
+        const onBare = (yield* sessions.get(bare)).replayComparisons ?? [];
+        const onHalfway =
+          (yield* sessions.get(halfway)).replayComparisons ?? [];
+        const onSource =
+          (yield* sessions.get(source.id)).replayComparisons ?? [];
+        // A fold of a pair already compared leaves its comparison as it was.
+        yield* sessions.close;
+        yield* sessions.get(bare);
+        yield* Effect.sleep("300 millis");
+        const onBareAgain = (yield* sessions.get(bare)).replayComparisons ?? [];
+        return {
+          source: source.id,
+          bare,
+          halfway,
+          halfwayCompared,
+          onBare,
+          onHalfway,
+          onSource,
+          onBareAgain,
+        };
+      }),
+    );
+
+    // The bare pair was compared once, both sides from one reading.
+    const bareOnSource = result.onSource.find(
+      (comparison) => comparison.counterpart.session === result.bare,
+    );
+    expect(result.onBare).toHaveLength(1);
+    const [bareOnReplay] = result.onBare;
+    if (bareOnSource === undefined || bareOnReplay === undefined)
+      throw new Error("unreachable");
+    expect(bareOnReplay.counterpart.session).toBe(result.source);
+    expect(bareOnReplay.self.outcome).toBe("answered");
+    expect(bareOnSource).toEqual(mirrorComparison(bareOnReplay));
+    expect(result.onBareAgain).toEqual(result.onBare);
+
+    // The halfway pair was finished from the side that was written: the replay holds its mirror,
+    // reading and all, rather than a second reading taken now.
+    expect(result.onHalfway).toEqual([
+      mirrorComparison(result.halfwayCompared.source),
+    ]);
+    expect(result.onHalfway[0]?.at).toBe("2026-01-01T00:00:00.000Z");
+    expect(result.onSource).toHaveLength(2);
   }, 120_000);
 
   it("refuses an unknown session, a session with no repo, and a model it does not serve", async () => {

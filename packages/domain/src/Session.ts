@@ -412,10 +412,15 @@ export type PrEvidence = typeof PrEvidence.Type;
  *
  * `model` is the `provider/modelId` the replay's link names for that side — the model the replay
  * ran on, or the one its source recorded (empty when the source recorded none). `outcome` is how the
- * session's first prompt settled: `answered`, `unanswered` with Pi Durable's `reason` (an abort, a
- * failed request), or `open` when it had not settled yet. `turns` counts the assistant entries the
- * log holds and `cost` is both `pi.usage` buckets — the whole log, at the moment the comparison was
- * taken, because spend is not split per submission.
+ * session's first user entry — the task a replay runs — settled: `answered`, `unanswered` with Pi
+ * Durable's `reason` (an abort, a failed request), or `open` when it had not settled yet.
+ *
+ * `turns` counts the assistant entries the log ran itself and `cost` is both its `pi.usage` buckets —
+ * the whole log, at the moment the comparison was taken, because spend is not split per submission.
+ * A fork's copied prefix is its parent's run, so it is neither: `inherited` names the parent and the
+ * assistant entries the copy holds, whose spend is the parent's. That is also where a fork's
+ * `outcome` comes from when its task was copied — read off the transcript, as no submission of the
+ * fork's placed it.
  */
 export const ReplayRun = Schema.Struct({
   session: SessionId,
@@ -424,6 +429,9 @@ export const ReplayRun = Schema.Struct({
   reason: Schema.optionalKey(Schema.String),
   turns: Schema.Int,
   cost: Schema.Finite,
+  inherited: Schema.optionalKey(
+    Schema.Struct({ from: Schema.String, turns: Schema.Int }),
+  ),
 });
 export type ReplayRun = typeof ReplayRun.Type;
 

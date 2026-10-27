@@ -38,6 +38,7 @@ import {
 } from "./replay";
 import {
   closeHarness,
+  forkSession,
   openSession,
   readSessionLog,
   submitMessage,
@@ -257,15 +258,22 @@ const runId = (logId: string): SessionId => SessionIdSchema.make(logId);
 
 const ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
-/** A fresh, well-formed session id, so a log of this file can be one side of a comparison. */
-const newSessionLogId = (): string =>
-  `ses_${Array.from(
-    { length: 26 },
-    () =>
-      ID_ALPHABET[
-        Effect.runSync(Random.nextIntBetween(0, ID_ALPHABET.length - 1))
-      ],
-  ).join("")}`;
+/**
+ * A fresh, well-formed session id for one side of a comparison. Only ever a *name* the comparison
+ * carries, never a log id: a log under a session-shaped id is one `rebuildIndexes` folds into a real
+ * `sessions` row, so this file's logs stay in the `replay-` namespace (`newLogId`) and the ids they
+ * are compared under are minted here.
+ */
+const newSessionId = (): SessionId =>
+  runId(
+    `ses_${Array.from(
+      { length: 26 },
+      () =>
+        ID_ALPHABET[
+          Effect.runSync(Random.nextIntBetween(0, ID_ALPHABET.length - 1))
+        ],
+    ).join("")}`,
+  );
 
 describe("comparing a replay with its source", () => {
   const run = (overrides: Partial<ReplayRun>): ReplayRun => ({
@@ -347,11 +355,13 @@ describe("committing the comparison to both logs", () => {
   }).access;
 
   it("measures each run, commits a document naming the other to each log, and changes nothing else", async () => {
-    const sourceId = newSessionLogId();
-    const replayId = newSessionLogId();
+    const sourceLogId = newLogId("compared-source");
+    const replayLogId = newLogId("compared-replay");
+    const sourceId = newSessionId();
+    const replayId = newSessionId();
     // The source took a follow-up the replay never runs, so it made more requests and spent more.
     await recordedSession(
-      sourceId,
+      sourceLogId,
       "fix the flaky login test",
       ["and the logout one"],
       priced,
@@ -360,14 +370,14 @@ describe("committing the comparison to both logs", () => {
     const result = await runtime.runPromise(
       Effect.gen(function* () {
         const sourceReader = yield* Effect.promise(() =>
-          openStorage(sourceId, "reader"),
+          openStorage(sourceLogId, "reader"),
         );
         const source = yield* readReplaySource(sourceReader);
         const before = yield* readSessionLog(sourceReader);
         const target = modelAccessFor(priced, "faux/faux-2");
         if (target === undefined) throw new Error("unreachable");
         const replayStorage = yield* Effect.promise(() =>
-          openStorage(replayId),
+          openStorage(replayLogId),
         );
         const replay = yield* replaySession({
           source,
@@ -380,16 +390,16 @@ describe("committing the comparison to both logs", () => {
         yield* Effect.promise(() => replay.submission.submission.wait(context));
 
         const replayReader = yield* Effect.promise(() =>
-          openStorage(replayId, "reader"),
+          openStorage(replayLogId, "reader"),
         );
         const replayRun = yield* readReplayRun(
           replayReader,
-          runId(replayId),
+          replayId,
           modelKey(target),
         );
         const sourceRun = yield* readReplayRun(
           sourceReader,
-          runId(sourceId),
+          sourceId,
           source.model ?? "",
         );
         const compared = compareReplay({
@@ -403,7 +413,9 @@ describe("committing the comparison to both logs", () => {
         yield* closeHarness(replay.harness);
 
         // The source is written through an owner of its own, as the control plane opens one.
-        const sourceOwner = yield* Effect.promise(() => openStorage(sourceId));
+        const sourceOwner = yield* Effect.promise(() =>
+          openStorage(sourceLogId),
+        );
         const opened = yield* openSession({
           storage: sourceOwner,
           model: priced,
@@ -413,10 +425,10 @@ describe("committing the comparison to both logs", () => {
         yield* closeHarness(opened.harness);
 
         const after = yield* readSessionLog(
-          yield* Effect.promise(() => openStorage(sourceId, "reader")),
+          yield* Effect.promise(() => openStorage(sourceLogId, "reader")),
         );
         const replayLog = yield* readSessionLog(
-          yield* Effect.promise(() => openStorage(replayId, "reader")),
+          yield* Effect.promise(() => openStorage(replayLogId, "reader")),
         );
         return { before, after, replayLog, replayRun, sourceRun, compared };
       }),
@@ -470,5 +482,104 @@ describe("committing the comparison to both logs", () => {
     expect(result.after.replay).toBeUndefined();
     // The source's recorded run is what it was: only the comparison differs.
     expect({ ...result.after, replayComparisons: [] }).toEqual(result.before);
+  }, 120_000);
+
+  // Mutations checked: taking the outcome from the log's first input submission (LOB-199's first
+  // cut) reads the rewound fork's copied task as `no prompt`; counting the copied assistant entries
+  // in `turns` fails the own-turn assertion.
+  it("measures a forked source by the task it copied: its answer from the transcript, its prefix as inherited", async () => {
+    const parentLog = newLogId("fork-parent");
+    const answeredLog = newLogId("fork-answered");
+    const rewoundLog = newLogId("fork-rewound");
+    const parent = newSessionId();
+    await recordedSession(parentLog, "fix the flaky login test", [], priced);
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const parentReader = yield* Effect.promise(() =>
+          openStorage(parentLog, "reader"),
+        );
+        const parentEntries = (yield* readSessionLog(parentReader)).entries;
+        const task = parentEntries.find((entry) => entry.kind === "user");
+        if (task === undefined) throw new Error("unreachable");
+        const fork = (log: string, at?: string) =>
+          Effect.gen(function* () {
+            const opened = yield* forkSession({
+              parent: yield* Effect.promise(() =>
+                openStorage(parentLog, "reader"),
+              ),
+              child: yield* Effect.promise(() => openStorage(log)),
+              lineage: parent,
+              binding: { repo, baseRef: "main" },
+              model: priced,
+              cwd: workdir,
+              ...(at === undefined ? {} : { at }),
+            });
+            return opened;
+          });
+
+        // A fork of the whole run, which then ran a follow-up of its own: its first *submission*
+        // is the follow-up, but the task a replay of it runs is the copied first entry.
+        const answered = yield* fork(answeredLog);
+        const followUp = yield* submitMessage(answered.root, {
+          content: "and the logout one",
+        });
+        yield* Effect.promise(() => followUp.submission.wait(context));
+        yield* closeHarness(answered.harness);
+        // A rewind to the prompt itself: the copy holds the task and no answer to it.
+        const rewound = yield* fork(rewoundLog, task.id);
+        yield* closeHarness(rewound.harness);
+
+        const measure = (log: string) =>
+          Effect.gen(function* () {
+            const reader = yield* Effect.promise(() =>
+              openStorage(log, "reader"),
+            );
+            return {
+              source: yield* readReplaySource(reader),
+              run: yield* readReplayRun(reader, newSessionId(), "faux/faux-1"),
+              log: yield* readSessionLog(reader),
+            };
+          });
+        return {
+          parentTurns: parentEntries.filter(
+            (entry) => entry.kind === "assistant",
+          ).length,
+          answered: yield* measure(answeredLog),
+          rewound: yield* measure(rewoundLog),
+        };
+      }),
+    );
+
+    // The task a replay of either fork runs is the parent's first prompt.
+    expect(result.answered.source.prompt).toBe("fix the flaky login test");
+    expect(result.rewound.source.prompt).toBe("fix the flaky login test");
+
+    // Answered, because the copied transcript answers it — not the follow-up's outcome, and not
+    // "no prompt" for want of a submission the copy never made.
+    expect(result.answered.run.outcome).toBe("answered");
+    expect(result.answered.run.reason).toBeUndefined();
+    // Its own turns are the follow-up's, and its cost is what those cost: the copied prefix is the
+    // parent's run, reported beside them rather than counted in.
+    const ownTurns =
+      result.answered.log.entries.filter((entry) => entry.kind === "assistant")
+        .length - result.parentTurns;
+    expect(result.parentTurns).toBeGreaterThan(0);
+    expect(ownTurns).toBeGreaterThan(0);
+    expect(result.answered.run.turns).toBe(ownTurns);
+    expect(result.answered.run.cost).toBeCloseTo(ownTurns * COST, 10);
+    expect(result.answered.run.inherited).toEqual({
+      from: parent,
+      turns: result.parentTurns,
+    });
+
+    // The rewound fork holds the task and nothing answers it.
+    expect(result.rewound.run).toMatchObject({
+      outcome: "unanswered",
+      reason: "no answer recorded",
+      turns: 0,
+      cost: 0,
+      inherited: { from: parent, turns: 0 },
+    });
   }, 120_000);
 });

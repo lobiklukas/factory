@@ -21,6 +21,23 @@ two deltas are exact opposites. The source's document carries only `comparisons`
 stay empty, so the source never reads as a replay — and its transcript, spend and lineage are
 untouched. The snapshot reports them as `replayComparisons`, absent for a session nobody replayed.
 
+What is owed is read off the logs, not held in the process (`reconcileReplay` in
+`packages/core/src/SessionService.ts`): a replay whose own document names no comparison of its
+source is still owed one. Every owner the API opens and every fold it serves checks, so a replay
+whose run crossed a restart or a close is compared when its owner is reopened (which is what resumes
+its run), and one whose run settled before the process stopped is compared on its next fold. The
+source's side is written first and the replay's last; a pair only the source holds is finished with
+the mirror of that side, so both still come from one reading.
+
+A side's `outcome` is the outcome of its first user entry, the task a replay runs. A fork's copied
+task has no submission of its own, so its outcome comes from the transcript. Its copied prefix is
+reported as `inherited: { from, turns }` and is not counted in `turns` or `cost`, because the parent
+paid for it.
+
+Writing the source's side opens an owner of the source, as any write to a released session does.
+That re-creates its worktree until the idle sweep releases it again, and it counts as activity, so
+the source moves up the session list when its replay is compared.
+
 ## How a user reaches it
 
 The `replaySession` RPC (`SessionRpc`, `packages/domain/src/Rpc.ts`) with `{ sessionId, model? }`,
@@ -87,5 +104,10 @@ it` (`packages/core/src/SessionService.test.ts`): it deletes both sessions' rows
   free, so the drive's deltas are zero and it checks their sum and their mirroring. The unit cases
   make them differ: the source takes a follow-up the replay never runs, and
   `packages/harness/src/replay.test.ts` prices each answer (`fauxCost`) so the costs differ too.
-- **A comparison after a crash.** The comparison waits for the replay's run in the API process; a
-  process that dies before it commits leaves none (the decision on LOB-199 names this window).
+- **A comparison after a restart.** The drive runs one process. The recovery from the logs is the
+  unit case `writes the comparison a stopped process left owing, on the next fold, from the logs
+alone` (`packages/core/src/SessionService.test.ts`). It replays out of band with every owner
+  released, once with neither side written and once with the source's side alone, and then folds
+  each replay. The re-armed wait on a reopened owner is the same path every replay's first open takes.
+- **A replayed fork.** The unit case `measures a forked source by the task it copied` in
+  `packages/harness/src/replay.test.ts` covers it. The drive replays an unforked session.

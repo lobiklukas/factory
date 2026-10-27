@@ -43,7 +43,7 @@ import {
   closeHarness,
   openSession,
   readBudgetSource,
-  readFirstPrompt,
+  readPromptSubmission,
   readSessionLog,
   SessionDoc,
   submitMessage,
@@ -258,10 +258,16 @@ export const replaySession = (
   });
 
 /**
- * One side of a replay, measured from its log (LOB-199): how its first prompt settled, how many
- * assistant entries the log holds, and what it spent — both `pi.usage` buckets, the total the list
- * shows. `model` is the caller's, from the replay's link: the log's spend names models, but a run
- * that never reached a request names none, and the link always says which model a side was.
+ * One side of a replay, measured from its log (LOB-199): how its task settled, how many assistant
+ * entries the log ran, and what it spent — both `pi.usage` buckets, the total the list shows.
+ * `model` is the caller's, from the replay's link: the log's spend names models, but a run that
+ * never reached a request names none, and the link always says which model a side was.
+ *
+ * The task is the log's first user entry — the one `readReplaySource` hands a replay — and its
+ * outcome is the submission that placed it. A fork's first entry was copied, not submitted, so no
+ * submission names it: its outcome is then what the transcript shows (an assistant entry answers it
+ * before the next prompt does), and its copied prefix is reported as `inherited` instead of being
+ * counted in `turns`, because the spend that bought it is the parent's and is not in `cost` either.
  */
 export const readReplayRun = (
   storage: Storage,
@@ -270,25 +276,55 @@ export const readReplayRun = (
 ): Effect.Effect<ReplayRun, SessionError> =>
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
-    const prompt = yield* readFirstPrompt(storage);
+    const entries = log.entries;
+    const copied =
+      log.forkedAt === undefined
+        ? 0
+        : entries.findIndex((entry) => entry.id === log.forkedAt) + 1;
+    const task = entries.findIndex((entry) => entry.kind === "user");
+    const record = yield* readPromptSubmission(storage, entries[task]?.id);
     const outcome =
-      prompt === undefined
-        ? // A replay's source always has a prompt (`readReplaySource` refuses one without), and a
-          // replay is opened with one; a log with none has nothing that settled.
-          { outcome: "unanswered" as const, reason: "no prompt" }
-        : prompt.status === "done"
+      record !== undefined
+        ? record.status === "done"
           ? { outcome: "answered" as const }
-          : prompt.status === "unanswered"
-            ? { outcome: "unanswered" as const, reason: prompt.reason }
-            : { outcome: "open" as const };
+          : record.status === "unanswered"
+            ? { outcome: "unanswered" as const, reason: record.reason }
+            : { outcome: "open" as const }
+        : task === -1
+          ? // A replay's source always has a prompt (`readReplaySource` refuses one without), and a
+            // replay is opened with one; a log with none has nothing that settled.
+            { outcome: "unanswered" as const, reason: "no prompt" }
+          : answeredInTranscript(entries, task)
+            ? { outcome: "answered" as const }
+            : { outcome: "unanswered" as const, reason: "no answer recorded" };
+    const assistants = (from: number, to: number): number =>
+      entries.slice(from, to).filter((entry) => entry.kind === "assistant")
+        .length;
     return {
       session,
       model,
       ...outcome,
-      turns: log.entries.filter((entry) => entry.kind === "assistant").length,
+      turns: assistants(copied, entries.length),
       cost: usageCostTotal(log.usage),
+      ...(log.forkedFrom === undefined
+        ? {}
+        : {
+            inherited: { from: log.forkedFrom, turns: assistants(0, copied) },
+          }),
     };
   });
+
+/** Whether an assistant entry follows the user entry at `task` before the next user entry does. */
+const answeredInTranscript = (
+  entries: readonly { readonly kind: string }[],
+  task: number,
+): boolean => {
+  for (const entry of entries.slice(task + 1)) {
+    if (entry.kind === "user") return false;
+    if (entry.kind === "assistant") return true;
+  }
+  return false;
+};
 
 /**
  * The two comparisons one reading yields (LOB-199): the replay's, naming its source, and the
@@ -303,26 +339,42 @@ export const compareReplay = (reading: {
 }): {
   readonly source: ReplayComparison;
   readonly replay: ReplayComparison;
-} => {
-  const side = (
-    role: ReplayComparison["role"],
-    self: ReplayRun,
-    counterpart: ReplayRun,
-  ): ReplayComparison => ({
-    role,
-    at: reading.at,
-    self,
-    counterpart,
-    delta: {
-      turns: self.turns - counterpart.turns,
-      cost: self.cost - counterpart.cost,
-    },
-  });
-  return {
-    replay: side("replay", reading.replay, reading.source),
-    source: side("source", reading.source, reading.replay),
-  };
-};
+} => ({
+  replay: compareSide("replay", reading.replay, reading.source, reading.at),
+  source: compareSide("source", reading.source, reading.replay, reading.at),
+});
+
+const compareSide = (
+  role: ReplayComparison["role"],
+  self: ReplayRun,
+  counterpart: ReplayRun,
+  at: string,
+): ReplayComparison => ({
+  role,
+  at,
+  self,
+  counterpart,
+  delta: {
+    turns: self.turns - counterpart.turns,
+    cost: self.cost - counterpart.cost,
+  },
+});
+
+/**
+ * The comparison the other side of `comparison` holds (LOB-199): the same reading with the roles
+ * swapped. What repairs a pair only one log of which carries its comparison — a write the process
+ * did not finish — without a second reading, so the two still mirror each other exactly: the delta
+ * is recomputed by the same subtraction `compareReplay` made, not negated.
+ */
+export const mirrorComparison = (
+  comparison: ReplayComparison,
+): ReplayComparison =>
+  compareSide(
+    comparison.role === "replay" ? "source" : "replay",
+    comparison.counterpart,
+    comparison.self,
+    comparison.at,
+  );
 
 const encodeComparison = Schema.encodeSync(ReplayComparison);
 

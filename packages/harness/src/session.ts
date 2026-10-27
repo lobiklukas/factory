@@ -1121,17 +1121,25 @@ export const submitMessage = (
   });
 
 /**
- * Wait for a submitted message to settle — answered, or over without an answer. What a step that has
- * to follow a run's end waits on (LOB-199): the replay's comparison needs its finished numbers.
+ * Wait for a prompt this harness runs to settle — answered, or over without an answer (LOB-199). The
+ * record is what `readPromptSubmission` found in committed storage; one that is already over needs
+ * no wait, and the handle is looked up by id rather than kept from the submit, so a process that
+ * reopened the log after a restart waits on the same run its predecessor started.
  */
-export const waitForSubmission = (
-  submitted: SubmittedMessage,
+export const waitForPrompt = (
+  harness: Harness,
+  record: SubmissionRecord,
 ): Effect.Effect<void, SessionError> =>
-  Effect.asVoid(
-    attempt("wait for submission", () =>
-      submitted.submission.wait(BACKGROUND_CONTEXT),
-    ),
-  );
+  Effect.gen(function* () {
+    if (record.status !== "queued" && record.status !== "placed") return;
+    const submission = yield* attempt("find submission", () =>
+      harness.submission(record.id, BACKGROUND_CONTEXT),
+    );
+    if (submission === undefined) return;
+    yield* attempt("wait for submission", () =>
+      submission.wait(BACKGROUND_CONTEXT),
+    );
+  });
 
 export const interrupt = (
   conversation: Conversation,
@@ -1206,12 +1214,17 @@ export const submissionStanding = (
   });
 
 /**
- * How a session's first prompt settled, read from committed storage alone (LOB-199): what a replay
- * comparison reports as each side's outcome. The first *input* submission of the root conversation
- * — a passive write is not a prompt. `undefined` for a log that was never prompted.
+ * The input submission that put `entry` in the transcript, read from committed storage alone
+ * (LOB-199): how a replay comparison tells how a side's task settled. With `entry` absent it is the
+ * root's first input submission — a prompt withdrawn before it was placed has no entry to name.
+ *
+ * `undefined` when no submission placed that entry, which is what a fork's copied prefix is: the
+ * entries were appended by the copy, not submitted, so the caller reads the outcome off the
+ * transcript instead. A passive write is never a prompt.
  */
-export const readFirstPrompt = (
+export const readPromptSubmission = (
   storage: Storage,
+  entry: string | undefined,
 ): Effect.Effect<SubmissionRecord | undefined, SessionError> =>
   Effect.gen(function* () {
     let cursor: Cursor | undefined;
@@ -1226,7 +1239,12 @@ export const readFirstPrompt = (
             BACKGROUND_CONTEXT,
           ),
       );
-      const prompt = page.items.find((record) => record.type === "input");
+      const prompt = page.items.find(
+        (record) =>
+          record.type === "input" &&
+          (entry === undefined ||
+            (record.entry !== undefined && String(record.entry) === entry)),
+      );
       if (prompt !== undefined) return prompt;
       cursor = page.next;
       if (cursor === undefined) return undefined;
@@ -1719,6 +1737,12 @@ export type SessionLog = {
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
+  /**
+   * The last entry the fork copied from its parent, when it was forked from a parent that had any
+   * (LOB-180): every entry up to it is the parent's run, appended by the copy, and every one after it
+   * is this log's own — which is how a replay comparison tells the two apart (LOB-199).
+   */
+  readonly forkedAt?: string;
   /** Who the session's spend is attributed to (LOB-162), when anyone was. */
   readonly actor?: string;
   /**
@@ -1799,6 +1823,35 @@ export const readRecordedPullRequest = (
   });
 
 /**
+ * A log's `factory.replay` document alone (LOB-199), without folding the rest of the log: the link
+ * when the log is a replay, and every comparison it holds. What the control plane reads to decide
+ * whether a replay still owes a comparison, on every owner it opens and every fold it serves — so it
+ * is one document read, not a fold.
+ */
+export const readReplayDocument = (
+  storage: Storage,
+): Effect.Effect<
+  {
+    readonly link?: {
+      readonly source: string;
+      readonly model: string;
+      readonly from: string;
+    };
+    readonly comparisons: readonly ReplayComparison[];
+  },
+  SessionError
+> =>
+  Effect.map(readDocument(storage, REPLAY_DOC_KIND), (value) => {
+    const doc = projectReplayDoc(value);
+    return {
+      comparisons: projectReplayComparisons(value),
+      ...(doc.source === ""
+        ? {}
+        : { link: { source: doc.source, model: doc.model, from: doc.from } }),
+    };
+  });
+
+/**
  * Read a session nobody owns by folding its log through a reader-mode `Storage`. No `Harness` is
  * opened: Pi Durable allows exactly one owner, and this is the read-only path D7 asks for — the
  * control plane must be able to read a session without owning it.
@@ -1826,6 +1879,7 @@ export const readSessionLog = (
     const spec = projectSpec(specDoc);
     const criteria = bindingString(criteriaDoc, "criteria");
     const forkedFrom = bindingString(forkDoc, "parent");
+    const forkedAt = bindingString(forkDoc, "at");
     return {
       entries: records.map(projectEntry),
       pages,
@@ -1843,6 +1897,7 @@ export const readSessionLog = (
       ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
+      ...(forkedFrom === "" || forkedAt === "" ? {} : { forkedAt }),
       ...(actor === "" ? {} : { actor }),
       ...(replayDoc.source === ""
         ? {}

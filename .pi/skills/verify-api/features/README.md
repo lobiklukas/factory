@@ -173,7 +173,10 @@ The replay comparison checks (LOB-199) were added to the same block and run from
 write removed, the drive times out on "the source's replay comparison" (36/37), in
 `.verify/evidence/lob-199/mutation/`. Under heavy machine load the four live-stream checks can see a
 `historical` first snapshot: `SESSION_IDLE_TIMEOUT_MS=2000` releases the session before the watch
-attaches. That happens on clean `main` too (2 of 3 fresh runs failed there that day).
+attaches. That happens on clean `main` too (2 of 3 fresh runs failed there that day). After the review fixes (the comparison is now recovered from the logs and forks are measured by
+the task they copied), the drive was rerun on `:9540`: **61/61**, evidence
+`.verify/evidence/lob-199/review/`. A first rerun at load average 88 failed only those four
+live-stream checks.
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
