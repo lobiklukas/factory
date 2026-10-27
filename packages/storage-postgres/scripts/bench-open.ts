@@ -11,7 +11,8 @@
  *
  * Prints JSON: the median and spread of each open in milliseconds, the commits each open read (from
  * the storage's own report, which is what the test suite asserts), the checkpoint's seq and its
- * stored (compressed) size beside the encoded fold's, and what an owner open that writes one costs.
+ * stored (compressed) size beside the encoded fold's, and, for an owner open that starts writing
+ * one, what the open costs its caller and what the checkpoint write took after it resolved.
  * The log is left in place under a unique id; nothing else is touched.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -171,10 +172,14 @@ const program = Effect.gen(function* () {
   yield* sql`DELETE FROM log_checkpoints WHERE log_id = ${logId}`;
   const fullFold = yield* opens;
 
-  // An owner opening a log with no checkpoint folds it and writes one; the difference from the
-  // reader's full fold is what writing a checkpoint costs.
+  // An owner opening a log with no checkpoint folds it and starts writing one. The open resolves
+  // before the write lands, so the write is timed on its own: `ownerOpenMs` is what the caller
+  // waits for, `checkpointWriteMs` what the background write took after it.
   const ownerOpen = yield* time(
     Effect.promise(() => PostgresStorage.open(sql, { logId }, context)),
+  );
+  const checkpointWrite = yield* time(
+    Effect.promise(() => ownerOpen.value.checkpointsWritten()),
   );
   const foldBytes = new TextEncoder().encode(
     ownerOpen.value.encodedFold() ?? "",
@@ -190,7 +195,8 @@ const program = Effect.gen(function* () {
       checkpoint: { ...rows[0], foldBytes },
       open: { fromCheckpoint, fullFold },
       speedup: round(fullFold.medianMs / fromCheckpoint.medianMs),
-      ownerOpenWithCheckpointWriteMs: Math.round(ownerOpen.ms),
+      ownerOpenMs: Math.round(ownerOpen.ms),
+      checkpointWriteMs: Math.round(checkpointWrite.ms),
     }),
   );
 }).pipe(Effect.provide(DatabaseLive));

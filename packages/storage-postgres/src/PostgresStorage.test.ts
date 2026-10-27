@@ -30,10 +30,12 @@ import {
   TIMING_SCALE,
 } from "@earendil-works/pi-durable/testing";
 import { randomBytes } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { BunServices } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import {
   Clock,
+  Deferred,
   Effect,
   Layer,
   ManagedRuntime,
@@ -46,7 +48,7 @@ import {
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { SqlError } from "effect/sql/SqlError";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DatabaseConfig, DatabaseLive } from "./index";
 import {
   CHECKPOINT_SHAPE,
@@ -191,8 +193,11 @@ class ReadsFromCheckpoint implements Storage {
     }
   }
 
-  commit(writes: readonly StorageWrite[], at: typeof context) {
-    return this.owner.commit(writes, at);
+  async commit(writes: readonly StorageWrite[], at: typeof context) {
+    // A commit does not wait for its checkpoint; the next read's reader must find it.
+    const seq = await this.owner.commit(writes, at);
+    await this.owner.checkpointsWritten();
+    return seq;
   }
   mintId<I extends Id<string>>(): Promise<I> {
     return this.owner.mintId<I>();
@@ -666,6 +671,7 @@ describe("PostgresStorage checkpoints", () => {
       // mint the same next id and would commit the same next seq.
       const throughFold = await PostgresStorage.open(sql, { logId }, context);
       expect(throughFold.opened.checkpoint).toBeUndefined();
+      await throughFold.checkpointsWritten();
       expect((await checkpointOf(logId))?.seq).toBe(
         (restoredAt ?? 0) + commitsRead,
       );
@@ -685,6 +691,23 @@ describe("PostgresStorage checkpoints", () => {
       await throughCheckpoint.close(context);
     },
   );
+
+  /** What `run` wrote to the console, each call's arguments joined. */
+  const logged = async (run: () => Promise<void>): Promise<string[]> => {
+    const lines: string[] = [];
+    const methods = ["log", "info", "warn", "error"] as const;
+    const spies = methods.map((method) =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((arg) => String(arg)).join(" "));
+      }),
+    );
+    try {
+      await run();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    return lines;
+  };
 
   describe("a stale checkpoint is ignored, not served", () => {
     /** Open `logId` as a reader and assert it folded all `commits` and reads back `expected`. */
@@ -763,16 +786,21 @@ describe("PostgresStorage checkpoints", () => {
     );
 
     it("whose fold does not decode", { timeout: 30_000 }, async () => {
-      // Bytes that are not gzip, and gzip of JSON that is not a fold: neither is served.
+      // Bytes that are not gzip, and gzip of JSON that is not a fold: neither is served, and
+      // each is a fault an operator can see, not only a slower open.
       const { logId, fold } = await seedLog(12, 5);
-      for (const bytes of [
-        Uint8Array.from([1, 2, 3]),
-        compressFold('{"recordTypes": "not a map"}'),
-      ]) {
+      for (const [bytes, warning] of [
+        [Uint8Array.from([1, 2, 3]), "could not be read"],
+        [await compressFold('{"recordTypes": "not a map"}'), "did not decode"],
+      ] as const) {
         await Effect.runPromise(sql`
           UPDATE log_checkpoints SET fold = ${bytes} WHERE log_id = ${logId}
         `);
-        await expectFullFold(logId, 13, fold);
+        const warnings = await logged(() => expectFullFold(logId, 13, fold));
+        expect(warnings).toContainEqual(
+          expect.stringContaining(`checkpoint of log ${logId}`),
+        );
+        expect(warnings).toContainEqual(expect.stringContaining(warning));
       }
     });
   });
@@ -800,6 +828,7 @@ describe("PostgresStorage checkpoints", () => {
         { logId, checkpointEvery: 4 },
         context,
       );
+      await owner.checkpointsWritten();
       expect((await checkpointOf(logId))?.seq).toBe(13);
       for (let at = 0; at < 3; at += 1) {
         await owner.commit(
@@ -807,11 +836,13 @@ describe("PostgresStorage checkpoints", () => {
           context,
         );
       }
+      await owner.checkpointsWritten();
       expect((await checkpointOf(logId))?.seq).toBe(13);
       await owner.commit(
         [entryWrite(await owner.mintId<EntryId>(), "fourth")],
         context,
       );
+      await owner.checkpointsWritten();
       expect((await checkpointOf(logId))?.seq).toBe(17);
       await owner.close(context);
       expect(CHECKPOINT_EVERY).toBeGreaterThan(0);
@@ -857,6 +888,7 @@ describe("PostgresStorage checkpoints", () => {
         }
         // Commit 3's checkpoint was rejected; 4 and 5 are inside the restarted interval.
         expect(seqs).toEqual([2, 3, 4, 5]);
+        await owner.checkpointsWritten();
         expect(await checkpointOf(logId)).toBeUndefined();
         await owner.close(context);
 
@@ -873,6 +905,96 @@ describe("PostgresStorage checkpoints", () => {
         );
         await reader.close(context);
       } finally {
+        await Effect.runPromise(
+          sql.unsafe(`DROP TRIGGER IF EXISTS ${name} ON log_checkpoints`),
+        );
+        await Effect.runPromise(
+          sql.unsafe(`DROP FUNCTION IF EXISTS ${name}()`),
+        );
+      }
+    },
+  );
+
+  it(
+    "resolves a commit before its checkpoint is written, and writes them in order",
+    { timeout: 30_000 },
+    async () => {
+      // A trigger that makes this one log's checkpoint upsert wait on an advisory lock the test
+      // holds, so the write is stuck for as long as the test says. A commit that waited for its
+      // checkpoint would never resolve here.
+      const logId = nextLogId();
+      const name = `hold_checkpoint_${logId.replaceAll("-", "_")}`;
+      await Effect.runPromise(
+        sql.unsafe(`
+          CREATE FUNCTION ${name}() RETURNS trigger AS $$
+          BEGIN PERFORM pg_advisory_xact_lock(hashtext(NEW.log_id)); RETURN NEW; END;
+          $$ LANGUAGE plpgsql
+        `),
+      );
+      await Effect.runPromise(
+        sql.unsafe(`
+          CREATE TRIGGER ${name} BEFORE INSERT OR UPDATE ON log_checkpoints
+          FOR EACH ROW WHEN (NEW.log_id = '${logId}') EXECUTE FUNCTION ${name}()
+        `),
+      );
+      const locked = Deferred.makeUnsafe<void>();
+      const released = Deferred.makeUnsafe<void>();
+      const release = () =>
+        Effect.runSync(Deferred.succeed(released, undefined));
+      const holder = Effect.runPromise(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`SELECT pg_advisory_xact_lock(hashtext(${logId}))`;
+            yield* Deferred.succeed(locked, undefined);
+            yield* Deferred.await(released);
+          }),
+        ),
+      );
+      try {
+        await Effect.runPromise(Deferred.await(locked));
+        const owner = await PostgresStorage.open(
+          sql,
+          { logId, checkpointEvery: 2 },
+          context,
+        );
+        const within = <A>(promise: Promise<A>) =>
+          Effect.runPromise(
+            Effect.promise(() => promise).pipe(
+              Effect.timeoutOrElse({
+                duration: "10 seconds",
+                orElse: () =>
+                  Effect.die(new Error("the commit waited on its checkpoint")),
+              }),
+            ),
+          );
+        await within(owner.commit([root], context));
+        const seqs: number[] = [];
+        for (let at = 0; at < 3; at += 1) {
+          seqs.push(
+            await within(
+              owner.commit(
+                [entryWrite(await owner.mintId<EntryId>(), `held ${at}`)],
+                context,
+              ),
+            ),
+          );
+        }
+        // Commits 2 and 4 each started a checkpoint; neither has landed, and neither held up a commit.
+        expect(seqs).toEqual([2, 3, 4]);
+        expect(await checkpointOf(logId)).toBeUndefined();
+
+        release();
+        await holder;
+        await owner.checkpointsWritten();
+        // Both landed, in the order they were taken: the row is the later one.
+        expect((await checkpointOf(logId))?.seq).toBe(4);
+        await owner.close(context);
+        const reader = await openReader(logId);
+        expect(reader.opened).toEqual({ checkpoint: 4, commitsRead: 0 });
+        await reader.close(context);
+      } finally {
+        release();
+        await holder;
         await Effect.runPromise(
           sql.unsafe(`DROP TRIGGER IF EXISTS ${name} ON log_checkpoints`),
         );
@@ -2579,6 +2701,34 @@ describe("the board's DDL, as 0007 writes it", () => {
       );
       expect(row?.column).toBe("no_such_column");
       expect(row?.definitionVersion).toBe(99);
+    },
+  );
+});
+
+/**
+ * The migrations directory as the migrator reads it: one file per id, ids running 1..N.
+ *
+ * `PgMigrator.fromFileSystem` keys each file by its leading number. Two files with one id make the
+ * migrator fail at startup ("Found duplicate migration id's"), and `MigratedLive` is `Layer.orDie`,
+ * so every `DatabaseLive` consumer dies. A gap is quieter and worse: the migrator skips every id at
+ * or below the latest one a database recorded, so a lower-numbered file that lands after a higher
+ * one never runs on any database already migrated past it. Both happen when two branches pick the
+ * same next number and git merges the two files without a conflict (LOB-186 and LOB-201 both took
+ * 0021); this names the collision before the migrator does.
+ */
+describe("the migrations directory", () => {
+  it(
+    "holds one file per id, numbered 1..N with no gap",
+    { timeout: 30_000 },
+    () => {
+      const ids = readdirSync(new URL("./migrations", import.meta.url))
+        .map((file) => /^(\d+)_[^.]+\.(?:js|ts)$/.exec(file))
+        .flatMap((match) => (match === null ? [] : [Number(match[1])]))
+        .sort((left, right) => left - right);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids).toEqual(
+        Array.from({ length: ids.length }, (_, at) => at + 1),
+      );
     },
   );
 });

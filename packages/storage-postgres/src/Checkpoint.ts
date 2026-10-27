@@ -1,6 +1,7 @@
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import piDurable from "@earendil-works/pi-durable/package.json";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip } from "node:zlib";
 
 /**
  * The fold a log checkpoint holds: `MemoryStorage`'s state, encoded and restored (LOB-186).
@@ -152,8 +153,12 @@ export const encodeFold = (store: MemoryStorage): string | undefined => {
  * so neither can be rejected on the way in. `node:zlib` rather than the web `CompressionStream`,
  * which measured three times slower to inflate a 9 MB fold under Bun (LOB-186's benchmark).
  */
-export const compressFold = (encoded: string): Uint8Array =>
-  new Uint8Array(gzipSync(encoded));
+export const compressFold = (encoded: string): Promise<Uint8Array> =>
+  // The async form runs on libuv's pool, so a fold written after a commit does not block the
+  // event loop the commit's caller is waiting on.
+  gzipAsync(encoded).then((compressed) => new Uint8Array(compressed));
+
+const gzipAsync = promisify(gzip);
 
 /** The encoded fold a checkpoint row's bytes hold; throws on bytes that are not gzip. */
 export const decompressFold = (compressed: Uint8Array): string =>
