@@ -37,6 +37,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   GITHUB_EVENT_HEADER,
   GITHUB_SIGNATURE_HEADER,
+  gitReviewFetch,
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
   handlePullRequestReviewWebhook,
@@ -132,10 +133,13 @@ export const GitHubWebhookLive = HttpRouter.add(
         mirrored.status,
       );
     }
+    // A head the registered checkout lacks (a push nobody made here) is fetched with the worker's
+    // read credential before the reviewer's worktree is cut at it.
     const reviewed = yield* handlePullRequestReviewWebhook({
       secret,
       raw,
       signature,
+      fetch: yield* gitReviewFetch,
     });
     return HttpServerResponse.setStatus(
       HttpServerResponse.jsonUnsafe({

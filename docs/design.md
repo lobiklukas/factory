@@ -248,9 +248,14 @@ Terraform's `github_repository_ruleset`.
 ### D16 — Review happens in GitHub
 
 The system's output is a pull request. The UI links to it.
-_Rejected:_ an agent-authored review command (cheap to add later as another conversation with a
-cheaper model and read-only tools, better once we know what our diffs look like); PR-level
-review automation in CI (a different product surface, and it belongs after we trust our output).
+_Amended (LOB-36):_ the factory now adds one agent-authored review to its own PRs, and it still
+happens in GitHub. A `pull_request` on a PR a card's run opened starts a reviewer run — another
+conversation, on the reviewer role's (cheaper) model, in a read-only stage — that posts one
+`COMMENT` review per head under its own GitHub identity, never the author's, and never approves:
+the human merge gate is the decision (B5). There is still no review UI. It is not trusted until it
+is measured on our own PRs (LOB-242), and gating a move on its verdict is LOB-241.
+_Rejected:_ PR-level review automation in CI (a different product surface, and it belongs after we
+trust our output).
 
 ### D17 — The unit of work is a task on a board, not a session
 

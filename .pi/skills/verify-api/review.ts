@@ -81,10 +81,14 @@ const server = Bun.serve({
       return Response.json({ number: NUMBER, head: { sha: forge.head } });
     if (request.method === "GET" && url.pathname === `${pull}/reviews`)
       return Response.json(forge.reviews);
+    // The reviewer's own login: asked only to attribute a review that already carries the marker.
+    if (request.method === "GET" && url.pathname === "/user")
+      return Response.json({ login: "verify-reviewer", type: "User" });
     if (request.method === "POST" && url.pathname === `${pull}/reviews`) {
       const review = {
         id: forge.reviews.length + 1,
         ...(body as Record<string, unknown>),
+        user: { login: "verify-reviewer", type: "User" },
         html_url: `${PAGE}#pullrequestreview-${forge.reviews.length + 1}`,
       };
       forge.reviews.push(review);

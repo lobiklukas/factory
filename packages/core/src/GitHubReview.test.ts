@@ -1,8 +1,8 @@
 /**
  * The reviewer's GitHub half (LOB-36): its identity, and the one comment it posts.
  *
- * No GitHub: the three endpoints the poster calls (`GET /pulls/{n}`, `GET /pulls/{n}/reviews`,
- * `POST /pulls/{n}/reviews`) are a hand-written fake behind Effect's `HttpClient`, answering GitHub's
+ * No GitHub: the endpoints the poster calls (`GET /pulls/{n}`, `GET /pulls/{n}/reviews` with its
+ * `Link` pages, `GET /user`, `POST /pulls/{n}/reviews`) are a hand-written fake behind Effect's `HttpClient`, answering GitHub's
  * documented shapes and recording every request, so the cases assert what was asked as which token.
  * The identity cases are pure: which credential the reviewer is given, and which it is refused.
  */
@@ -45,7 +45,11 @@ type Recorded = {
 /** The forge as one PR: its head, its reviews, and what a post answers. */
 const fakeForge = (forge: {
   readonly head?: string;
+  /** The reviews, one array per page; a page past the first is linked from the one before it. */
   readonly reviews?: ReadonlyArray<unknown>;
+  readonly pages?: ReadonlyArray<ReadonlyArray<unknown>>;
+  /** Who `GET /user` says the token is. */
+  readonly login?: string;
   readonly postStatus?: number;
 }) => {
   const requests: Recorded[] = [];
@@ -66,7 +70,13 @@ const fakeForge = (forge: {
           authorization: request.headers["authorization"],
           body,
         });
-        const answer =
+        const pages = forge.pages ?? [forge.reviews ?? []];
+        const index = Number(url.searchParams.get("page") ?? "1") - 1;
+        const answer: {
+          readonly status: number;
+          readonly body: unknown;
+          readonly link?: string;
+        } =
           request.method === "POST"
             ? {
                 status: forge.postStatus ?? 200,
@@ -75,12 +85,22 @@ const fakeForge = (forge: {
                   html_url: `${TARGET.url}#pullrequestreview-1`,
                 },
               }
-            : url.pathname.endsWith("/reviews")
-              ? { status: 200, body: forge.reviews ?? [] }
-              : {
-                  status: 200,
-                  body: { number: 7, head: { sha: forge.head ?? HEAD } },
-                };
+            : url.pathname === "/user"
+              ? { status: 200, body: { login: forge.login ?? "reviewer" } }
+              : url.pathname.endsWith("/reviews")
+                ? {
+                    status: 200,
+                    body: pages[index] ?? [],
+                    ...(index + 1 < pages.length
+                      ? {
+                          link: `<${url.origin}${url.pathname}?per_page=100&page=${index + 2}>; rel="next"`,
+                        }
+                      : {}),
+                  }
+                : {
+                    status: 200,
+                    body: { number: 7, head: { sha: forge.head ?? HEAD } },
+                  };
         const text = yield* Schema.encodeEffect(Json)(answer.body).pipe(
           Effect.orDie,
         );
@@ -88,7 +108,10 @@ const fakeForge = (forge: {
           request,
           new Response(text, {
             status: answer.status,
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              ...(answer.link === undefined ? {} : { link: answer.link }),
+            },
           }),
         );
       }).pipe(Effect.orDie),
@@ -145,14 +168,113 @@ describe("the review post", () => {
 
   it("posts nothing when its comment is already there (a retry after a lost acknowledgement)", async () => {
     const forge = fakeForge({
+      login: "Factory-Reviewer",
       reviews: [
-        { body: "someone else's review", html_url: "https://x/1" },
-        { body: `${BODY}\n(earlier copy)`, html_url: "https://x/2" },
+        {
+          body: "someone else's review",
+          html_url: "https://x/1",
+          user: { login: "lukas" },
+        },
+        {
+          body: `${BODY}\n(earlier copy)`,
+          html_url: "https://x/2",
+          user: { login: "factory-reviewer" },
+        },
       ],
     });
     const exit = await post(forge);
     expect(exit).toEqual(Exit.succeed({ _tag: "posted", url: "https://x/2" }));
     expect(forge.requests.some((r) => r.method === "POST")).toBe(false);
+    // Whose the marked review is was asked, as the reviewer.
+    expect(forge.requests.map((r) => `${r.method} ${r.path}`)).toContain(
+      "GET /user",
+    );
+  });
+
+  it("posts anyway when the marker is in someone else's review: a copied marker suppresses nothing", async () => {
+    const forge = fakeForge({
+      login: "factory-reviewer",
+      reviews: [
+        {
+          body: `${MARKER} looks fine to me`,
+          html_url: "https://x/spoof",
+          user: { login: "mallory" },
+        },
+      ],
+    });
+    const exit = await post(forge);
+    expect(exit).toEqual(
+      Exit.succeed({
+        _tag: "posted",
+        url: `${TARGET.url}#pullrequestreview-1`,
+      }),
+    );
+    expect(forge.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
+  it("reads every page of the reviews, so its comment past the first hundred is still found", async () => {
+    const forge = fakeForge({
+      login: "factory-reviewer",
+      pages: [
+        Array.from({ length: 100 }, (_, n) => ({
+          body: `review ${n}`,
+          user: { login: "lukas" },
+        })),
+        [
+          {
+            body: BODY,
+            html_url: "https://x/page-2",
+            user: { login: "factory-reviewer" },
+          },
+        ],
+      ],
+    });
+    const exit = await post(forge);
+    expect(exit).toEqual(
+      Exit.succeed({ _tag: "posted", url: "https://x/page-2" }),
+    );
+    expect(forge.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "GET /repos/acme/sum/pulls/7",
+      "GET /repos/acme/sum/pulls/7/reviews?per_page=100",
+      "GET /repos/acme/sum/pulls/7/reviews?per_page=100&page=2",
+      "GET /user",
+    ]);
+  });
+
+  it("as an App, counts only a bot's marked review as its own", async () => {
+    const app: CredentialProviderShape = {
+      source: "github-app",
+      tokenFor: () => Effect.succeed(Redacted.make("ghs-app")),
+    };
+    const person = fakeForge({
+      reviews: [
+        {
+          body: BODY,
+          html_url: "https://x/p",
+          user: { login: "lukas", type: "User" },
+        },
+      ],
+    });
+    expect(await post(person, app)).toEqual(
+      Exit.succeed({
+        _tag: "posted",
+        url: `${TARGET.url}#pullrequestreview-1`,
+      }),
+    );
+    const bot = fakeForge({
+      reviews: [
+        {
+          body: BODY,
+          html_url: "https://x/bot",
+          user: { login: "factory-reviewer[bot]", type: "Bot" },
+        },
+      ],
+    });
+    expect(await post(bot, app)).toEqual(
+      Exit.succeed({ _tag: "posted", url: "https://x/bot" }),
+    );
+    // An installation token cannot read `/user`, so it is never asked.
+    expect(bot.requests.some((r) => r.path === "/user")).toBe(false);
   });
 
   it("answers stale and posts nothing when the PR moved past the reviewed head", async () => {

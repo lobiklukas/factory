@@ -126,8 +126,13 @@ The run is started by the PR, not by a person: a `pull_request` (`opened`, `reop
 reviewer column, cut at the PR's head, one per head (`packages/core/src/ReviewTrigger.ts`). It posts
 as the reviewer's own GitHub identity, never the worker's (`GITHUB_REVIEWER_TOKEN` or
 `GITHUB_REVIEWER_APP_*`, `packages/core/src/GitHubReview.ts`), and a post whose PR moved past the
-reviewed head is `stale` and posts nothing. The `review_verdict` exit requirement is still not
-checked: the verdict is recorded, and gating `review → done` on it is LOB-241.
+reviewed head is `stale` and posts nothing. A head the registered checkout lacks (a person's push,
+GitHub's "Update branch") is fetched first with the worker's read credential, and one that still
+cannot be had is `skipped`, naming the commit. A review run is not one of the card's runs as the
+exit checks read them: it starts while the card is still in `building`, and `pr_link` and
+`non_empty_diff` judge the latest run that makes the change. The `review_verdict` exit requirement
+is still not checked: the verdict is recorded, and gating `review → done` on it is LOB-241. The
+review is not trusted until it is measured on our own PRs (LOB-242).
 
 ## B7 — Asking a human happens on the task, never in the transcript
 

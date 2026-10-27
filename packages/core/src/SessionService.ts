@@ -893,8 +893,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       /**
        * How a reviewer run posts its review (LOB-36): the deployment's poster, under the reviewer's
-       * own identity. Handed to every run of a card, as the spec's post is; the harness offers the
-       * tool to the reviewer role alone, and the tool reads what it reviews from the run's own log.
+       * own identity. Handed only to a review run — a session whose log records a review target —
+       * whatever its role: the role is not what grants the tool, and the tool reads what it reviews
+       * from the run's own log.
        */
       const reviewFor = (): ReviewOptions => ({
         post: (request) =>
@@ -1315,6 +1316,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           sql`UPDATE sessions SET title = ${title} WHERE id = ${sessionId}`,
         );
 
+      /**
+       * A retried review create (LOB-36) finds its session by request id; if the first attempt died
+       * between the owner's open and the review target's commit, the log names no target, and every
+       * later open would read the run as an ordinary one with write tools. The retry commits the
+       * target it was given, so the prompt that follows reaches the read-only stage.
+       */
+      const ensureReviewTarget = (
+        id: SessionId,
+        row: SessionRow,
+        review: NonNullable<CreateSessionInput["review"]>,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (row.repo === null) return;
+          const owner = yield* acquireOwner(id, row, true);
+          const recorded = yield* readRecordedReview(owner.storage);
+          if (recorded !== undefined) return;
+          yield* writeReviewTarget(owner.root, { repo: row.repo, ...review });
+        });
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -1328,7 +1348,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 );
           const already = requested?.[0];
           if (already !== undefined) {
-            return yield* describe(yield* toSessionId(already.id), already);
+            const sessionId = yield* toSessionId(already.id);
+            if (input.review !== undefined)
+              yield* ensureReviewTarget(sessionId, already, input.review);
+            return yield* describe(sessionId, already);
           }
 
           if (input.review !== undefined && input.repo === undefined) {
@@ -1386,6 +1409,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             row,
             input.review !== undefined,
           );
+          if (input.review !== undefined && binding.repo !== undefined) {
+            // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
+            // it is the first: a reopen reads the read-only stage from it alone, so no other write
+            // may sit between the owner's open and it. A create that died before it is repaired by
+            // its retry (`ensureReviewTarget`).
+            yield* writeReviewTarget(owner.root, {
+              repo: binding.repo,
+              ...input.review,
+            });
+          }
           if (title.length > 0) {
             // The log keeps the title too, so rebuilding the index does not lose it.
             yield* writeTitle(owner.root, title);
@@ -1404,13 +1437,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
             // this session is.
             yield* writeActor(owner.root, input.actor);
-          }
-          if (input.review !== undefined && binding.repo !== undefined) {
-            // What the reviewer reviews is a fact in its log before it is told anything (LOB-36).
-            yield* writeReviewTarget(owner.root, {
-              repo: binding.repo,
-              ...input.review,
-            });
           }
           if (input.taskId !== undefined && column !== undefined) {
             yield* writeTaskBinding(owner.root, {

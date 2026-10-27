@@ -22,11 +22,24 @@
  * nothing (`githubReviewPoster`'s `stale`). The run is told the PR, the base and the head, and its
  * worktree is cut at the head, so `git diff <base>...HEAD` there is exactly the change under review.
  *
+ * **The head has to be here.** The worktree is cut from the repo's registered checkout, and a head
+ * nobody committed on this machine — a person's push to the PR branch, GitHub's "Update branch" merge
+ * — is not in it. So before the run starts, the head (and the base commit the event names) are
+ * looked up there, and what is missing is fetched (`ReviewFetch`: the PR's head branch and its base,
+ * with the worker's read credential in a deployment, `gitReviewFetch`). A head that is still not
+ * there is answered `skipped`, naming the commit and why, instead of a session that fails to cut its
+ * worktree. The diff is taken against the base *commit* the event names when the checkout has it, so
+ * a stale or absent local base branch does not change what is reviewed; the base branch's name is
+ * the fallback.
+ *
  * It goes through the same seam as every other trigger (`TriggerServiceLive`), so the dedupe, the
  * claim and its release, and the one-prompt-per-delivery rule are the seam's, not this file's.
  */
-import { Effect, Layer, Option, Schema } from "effect";
+import { Effect, type FileSystem, Layer, Option, Schema } from "effect";
+import type { ChildProcessSpawner } from "effect/process";
 import { SqlClient } from "effect/sql/SqlClient";
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- whether a commit is in the checkout is a question for the local git CLI, the one `workspace.ts` cuts the worktree with.
+import { execFileSync } from "node:child_process";
 import {
   BranchName,
   type RepoSlug,
@@ -39,6 +52,8 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { REVIEW_ROLES } from "@repo/harness";
+import type { CredentialProvider } from "./credentials";
+import { fetchBranch } from "./git";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
 import {
@@ -81,8 +96,15 @@ export type PullRequestUpdate = {
   /** The PR's API resource (`url`), matched as well, as the Linear mirror does. */
   readonly apiUrl?: string;
   readonly title: string;
+  /** The branch the PR merges into. */
   readonly base: string;
+  /** The base branch's commit when the event was sent (`base.sha`), when the payload names one. */
+  readonly baseSha?: string;
   readonly head: string;
+  /** The PR's head branch (`head.ref`), fetched when the head commit is not in the checkout. */
+  readonly headRef?: string;
+  /** Whether the head branch is in the PR's own repository (not a fork), so it can be fetched there. */
+  readonly headInRepo?: boolean;
   readonly draft: boolean;
 };
 
@@ -130,6 +152,12 @@ export const pullRequestUpdate = (
   const repo = Schema.decodeOption(RepoSlugSchema)(fullName.toLowerCase());
   if (Option.isNone(repo)) return undefined;
   const apiUrl = text(pr, "url");
+  const baseSha = text(asRecord(pr?.["base"]), "sha");
+  const headRef = text(asRecord(pr?.["head"]), "ref");
+  const headRepo = text(
+    asRecord(asRecord(pr?.["head"])?.["repo"]),
+    "full_name",
+  );
   return {
     action: text(body, "action") ?? "",
     repo: repo.value,
@@ -138,7 +166,12 @@ export const pullRequestUpdate = (
     ...(apiUrl === undefined || apiUrl === url ? {} : { apiUrl }),
     title: text(pr, "title") ?? "",
     base,
+    ...(baseSha !== undefined && SHA.test(baseSha) ? { baseSha } : {}),
     head,
+    ...(headRef === undefined || headRef === "" ? {} : { headRef }),
+    ...(headRepo === undefined
+      ? {}
+      : { headInRepo: headRepo.toLowerCase() === repo.value }),
     draft: pr?.["draft"] === true,
   };
 };
@@ -151,8 +184,14 @@ export const reviewToken = (update: PullRequestUpdate): string =>
 export const reviewBranch = (update: PullRequestUpdate): string =>
   `${REVIEW_BRANCH_PREFIX}${update.number}-${update.head.slice(0, 12)}`;
 
-/** One head of one PR, as the seam takes it. */
-export const reviewDelivery = (update: PullRequestUpdate): TriggerDelivery => ({
+/**
+ * One head of one PR, as the seam takes it. `diffBase` is what the change is measured against: the
+ * base commit when the checkout has it (`prepareReviewCheckout`), the base branch otherwise.
+ */
+export const reviewDelivery = (
+  update: PullRequestUpdate,
+  diffBase: string = update.base,
+): TriggerDelivery => ({
   requestId: reviewToken(update),
   event: {
     source: "github",
@@ -161,7 +200,7 @@ export const reviewDelivery = (update: PullRequestUpdate): TriggerDelivery => ({
     title: update.title === "" ? `#${update.number}` : update.title,
     body:
       `${update.url}\n` +
-      `It merges ${update.head} into ${update.base}: the change under review is \`git diff ${update.base}...HEAD\`.`,
+      `It merges ${update.head} into ${update.base}${diffBase === update.base ? "" : ` (at ${diffBase})`}: the change under review is \`git diff ${diffBase}...HEAD\`.`,
     labels: [REVIEW_TRIGGER_LABEL],
     repo: update.repo,
   },
@@ -267,6 +306,7 @@ export const reviewCardOf = (
 export const ReviewSessionsFromSessionService = (
   update: PullRequestUpdate,
   card: ReviewCard,
+  diffBase: string = update.base,
 ) =>
   Layer.effect(
     TriggerSessions,
@@ -296,7 +336,7 @@ export const ReviewSessionsFromSessionService = (
               review: {
                 number: update.number,
                 url: update.url,
-                base: update.base,
+                base: diffBase,
                 head: update.head,
               },
               actor: triggerActorOf(input.source),
@@ -322,11 +362,146 @@ export const ReviewSessionsFromSessionService = (
 export const ReviewTriggerLive = (
   update: PullRequestUpdate,
   card: ReviewCard,
+  diffBase: string = update.base,
 ) =>
   TriggerServiceLive({ rules: reviewTriggerRules(update) }).pipe(
-    Layer.provide(ReviewSessionsFromSessionService(update, card)),
+    Layer.provide(ReviewSessionsFromSessionService(update, card, diffBase)),
     Layer.provide(NoWriteBack),
   );
+
+/**
+ * How the review brings one branch of the PR's repository into its registered checkout, when a commit
+ * the event names is not there (module doc). A failure is a reason, not an error: the review is then
+ * skipped, naming it.
+ */
+export type ReviewFetch = (input: {
+  readonly repo: RepoSlug;
+  readonly localPath: string;
+  readonly branch: string;
+}) => Effect.Effect<void, { readonly message: string }>;
+
+/**
+ * The deployment's `ReviewFetch`: `fetchBranch` from the repo's forge into
+ * `refs/remotes/origin/<branch>` of the checkout, with the worker's credential — a read of the
+ * worker's own repository, never a post, so it is not the reviewer's identity that is needed.
+ */
+export const gitReviewFetch: Effect.Effect<
+  ReviewFetch,
+  never,
+  | CredentialProvider
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+> = Effect.gen(function* () {
+  const context = yield* Effect.context<
+    | CredentialProvider
+    | ChildProcessSpawner.ChildProcessSpawner
+    | FileSystem.FileSystem
+  >();
+  return (input) =>
+    fetchBranch({
+      worktree: input.localPath,
+      repo: input.repo,
+      branch: input.branch,
+    }).pipe(
+      Effect.asVoid,
+      Effect.mapError((error) => ({ message: error.message })),
+      Effect.provideContext(context),
+    );
+});
+
+/** Whether `sha` names a commit the checkout at `localPath` has. */
+const hasCommit = (localPath: string, sha: string): Effect.Effect<boolean> =>
+  Effect.sync(() => {
+    try {
+      execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], {
+        cwd: localPath,
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+/** The checkout is ready at the head, and the change is measured against `diffBase`; or why not. */
+export type ReviewCheckout =
+  | { readonly _tag: "ready"; readonly diffBase: string }
+  | { readonly _tag: "missing"; readonly reason: string };
+
+/**
+ * Make sure the registered checkout has the head (and the base commit) the event names, fetching
+ * what it lacks (module doc). A repo nobody registered is left to the seam, which skips it naming the
+ * repo.
+ */
+export const prepareReviewCheckout = (
+  update: PullRequestUpdate,
+  fetch: ReviewFetch | undefined,
+): Effect.Effect<ReviewCheckout, TriggerError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{ readonly localPath: string | null }>`
+      SELECT local_path FROM repos WHERE slug = ${update.repo}
+    `.pipe(
+      Effect.mapError(
+        (cause) =>
+          new TriggerError({
+            code: "storage",
+            message: `read the registration of ${update.repo}: ${cause.message}`,
+          }),
+      ),
+    );
+    const localPath = rows[0]?.localPath ?? undefined;
+    if (localPath === undefined)
+      return { _tag: "ready", diffBase: update.base };
+    const baseSha = update.baseSha;
+    const wanted = [
+      ...((yield* hasCommit(localPath, update.head))
+        ? []
+        : [
+            update.headRef !== undefined && update.headInRepo !== false
+              ? { branch: update.headRef }
+              : {
+                  unfetchable:
+                    update.headRef === undefined
+                      ? "the event names no head branch to fetch it from"
+                      : `its branch ${update.headRef} is in a fork, which the factory does not fetch`,
+                },
+          ]),
+      ...(baseSha === undefined || (yield* hasCommit(localPath, baseSha))
+        ? []
+        : [{ branch: update.base }]),
+    ];
+    const why: string[] = [];
+    for (const want of wanted) {
+      if ("unfetchable" in want) {
+        why.push(want.unfetchable);
+        continue;
+      }
+      if (fetch === undefined) {
+        why.push(`no fetch is configured to bring ${want.branch} here`);
+        continue;
+      }
+      const fetched = yield* fetch({
+        repo: update.repo,
+        localPath,
+        branch: want.branch,
+      }).pipe(Effect.result);
+      if (fetched._tag === "Failure")
+        why.push(`fetching ${want.branch} failed: ${fetched.failure.message}`);
+    }
+    if (!(yield* hasCommit(localPath, update.head)))
+      return {
+        _tag: "missing",
+        reason: `${update.repo}#${update.number}'s head ${update.head.slice(0, 12)} is not in the registered checkout ${localPath}${why.length === 0 ? "" : ` (${why.join("; ")})`}, so it cannot be reviewed there`,
+      };
+    return {
+      _tag: "ready",
+      diffBase:
+        baseSha !== undefined && (yield* hasCommit(localPath, baseSha))
+          ? baseSha
+          : update.base,
+    };
+  });
 
 /** What one `pull_request` event did for review: started (or replayed) a run, or why it did not. */
 export type ReviewTriggerOutcome =
@@ -342,6 +517,7 @@ export type ReviewTriggerOutcome =
 /** Start the reviewer run one PR event asks for, or say why it asks for none (module doc). */
 export const reviewPullRequest = (
   update: PullRequestUpdate,
+  fetch?: ReviewFetch,
 ): Effect.Effect<
   ReviewTriggerOutcome,
   TriggerError,
@@ -361,10 +537,15 @@ export const reviewPullRequest = (
     const lookup = yield* reviewCardOf(update);
     if (lookup._tag === "none")
       return { status: "skipped", reason: lookup.reason };
+    const checkout = yield* prepareReviewCheckout(update, fetch);
+    if (checkout._tag === "missing")
+      return { status: "skipped", reason: checkout.reason };
     const delivered = yield* Effect.gen(function* () {
       const trigger = yield* TriggerService;
-      return yield* trigger.deliver(reviewDelivery(update));
-    }).pipe(Effect.provide(ReviewTriggerLive(update, lookup.card)));
+      return yield* trigger.deliver(reviewDelivery(update, checkout.diffBase));
+    }).pipe(
+      Effect.provide(ReviewTriggerLive(update, lookup.card, checkout.diffBase)),
+    );
     if (delivered.status === "skipped")
       return { status: "skipped", reason: delivered.reason ?? "skipped" };
     return {
@@ -389,6 +570,8 @@ export const handlePullRequestReviewWebhook = (input: {
   readonly secret: string | undefined;
   readonly raw: string;
   readonly signature: string | undefined;
+  /** How a head the checkout lacks is fetched (`gitReviewFetch`); absent, it is skipped. */
+  readonly fetch?: ReviewFetch;
 }): Effect.Effect<GitHubWebhookAnswer, never, SessionService | SqlClient> =>
   Effect.gen(function* () {
     const refused = refuseGitHubDelivery(input);
@@ -407,7 +590,7 @@ export const handlePullRequestReviewWebhook = (input: {
           code: "bad-payload",
         },
       };
-    return yield* reviewPullRequest(update).pipe(
+    return yield* reviewPullRequest(update, input.fetch).pipe(
       Effect.map((outcome): GitHubWebhookAnswer => ({
         status: 200,
         body: { ok: true, ...outcome },

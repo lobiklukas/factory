@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunServices } from "@effect/platform-bun";
 import {
+  BranchName,
   RepoSlug as RepoSlugSchema,
   type SessionId,
 } from "@repo/domain/Session";
@@ -43,6 +44,7 @@ import {
   handlePullRequestReviewWebhook,
   pullRequestUpdate,
   reviewBranch,
+  type ReviewFetch,
   reviewToken,
 } from "./ReviewTrigger";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -166,6 +168,8 @@ const payload = (
   over: {
     readonly action?: string;
     readonly head?: string;
+    readonly headRef?: string;
+    readonly baseSha?: string;
     readonly number?: number;
     readonly draft?: boolean;
   } = {},
@@ -178,8 +182,15 @@ const payload = (
     url: `https://api.github.com/repos/${repo}/pulls/${over.number ?? NUMBER}`,
     title: "Skip the first element",
     draft: over.draft ?? false,
-    base: { ref: "main" },
-    head: { ref: "feature", sha: over.head ?? HEAD },
+    base: {
+      ref: "main",
+      ...(over.baseSha === undefined ? {} : { sha: over.baseSha }),
+    },
+    head: {
+      ref: over.headRef ?? "feature",
+      sha: over.head ?? HEAD,
+      repo: { full_name: repo },
+    },
   },
   repository: { full_name: repo },
 });
@@ -188,16 +199,50 @@ const sign = (raw: string) =>
   `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
 
 /** POST one `pull_request` delivery to the review handler, signed as GitHub signs it. */
-const deliver = (body: unknown, signature?: string) => {
+const deliver = (body: unknown, signature?: string, fetch?: ReviewFetch) => {
   const raw = JSON.stringify(body);
   return run(
     handlePullRequestReviewWebhook({
       secret: SECRET,
       raw,
       signature: signature ?? sign(raw),
+      ...(fetch === undefined ? {} : { fetch }),
     }),
   );
 };
+
+/**
+ * Where the PR's branch lives when someone other than the factory pushed it: a clone of the checkout
+ * whose `pushed-elsewhere` branch has commits the registered checkout has never seen, as a person's
+ * push to the PR branch would.
+ */
+const elsewhere = mkdtempSync(join(tmpdir(), "review-trigger-remote-"));
+git(elsewhere, "clone", "-q", checkout, ".");
+git(elsewhere, "checkout", "-q", "-b", "pushed-elsewhere", "origin/feature");
+writeFileSync(join(elsewhere, "src/sum.ts"), "export const sum = () => 0;\n");
+git(elsewhere, "commit", "-q", "-am", "a person's push");
+const REMOTE_ONLY = git(elsewhere, "rev-parse", "HEAD");
+writeFileSync(join(elsewhere, "src/sum.ts"), "export const sum = () => 1;\n");
+git(elsewhere, "commit", "-q", "-am", "another push");
+const REMOTE_ONLY_TOO = git(elsewhere, "rev-parse", "HEAD");
+
+/** The fetch a deployment does with `fetchBranch`, here from the clone over a path (no credential). */
+const fetchFromElsewhere =
+  (fetched: string[]): ReviewFetch =>
+  (input) =>
+    Effect.try({
+      try: () => {
+        fetched.push(input.branch);
+        git(
+          input.localPath,
+          "fetch",
+          "-q",
+          elsewhere,
+          `+refs/heads/${input.branch}:refs/remotes/origin/${input.branch}`,
+        );
+      },
+      catch: (cause) => ({ message: String(cause) }),
+    });
 
 /** Wait until `sessionId` has settled with a recorded verdict, then read what its log holds. */
 const settled = (sessionId: SessionId) =>
@@ -280,6 +325,8 @@ describe("a reviewable pull_request event", () => {
       title: "Skip the first element",
       base: "main",
       head: HEAD,
+      headRef: "feature",
+      headInRepo: true,
       draft: false,
     });
     if (update === undefined) return;
@@ -464,6 +511,107 @@ describe("the review a pull_request event starts", () => {
     } finally {
       await restarted.dispose();
     }
+  }, 120_000);
+
+  it("fetches a head nobody committed here, then reviews it; with no way to fetch it, skips naming the commit", async () => {
+    const number = 14;
+    await cardWithPr(pageOf(number));
+    // No fetch: the head is not in the checkout, so nothing is started and the answer says why.
+    const unfetched = await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: REMOTE_ONLY,
+        headRef: "pushed-elsewhere",
+      }),
+    );
+    expect(unfetched.status).toBe(200);
+    expect(unfetched.body).toMatchObject({ status: "skipped" });
+    expect(String(unfetched.body["reason"])).toContain(
+      `head ${REMOTE_ONLY.slice(0, 12)} is not in the registered checkout`,
+    );
+
+    // With the fetch a deployment has, the head's branch is brought here and the run is cut at it.
+    const fetched: string[] = [];
+    const answer = await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: REMOTE_ONLY_TOO,
+        headRef: "pushed-elsewhere",
+      }),
+      undefined,
+      fetchFromElsewhere(fetched),
+    );
+    expect(answer.body).toMatchObject({
+      status: "processed",
+      head: REMOTE_ONLY_TOO,
+    });
+    expect(fetched).toEqual(["pushed-elsewhere"]);
+    const reviewed = await settled(answer.body["sessionId"] as SessionId);
+    expect(git(reviewed.snapshot.workspace.path, "rev-parse", "HEAD")).toBe(
+      REMOTE_ONLY_TOO,
+    );
+  }, 120_000);
+
+  it("measures the change against the base commit the event names, not the local base branch", async () => {
+    const number = 15;
+    await cardWithPr(pageOf(number));
+    const baseSha = git(checkout, "rev-parse", "main");
+    const answer = await deliver(payload({ number, baseSha }));
+    const reviewed = await settled(answer.body["sessionId"] as SessionId);
+    expect(reviewed.review?.target.base).toBe(baseSha);
+    const posted = forge.posts.find(
+      (post) => post.target.url === pageOf(number),
+    );
+    expect(posted?.body).toContain(`against \`${baseSha.slice(0, 12)}\``);
+  }, 120_000);
+
+  it("a retried create repairs a review session whose first attempt died before its target was written", async () => {
+    const number = 16;
+    const { card } = await cardWithPr(pageOf(number));
+    const update = pullRequestUpdate(payload({ number }));
+    if (update === undefined) throw new Error("the payload does not read");
+    const requestId = `trigger:${reviewToken(update)}`;
+    const target = await run(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        // The first attempt: its row, its run and its owner, and no review target in its log.
+        const first = yield* sessions.create({
+          requestId,
+          repo,
+          baseRef: HEAD,
+          branch: BranchName.make(reviewBranch(update)),
+          taskId: card.id,
+          taskColumn: "review",
+        });
+        // The process dies here; another takes the retry.
+        yield* sessions.close;
+        const retried = yield* sessions.create({
+          requestId,
+          repo,
+          baseRef: HEAD,
+          branch: BranchName.make(reviewBranch(update)),
+          taskId: card.id,
+          taskColumn: "review",
+          review: { number, url: pageOf(number), base: "main", head: HEAD },
+        });
+        expect(retried.id).toBe(first.id);
+        return yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, first.id)),
+          (storage) => readRecordedReview(storage),
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+      }),
+    );
+    expect(target?.target).toEqual({
+      repo,
+      number,
+      url: pageOf(number),
+      base: "main",
+      head: HEAD,
+    });
   }, 120_000);
 
   it("starts nothing for a PR the factory did not open, a draft, or an action that is not a review's", async () => {

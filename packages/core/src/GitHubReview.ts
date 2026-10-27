@@ -18,8 +18,10 @@
  *
  * **One comment per head, never an approval.** `githubReviewPoster` reads the PR first: a head that
  * moved since the run began answers `stale` and posts nothing (the new head has its own run, opened by
- * `synchronize`). Then it reads the PR's reviews for the run's marker, so a retry after a lost
- * acknowledgement finds its own comment instead of posting a second. Only then does it post, as a
+ * `synchronize`). Then it reads every page of the PR's reviews for the run's marker, written by the
+ * reviewer itself — its token's login, or for an App its bot — so a retry after a lost
+ * acknowledgement finds its own comment instead of posting a second, and anyone else's copy of the
+ * (predictable) marker suppresses nothing. Only then does it post, as a
  * `COMMENT` review pinned to the reviewed commit (`commit_id`). It never posts `APPROVE` or
  * `REQUEST_CHANGES`: the board's human merge gate is the decision (B5), and an approval is the one
  * thing a push could leave standing — a comment states what it reviewed and leaves nothing to dismiss.
@@ -164,13 +166,32 @@ const GitHubPull = Schema.Struct({
   head: Schema.Struct({ sha: Schema.String }),
 });
 
-/** One page of a PR's reviews: each one's body and page. */
+/** Who wrote a review (or is asking): GitHub's `user`, as far as the marker check reads it. */
+const GitHubUser = Schema.Struct({
+  login: Schema.String,
+  type: Schema.optional(Schema.String),
+});
+
+/** One page of a PR's reviews: each one's body, page and author. */
 const GitHubReviews = Schema.Array(
   Schema.Struct({
     body: Schema.optional(Schema.NullOr(Schema.String)),
     html_url: Schema.optional(Schema.String),
+    user: Schema.optional(Schema.NullOr(GitHubUser)),
   }),
 );
+
+/** The most pages of reviews read before the post gives up rather than reading forever. */
+const MAX_REVIEW_PAGES = 50;
+
+/** The `rel="next"` URL of a GitHub `Link` header, if it has one. */
+export const nextPageOf = (link: string | undefined): string | undefined => {
+  for (const part of (link ?? "").split(",")) {
+    const match = /<([^>]+)>\s*;\s*rel="next"/.exec(part);
+    if (match?.[1] !== undefined) return match[1];
+  }
+  return undefined;
+};
 
 const GitHubReview = Schema.Struct({ html_url: Schema.String });
 
@@ -185,6 +206,8 @@ export const githubReviewPoster = (input: {
 }): Effect.Effect<ReviewPoster, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient;
+    /** The reviewer token's login, read the first time a marked review has to be attributed. */
+    let reviewerLogin: string | undefined;
     return (request) =>
       Effect.gen(function* () {
         const { target } = request;
@@ -243,19 +266,59 @@ export const githubReviewPoster = (input: {
         if (pr.head.sha !== target.head) {
           return { _tag: "stale", head: pr.head.sha } satisfies ReviewPosted;
         }
-        const reviews = yield* send(
-          "its reviews",
-          HttpClientRequest.get(`${pull}/reviews?per_page=100`, { headers }),
-        ).pipe(
-          Effect.flatMap((response) =>
-            read("its reviews", response, GitHubReviews),
-          ),
-        );
-        const already = reviews.find(
-          (review) =>
-            typeof review.body === "string" &&
-            review.body.includes(request.marker),
-        );
+        // Every page of the PR's reviews, following GitHub's `Link` header: a marker on page two is
+        // still this run's comment.
+        const marked: Array<(typeof GitHubReviews.Type)[number]> = [];
+        let page: string | undefined = `${pull}/reviews?per_page=100`;
+        for (let pages = 0; page !== undefined; pages += 1) {
+          if (pages === MAX_REVIEW_PAGES)
+            return yield* fail(
+              `its reviews run past ${MAX_REVIEW_PAGES} pages, so whether this head was already reviewed cannot be read`,
+            );
+          const response = yield* send(
+            "its reviews",
+            HttpClientRequest.get(page, { headers }),
+          );
+          const reviews = yield* read("its reviews", response, GitHubReviews);
+          marked.push(
+            ...reviews.filter(
+              (review) =>
+                typeof review.body === "string" &&
+                review.body.includes(request.marker),
+            ),
+          );
+          page = nextPageOf(response.headers["link"]);
+          // The token goes only where the first page went: GitHub's own API root.
+          if (page !== undefined && !page.startsWith(`${apiUrl}/`))
+            return yield* fail(
+              `GitHub's next page of reviews is not under ${apiUrl}`,
+            );
+        }
+        // The marker is predictable (the PR and a public head), so a review carrying it is this
+        // run's only when the reviewer wrote it: anyone else's copy must not suppress the post. A
+        // token's identity is its login (`GET /user`, read once per poster); an App's installation
+        // token cannot read `/user`, and the App posts as its bot, so for an App a bot's review is.
+        const owns = yield* Effect.gen(function* () {
+          if (marked.length === 0) return (): boolean => false;
+          if (input.credentials.source === "github-app")
+            return (review: (typeof marked)[number]) =>
+              review.user?.type === "Bot";
+          if (reviewerLogin === undefined) {
+            const me = yield* send(
+              "the reviewer's own login",
+              HttpClientRequest.get(`${apiUrl}/user`, { headers }),
+            ).pipe(
+              Effect.flatMap((response) =>
+                read("the reviewer's own login", response, GitHubUser),
+              ),
+            );
+            reviewerLogin = me.login.toLowerCase();
+          }
+          const login = reviewerLogin;
+          return (review: (typeof marked)[number]) =>
+            review.user?.login.toLowerCase() === login;
+        });
+        const already = marked.find(owns);
         if (already !== undefined) {
           return {
             _tag: "posted",

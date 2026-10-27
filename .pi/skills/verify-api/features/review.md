@@ -11,7 +11,10 @@ comment on the PR, under an identity that is not the PR author's (LOB-36).
   `reopened`, `ready_for_review` and `synchronize` on a PR whose page a session recorded, when that
   session is a run of a card, start one run in the card's reviewer column (the column whose role is
   `reviewer`). The delivery id is the head (`review-<owner>-<repo>-<number>-<sha>`), so a redelivery is
-  a replay and a push is a new run on `factory/review-<number>-<sha12>`, cut at the new head. A draft,
+  a replay and a push is a new run on `factory/review-<number>-<sha12>`, cut at the new head — a head
+  the registered checkout lacks is fetched first (`gitReviewFetch`, the worker's read credential), and
+  one it still lacks is `skipped` naming the commit. The change is measured against the event's base
+  commit when the checkout has it. A review run is not a run the card's exit checks read. A draft,
   another action, a PR the factory did not open and one from a run of no card start nothing, each
   answered with its reason under `review`.
 - **The run** (`packages/harness/src/review.ts`). A session opened with a review target is a review
@@ -24,8 +27,9 @@ comment on the PR, under an identity that is not the PR author's (LOB-36).
 - **The post** (`packages/core/src/GitHubReview.ts`). Under the reviewer's own credential
   (`GITHUB_REVIEWER_TOKEN`, or a second App on `GITHUB_REVIEWER_APP_*`; the worker's token or App is
   refused at boot, and none at all posts nothing). It reads the PR's head first — a head that moved is
-  `stale` and nothing is posted — then the PR's reviews for its marker, then posts one `COMMENT` review
-  pinned to the reviewed commit. Never an approval.
+  `stale` and nothing is posted — then every page of the PR's reviews for its marker, counting only a
+  review the reviewer itself wrote (its token's `GET /user` login, or for an App a bot), then posts
+  one `COMMENT` review pinned to the reviewed commit. Never an approval.
 
 ## How the skill drives it
 
@@ -54,4 +58,8 @@ worktree's own database on 5442): **12/12**, evidence `.verify/evidence/lob-36/`
 That a real model finds a real bug, or stays quiet on a clean PR: the faux reviewer files what its
 script says (the rubric and the diff check are what is proven). Measuring the reviewer on the
 factory's own PRs with a live model is LOB-242. Nor that GitHub accepts the review as spelled
-(`docs/testing-third-parties.md`'s GitHub review row).
+(`docs/testing-third-parties.md`'s GitHub review row). Nor the fetch of a head pushed elsewhere: the
+drive builds every head in the registered checkout, and `ReviewTrigger.test.ts` proves the fetch
+path with a path remote standing in for `fetchBranch` (whose credentialed fetch `git.test.ts`
+proves). For an App identity, a marked review by _any_ bot counts as its own: an installation token
+cannot read its own login.

@@ -201,7 +201,7 @@ export type ReviewTarget = {
   readonly repo: string;
   readonly number: number;
   readonly url: string;
-  /** The ref the PR merges into; the diff is `base...HEAD`. */
+  /** What the PR merges into — its base commit, or the base branch — the diff is `base...HEAD`. */
   readonly base: string;
   /** The commit the run reviews, which its worktree is checked out at. */
   readonly head: string;
@@ -247,6 +247,10 @@ export const reviewMarker = (target: ReviewTarget): string =>
 
 const short = (sha: string): string => sha.slice(0, 12);
 
+/** A base as a reader takes it: a branch name as it is, a commit (the event's `base.sha`) shortened. */
+const shortRef = (ref: string): string =>
+  /^[0-9a-f]{40}$/.test(ref) ? short(ref) : ref;
+
 /** The comment: verdict, a table of the four dimensions, the findings, and the rubric. */
 export const renderReview = (input: {
   readonly review: Review;
@@ -279,7 +283,7 @@ export const renderReview = (input: {
     input.marker,
     `## Factory review: ${verdict === "fail" ? "changes needed" : "no blocking finding"}`,
     "",
-    `Reviewed \`${short(target.head)}\` against \`${target.base}\`. ${review.summary.trim()}`,
+    `Reviewed \`${short(target.head)}\` against \`${shortRef(target.base)}\`. ${review.summary.trim()}`,
     "",
     "| Dimension | Verdict | Findings |",
     "| --- | --- | --- |",

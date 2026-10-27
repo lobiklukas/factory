@@ -31,7 +31,10 @@
  * runs, `pr_link` the latest run's `factory.pr` document, and `non_empty_diff` the latest run's
  * branch, measured against its base by the PR step's own `git diff --numstat` from the run's
  * registered checkout (a session's worktree is a linked worktree of it, so the two share every ref).
- * The diff runs in a child process without blocking the event loop (`branchDiffSize`), so a large one
+ * A review run (LOB-36: a log with a `factory.review` target) is not among them: it judges a run's
+ * change and makes none, and it starts while the card is still in `building` — the PR's `opened` is
+ * what starts it — so counting it would make it the "latest run" whose PR and branch `building`'s exit
+ * reads, and the card could never leave. The diff runs in a child process without blocking the event loop (`branchDiffSize`), so a large one
  * holds up this move only. The logs are read, and the branch measured, *before* the card is locked,
  * not inside the transaction: a log fold and a `git diff` are unbounded work, and holding the row
  * lock (and a pool connection) across them would let a long log or a large diff stall every other
@@ -83,7 +86,11 @@ import type {
   TaskPriority as TaskPriorityType,
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
-import { readRecordedPullRequest, readVerifyCalls } from "@repo/harness";
+import {
+  readRecordedPullRequest,
+  readRecordedReview,
+  readVerifyCalls,
+} from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import { mintBoardId, mintTaskId } from "./ids";
 import { branchDiffSize } from "./prStep";
@@ -905,16 +912,36 @@ export const TaskServiceLive = Layer.effect(
           WHERE tr.task_id = ${taskId}
           ORDER BY tr.started_at, tr.id
         `;
-        const ids = runs.map((run) => run.sessionId);
         const logs = yield* Effect.tryPromise({
-          try: () => PostgresStorage.readers(sql, ids),
+          try: () =>
+            PostgresStorage.readers(
+              sql,
+              runs.map((run) => run.sessionId),
+            ),
           catch: (cause) =>
             new TaskStorageError({
               message: `task ${taskId}: could not read its runs' logs: ${String(cause)}`,
             }),
         });
+        // A review run is not a run of the card's change (module doc), so it is neither evidence nor
+        // the latest run.
+        const reviewing = yield* Effect.forEach(runs, (run) => {
+          const storage = logs.get(run.sessionId);
+          return storage === undefined
+            ? Effect.succeed(false)
+            : readRecordedReview(storage).pipe(
+                Effect.map((review) => review !== undefined),
+                Effect.mapError(
+                  (cause) =>
+                    new TaskStorageError({
+                      message: `task ${taskId}: run ${run.sessionId}'s review record does not read: ${cause.message}`,
+                    }),
+                ),
+              );
+        });
+        const changing = runs.filter((_, index) => reviewing[index] !== true);
         const recorded = yield* Effect.forEach(
-          ids,
+          changing.map((run) => run.sessionId),
           (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
             const storage = logs.get(sessionId);
             if (storage === undefined)
@@ -944,7 +971,7 @@ export const TaskServiceLive = Layer.effect(
             });
           },
         );
-        const latest = runs.at(-1);
+        const latest = changing.at(-1);
         const evidence: CardEvidence =
           measureDiff && latest !== undefined
             ? { runs: recorded, diff: yield* branchDiff(latest) }
