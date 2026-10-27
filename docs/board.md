@@ -81,6 +81,12 @@ input. When the source is Linear, the question rides Linear's `elicitation` acti
 arrives as a session event: **answers are events, never re-read editable comments**, which is Linear's
 own guidance about comments.
 
+Built (LOB-73): the thread is `task_events` itself — a comment is a `commented` event with a kind
+(`question | answer | note`), so the ask (comment + block) and the answer (comment + unblock) are each
+one transaction over one table, and B3's "cards are rows" holds for the thread too. The run asks with
+the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
+card carries the thread as its `task_thread` prompt section.
+
 ## B8 — Evidence gates, not evidence prose
 
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body

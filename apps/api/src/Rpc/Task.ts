@@ -14,6 +14,8 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       moveTask: (input) => tasks.move(input as any),
       blockTask: (input) => tasks.block(input as any),
       unblockTask: (input) => tasks.unblock(input as any),
+      commentTask: (input) => tasks.comment(input),
+      listTaskComments: (input) => tasks.comments(input.taskId),
       listTaskRuns: (input) => tasks.listRuns(input.taskId),
     });
   }),
