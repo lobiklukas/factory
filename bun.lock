@@ -144,6 +144,19 @@
         "vitest": "^4.1.4",
       },
     },
+    "packages/sandbox": {
+      "name": "@repo/sandbox",
+      "version": "0.0.0",
+      "dependencies": {
+        "@earendil-works/chord": "1.0.3",
+        "@earendil-works/pi-durable": "1.0.3",
+        "effect": "4.0.0",
+      },
+      "devDependencies": {
+        "@repo/config-typescript": "workspace:*",
+        "vitest": "^4.1.4",
+      },
+    },
     "packages/storage-postgres": {
       "name": "@repo/storage-postgres",
       "version": "0.0.0",
@@ -552,6 +565,8 @@
     "@repo/domain": ["@repo/domain@workspace:packages/domain"],
 
     "@repo/harness": ["@repo/harness@workspace:packages/harness"],
+
+    "@repo/sandbox": ["@repo/sandbox@workspace:packages/sandbox"],
 
     "@repo/storage-postgres": ["@repo/storage-postgres@workspace:packages/storage-postgres"],
 
