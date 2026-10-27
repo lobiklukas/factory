@@ -86,7 +86,7 @@ running, and writes its own evidence:
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ./docs-trigger.sh  # fake GitHub on :9410 — a push and a schedule start docs runs on factory/doc-<id>
-./verify-tool.sh # no port — the `verify` tool over four fixture repos (features/verify-tool.md)
+./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the

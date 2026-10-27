@@ -11,28 +11,47 @@
  *    the branch against its base, plus what is uncommitted and untracked — are mapped to surfaces by
  *    `surfaceOf`. A directory that is not a checkout root measures nothing, for the reason
  *    `prStep.ts`'s `diffSize` gives: a plain session directory sits inside the control plane's own
- *    checkout, and a bare `git diff` there would measure *its* branch.
+ *    checkout, and a bare `git diff` there would measure *its* branch. A changed path that belongs to
+ *    no surface (`src/`, `docs/`, a single-package repo's root) is the repo surface, `REPO_SURFACE`.
  * 2. **What runs, per surface.** The repo's declared `verify` command (`.factory/config`, the
  *    workspace's `commands.verify`) when there is one — the repo said how it verifies itself, so that
- *    is the answer — and only otherwise the surface's skill directory, run as `up.sh`, its driver,
- *    then `down.sh`. The declared command is told which surface it is verifying through
- *    `FACTORY_VERIFY_SURFACE`; a command that ignores it verifies the whole repo once per surface.
+ *    is the answer, whatever the repo's layout — and only otherwise the surface's skill directory,
+ *    run as `up.sh`, its driver, then `down.sh`. The declared command is told which surface it is
+ *    verifying through `FACTORY_VERIFY_SURFACE` (`.` for the repo surface); a command that ignores it
+ *    verifies the whole repo once per surface. The repo surface has no skill directory, so without a
+ *    declared command it is no evidence.
  * 3. **What is recorded.** One typed result per surface, as the tool result's `details`: the command,
  *    where it ran, the exit code, and a bounded tail of its output. A surface with neither a command
- *    nor a skill is a typed `VerifyNoEvidence` naming the surface, never a missing row; a command
- *    that could not run (spawn failure, timeout) is `VerifyUnrunnable` with what it printed before it
- *    stopped. None of these throw: a failed verification is a result the model reads and a gate
- *    checks, not a tool crash. The one throw is an abort, which belongs to Pi Durable.
+ *    nor a skill is a typed `VerifyNoEvidence` naming the surface, never a missing row — so a report
+ *    with changed paths always has at least one result, and an empty `results` means the run changed
+ *    nothing. A command that could not run (spawn failure, timeout) is `VerifyUnrunnable` with what
+ *    it printed before it stopped. None of these throw: a failed verification is a result the model
+ *    reads and a gate checks, not a tool crash. The one throw is an abort, which belongs to Pi
+ *    Durable.
  *
  * The record is the tool result Pi Durable already commits, not a second document beside it: one
- * write, so the evidence a reader decodes (`verifyReportsIn`) and the text the model read can never
+ * write, so the evidence a reader decodes (`verifyRecordsIn`) and the text the model read can never
  * disagree.
  *
  * The tool takes no arguments, deliberately. The model does not choose the surface or the command:
  * a tool that let it name a surface could verify one whose skill passes instead of the one it
- * touched, and one that took a command would be `bash` with a better name. Everything it runs is
- * something the repo itself declared, which is also why the policy (`./policy`) has nothing to read
- * in its arguments.
+ * touched, and one that took a command would be `bash` with a better name. That is a guard against
+ * choosing *which* verification runs, not a sandbox: the skill scripts run from the session's own
+ * worktree, which the run can write, and editing a driver is exactly what makes `surfaceOf` pick it.
+ * So what `verify` runs may be model-written shell that `./policy`'s textual `bash` checks never
+ * see — the same non-boundary `./policy` already accepts for "a script written and then executed",
+ * and no capability `bash` does not already give. A gate that reads a `VerifyRan` exit 0 (LOB-79)
+ * reads what the worktree's verifier said, not what the base ref's would have.
+ *
+ * **Isolation, and what it does not cover.** A verify skill starts servers on its default ports and
+ * reads `DATABASE_URL` (see `verify-api/up.sh`). So each verification runs with `DATABASE_URL` set
+ * to `VerifyOptions.databaseUrl`, or blank — never the control plane's own database, which the
+ * nested API would otherwise migrate with the session branch's unmerged migrations and write its
+ * drive rows into. And every verification in this process takes `verifyLock` first, so two sessions
+ * of one control plane never drive fixed ports at once and read each other's server as ready. What
+ * the lock cannot see is another process on the host holding the port (a second control plane, a
+ * developer's own server): a skill's readiness poll would reach it. Evidence from a skill is
+ * attributable to the session only on a host where this control plane is the one running skills.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -50,7 +69,7 @@ import {
   ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Schema, Semaphore } from "effect";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const VERIFY_TOOL = "verify";
@@ -87,6 +106,28 @@ export const VERIFY_OUTPUT_TAIL = { maxChars: 16_384, maxLines: 200 } as const;
  */
 export const VERIFY_TIMEOUT_SECONDS = 1_800;
 
+/**
+ * How long `down.sh` may run when it is run on its own, after the skill's script was stopped
+ * (timeout or abort) before it could reach its own `down.sh`.
+ */
+export const VERIFY_CLEANUP_TIMEOUT_SECONDS = 120;
+
+/**
+ * The surface a changed path that belongs to no package names: the repo itself. It is what a
+ * declared command is told (`FACTORY_VERIFY_SURFACE=.`) when it verifies `src/`, `docs/` or a
+ * single-package repo's root.
+ */
+export const REPO_SURFACE = ".";
+
+/** The variable carrying the database a verification may use; see `VerifyOptions.databaseUrl`. */
+export const VERIFY_DATABASE_VARIABLE = "DATABASE_URL";
+
+/**
+ * How many changed paths the record keeps, and how many the model's text names. `changedCount` is
+ * always the whole count; the record says when the list is a prefix of it.
+ */
+export const VERIFY_CHANGED_LIMIT = { record: 500, text: 20 } as const;
+
 /** A verification that ran to an exit code, zero or not. */
 export const VerifyRan = Schema.TaggedStruct("VerifyRan", {
   surface: Schema.String,
@@ -104,10 +145,14 @@ export const VerifyRan = Schema.TaggedStruct("VerifyRan", {
 });
 export type VerifyRan = typeof VerifyRan.Type;
 
-/** A surface the repo gives no way to verify: no declared command and no skill with a driver. */
+/**
+ * A surface the repo gives no way to verify: no declared command and no skill with a driver
+ * (`no-verify-skill`), or changed paths that belong to no package and no declared command to verify
+ * the repo with (`no-surface`, surface `REPO_SURFACE`).
+ */
 export const VerifyNoEvidence = Schema.TaggedStruct("VerifyNoEvidence", {
   surface: Schema.String,
-  reason: Schema.Literals(["no-verify-skill"]),
+  reason: Schema.Literals(["no-verify-skill", "no-surface"]),
   message: Schema.String,
 });
 export type VerifyNoEvidence = typeof VerifyNoEvidence.Type;
@@ -135,7 +180,10 @@ export type VerifyResult = typeof VerifyResult.Type;
 
 /** What one call found: the changed paths, and one result per surface they name. */
 export const VerifyReport = Schema.TaggedStruct("VerifyReport", {
+  /** The changed paths, sorted: the first `VERIFY_CHANGED_LIMIT.record` of them. */
   changed: Schema.mutable(Schema.Array(Schema.String)),
+  /** How many paths changed in all; more than `changed.length` when the list was cut. */
+  changedCount: Schema.Int,
   /** The surfaces `changed` names, in first-seen order, one result each. */
   results: Schema.mutable(Schema.Array(VerifyResult)),
 });
@@ -166,6 +214,11 @@ export type VerifyOptions = {
   readonly baseRef?: string | undefined;
   /** Overrides `VERIFY_TIMEOUT_SECONDS`. */
   readonly timeoutSeconds?: number | undefined;
+  /**
+   * The database a verification may use, as its `DATABASE_URL`. Absent: blank, so a skill never
+   * inherits the control plane's own database (the module doc's "Isolation").
+   */
+  readonly databaseUrl?: string | undefined;
 };
 
 const SURFACE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -176,7 +229,8 @@ const SURFACE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * A workspace package is its own surface: `apps/<name>/…` and `packages/<name>/…` name `<name>`,
  * which is the `verify-<name>` skill the convention looks for. A change to a verify skill itself
  * (`.pi/skills/verify-<name>/…`) names the surface it verifies, so editing a driver runs it. Anything
- * else — `docs/`, the root's own files — names no surface: there is nothing to drive.
+ * else — `src/`, `docs/`, the root's own files — names no package surface; `runVerify` counts it
+ * toward `REPO_SURFACE`, which only a declared command can verify.
  *
  * A path rule rather than a table a skill declares, on purpose for this part: it needs nothing the
  * repo does not already have, and a package with no skill of its own is reported as exactly that
@@ -403,12 +457,18 @@ type Plan = {
   readonly source: "workspace" | "skill";
   readonly directory: string;
   readonly command: string;
+  /** Whether the skill has a `down.sh`, to run on its own when `command` is stopped before it. */
+  readonly down: boolean;
 };
 
 /**
  * How a skill directory is run: `up.sh` if it has one, then its driver if `up.sh` succeeded, then
- * `down.sh` whatever happened — so a failed drive still stops what `up.sh` started. The exit code is
- * the first failure's (`up.sh`'s, else the driver's); `down.sh`'s own is not the verdict.
+ * `down.sh` whether the driver passed or failed — so a failed drive still stops what `up.sh`
+ * started. The exit code is the first failure's (`up.sh`'s, else the driver's); `down.sh`'s own is
+ * not the verdict.
+ *
+ * A timeout or an abort SIGKILLs this whole script's process group, so the `down.sh` in it never
+ * runs on that path; `verifySurface` runs `down.sh` again on its own then.
  */
 export const skillScript = (input: {
   readonly up: boolean;
@@ -443,31 +503,40 @@ const planFor = (input: {
         source: "workspace",
         directory: ".",
         command: input.command,
+        down: false,
       } satisfies Plan);
     }
+    // The repo surface has no skill directory: only a declared command verifies it.
+    if (input.surface === REPO_SURFACE) return Option.none();
     const directory = `${VERIFY_SKILLS_DIR}/verify-${input.surface}`;
     const root = `${input.env.cwd}/${directory}`;
     const has = (file: string) =>
       exists(input.env, `${root}/${file}`, input.context);
     for (const [file, driver] of VERIFY_DRIVERS) {
       if (yield* has(file)) {
+        const down = yield* has("down.sh");
         return Option.some({
           source: "skill",
           directory,
-          command: skillScript({
-            up: yield* has("up.sh"),
-            driver,
-            down: yield* has("down.sh"),
-          }),
+          command: skillScript({ up: yield* has("up.sh"), driver, down }),
+          down,
         } satisfies Plan);
       }
     }
     return Option.none();
   });
 
+/** At most `limit` of `paths`, joined, and how many more there were. */
+const namePaths = (paths: readonly string[], limit: number): string =>
+  paths.length <= limit
+    ? paths.join(", ")
+    : `${paths.slice(0, limit).join(", ")}, and ${paths.length - limit} more`;
+
 const verifySurface = (input: {
   readonly env: ExecutionEnv;
   readonly surface: string;
+  /** For `REPO_SURFACE`: the changed paths that belong to no package, named when nothing runs. */
+  readonly unmapped: readonly string[];
   readonly options: VerifyOptions;
   readonly onOutput: (text: string) => void;
   readonly context: Context;
@@ -481,29 +550,59 @@ const verifySurface = (input: {
       context,
     });
     if (Option.isNone(plan)) {
-      return VerifyNoEvidence.make({
-        surface,
-        reason: "no-verify-skill",
-        message: `no evidence for surface "${surface}": the repo declares no verify command and ${VERIFY_SKILLS_DIR}/verify-${surface}/ holds no driver (${VERIFY_DRIVERS.map(([file]) => file).join(", ")})`,
-      });
+      return surface === REPO_SURFACE
+        ? VerifyNoEvidence.make({
+            surface,
+            reason: "no-surface",
+            message: `no evidence for ${input.unmapped.length} changed path(s) outside every package surface: the repo declares no verify command to verify them with (${namePaths(input.unmapped, VERIFY_CHANGED_LIMIT.text)})`,
+          })
+        : VerifyNoEvidence.make({
+            surface,
+            reason: "no-verify-skill",
+            message: `no evidence for surface "${surface}": the repo declares no verify command and ${VERIFY_SKILLS_DIR}/verify-${surface}/ holds no driver (${VERIFY_DRIVERS.map(([file]) => file).join(", ")})`,
+          });
     }
-    const { source, directory, command } = plan.value;
+    const { source, directory, command, down } = plan.value;
     input.onOutput(`== verify ${surface} (${source}): ${command}\n`);
     const tail = runningTail();
+    const cwd = directory === "." ? env.cwd : `${env.cwd}/${directory}`;
+    // Never the control plane's own database (the module doc's "Isolation").
+    const variables = {
+      [VERIFY_SURFACE_VARIABLE]: surface,
+      [VERIFY_DATABASE_VARIABLE]: input.options.databaseUrl ?? "",
+    };
+    const onOutput = (text: string) => {
+      tail.push(text);
+      input.onOutput(text);
+    };
     const ran = yield* Effect.result(
       exec({
         env,
         command,
-        cwd: directory === "." ? env.cwd : `${env.cwd}/${directory}`,
-        variables: { [VERIFY_SURFACE_VARIABLE]: surface },
+        cwd,
+        variables,
         timeoutSeconds: input.options.timeoutSeconds ?? VERIFY_TIMEOUT_SECONDS,
-        onOutput: (text) => {
-          tail.push(text);
-          input.onOutput(text);
-        },
+        onOutput,
         context,
       }),
     );
+    if (ran._tag === "Failure" && down) {
+      // The script was stopped (timeout, abort) or never started, so its own `down.sh` did not run:
+      // run it here, on a context of its own, because an aborted run's context would refuse it and
+      // what `up.sh` started would outlive the session. Its exit code is not the verdict.
+      onOutput(`== ${surface}: running down.sh after ${ran.failure.code}\n`);
+      yield* Effect.ignore(
+        exec({
+          env,
+          command: "bash down.sh",
+          cwd,
+          variables,
+          timeoutSeconds: VERIFY_CLEANUP_TIMEOUT_SECONDS,
+          onOutput,
+          context: BACKGROUND_CONTEXT,
+        }),
+      );
+    }
     const { output, truncated } = tail.done();
     if (ran._tag === "Failure") {
       return VerifyUnrunnable.make({
@@ -529,8 +628,38 @@ const verifySurface = (input: {
   });
 
 /**
+ * The one lock every verification in this process takes: verify skills bind fixed default ports, so
+ * two sessions verifying at once would collide, and the second's readiness poll would reach the
+ * first's server. `executionMode: "sequential"` serializes only one session's tool round; this
+ * serializes the control plane. It is held per call, not per surface, so a call's surfaces run
+ * back to back.
+ */
+export const verifyLock = Semaphore.makeUnsafe(1);
+
+/**
+ * The surfaces a call verifies: each package surface the changed paths name, in first-seen order,
+ * then `REPO_SURFACE` when any path names none — so no changed path goes unaccounted for.
+ */
+const surfacesFor = (
+  changed: readonly string[],
+): {
+  readonly surfaces: readonly string[];
+  readonly unmapped: readonly string[];
+} => {
+  const unmapped = changed.filter((path) => surfaceOf(path) === undefined);
+  return {
+    surfaces: [
+      ...surfacesOf(changed),
+      ...(unmapped.length > 0 ? [REPO_SURFACE] : []),
+    ],
+    unmapped,
+  };
+};
+
+/**
  * One verification pass over a session's environment: measure what changed, then verify each
- * surface it names, one after another (verify skills bind ports, so two at once would collide).
+ * surface it names, one after another (verify skills bind ports, so two at once would collide),
+ * under `verifyLock`.
  *
  * Never fails: every outcome, including "could not tell what changed", is a value of the record.
  */
@@ -554,19 +683,31 @@ export const runVerify = (input: {
       changedPaths({ env, baseRef: options.baseRef, context }),
     );
     if (changed._tag === "Failure") return changed.failure;
+    const { surfaces, unmapped } = surfacesFor(changed.success);
     const results: VerifyResult[] = [];
-    for (const surface of surfacesOf(changed.success)) {
-      results.push(
-        yield* verifySurface({
-          env,
-          surface,
-          options,
-          onOutput: input.onOutput ?? (() => undefined),
-          context,
+    if (surfaces.length > 0) {
+      yield* verifyLock.withPermit(
+        Effect.gen(function* () {
+          for (const surface of surfaces) {
+            results.push(
+              yield* verifySurface({
+                env,
+                surface,
+                unmapped,
+                options,
+                onOutput: input.onOutput ?? (() => undefined),
+                context,
+              }),
+            );
+          }
         }),
       );
     }
-    return VerifyReport.make({ changed: [...changed.success], results });
+    return VerifyReport.make({
+      changed: changed.success.slice(0, VERIFY_CHANGED_LIMIT.record),
+      changedCount: changed.success.length,
+      results,
+    });
   });
 
 /** Whether a record says a verification failed: a non-zero exit, or a command that could not run. */
@@ -582,13 +723,11 @@ export const verifyFailed = (record: VerifyRecord): boolean =>
 export const describeVerify = (record: VerifyRecord): string => {
   if (record._tag === "VerifyUnmeasured")
     return `verify: nothing verified (${record.reason}): ${record.message}`;
-  if (record.results.length === 0) {
-    return record.changed.length === 0
-      ? "verify: nothing verified: the run changed no paths"
-      : `verify: nothing verified: no changed path belongs to a surface (${record.changed.join(", ")})`;
-  }
+  // `runVerify` gives every changed path a surface, so no results means no changes.
+  if (record.results.length === 0)
+    return "verify: nothing verified: the run changed no paths";
   const lines = [
-    `verify: ${record.changed.length} changed path(s), ${record.results.length} surface(s)`,
+    `verify: ${record.changedCount} changed path(s), ${record.results.length} surface(s)`,
   ];
   for (const result of record.results) {
     switch (result._tag) {
@@ -660,16 +799,18 @@ const encodeRecord = Schema.encodeSync(VerifyRecord);
  * The `verify` tool, bound to one session's repo facts.
  *
  * Sequential, because a verify skill starts servers on fixed ports and two in one round would
- * collide. The output streams to the live tool slot as it arrives, so a person watching sees a drive
- * progress; the committed result is the record and its description, not that stream.
+ * collide (across sessions, `verifyLock` does the same). The output streams to the live tool slot
+ * as it arrives, so a person watching sees a drive progress; the committed result is the record and
+ * its description, not that stream.
  */
 export const verifyTool = (options: VerifyOptions = {}) =>
   defineTool({
     name: VERIFY_TOOL,
     description:
       "Verify the change this run made. Finds the surfaces the changed paths belong to " +
-      "(apps/<name>, packages/<name>), runs the repo's declared verify command or else the " +
-      `${VERIFY_SKILLS_DIR}/verify-<surface>/ skill for each, and records each exit code and ` +
+      "(apps/<name>, packages/<name>, or the repo itself for anything else), runs the repo's " +
+      `declared verify command or else the ${VERIFY_SKILLS_DIR}/verify-<surface>/ skill for ` +
+      "each, and records each exit code and " +
       "the tail of its output as evidence. Takes no arguments. Call it after the change is made " +
       "and before claiming it works.",
     parameters: Type.Object({}),

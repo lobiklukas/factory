@@ -5765,6 +5765,7 @@ describe("the verify tool reads the session's workspace", () => {
         {
           _tag: "VerifyReport",
           changed: ["apps/api/feature.ts"],
+          changedCount: 1,
           results: [
             {
               _tag: "VerifyRan",

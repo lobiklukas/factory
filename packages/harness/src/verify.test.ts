@@ -10,7 +10,14 @@
  * record, not the Postgres adapter, which `session.test.ts` covers.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -31,11 +38,14 @@ import {
   submitMessage,
 } from "./session";
 import {
+  describeVerify,
   readVerifyRecords,
+  REPO_SURFACE,
   runVerify,
   skillScript,
   surfaceOf,
   tailOf,
+  VERIFY_CHANGED_LIMIT,
   VERIFY_OUTPUT_TAIL,
   VERIFY_TOOL,
   type VerifyOptions,
@@ -149,6 +159,7 @@ describe("the verify tool, through a session's log", () => {
     expect(turn.status).toBe("done");
     const report = onlyReport(turn.records);
     expect(report.changed).toEqual(["apps/api/src/feature.ts"]);
+    expect(report.changedCount).toBe(1);
     expect(report.results).toEqual([
       {
         _tag: "VerifyRan",
@@ -249,6 +260,33 @@ describe("the verify tool, through a session's log", () => {
     ]);
     expect(turn.results[0]?.isError).toBe(false);
   });
+
+  it("runs the declared command once for the repo when the change is outside every package, and records its failure", async () => {
+    // A single-package layout: nothing under apps/ or packages/, so no package surface.
+    const root = checkout({});
+    write(root, "src/app.ts", "export const app = 1;\n");
+    const command =
+      'echo "repo verify surface=$FACTORY_VERIFY_SURFACE"; exit 1';
+
+    const turn = await verifiedTurn(root, { command });
+
+    const report = onlyReport(turn.records);
+    expect(report.changed).toEqual(["src/app.ts"]);
+    expect(report.results).toEqual([
+      {
+        _tag: "VerifyRan",
+        surface: REPO_SURFACE,
+        source: "workspace",
+        directory: ".",
+        command,
+        exitCode: 1,
+        output: "repo verify surface=.\n",
+        truncated: false,
+      },
+    ]);
+    expect(turn.results[0]?.isError).toBe(true);
+    expect(turn.results[0]?.text).toContain("[.] exit 1");
+  });
 });
 
 /** One pass of the tool's work over a checkout, without a model in between. */
@@ -347,6 +385,116 @@ describe("runVerify", () => {
     // The shell may add its own line about the killed child; what the drive printed is kept.
     expect(result.output.startsWith("started\n")).toBe(true);
   }, 15_000);
+
+  it("runs down.sh on its own when the skill's script is stopped by a timeout", async () => {
+    const root = checkout({
+      [`${API_SKILL}/up.sh`]: "echo up\n",
+      [`${API_SKILL}/drive.sh`]: "echo started\nsleep 30\n",
+      [`${API_SKILL}/down.sh`]: "echo down\ntouch down.ran\n",
+    });
+    write(root, "apps/api/x.ts", "x\n");
+
+    const report = onlyReport([await verifyIn(root, { timeoutSeconds: 1 })]);
+    const [result] = report.results;
+    if (result?._tag !== "VerifyUnrunnable")
+      throw new Error(`expected unrunnable, got ${JSON.stringify(result)}`);
+    expect(result.code).toBe("timeout");
+    // The group kill stopped the script before its own down.sh; the tool ran it after.
+    expect(existsSync(join(root, API_SKILL, "down.ran"))).toBe(true);
+    expect(result.output).toContain("running down.sh after timeout\ndown\n");
+  }, 15_000);
+
+  it("verifies the repo surface alongside a package surface when the change spans both", async () => {
+    const root = checkout({
+      [`${API_SKILL}/drive.sh`]: "echo skill\n",
+    });
+    write(root, "apps/api/x.ts", "x\n");
+    write(root, "docs/notes.md", "x\n");
+
+    const report = onlyReport([
+      await verifyIn(root, { command: 'echo "for $FACTORY_VERIFY_SURFACE"' }),
+    ]);
+    expect(
+      report.results.map((result) =>
+        result._tag === "VerifyRan" ? result.output : result._tag,
+      ),
+    ).toEqual(["for api\n", "for .\n"]);
+  });
+
+  it("names changed paths outside every package as no evidence when the repo declares no command", async () => {
+    const root = checkout({});
+    write(root, "src/app.ts", "x\n");
+
+    const report = onlyReport([await verifyIn(root)]);
+    expect(report.results).toEqual([
+      expect.objectContaining({
+        _tag: "VerifyNoEvidence",
+        surface: REPO_SURFACE,
+        reason: "no-surface",
+      }),
+    ]);
+    // Never an empty report for a non-empty change: a gate cannot read silence as a pass.
+    expect(describeVerify(report)).toContain(
+      "[.] no evidence for 1 changed path(s)",
+    );
+    expect(describeVerify(report)).toContain("src/app.ts");
+  });
+
+  it("never hands a verification the control plane's database, only the one it is given", async () => {
+    const root = checkout({
+      [`${API_SKILL}/drive.sh`]: 'echo "db=[$DATABASE_URL]"\n',
+    });
+    write(root, "apps/api/x.ts", "x\n");
+    // The control plane's database, in the environment every session command inherits.
+    const env = new NodeExecutionEnv({
+      cwd: root,
+      shellEnv: { DATABASE_URL: "postgres://control-plane/factory" },
+    });
+    const outputOf = async (options: VerifyOptions) => {
+      const [result] = onlyReport([
+        await run(runVerify({ env, options })),
+      ]).results;
+      return result?._tag === "VerifyRan" ? result.output : result?._tag;
+    };
+    expect(await outputOf({})).toBe("db=[]\n");
+    expect(await outputOf({ databaseUrl: "postgres://verify/own" })).toBe(
+      "db=[postgres://verify/own]\n",
+    );
+  });
+
+  it("serializes verifications across calls, so two sessions never drive at once", async () => {
+    const log = join(
+      mkdtempSync(join(tmpdir(), "factory-verify-lock-")),
+      "log",
+    );
+    const drive = `echo start >> "${log}"\nsleep 0.5\necho end >> "${log}"\n`;
+    const first = checkout({ [`${API_SKILL}/drive.sh`]: drive });
+    const second = checkout({ [`${API_SKILL}/drive.sh`]: drive });
+    write(first, "apps/api/x.ts", "x\n");
+    write(second, "apps/api/x.ts", "x\n");
+
+    await Promise.all([verifyIn(first), verifyIn(second)]);
+
+    expect(readFileSync(log, "utf8")).toBe("start\nend\nstart\nend\n");
+  });
+
+  it("caps the changed paths the record and the text carry, and keeps the whole count", async () => {
+    const root = checkout({});
+    const total = VERIFY_CHANGED_LIMIT.record + 25;
+    for (let index = 0; index < total; index++)
+      write(
+        root,
+        `generated/file-${String(index).padStart(4, "0")}.txt`,
+        "x\n",
+      );
+
+    const report = onlyReport([await verifyIn(root)]);
+    expect(report.changedCount).toBe(total);
+    expect(report.changed).toHaveLength(VERIFY_CHANGED_LIMIT.record);
+    const text = describeVerify(report);
+    expect(text).toContain(`and ${total - VERIFY_CHANGED_LIMIT.text} more`);
+    expect(text).not.toContain("file-0100");
+  });
 
   it("reports no session environment as unmeasured", async () => {
     expect(await run(runVerify({ env: undefined }))).toMatchObject({

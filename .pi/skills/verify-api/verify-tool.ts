@@ -11,12 +11,14 @@
 // `fauxVerify`: its `bash` turn writes (and commits) the change, its next turn calls `verify`. Nothing
 // reaches a network.
 //
-// Four scenarios, each its own fixture repo and its own session:
+// Five scenarios, each its own fixture repo and its own session:
 //
 //   pass       the surface's skill (`.pi/skills/verify-api/drive.sh`) exits 0 → exit 0 and its output
 //   fail       the skill prints 400 lines and exits 3 → exit 3, the output's tail, the run still idle
 //   no-skill   the change is under apps/web and the repo has no verify-web → typed no evidence
 //   declared   `.factory/config` declares `verify` and a disagreeing skill exists → the declared one
+//   repo       the change is `src/app.ts`, outside every package, and the declared `verify` fails →
+//              the declared command ran once for the repo surface (`.`), exit 1, an error result
 //
 // Env: DATABASE_URL (via DatabaseLive), SESSION_ROOT, VERIFY_TOOL_REPOS, EVIDENCE_DIR.
 import { BunServices } from "@effect/platform-bun";
@@ -42,6 +44,8 @@ const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api";
 
 const DECLARED = 'echo "declared verify for $FACTORY_VERIFY_SURFACE"';
+const DECLARED_FAILING =
+  'echo "repo verify for $FACTORY_VERIFY_SURFACE"; exit 1';
 
 type Scenario = {
   readonly name: string;
@@ -82,6 +86,13 @@ const SCENARIOS: readonly Scenario[] = [
       ".pi/skills/verify-api/drive.sh": 'echo "the skill ran"\nexit 9\n',
     },
     change: "apps/api/src/feature.ts",
+  },
+  {
+    name: "repo",
+    base: {
+      ".factory/config": JSON.stringify({ verify: DECLARED_FAILING }),
+    },
+    change: "src/app.ts",
   },
 ];
 
@@ -300,6 +311,27 @@ const checks: Record<
         result.exitCode === 0 &&
         result.output === "declared verify for api\n",
       JSON.stringify(result),
+    );
+  },
+  repo: (entry) => {
+    const report = reportOf(entry.records);
+    const result = report?.results[0];
+    assert(
+      "repo: a change outside every package still runs the declared verify, once, for the repo",
+      report?.results.length === 1 &&
+        result?._tag === "VerifyRan" &&
+        result.surface === "." &&
+        result.source === "workspace" &&
+        result.command === DECLARED_FAILING &&
+        result.output === "repo verify for .\n",
+      JSON.stringify(report),
+    );
+    assert(
+      "repo: and its failure is the verdict, not silence",
+      result?._tag === "VerifyRan" &&
+        result.exitCode === 1 &&
+        verifyText(entry).includes("[.] exit 1"),
+      verifyText(entry).split("\n")[1] ?? "",
     );
   },
 };
