@@ -58,6 +58,8 @@ import type {
   CompactSessionResult,
   CreateSessionInput,
   ForkSessionInput,
+  GetRepoInput,
+  ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
@@ -83,6 +85,7 @@ import type {
   WithdrawMessageResult,
 } from "@repo/domain/Session";
 import {
+  RepoNotFound,
   RepoSlug,
   SessionActor,
   SessionError as SessionErrorClass,
@@ -204,6 +207,7 @@ import {
   SessionWriteBack,
 } from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { inspectCheckout, isGitWorkTree } from "./repos";
 import { resolveWorkspace } from "./workspace";
 
 /** Longest title we derive from a first message, in characters. */
@@ -307,10 +311,20 @@ export type SessionServiceShape = {
    * from the same index, in one grouped read — never a fold (R6).
    */
   readonly spend: Effect.Effect<SpendReport, SessionError>;
-  /** Register or update a repo a session can bind to (docs/features.md §3 A1). */
+  /**
+   * Register or update a repo a session can bind to (docs/features.md §3 A1). A `localPath` that is
+   * not absolute or not inside a git work tree is `invalid_input` naming it, and nothing is written
+   * (LOB-253).
+   */
   readonly registerRepo: (
     input: RegisterRepoInput,
   ) => Effect.Effect<RepoSummary, SessionError>;
+  /** Every registered repo, by slug, each with what its checkout says about itself (LOB-253). */
+  readonly listRepos: Effect.Effect<ListReposOutput, SessionError>;
+  /** One registered repo, or `RepoNotFound` for a slug the registry has no row for (LOB-253). */
+  readonly getRepo: (
+    input: GetRepoInput,
+  ) => Effect.Effect<RepoSummary, SessionError | RepoNotFound>;
   /** A session's events: live while this process owns it, a single historical snapshot otherwise. */
   readonly events: (
     sessionId: SessionId,
@@ -1124,10 +1138,54 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
         });
 
+      /** A registry row as the wire answers it, with its checkout read now rather than stored. */
+      const repoSummary = (
+        row: RepoRow,
+      ): Effect.Effect<RepoSummary, SessionError> =>
+        Effect.gen(function* () {
+          const localPath = row.localPath ?? undefined;
+          const facts = yield* inspectCheckout(localPath, { fs, path });
+          return {
+            repo: yield* toRepoSlug(row.slug),
+            url: row.url,
+            defaultBaseRef: row.defaultBaseRef,
+            ...(localPath === undefined ? {} : { localPath }),
+            registeredAt: row.registeredAt,
+            ...facts,
+          };
+        });
+
+      /**
+       * A checkout a registration names must be one a worktree can be cut from: an absolute path,
+       * because the server resolves it and a relative one would mean wherever the API was started,
+       * inside a git work tree (LOB-253). Checked before the row is read, so a refusal writes nothing.
+       */
+      const requireCheckout = (
+        repo: RepoSlug,
+        localPath: string,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!path.isAbsolute(localPath)) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `repo ${repo}: local path ${localPath} is not an absolute path`,
+            });
+          }
+          if (!(yield* isGitWorkTree(localPath))) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `repo ${repo}: local path ${localPath} is not a git work tree`,
+            });
+          }
+        });
+
       const registerRepo = (
         input: RegisterRepoInput,
       ): Effect.Effect<RepoSummary, SessionError> =>
         Effect.gen(function* () {
+          if (input.localPath !== undefined) {
+            yield* requireCheckout(input.repo, input.localPath);
+          }
           const existing = (yield* paper("read repo", readRepo(input.repo)))[0];
           const rows = yield* paper(
             "register repo",
@@ -1149,13 +1207,31 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `repo ${input.repo} did not register`,
             });
           }
-          return {
-            repo: yield* toRepoSlug(row.slug),
-            url: row.url,
-            defaultBaseRef: row.defaultBaseRef,
-            ...(row.localPath === null ? {} : { localPath: row.localPath }),
-            registeredAt: row.registeredAt,
-          };
+          return yield* repoSummary(row);
+        });
+
+      const listRepos: Effect.Effect<ListReposOutput, SessionError> =
+        Effect.gen(function* () {
+          const rows = yield* paper("list repos", readRepos);
+          // One `git` per checkout, a few at a time: the registry is small, and the read is a picker's.
+          const repos = yield* Effect.forEach(rows, repoSummary, {
+            concurrency: 4,
+          });
+          return { repos };
+        });
+
+      const getRepo = (
+        input: GetRepoInput,
+      ): Effect.Effect<RepoSummary, SessionError | RepoNotFound> =>
+        Effect.gen(function* () {
+          const row = (yield* paper("read repo", readRepo(input.repo)))[0];
+          if (row === undefined) {
+            return yield* new RepoNotFound({
+              repo: input.repo,
+              message: `repo ${input.repo} is not registered`,
+            });
+          }
+          return yield* repoSummary(row);
         });
 
       /**
@@ -3287,6 +3363,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           WHERE slug = ${slug}
         `;
 
+      const readRepos = sql<RepoRow>`
+        SELECT
+          slug,
+          url,
+          default_base_ref,
+          local_path,
+          to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at
+        FROM repos
+        ORDER BY slug
+      `;
+
       const upsertRepo = (input: {
         readonly slug: string;
         readonly url: string;
@@ -3464,6 +3551,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         list,
         spend,
         registerRepo,
+        listRepos,
+        getRepo,
         events,
         requestApproval,
         decideApproval,

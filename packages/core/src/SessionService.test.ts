@@ -36,6 +36,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -63,6 +64,7 @@ import type {
   SpendReport,
 } from "@repo/domain/Session";
 import {
+  RepoNotFound,
   RepoSlug as RepoSlugSchema,
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
@@ -1838,6 +1840,222 @@ describe("repo binding", () => {
     expect(result.workspace.baseRef).toBe("trunk");
     expect(result.workspace.commandsSource).toBe("none");
     expect(result.workspace.commands).toEqual({});
+  });
+
+  /** A slug of this run's own, so a registry row another case or run wrote is never the one read. */
+  const runSlug = (name: string) =>
+    RepoSlugSchema.make(
+      `factory-test/${name}-${randomBytes(4).toString("hex")}`,
+    );
+
+  it("answers a registered repo's checkout facts on register, list and get (LOB-253)", async () => {
+    const configured = runSlug("registry-config");
+    const configless = runSlug("registry-configless");
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const registered = yield* sessions.registerRepo({
+          repo: configured,
+          url: "https://example.invalid/registry.git",
+          defaultBaseRef: "main",
+          localPath: repoRoot,
+        });
+        yield* sessions.registerRepo({
+          repo: configless,
+          localPath: emptyRepoRoot,
+        });
+        const listed = yield* sessions.listRepos;
+        const got = yield* sessions.getRepo({ repo: configured });
+        const bare = yield* sessions.getRepo({ repo: configless });
+        return { registered, listed, got, bare };
+      }),
+    );
+
+    expect(result.registered).toMatchObject({
+      repo: configured,
+      url: "https://example.invalid/registry.git",
+      defaultBaseRef: "main",
+      localPath: repoRoot,
+      localPathIsGit: true,
+      hasFactoryConfig: true,
+    });
+    expect(result.registered.registeredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // `get` answers the row `register` wrote, field for field.
+    expect(result.got).toEqual(result.registered);
+    // A work tree with no `.factory/config` is a git checkout that declares nothing.
+    expect(result.bare).toMatchObject({
+      localPath: emptyRepoRoot,
+      localPathIsGit: true,
+      hasFactoryConfig: false,
+    });
+    // The list holds both rows as `get` answers them, ordered by slug.
+    const ours = result.listed.repos.filter(
+      (repo) => repo.repo === configured || repo.repo === configless,
+    );
+    expect(ours).toEqual(
+      [result.got, result.bare].sort((a, b) => a.repo.localeCompare(b.repo)),
+    );
+    const slugs = result.listed.repos.map((repo) => repo.repo);
+    expect(slugs).toEqual([...slugs].sort());
+  });
+
+  it("keeps the registered checkout when a second registration names only a new base ref (LOB-253)", async () => {
+    const slug = runSlug("registry-rebase");
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const first = yield* sessions.registerRepo({
+          repo: slug,
+          url: "https://example.invalid/rebase.git",
+          defaultBaseRef: "main",
+          localPath: repoRoot,
+        });
+        const second = yield* sessions.registerRepo({
+          repo: slug,
+          defaultBaseRef: "trunk",
+        });
+        const read = yield* sessions.getRepo({ repo: slug });
+        return { first, second, read };
+      }),
+    );
+
+    expect(result.second.defaultBaseRef).toBe("trunk");
+    expect(result.second.localPath).toBe(repoRoot);
+    expect(result.second.url).toBe("https://example.invalid/rebase.git");
+    // An update, not a second row: the registration time is the first one's.
+    expect(result.second.registeredAt).toBe(result.first.registeredAt);
+    expect(result.read).toEqual(result.second);
+  });
+
+  it("refuses a local path that is not a git work tree, naming it, and writes nothing (LOB-253)", async () => {
+    const fresh = runSlug("registry-refused");
+    const kept = runSlug("registry-kept");
+    const plain = mkdtempSync(join(tmpdir(), "factory-repo-plain-"));
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const notGit = yield* Effect.flip(
+          sessions.registerRepo({ repo: fresh, localPath: plain }),
+        );
+        const missing = yield* Effect.flip(sessions.getRepo({ repo: fresh }));
+        // Inside a `.git` directory `rev-parse` exits 0 and prints `false`: still not a work tree.
+        const gitDir = yield* Effect.flip(
+          sessions.registerRepo({
+            repo: fresh,
+            localPath: join(repoRoot, ".git"),
+          }),
+        );
+        const relative = yield* Effect.flip(
+          sessions.registerRepo({ repo: fresh, localPath: "." }),
+        );
+        // A refused update leaves the row it would have changed as it was, base ref included.
+        const before = yield* sessions.registerRepo({
+          repo: kept,
+          defaultBaseRef: "main",
+          localPath: repoRoot,
+        });
+        const refusedUpdate = yield* Effect.flip(
+          sessions.registerRepo({
+            repo: kept,
+            defaultBaseRef: "trunk",
+            localPath: plain,
+          }),
+        );
+        const after = yield* sessions.getRepo({ repo: kept });
+        return {
+          notGit,
+          missing,
+          gitDir,
+          relative,
+          before,
+          refusedUpdate,
+          after,
+        };
+      }),
+    );
+
+    expect(result.notGit).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(result.notGit.message).toContain(plain);
+    expect(result.notGit.message).toContain("not a git work tree");
+    expect(result.missing).toBeInstanceOf(RepoNotFound);
+    expect(result.gitDir).toMatchObject({ code: "invalid_input" });
+    expect(result.relative).toMatchObject({ code: "invalid_input" });
+    expect(result.relative.message).toContain("not an absolute path");
+    expect(result.refusedUpdate).toMatchObject({ code: "invalid_input" });
+    expect(result.after).toEqual(result.before);
+  });
+
+  it("answers an unknown slug with RepoNotFound naming it (LOB-253)", async () => {
+    const unknown = runSlug("registry-unknown");
+    const error = await program(
+      Effect.flip(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          return yield* sessions.getRepo({ repo: unknown });
+        }),
+      ),
+    );
+    expect(error).toBeInstanceOf(RepoNotFound);
+    expect(error).toMatchObject({ repo: unknown });
+    expect(error.message).toContain(unknown);
+  });
+
+  it("answers a repo a session registered as having no URL and no checkout (LOB-253)", async () => {
+    const auto = runSlug("registry-auto");
+    const read = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.create({
+          repo: auto,
+          title: "auto-registers its repo",
+        });
+        return yield* sessions.getRepo({ repo: auto });
+      }),
+    );
+    expect(read).toMatchObject({
+      repo: auto,
+      url: "",
+      defaultBaseRef: "main",
+      localPathIsGit: false,
+      hasFactoryConfig: false,
+    });
+    expect(read.localPath).toBeUndefined();
+  });
+
+  it("reads the checkout when it answers, so a moved checkout reads as no work tree (LOB-253)", async () => {
+    const slug = runSlug("registry-moved");
+    const checkout = mkdtempSync(join(tmpdir(), "factory-repo-moved-"));
+    execSync("git init -b main", { cwd: checkout, stdio: "ignore" });
+    mkdirSync(join(checkout, ".factory"));
+    writeFileSync(join(checkout, ".factory", "config"), "{}");
+    const registered = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.registerRepo({
+          repo: slug,
+          localPath: checkout,
+        });
+      }),
+    );
+    renameSync(checkout, `${checkout}-moved`);
+    const read = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.getRepo({ repo: slug });
+      }),
+    );
+    expect(registered).toMatchObject({
+      localPathIsGit: true,
+      hasFactoryConfig: true,
+    });
+    expect(read).toMatchObject({
+      localPath: checkout,
+      localPathIsGit: false,
+      hasFactoryConfig: false,
+    });
   });
 });
 
