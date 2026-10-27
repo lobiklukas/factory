@@ -39,7 +39,11 @@ import {
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
-import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
+import {
+  describeFauxBackend,
+  describeLoadedEnvFiles,
+  loadedEnvFiles,
+} from "./EnvFiles";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
 
@@ -430,13 +434,7 @@ const HttpLive = Effect.gen(function* () {
     }),
   );
   if (backend === "faux") {
-    // A key that is absent and a backend someone chose are different facts: the second is not a
-    // problem to warn about, and the first sends the operator to the env file.
-    yield* Effect.logWarning(
-      Option.isSome(model.backend)
-        ? "sessions run against the faux provider and produce scripted answers (chosen by MODEL_BACKEND=faux)"
-        : "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers",
-    );
+    yield* Effect.logWarning(describeFauxBackend(Option.isSome(model.backend)));
   }
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).

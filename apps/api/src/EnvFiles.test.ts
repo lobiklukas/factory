@@ -2,6 +2,7 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   autoloadedEnvFiles,
+  describeFauxBackend,
   describeLoadedEnvFiles,
   explicitEnvFiles,
   loadedEnvFiles,
@@ -80,12 +81,61 @@ describe("loadedEnvFiles", () => {
     ).toEqual([]);
   });
 
-  it("lists the package's own autoloaded file beside the root one, once each", async () => {
+  it("lists only the named files when --env-file is given: Bun skips the package's autoload", async () => {
+    expect(
+      await loadedWith(
+        [
+          "/repo/.env",
+          "/repo/apps/api/.env",
+          "/repo/apps/api/.env.development",
+          "/repo/apps/api/.env.local",
+        ],
+        { execArgv: ["--env-file=../../.env"] },
+      ),
+    ).toEqual(["/repo/.env"]);
+  });
+
+  it("lists a package file the flag names, once each", async () => {
     expect(
       await loadedWith(["/repo/.env", "/repo/apps/api/.env"], {
-        execArgv: ["--env-file=../../.env", "--env-file=.env"],
+        execArgv: [
+          "--env-file=../../.env",
+          "--env-file=.env",
+          "--env-file=.env",
+        ],
       }),
     ).toEqual(["/repo/.env", "/repo/apps/api/.env"]);
+  });
+
+  it("lists the working directory's autoloaded files when no flag is given", async () => {
+    expect(
+      await loadedWith(
+        ["/repo/.env", "/repo/apps/api/.env", "/repo/apps/api/.env.local"],
+        { execArgv: ["--watch"] },
+      ),
+    ).toEqual(["/repo/apps/api/.env", "/repo/apps/api/.env.local"]);
+  });
+
+  it("lists nothing under --no-env-file", async () => {
+    expect(
+      await loadedWith(["/repo/apps/api/.env", "/repo/.env"], {
+        execArgv: ["--no-env-file", "--env-file=../../.env"],
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("describeFauxBackend", () => {
+  it("says faux was chosen, not that a key is missing, when MODEL_BACKEND set it", () => {
+    const line = describeFauxBackend(true);
+    expect(line).toContain("chosen by MODEL_BACKEND=faux");
+    expect(line).not.toContain("no ANTHROPIC_API_KEY");
+  });
+
+  it("points at the missing key when the backend was inferred", () => {
+    const line = describeFauxBackend(false);
+    expect(line).toContain("no ANTHROPIC_API_KEY");
+    expect(line).not.toContain("chosen by");
   });
 });
 

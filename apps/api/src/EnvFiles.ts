@@ -28,9 +28,14 @@ export const explicitEnvFiles = (
   return files;
 };
 
+/** Whether a process's runtime flags turn Bun's env-file handling off (`--no-env-file`). */
+export const disablesEnvFiles = (execArgv: readonly string[]) =>
+  execArgv.includes("--no-env-file");
+
 /**
  * The files Bun autoloads from the working directory when no flag says otherwise: `.env`, then the
- * one for `NODE_ENV`, then `.env.local` (which a test run skips).
+ * one for `NODE_ENV`, then `.env.local` (which a test run skips). Bun autoloads nothing once
+ * `--env-file` or `--no-env-file` is given, so a caller adds these only when neither is present.
  */
 export const autoloadedEnvFiles = (nodeEnv: string | undefined) => {
   const mode =
@@ -41,9 +46,10 @@ export const autoloadedEnvFiles = (nodeEnv: string | undefined) => {
 };
 
 /**
- * The absolute path of every env file that exists and was in play: the explicit `--env-file`s
- * first, then the working directory's autoloaded ones. A flag naming a missing file is not listed,
- * because Bun treats it as a no-op and it supplied nothing.
+ * The absolute path of every env file that exists and was in play. With `--env-file` flags, those
+ * alone: Bun then skips its working-directory autoload, so a package-local `.env` is not read and
+ * must not be listed. With `--no-env-file`, none. With neither flag, the autoloaded set. A flag
+ * naming a missing file is not listed, because Bun treats it as a no-op and it supplied nothing.
  */
 export const loadedEnvFiles = Effect.fn("EnvFiles.loaded")(function* (input: {
   readonly execArgv: readonly string[];
@@ -52,10 +58,13 @@ export const loadedEnvFiles = Effect.fn("EnvFiles.loaded")(function* (input: {
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const candidates = [
-    ...explicitEnvFiles(input.execArgv),
-    ...autoloadedEnvFiles(input.nodeEnv),
-  ].map((file) => path.resolve(input.cwd, file));
+  const explicit = explicitEnvFiles(input.execArgv);
+  const named = disablesEnvFiles(input.execArgv)
+    ? []
+    : explicit.length > 0
+      ? explicit
+      : autoloadedEnvFiles(input.nodeEnv);
+  const candidates = named.map((file) => path.resolve(input.cwd, file));
   const loaded: string[] = [];
   for (const candidate of new Set(candidates)) {
     const present = yield* fs
@@ -71,3 +80,13 @@ export const describeLoadedEnvFiles = (files: readonly string[]) =>
   files.length === 0
     ? "env files loaded: none (the process environment only)"
     : `env files loaded: ${files.join(", ")} (paths only; values are never logged)`;
+
+/**
+ * The warning logged when the model backend is faux. A key that is absent and a backend someone chose
+ * are different facts: the second is not a problem to warn about, and the first sends the operator to
+ * the env file.
+ */
+export const describeFauxBackend = (chosenByEnv: boolean) =>
+  chosenByEnv
+    ? "sessions run against the faux provider and produce scripted answers (chosen by MODEL_BACKEND=faux)"
+    : "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers";

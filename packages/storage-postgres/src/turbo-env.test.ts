@@ -521,7 +521,11 @@ describe("the dev scripts load the repo-root env file (LOB-256)", () => {
   }, 120_000);
 
   it("lets a value exported in the shell override the root .env", () => {
-    for (const script of [scriptOf("api", "dev"), scriptOf("cli", "dev")]) {
+    for (const script of [
+      scriptOf("api", "dev"),
+      scriptOf("api", "dev:watch"),
+      scriptOf("cli", "dev"),
+    ]) {
       const run = probe(script, {
         rootEnv: "from-root-file",
         shell: "from-shell",
@@ -529,5 +533,5 @@ describe("the dev scripts load the repo-root env file (LOB-256)", () => {
       expect(run.status).toBe(0);
       expect(run.value).toBe("from-shell");
     }
-  }, 120_000);
+  }, 180_000);
 });

@@ -78,11 +78,12 @@ bun run dev
   password, and database all `factory`, on host port **5442** (not 5432, which developer machines
   routinely have taken).
 - `bun run dev` runs `turbo run dev`: the API on port **9000** (root `package.json` -> `apps/api`'s
-  `dev`), the Vite dashboard on port **3000** (`VITE_PORT` overrides), and the CLI in watch mode.
+  `dev`), the Vite dashboard on port **3000** (`VITE_PORT`, from the shell or the root `.env`, overrides), and the CLI in watch mode.
 - `cp .env.example .env` if you want a real model, and put `ANTHROPIC_API_KEY` in it. `bun run dev`
   loads the repo-root `.env` itself (Turborepo does not load `.env` files, so `apps/api` and
   `apps/cli` pass `bun --env-file=../../.env` and `apps/web` sets Vite's `envDir` to the root); a
-  variable exported in your shell wins over the file. The API's boot log names the env files it
+  variable exported in your shell wins over the file. `--env-file` turns off Bun's own autoload, so a
+  package-local `apps/api/.env` is not read under `bun run dev`; put the key in the root file. The API's boot log names the env files it
   loaded (paths only, never values) and the backend it chose: look for `model backend: anthropic`.
   `ANTHROPIC_API_KEY` is optional: with no key, `MODEL_BACKEND` falls back to pi-ai's deterministic
   faux provider and sessions still run offline with scripted answers (`model backend: faux`).

@@ -130,7 +130,8 @@ passes ten.
   `.env` files into a task, so every dev entry point names the root file itself: `bun run dev` for
   `apps/api` (`dev` and `dev:watch`) and `apps/cli` passes `bun --env-file=../../.env`, `apps/web`
   sets Vite's `envDir` to the root, and `bun run m0` does the same from `packages/harness`. A value
-  exported in the shell wins over the file; a missing file is a no-op. The API's boot log says
+  exported in the shell wins over the file; a missing file is a no-op. `--env-file` turns off Bun's
+  working-directory autoload, so a package-local `.env` is no longer read under `bun run dev`. The API's boot log says
   `env files loaded: <paths>` (never values) and `model backend: anthropic|faux`, with
   `(MODEL_BACKEND)` when the backend was chosen rather than inferred (LOB-256).
 - **Browser verification:** `.pi/skills/verify-web/up.sh`, then `node drive.mjs`, then `down.sh`.

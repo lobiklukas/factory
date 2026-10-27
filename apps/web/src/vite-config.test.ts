@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveConfig } from "vite";
 import { describe, expect, it } from "vitest";
 
@@ -27,4 +28,29 @@ describe("vite.config.ts", () => {
     // The root is the repository's, not merely two levels up: it holds the file the README names.
     expect(existsSync(join(REPO_ROOT, ".env.example"))).toBe(true);
   }, 30_000);
+
+  it("reads VITE_PORT from a .env in envDir, with the shell winning, else 3000", async () => {
+    // Loaded by path: the helper belongs to the Node-side tsconfig project, which the app project
+    // references but cannot import from without a build.
+    const { devPort } = (await import(
+      pathToFileURL(join(WEB_ROOT, "vite-port.ts")).href
+    )) as {
+      devPort: (
+        mode: string,
+        envDir: string,
+        shell: Record<string, string | undefined>,
+      ) => number;
+    };
+    const dir = mkdtempSync(join(tmpdir(), "vite-port-"));
+    const empty = mkdtempSync(join(tmpdir(), "vite-port-empty-"));
+    try {
+      writeFileSync(join(dir, ".env"), "VITE_PORT=3987\n");
+      expect(devPort("development", dir, {})).toBe(3987);
+      expect(devPort("development", dir, { VITE_PORT: "3555" })).toBe(3555);
+      expect(devPort("development", empty, {})).toBe(3000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
 });
