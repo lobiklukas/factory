@@ -99,6 +99,16 @@ evidence `.verify/evidence/lob-230/verify-api/`. `./sigterm.sh` and `./degraded.
 there; neither touches the mission path. See `mission.md`, which names what the case does not prove
 (resume across a kill — LOB-231).
 
+The mission checks were re-run for LOB-233 (the document names the phase its checkpoint is in)
+from the `agent/LOB-233` worktree on 2026-10-27 (API on `:9560`, faux, Postgres on 5442,
+`DATABASE_URL=…/factory_agent_lob_233`): `bun drive.ts` **52/52**, evidence
+`.verify/evidence/lob-233-r3/` (after the review fixes; `lob-233-final/` before them). Some runs
+there, on clean `origin/main` as well as on the branch, failed the four live-stream checks together
+(`the stream opens with a live snapshot` saw `mode=historical`, then no entries, run state or
+answer); a re-run passed each time, so that race is not this issue's and not a regression from it.
+The drive cannot stop a mission between two of its commits, so the claim itself is proven in
+`packages/harness/src/mission.test.ts` — see `mission.md`.
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
@@ -131,6 +141,12 @@ the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** 
 shell checks), evidence `.verify/evidence/lob-213/api/`, with the no-handler mutation run failing it.
 See [pr-rpc.md](pr-rpc.md).
 
+The pages-surface checks (LOB-220) were run from the `agent/LOB-220` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_220` on 5442, faux priced at `FAUX_COST=0.01`,
+API on `PAGES_PORT=9570`): `./pages.sh` **15/15** (12 driver checks, 3 shell checks), evidence
+`.verify/evidence/lob-220/api/`, with three mutation runs (no dedupe, a free repeat, no page fold in
+the rebuild) each failing it, in `.verify/evidence/lob-220/mutation/`. See [pages.md](pages.md).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -162,6 +178,7 @@ See [pr-rpc.md](pr-rpc.md).
 | The spec document        | passing | [spec.md](spec.md)                         |
 | A budget cap             | passing | [budget.md](budget.md)                     |
 | The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
+| The pages surface        | passing | [pages.md](pages.md)                       |
 
 ## Deliberately absent
 
