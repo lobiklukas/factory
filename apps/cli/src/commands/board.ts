@@ -58,10 +58,12 @@ const actorFlag = Flag.String("actor").pipe(
  * `factory board create` — a board over a repository (B2, LOB-208).
  *
  * The definition defaults to the shipped pipeline and its version to that definition's newest, which
- * is what the server pins when none is named; `--version` is for a board that must run an older
- * pipeline. The repo and the definition id are decoded here against the domain's own schemas, so a
- * malformed one is `invalid_input` and nothing is sent. An unknown definition, or a version of it
- * that does not exist, is the server's `definition_not_found`, printed verbatim.
+ * is what the server pins when none is named; `--definition-version` is for a board that must run an
+ * older pipeline (not `--version`, which is the CLI's own global flag). The repo and the definition
+ * id are decoded here against the domain's own schemas, so a malformed one is `invalid_input` and
+ * nothing is sent. An unknown definition, or a version of it that does not exist, is the server's
+ * `definition_not_found`, printed verbatim; a repository that already has a board is the server's
+ * `board_exists`, naming that board (one board per repository).
  */
 const createCommand = Command.make(
   "create",
@@ -73,7 +75,7 @@ const createCommand = Command.make(
       Flag.withDescription("The board definition the board binds"),
       Flag.withDefault(DEFAULT_DEFINITION_ID),
     ),
-    version: Flag.Int("version").pipe(
+    definitionVersion: Flag.Int("definition-version").pipe(
       Flag.withDescription(
         "The definition version to pin (defaults to the newest)",
       ),
@@ -81,7 +83,7 @@ const createCommand = Command.make(
     ),
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ repo, definition, version, api }) {
+  Effect.fnUntraced(function* ({ repo, definition, definitionVersion, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -103,7 +105,9 @@ const createCommand = Command.make(
       const board = yield* client.createBoard({
         repo: repoSlug,
         definitionId,
-        ...(Option.isSome(version) ? { definitionVersion: version.value } : {}),
+        ...(Option.isSome(definitionVersion)
+          ? { definitionVersion: definitionVersion.value }
+          : {}),
       });
       yield* Console.log(`board       ${board.id}`);
       yield* Console.log(`repo        ${board.repo}`);
@@ -122,7 +126,8 @@ const createCommand = Command.make(
       description: "The default pipeline at its newest version",
     },
     {
-      command: "factory board create --repo lobiklukas/factory --version 1",
+      command:
+        "factory board create --repo lobiklukas/factory --definition-version 1",
       description: "The default pipeline pinned to version 1",
     },
   ]),

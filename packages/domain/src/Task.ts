@@ -202,8 +202,9 @@ export const DEFAULT_DEFINITION_ID = "default";
  * `definitionVersion` is optional and defaults to the definition's **newest** version, read when the
  * board is created and pinned from then on — a board made today gets today's pipeline, and a version
  * a later migration adds reaches the next board, never this one. Naming a version is for a caller
- * that needs an older pipeline on purpose (a drive pinned to version 1's exits, say). Two boards
- * over one repository are allowed: B2 binds an instance to a repo, it does not make the repo a key.
+ * that needs an older pipeline on purpose (a drive pinned to version 1's exits, say). A repository
+ * gets one board: a second `createBoard` for it is `BoardExists`, naming the board it already has —
+ * more than one board per repository is deferred board customization (docs/board.md, item 8).
  */
 export const CreateBoardInput = Schema.Struct({
   repo: RepoSlug,
@@ -432,6 +433,15 @@ export class DefinitionNotFound extends Schema.TaggedError<DefinitionNotFound>()
   },
 ) {}
 
+/**
+ * A board was asked for over a repository that already has one (LOB-208): the MVP has one board per
+ * repository. `boardId` names the board it already has.
+ */
+export class BoardExists extends Schema.TaggedError<BoardExists>()(
+  "BoardExists",
+  { repo: Schema.String, boardId: Schema.String, message: Schema.String },
+) {}
+
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
   {
@@ -499,6 +509,7 @@ export type TaskError =
   | TaskNotFound
   | BoardNotFound
   | DefinitionNotFound
+  | BoardExists
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired

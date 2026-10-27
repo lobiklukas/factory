@@ -700,7 +700,9 @@ describe("the declared transitions and human gates (B4, B5)", () => {
       expect(gatedExit(column)).toBeUndefined();
     }
   });
+});
 
+describe("a new board (B2, LOB-208)", () => {
   /**
    * `createBoard`'s payload (LOB-208) is the RPC's only check on what reaches `board_instances`:
    * `repo` has no CHECK in 0007, so a malformed slug would be stored and then fail every read of

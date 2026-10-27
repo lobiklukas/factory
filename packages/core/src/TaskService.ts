@@ -113,6 +113,17 @@ export class DefinitionNotFound extends Schema.TaggedError<DefinitionNotFound>()
   },
 ) {}
 
+/**
+ * `createBoard` was asked for a second board over a repository that already has one (LOB-208): the
+ * MVP has one board per repository, and more than one is deferred board customization
+ * (docs/board.md, deferred item 8). `boardId` is the board the repository already has, so a retried
+ * call can read the answer it was after rather than be left with a bare "no".
+ */
+export class BoardExists extends Schema.TaggedError<BoardExists>()(
+  "BoardExists",
+  { repo: Schema.String, boardId: Schema.String, message: Schema.String },
+) {}
+
 /** The expected revision was not the card's current one; `actual` is what it is now. */
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
@@ -182,6 +193,7 @@ export type TaskError =
   | TaskNotFound
   | BoardNotFound
   | DefinitionNotFound
+  | BoardExists
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -254,7 +266,8 @@ export type TaskServiceShape = {
   readonly listBoards: Effect.Effect<ReadonlyArray<BoardInstance>, TaskError>;
   /**
    * A new board over a named definition (B2, LOB-208), pinned to the version the caller names or, by
-   * default, the definition's newest. An unknown definition or version is `DefinitionNotFound`.
+   * default, the definition's newest. An unknown definition or version is `DefinitionNotFound`; a
+   * repository that already has a board is `BoardExists`, naming it (one board per repository).
    */
   readonly createBoard: (
     input: CreateBoardInput,
@@ -571,53 +584,76 @@ export const TaskServiceLive = Layer.effect(
 
     /**
      * The one writer of `board_instances` (LOB-208): an instance over `definitionId`, at the version
-     * named or the newest one.
+     * named or the newest one, for a repository that has no board yet.
      *
-     * One statement, `INSERT … SELECT` over the definition's own rows, so the version the board pins
-     * is the version that exists at the moment of the insert — there is no read-then-write window in
-     * which "the newest" could be a row the insert then fails to reference. No row selected is the
-     * refusal: the definition, or that version of it, is not in the factory's database (B2).
+     * One board per repository (docs/board.md, deferred item 8): the transaction takes an advisory
+     * lock on the repository before it looks, so two concurrent creates for one repo cannot both see
+     * none and both insert — the second waits, then finds the first's board and is `BoardExists`.
+     *
+     * The insert is one `INSERT … SELECT` over the definition's own rows, so the version the board
+     * pins is the version that exists at the moment of the insert — there is no read-then-write
+     * window in which "the newest" could be a row the insert then fails to reference. No row selected
+     * is the refusal: the definition, or that version of it, is not in the factory's database (B2).
      */
     const createBoard = (
       input: CreateBoardInput,
     ): Effect.Effect<BoardInstance, TaskError> =>
       withStorage(
-        Effect.gen(function* () {
-          const id = yield* mintBoardId;
-          const rows =
-            input.definitionVersion === undefined
-              ? yield* sql<BoardInstanceRow>`
-                  INSERT INTO board_instances (id, repo, definition_id, definition_version)
-                  SELECT ${id}, ${input.repo}, bd.id, bd.version
-                  FROM board_definitions bd
-                  WHERE bd.id = ${input.definitionId}
-                  ORDER BY bd.version DESC
-                  LIMIT 1
-                  RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
-                `
-              : yield* sql<BoardInstanceRow>`
-                  INSERT INTO board_instances (id, repo, definition_id, definition_version)
-                  SELECT ${id}, ${input.repo}, bd.id, bd.version
-                  FROM board_definitions bd
-                  WHERE bd.id = ${input.definitionId}
-                    AND bd.version = ${input.definitionVersion}
-                  RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
-                `;
-          const row = rows[0];
-          if (row === undefined) {
-            return yield* input.definitionVersion === undefined
-              ? new DefinitionNotFound({
-                  definitionId: input.definitionId,
-                  message: `no board definition ${input.definitionId}`,
-                })
-              : new DefinitionNotFound({
-                  definitionId: input.definitionId,
-                  version: input.definitionVersion,
-                  message: `board definition ${input.definitionId} has no version ${input.definitionVersion}`,
-                });
-          }
-          return yield* toInstance(row);
-        }),
+        sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              SELECT pg_advisory_xact_lock(hashtext(${`board_instances:${input.repo}`}))
+            `;
+            const existing = yield* sql<{ id: string }>`
+              SELECT id FROM board_instances
+              WHERE repo = ${input.repo}
+              ORDER BY created_at, id
+              LIMIT 1
+            `;
+            const found = existing[0];
+            if (found !== undefined) {
+              return yield* new BoardExists({
+                repo: input.repo,
+                boardId: found.id,
+                message: `repository ${input.repo} already has board ${found.id}`,
+              });
+            }
+            const id = yield* mintBoardId;
+            const rows =
+              input.definitionVersion === undefined
+                ? yield* sql<BoardInstanceRow>`
+                    INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    SELECT ${id}, ${input.repo}, bd.id, bd.version
+                    FROM board_definitions bd
+                    WHERE bd.id = ${input.definitionId}
+                    ORDER BY bd.version DESC
+                    LIMIT 1
+                    RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
+                  `
+                : yield* sql<BoardInstanceRow>`
+                    INSERT INTO board_instances (id, repo, definition_id, definition_version)
+                    SELECT ${id}, ${input.repo}, bd.id, bd.version
+                    FROM board_definitions bd
+                    WHERE bd.id = ${input.definitionId}
+                      AND bd.version = ${input.definitionVersion}
+                    RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
+                  `;
+            const row = rows[0];
+            if (row === undefined) {
+              return yield* input.definitionVersion === undefined
+                ? new DefinitionNotFound({
+                    definitionId: input.definitionId,
+                    message: `no board definition ${input.definitionId}`,
+                  })
+                : new DefinitionNotFound({
+                    definitionId: input.definitionId,
+                    version: input.definitionVersion,
+                    message: `board definition ${input.definitionId} has no version ${input.definitionVersion}`,
+                  });
+            }
+            return yield* toInstance(row);
+          }),
+        ),
       );
 
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>

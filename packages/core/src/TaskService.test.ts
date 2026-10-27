@@ -504,11 +504,6 @@ describe("TaskService", () => {
   });
 });
 
-/**
- * The thread on a card (B7, LOB-73): a run's question, a person's answer, and every refusal on the
- * way — each refusal checked against the event count, because a refused ask that left a comment
- * behind would be a question nobody can tell was never asked.
- */
 describe("TaskService — creating a board (LOB-208)", () => {
   /**
    * A definition of the case's own, with `versions` rows carrying the default pipeline's version-1
@@ -569,9 +564,9 @@ describe("TaskService — creating a board (LOB-208)", () => {
       }),
     );
     const second = await withService((s) =>
-      s.createBoard({ repo, definitionId }),
+      s.createBoard({ repo: newRepo(), definitionId }),
     );
-    // Two boards over one repository stay two boards (B2), each on the version it was made under.
+    // Each board stays on the version it was made under (B2).
     expect(second.id).not.toBe(first.id);
     expect(second.definitionVersion).toBe(3);
     const reread = await withService((s) => s.getBoard(first.id));
@@ -610,6 +605,56 @@ describe("TaskService — creating a board (LOB-208)", () => {
     expect(card.column).toBe("intake");
   });
 
+  /**
+   * One board per repository (docs/board.md, deferred item 8): a repeated `factory board create` or a
+   * retried RPC call is refused, naming the board the repository already has, and adds no row.
+   * Mutation: drop the existence check — the second call makes a second board and resolves.
+   */
+  it("refuses a second board over a repository, naming the one it has, and makes no other", async () => {
+    const repo = newRepo();
+    const definitionId = DefinitionId.make(DEFAULT_DEFINITION_ID);
+    const first = await withService((s) =>
+      s.createBoard({ repo, definitionId }),
+    );
+    const err = await refusal((s) =>
+      s.createBoard({ repo, definitionId, definitionVersion: 1 }),
+    );
+    expect(err._tag).toBe("BoardExists");
+    if (err._tag !== "BoardExists") throw new Error("unreachable");
+    expect(err.repo).toBe(repo);
+    expect(err.boardId).toBe(first.id);
+    expect(err.message).toBe(
+      `repository ${repo} already has board ${first.id}`,
+    );
+    expect(await boardsOver(repo)).toBe(1);
+  });
+
+  /**
+   * Creates racing for one repository: exactly one board lands and every other is `BoardExists`.
+   * Eight, not two, so the race is wide enough to show. Mutation: drop the advisory lock — several
+   * transactions see no board under READ COMMITTED and insert, so the repository ends with more.
+   */
+  it("lets exactly one of several concurrent creates for a repository through", async () => {
+    const repo = newRepo();
+    const definitionId = DefinitionId.make(DEFAULT_DEFINITION_ID);
+    const outcomes = await withService((s) =>
+      Effect.all(
+        Array.from({ length: 8 }, () =>
+          Effect.result(s.createBoard({ repo, definitionId })),
+        ),
+        { concurrency: "unbounded" },
+      ),
+    );
+    const made = outcomes.filter((outcome) => outcome._tag === "Success");
+    const refused = outcomes.filter(
+      (outcome) =>
+        outcome._tag === "Failure" && outcome.failure._tag === "BoardExists",
+    );
+    expect(made).toHaveLength(1);
+    expect(refused).toHaveLength(7);
+    expect(await boardsOver(repo)).toBe(1);
+  });
+
   it("refuses a definition the factory does not hold, naming it, and makes no board", async () => {
     const repo = newRepo();
     const definitionId = DefinitionId.make(`missing${hex(4)}`);
@@ -640,6 +685,11 @@ describe("TaskService — creating a board (LOB-208)", () => {
   });
 });
 
+/**
+ * The thread on a card (B7, LOB-73): a run's question, a person's answer, and every refusal on the
+ * way — each refusal checked against the event count, because a refused ask that left a comment
+ * behind would be a question nobody can tell was never asked.
+ */
 describe("TaskService — the ask and the thread", () => {
   /** The `kind` column of every event a card has, in write order. */
   const eventKinds = (taskId: string): Promise<ReadonlyArray<string>> =>

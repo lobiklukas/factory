@@ -2,8 +2,8 @@
 # Drive board creation (LOB-208): `factory board create` against a real control plane, then read the
 # board it made back through `factory board ls`, put a card on it through `createTask`, start a run
 # on the card in `specifying`, and read the run's prompt from its own log — the column's skill is
-# there only if the run-column join found the board `createBoard` wrote. Then the refusals: an
-# unknown definition, an unknown version, and a repo that is not one.
+# there only if the run-column join found the board `createBoard` wrote. Then the refusals: a second
+# board over one repository, an unknown definition, an unknown version, and a repo that is not one.
 #
 # The commands run as plain subprocesses, not in tmux: what is asserted here is stdout, stderr and
 # the exit code, which a subprocess captures exactly; `drive.sh` already proves the terminal reading
@@ -78,11 +78,19 @@ check "it binds the repo named" "$(yes_if has create "repo        $REPO")" "repo
 check "it pins the default definition's newest version" \
   "$(yes_if has create "definition  default v$NEWEST")" "newest in the database=v$NEWEST"
 
+# --- create: one board per repository --------------------------------------------------------------
+run again board create --repo "$REPO" --api "$API_URL"
+check "a second board over the same repo is refused, naming the first" \
+  "$([ -n "$BOARD_ID" ] && has again "error: board_exists: repository $REPO already has board $BOARD_ID" && echo 0 || echo 1)" \
+  "message verbatim"
+check "and the second-board refusal exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)" "exit=$rc"
+
 # --- create: a version named on purpose ------------------------------------------------------------
-run pinned board create --repo "$REPO" --version 1 --api "$API_URL"
+PINNED_REPO="$REPO-v1"
+run pinned board create --repo "$PINNED_REPO" --definition-version 1 --api "$API_URL"
 PINNED_ID="$(field pinned board)"
-check "board create --version 1 exits 0" "$([ "$rc" = "0" ] && echo 0 || echo 1)" "exit=$rc"
-check "it pins version 1, a second board over the same repo" \
+check "board create --definition-version 1 exits 0" "$([ "$rc" = "0" ] && echo 0 || echo 1)" "exit=$rc"
+check "it pins version 1" \
   "$([ -n "$PINNED_ID" ] && [ "$PINNED_ID" != "$BOARD_ID" ] && has pinned "definition  default v1" && echo 0 || echo 1)" \
   "board=${PINNED_ID:-none}"
 
@@ -124,12 +132,12 @@ check "the run is told the specifying column's skill (the run-column join)" \
   "exit=$PROMPT_RC, see create-board-prompt.json"
 
 # --- refusals --------------------------------------------------------------------------------------
-run unknown board create --repo "$REPO" --definition "nosuch$HEX" --api "$API_URL"
+run unknown board create --repo "$REPO-unknown" --definition "nosuch$HEX" --api "$API_URL"
 check "an unknown definition is refused, naming it" \
   "$(yes_if has unknown "error: definition_not_found: no board definition nosuch$HEX")" "message verbatim"
 check "and the unknown-definition refusal exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)" "exit=$rc"
 
-run noversion board create --repo "$REPO" --version 99 --api "$API_URL"
+run noversion board create --repo "$REPO-noversion" --definition-version 99 --api "$API_URL"
 check "a version the definition lacks is refused, naming both" \
   "$(yes_if has noversion "error: definition_not_found: board definition default has no version 99")" \
   "message verbatim"

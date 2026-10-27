@@ -88,9 +88,10 @@ runs the real script against a closed port and an answering one.
 ```
 
 `board-create.sh` (LOB-208) makes boards with `factory board create` and reads them back: the
-default definition's newest version unless `--version` names one, `board ls` on the made board, a
-card and a run on it whose prompt carries the `specifying` column's skill, and the two
-`definition_not_found` refusals plus a malformed `--repo`. `board-create.ts` reads the newest version
+default definition's newest version unless `--definition-version` names one, `board ls` on the made
+board, a card and a run on it whose prompt carries the `specifying` column's skill, the
+`board_exists` refusal of a second board over one repository, and the two `definition_not_found`
+refusals plus a malformed `--repo`. `board-create.ts` reads the newest version
 straight from the database (the oracle) and the run's prompt from its log. See `features/boards.md`.
 
 `requires.sh` (LOB-80) walks a card on the newest `default` definition into `review` and proves the
