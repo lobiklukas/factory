@@ -446,8 +446,10 @@ Of the design's component inventory (§3), these do not exist yet, and none of t
   (not `either` + `Either`), and a tagged error is yielded directly (no `Effect.fail` wrapper).
   The Effect language service reports these as `outdated-api` warnings, and warnings are errors.
 - **`oxlint` runs with `denyWarnings: true`.** Fix the code; do not suppress the rule.
-- **`.pi` and `.verify` are excluded from lint**, because skill helpers are Node tooling where
-  `process.env`, `console`, and `fs` are correct.
+- **`.verify` is excluded from lint; most of `.pi` is not.** The skills' drivers are linted with
+  the Node-tooling rules (`process.env`, `console`, `fs`) turned off for them, bar the skills
+  `.oxlintrc.json` still ignores (LOB-175), and every `.pi/skills/**/*.ts` is type-checked by the root task `//#type-check:pi` over `.pi/tsconfig.json`
+  (LOB-176), so a driver that stops type-checking fails `bun run type-check`.
 - **pi-ai is ESM-only.** `require.resolve` on its subpaths fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`
   even though the export map lists them. Bun and Vitest are fine.
 - **Local kind cannot run gVisor**, so no local run ever proves isolation (design R2).

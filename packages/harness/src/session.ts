@@ -36,8 +36,9 @@ import {
 import { createRegistry } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { Effect, Queue, Stream } from "effect";
+import { Effect, Queue, Schema, Stream } from "effect";
 import type {
+  PrEvidence,
   SessionError,
   SessionErrorCode,
   SessionEvent,
@@ -52,7 +53,10 @@ import type {
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
 import type { Page as CitedPage } from "@repo/domain/Page";
-import { SessionError as SessionErrorClass } from "@repo/domain/Session";
+import {
+  PrEvidence as PrEvidenceSchema,
+  SessionError as SessionErrorClass,
+} from "@repo/domain/Session";
 import { skillsExtension, type RunProfile } from "./loader";
 import { compactionPolicyFor, type ModelAccess } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
@@ -69,7 +73,12 @@ import {
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
-import { verifyExtension, type VerifyOptions } from "./verify";
+import {
+  verifyCallsIn,
+  verifyExtension,
+  type VerifyOptions,
+  type VerifyRecord,
+} from "./verify";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -80,6 +89,7 @@ import {
 } from "./policy";
 import {
   diffView,
+  evidenceAt,
   pendingApprovals,
   projectApprovals,
   projectEntry,
@@ -541,16 +551,27 @@ export type PullRequestRecord = {
   readonly base: string;
   readonly head: string;
   readonly openedAt: string;
+  /**
+   * What the PR's body states was verified (LOB-79). Absent only on a PR recorded before evidence
+   * existed: the step always derives one, `EvidenceNone` included.
+   */
+  readonly evidence?: PrEvidence;
 };
 
 /**
  * The PR a session opened, announced in the transcript so an attached client learns the link
- * (LOB-177). It carries no model content, so the agent never sees it.
+ * (LOB-177) and, since LOB-79, what it says was verified. It carries no model content, so the agent
+ * never sees it.
  */
 export const PrOpenedEntry = defineEntry<{
   readonly url: string;
   readonly number: number;
+  readonly evidence?: JsonValue;
 }>(PR_OPENED_ENTRY_KIND);
+
+/** Evidence as a document field: the schema's own encoding, which is plain JSON. */
+const encodeEvidence = (evidence: PrEvidence): JsonValue =>
+  Schema.encodeSync(PrEvidenceSchema)(evidence);
 
 /**
  * Commit the PR a session opened. The log, not the `sessions` row, is what makes the link survive a
@@ -575,9 +596,19 @@ export const writePullRequestDoc = (
             doc.base = pullRequest.base;
             doc.head = pullRequest.head;
             doc.openedAt = pullRequest.openedAt;
+            doc.evidence =
+              pullRequest.evidence === undefined
+                ? null
+                : encodeEvidence(pullRequest.evidence);
           }),
           tx.appendEntry(PrOpenedEntry, conversation.id, {
-            data: { url: pullRequest.url, number: pullRequest.number },
+            data: {
+              url: pullRequest.url,
+              number: pullRequest.number,
+              ...(pullRequest.evidence === undefined
+                ? {}
+                : { evidence: encodeEvidence(pullRequest.evidence) }),
+            },
           }),
         ]),
       BACKGROUND_CONTEXT,
@@ -597,14 +628,27 @@ export const readPullRequestDoc = (
       harness.snapshot(PrDoc, conversation.id, BACKGROUND_CONTEXT),
     );
     if (doc === undefined || doc.url === "") return undefined;
+    const evidence = evidenceAt(doc);
     return {
       url: doc.url,
       number: doc.number,
       base: doc.base,
       head: doc.head,
       openedAt: doc.openedAt,
+      ...(evidence === undefined ? {} : { evidence }),
     };
   });
+
+/**
+ * Every `verify` call in a session this process owns, oldest first, read through its conversation
+ * (LOB-79): its record, or `undefined` for a call that left none (blocked or crashed). What the PR
+ * step derives the body's evidence from, so a newest call without a record is said rather than
+ * skipped. `readVerifyRecords` reads the records alone from a log nobody owns.
+ */
+export const readConversationVerifyCalls = (
+  conversation: Conversation,
+): Effect.Effect<readonly (VerifyRecord | undefined)[], SessionError> =>
+  Effect.map(readConversationEntries(conversation), verifyCallsIn);
 
 /**
  * Commit the session's spec (LOB-72), after `decodeSpec` accepts it.
@@ -1318,6 +1362,9 @@ export const readSessionLog = (
               base: prDoc.base,
               head: prDoc.head,
               openedAt: prDoc.openedAt,
+              ...(prDoc.evidence === undefined
+                ? {}
+                : { evidence: prDoc.evidence }),
             },
           }),
       ...(spec === undefined ? {} : { spec }),

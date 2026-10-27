@@ -113,7 +113,8 @@ command line it resolved.
   `export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock`.
 - **Gate every change:** `bun run format:check`, `build`, `lint`, `test`, `type-check` — all five,
   green, before you claim anything works. The Effect diagnostics run with `denyWarnings`, so a warning
-  fails the build, and `.pi/` / `.verify/` are excluded from lint on purpose. `turbo` caches results:
+  fails the build. `.verify/` is excluded from lint on purpose; `.pi/skills` is type-checked
+  (`.pi/tsconfig.json`, the root task `//#type-check:pi`) and linted bar what `.oxlintrc.json` ignores. `turbo` caches results:
   `bunx turbo run test --force` when you need a real run.
 - **Another OMP session shares this checkout.** While this brief was written one was mid-flight in
   `apps/web` (the UI aesthetic work: shadcn components, theme, nav rail), uncommitted. Commit by path,

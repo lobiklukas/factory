@@ -9,7 +9,8 @@
   "scripts": {
     "build": "DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1 turbo run build",
     "dev": "DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1 turbo run dev",
-    "type-check": "DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1 turbo run type-check",
+    "type-check": "DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1 turbo run type-check type-check:pi",
+    "type-check:pi": "tsc -p .pi/tsconfig.json",
     "clean": "DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1 turbo run clean && git clean -xdf node_modules .cache .turbo dist tsconfig.tsbuildinfo",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
@@ -40,6 +41,7 @@
     "@repo/domain": "workspace:*",
     "@repo/harness": "workspace:*",
     "@repo/storage-postgres": "workspace:*",
+    "@types/bun": "^1.2.17",
     "effect": "4.0.0",
     "oxfmt": "^0.65.0",
     "oxlint": "1.80.0",
