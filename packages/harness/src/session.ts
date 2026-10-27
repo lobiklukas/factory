@@ -23,6 +23,7 @@ import type {
   Storage,
   Submission,
   SubmissionRecord,
+  TaskId,
   Tx,
 } from "@earendil-works/pi-durable";
 import {
@@ -55,7 +56,11 @@ import type {
   WithdrawOutcome,
 } from "@repo/domain/Session";
 import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
-import { missionSnapshot, type MissionSnapshot } from "@repo/domain/Mission";
+import {
+  MISSION_VERSION,
+  missionSnapshot,
+  type MissionSnapshot,
+} from "@repo/domain/Mission";
 import type { Page as CitedPage } from "@repo/domain/Page";
 import {
   PrEvidence as PrEvidenceSchema,
@@ -1944,6 +1949,24 @@ const snapshotEvent = (snapshot: SessionSnapshot): SessionEvent => ({
 });
 
 /**
+ * The live checkpoint of a mission whose document an older definition wrote, for `readMissionDoc`
+ * (`@repo/domain/Mission`) to read that document by (LOB-233). `undefined` when the document is
+ * current — it already names the checkpoint's phase, so the task is not read at all — or when the
+ * task has settled (a terminal record holds no checkpoint) or is gone. Lives here rather than in
+ * `mission.ts` because the session snapshot reads it too, and `mission.ts` imports this module.
+ */
+export const missionCheckpoint = (
+  harness: Harness,
+  taskId: TaskId,
+  definitionVersion: unknown,
+): Effect.Effect<unknown, SessionError> =>
+  typeof definitionVersion === "number" && definitionVersion < MISSION_VERSION
+    ? attempt("read mission task", () =>
+        harness.getTask(taskId, BACKGROUND_CONTEXT),
+      ).pipe(Effect.map((task) => task?.state.checkpoint))
+    : Effect.void;
+
+/**
  * The mission a session is running, read off the two documents a start commits (LOB-230): the
  * binding names the mission's task id, and the mission's own document names the phase it reached.
  *
@@ -1965,7 +1988,17 @@ const readMissionSnapshot = (
     const doc = yield* attempt("read mission", () =>
       harness.snapshot(MissionDoc, conversation.id, taskId, BACKGROUND_CONTEXT),
     );
-    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+    if (doc === undefined) return undefined;
+    // The live task's checkpoint is what tells an older definition's document apart where the
+    // document alone cannot (`readMissionDoc`); the folded read below has no live task to ask.
+    const checkpoint = /^[0-9]+$/.test(taskId)
+      ? yield* missionCheckpoint(
+          harness,
+          Number(taskId) as TaskId,
+          doc.definitionVersion,
+        )
+      : undefined;
+    return missionSnapshot(taskId, doc, checkpoint);
   });
 
 /** `readMissionSnapshot` for a session nobody owns: the same two documents, folded from its log. */

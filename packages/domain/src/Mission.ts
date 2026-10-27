@@ -54,22 +54,142 @@ export const MissionSnapshot = Schema.Struct({
 export type MissionSnapshot = typeof MissionSnapshot.Type;
 
 /**
- * A mission read back from the two documents it commits: the binding names its task id, and the
- * mission's own document names the phase it reached.
+ * The mission task's definition version (`packages/harness/src/mission.ts`), which every document
+ * the mission commits records as its `definitionVersion`.
  *
- * The document values are `unknown` because one function serves both read paths — a live harness
- * snapshot and a raw document folded out of a released session's log — and because a document is
- * data a previous version wrote. A phase or an `entered` entry this contract does not know is
- * dropped rather than carried, which is what the harness's own reopen does. `undefined` is "this
+ * Defined here, beside the table that reads an older document forward, because both read paths —
+ * the harness's `readMission` and the session snapshot's `missionSnapshot` — have to read a
+ * document through the definition that wrote it, and a version the table and the task disagree on
+ * would be a document read under the wrong rules.
+ */
+export const MISSION_VERSION = 2;
+
+/** What a mission's document says, read under the current definition: the phase, and how it got there. */
+export type MissionPhaseRecord = {
+  /** The phase the mission's checkpoint is in — what a resume continues from. */
+  readonly phase: MissionPhase;
+  /** Every phase the mission entered, in the order it entered them. */
+  readonly entered: readonly MissionPhase[];
+};
+
+/** The phase after `phase`, or `phase` itself when it is the last one. */
+const successor = (phase: MissionPhase): MissionPhase =>
+  MISSION_PHASES[
+    Math.min(MISSION_PHASES.indexOf(phase) + 1, MISSION_PHASES.length - 1)
+  ] ?? phase;
+
+/**
+ * How a document an older definition wrote reads under this one, keyed by the version that wrote
+ * it; a document is carried through every step from its version up to `MISSION_VERSION`.
+ *
+ * Version 1 (LOB-233) recorded the phase whose handler *ran*, in the same commit that moved the
+ * checkpoint to the *next* phase, so its document lags the checkpoint by one: a v1 `plan` is a
+ * mission in `implement`, and a v1 `implement` is a mission in `verify`. A v1 `verify` is the
+ * mission in `verify` — that phase's commit settles the mission, so there is no next phase for it to
+ * lag behind. `entered` gains the phase read forward, so the list still ends in the phase the
+ * mission is in.
+ *
+ * One v1 document cannot be read exactly from the document alone: the seed v1's `startMission`
+ * wrote (`plan`, `[plan]`) is the document v1's plan commit leaves, value for value. So this table
+ * is the rule only where nothing better is at hand. A reader holding the live task record passes
+ * its checkpoint to `readMissionDoc`, and a live v1 mission — including one killed between its start
+ * and its first phase, which sits `pending` until a caller asks for progress — reads the phase the
+ * checkpoint names. Two readers have no checkpoint, and for them a v1 seed reads `implement` for
+ * good: the folded read of a released session, and a v1 mission that settled (aborted, or faulted)
+ * before plan ran, whose terminal record holds no checkpoint and whose document no commit rewrites.
+ */
+const MISSION_DOC_MIGRATIONS: Readonly<
+  Record<number, (record: MissionPhaseRecord) => MissionPhaseRecord>
+> = {
+  1: ({ phase, entered }) => {
+    const next = successor(phase);
+    return {
+      phase: next,
+      entered:
+        entered[entered.length - 1] === next ? entered : [...entered, next],
+    };
+  },
+};
+
+/** The phase a task record's checkpoint names, or `undefined` when it names none this contract knows. */
+const checkpointPhase = (checkpoint: unknown): MissionPhase | undefined =>
+  typeof checkpoint === "object" &&
+  checkpoint !== null &&
+  "phase" in checkpoint &&
+  isMissionPhase(checkpoint.phase)
+    ? checkpoint.phase
+    : undefined;
+
+/**
+ * Read a mission's document under the current definition: the phase it names, read forward from
+ * the version that wrote it.
+ *
+ * The values are `unknown` because a document is data a previous version wrote. A phase or an
+ * `entered` entry this contract does not know is dropped rather than carried, which is what the
+ * harness's own reopen does. A document with no `definitionVersion`, or one newer than this
+ * definition, is read as written: there is no rule for it to be read through. `undefined` is "this
  * mission has entered no phase", which is a mission whose document still holds its seed.
+ *
+ * `checkpoint` is the live task record's checkpoint, when the reader has one. It decides only for a
+ * document an older definition wrote: such a document was not committed under this definition's
+ * rule that the document names the checkpoint's phase, so the checkpoint is the better witness, and
+ * it is the one thing that tells a v1 seed from a v1 plan commit. A current document already names
+ * the checkpoint's phase — the two are one commit — so it is read as written.
+ */
+export const readMissionDoc = (
+  doc: {
+    readonly phase?: unknown;
+    readonly entered?: unknown;
+    readonly definitionVersion?: unknown;
+  },
+  checkpoint?: unknown,
+): MissionPhaseRecord | undefined => {
+  if (!isMissionPhase(doc.phase)) return undefined;
+  const entered = Array.isArray(doc.entered) ? doc.entered : [];
+  let record: MissionPhaseRecord = {
+    phase: doc.phase,
+    entered: entered.filter(isMissionPhase),
+  };
+  const from = doc.definitionVersion;
+  // A version below the first one is no definition's: the seed's `0` never names a phase.
+  if (typeof from !== "number" || !Number.isInteger(from) || from < 1)
+    return record;
+  if (from >= MISSION_VERSION) return record;
+  const live = checkpointPhase(checkpoint);
+  if (live !== undefined)
+    return {
+      phase: live,
+      entered:
+        record.entered[record.entered.length - 1] === live
+          ? record.entered
+          : [...record.entered, live],
+    };
+  for (let version = from; version < MISSION_VERSION; version++) {
+    const migrate = MISSION_DOC_MIGRATIONS[version];
+    if (migrate !== undefined) record = migrate(record);
+  }
+  return record;
+};
+
+/**
+ * A mission read back from the two documents it commits: the binding names its task id, and the
+ * mission's own document names the phase it reached, read through `readMissionDoc`.
+ *
+ * One function serves both read paths — a live harness snapshot and a raw document folded out of a
+ * released session's log — so the two cannot read one document as two phases. `checkpoint` is the
+ * live task's, which only the live path has; see `readMissionDoc`.
  */
 export const missionSnapshot = (
   taskId: string,
-  doc: { readonly phase?: unknown; readonly entered?: unknown },
+  doc: {
+    readonly phase?: unknown;
+    readonly entered?: unknown;
+    readonly definitionVersion?: unknown;
+  },
+  checkpoint?: unknown,
 ): MissionSnapshot | undefined => {
-  if (!isMissionPhase(doc.phase)) return undefined;
-  const entered = Array.isArray(doc.entered) ? doc.entered : [];
-  return { taskId, phase: doc.phase, entered: entered.filter(isMissionPhase) };
+  const record = readMissionDoc(doc, checkpoint);
+  return record === undefined ? undefined : { taskId, ...record };
 };
 
 /**

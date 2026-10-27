@@ -5,9 +5,9 @@
  * The phases are Pi Durable task states rather than an Effect pipeline, because the mission's
  * progress has to be a committed checkpoint: a process that dies mid-phase leaves a task the
  * harness resumes in the phase it died in, and a reopen reads the phase the mission reached out of
- * the log instead of out of a caller's memory. Each phase entry commits the `factory.mission`
- * document *and* the checkpoint that follows it in one commit (`enterPhase`), so the two can never
- * disagree.
+ * the log instead of out of a caller's memory. Each phase commits the `factory.mission` document
+ * *and* the checkpoint that follows it in one commit (`enterPhase`), and the document names the
+ * phase that checkpoint is in, so the two can never disagree.
  *
  * What plan and implement do is the later parts' — LOB-230 starts a mission over the RPC client and
  * reads its phase, LOB-231 resumes one — and a phase ends at a pushed branch: opening the PR
@@ -18,7 +18,7 @@
  * Everything this module hands back across the Pi Durable Promise boundary is an Effect, like the
  * rest of the harness.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context, JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type {
   ConversationId,
@@ -27,15 +27,21 @@ import type {
   TaskRuntime,
 } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import {
   MISSION_PHASES,
-  isMissionPhase,
-  type MissionPhase,
+  MISSION_VERSION,
+  MissionPhase,
+  readMissionDoc,
 } from "@repo/domain/Mission";
-import type { SessionError, SessionWorkspace } from "@repo/domain/Session";
+import { SessionWorkspace, type SessionError } from "@repo/domain/Session";
 import { MissionBindingDoc, MissionDoc } from "./docs";
-import { attempt, type Harness, type LiveSession } from "./session";
+import {
+  attempt,
+  missionCheckpoint,
+  type Harness,
+  type LiveSession,
+} from "./session";
 
 /**
  * The phases a mission passes through, in the order it passes through them.
@@ -47,10 +53,11 @@ export { MISSION_PHASES, type MissionPhase };
 
 /**
  * The definition version, recorded in every document the mission commits and pinned by the task
- * record. The document names it because a checkpoint is read back through the definition (and its
- * `migrate`, once there is one) that wrote it.
+ * record. The document names it because a document is read back through the definition that wrote
+ * it: version 1's document lagged its checkpoint by one phase, and `readMissionDoc` reads such a
+ * document forward (LOB-233). The number itself lives in `@repo/domain/Mission`, beside that table.
  */
-export const MISSION_VERSION = 1;
+export { MISSION_VERSION };
 
 /** The task kind a mission registers under: one mission is one task. */
 export const MISSION_TASK_NAME = "factory.mission";
@@ -72,16 +79,40 @@ export const missionKey = (taskId: TaskId): string => String(taskId);
  * and one that declares a config without a `verify` command both leave `commands.verify`
  * undefined, and only the source says which of the two happened.
  */
-export type MissionInput = {
-  readonly feature: string;
-  readonly workspace: Pick<
-    SessionWorkspace,
-    "path" | "commands" | "commandsSource"
-  >;
-};
+export const MissionInput = Schema.Struct({
+  feature: Schema.String,
+  workspace: Schema.Struct({
+    path: SessionWorkspace.fields.path,
+    commands: SessionWorkspace.fields.commands,
+    commandsSource: SessionWorkspace.fields.commandsSource,
+  }),
+});
+export type MissionInput = typeof MissionInput.Type;
 
 /** Where a mission is: the phase its checkpoint names. */
-export type MissionState = { readonly phase: MissionPhase };
+export const MissionState = Schema.Struct({ phase: MissionPhase });
+export type MissionState = typeof MissionState.Type;
+
+const decodeInput = Schema.decodeUnknownSync(MissionInput);
+const decodeState = Schema.decodeUnknownSync(MissionState);
+
+/**
+ * Carry a task record an older definition stored into this one; Pi Durable runs it when it reserves
+ * the task, and a newer definition with no `migrate` would leave every live older mission blocked.
+ *
+ * Version 1 → 2 changed what the *document* records (LOB-233), not the input or the checkpoint: the
+ * checkpoint always named the phase the mission is in, so a v1 mission resumes in the phase it died
+ * in, and that phase's commit rewrites the document under this definition. Both are decoded rather
+ * than cast, so a record that is not a mission's throws here — which Pi Durable records as a failed
+ * migration and leaves the task blocked, rather than handing a phase handler a shape it cannot run.
+ */
+const migrateRecord = (
+  input: JsonValue,
+  checkpoint: JsonValue,
+): { input: MissionInput; checkpoint: MissionState } => ({
+  input: decodeInput(input),
+  checkpoint: decodeState(checkpoint),
+});
 
 /** What a completed mission did, as its terminal result records it. */
 export type MissionResult = {
@@ -140,15 +171,21 @@ const failed = (
 });
 
 /**
- * Commit one phase entry: the document that names the phase, and the state the mission moves to.
+ * Commit the end of one phase: the state the mission moves to, and the document that names it.
  *
- * One commit for both, not two: a document that says `implement` while the checkpoint still says
- * `plan` is a reopen that resumes the wrong phase. Called by every phase, including verify on its
- * way to a terminal outcome, so the document always names the phase the mission last entered even
- * when that phase is also the one that failed.
+ * The document names the phase the checkpoint is *entering* — `next`'s phase when the mission moves
+ * on, the running phase when it settles — because that is the phase a resume continues from. Naming
+ * the phase whose handler ran instead (version 1, LOB-233) left the document one phase behind its
+ * own checkpoint for as long as the next phase ran, so a client reading it after a kill was told a
+ * phase the reopened harness would not continue from. One commit for both, not two: a document
+ * written after the checkpoint is a moment at which the two disagree. Called by every phase,
+ * including verify on its way to a terminal outcome, so a mission that settles `failed` still names
+ * the phase it failed in.
  *
- * `entered` grows only when the phase is a new one, so a phase the harness resumes appends nothing
- * and the list stays "each phase the mission entered" rather than "each commit it took".
+ * `entered` records the running phase and then the entered one, each only when it is not already
+ * the last entry: a mission created without the start's seed still lists `plan`, a phase the
+ * harness resumes appends nothing, and the list stays "each phase the mission entered" rather than
+ * "each commit it took".
  */
 const enterPhase = (
   runtime: MissionRuntime,
@@ -166,13 +203,17 @@ const enterPhase = (
           missionKey(runtime.taskId),
         )
         .then((doc) => {
-          const entered = doc.entered;
+          const entering =
+            next.status === "terminal" ? phase : next.checkpoint.phase;
           // Re-entering the phase the mission is already in is the same entry, not a second one: a
           // phase the harness resumes after a crash must not read as a phase the mission passed
           // through twice.
-          if (entered[entered.length - 1] !== phase)
-            doc.entered = [...entered, phase];
-          doc.phase = phase;
+          let entered = doc.entered;
+          for (const each of [phase, entering])
+            if (entered[entered.length - 1] !== each)
+              entered = [...entered, each];
+          if (entered !== doc.entered) doc.entered = entered;
+          doc.phase = entering;
           doc.definitionVersion = MISSION_VERSION;
           return next;
         }),
@@ -275,6 +316,7 @@ export const MissionTask = defineTask<
   name: MISSION_TASK_NAME,
   version: MISSION_VERSION,
   initial: () => ({ phase: "plan" }),
+  migrate: migrateRecord,
   phases: {
     // Plan and implement are checkpoints in this part: the phases' own work is LOB-230's and
     // LOB-231's, and what the mission commits here is the phase it reached.
@@ -293,8 +335,9 @@ export const MissionTask = defineTask<
         context,
       ),
     verify: (task, runtime, context) =>
-      // The document commit and the terminal outcome are one commit, so a verify that settles
-      // `failed` still names the phase it failed in.
+      // The document already says `verify` — implement's commit named it — and the terminal
+      // outcome commits it again, so a verify that settles `failed` still names the phase it
+      // failed in.
       Effect.runPromise(
         Effect.gen(function* () {
           const next = yield* runVerify(runtime, task.input, context);
@@ -318,6 +361,7 @@ export const MissionTask = defineTask<
 export type MissionRecord = {
   /** The phase the mission is in — what a resume reads. */
   readonly phase: MissionPhase;
+  /** The definition version that wrote the document; its phase is already read forward from it. */
   readonly definitionVersion: number;
   /** Every phase the mission entered, in the order it entered them. */
   readonly entered: readonly MissionPhase[];
@@ -329,9 +373,13 @@ export type MissionRecord = {
  *
  * A mission is named by the conversation it runs in and its own task id, so a conversation holding
  * two missions has two documents and each reads back only its own. `undefined` means this mission has
- * not entered a phase: either the document was never written or it still holds its seed. A renamed or foreign phase reads the same way, because
- * a phase this definition does not know is not a phase it can resume; in `entered` such a value is
- * dropped rather than guessed at, and the phase the mission is in is the one that decides.
+ * not entered a phase: either the document was never written or it still holds its seed. A renamed
+ * or foreign phase reads the same way, because a phase this definition does not know is not a phase
+ * it can resume; in `entered` such a value is dropped rather than guessed at, and the phase the
+ * mission is in is the one that decides. A document an older definition wrote is read through
+ * `readMissionDoc`, the same reader the session snapshot uses, with the task's own checkpoint when
+ * the task is still live — the one witness that tells a v1 seed (`plan`) from a v1 plan commit
+ * (`implement`), which the two documents cannot — and forward through the version table otherwise.
  */
 export const readMission = (
   harness: Harness,
@@ -347,12 +395,15 @@ export const readMission = (
         BACKGROUND_CONTEXT,
       ),
     );
-    if (doc === undefined || !isMissionPhase(doc.phase)) return undefined;
-    return {
-      phase: doc.phase,
-      definitionVersion: doc.definitionVersion,
-      entered: doc.entered.filter(isMissionPhase),
-    };
+    if (doc === undefined) return undefined;
+    const checkpoint = yield* missionCheckpoint(
+      harness,
+      taskId,
+      doc.definitionVersion,
+    );
+    const record = readMissionDoc(doc, checkpoint);
+    if (record === undefined) return undefined;
+    return { ...record, definitionVersion: doc.definitionVersion };
   });
 
 /**
