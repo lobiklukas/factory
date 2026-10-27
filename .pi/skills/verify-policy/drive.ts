@@ -95,13 +95,13 @@ const ProtocolLive = RpcClient.layerProtocolHttp({
 
 /** Poll until `check` yields anything but `false`, so the driver never depends on a fixed delay. */
 const waitUntil = <A, E, R>(
-  check: Effect.Effect<A, E, R>,
+  check: Effect.Effect<A | false | undefined, E, R>,
   label: string,
 ): Effect.Effect<A, E, R> =>
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const value = yield* check;
-      if (value !== false && value !== undefined) return value as A;
+      if (value !== false && value !== undefined) return value;
       yield* Effect.sleep(100);
     }
     return yield* Effect.die(new Error(`timed out waiting for ${label}`));

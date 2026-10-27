@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/@effect/tsgo/schema.json",
+  "extends": "../packages/config-typescript/base.json",
+  "include": ["skills/**/*.ts"],
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  }
+}
