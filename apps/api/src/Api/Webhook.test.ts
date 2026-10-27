@@ -236,3 +236,73 @@ describe("a replay of a delivery still in flight", () => {
     ).toBe(200);
   });
 });
+
+describe("a generic delivery that names a lifecycle action", () => {
+  // LOB-235: the generic caller types its own `action`, so it cannot be the one that says a push or
+  // a schedule tick happened. Before the refusal, `{action: "push", label: "docs"}` reached the seam,
+  // whose docs rule admits `push` (`startsWorkFor`), and the recorded outcome named a push no push
+  // produced. The route now answers `400 lifecycle-action` and hands the seam nothing; removing the
+  // refusal turns these red with `expected 200 to be 400`, because the fake seam answers `200`.
+  beforeEach(() => {
+    configure({ TRIGGER_SECRET: "generic-secret" });
+  });
+
+  for (const action of ["push", "schedule"]) {
+    it(`refuses "${action}" with 400, naming why, and records nothing`, async () => {
+      const refused = await post(
+        "/webhooks/generic",
+        { requestId: `lob-235-${action}`, action, label: "docs" },
+        "generic-secret",
+      );
+
+      expect(refused.status).toBe(400);
+      expect(refused.body).toMatchObject({
+        ok: false,
+        code: "lifecycle-action",
+      });
+      const error = (refused.body as { readonly error?: unknown }).error;
+      expect(typeof error).toBe("string");
+      // It names the action it refused and why, and claims nothing about a delivery that happened.
+      expect(error).toContain(`lifecycle action "${action}"`);
+      expect(error).toContain("generic webhook cannot name");
+      expect(refused.body).not.toHaveProperty("status");
+      expect(refused.body).not.toHaveProperty("reason");
+      expect(delivered).toHaveLength(0);
+    });
+  }
+
+  it("still hands a create on the docs label to the seam, as a create", async () => {
+    answer = { status: "processed", replayed: false };
+    const created = await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-create", action: "create", label: "docs" },
+      "generic-secret",
+    );
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({ ok: true, status: "processed" });
+    expect(delivered.map((delivery) => delivery.event)).toMatchObject([
+      { source: "generic", action: "create", labels: ["docs"] },
+    ]);
+  });
+
+  it("refuses only the lifecycle actions: any other action still reaches the seam's filter", async () => {
+    // The control: `update` is the seam's to refuse (`skipped`, with its reason — `webhook.sh`'s
+    // check 4), so a route that refused every non-create would fail here.
+    await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-update", action: "update", label: "docs" },
+      "generic-secret",
+    );
+    await post(
+      "/webhooks/generic",
+      { requestId: "lob-235-default", label: "docs" },
+      "generic-secret",
+    );
+
+    expect(delivered.map((delivery) => delivery.event.action)).toEqual([
+      "update",
+      "create",
+    ]);
+  });
+});

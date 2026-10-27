@@ -15,10 +15,12 @@
  * 2. **Verify the signature.** A wrong or missing one is `401` and writes nothing.
  * 3. **Parse and normalize.** A body that is not a JSON object is `400`, and so is one the adapter
  *    cannot address: a generic body with no request id or no label, or a Linear issue body with no
- *    issue id (any other Linear entity is answered and skipped, id or not). The adapter names the
- *    delivery's idempotency key here and nothing else about it: the generic sender supplies its
- *    own, and the Linear adapter derives one from the issue (LOB-164), because which deliveries
- *    are the same work is a fact about the sender.
+ *    issue id (any other Linear entity is answered and skipped, id or not). A generic body that
+ *    names a lifecycle action (`push`, `schedule`) is `400` too: its `action` is whatever the
+ *    caller typed, and only the adapter that observed a push or a tick may say one happened
+ *    (LOB-235). The adapter names the delivery's idempotency key here and nothing else about it:
+ *    the generic sender supplies its own, and the Linear adapter derives one from the issue
+ *    (LOB-164), because which deliveries are the same work is a fact about the sender.
  * 4. **Delegate.** Everything about replays, refusals, mapping and sessions is
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip. The one
  *    outcome the route translates is a replay still `received` — work claimed with no outcome
@@ -47,7 +49,7 @@ import type {
   TriggerEvent,
   TriggerRule,
 } from "@repo/domain/Trigger";
-import { TriggerRules } from "@repo/domain/Trigger";
+import { LIFECYCLE_ACTIONS, TriggerRules } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { TriggerWriteBackLive } from "./LinearSync";
 
@@ -131,7 +133,7 @@ const labelNames = (value: unknown): ReadonlyArray<string> => {
 /**
  * The generic payload: `{requestId?, action?, label?, labels?, title?, body?}`. `label` is the one
  * field a sender must supply — it is what a mapping rule matches — and the rest is carried into
- * the prompt.
+ * the prompt. `action` defaults to `create`; a lifecycle action is refused by `genericDelivery`.
  */
 const genericEvent = (
   payload: Record<string, unknown>,
@@ -183,6 +185,18 @@ const genericDelivery =
       return {
         refused: "the payload does not name an issue or a label",
         code: "bad-payload",
+      };
+    }
+    // The generic caller types its own `action`, so it cannot be the one that says a push or a
+    // schedule tick happened: those are facts only the GitHub push route and the schedule daemon
+    // observe (LOB-197). Admitting one would let the seam record `rule "docs" mapped it …` about a
+    // delivery no push produced (LOB-235). Refusing it here, before the seam, also writes no
+    // `webhook_deliveries` row, so nothing recorded can claim it. Any other non-`create` action
+    // still reaches the seam, whose filter records it `skipped` with its reason.
+    if (LIFECYCLE_ACTIONS.includes(event.action)) {
+      return {
+        refused: `the generic webhook cannot name the lifecycle action "${event.action}"; only the adapter that observes it can, so send "create"`,
+        code: "lifecycle-action",
       };
     }
     return { requestId, event };

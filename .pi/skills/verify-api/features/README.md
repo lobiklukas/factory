@@ -47,6 +47,12 @@ The stale-claim and in-flight checks (LOB-216) were added to `./webhook.sh` and 
 **14/14**, evidence `.verify/evidence/lob-216/webhook/`. The same drive against the seam from before
 LOB-216 failed the reclaim check (`replayed: true` to an orphaned claim).
 
+The lifecycle-action checks (LOB-235) were added to `./webhook.sh` and run from the
+`agent/LOB-235` worktree on 2026-10-27 (API on `:9520`, faux, the worktree's own database on 5442):
+**16/16**, evidence `.verify/evidence/lob-235/webhook/`. The same drive against the adapter from
+before LOB-235 failed its first new check: a generic `push` on the `docs` label was recorded
+`processed` with `rule "docs" mapped it to …`.
+
 The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
 (`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
 `./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver

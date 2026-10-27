@@ -351,6 +351,71 @@ const program = Effect.gen(function* () {
       afterInFlight === afterReclaim,
     `status=${inFlight.status} retry-after=${inFlight.retryAfter} body=${JSON.stringify(inFlight.body)} sessions ${afterReclaim}→${afterInFlight}`,
   );
+
+  // Feature: the generic caller cannot name a lifecycle action (LOB-235). webhook.sh's `docs` rule
+  // admits `push` and `schedule`, as `docsTriggerRules` does, so before the adapter refused it a
+  // signed `{action: "push", label: "docs"}` reached the seam and was recorded `processed` with
+  // `rule "docs" mapped it to …` — a push nobody pushed. It is now `400 lifecycle-action`, names
+  // why, starts nothing, and leaves no `webhook_deliveries` row whose outcome could claim a push.
+  const pushId = `${requestId}-push`;
+  const pushed = yield* Effect.promise(() =>
+    post(
+      "/webhooks/generic",
+      generic(pushId, { action: "push", label: "docs" }),
+    ),
+  );
+  const pushRows = yield* Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      const rows: Array<{ status: string; skip_reason: string | null }> =
+        await db`
+        SELECT status, skip_reason FROM webhook_deliveries WHERE request_id = ${pushId}
+      `;
+      return rows;
+    } finally {
+      await db.close();
+    }
+  });
+  const afterPush = yield* countForRepo;
+  const pushError =
+    typeof pushed.body === "object" && pushed.body !== null
+      ? String((pushed.body as { error?: unknown }).error ?? "")
+      : "";
+  assert(
+    "a generic delivery naming push is 400 lifecycle-action, names why, and records nothing",
+    pushed.status === 400 &&
+      pushed.refusal?.code === "lifecycle-action" &&
+      pushError.includes('lifecycle action "push"') &&
+      pushed.outcome === null &&
+      pushRows.length === 0 &&
+      afterPush === afterInFlight,
+    `status=${pushed.status} body=${JSON.stringify(pushed.body)} rows=${JSON.stringify(pushRows)} sessions ${afterInFlight}→${afterPush}`,
+  );
+
+  // The same caller saying `create` on the same label still starts a docs session: the refusal
+  // removed a false claim, not a capability.
+  const docs = yield* Effect.promise(() =>
+    post(
+      "/webhooks/generic",
+      generic(`${requestId}-docs`, { action: "create", label: "docs" }),
+    ),
+  );
+  const afterDocs = yield* countForRepo;
+  const docsPrompt =
+    docs.outcome?.sessionId === undefined
+      ? undefined
+      : (yield* client.getSession({
+          sessionId: docs.outcome.sessionId,
+        })).entries.find((entry) => entry.kind === "user")?.text;
+  assert(
+    "a generic create on the docs label still starts a docs session",
+    docs.status === 200 &&
+      docs.outcome?.status === "processed" &&
+      docs.outcome?.reason === `rule "docs" mapped it to ${REPO}` &&
+      afterDocs === afterPush + 1 &&
+      (docsPrompt ?? "").startsWith(`Document trigger ${requestId}-docs`),
+    `status=${docs.status} body=${JSON.stringify(docs.body)} prompt=${JSON.stringify(docsPrompt ?? null)} sessions ${afterPush}→${afterDocs}`,
+  );
 });
 
 try {
