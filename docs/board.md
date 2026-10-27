@@ -111,6 +111,24 @@ specifier resumed after a person moved the card on still declares its spec from 
 is not an ask: a gap still parks the card through `ask`, and the `spec_doc` exit requirement is
 still not checked.
 
+Built (LOB-36): the reviewer. A **review run** — a session opened for one pull request's head, which
+its log records as `factory.review`'s target — is the read-only `reviewing` stage whatever its
+column (`REVIEWING_STAGE`, `RunProfile.reviewing`), and it is the one run offered the `review` tool
+(`packages/harness/src/review.ts`, `resolveRole().writesReview`): a verdict and findings for each of
+correctness, security, tests and performance, checked against the P0/P1/P2 rubric (a dimension fails
+exactly when it holds a P0 or P1) and against the files the PR changes, committed as
+`factory.review`, then posted as one `COMMENT` review — nothing when there is no finding. Its model
+is its column's role's (`ROLE_MODELS`' `reviewer` row). Keyed by the run being a review rather than
+by the `reviewer` role, because a person may still start a run in `review` that changes and
+verifies (a fix-up, B8) — that run is not a review and is not limited.
+The run is started by the PR, not by a person: a `pull_request` (`opened`, `reopened`,
+`ready_for_review`, `synchronize`) on a PR a run of the card opened starts one run in the card's
+reviewer column, cut at the PR's head, one per head (`packages/core/src/ReviewTrigger.ts`). It posts
+as the reviewer's own GitHub identity, never the worker's (`GITHUB_REVIEWER_TOKEN` or
+`GITHUB_REVIEWER_APP_*`, `packages/core/src/GitHubReview.ts`), and a post whose PR moved past the
+reviewed head is `stale` and posts nothing. The `review_verdict` exit requirement is still not
+checked: the verdict is recorded, and gating `review → done` on it is LOB-241.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a
