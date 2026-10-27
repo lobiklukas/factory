@@ -57,6 +57,7 @@ import type {
   SessionListEntry,
   SessionSnapshot,
   SessionSummary,
+  SessionTask,
   SessionUsage,
   SpendReport,
 } from "@repo/domain/Session";
@@ -7140,6 +7141,130 @@ describe("a mission on a session", () => {
     // mission out of its parent's log would report a phase nothing in this log ever ran.
     expect(outcome.parent.mission?.taskId).toEqual(expect.any(String));
     expect(outcome.forked.mission).toBeUndefined();
+  }, 120_000);
+
+  it("fans a mission out to workers the mission owns, each in a conversation of its own", async () => {
+    // Each worker's check holds until the case writes `release`, so both are live at once and the
+    // fan-out is read off the snapshot rather than raced. Absolute paths: the check runs in the
+    // session's workspace, which this case does not need to know.
+    const hold = mkdtempSync(join(tmpdir(), "factory-mission-workers-"));
+    const check = (name: string) =>
+      `touch ${join(hold, `${name}.started`)}; while [ ! -f ${join(hold, "release")} ]; do sleep 0.01; done`;
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "fanned out" });
+          const started = yield* sessions.startMission({
+            sessionId: created.id,
+            feature: "a mission with two workers",
+            workers: [
+              { id: "a", prompt: "do part a", check: check("a") },
+              { id: "b", prompt: "do part b", check: check("b") },
+            ],
+          });
+          const workersIn = (tasks: readonly SessionTask[]) =>
+            tasks.filter((task) => task.kind === "factory.mission.worker");
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(
+                Effect.map(
+                  (snapshot) =>
+                    workersIn(snapshot.tasks).filter(
+                      (task) => task.phase === "check",
+                    ).length === 2,
+                ),
+              ),
+            "both workers to reach their check",
+          );
+          const fanned = yield* sessions.get(created.id);
+          writeFileSync(join(hold, "release"), "");
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(
+                Effect.map(
+                  (snapshot) =>
+                    snapshot.mission?.phase === "verify" &&
+                    !snapshot.tasks.some(
+                      (task) => task.kind === "factory.mission",
+                    ),
+                ),
+              ),
+            "the mission to settle",
+          );
+          const settled = yield* sessions.get(created.id);
+          return {
+            started,
+            mission: fanned.tasks.find((task) => task.id === started.taskId),
+            workers: workersIn(fanned.tasks),
+            settled,
+          };
+        }),
+      );
+
+      // The service installed the worker kind and handed the workers through: two worker tasks,
+      // each owned by the mission and owning one conversation, and the mission parked on both.
+      expect(outcome.workers).toHaveLength(2);
+      for (const worker of outcome.workers) {
+        expect(worker.owner).toBe(outcome.started.taskId);
+        expect(worker.conversations).toHaveLength(1);
+      }
+      expect(
+        new Set(outcome.workers.flatMap((worker) => worker.conversations)).size,
+      ).toBe(2);
+      expect(outcome.mission).toMatchObject({
+        kind: "factory.mission",
+        status: "waiting",
+        phase: "implement",
+        waitingOn: outcome.workers.map((worker) => worker.id),
+      });
+      // Both workers completed, so the join moved on to verify, where a scratch session settles for
+      // its own reason (no verify command), and the log names every phase the mission entered.
+      expect(outcome.settled.mission).toEqual({
+        taskId: outcome.started.taskId,
+        phase: "verify",
+        entered: ["plan", "implement", "verify"],
+      });
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+    }
+  }, 120_000);
+
+  it("refuses workers that cannot be told apart, before any task exists", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "bad workers" });
+        const duplicate = yield* Effect.result(
+          sessions.startMission({
+            sessionId: created.id,
+            feature: "a mission",
+            workers: [
+              { id: "a", prompt: "one" },
+              { id: " a ", prompt: "two" },
+            ],
+          }),
+        );
+        const blank = yield* Effect.result(
+          sessions.startMission({
+            sessionId: created.id,
+            feature: "a mission",
+            workers: [{ id: "a", prompt: "  " }],
+          }),
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return { duplicate, blank, snapshot };
+      }),
+    );
+
+    const messageOf = (result: typeof outcome.duplicate) =>
+      result._tag === "Failure" ? result.failure.message : undefined;
+    expect(messageOf(outcome.duplicate)).toContain('named "a"');
+    expect(messageOf(outcome.blank)).toContain("non-empty id and prompt");
+    expect(outcome.snapshot.mission).toBeUndefined();
+    expect(outcome.snapshot.tasks).toEqual([]);
   }, 120_000);
 
   it("refuses a mission with no feature, and answers no id for it", async () => {

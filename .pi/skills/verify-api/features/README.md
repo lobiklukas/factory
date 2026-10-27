@@ -123,6 +123,14 @@ answer); a re-run passed each time, so that race is not this issue's and not a r
 The drive cannot stop a mission between two of its commits, so the claim itself is proven in
 `packages/harness/src/mission.test.ts` — see `mission.md`.
 
+The mission fan-out checks (LOB-193) were run from the `agent/LOB-193` worktree on 2026-10-27 (API
+on `:9530`, faux, Postgres on 5442, `DATABASE_URL=…/factory_agent_lob_193`): `bun drive.ts`
+**62/62** with the fan-out block added (two workers held live and joined; a failing worker under
+`failFast` leaving no task and the mission in `implement`), evidence `.verify/evidence/lob-193/verify-api/`.
+The abort reason on the aborted worker, `allSettled`, and the join reading only once both workers
+are terminal are proven from the task graph in `packages/harness/src/mission.fanout.test.ts` — see
+`mission.md`.
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`

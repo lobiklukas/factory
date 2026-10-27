@@ -9,11 +9,18 @@
  * *and* the checkpoint that follows it in one commit (`enterPhase`), and the document names the
  * phase that checkpoint is in, so the two can never disagree.
  *
- * What plan and implement do is the later parts' — LOB-230 starts a mission over the RPC client and
- * reads its phase, LOB-231 resumes one — and a phase ends at a pushed branch: opening the PR
- * belongs to the session's PR step (`prStep.ts`, LOB-177), not to a phase. Verify is therefore the
- * one phase with work to do here, and it is the repo's own: the `verify` command the workspace the
- * session resolved declares, run in that workspace.
+ * What plan does is a later part's — LOB-230 starts a mission over the RPC client and reads its
+ * phase, LOB-231 resumes one — and a phase ends at a pushed branch: opening the PR belongs to the
+ * session's PR step (`prStep.ts`, LOB-177), not to a phase. Verify runs the repo's own `verify`
+ * command, the one the workspace the session resolved declares, in that workspace.
+ *
+ * Implement is the fan-out (LOB-193): a mission started with workers creates one child task per
+ * worker (`mission-worker.ts`), each talking in a conversation it owns, and parks on all of them
+ * under a join policy. `failFast` — the default — lets Pi Durable abort the workers still running
+ * the moment one settles other than `completed`; `allSettled` lets them finish. Either way the join
+ * settles the mission `failed` when any worker did not complete, naming each worker's outcome, and
+ * moves on to verify only when every one did. A mission started without workers passes through
+ * implement as a checkpoint, as it did before.
  *
  * Everything this module hands back across the Pi Durable Promise boundary is an Effect, like the
  * rest of the harness.
@@ -22,20 +29,31 @@ import type { Context, JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type {
   ConversationId,
+  JoinPolicy,
   NextTaskState,
+  RunningTask,
   TaskId,
+  TaskOutcome,
   TaskRuntime,
+  Tx,
 } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
 import { Effect, Schema } from "effect";
 import {
   MISSION_PHASES,
   MISSION_VERSION,
+  MissionJoin,
   MissionPhase,
   readMissionDoc,
 } from "@repo/domain/Mission";
 import { SessionWorkspace, type SessionError } from "@repo/domain/Session";
 import { MissionBindingDoc, MissionDoc } from "./docs";
+import {
+  MissionWorker,
+  MissionWorkerTask,
+  runCommand,
+  type MissionWorkerResult,
+} from "./mission-worker";
 import {
   attempt,
   missionCheckpoint,
@@ -86,11 +104,44 @@ export const MissionInput = Schema.Struct({
     commands: SessionWorkspace.fields.commands,
     commandsSource: SessionWorkspace.fields.commandsSource,
   }),
+  /**
+   * The independent subtasks implement fans out to, one worker task and one owned conversation
+   * each (LOB-193). Absent or empty: implement is a checkpoint and nothing fans out.
+   */
+  workers: Schema.optional(Schema.Array(MissionWorker)),
+  /**
+   * How the join treats a worker that settles other than `completed`: `failFast` (the default)
+   * aborts the workers still running, `allSettled` lets them finish. The mission fails either way.
+   */
+  join: Schema.optional(MissionJoin),
 });
 export type MissionInput = typeof MissionInput.Type;
 
-/** Where a mission is: the phase its checkpoint names. */
-export const MissionState = Schema.Struct({ phase: MissionPhase });
+/** The join policy a mission's fan-out parks under when its input names none. */
+export const DEFAULT_MISSION_JOIN: JoinPolicy = "failFast";
+
+/** A task id as a checkpoint stores it: Pi Durable's ids are non-negative integers on the wire. */
+const StoredWorkerId = Schema.declare(
+  (value: unknown): value is TaskId<MissionWorkerResult> =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+);
+
+/**
+ * Where a mission is: the phase its checkpoint names, and — from the fan-out on — the worker tasks
+ * implement created, in the order of the input's `workers`. Implement's own checkpoint carries them
+ * while the mission waits, which is how the phase tells "fan out" from "join" when it runs again.
+ */
+export const MissionState = Schema.Union([
+  Schema.Struct({ phase: Schema.Literal("plan") }),
+  Schema.Struct({
+    phase: Schema.Literal("implement"),
+    workers: Schema.optional(Schema.Array(StoredWorkerId)),
+  }),
+  Schema.Struct({
+    phase: Schema.Literal("verify"),
+    workers: Schema.optional(Schema.Array(StoredWorkerId)),
+  }),
+]);
 export type MissionState = typeof MissionState.Type;
 
 const decodeInput = Schema.decodeUnknownSync(MissionInput);
@@ -114,10 +165,28 @@ const migrateRecord = (
   checkpoint: decodeState(checkpoint),
 });
 
+/** One worker of a completed mission: its id, its task, and the conversation it talked in. */
+export type MissionWorkerRecord = {
+  readonly id: string;
+  readonly taskId: string;
+  readonly conversationId: string;
+};
+
 /** What a completed mission did, as its terminal result records it. */
 export type MissionResult = {
   readonly feature: string;
   readonly verify: { readonly command: string; readonly exitCode: number };
+  /** Every worker the mission fanned out to, in input order; absent when it fanned out to none. */
+  readonly workers?: MissionWorkerRecord[];
+};
+
+/** How one worker settled, as the join that read it records it. */
+export type MissionWorkerOutcome = {
+  readonly id: string;
+  readonly taskId: string;
+  readonly status: TaskOutcome<unknown>["status"];
+  /** The worker's error message, or its abort reason, when it did not complete. */
+  readonly message?: string;
 };
 
 /**
@@ -148,6 +217,17 @@ export type MissionFailureDetail =
       readonly reason: "exec-error";
       readonly command: string;
       readonly message: string;
+    }
+  | {
+      readonly phase: MissionPhase;
+      readonly reason: "duplicate-worker";
+      readonly worker: string;
+    }
+  | {
+      readonly phase: MissionPhase;
+      readonly reason: "worker-failed";
+      readonly join: JoinPolicy;
+      readonly workers: MissionWorkerOutcome[];
     };
 
 /** The next state a phase commits; every phase here either advances or settles the mission. */
@@ -186,23 +266,31 @@ const failed = (
  * the last entry: a mission created without the start's seed still lists `plan`, a phase the
  * harness resumes appends nothing, and the list stays "each phase the mission entered" rather than
  * "each commit it took".
+ *
+ * `change` is the next state, or a function that writes what the phase creates — the fan-out's
+ * worker tasks — in the same transaction and answers the next state, so the workers, the wait on
+ * them and the document are one commit too.
  */
 const enterPhase = (
   runtime: MissionRuntime,
   phase: MissionPhase,
-  next: MissionNext,
+  change: MissionNext | ((tx: Tx) => Promise<MissionNext>),
   context: Context,
 ): Promise<void> =>
   runtime.commit(
     (tx) =>
-      tx
-        .doc(
-          MissionDoc,
-          runtime.conversationId,
-          missionKey(runtime.taskId),
-          missionKey(runtime.taskId),
+      (typeof change === "function" ? change(tx) : Promise.resolve(change))
+        .then((next) =>
+          tx
+            .doc(
+              MissionDoc,
+              runtime.conversationId,
+              missionKey(runtime.taskId),
+              missionKey(runtime.taskId),
+            )
+            .then((doc) => ({ next, doc })),
         )
-        .then((doc) => {
+        .then(({ next, doc }) => {
           const entering =
             next.status === "terminal" ? phase : next.checkpoint.phase;
           // Re-entering the phase the mission is already in is the same entry, not a second one: a
@@ -233,6 +321,7 @@ const enterPhase = (
 const runVerify = (
   runtime: MissionRuntime,
   input: MissionInput,
+  workers: MissionWorkerRecord[] | undefined,
   context: Context,
 ): Effect.Effect<MissionNext> =>
   Effect.gen(function* () {
@@ -244,48 +333,29 @@ const runVerify = (
         { phase: "verify", reason: "no-verify-command", commandsSource },
       );
     }
-    // Both calls reject on failure; a rejection is a reason the mission could not verify, so it
-    // becomes a typed outcome rather than a throw out of the phase.
-    const env = yield* Effect.result(
-      attempt("open the execution environment", () => runtime.env(context)),
+    const ran = yield* runCommand(
+      (invocation) => runtime.env(invocation),
+      command,
+      path,
+      context,
     );
-    if (env._tag === "Failure") {
-      return failed(
-        `the mission over "${input.feature}" cannot verify: ${env.failure.message}`,
-        { phase: "verify", reason: "no-environment" },
-      );
+    switch (ran._tag) {
+      case "no-environment":
+        return failed(
+          `the mission over "${input.feature}" cannot verify: ${ran.message}`,
+          { phase: "verify", reason: "no-environment" },
+        );
+      case "exec-error":
+        return failed(`the verify command could not run: ${ran.message}`, {
+          phase: "verify",
+          reason: "exec-error",
+          command,
+          message: ran.message,
+        });
+      case "exited":
+        break;
     }
-    const environment = env.success;
-    if (environment === undefined) {
-      return failed(
-        `the mission over "${input.feature}" cannot verify: the session has no execution environment`,
-        { phase: "verify", reason: "no-environment" },
-      );
-    }
-    const ran = yield* Effect.result(
-      attempt("run the verify command", () =>
-        environment.exec(command, { cwd: path }, context),
-      ),
-    );
-    if (ran._tag === "Failure") {
-      const { message } = ran.failure;
-      return failed(`the verify command could not run: ${message}`, {
-        phase: "verify",
-        reason: "exec-error",
-        command,
-        message,
-      });
-    }
-    if (!ran.success.ok) {
-      const { message } = ran.success.error;
-      return failed(`the verify command could not run: ${message}`, {
-        phase: "verify",
-        reason: "exec-error",
-        command,
-        message,
-      });
-    }
-    const { exitCode } = ran.success.value;
+    const { exitCode } = ran;
     if (exitCode !== 0) {
       return failed(
         `the mission over "${input.feature}" failed in verify: \`${command}\` exited ${exitCode}`,
@@ -296,17 +366,169 @@ const runVerify = (
       status: "terminal",
       outcome: {
         status: "completed",
-        result: { feature: input.feature, verify: { command, exitCode } },
+        result: {
+          feature: input.feature,
+          verify: { command, exitCode },
+          ...(workers === undefined ? {} : { workers }),
+        },
       },
     };
   });
+
+/** The first worker id two of `workers` share, or `undefined` when every id is its own. */
+const duplicateWorker = (
+  workers: readonly MissionWorker[],
+): string | undefined => {
+  const seen = new Set<string>();
+  for (const { id } of workers) {
+    if (seen.has(id)) return id;
+    seen.add(id);
+  }
+  return undefined;
+};
+
+/**
+ * The fan-out, inside implement's commit: one worker task per input worker, owned by the mission,
+ * and the wait on all of them under the mission's join policy.
+ *
+ * Owned by the mission task rather than by its conversation, because ownership is what the abort
+ * wiring runs on: Pi Durable only lets a task wait `failFast` on tasks it owns, and a task's abort
+ * reaches the work it owns first. The checkpoint the wait resumes at is implement again, carrying
+ * the worker ids, so the phase's next run is the join.
+ */
+const fanOut =
+  (
+    runtime: MissionRuntime,
+    input: MissionInput,
+    workers: readonly MissionWorker[],
+  ) =>
+  (tx: Tx): Promise<MissionNext> =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const ids: TaskId<MissionWorkerResult>[] = [];
+        // One at a time: each creation is a write on the same transaction.
+        for (const worker of workers)
+          ids.push(
+            yield* Effect.promise(() =>
+              tx.createTask(
+                MissionWorkerTask,
+                { worker, workspace: { path: input.workspace.path } },
+                { ownership: { kind: "task", taskId: runtime.taskId } },
+              ),
+            ),
+          );
+        const next: MissionNext = {
+          status: "waiting",
+          checkpoint: { phase: "implement", workers: ids },
+          on: ids,
+          policy: input.join ?? DEFAULT_MISSION_JOIN,
+        };
+        return next;
+      }),
+    );
+
+/** How one worker's outcome reads in the join's record. */
+const workerOutcome = (
+  id: string,
+  taskId: TaskId<MissionWorkerResult>,
+  outcome: TaskOutcome<MissionWorkerResult>,
+): MissionWorkerOutcome => {
+  const message =
+    outcome.status === "failed" || outcome.status === "faulted"
+      ? outcome.error.message
+      : outcome.status === "aborted" || outcome.status === "orphaned"
+        ? outcome.reason
+        : undefined;
+  return {
+    id,
+    taskId: String(taskId),
+    status: outcome.status,
+    ...(message === undefined ? {} : { message }),
+  };
+};
+
+/**
+ * The join: every worker is terminal, so read their outcomes and either move on to verify or settle
+ * the mission `failed` with each worker's outcome named.
+ *
+ * Any outcome other than `completed` fails the mission, whatever the policy: `allSettled` decides
+ * whether the other workers get to finish, not whether a mission with a failed subtask may verify.
+ */
+const join = (
+  task: RunningTask<MissionInput, MissionState, MissionResult>,
+  runtime: MissionRuntime,
+  ids: readonly TaskId<MissionWorkerResult>[],
+  context: Context,
+): Promise<void> => {
+  const workers = task.input.workers ?? [];
+  return runtime
+    .outcomes<MissionWorkerResult>(ids, context)
+    .then((outcomes) => {
+      const settled = ids.map((taskId, index) =>
+        workerOutcome(
+          workers[index]?.id ?? String(taskId),
+          taskId,
+          outcomes[index] ?? {
+            status: "orphaned",
+            reason: "the worker has no outcome",
+          },
+        ),
+      );
+      const failures = settled.filter((each) => each.status !== "completed");
+      const policy = task.input.join ?? DEFAULT_MISSION_JOIN;
+      const next: MissionNext =
+        failures.length === 0
+          ? {
+              status: "running",
+              checkpoint: { phase: "verify", workers: [...ids] },
+            }
+          : failed(
+              `the mission over "${task.input.feature}" failed in implement: ${failures
+                .map((each) => `worker "${each.id}" ${each.status}`)
+                .join(", ")}`,
+              {
+                phase: "implement",
+                reason: "worker-failed",
+                join: policy,
+                workers: settled,
+              },
+            );
+      return enterPhase(runtime, "implement", next, context);
+    });
+};
+
+/** The workers a completed mission reports: each one's id, task and owned conversation. */
+const workerRecords = (
+  input: MissionInput,
+  ids: readonly TaskId<MissionWorkerResult>[] | undefined,
+  runtime: MissionRuntime,
+  context: Context,
+): Promise<MissionWorkerRecord[] | undefined> => {
+  if (ids === undefined) return Promise.resolve(undefined);
+  const workers = input.workers ?? [];
+  return runtime.outcomes<MissionWorkerResult>(ids, context).then((outcomes) =>
+    ids.map((taskId, index) => {
+      const outcome = outcomes[index];
+      return {
+        id: workers[index]?.id ?? String(taskId),
+        taskId: String(taskId),
+        conversationId:
+          outcome?.status === "completed"
+            ? String(outcome.result.conversationId)
+            : "",
+      };
+    }),
+  );
+};
 
 /**
  * One mission: plan, implement, verify, as one task.
  *
  * `initial` is `plan`, so a mission that is created and never scheduled is a mission that has not
  * started planning; the phases advance their checkpoint and commit their document together. Abort
- * settles `aborted` and leaves the document alone: the phase it died in is what a resume reads.
+ * settles `aborted` and leaves the document alone: the phase it died in is what a resume reads. A
+ * mission aborted while it waits on its workers aborts them first — Pi Durable runs abort bottom-up
+ * — so its own abort runs once no worker is live.
  */
 export const MissionTask = defineTask<
   MissionInput,
@@ -318,8 +540,8 @@ export const MissionTask = defineTask<
   initial: () => ({ phase: "plan" }),
   migrate: migrateRecord,
   phases: {
-    // Plan and implement are checkpoints in this part: the phases' own work is LOB-230's and
-    // LOB-231's, and what the mission commits here is the phase it reached.
+    // Plan is a checkpoint in this part: its own work is a later part's, and what the mission
+    // commits here is the phase it reached.
     plan: (_task, runtime, context) =>
       enterPhase(
         runtime,
@@ -327,20 +549,56 @@ export const MissionTask = defineTask<
         { status: "running", checkpoint: { phase: "implement" } },
         context,
       ),
-    implement: (_task, runtime, context) =>
-      enterPhase(
+    implement: (task, runtime, context) => {
+      // Implement runs twice when it fans out: once to create the workers and wait on them, and
+      // once more, at the checkpoint the wait names, to join them.
+      const joining = task.state.checkpoint.workers;
+      if (joining !== undefined) return join(task, runtime, joining, context);
+      const workers = task.input.workers ?? [];
+      if (workers.length === 0)
+        return enterPhase(
+          runtime,
+          "implement",
+          { status: "running", checkpoint: { phase: "verify" } },
+          context,
+        );
+      const duplicate = duplicateWorker(workers);
+      if (duplicate !== undefined)
+        return enterPhase(
+          runtime,
+          "implement",
+          failed(
+            `the mission over "${task.input.feature}" cannot fan out: two workers are named "${duplicate}"`,
+            {
+              phase: "implement",
+              reason: "duplicate-worker",
+              worker: duplicate,
+            },
+          ),
+          context,
+        );
+      return enterPhase(
         runtime,
         "implement",
-        { status: "running", checkpoint: { phase: "verify" } },
+        fanOut(runtime, task.input, workers),
         context,
-      ),
+      );
+    },
     verify: (task, runtime, context) =>
       // The document already says `verify` — implement's commit named it — and the terminal
       // outcome commits it again, so a verify that settles `failed` still names the phase it
       // failed in.
       Effect.runPromise(
         Effect.gen(function* () {
-          const next = yield* runVerify(runtime, task.input, context);
+          const workers = yield* Effect.promise(() =>
+            workerRecords(
+              task.input,
+              task.state.checkpoint.workers,
+              runtime,
+              context,
+            ),
+          );
+          const next = yield* runVerify(runtime, task.input, workers, context);
           yield* Effect.promise(() =>
             enterPhase(runtime, "verify", next, context),
           );
@@ -356,6 +614,13 @@ export const MissionTask = defineTask<
       context,
     ),
 });
+
+/**
+ * Every task kind a mission runs: the mission and the workers it fans out to. A registry that ran
+ * the mission without its workers would leave each worker blocked on a missing definition and the
+ * mission waiting on them for good, so the two are installed together.
+ */
+export const MISSION_TASKS = [MissionTask, MissionWorkerTask] as const;
 
 /** The phase a mission reached, as its log records it. */
 export type MissionRecord = {

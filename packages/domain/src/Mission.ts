@@ -193,16 +193,44 @@ export const missionSnapshot = (
 };
 
 /**
- * What starting a mission needs: the session it runs in, and the feature it takes through the
- * phases.
+ * One independent subtask of a mission (LOB-193): a worker the implement phase fans out to, run as
+ * a child task of the mission in a conversation it owns (`packages/harness/src/mission-worker.ts`).
+ *
+ * `id` names the worker within its mission — what a failure, an abort reason and a cost breakdown
+ * are keyed by — so two workers of one mission may not share it. `prompt` is what the worker's
+ * conversation is asked. `check` is the command, run in the session's workspace, that decides
+ * whether the worker succeeded; a worker without one succeeds once its conversation answered.
+ */
+export const MissionWorker = Schema.Struct({
+  id: Schema.String,
+  prompt: Schema.String,
+  check: Schema.optional(Schema.String),
+});
+export type MissionWorker = typeof MissionWorker.Type;
+
+/**
+ * How a mission's join treats a worker that settles other than `completed`: `failFast` aborts the
+ * workers still running, `allSettled` lets them finish. The names are Pi Durable's `JoinPolicy`,
+ * because that is the rule the durable wait applies. A mission with a failed worker fails either
+ * way; the policy decides only what happens to the others.
+ */
+export const MISSION_JOIN_POLICIES = ["failFast", "allSettled"] as const;
+export const MissionJoin = Schema.Literals(MISSION_JOIN_POLICIES);
+export type MissionJoin = typeof MissionJoin.Type;
+
+/**
+ * What starting a mission needs: the session it runs in, the feature it takes through the phases,
+ * and — optionally — the independent workers implement fans out to and the policy that joins them.
  *
  * The workspace is not here. The server resolves it from the session, so a client cannot point a
  * mission at a directory that session does not own — the same rule every other session call
- * follows.
+ * follows. A worker's `check` runs in that workspace for the same reason.
  */
 export const StartMissionInput = Schema.Struct({
   sessionId: SessionId,
   feature: Schema.String,
+  workers: Schema.optional(Schema.Array(MissionWorker)),
+  join: Schema.optional(MissionJoin),
 });
 export type StartMissionInput = typeof StartMissionInput.Type;
 

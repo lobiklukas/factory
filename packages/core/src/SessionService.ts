@@ -107,7 +107,7 @@ import type {
 import {
   EMPTY_RUN_PROFILE,
   loadRun,
-  MissionTask,
+  MISSION_TASKS,
   Policy,
   PolicyLive,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
@@ -1237,8 +1237,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(thread === undefined ? {} : { thread }),
               ...(spec === undefined ? {} : { spec }),
               // A mission is a durable task, so the kind has to be installed in the registry this
-              // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
-              tasks: [MissionTask],
+              // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230). Its
+              // workers are tasks of their own kind, installed with it (LOB-193).
+              tasks: [...MISSION_TASKS],
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
               policy: sessionPolicy,
@@ -1890,6 +1891,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        *
        * An empty feature is refused rather than started: a mission's feature is the one thing its
        * phases and its result are about, and a blank one would settle a result nobody can read.
+       * Workers (LOB-193) are refused the same way, before a task exists: a worker with no id or no
+       * prompt, or two that share an id, would fan out into work nobody can attribute.
        */
       const startMission = (
         input: StartMissionInput,
@@ -1902,6 +1905,26 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: "a mission needs a non-empty feature",
             });
           }
+          const workers = (input.workers ?? []).map((worker) => ({
+            ...worker,
+            id: worker.id.trim(),
+          }));
+          const ids = new Set<string>();
+          for (const worker of workers) {
+            if (worker.id === "" || worker.prompt.trim() === "") {
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: "a mission worker needs a non-empty id and prompt",
+              });
+            }
+            if (ids.has(worker.id)) {
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `two mission workers are named "${worker.id}"`,
+              });
+            }
+            ids.add(worker.id);
+          }
           const row = yield* requireSession(input.sessionId);
           const workspace = yield* workspaceFor(row);
           const owner = yield* acquireOwner(input.sessionId, row);
@@ -1912,6 +1935,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               commands: workspace.commands,
               commandsSource: workspace.commandsSource,
             },
+            ...(workers.length === 0 ? {} : { workers }),
+            ...(input.join === undefined ? {} : { join: input.join }),
           });
           yield* touchActivity(input.sessionId);
           return { sessionId: input.sessionId, taskId };

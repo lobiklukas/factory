@@ -1020,6 +1020,125 @@ const program = Effect.gen(function* () {
     },
   });
 
+  // Feature: a mission's fan-out (LOB-193). Two workers, each a task the mission owns with a
+  // conversation of its own, and a join that either waits for both or — failFast — aborts the one
+  // still running when the other fails. Each worker's check holds on a file this driver writes, so
+  // the fan-out is read off the snapshot while both are live rather than raced; the API runs on this
+  // machine, so an absolute path is a file both ends see.
+  const holdDir = path.resolve(EVIDENCE_DIR, `mission-hold-${Date.now()}`);
+  yield* Effect.promise(() => mkdir(holdDir, { recursive: true }));
+  const holdUntil = (name: string) =>
+    `while [ ! -f ${path.join(holdDir, name)} ]; do sleep 0.01; done`;
+  const workersOf = <T extends { readonly kind: string }>(
+    tasks: readonly T[],
+  ): T[] => tasks.filter((task) => task.kind === "factory.mission.worker");
+  const fanSession = yield* client.createSession({
+    requestId: `verify-api-fanout-${Date.now()}`,
+  });
+  const fanned = yield* client.startMission({
+    sessionId: fanSession.id,
+    feature: "verify-api fan-out probe",
+    workers: [
+      { id: "a", prompt: "do part a", check: holdUntil("release") },
+      { id: "b", prompt: "do part b", check: holdUntil("release") },
+    ],
+  });
+  const bothLive = yield* waitUntil(
+    client
+      .getSession({ sessionId: fanSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          workersOf(snapshot.tasks).filter((task) => task.phase === "check")
+            .length === 2
+            ? snapshot
+            : undefined,
+        ),
+      ),
+    "both workers to reach their check",
+  );
+  const liveWorkers = workersOf(bothLive.tasks);
+  const fanMission = bothLive.tasks.find((task) => task.id === fanned.taskId);
+  assert(
+    "a mission fans out to two workers it owns, each with a conversation of its own",
+    liveWorkers.every(
+      (task) => task.owner === fanned.taskId && task.conversations.length === 1,
+    ) && new Set(liveWorkers.flatMap((task) => task.conversations)).size === 2,
+    `workers=${JSON.stringify(liveWorkers)}`,
+  );
+  assert(
+    "the mission waits on both workers, failFast by default",
+    fanMission?.status === "waiting" &&
+      fanMission.phase === "implement" &&
+      fanMission.waitingOn.join(",") ===
+        liveWorkers.map((task) => task.id).join(","),
+    `mission=${JSON.stringify(fanMission ?? null)}`,
+  );
+  yield* Effect.promise(() => writeFile(path.join(holdDir, "release"), ""));
+  const joined = yield* waitUntil(
+    client
+      .getSession({ sessionId: fanSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.length === 0 ? snapshot : undefined,
+        ),
+      ),
+    "the fanned-out mission to settle",
+  );
+  assert(
+    "the join moves on to verify once both workers are done",
+    joined.mission?.taskId === fanned.taskId &&
+      joined.mission.entered.join(",") === "plan,implement,verify",
+    `mission=${JSON.stringify(joined.mission ?? null)}`,
+  );
+
+  // failFast: `a` fails at once and `b` holds on a file this driver never writes, so `b` can only
+  // leave the task list by being aborted — and the mission settles in implement, never verifying.
+  const failSession = yield* client.createSession({
+    requestId: `verify-api-failfast-${Date.now()}`,
+  });
+  const failing = yield* client.startMission({
+    sessionId: failSession.id,
+    feature: "verify-api failFast probe",
+    workers: [
+      { id: "a", prompt: "do part a", check: "exit 1" },
+      { id: "b", prompt: "do part b", check: holdUntil("never") },
+    ],
+  });
+  const aborted = yield* waitUntil(
+    client
+      .getSession({ sessionId: failSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.length === 0 && snapshot.mission !== undefined
+            ? snapshot
+            : undefined,
+        ),
+      ),
+    "the failFast mission to settle",
+  );
+  assert(
+    "a failing worker aborts its sibling under failFast, and the mission stops in implement",
+    aborted.mission?.taskId === failing.taskId &&
+      aborted.mission.phase === "implement" &&
+      aborted.mission.entered.join(",") === "plan,implement",
+    `mission=${JSON.stringify(aborted.mission ?? null)}`,
+  );
+  Object.assign(observed, {
+    missionFanOut: {
+      joined: {
+        sessionId: fanSession.id,
+        started: fanned,
+        whileWaiting: { mission: fanMission ?? null, workers: liveWorkers },
+        settled: joined.mission ?? null,
+      },
+      failFast: {
+        sessionId: failSession.id,
+        started: failing,
+        settled: aborted.mission ?? null,
+      },
+    },
+  });
+
   // Feature: curate a finished session's pages (LOB-206). One bounded model call over the transcript
   // and the pages the session already holds proposes page writes; the server commits at most
   // `maxPages` of them, cites the curated session, and commits nothing when it taught nothing new.
