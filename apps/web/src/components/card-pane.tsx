@@ -19,6 +19,7 @@ import {
   moveTaskAtom,
   startRunAtom,
   taskRunsAtom,
+  taskSpecAtom,
 } from "@/lib/atoms/board-atom";
 import {
   awaitingMove,
@@ -31,6 +32,7 @@ import {
   type MoveRefusal,
 } from "@/lib/board-view";
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
+import { specLists } from "@/lib/spec-view";
 import { RunApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -283,6 +285,77 @@ const Runs = ({
 };
 
 /**
+ * The card's spec (LOB-238): what its newest specifying run declared with the `spec` tool — the goal,
+ * the acceptance criteria, the gaps and the open questions — and which run declared it.
+ *
+ * A card no run has specified says so, rather than rendering nothing, so a pane with no spec cannot
+ * be mistaken for one that failed to load. The last answer stays on screen through a failed poll.
+ */
+const Spec = ({ task }: { readonly task: Task }) => {
+  const result = useAtomValue(taskSpecAtom(task.id));
+  const loaded = AsyncResult.value(result);
+  return (
+    <section aria-label="Spec" className="flex flex-col gap-2">
+      <h2 className="text-[11px] font-medium text-muted-foreground uppercase">
+        Spec
+      </h2>
+      {Option.isNone(loaded) ? (
+        AsyncResult.isFailure(result) ? (
+          <p className="text-xs text-destructive">
+            The spec did not load: {Cause.pretty(result.cause)}
+          </p>
+        ) : (
+          <Spinner className="size-3.5 text-muted-foreground" />
+        )
+      ) : loaded.value === null ? (
+        <p className="text-xs text-muted-foreground" data-no-spec>
+          No run has declared a spec for this card.
+        </p>
+      ) : (
+        <div
+          className="flex flex-col gap-2"
+          data-spec={loaded.value.sessionId}
+          data-spec-revision={loaded.value.revision}
+        >
+          <p className="text-xs break-words" data-spec-goal>
+            {loaded.value.goal}
+          </p>
+          {specLists(loaded.value).map((list) => (
+            <div
+              key={list.key}
+              className="flex flex-col gap-1"
+              data-spec-list={list.key}
+              data-spec-count={list.items.length}
+            >
+              <h3 className="text-[10px] font-medium text-muted-foreground uppercase">
+                {list.title}
+              </h3>
+              {list.items.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">
+                  {list.empty}
+                </p>
+              ) : (
+                <ul className="flex list-disc flex-col gap-0.5 pl-4 text-[11px]">
+                  {list.items.map((item, index) => (
+                    <li key={index} data-spec-item className="break-words">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+          <p className="font-mono text-[10px] text-muted-foreground">
+            declared by {loaded.value.sessionId} in {loaded.value.column}, r
+            {loaded.value.revision}
+          </p>
+        </div>
+      )}
+    </section>
+  );
+};
+
+/**
  * The selected run, as panes inside the card (LOB-76): its transcript and steering (the session
  * pane, composer included), its approvals, and its sandbox. `/sandboxes` and `/approvals` left the
  * rail for here, because each only means something for one run of one card.
@@ -386,6 +459,7 @@ export const CardPane = ({
           task={task}
           definition={definition}
         />
+        <Spec task={task} />
         <Runs
           boardId={boardId}
           task={task}

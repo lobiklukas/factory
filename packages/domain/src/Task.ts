@@ -273,6 +273,40 @@ export const TaskComment = Schema.Struct({
 export type TaskComment = typeof TaskComment.Type;
 
 /**
+ * The spec a card's specifying run declared (LOB-238, the card half of LOB-72's `factory.spec`).
+ *
+ * The run's log holds the document, and is the truth for what the run committed; this is the card's
+ * record of it, written by the run's `spec` tool in the same call, so the card's spec is one read
+ * over `task_events` rather than a fold of every run's log. A card has the spec its newest
+ * `specified` event declared: a later specifying run that closes the gaps replaces an earlier one's
+ * without erasing it from the history.
+ *
+ * The fields are LOB-72's `Spec` as the harness's validator accepted it — the harness owns the
+ * rules (`gaps` required, `[]` allowed, nothing empty), so this shape only carries the result.
+ * `sessionId` is the run that declared it, and `column` the column the card was in when it did.
+ */
+export const TaskSpecFields = {
+  goal: Schema.String,
+  acceptance: Schema.Array(Schema.String),
+  gaps: Schema.Array(Schema.String),
+  openQuestions: Schema.Array(Schema.String),
+} as const;
+
+export const TaskSpec = Schema.Struct({
+  taskId: TaskId,
+  sessionId: SessionId,
+  column: Schema.String,
+  ...TaskSpecFields,
+  revision: Schema.Int,
+  createdAt: Timestamp,
+});
+export type TaskSpec = typeof TaskSpec.Type;
+
+/** The spec a card holds, or `null` when no run on it has declared one (LOB-238). */
+export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskSpecInput = typeof GetTaskSpecInput.Type;
+
+/**
  * One card on a board (B1, B3).
  *
  * `column` is a *name*, not a position: B9 rejects a drag-ordered queue as a second source of
@@ -319,8 +353,9 @@ export type Actor = typeof Actor.Type;
  * It is a card's history either way — the audit trail for a gated move.
  *
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
- * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), and a priority
- * change (B9, "priority changes are recorded as events"). A run starting or finishing is a later
+ * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), the spec a
+ * specifying run declared (B4's `specifying` exit, LOB-238), and a priority change (B9, "priority
+ * changes are recorded as events"). A run starting or finishing is a later
  * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
  * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
  * because B1 makes a run a first-class thing a task owns.
@@ -365,6 +400,18 @@ export const TaskEvent = Schema.TaggedUnion({
      * finds the question it already recorded instead of asking twice (LOB-73).
      */
     askId: Schema.optional(Schema.String),
+  },
+  /**
+   * A specifying run declared the card's spec (LOB-238). `actor` is the run's session id; `specId`
+   * is `<session id>:<tool call id>`, so a `spec` call replayed after a crash posts nothing twice.
+   */
+  specified: {
+    taskId: TaskId,
+    actor: Actor,
+    revision: Schema.Int,
+    column: Schema.String,
+    ...TaskSpecFields,
+    specId: Schema.optional(Schema.String),
   },
   priorityChanged: {
     taskId: TaskId,

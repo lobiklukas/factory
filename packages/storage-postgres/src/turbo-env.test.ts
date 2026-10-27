@@ -262,6 +262,7 @@ describe("the dev tasks' environment", () => {
     "APPROVAL_REQUIRED",
     "ROLE_MODELS",
     "FAUX_ASK",
+    "FAUX_SPEC",
     "FAUX_VERIFY",
     "FAUX_SLEEP_MS",
     "SESSION_ROOT",

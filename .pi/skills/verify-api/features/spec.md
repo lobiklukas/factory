@@ -25,6 +25,10 @@ whoever writes it (LOB-72, part 1 of LOB-46).
   "specified, no gaps" do not collapse into one answer.
 - `readSessionLog(storage).spec` is the read-only fold's copy of the same value, read through the
   same validator.
+- A run's own writer is the `spec` tool (LOB-238, `packages/harness/src/specify.ts`), offered only to
+  the `specifier` role: it decodes with the same `decodeSpec`, commits through the same `commitSpec`,
+  and posts the spec on the card. Driven by `.pi/skills/verify-board`'s `drive.sh`
+  (`features/specify.md`).
 
 ## How a user reaches it
 

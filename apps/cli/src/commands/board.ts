@@ -7,7 +7,7 @@ import {
   DefinitionId,
   TaskId,
 } from "@repo/domain/Task";
-import type { Task, TaskComment } from "@repo/domain/Task";
+import type { Task, TaskComment, TaskSpec } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
@@ -16,8 +16,8 @@ import { BoardClient } from "../rpc";
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
  *
  * The verbs are the ones a person needs to work a card from a terminal: make the board a repository's
- * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card and
- * its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73), and
+ * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card, its
+ * spec and its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73), and
  * start the run that advances it (`start`). Nothing here folds a log or reads the database; every
  * answer is the server's, which is what keeps `factory board ls` and the RPC list in agreement.
  *
@@ -210,9 +210,36 @@ export const threadLines = (comment: TaskComment): ReadonlyArray<string> => [
   ...comment.body.split("\n").map((line) => `    ${line}`),
 ];
 
+/** One list of a spec: its name and count, then each item under it; `none` when it is empty. */
+const specList = (
+  name: string,
+  items: ReadonlyArray<string>,
+): ReadonlyArray<string> =>
+  items.length === 0
+    ? [`  ${name}: none`]
+    : [`  ${name}: ${items.length}`, ...items.map((item) => `    - ${item}`)];
+
 /**
- * `factory board show <task>` — one card, as the server has it, and its thread (B7): the question a
- * parked run asked and the answer a person gave are read here, on the task, not in a transcript.
+ * The card's spec (LOB-238): the run that declared it, the column and revision it was declared at,
+ * then its goal and its three lists. An empty list prints `none` — a spec that declares no gaps says
+ * so — and a card no run has specified prints `spec      -`, so "never specified" and "specified,
+ * no gaps" read as two answers.
+ */
+export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
+  spec === null
+    ? ["spec      -"]
+    : [
+        `spec      ${spec.sessionId} from ${spec.column} (revision ${spec.revision})`,
+        `  goal: ${spec.goal}`,
+        ...specList("acceptance", spec.acceptance),
+        ...specList("gaps", spec.gaps),
+        ...specList("open questions", spec.openQuestions),
+      ];
+
+/**
+ * `factory board show <task>` — one card, as the server has it, its spec (LOB-238), and its thread
+ * (B7): the question a parked run asked and the answer a person gave are read here, on the task, not
+ * in a transcript.
  */
 const showCommand = Command.make(
   "show",
@@ -234,6 +261,7 @@ const showCommand = Command.make(
       const { client } = yield* BoardClient;
       const card = yield* client.getTask({ taskId });
       const thread = yield* client.listTaskComments({ taskId });
+      const spec = yield* client.getTaskSpec({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
       yield* Console.log(`board     ${card.boardId}`);
@@ -249,6 +277,7 @@ const showCommand = Command.make(
         }`,
       );
       yield* Console.log(`title     ${card.title}`);
+      for (const line of specLines(spec)) yield* Console.log(line);
       yield* Console.log(`thread    ${thread.length}`);
       for (const comment of thread) {
         for (const line of threadLines(comment)) yield* Console.log(line);

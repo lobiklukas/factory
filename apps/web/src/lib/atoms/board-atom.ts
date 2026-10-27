@@ -108,6 +108,23 @@ export const taskRunsAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
+ * A card's spec (LOB-238): what its newest specifying run declared with the `spec` tool, or `null`.
+ *
+ * Polled with the board, like the runs: the run that declares it is not this pane's doing, so the
+ * pane learns of it from the server, within one interval.
+ */
+export const taskSpecAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getTaskSpec({ taskId });
+      }),
+    )
+    .pipe(Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
  * Starts a run against a card: `createSession` with the card named, exactly as `factory board
  * start` does (LOB-61), so a run is one Pi Durable session (B1) and its row lands in `task_runs`.
  *

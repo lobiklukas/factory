@@ -19,7 +19,7 @@ import {
   type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
-import { Cause, Config, Effect, Exit, Layer, Option } from "effect";
+import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
@@ -130,6 +130,20 @@ const ModelConfig = Config.all({
    * verification that proves the parked run (`.pi/skills/verify-board/ask.sh`) sets it.
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
+  /**
+   * The `spec` calls the faux script makes when a run is offered the tool (LOB-238): a JSON array of
+   * the tool's arguments, tried in order until one is accepted. Unset, the script never specs; a
+   * verification that proves the specifier's spec (`.pi/skills/verify-board/drive.sh`) sets it. A
+   * value that is not a JSON array of objects fails the boot.
+   */
+  fauxSpec: Config.option(
+    Config.schema(
+      Schema.fromJsonString(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
+      "FAUX_SPEC",
+    ),
+  ),
   /**
    * What each faux request costs, in US dollars (LOB-163). pi-ai's faux reports no cost, so a capped
    * session on it could never reach its cap; a verification that proves the cap
@@ -335,6 +349,7 @@ const HttpLive = Effect.gen(function* () {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
+    fauxSpec: Option.getOrUndefined(model.fauxSpec),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,

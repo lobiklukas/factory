@@ -22,6 +22,7 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Message,
+  ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import {
@@ -31,6 +32,7 @@ import {
 import { Effect } from "effect";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
+import { SPEC_TOOL } from "./specify";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -76,6 +78,46 @@ const toolResultText = (
     }
   }
   return undefined;
+};
+
+/** Every `toolName` result in the transcript, oldest first, as whether each was an error. */
+const toolResultErrors = (
+  messages: readonly Message[],
+  toolName: string,
+): readonly boolean[] =>
+  messages.flatMap((message) =>
+    message.role === "toolResult" && message.toolName === toolName
+      ? [message.isError]
+      : [],
+  );
+
+/** A spec attempt the faux script sends (`fauxSpec`): the `spec` tool's arguments, verbatim. */
+export type FauxSpecAttempt = ToolCall["arguments"];
+
+/**
+ * The `spec` call the faux script makes next, or `undefined` when it is done specifying (LOB-238).
+ *
+ * Only a run offered the tool specs, and only until one attempt is accepted. A run whose prompt has
+ * no task thread yet tries the attempts in order, one per refusal, so a first attempt without `gaps`
+ * is the model that forgot the field and the next is its retry. A run whose prompt carries the thread
+ * — the run after a person answered — declares the last attempt with its gaps closed (`gaps` and
+ * `openQuestions` empty), once: the answer is what closed them.
+ */
+const nextSpecAttempt = (
+  messages: readonly Message[],
+  attempts: readonly FauxSpecAttempt[],
+): FauxSpecAttempt | undefined => {
+  if (attempts.length === 0 || !offersTool(messages, SPEC_TOOL))
+    return undefined;
+  const results = toolResultErrors(messages, SPEC_TOOL);
+  if (results.some((isError) => !isError)) return undefined;
+  if (sectionInEffect(messages, THREAD_SECTION_KEY)) {
+    const last = attempts.at(-1);
+    return results.length > 0 || last === undefined
+      ? undefined
+      : { ...last, gaps: [], openQuestions: [] };
+  }
+  return attempts[results.length];
 };
 
 /** The user's newest message, flattened. */
@@ -185,6 +227,10 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * and whose prompt carries no task thread yet asks `ask`, verbatim. The tool ends the run, so there
  * is no reply. A run whose prompt *does* carry the thread — the run after a person answered — does
  * not ask again and replies as usual, which is how one script plays both runs of the story.
+ *
+ * `spec` adds the specifier's declaration before the ask (LOB-238): a run offered the `spec` tool
+ * calls it with the scripted attempts until one is accepted (`nextSpecAttempt`), and only then asks
+ * — a run declares what it is missing before it asks a person for it.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
@@ -193,6 +239,7 @@ export const fauxAnswer = (
   verify = false,
   ask?: string,
   everyTurn = false,
+  spec: readonly FauxSpecAttempt[] = [],
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -220,6 +267,12 @@ export const fauxAnswer = (
   const verified = verify ? toolResultText(turn, VERIFY_TOOL) : undefined;
   if (verify && verified === undefined) {
     return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
+      stopReason: "toolUse",
+    });
+  }
+  const specAttempt = nextSpecAttempt(messages, spec);
+  if (specAttempt !== undefined) {
+    return fauxAssistantMessage(fauxToolCall(SPEC_TOOL, specAttempt), {
       stopReason: "toolUse",
     });
   }
@@ -281,6 +334,12 @@ export type ModelAccessOptions = {
    * `fauxAnswer`), when the run was offered the tool and carries no task thread. Absent: never asks.
    */
   readonly fauxAsk?: string | undefined;
+  /**
+   * The `spec` calls the faux script makes, in order, when the run was offered the tool (LOB-238,
+   * `fauxAnswer`): each is the tool's arguments verbatim, and the next is sent only when the one
+   * before it was refused. Absent or empty: never specs.
+   */
+  readonly fauxSpec?: readonly FauxSpecAttempt[] | undefined;
   /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
@@ -445,6 +504,7 @@ export const createFauxModelAccess = (
         options.fauxVerify ?? false,
         options.fauxAsk,
         options.fauxEveryTurn ?? false,
+        options.fauxSpec ?? [],
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)

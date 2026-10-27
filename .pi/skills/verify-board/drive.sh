@@ -17,6 +17,12 @@
 # the answer verbatim. The two facts no command prints (is the run busy, what was it told) are
 # `ask.ts`'s probes, as in ask.sh; everything a person reads is read back from the pane.
 #
+# Before it asks, the specifying run declares the card's spec with the `spec` tool (LOB-238): its
+# first attempt leaves out `gaps` and is refused naming the field, its retry is committed to its log
+# and recorded on the card — `factory board show` prints it, `spec.ts` reads the log and
+# `getTaskSpec`. The run after the answer declares the same spec with its gaps closed, and the card
+# pane shows that one (`spec-pane.mjs`).
+#
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
 # .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
 # the drive can run twice against one instance — after a failed drive too: the checks find this
@@ -56,6 +62,13 @@ ANSWER_WORD="\$'Postgres 16.\\n  Keep port 5442 \\xe2\\x80\\x94 it is shared.'"
 ANSWER="$(printf 'Postgres 16.\n  Keep port 5442 \xe2\x80\x94 it is shared.')"
 if [ -z "$QUESTION" ]; then
   echo "no faux question in $RUN_DIR/faux-ask — run ./down.sh and ./up.sh again" >&2
+  exit 1
+fi
+# The spec ./up.sh's faux script declares once its `gaps`-less first attempt is refused (FAUX_SPEC).
+EXPECT_SPEC="$(cat "$RUN_DIR/faux-spec" 2>/dev/null)"
+SPEC_GAP="$(printf '%s' "$EXPECT_SPEC" | sed -n 's/.*"gaps":\["\([^"]*\)"\].*/\1/p')"
+if [ -z "$EXPECT_SPEC" ] || [ -z "$SPEC_GAP" ]; then
+  echo "no faux spec in $RUN_DIR/faux-spec — run ./down.sh and ./up.sh again" >&2
   exit 1
 fi
 
@@ -128,7 +141,8 @@ fi
 # beside this run's failing `observed.json`.
 rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
-  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json
+  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json \
+  "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png}
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -249,6 +263,17 @@ check "the run is busy while its turn runs (the control)" "$?" "see specify-busy
 probe parked SESSION_ID="${SESSION_ID:-}"
 check "after the ask the run is parked, not busy" "$?" "see specify-parked.json"
 
+# --- spec: the run declared the card's spec before it asked (LOB-238) ------------------------------
+spec_probe() { # mode, session id
+  env MODE="$1" API_URL="$API_URL" SESSION_ID="$2" TASK_ID="$TASK_ID" EXPECT_SPEC="$EXPECT_SPEC" \
+    EVIDENCE_DIR="$EVIDENCE_DIR" bun "$SKILL/spec.ts" > "$RUN_DIR/spec-$1.log" 2>&1
+  local rc=$?
+  cat "$RUN_DIR/spec-$1.log"
+  return "$rc"
+}
+spec_probe declared "${SESSION_ID:-}"
+check "the run's spec is in its log and on the card, after a refusal naming gaps" "$?" "see spec-declared.json"
+
 fresh
 run_cmd asked "$FACTORY board show --task $TASK_ID --api $API_URL" || true
 capture show-asked.txt
@@ -256,8 +281,12 @@ ASKED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-ask
 check "the parked card is blocked needs_input from specifying" \
   "$([ "$(exit_code asked)" = "0" ] && grep -q '^blocked   needs_input from specifying since ' "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code asked), revision=${ASKED_REVISION:-?}"
+# The spec moved the card one revision (to REVISION + 2), so the question was written at that one.
+check "show prints the run's spec, its gap under it" \
+  "$(grep -qxF "spec      ${SESSION_ID:-ses_missing} from specifying (revision $((REVISION + 1)))" "$EVIDENCE_DIR/show-asked.txt" && grep -qx '  gaps: 1' "$EVIDENCE_DIR/show-asked.txt" && grep -qxF "    - $SPEC_GAP" "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
+  "spec by ${SESSION_ID:-none}"
 check "show prints the run's question verbatim" \
-  "$(grep -qF "  [question] ${SESSION_ID:-ses_missing} (revision $((REVISION + 1)))" "$EVIDENCE_DIR/show-asked.txt" && grep -qxF "    $QUESTION" "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
+  "$(grep -qF "  [question] ${SESSION_ID:-ses_missing} (revision $((REVISION + 2)))" "$EVIDENCE_DIR/show-asked.txt" && grep -qxF "    $QUESTION" "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
   "question by ${SESSION_ID:-none}"
 
 # --- answer: a person's comment on the blocked card lifts the block ---------------------------------
@@ -288,9 +317,28 @@ check "board start opens the next run on the answered card" \
 probe told SESSION_ID="${NEXT_SESSION_ID:-}"
 check "the next run's recorded prompt contains the answer verbatim" "$?" "see specify-told.json"
 
+# --- spec: the next run, told the answer, declared the spec with its gaps closed (LOB-238) ----------
+spec_probe closed "${NEXT_SESSION_ID:-}"
+check "the next run's spec, gaps closed, is in its log and on the card" "$?" "see spec-closed.json"
+fresh
+run_cmd specified "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-specified.txt
+SPECIFIED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-specified.txt")"
+check "show prints the newest spec, which declares no gaps" \
+  "$([ "$(exit_code specified)" = "0" ] && grep -qxF "spec      ${NEXT_SESSION_ID:-ses_missing} from specifying (revision ${ANSWERED_REVISION:-?})" "$EVIDENCE_DIR/show-specified.txt" && grep -qx '  gaps: none' "$EVIDENCE_DIR/show-specified.txt" && [ "${SPECIFIED_REVISION:-0}" = "$((${ANSWERED_REVISION:-0} + 1))" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code specified), revision ${ANSWERED_REVISION:-?} → ${SPECIFIED_REVISION:-?}"
+WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" \
+  EXPECT_SESSION="${NEXT_SESSION_ID:-}" EVIDENCE_DIR="$EVIDENCE_DIR" \
+  node "$SKILL/spec-pane.mjs" > "$RUN_DIR/spec-pane.log" 2>&1
+SPEC_PANE_RC=$?
+cat "$RUN_DIR/spec-pane.log"
+check "the card pane shows the card's spec (spec-pane.mjs)" \
+  "$([ "$SPEC_PANE_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$SPEC_PANE_RC, see spec-pane.json"
+
 # --- move: a person moves the card on to `planning`, the column before the plan approval gate -----
 fresh
-run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision ${ANSWERED_REVISION:-0} --api $API_URL" || true
+run_cmd planning "$FACTORY board move --task $TASK_ID --to planning --expect-revision ${SPECIFIED_REVISION:-0} --api $API_URL" || true
 capture move-planning.txt
 PLANNING_REVISION="$(sed -n "s/^moved $TASK_ID to planning (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-planning.txt")"
 check "a person moves the card on to planning" \

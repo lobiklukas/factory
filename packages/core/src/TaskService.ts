@@ -1,6 +1,7 @@
 /**
  * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9),
- * and the thread on each card — a run's question, a person's answer, a note (B7, LOB-73). The boards
+ * the thread on each card — a run's question, a person's answer, a note (B7, LOB-73) — and the spec
+ * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
  * exist before any card and this service is the one that reads it back for every card.
  *
@@ -65,6 +66,7 @@ import {
   TaskEvent,
   TaskId,
   TaskRun,
+  TaskSpec,
 } from "@repo/domain/Task";
 import { TaskComment } from "@repo/domain/Task";
 import type {
@@ -252,6 +254,24 @@ export type AskTaskInput = {
   readonly askId?: string;
 };
 
+/**
+ * A specifying run's spec, as its `spec` tool posts it on the card (LOB-238).
+ *
+ * Like the ask, no expected revision: the writer is the run working the card, not a person who read
+ * it, and the spec lands on whatever revision the card is at. The fields arrive already validated by
+ * the harness (LOB-72's `decodeSpec`), which is the one place that may say a value is a spec.
+ * `specId` makes the post idempotent: a second post with the same id records nothing.
+ */
+export type DeclareSpecInput = {
+  readonly taskId: string;
+  readonly actor: Actor;
+  readonly goal: string;
+  readonly acceptance: ReadonlyArray<string>;
+  readonly gaps: ReadonlyArray<string>;
+  readonly openQuestions: ReadonlyArray<string>;
+  readonly specId?: string;
+};
+
 export type CommentTaskInput = {
   readonly taskId: string;
   readonly expectedRevision: number;
@@ -288,6 +308,18 @@ export type TaskServiceShape = {
   readonly comments: (
     taskId: string,
   ) => Effect.Effect<ReadonlyArray<TaskComment>, TaskError>;
+  /**
+   * A specifying run's spec, recorded on the card as a `specified` event (LOB-238). The card's
+   * revision moves on by one, and a card blocked for any reason stays blocked: a spec is not an
+   * answer, and the gaps it declares are the ask's to raise.
+   */
+  readonly declareSpec: (
+    input: DeclareSpecInput,
+  ) => Effect.Effect<Task, TaskError>;
+  /** The card's spec: its newest `specified` event, or `undefined` when no run declared one. */
+  readonly spec: (
+    taskId: string,
+  ) => Effect.Effect<TaskSpec | undefined, TaskError>;
   /** A card's runs, newest first (LOB-76). An unknown card is `TaskNotFound`, not an empty list. */
   readonly listRuns: (
     taskId: string,
@@ -1184,6 +1216,111 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const declareSpec = (
+      input: DeclareSpecInput,
+    ): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (input.specId !== undefined) {
+              // Read under the card's lock, as the ask's id is, so two replays cannot both miss.
+              const posted = yield* sql<{ n: number }>`
+                SELECT count(*)::int AS n FROM task_events
+                WHERE task_id = ${input.taskId} AND kind = 'specified'
+                  AND payload->>'specId' = ${input.specId}
+              `;
+              if ((posted[0]?.n ?? 0) > 0) return yield* toTask(row);
+            }
+            yield* appendEvent({
+              _tag: "specified",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              revision: row.revision,
+              column: row.column,
+              goal: input.goal,
+              acceptance: [...input.acceptance],
+              gaps: [...input.gaps],
+              openQuestions: [...input.openQuestions],
+              ...(input.specId === undefined ? {} : { specId: input.specId }),
+            });
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks SET revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
+    const decodeSpecView = Schema.decodeUnknownEffect(TaskSpec);
+
+    const spec = (
+      taskId: string,
+    ): Effect.Effect<TaskSpec | undefined, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const exists = yield* sql<{ id: string }>`
+            SELECT id FROM tasks WHERE id = ${taskId}
+          `;
+          if (exists[0] === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          // The newest by write order, as the thread is ordered: two specs in one millisecond keep
+          // the order they were written in.
+          const rows = yield* sql<{
+            id: string;
+            payload: string;
+            createdAt: Date | string;
+          }>`
+            SELECT id::text AS id, payload::text AS payload, created_at
+            FROM task_events
+            WHERE task_id = ${taskId} AND kind = 'specified'
+            ORDER BY task_events.id DESC
+            LIMIT 1
+          `;
+          const row = rows[0];
+          if (row === undefined) return undefined;
+          return yield* Effect.gen(function* () {
+            const event = yield* decodeEvent(row.payload);
+            if (event._tag !== "specified") {
+              return yield* Effect.fail(
+                `event ${row.id} is stored as specified but is ${event._tag}`,
+              );
+            }
+            return yield* decodeSpecView({
+              taskId: event.taskId,
+              sessionId: event.actor,
+              column: event.column,
+              goal: event.goal,
+              acceptance: event.acceptance,
+              gaps: event.gaps,
+              openQuestions: event.openQuestions,
+              revision: event.revision,
+              createdAt: iso(row.createdAt),
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `task ${taskId} holds an unreadable spec ${row.id}: ${String(cause)}`,
+                }),
+            ),
+          );
+        }),
+      );
+
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
 
     /**
@@ -1430,6 +1567,8 @@ export const TaskServiceLive = Layer.effect(
       ask,
       comment,
       comments,
+      declareSpec,
+      spec,
       listRuns,
       attention,
     } satisfies TaskServiceShape;
