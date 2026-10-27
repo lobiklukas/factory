@@ -38,3 +38,13 @@ describe("a budget stop in a terminal (LOB-163)", () => {
     expect(formatDollars(2)).toBe("$2.0000");
   });
 });
+
+describe("an inherited PR line in a terminal (LOB-211)", () => {
+  it("prints under its own kind, not as `other`", () => {
+    const text =
+      "a session this one was forked from opened https://github.com/o/r/pull/9";
+    expect(
+      formatEntry({ id: "7", kind: "inherited", text, toolCalls: [] }),
+    ).toBe(`[inherited] ${text}`);
+  });
+});
