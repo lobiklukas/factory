@@ -31,8 +31,9 @@ PG_ROOT="${PG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 
 # `docker`, with a colima fallback for a machine whose active context is a stopped Docker Desktop
 # while Colima runs. It only picks the CLI's socket: which Postgres the tests reach is whatever
-# publishes the port, which is why `ensure_postgres` asks the port first. An explicit DOCKER_HOST always wins here — the same rule `.pi/ralph/loop.sh`'s
-# `docker_env` follows since LOB-105, so the driver and the skills it starts agree on the socket.
+# publishes the port, which is why `ensure_postgres` asks the port first. An explicit DOCKER_HOST
+# always wins here — the same rule `.pi/ralph/loop.sh`'s `docker_env` follows since LOB-105, so
+# the driver and the skills it starts agree on the socket.
 pg_docker() {
   if [ -z "${DOCKER_HOST:-}" ] && ! docker info >/dev/null 2>&1 &&
     [ -S "$HOME/.colima/default/docker.sock" ]; then

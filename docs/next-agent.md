@@ -136,8 +136,9 @@ command line it resolved.
   catches a SIGTERM mid-run).
 - **One writer per checkout.** If you fan out, use isolated subagents (`isolated: true` per item —
   isolation is on for this repo by `.omp/config.yml`) or separate `git worktree add` checkouts, and
-  give each parallel worktree its own database (`createdb factory_<slug>`) and port. A subagent spawned
-  _without_ `isolated: true` edits this checkout directly.
+  give each parallel worktree its own database, created over TCP on port 5442 (see
+  `docs/parallel-work.md` §1), and its own port. A subagent spawned _without_ `isolated: true` edits
+  this checkout directly.
 - **The verify skills share `.verify/run/api.pid`** and each starts its own API, so run them one at a
   time: `verify-api` on `:9200`, `verify-cli` on `:9300` (private tmux server), `verify-web` on `:9100`
   - `:3100`. `verify-api/degraded.sh` stops the local Postgres container and always restarts it.
