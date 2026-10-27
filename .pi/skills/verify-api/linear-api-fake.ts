@@ -214,4 +214,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`linear api fake listening on ${server.url}`);
+console.log(`linear api fake listening on ${server.url.href}`);
