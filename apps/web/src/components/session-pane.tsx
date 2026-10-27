@@ -7,7 +7,6 @@ import {
   GitForkIcon,
   GitPullRequestIcon,
   Loader2Icon,
-  Minimize2Icon,
   SquareIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -35,6 +34,7 @@ import {
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { prLink } from "@/lib/pr-link";
 import { SessionsBackLink } from "@/components/sessions-back-link";
+import { CompactButton } from "@/components/compact-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -341,31 +341,18 @@ export const SessionPane = ({
            * stream, or the task settles with nothing to cut — the pending line below says which is
            * happening, so the button itself carries no spinner.
            */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-label={
-              compactRunning ? "Compacting session" : "Compact session"
-            }
-            data-compaction-state={
+          <CompactButton
+            blocked={compactBlocked}
+            running={compactRunning}
+            calling={compacting}
+            state={
               settleNow.state === "requested"
                 ? "requested"
                 : settleNow.state === "idle"
                   ? "idle"
                   : "settled"
             }
-            title={
-              compactRunning
-                ? "Compacting"
-                : (compactBlocked ?? "Compact this session now")
-            }
-            aria-busy={compactRunning}
-            aria-describedby={
-              compactBlocked === null ? undefined : "compact-blocked"
-            }
-            disabled={compactBlocked !== null || compactRunning}
-            onClick={() => {
+            onPress={() => {
               if (view === null) return;
               setCompacting(true);
               // The before reading, and where the transcript ended: the summary the task writes is
@@ -402,23 +389,7 @@ export const SessionPane = ({
                 })
                 .finally(() => setCompacting(false));
             }}
-          >
-            {compacting ? (
-              <Loader2Icon
-                data-slot="spinner"
-                aria-hidden
-                className="size-4 animate-spin"
-              />
-            ) : (
-              <Minimize2Icon className="size-4" strokeWidth={1.75} />
-            )}
-            {compactRunning ? "Compacting" : "Compact"}
-          </Button>
-          {compactBlocked === null ? null : (
-            <span id="compact-blocked" className="sr-only">
-              {compactBlocked}
-            </span>
-          )}
+          />
           {/*
            * Fork from here (LOB-182). A text button, not an icon-only one: the header has the room,
            * and "Fork" beside the status chip says what the live session can become without the

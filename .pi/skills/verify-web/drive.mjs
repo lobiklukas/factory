@@ -791,6 +791,48 @@ const usageChip = page.locator("[data-session-usage]");
 const spendLine = page.locator("[data-compaction-spend]");
 
 /**
+ * What a screen reader is handed for an element, from Chrome's own accessibility tree (LOB-232):
+ * its computed name, description, and whether it is disabled and focusable. The DOM says which
+ * attributes are set; this says what they add up to, which is what "announced" means.
+ */
+const announcedAt = async (locator) => {
+  // CDP finds nodes by selector, not by Playwright handle, so the element is marked for the lookup.
+  await locator.evaluate((element) =>
+    element.setAttribute("data-announced-probe", ""),
+  );
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+    const { nodeId } = await cdp.send("DOM.querySelector", {
+      nodeId: root.nodeId,
+      selector: "[data-announced-probe]",
+    });
+    const { nodes } = await cdp.send("Accessibility.getPartialAXTree", {
+      nodeId,
+      fetchRelatives: false,
+    });
+    const node = nodes[0];
+    const property = (name) =>
+      node?.properties?.find((candidate) => candidate.name === name)?.value
+        ?.value ?? null;
+    return {
+      role: node?.role?.value ?? null,
+      name: node?.name?.value ?? null,
+      description: node?.description?.value ?? null,
+      disabled: property("disabled") === true,
+      focusable: property("focusable") === true,
+    };
+  } catch (error) {
+    return { error: String(error).slice(0, 300) };
+  } finally {
+    await cdp.detach();
+    await locator
+      .evaluate((element) => element.removeAttribute("data-announced-probe"))
+      .catch(() => {});
+  }
+};
+
+/**
  * Record every render of the pane's compaction status until asked to stop (LOB-224).
  *
  * A compaction task can settle in a few hundred milliseconds, and a poll would miss the pending
@@ -798,14 +840,28 @@ const spendLine = page.locator("[data-compaction-spend]");
  * that the pending state really replaced, and was replaced by, the verdict — and each sample keeps
  * whether the "Nothing to compact" text was on screen at that moment and how tall the status box
  * was, which is what the premature-verdict and layout checks need.
+ *
+ * Each sample also keeps where keyboard focus was (LOB-232) and whether the button said it was busy.
+ * A focus move is not a DOM mutation, so the observer alone would never see focus fall to `body`;
+ * a per-frame sample beside it does.
  */
 const watchCompactionStatus = () =>
   page.evaluate(() => {
     window.__compactionSamples = [];
     const snap = () => {
       const element = document.querySelector("[data-compaction-status]");
+      const button = document.querySelector("button[data-compaction-state]");
+      const active = document.activeElement;
       const sample = {
         state: element?.getAttribute("data-compaction-status") ?? null,
+        // `compact`, `status`, or the tag focus fell to (`BODY` is the defect).
+        focus:
+          active !== null && active === button
+            ? "compact"
+            : active !== null && active === element
+              ? "status"
+              : (active?.tagName ?? null),
+        pending: button?.getAttribute("aria-busy") === "true",
         verdictVisible: document.body.innerText.includes("Nothing to compact"),
         // Whether a run is in flight: the header chip is the pane's own word for it.
         busy: document.body.innerText.includes("BUSY"),
@@ -820,10 +876,17 @@ const watchCompactionStatus = () =>
         last.state !== sample.state ||
         last.verdictVisible !== sample.verdictVisible ||
         last.busy !== sample.busy ||
-        last.height !== sample.height
+        last.height !== sample.height ||
+        last.focus !== sample.focus ||
+        last.pending !== sample.pending
       )
         window.__compactionSamples.push(sample);
     };
+    const everyFrame = () => {
+      snap();
+      window.__compactionFrame = requestAnimationFrame(everyFrame);
+    };
+    window.__compactionFrame = requestAnimationFrame(everyFrame);
     window.__compactionObserver = new MutationObserver(snap);
     window.__compactionObserver.observe(document.body, {
       subtree: true,
@@ -838,6 +901,8 @@ const watchCompactionStatus = () =>
 const readCompactionStatus = () =>
   page.evaluate(() => {
     window.__compactionObserver?.disconnect();
+    if (window.__compactionFrame !== undefined)
+      cancelAnimationFrame(window.__compactionFrame);
     return window.__compactionSamples ?? [];
   });
 const SUMMARY = "Summary: the session ran its tools and kept working.";
@@ -877,16 +942,21 @@ if (longSessionId !== "") {
 // A busy session cannot be compacted on demand: the run is using the same context. The state has to
 // say why, in the DOM, or a disabled button is a dead control. The faux script's command sleeps, so
 // the run stays busy long enough to read the reason twice.
+//
+// Unavailable is `aria-disabled`, never the native `disabled` (LOB-232): a focused button that turns
+// `disabled` drops focus to `body`, and a natively disabled one is skipped by Tab, so its reason was
+// never heard. So the check also takes focus to the button and asks Chrome's accessibility tree
+// what it would announce there: the name, that it is disabled, and the reason as its description.
 const busyCompact = {};
 try {
-  // Wait for the *busy* reason rather than for "disabled": the pane is disabled while it attaches
-  // too, and attaching is not the state this check is about.
+  // Wait for the *busy* reason rather than for "unavailable": the pane is unavailable while it
+  // attaches too, and attaching is not the state this check is about.
   await page.waitForFunction(
     () => {
       const button = document.querySelector("button[data-compaction-state]");
       return (
         button !== null &&
-        button.disabled &&
+        button.getAttribute("aria-disabled") === "true" &&
         (button.getAttribute("title") ?? "").includes(
           "Wait for this run to finish",
         )
@@ -896,6 +966,14 @@ try {
     { timeout: 20_000 },
   );
   busyCompact.disabled = await compactButton.isDisabled();
+  busyCompact.nativeDisabled = await compactButton.evaluate(
+    (button) => button.disabled,
+  );
+  await compactButton.focus();
+  busyCompact.focused = await compactButton.evaluate(
+    (button) => document.activeElement === button,
+  );
+  busyCompact.announced = await announcedAt(compactButton);
   busyCompact.title = await compactButton.getAttribute("title");
   busyCompact.describedBy = await page.evaluate(() => {
     const button = document.querySelector("button[data-compaction-state]");
@@ -918,6 +996,17 @@ assert(
     ),
   `disabled=${String(busyCompact.disabled)} title=${JSON.stringify(busyCompact.title ?? null)} describedby=${JSON.stringify(busyCompact.describedBy ?? null)}`,
 );
+assert(
+  "the busy Compact stays focusable and announces its reason (LOB-232)",
+  busyCompact.nativeDisabled === false &&
+    busyCompact.focused === true &&
+    busyCompact.announced?.focusable === true &&
+    busyCompact.announced?.disabled === true &&
+    (busyCompact.announced?.description ?? "").includes(
+      "Wait for this run to finish before compacting",
+    ),
+  `nativeDisabled=${String(busyCompact.nativeDisabled)} focused=${String(busyCompact.focused)} announced=${JSON.stringify(busyCompact.announced ?? null)}`,
+);
 
 // The run has to settle before the compaction: a summary admitted while the turn was still writing
 // its entries would have nothing to cut.
@@ -926,7 +1015,11 @@ try {
   await page.waitForFunction(
     () => {
       const button = document.querySelector("button[data-compaction-state]");
-      return button !== null && !button.disabled;
+      return (
+        button !== null &&
+        !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true"
+      );
     },
     null,
     { timeout: 90_000 },
@@ -952,10 +1045,13 @@ assert(
   `header said ${JSON.stringify(observed.compactSpend.usageBefore)}, text ${JSON.stringify(await usageChip.innerText().catch(() => ""))}`,
 );
 
+// Pressed from the keyboard (LOB-232): focus is taken to the button and Enter admits the press, so
+// the samples below can say where focus was for as long as the press was pending.
 let compacted = false;
+await compactButton.focus();
 await watchCompactionStatus();
 try {
-  await compactButton.click();
+  await page.keyboard.press("Enter");
   await page.waitForFunction(
     (summary) => document.body.innerText.includes(summary),
     SUMMARY,
@@ -1040,6 +1136,29 @@ assert(
     longState === "settled-compacted",
   `states ${JSON.stringify(longStates)} final ${JSON.stringify(longState)}`,
 );
+
+// Where the keyboard press left focus (LOB-232). The press makes the button unavailable in the same
+// tick, and a focused `<button>` that turns `disabled` drops focus to `body` — measured on the
+// old pane: `BODY` for every frame of a `requested` state. Every sample taken while the press was
+// pending must have focus on the button or the status region, and once it settles the button —
+// available again — must still hold it, so the operator can press again without hunting for it.
+const pendingFocus = longStates.filter(
+  (sample) => sample.pending || sample.state === "requested",
+);
+const focusAfter = await compactButton.evaluate(
+  (button) => document.activeElement === button,
+);
+observed.compactFocus = { pending: pendingFocus, after: focusAfter };
+assert(
+  "a keyboard press of Compact keeps focus on the button while it is pending (LOB-232)",
+  compacted &&
+    pendingFocus.length > 0 &&
+    pendingFocus.every(
+      (sample) => sample.focus === "compact" || sample.focus === "status",
+    ) &&
+    focusAfter,
+  `pending samples ${JSON.stringify(pendingFocus)}, focused after settle=${String(focusAfter)}`,
+);
 await page.screenshot({
   path: path.join(EVIDENCE_DIR, "compaction.png"),
   fullPage: true,
@@ -1101,6 +1220,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         button.getAttribute("aria-busy") === "false"
       );
     },
@@ -1166,6 +1286,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         document.body.innerText.includes("IDLE")
       );
     },
@@ -1355,6 +1476,7 @@ try {
       return (
         button !== null &&
         !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
         document.body.innerText.includes("IDLE")
       );
     },
@@ -1377,8 +1499,9 @@ await watchCompactionStatus();
 // since Compact is disabled while a run is in flight.
 //
 // The click comes first for a reason: `requestSubmit` dispatches a submit event, React flushes that
-// event's state before the next dispatch, and the button is `disabled` by then, so a click after the
-// send is a no-op on a disabled element and the drive records no press at all. Measured, not assumed.
+// event's state before the next dispatch, and the button is unavailable by then (`aria-disabled`
+// since LOB-232), so a click after the send is swallowed and the drive records no press at all.
+// Measured, not assumed.
 await page
   .locator("textarea")
   .first()
