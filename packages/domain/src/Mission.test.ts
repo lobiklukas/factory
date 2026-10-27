@@ -19,12 +19,14 @@ import { Effect, Exit, Schema } from "effect";
 import { SessionId } from "./Ids";
 import {
   MISSION_PHASES,
+  MISSION_VERSION,
   MissionPhase,
   MissionSnapshot,
   StartMissionInput,
   StartMissionResult,
   isMissionPhase,
   missionSnapshot,
+  readMissionDoc,
 } from "./Mission";
 
 /** Whether `schema` refuses `value`, as a value rather than a throw, so a case reads as data. */
@@ -97,6 +99,108 @@ describe("reading a mission out of the documents it commits", () => {
       phase: "plan",
       entered: [],
     });
+  });
+
+  /**
+   * LOB-233: version 1 recorded the phase whose handler ran, in the commit that moved the checkpoint
+   * to the next phase, so its document is one phase behind the mission. Both read paths — the
+   * snapshot here and the harness's `readMission` — read it forward through the same table.
+   */
+  it("reads a document version 1 wrote forward, to the phase the mission is in", () => {
+    expect(
+      readMissionDoc({
+        phase: "plan",
+        entered: ["plan"],
+        definitionVersion: 1,
+      }),
+    ).toEqual({ phase: "implement", entered: ["plan", "implement"] });
+    expect(
+      missionSnapshot("7", {
+        phase: "implement",
+        entered: ["plan", "implement"],
+        definitionVersion: 1,
+      }),
+    ).toEqual({
+      taskId: "7",
+      phase: "verify",
+      entered: ["plan", "implement", "verify"],
+    });
+    // Verify's commit settled the mission, so a v1 `verify` is the phase it is in, not one behind.
+    expect(
+      readMissionDoc({
+        phase: "verify",
+        entered: ["plan", "implement", "verify"],
+        definitionVersion: 1,
+      }),
+    ).toEqual({ phase: "verify", entered: ["plan", "implement", "verify"] });
+    // A v1 seed is still no mission: there is no phase to read forward.
+    expect(
+      readMissionDoc({ phase: "", entered: [], definitionVersion: 1 }),
+    ).toBeUndefined();
+  });
+
+  /**
+   * The v1 seed and a v1 plan commit are the same document, so the table reads both `implement`. A
+   * reader holding the live task's checkpoint passes it, and the checkpoint decides; a reader with
+   * none — the folded path, or a mission that settled before plan ran — keeps the table's answer.
+   */
+  it("reads a document version 1 wrote by the live checkpoint when there is one", () => {
+    const seed = { phase: "plan", entered: ["plan"], definitionVersion: 1 };
+    expect(readMissionDoc(seed, { phase: "plan" })).toEqual({
+      phase: "plan",
+      entered: ["plan"],
+    });
+    expect(readMissionDoc(seed, { phase: "implement" })).toEqual({
+      phase: "implement",
+      entered: ["plan", "implement"],
+    });
+    expect(missionSnapshot("7", seed, { phase: "plan" })).toEqual({
+      taskId: "7",
+      phase: "plan",
+      entered: ["plan"],
+    });
+    // No checkpoint, or one that names no phase, is the table's reading.
+    for (const checkpoint of [undefined, null, {}, { phase: "planning" }])
+      expect(readMissionDoc(seed, checkpoint)).toEqual({
+        phase: "implement",
+        entered: ["plan", "implement"],
+      });
+    // A current document names its checkpoint's phase by construction, so it is read as written.
+    expect(
+      readMissionDoc(
+        {
+          phase: "implement",
+          entered: ["plan", "implement"],
+          definitionVersion: MISSION_VERSION,
+        },
+        { phase: "plan" },
+      ),
+    ).toEqual({ phase: "implement", entered: ["plan", "implement"] });
+  });
+
+  it("reads a document the current version wrote, or one with no version, as written", () => {
+    for (const phase of MISSION_PHASES) {
+      const entered = MISSION_PHASES.slice(
+        0,
+        MISSION_PHASES.indexOf(phase) + 1,
+      );
+      expect(
+        readMissionDoc({ phase, entered, definitionVersion: MISSION_VERSION }),
+      ).toEqual({ phase, entered });
+      expect(readMissionDoc({ phase, entered })).toEqual({ phase, entered });
+    }
+    // A version below the first, or one newer than this contract knows, has no rule to be read
+    // through, so it is not guessed forward either.
+    expect(
+      readMissionDoc({ phase: "plan", entered: [], definitionVersion: 0 }),
+    ).toEqual({ phase: "plan", entered: [] });
+    expect(
+      readMissionDoc({
+        phase: "plan",
+        entered: [],
+        definitionVersion: MISSION_VERSION + 1,
+      }),
+    ).toEqual({ phase: "plan", entered: [] });
   });
 });
 

@@ -17,6 +17,14 @@ read off the session's snapshot, not off a second call (LOB-230, part 2 of LOB-1
   the snapshot says how the mission got to where it is, not only where it stopped.
 - The record is a conversation document, so it survives the mission settling and survives the
   owner being released: the fold reports the same phase the live read did.
+- The phase is the one the mission's checkpoint is in, committed with that checkpoint, so a reader
+  after a kill is told the phase a resume continues from (LOB-233). Version 1 of the mission wrote
+  the phase one behind its checkpoint; both read paths read such a document by the live task's
+  checkpoint when there is one, and forward through a version table otherwise (`readMissionDoc` in
+  `packages/domain/src/Mission.ts`). The table cannot tell a v1 seed from a v1 plan commit, so a
+  folded v1 seed, or a v1 mission that settled before plan ran, reads `implement`. That is proven in
+  `packages/harness/src/mission.test.ts` — a mission sampled while it runs, and a v1 log reopened —
+  not by this drive, which cannot stop a mission between two of its commits.
 
 ## Why the phase is on the session and not on a group of its own
 
