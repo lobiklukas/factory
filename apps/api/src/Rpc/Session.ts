@@ -1,6 +1,11 @@
-import { SessionService, TaskServiceLive } from "@repo/core";
+import {
+  CredentialProvider,
+  SessionService,
+  TaskServiceLive,
+} from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
+import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { TaskRpcHandlers } from "./Task";
@@ -11,10 +16,17 @@ import { TaskRpcHandlers } from "./Task";
  * Every handler is a thin call into `SessionService`; the policy — who owns a log, when a read is
  * live and when it is a fold, what wakes a session — lives there rather than here, so the CLI and
  * the dashboard cannot drift from each other.
+ *
+ * The PR step is the one handler with requirements of its own (LOB-213): the forge client and the
+ * credential are the step's, not the session service's (`SessionService.openPullRequest` says why),
+ * so this layer takes them from its context and hands them to that one call. The process wires the
+ * real ones (`CredentialProviderLive`, `FetchHttpClient`); a test or a drive wires a fake forge.
  */
 const SessionRpcHandlers = SessionRpc.toLayer(
   Effect.gen(function* () {
     const sessions = yield* SessionService;
+    const credentials = yield* CredentialProvider;
+    const forge = yield* HttpClient.HttpClient;
     return SessionRpc.of({
       createSession: (input) => sessions.create(input),
       getSession: (input) => sessions.get(input.sessionId),
@@ -32,6 +44,14 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       listPages: (input) => sessions.listPages(input),
       curateSession: (input) => sessions.curate(input),
       registerRepo: (input) => sessions.registerRepo(input),
+      // Only the session and the title: the branches are the session's own, read server-side.
+      openPullRequest: (input) =>
+        sessions
+          .openPullRequest({ sessionId: input.sessionId, title: input.title })
+          .pipe(
+            Effect.provideService(CredentialProvider, credentials),
+            Effect.provideService(HttpClient.HttpClient, forge),
+          ),
       watchSession: (input) => sessions.events(input.sessionId),
     });
   }),

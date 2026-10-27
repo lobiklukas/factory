@@ -50,6 +50,12 @@ import {
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import {
+  CredentialError,
+  OpenPullRequestPayload,
+  PrError,
+  PullRequestStep,
+} from "@repo/domain/PullRequest";
+import {
   CompactSessionInput,
   CompactSessionResult,
   CreateSessionInput,
@@ -169,6 +175,14 @@ export class SessionRpc extends RpcGroup.make(
     payload: StartMissionInput,
     success: StartMissionResult,
     error: SessionError,
+  }),
+  // The session's PR (LOB-213): opened once, and a repeat answers the recorded one tagged
+  // `already-open` without asking the forge again. An over-cap or unchanged branch is an outcome in
+  // the answer, not an error; the forge's and the credential's failures cross the wire typed.
+  Rpc.make("openPullRequest", {
+    payload: OpenPullRequestPayload,
+    success: PullRequestStep,
+    error: Schema.Union([SessionError, PrError, CredentialError]),
   }),
   Rpc.make("watchSession", {
     payload: SessionIdInput,

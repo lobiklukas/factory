@@ -30,17 +30,12 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/http";
+import { CredentialError } from "@repo/domain/PullRequest";
 import type { RepoSlug } from "@repo/domain/Session";
 
-/** A credential could not be resolved. Typed, so callers handle it instead of crashing. */
-export class CredentialError extends Schema.TaggedError<CredentialError>()(
-  "CredentialError",
-  {
-    repo: Schema.String,
-    code: Schema.Literals(["missing", "unsupported", "failed"]),
-    message: Schema.String,
-  },
-) {}
+// The failure is the wire's (LOB-213): the PR step's RPC member answers it, so it is declared in
+// `@repo/domain/PullRequest` beside the step's other schemas and re-exported here.
+export { CredentialError } from "@repo/domain/PullRequest";
 
 /** The credential sources that exist. */
 export type CredentialSource = "static-token" | "github-app";

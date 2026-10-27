@@ -2,6 +2,10 @@
   "$schema": "https://turborepo.com/schema.json",
   "extends": ["//"],
   "tasks": {
+    "test": {
+      // Serves the RPC router over a real Postgres log (LOB-213), so a cached pass proves nothing.
+      "cache": false
+    },
     "dev": {
       // Every variable apps/api reads at boot (ServerConfig, the model backend, the session root,
       // the Motel and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres). Strict Mode
