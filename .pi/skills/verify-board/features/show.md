@@ -18,8 +18,8 @@ factory board show --task tsk_0123456789abcdefghjkmnpqrs
 
 ## How the skill drives it
 
-`drive.sh` asserts exit 0, a `revision  <n>` line matching the revision the seed created, and a
-`title` line matching the seeded title. `ask.sh` reads the block line (`needs_input from
+`drive.sh` asserts exit 0, a `revision  <n>` line matching the revision `createTask` returned, and a
+`title` line matching the created title. `ask.sh` reads the block line (`needs_input from
 specifying`) and the thread — the question a parked run asked, before and after a restart, and the
 answer under it ([ask.md](ask.md)).
 

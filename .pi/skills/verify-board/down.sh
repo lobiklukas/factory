@@ -6,8 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUN_DIR="$ROOT/.verify/run"
 
-pidfile="$RUN_DIR/api.pid"
-if [ -f "$pidfile" ]; then
+for name in api web; do
+  pidfile="$RUN_DIR/$name.pid"
+  [ -f "$pidfile" ] || continue
   pid="$(cat "$pidfile")"
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
@@ -16,10 +17,10 @@ if [ -f "$pidfile" ]; then
       sleep 0.25
     done
     kill -9 "$pid" 2>/dev/null || true
-    echo "stopped api (pid $pid)"
+    echo "stopped $name (pid $pid)"
   fi
   rm -f "$pidfile"
-fi
+done
 
 sock="$RUN_DIR/board-tmux.sock"
 if [ -S "$sock" ]; then
@@ -27,6 +28,6 @@ if [ -S "$sock" ]; then
   echo "stopped the drive's tmux server"
 fi
 
-rm -f "$RUN_DIR/board.json"
+rm -f "$RUN_DIR/board.json" "$RUN_DIR/card.json"
 rm -rf "$RUN_DIR/sessions"
 echo "run dir cleaned; evidence kept in $ROOT/.verify/evidence"
