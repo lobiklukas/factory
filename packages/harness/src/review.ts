@@ -209,17 +209,24 @@ export type ReviewTarget = {
 
 /**
  * Where a call left the PR. `clean`: no finding, nothing posted. `posted`: the comment is on the PR.
- * `stale`: the PR moved past the run's head before the post, so nothing was posted.
+ * `stale`: the PR moved past the run's head before the post, so nothing was posted. `withheld`: the
+ * deployment can never post it (no reviewer identity of its own), so nothing was posted and the
+ * review is settled — a retry would fail the same way and only spend the model's tokens.
  */
 export type ReviewOutcome =
   | { readonly _tag: "clean" }
   | { readonly _tag: "posted"; readonly url: string }
-  | { readonly _tag: "stale"; readonly head: string };
+  | { readonly _tag: "stale"; readonly head: string }
+  | { readonly _tag: "withheld"; readonly reason: string };
 
-/** What a post answers: the comment is there, or the PR is no longer at the reviewed head. */
+/**
+ * What a post answers: the comment is there, the PR is no longer at the reviewed head, or nothing can
+ * ever be posted from this deployment (and why).
+ */
 export type ReviewPosted =
   | { readonly _tag: "posted"; readonly url: string }
-  | { readonly _tag: "stale"; readonly head: string };
+  | { readonly _tag: "stale"; readonly head: string }
+  | { readonly _tag: "withheld"; readonly reason: string };
 
 export type ReviewOptions = {
   /**
@@ -318,6 +325,8 @@ export const describeReview = (
       return `${head} Posted on the pull request: ${outcome.url}. The review is done.`;
     case "stale":
       return `${head} Not posted: the pull request moved to ${short(outcome.head)} after this run began, so this verdict is stale and the new head is reviewed by its own run. The review is done.`;
+    case "withheld":
+      return `${head} Not posted: ${outcome.reason}. The verdict stays in this run's log, and calling the tool again posts nothing either. The review is done.`;
   }
 };
 
@@ -385,7 +394,9 @@ const commitVerdict = (
         ? ""
         : outcome._tag === "posted"
           ? outcome.url
-          : outcome.head;
+          : outcome._tag === "withheld"
+            ? outcome.reason
+            : outcome.head;
   });
 
 /** Run an Effect for the tool, rejecting with the failure's own sentence. */

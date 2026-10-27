@@ -8,7 +8,9 @@
 //   1. the boot names the reviewer's identity (its own token), and a PR the factory opened from a
 //      card is answered `review: {status: "processed", sessionId}` beside the Linear mirror
 //   2. the reviewer is a run of that card in `review`, cut at the PR's head, on the reviewer role's
-//      model, and is offered no `write`, `edit` or `verify`
+//      model, told to diff against the base commit the event names (which the checkout has, so
+//      nothing is fetched), and is offered no `write`, `edit` or `verify` (the tool set its log's
+//      prompt carries, not just the calls the faux made)
 //   3. GitHub gets exactly one `COMMENT` review on the head commit, as `GITHUB_REVIEWER_TOKEN` — never
 //      the worker's `GITHUB_TOKEN` — naming the seeded file and its mechanism, after reading the PR
 //      and its reviews
@@ -21,8 +23,8 @@
 // its reviews, `POST` a review — and every request kept in memory for the checks, since it lives as
 // long as the drive does. The checkout is a real git repository with a seeded bug on its head.
 //
-// Env: API_URL, EVIDENCE_DIR, GITHUB_WEBHOOK_SECRET, REVIEW_REPO, REVIEW_CHECKOUT, REVIEW_HEAD,
-// REVIEW_PUSHED, FORGE_PORT, DATABASE_URL (via DatabaseLive).
+// Env: API_URL, EVIDENCE_DIR, GITHUB_WEBHOOK_SECRET, REVIEW_REPO, REVIEW_CHECKOUT, REVIEW_BASE,
+// REVIEW_HEAD, REVIEW_PUSHED, FORGE_PORT, DATABASE_URL (via DatabaseLive).
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -30,7 +32,8 @@ import { BunServices } from "@effect/platform-bun";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
-import { DatabaseLive } from "@repo/storage-postgres";
+import { readOfferedTools } from "@repo/harness";
+import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -41,6 +44,9 @@ const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-36";
 const SECRET = process.env["GITHUB_WEBHOOK_SECRET"] ?? "";
 const REPO = RepoSlug.make(process.env["REVIEW_REPO"] ?? "acme/verify-review");
 const CHECKOUT = process.env["REVIEW_CHECKOUT"] ?? "";
+// The base commit the event names. It has to be one the checkout has: a commit it lacks is fetched
+// from the forge (`gitReviewFetch`), which is github.com, not this drive's loopback forge.
+const BASE = process.env["REVIEW_BASE"] ?? "";
 const HEAD = process.env["REVIEW_HEAD"] ?? "";
 const PUSHED = process.env["REVIEW_PUSHED"] ?? "";
 const FORGE_PORT = Number(process.env["FORGE_PORT"] ?? "9201");
@@ -101,6 +107,7 @@ const server = Bun.serve({
 const observed = {
   apiUrl: API_URL,
   repo: REPO,
+  base: BASE,
   head: HEAD,
   pushed: PUSHED,
   checks: {},
@@ -125,7 +132,7 @@ const pullRequest = (action: string, head: string, number = NUMBER) => ({
     state: "open",
     draft: false,
     merged: false,
-    base: { ref: "main", sha: "0".repeat(40) },
+    base: { ref: "main", sha: BASE },
     head: { ref: "feature", sha: head },
   },
   repository: { full_name: REPO, default_branch: "main" },
@@ -232,19 +239,36 @@ const program = Effect.gen(function* () {
     models.length === 1 && models[0] === "faux/faux-review",
     `models=${models.join(",")}`,
   );
+  const prompt =
+    first.entries.find((entry) => entry.kind === "user")?.text ?? "";
+  assert(
+    "the reviewer is told to diff against the base commit the event names, which the checkout has",
+    BASE !== "" && prompt.includes(`\`git diff ${BASE}...HEAD\``),
+    `base=${BASE} prompt=${JSON.stringify(prompt.slice(0, 600))}`,
+  );
+  // What the stage offered is the tool set its log's prompt carries, not the calls the faux chose.
   const offered = new Set(
+    yield* Effect.acquireUseRelease(
+      Effect.promise(() => PostgresStorage.reader(sql, firstId)),
+      readOfferedTools,
+      (storage) => Effect.promise(() => storage.dispose()),
+    ),
+  );
+  const called = new Set(
     first.entries.flatMap((entry) => entry.toolCalls.map((call) => call.name)),
   );
   const reviewResult = first.entries.find(
     (entry) => entry.kind === "toolResult" && entry.toolName === "review",
   );
   assert(
-    "the reviewer only read (bash) and reviewed: no write, edit or verify call",
-    !offered.has("write") &&
+    "the reviewer is offered no write, edit or verify, and is offered the review tool",
+    offered.size > 0 &&
+      !offered.has("write") &&
       !offered.has("edit") &&
       !offered.has("verify") &&
-      offered.has("review"),
-    `calls=${[...offered].join(",")}; review result: ${reviewResult?.text ?? "none"}`,
+      offered.has("review") &&
+      [...called].every((name) => offered.has(name)),
+    `offered=${[...offered].join(",")}; calls=${[...called].join(",")}; review result: ${reviewResult?.text ?? "none"}`,
   );
 
   // 3

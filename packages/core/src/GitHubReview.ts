@@ -10,23 +10,27 @@
  * - `GITHUB_REVIEWER_APP_ID` with `GITHUB_REVIEWER_APP_PRIVATE_KEY` and
  *   `GITHUB_REVIEWER_APP_INSTALLATION_ID`, a second GitHub App, minted exactly as the worker's is.
  *
- * It never falls back to the worker's: a deployment with no reviewer credential posts no review (each
- * post fails, naming the variables), and one whose reviewer credential *is* the worker's — the same
+ * It never falls back to the worker's: a deployment with no reviewer credential posts no review (the
+ * post answers `withheld`, naming the variables, which settles the run's review so the model does not
+ * retry a post that can never succeed), and one whose reviewer credential *is* the worker's — the same
  * token, or the same App — is refused at selection, so the process does not boot into posting as the
  * author. Two different tokens can still belong to one account, which only GitHub can tell; that is
  * the operator's to get right, and `docs/testing-third-parties.md` records it.
  *
- * **One comment per head, never an approval.** `githubReviewPoster` reads the PR first: a head that
- * moved since the run began answers `stale` and posts nothing (the new head has its own run, opened by
- * `synchronize`). Then it reads every page of the PR's reviews for the run's marker, written by the
- * reviewer itself — its token's login, or for an App its bot — so a retry after a lost
- * acknowledgement finds its own comment instead of posting a second, and anyone else's copy of the
- * (predictable) marker suppresses nothing. Only then does it post, as a
+ * **One comment per head, never an approval.** `githubReviewPoster` reads the PR's head and every
+ * page of its reviews for the run's marker, written by the reviewer itself — its token's login, or
+ * for an App its own bot (`<app-slug>[bot]`, the slug read from `GET /app` with the App's JWT) — so a
+ * retry after a lost acknowledgement finds its own comment instead of posting a second, and anyone
+ * else's copy of the (predictable) marker, another App's bot's included, suppresses nothing. Its own
+ * comment found is `posted` whatever the head is now: a replay of a post that landed before the PR
+ * moved still reports the comment that is there. Otherwise a head that moved since the run began
+ * answers `stale` and posts nothing (the new head has its own run, opened by `synchronize`). Only
+ * then does it post, as a
  * `COMMENT` review pinned to the reviewed commit (`commit_id`). It never posts `APPROVE` or
  * `REQUEST_CHANGES`: the board's human merge gate is the decision (B5), and an approval is the one
  * thing a push could leave standing — a comment states what it reviewed and leaves nothing to dismiss.
  */
-import { Config, Effect, Option, Redacted, Schema } from "effect";
+import { Clock, Config, Effect, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import type { ReviewPosted, ReviewTarget } from "@repo/harness";
 import { CredentialError } from "@repo/domain/PullRequest";
@@ -37,6 +41,7 @@ import {
 import {
   type CredentialConfigShape,
   type CredentialProviderShape,
+  mintAppJwt,
   selectCredentialProvider,
 } from "./credentials";
 import { githubApiUrl } from "./pr";
@@ -195,18 +200,29 @@ export const nextPageOf = (link: string | undefined): string | undefined => {
 
 const GitHubReview = Schema.Struct({ html_url: Schema.String });
 
+/** `GET /app` as far as the poster reads it: the App's slug, whose bot is `<slug>[bot]`. */
+const GitHubApp = Schema.Struct({ slug: Schema.String });
+
+/** The reviewer App's id and key, so the poster can ask GitHub which bot is its own. */
+export type ReviewerApp = {
+  readonly appId: string;
+  readonly privateKey: Redacted.Redacted<string>;
+};
+
 /**
  * The poster, over the reviewer's credentials (module doc): read the PR's head, read its reviews for
  * the marker, post one `COMMENT` review. `apiUrl` defaults to the deployment's `GITHUB_API_URL`, the
- * same root every GitHub client here reads, so a loopback fake answers all of them.
+ * same root every GitHub client here reads, so a loopback fake answers all of them. `app` is the
+ * reviewer App's id and key, which an App credential needs to tell its own bot from another's.
  */
 export const githubReviewPoster = (input: {
   readonly credentials: CredentialProviderShape;
   readonly apiUrl?: string;
+  readonly app?: ReviewerApp;
 }): Effect.Effect<ReviewPoster, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient;
-    /** The reviewer token's login, read the first time a marked review has to be attributed. */
+    /** The reviewer's login (its token's, or its App's bot), read the first time a marked review has to be attributed. */
     let reviewerLogin: string | undefined;
     return (request) =>
       Effect.gen(function* () {
@@ -220,9 +236,26 @@ export const githubReviewPoster = (input: {
         if (Option.isNone(repo)) {
           return yield* fail(`${target.repo} is not an owner/name repository`);
         }
-        const token = yield* input.credentials
-          .tokenFor(repo.value)
-          .pipe(Effect.mapError((error) => fail(error.message)));
+        const credential = yield* input.credentials.tokenFor(repo.value).pipe(
+          Effect.map((token) => ({ _tag: "token", token }) as const),
+          Effect.catch((error) =>
+            // No reviewer identity at all (`code: "missing"`, the only way the reviewer's provider
+            // says it) is not a failure to retry: no call can ever post, so the review is settled.
+            error.code === "missing"
+              ? Effect.succeed({
+                  _tag: "withheld",
+                  reason: error.message,
+                } as const)
+              : Effect.fail(fail(error.message)),
+          ),
+        );
+        if (credential._tag === "withheld") {
+          return {
+            _tag: "withheld",
+            reason: credential.reason,
+          } satisfies ReviewPosted;
+        }
+        const token = credential.token;
         const apiUrl = input.apiUrl ?? githubApiUrl();
         const pull = `${apiUrl}/repos/${target.repo}/pulls/${target.number}`;
         const headers = {
@@ -263,9 +296,6 @@ export const githubReviewPoster = (input: {
             read("the pull request", response, GitHubPull),
           ),
         );
-        if (pr.head.sha !== target.head) {
-          return { _tag: "stale", head: pr.head.sha } satisfies ReviewPosted;
-        }
         // Every page of the PR's reviews, following GitHub's `Link` header: a marker on page two is
         // still this run's comment.
         const marked: Array<(typeof GitHubReviews.Type)[number]> = [];
@@ -296,13 +326,42 @@ export const githubReviewPoster = (input: {
         }
         // The marker is predictable (the PR and a public head), so a review carrying it is this
         // run's only when the reviewer wrote it: anyone else's copy must not suppress the post. A
-        // token's identity is its login (`GET /user`, read once per poster); an App's installation
-        // token cannot read `/user`, and the App posts as its bot, so for an App a bot's review is.
+        // token's identity is its login (`GET /user`, read once per poster). An App's installation
+        // token cannot read `/user`; the App posts as `<slug>[bot]`, and its slug is `GET /app`'s,
+        // asked with the App's own JWT (once per poster), so another App's bot is not this one.
         const owns = yield* Effect.gen(function* () {
           if (marked.length === 0) return (): boolean => false;
-          if (input.credentials.source === "github-app")
-            return (review: (typeof marked)[number]) =>
-              review.user?.type === "Bot";
+          if (
+            reviewerLogin === undefined &&
+            input.credentials.source === "github-app"
+          ) {
+            const app = input.app;
+            if (app === undefined)
+              return yield* fail(
+                "a review carries its marker, and the reviewer App was given no id and key to read which bot is its own",
+              );
+            const now = yield* Clock.currentTimeMillis;
+            const jwt = yield* Effect.try({
+              try: () =>
+                mintAppJwt(
+                  app.appId,
+                  Redacted.value(app.privateKey).replace(/\\n/g, "\n"),
+                  now,
+                ),
+              catch: () => fail("the reviewer App's key could not sign a JWT"),
+            });
+            const me = yield* send(
+              "the reviewer App",
+              HttpClientRequest.get(`${apiUrl}/app`, {
+                headers: { ...headers, authorization: `Bearer ${jwt}` },
+              }),
+            ).pipe(
+              Effect.flatMap((response) =>
+                read("the reviewer App", response, GitHubApp),
+              ),
+            );
+            reviewerLogin = `${me.slug}[bot]`.toLowerCase();
+          }
           if (reviewerLogin === undefined) {
             const me = yield* send(
               "the reviewer's own login",
@@ -324,6 +383,9 @@ export const githubReviewPoster = (input: {
             _tag: "posted",
             url: already.html_url ?? target.url,
           } satisfies ReviewPosted;
+        }
+        if (pr.head.sha !== target.head) {
+          return { _tag: "stale", head: pr.head.sha } satisfies ReviewPosted;
         }
         const post = yield* HttpClientRequest.post(`${pull}/reviews`, {
           headers,

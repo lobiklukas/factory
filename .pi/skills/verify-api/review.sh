@@ -37,6 +37,7 @@ g() { git -C "$CHECKOUT" -c user.email=verify-api@localhost -c user.name=verify-
 g init -q -b main
 printf 'export const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);\n' >"$CHECKOUT/src/sum.ts"
 g add . && g commit -q -m base
+BASE_SHA="$(g rev-parse HEAD)"
 g checkout -q -b feature
 printf 'export const sum = (xs: number[]) => xs.slice(1).reduce((a, b) => a + b, 0);\n' >"$CHECKOUT/src/sum.ts"
 g commit -q -am "skip the first element"
@@ -71,6 +72,7 @@ env \
   GITHUB_WEBHOOK_SECRET="$SECRET" \
   REVIEW_REPO="$REPO" \
   REVIEW_CHECKOUT="$CHECKOUT" \
+  REVIEW_BASE="$BASE_SHA" \
   REVIEW_HEAD="$HEAD_SHA" \
   REVIEW_PUSHED="$PUSHED_SHA" \
   FORGE_PORT="$FORGE_PORT" \

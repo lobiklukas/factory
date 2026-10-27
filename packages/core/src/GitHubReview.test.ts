@@ -19,6 +19,7 @@ import type {
 import {
   githubReviewPoster,
   NO_REVIEWER_IDENTITY,
+  type ReviewerApp,
   selectReviewerCredentialProvider,
   type ReviewerCredentialConfigShape,
 } from "./GitHubReview";
@@ -50,6 +51,8 @@ const fakeForge = (forge: {
   readonly pages?: ReadonlyArray<ReadonlyArray<unknown>>;
   /** Who `GET /user` says the token is. */
   readonly login?: string;
+  /** The slug `GET /app` answers for the App whose JWT asks. */
+  readonly appSlug?: string;
   readonly postStatus?: number;
 }) => {
   const requests: Recorded[] = [];
@@ -87,20 +90,25 @@ const fakeForge = (forge: {
               }
             : url.pathname === "/user"
               ? { status: 200, body: { login: forge.login ?? "reviewer" } }
-              : url.pathname.endsWith("/reviews")
+              : url.pathname === "/app"
                 ? {
                     status: 200,
-                    body: pages[index] ?? [],
-                    ...(index + 1 < pages.length
-                      ? {
-                          link: `<${url.origin}${url.pathname}?per_page=100&page=${index + 2}>; rel="next"`,
-                        }
-                      : {}),
+                    body: { slug: forge.appSlug ?? "factory-reviewer" },
                   }
-                : {
-                    status: 200,
-                    body: { number: 7, head: { sha: forge.head ?? HEAD } },
-                  };
+                : url.pathname.endsWith("/reviews")
+                  ? {
+                      status: 200,
+                      body: pages[index] ?? [],
+                      ...(index + 1 < pages.length
+                        ? {
+                            link: `<${url.origin}${url.pathname}?per_page=100&page=${index + 2}>; rel="next"`,
+                          }
+                        : {}),
+                    }
+                  : {
+                      status: 200,
+                      body: { number: 7, head: { sha: forge.head ?? HEAD } },
+                    };
         const text = yield* Schema.encodeEffect(Json)(answer.body).pipe(
           Effect.orDie,
         );
@@ -128,12 +136,14 @@ const reviewerToken: CredentialProviderShape = {
 const post = (
   forge: ReturnType<typeof fakeForge>,
   credentials: CredentialProviderShape = reviewerToken,
+  app?: ReviewerApp,
 ) =>
   Effect.runPromiseExit(
     Effect.gen(function* () {
       const poster = yield* githubReviewPoster({
         credentials,
         apiUrl: "https://forge.test",
+        ...(app === undefined ? {} : { app }),
       });
       return yield* poster({ target: TARGET, body: BODY, marker: MARKER });
     }).pipe(Effect.provide(forge.client)),
@@ -241,40 +251,55 @@ describe("the review post", () => {
     ]);
   });
 
-  it("as an App, counts only a bot's marked review as its own", async () => {
+  it("as an App, counts only its own bot's marked review: not a person's, not another App's bot", async () => {
     const app: CredentialProviderShape = {
       source: "github-app",
       tokenFor: () => Effect.succeed(Redacted.make("ghs-app")),
     };
-    const person = fakeForge({
-      reviews: [
-        {
-          body: BODY,
-          html_url: "https://x/p",
-          user: { login: "lukas", type: "User" },
-        },
-      ],
-    });
-    expect(await post(person, app)).toEqual(
-      Exit.succeed({
-        _tag: "posted",
-        url: `${TARGET.url}#pullrequestreview-1`,
-      }),
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const reviewerApp: ReviewerApp = {
+      appId: "777",
+      privateKey: Redacted.make(
+        privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+      ),
+    };
+    const marked = (login: string, type: string, link: string) =>
+      fakeForge({
+        appSlug: "factory-reviewer",
+        reviews: [{ body: BODY, html_url: link, user: { login, type } }],
+      });
+    const fresh = {
+      _tag: "posted",
+      url: `${TARGET.url}#pullrequestreview-1`,
+    } as const;
+
+    const person = marked("lukas", "User", "https://x/p");
+    expect(await post(person, app, reviewerApp)).toEqual(Exit.succeed(fresh));
+    // The worker's App, or any third-party review bot, carrying the (predictable) marker.
+    const otherBot = marked("factory-worker[bot]", "Bot", "https://x/other");
+    expect(await post(otherBot, app, reviewerApp)).toEqual(Exit.succeed(fresh));
+    expect(otherBot.requests.filter((r) => r.method === "POST")).toHaveLength(
+      1,
     );
-    const bot = fakeForge({
-      reviews: [
-        {
-          body: BODY,
-          html_url: "https://x/bot",
-          user: { login: "factory-reviewer[bot]", type: "Bot" },
-        },
-      ],
-    });
-    expect(await post(bot, app)).toEqual(
+
+    const own = marked("factory-reviewer[bot]", "Bot", "https://x/bot");
+    expect(await post(own, app, reviewerApp)).toEqual(
       Exit.succeed({ _tag: "posted", url: "https://x/bot" }),
     );
-    // An installation token cannot read `/user`, so it is never asked.
-    expect(bot.requests.some((r) => r.path === "/user")).toBe(false);
+    expect(own.requests.some((r) => r.method === "POST")).toBe(false);
+    // Which bot is its own is `GET /app`, asked with the App's JWT — never the installation token,
+    // and never `/user`, which an installation token cannot read.
+    const asked = own.requests.find((r) => r.path === "/app");
+    expect(asked?.authorization).toMatch(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
+    expect(asked?.authorization).not.toBe("Bearer ghs-app");
+    expect(own.requests.some((r) => r.path === "/user")).toBe(false);
+
+    // Without the App's id and key, a marked review cannot be attributed, so nothing is posted.
+    const blind = marked("factory-reviewer[bot]", "Bot", "https://x/bot");
+    const refused = await post(blind, app);
+    expect(Exit.isFailure(refused)).toBe(true);
+    expect(JSON.stringify(refused)).toContain("which bot is its own");
+    expect(blind.requests.some((r) => r.method === "POST")).toBe(false);
   });
 
   it("answers stale and posts nothing when the PR moved past the reviewed head", async () => {
@@ -282,7 +307,27 @@ describe("the review post", () => {
     const forge = fakeForge({ head: moved });
     const exit = await post(forge);
     expect(exit).toEqual(Exit.succeed({ _tag: "stale", head: moved }));
-    expect(forge.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(forge.requests.map((r) => r.method)).toEqual(["GET", "GET"]);
+  });
+
+  it("reports its own comment as posted even when the PR has moved since (a replay after the post landed)", async () => {
+    const moved = "2".repeat(40);
+    const forge = fakeForge({
+      head: moved,
+      login: "factory-reviewer",
+      reviews: [
+        {
+          body: BODY,
+          html_url: "https://x/landed",
+          user: { login: "factory-reviewer" },
+        },
+      ],
+    });
+    const exit = await post(forge);
+    expect(exit).toEqual(
+      Exit.succeed({ _tag: "posted", url: "https://x/landed" }),
+    );
+    expect(forge.requests.some((r) => r.method === "POST")).toBe(false);
   });
 
   it("fails naming GitHub's status when the post is refused", async () => {
@@ -294,7 +339,7 @@ describe("the review post", () => {
     );
   });
 
-  it("asks nothing of GitHub when the reviewer has no identity", async () => {
+  it("asks nothing of GitHub, and settles the review as withheld, when the reviewer has no identity", async () => {
     const forge = fakeForge({});
     const none = await Effect.runPromise(
       selectReviewerCredentialProvider(workerWith({}), reviewerWith({})).pipe(
@@ -302,7 +347,10 @@ describe("the review post", () => {
       ),
     );
     const exit = await post(forge, none);
-    expect(JSON.stringify(exit)).toContain(NO_REVIEWER_IDENTITY);
+    // Settled, not failed: no retry of this post could ever succeed, so the model is not asked to.
+    expect(exit).toEqual(
+      Exit.succeed({ _tag: "withheld", reason: NO_REVIEWER_IDENTITY }),
+    );
     expect(forge.requests).toHaveLength(0);
   });
 });

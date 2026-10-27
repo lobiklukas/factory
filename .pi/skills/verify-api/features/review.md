@@ -29,7 +29,13 @@ comment on the PR, under an identity that is not the PR author's (LOB-36).
   refused at boot, and none at all posts nothing). It reads the PR's head first — a head that moved is
   `stale` and nothing is posted — then every page of the PR's reviews for its marker, counting only a
   review the reviewer itself wrote (its token's `GET /user` login, or for an App a bot), then posts
-  one `COMMENT` review pinned to the reviewed commit. Never an approval.
+  one `COMMENT` review pinned to the reviewed commit. Never an approval. A run's own comment found is
+  `posted` even when the head moved since (a replay of a post that landed). For an App, its own
+  review is its bot's (`<slug>[bot]`, the slug from `GET /app` with the App's JWT), not any bot's. No
+  reviewer identity at all settles the review as `withheld` (the verdict is in the log, nothing is
+  posted, and a retry is refused), so a model does not spend tokens retrying a post that cannot land.
+  The run's model is the `reviewer` row of `ROLE_MODELS`; the boot warns when the webhook is live and
+  there is none, since every review would then run on the deployment's model.
 
 ## How the skill drives it
 
@@ -42,16 +48,18 @@ PR's page, then signs and posts the events.
 
 ## End state that proves it
 
-12 checks (`review.json`, `review.log`, `api.log`): the reviewer run is processed beside the mirror;
-it is a run of the card in `review`, cut at the head; it ran on `faux/faux-review`; it called only
-`bash` and `review`; GitHub got exactly one `COMMENT` review with `commit_id` = the head, naming
+13 checks (`review.json`, `review.log`, `api.log`): the reviewer run is processed beside the mirror;
+it is a run of the card in `review`, cut at the head; it ran on `faux/faux-review`; its prompt names
+`git diff <base commit>...HEAD` for the base commit the event names, which the checkout has (so nothing
+was fetched off the box); the tool set its log's prompt offers has no `write`, `edit` or `verify` and
+has `review`, and every call it made is in that set; GitHub got exactly one `COMMENT` review with `commit_id` = the head, naming
 `src/sum.ts:1` and the mechanism; every forge request carried the reviewer's token; the post read the
 PR and its reviews first; a redelivery replayed with no second post; a `synchronize` opened a new run
 and a second comment pinned to the new head; a PR the factory did not open was skipped; an unsigned
 delivery was `401`; and the boot log names the reviewer's own identity.
 
-Last run: 2026-10-27, from the `agent/LOB-36` worktree (API on `:9560`, forge on `:9561`, faux, the
-worktree's own database on 5442): **12/12**, evidence `.verify/evidence/lob-36/`.
+Last run: 2026-10-28, from the `agent/LOB-36` worktree (API on `:9560`, forge on `:9561`, faux, the
+worktree's own database on 5442): **13/13**, evidence `.verify/evidence/lob-36/`.
 
 ## What it does not prove
 
@@ -61,5 +69,5 @@ factory's own PRs with a live model is LOB-242. Nor that GitHub accepts the revi
 (`docs/testing-third-parties.md`'s GitHub review row). Nor the fetch of a head pushed elsewhere: the
 drive builds every head in the registered checkout, and `ReviewTrigger.test.ts` proves the fetch
 path with a path remote standing in for `fetchBranch` (whose credentialed fetch `git.test.ts`
-proves). For an App identity, a marked review by _any_ bot counts as its own: an installation token
-cannot read its own login.
+proves). Nor the App identity's `GET /app` against GitHub: `GitHubReview.test.ts` answers it with a
+fake.

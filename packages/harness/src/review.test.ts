@@ -391,6 +391,36 @@ describe("the review tool", { timeout: 60_000 }, () => {
     expect(ran.recorded?.outcome).toBe("posted");
   });
 
+  it("settles a review that can never be posted (no reviewer identity) and refuses a retry", async () => {
+    const { posts, options } = recorder(() => ({
+      _tag: "withheld",
+      reason: "no reviewer identity is configured",
+    }));
+    const ran = await reviewOnce({
+      run: reviewer,
+      review: options,
+      attempts: [BUG],
+      again: true,
+    });
+
+    const results = reviewResults(ran.entries);
+    // The first call is not an error the model is invited to retry: it is the review, done.
+    expect(results.map((result) => result.isError)).toEqual([false, true]);
+    expect(results[0]?.text).toContain(
+      "Not posted: no reviewer identity is configured",
+    );
+    expect(results[0]?.text).toContain("The review is done.");
+    expect(results[1]?.text).toContain(
+      "this run already recorded its review of",
+    );
+    expect(posts).toHaveLength(1);
+    expect(ran.recorded).toMatchObject({
+      verdict: "fail",
+      outcome: "withheld",
+      outcomeDetail: "no reviewer identity is configured",
+    });
+  });
+
   it("lets a run whose post failed review again, and posts once", async () => {
     let calls = 0;
     const posts: string[] = [];

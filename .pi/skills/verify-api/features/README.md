@@ -109,8 +109,8 @@ the interval lower bound, the docs-PR merge skip and the redelivery after regist
 `mutation-no-push-route/`). `./docs-trigger.sh` and `./linear-writeback.sh` were re-run there too,
 because the module and the GitHub route they drive changed. See `docs-trigger.md`.
 
-The review agent (LOB-36) was run from the `agent/LOB-36` worktree on 2026-10-27 (API on `:9560`,
-forge on `:9561`, faux, the worktree's own database on 5442): `./review.sh` **12/12**, evidence
+The review agent (LOB-36) was run from the `agent/LOB-36` worktree on 2026-10-28 (API on `:9560`,
+forge on `:9561`, faux, the worktree's own database on 5442): `./review.sh` **13/13**, evidence
 `.verify/evidence/lob-36/`. `./docs-trigger-http.sh` and `./linear-writeback.sh` were re-run there,
 because the GitHub route they drive now hands a `pull_request` to the review too. See `review.md`.
 

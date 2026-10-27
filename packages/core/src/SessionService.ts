@@ -942,8 +942,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const reviewFor = (): ReviewOptions => ({
         post: (request) =>
           forHarness(
+            // No poster is no reviewer identity: settled as withheld, not a failure the model retries.
             options.reviewPoster === undefined
-              ? Effect.fail({ message: NO_REVIEWER_IDENTITY })
+              ? Effect.succeed({
+                  _tag: "withheld",
+                  reason: NO_REVIEWER_IDENTITY,
+                } as const)
               : options.reviewPoster(request),
           ),
       });

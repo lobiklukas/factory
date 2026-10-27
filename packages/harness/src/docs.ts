@@ -293,7 +293,8 @@ export const ProposedIssuesDoc = defineDoc({
  * what the run reviews is a fact in its log before the model says anything. The `review` tool writes
  * the **verdict**: the call that made it (`callId`), `pass` or `fail`, the summary, the four dimensions
  * as the tool's own encoding, and where the call left the PR (`outcome`: `unposted` until the post
- * answers, then `clean`, `posted` with the comment's link, or `stale` with the head the PR moved to).
+ * answers, then `clean`, `posted` with the comment's link, `stale` with the head the PR moved to, or
+ * `withheld` with why this deployment can never post it).
  *
  * An empty `head` is "this run was opened for no pull request", and an empty `verdict` is "not reviewed
  * yet", which is what the seed says for both.

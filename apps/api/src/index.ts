@@ -22,6 +22,7 @@ import {
   parseFauxModelScripts,
   parseRoleModels,
   resolveRoleModels,
+  REVIEW_ROLES,
   type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
@@ -454,6 +455,19 @@ const HttpLive = Effect.gen(function* () {
       .concat(`any other role → ${modelKey(modelAccess)}`)
       .join(", ")}${declaredRoles.size === 0 ? "" : " (ROLE_MODELS)"}`,
   );
+  // A review run's model is its role's row (LOB-36); with none, every PR head the review trigger
+  // reviews runs on the deployment's model, which is the one the builders need and rarely the cheap one.
+  const webhookSecret = yield* Config.String("GITHUB_WEBHOOK_SECRET").pipe(
+    Config.withDefault(""),
+  );
+  if (
+    webhookSecret !== "" &&
+    ![...REVIEW_ROLES].some((role) => roleModels.has(role))
+  ) {
+    yield* Effect.logWarning(
+      `review runs: ROLE_MODELS has no row for ${[...REVIEW_ROLES].join(" or ")}, so every pull request review runs on the deployment's model (${modelKey(modelAccess)}); set ROLE_MODELS=reviewer=<provider>/<model> to review on a cheaper one`,
+    );
+  }
 
   // The reviewer's identity (LOB-36): its own token or App, never the worker's. One that *is* the
   // worker's fails the boot here; none at all boots, and each review's post says what is missing.
@@ -462,8 +476,19 @@ const HttpLive = Effect.gen(function* () {
     yield* CredentialConfig,
     reviewerConfig,
   ).pipe(Effect.provide(FetchHttpClient.layer));
+  const reviewerAppId = Option.filter(reviewerConfig.appId, (id) => id !== "");
   const reviewPoster = yield* githubReviewPoster({
     credentials: reviewerCredentials,
+    // An App reviewer asks `GET /app` which bot is its own, so another App's marked review is not.
+    ...(Option.isSome(reviewerAppId) &&
+    Option.isSome(reviewerConfig.appPrivateKey)
+      ? {
+          app: {
+            appId: reviewerAppId.value,
+            privateKey: reviewerConfig.appPrivateKey.value,
+          },
+        }
+      : {}),
   }).pipe(Effect.provide(FetchHttpClient.layer));
   yield* Effect.logInfo(
     `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
