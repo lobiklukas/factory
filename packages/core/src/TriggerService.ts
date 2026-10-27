@@ -154,6 +154,14 @@ type DeliveryRow = {
   readonly skipReason: string | null;
 };
 
+/**
+ * The unregistered-repo skip reason, and the `LIKE` pattern that recognizes it in a recorded row.
+ * One definition for both, so the reclaim cannot drift from the words the skip writes.
+ */
+const unregisteredRepo = (repo: RepoSlug): string =>
+  `repo ${repo} is not registered`;
+const UNREGISTERED_REPO_PATTERN = "repo % is not registered";
+
 const toTriggerError =
   (what: string) =>
   (cause: SqlError): TriggerError =>
@@ -230,14 +238,29 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
           // The claim. `RETURNING` on a conflicting insert yields no row, which is exactly the
           // question "am I the first?" — one statement, so two workers cannot both win.
+          //
+          // A key that names the work (`keyedByWork`) also wins over its own recorded
+          // unregistered-repo skip: the conditional `DO UPDATE` flips that row back to `received`
+          // in the same statement, so the delivery after the operator registers the repo starts the
+          // session, and two such deliveries still cannot both win (the second sees `received`).
           const claimed = yield* storage(
             "claim delivery",
-            sql<{ requestId: string }>`
-              INSERT INTO webhook_deliveries (request_id, status)
-              VALUES (${requestId}, 'received')
-              ON CONFLICT (request_id) DO NOTHING
-              RETURNING request_id
-            `,
+            delivery.keyedByWork === true
+              ? sql<{ requestId: string }>`
+                  INSERT INTO webhook_deliveries (request_id, status)
+                  VALUES (${requestId}, 'received')
+                  ON CONFLICT (request_id) DO UPDATE
+                    SET status = 'received', skip_reason = NULL
+                    WHERE webhook_deliveries.status = 'skipped'
+                      AND webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
+                  RETURNING request_id
+                `
+              : sql<{ requestId: string }>`
+                  INSERT INTO webhook_deliveries (request_id, status)
+                  VALUES (${requestId}, 'received')
+                  ON CONFLICT (request_id) DO NOTHING
+                  RETURNING request_id
+                `,
           );
           if (claimed.length === 0) {
             return yield* replay(requestId);
@@ -295,10 +318,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               `,
               );
               if (registered.length === 0) {
-                return yield* skip(
-                  requestId,
-                  `repo ${mapping.repo} is not registered`,
-                );
+                return yield* skip(requestId, unregisteredRepo(mapping.repo));
               }
 
               const session = yield* sessions.create({
