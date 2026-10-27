@@ -18,28 +18,29 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 ## What it proves
 
-| Feature                          | Check in the driver                                                                   | Why it matters                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals  | a board is a real operation, not a row a test inserts                |
-| create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it              | a trigger's card is a real row the board reads back                  |
-| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                       | the lane order is the definition's, not the DB's                     |
-| a card in its lane               | the created card is the row under `intake`                                            | lanes and cards come from one read, so they agree                    |
-| `board show`                     | revision and title printed, exit 0                                                    | one card as the server has it                                        |
-| `board move` (B5)                | a declared move prints the new column and revision, exit 0                            | the write path is real, at the revision it expected                  |
-| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                         | a script can tell a refusal from a success                           |
-| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                            | the refusal is typed, not generic prose                              |
-| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                 | a run is one session, bound to the card                              |
-| specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told      | the drive's own card is specified and answered before `planning`     |
-| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim           | only a person crosses plan approval, and the refusal names the gate  |
-| the refusals wrote nothing       | `board show` after them: the last accepted column and revision                        | a refused move is not a half-applied one                             |
-| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                 | the browser shows what the CLI left, and offers a person the gate    |
-| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal  | the PR and its evidence are real, and only a person reaches `done`   |
-| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt           | a run that needs a person ends, and the answer reaches the next run  |
-| `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through | a refusal names the requirement; evidence is a condition of the move |
+| Feature                          | Check in the driver                                                                      | Why it matters                                                       |
+| -------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals     | a board is a real operation, not a row a test inserts                |
+| create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it                 | a trigger's card is a real row the board reads back                  |
+| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                          | the lane order is the definition's, not the DB's                     |
+| a card in its lane               | the created card is the row under `intake`                                               | lanes and cards come from one read, so they agree                    |
+| `board show`                     | revision and title printed, exit 0                                                       | one card as the server has it                                        |
+| `board move` (B5)                | a declared move prints the new column and revision, exit 0                               | the write path is real, at the revision it expected                  |
+| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                            | a script can tell a refusal from a success                           |
+| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                               | the refusal is typed, not generic prose                              |
+| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                    | a run is one session, bound to the card                              |
+| specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told         | the drive's own card is specified and answered before `planning`     |
+| the run's spec (LOB-238)         | `spec.ts`: refused without `gaps`, retried; log + `getTaskSpec`; `show`; `spec-pane.mjs` | a specifying run writes the typed spec, and the card shows it        |
+| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim              | only a person crosses plan approval, and the refusal names the gate  |
+| the refusals wrote nothing       | `board show` after them: the last accepted column and revision                           | a refused move is not a half-applied one                             |
+| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                    | the browser shows what the CLI left, and offers a person the gate    |
+| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal     | the PR and its evidence are real, and only a person reaches `done`   |
+| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt              | a run that needs a person ends, and the answer reaches the next run  |
+| `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through    | a refusal names the requirement; evidence is a condition of the move |
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh` and `board-create.sh` each exit
-non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s (its specify phase), `web.mjs`'s and
-`build.ts`'s (its build phase) exit codes into its own.
+non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+specify phase), `spec-pane.mjs`'s, `web.mjs`'s and `build.ts`'s (its build phase) exit codes into its own.
 
 ## Launch
 
@@ -78,7 +79,9 @@ document are real; only the model behind it is scripted. It is pinned, not read 
 exported one is ignored, because the probes need its sleep (the busy control) and its `faux-ok` (the
 read was not refused). The 8 s leaves the busy probe, which starts after `board start` returns, the
 tmux round-trip and a cold `bun`, several seconds of margin under load. A run on an answered card
-never asks.
+never asks. `FAUX_SPEC` (LOB-238, fixed like `FAUX_COMMAND`) is the specifier's `spec` calls: a first
+attempt without `gaps`, then the complete spec, which is recorded in `.verify/run/faux-spec`; only a
+run offered the tool — one whose column declares the `specifier` role — ever makes them.
 
 The build phase (LOB-86) needs a run of another kind on the same instance: under faux a model is its
 script, so `ROLE_MODELS=builder=faux/builder` gives the `building` column's role its own model, and
@@ -140,8 +143,11 @@ The phases, in order: **create** (`create.ts`, over RPC) → `ls` → `show` →
 refusal (`specifying → done`) → `start` (the run, `ses_…`, sent a prompt) → **specify**: the run is
 busy, then asks and is parked (`ask.ts`), `show` prints the `needs_input` block and the question,
 `comment` answers and lifts it, `show` prints the answer, a second `start` opens the next run and its
-recorded prompt quotes the answer verbatim (`ask.ts`; see `features/specify.md`) → a person's move to
-`planning` at the revision `show` printed → the
+recorded prompt quotes the answer verbatim (`ask.ts`; see `features/specify.md`). Around the ask,
+the **spec** (LOB-238): the asking run's spec, refused once without `gaps` and then committed, is in
+its log and on the card (`spec.ts MODE=declared`) and `show` prints it; the next run's spec, its gaps
+closed, replaces it (`spec.ts MODE=closed`), `show` prints `gaps: none`, and the card pane shows it
+(`spec-pane.mjs`) → a person's move to `planning` at the revision that `show` printed → the
 **human-gate** refusal (`planning → building` with `--actor <that ses_…>`) → `show` again (the
 refusals wrote nothing) → **web** (`web.mjs` in headless Chrome: the card's lane, the pane's revision,
 `building` offered and marked `plan approval`) → **build** (LOB-86; see `features/build.md`): a
@@ -172,11 +178,14 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   PR body as the fake received it, and git's diff of the run's branch
 - `specify-busy.json`, `specify-parked.json`, `specify-told.json` — the specify phase's probes:
   their checks and facts, the next run's recorded `task_thread` section among them
+- `spec-declared.json`, `spec-closed.json`, `show-specified.txt`, `spec-pane.json`, `spec-pane.png` —
+  the spec's probes (each run's `spec` results, its logged spec, the card's `getTaskSpec`), the pane
+  after the next run, and the card pane's Spec section as rendered
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
 - `observed.json` — every check with its detail, the board id, the card id and both session ids.
-  `drive.sh` deletes `create.json`, `specify-*.json`, `build-*.json`, `pr-body.md`, `web.json`,
-  `web-board.png` and `observed.json` before it starts,
+  `drive.sh` deletes `create.json`, `specify-*.json`, `spec-*.json`, `spec-pane.png`, `build-*.json`,
+  `pr-body.md`, `web.json`, `web-board.png` and `observed.json` before it starts,
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
@@ -234,6 +243,9 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
   offered the tool and its prompt has no `task_thread` yet, so the run after an answer replies instead.
   A phase that starts a run on a card nobody has answered yet will park it; that is the script, not a
   bug.
+- **The spec moves the card.** Each accepted `spec` call is a `specified` event, one revision: the
+  asking run's question lands a revision later than it would without it, and the move to `planning`
+  expects the revision `show` printed after the next run's spec, not after the answer.
 - **The answer is typed as a `$'…'` word.** It carries a newline and an em dash so a trimmed or
   re-encoded answer is caught; the pane's shell (bash or zsh) turns the escapes into one argument.
 - **`board start` does not move the card.** The lane a run works in is where the card already sits;

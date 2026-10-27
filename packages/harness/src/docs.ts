@@ -26,8 +26,9 @@ const unspecified = () => ({
 /**
  * The specifying stage's artifact (LOB-72): goal, acceptance criteria, declared gaps and open
  * questions. The shape and its rule — `gaps` declared, `[]` when there are none — are `./spec`'s;
- * this token is only where the value is stored, and `writeSpec` is its only writer, so nothing
- * reaches it without passing that rule.
+ * this token is only where the value is stored, and its two writers — `writeSpec` and a specifying
+ * run's `spec` tool (LOB-238, `./specify`) — both decode with `decodeSpec` and commit through
+ * `commitSpec`, so nothing reaches it without passing that rule.
  *
  * The seed is not a spec: its `goal` is empty, which the validator refuses, so a session that never
  * specified reads as no spec rather than as one declaring no gaps.
@@ -165,8 +166,10 @@ export const PagePromptDoc = defineDoc({
  * Re-entering the phase the mission is already in appends nothing, so a resumed phase is one entry,
  * not two. `mission` is the key, so a member names the mission it belongs to.
  *
- * `definitionVersion` is the version of `mission.ts` that named the phase, because a stored checkpoint
- * is read back through the definition that wrote it.
+ * `definitionVersion` is the version of `mission.ts` that named the phase, because a stored document
+ * is read back through the definition that wrote it: a version-1 document names the phase one
+ * behind its checkpoint, and `readMissionDoc` (`@repo/domain/Mission`) reads it forward (LOB-233).
+ * The value's shape did not change with it, so this document's own `version` did not either.
  *
  * Empty `phase` is "this mission has not entered a phase yet", which is what the seed says; the seed
  * cannot say `plan`, because a mission that never ran never planned anything.

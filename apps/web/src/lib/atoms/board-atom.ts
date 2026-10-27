@@ -1,5 +1,6 @@
 import type {
   BoardInstanceId,
+  CommentTaskInput,
   MoveTaskInput,
   Task,
   TaskId,
@@ -18,6 +19,9 @@ export const BOARD_KEY = "board";
 
 /** The reactivity key a run start invalidates: the card pane's run list re-reads. */
 export const RUNS_KEY = "task-runs";
+
+/** The reactivity key a comment invalidates: the card pane's thread re-reads (LOB-239). */
+export const THREAD_KEY = "task-thread";
 
 /** The reactivity key an approval decision invalidates. */
 export const APPROVALS_KEY = "approvals";
@@ -108,6 +112,23 @@ export const taskRunsAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
+ * A card's spec (LOB-238): what its newest specifying run declared with the `spec` tool, or `null`.
+ *
+ * Polled with the board, like the runs: the run that declares it is not this pane's doing, so the
+ * pane learns of it from the server, within one interval.
+ */
+export const taskSpecAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getTaskSpec({ taskId });
+      }),
+    )
+    .pipe(Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
  * Starts a run against a card: `createSession` with the card named, exactly as `factory board
  * start` does (LOB-61), so a run is one Pi Durable session (B1) and its row lands in `task_runs`.
  *
@@ -128,6 +149,43 @@ export const startRunAtom = runtime.fn(
       });
     }),
   { reactivityKeys: [RUNS_KEY, SESSIONS_KEY] },
+);
+
+/**
+ * A card's thread, oldest first (LOB-239): `listTaskComments`, every comment verbatim with the kind
+ * the server recorded when it was written (B7).
+ *
+ * Polled with the board, because most of a thread is written off this page — a run's question is
+ * its `ask` tool's, in-process, and an answer can come from `factory board comment` — and the pane
+ * has to show the question a parked run asked without a reload.
+ */
+export const taskCommentsAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.listTaskComments({ taskId });
+      }),
+    )
+    .pipe(Atom.withReactivity([THREAD_KEY]), Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
+ * Adds to a card's thread at the revision the pane rendered (LOB-239), exactly as `factory board
+ * comment` does. On a card blocked `needs_input` the server makes it the answer and lifts the block
+ * in the same transaction, so the board (and the attention view, `BOARD_KEY`) re-reads with the
+ * thread once it lands.
+ *
+ * The revision is the one on screen, for the reason a move's is: an answer typed against a card
+ * someone else already answered must be refused as stale, not appended as though it were the answer.
+ */
+export const commentTaskAtom = runtime.fn(
+  (input: CommentTaskInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.commentTask(input);
+    }),
+  { reactivityKeys: [THREAD_KEY, BOARD_KEY] },
 );
 
 /** The approvals a run is waiting on, oldest first: the card pane's approvals pane (LOB-76). */

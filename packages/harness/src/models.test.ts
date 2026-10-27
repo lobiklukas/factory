@@ -6,7 +6,11 @@
  * threshold commits one summary and heads the context with it — is
  * `session.test.ts`'s "compaction" block, and the RPC path is `.pi/skills/verify-api`.
  */
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import {
+  Type,
+  type AssistantMessage,
+  type Message,
+} from "@earendil-works/pi-ai";
 import { Effect, Exit } from "effect";
 import { describe, expect, it } from "vitest";
 import {
@@ -121,6 +125,75 @@ describe("the faux script's turns", () => {
     );
     expect(callsBash(answered)).toBe(false);
     expect(answered.content).toEqual([{ type: "text", text: "ran (re: two)" }]);
+  });
+});
+
+describe("the faux script's spec (LOB-238)", () => {
+  const offered = (sections?: Record<string, string>): Message => ({
+    role: "system",
+    content: "",
+    toolsAdded: [
+      { name: "spec", description: "", parameters: Type.Object({}) },
+    ],
+    ...(sections === undefined ? {} : { sections }),
+    timestamp: 0,
+  });
+  const user: Message = { role: "user", content: "specify", timestamp: 0 };
+  const result = (toolName: string, isError: boolean): Message => ({
+    role: "toolResult",
+    toolCallId: `call_${toolName}`,
+    toolName,
+    content: [{ type: "text", text: isError ? "refused" : "ran" }],
+    isError,
+    timestamp: 0,
+  });
+  const first = { goal: "g", acceptance: [], openQuestions: [] };
+  const second = { ...first, gaps: ["which major"], openQuestions: ["q?"] };
+  /** The arguments of the spec call an answer makes, or `undefined` when it makes none. */
+  const specCall = (messages: readonly Message[]) => {
+    const answer = fauxAnswer(
+      messages,
+      "echo x",
+      undefined,
+      false,
+      undefined,
+      false,
+      [first, second],
+    );
+    const call = answer.content.find((part) => part.type === "toolCall");
+    return call?.name === "spec" ? call.arguments : undefined;
+  };
+  const ran = [offered(), user, result("bash", false)];
+
+  it("tries the attempts in order, one per refusal, and stops once one is accepted", () => {
+    expect(specCall(ran)).toEqual(first);
+    expect(specCall([...ran, result("spec", true)])).toEqual(second);
+    expect(
+      specCall([...ran, result("spec", true), result("spec", false)]),
+    ).toBeUndefined();
+    // Out of attempts: the script replies rather than calling forever.
+    expect(
+      specCall([...ran, result("spec", true), result("spec", true)]),
+    ).toBeUndefined();
+  });
+
+  it("does not spec when the run was not offered the tool, or before its bash turn", () => {
+    expect(specCall([user, result("bash", false)])).toBeUndefined();
+    expect(specCall([offered(), user])).toBeUndefined();
+  });
+
+  it("declares the last attempt with its gaps closed once the thread is in the prompt", () => {
+    const answered = [
+      offered({ task_thread: "<task_thread>…</task_thread>" }),
+      user,
+      result("bash", false),
+    ];
+    expect(specCall(answered)).toEqual({
+      ...second,
+      gaps: [],
+      openQuestions: [],
+    });
+    expect(specCall([...answered, result("spec", true)])).toBeUndefined();
   });
 });
 

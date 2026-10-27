@@ -33,6 +33,7 @@ import {
   STAGE_REFUSED_TOOLS,
   type ReadOnlyStage,
 } from "./policy";
+import { SPEC_ROLES } from "./specify";
 
 /** A column names a skill the factory does not hold. */
 export class MissingSkill extends Schema.TaggedError<MissingSkill>()(
@@ -243,6 +244,11 @@ export type RoleResolution = {
   readonly withheldTools: ReadonlySet<string>;
   /** The read-only stage the role makes the run (LOB-74), when it is one. */
   readonly stage?: ReadOnlyStage;
+  /**
+   * Whether the run is offered the `spec` tool (LOB-238, `./specify`'s `SPEC_ROLES`): the specifier
+   * declares the card's spec, and no other role is offered a way to.
+   */
+  readonly writesSpec: boolean;
 };
 
 const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
@@ -252,8 +258,8 @@ const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
  *
  * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is
  * the read-only stage's (`READ_ONLY_ROLES`): a read-only role is not offered the tools the stage
- * refuses (`STAGE_REFUSED_TOOLS`), and every other role is offered every tool. Pure, so the whole
- * mapping is a table in a test.
+ * refuses (`STAGE_REFUSED_TOOLS`), and every other role is offered every tool — except `spec`, which
+ * only a role in `SPEC_ROLES` is offered (LOB-238). Pure, so the whole mapping is a table in a test.
  */
 export const resolveRole = (
   run: RunProfile | undefined,
@@ -267,5 +273,9 @@ export const resolveRole = (
     withheldTools:
       stage === undefined ? NO_TOOLS_WITHHELD : STAGE_REFUSED_TOOLS,
     ...(stage === undefined ? {} : { stage }),
+    writesSpec:
+      run?.column !== undefined &&
+      run.role !== undefined &&
+      SPEC_ROLES.has(run.role),
   };
 };

@@ -160,6 +160,19 @@ describe("resolveRole", () => {
     expect(modelKey(specifier.model)).toBe("faux/faux-1");
     expect(specifier.withheldTools).toBe(STAGE_REFUSED_TOOLS);
   });
+
+  it("offers the spec tool to the specifier role alone, whatever its column is called (LOB-238)", () => {
+    const writesSpec = (profile: RunProfile | undefined) =>
+      resolveRole(profile, deployment.access, roles).writesSpec;
+
+    expect(writesSpec(run("specifying", "specifier"))).toBe(true);
+    expect(writesSpec(run("clarifying", "specifier"))).toBe(true);
+    expect(writesSpec(run("planning", "planner"))).toBe(false);
+    expect(writesSpec(run("building", "builder"))).toBe(false);
+    expect(writesSpec(run("specifying"))).toBe(false);
+    expect(writesSpec(run("odd", "constructor"))).toBe(false);
+    expect(writesSpec(undefined)).toBe(false);
+  });
 });
 
 describe("the deployment's role table", () => {

@@ -98,6 +98,19 @@ so it is not affected). Under faux, keep a row until the runs on it are done.
 run in flight across the deploy that brought it), or one configured since. `READ_ONLY_ROLES` stays
 the one table of which roles read only.
 
+Built (LOB-238): the specifier's writer. A run whose role is in `SPEC_ROLES`
+(`packages/harness/src/specify.ts`, `resolveRole().writesSpec`) is offered the `spec` tool, and no
+other run is. The tool validates with LOB-72's `decodeSpec`, so a spec with no `gaps` is refused in
+words the model reads, and the run retries. It commits the `factory.spec` document to the run's log,
+then posts the same spec on the card as a `specified` task event, idempotent by
+`<session id>:<tool call id>`. The card's spec is its newest `specified` event, read with
+`getTaskSpec`. That is a second record next to the log (D7): the log is the truth for what the run
+declared, and the event is the card's copy, written in the same call, so the board reads it without
+folding every run's log. The event records the run's own column, the one its role came from, so a
+specifier resumed after a person moved the card on still declares its spec from `specifying`. A spec
+is not an ask: a gap still parks the card through `ask`, and the `spec_doc` exit requirement is
+still not checked.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a

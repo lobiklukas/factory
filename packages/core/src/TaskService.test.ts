@@ -922,6 +922,130 @@ describe("TaskService — the ask and the thread", () => {
   });
 });
 
+describe("TaskService — the card's spec (LOB-238)", () => {
+  const SPEC = {
+    goal: "Pin the card's Postgres major",
+    acceptance: ["the compose file names one major"],
+    gaps: ["which major the card targets"],
+    openQuestions: ["Which Postgres major?"],
+  } as const;
+
+  /** A card moved into `specifying`, at revision 2. */
+  const inSpecifying = async () => {
+    const boardId = await newBoard();
+    const task = await withService((s) =>
+      s.create({ boardId, title: "thin", actor: LUKAS }),
+    );
+    return withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 1,
+        to: "specifying",
+        actor: LUKAS,
+      }),
+    );
+  };
+
+  it("reads no spec for a card no run has specified, and refuses a card that does not exist", async () => {
+    const task = await inSpecifying();
+    expect(await withService((s) => s.spec(task.id))).toBeUndefined();
+    const missing = await refusal((s) => s.spec(`tsk_${hex(13)}`));
+    expect(missing._tag).toBe("TaskNotFound");
+    const posted = await refusal((s) =>
+      s.declareSpec({ taskId: `tsk_${hex(13)}`, actor: RUN, ...SPEC }),
+    );
+    expect(posted._tag).toBe("TaskNotFound");
+  });
+
+  it("records a run's spec as one specified event, a revision on, and reads it back", async () => {
+    const task = await inSpecifying();
+    const specified = await withService((s) =>
+      s.declareSpec({ taskId: task.id, actor: RUN, ...SPEC }),
+    );
+    expect(specified.revision).toBe(task.revision + 1);
+    expect(specified.blocked).toBeUndefined();
+    expect(await eventCount(task.id)).toBe(3);
+    const spec = await withService((s) => s.spec(task.id));
+    expect(spec).toEqual({
+      taskId: task.id,
+      sessionId: RUN,
+      column: "specifying",
+      ...SPEC,
+      revision: task.revision,
+      createdAt: spec?.createdAt,
+    });
+    // A spec is the card's record, not a comment: the thread the next run is told stays as it was.
+    expect(await withService((s) => s.comments(task.id))).toEqual([]);
+  });
+
+  it("answers the newest spec, keeps an empty list empty, and leaves a parked card parked", async () => {
+    const task = await inSpecifying();
+    await withService((s) =>
+      s.declareSpec({ taskId: task.id, actor: RUN, ...SPEC }),
+    );
+    const asked = await withService((s) =>
+      s.ask({ taskId: task.id, question: "Which major?", actor: RUN }),
+    );
+    const closed = await withService((s) =>
+      s.declareSpec({
+        taskId: task.id,
+        actor: RUN,
+        ...SPEC,
+        gaps: [],
+        openQuestions: [],
+      }),
+    );
+    // A spec is not an answer: only a person's comment lifts the block.
+    expect(closed.blocked?.reason).toBe("needs_input");
+    expect(closed.revision).toBe(asked.revision + 1);
+    const spec = await withService((s) => s.spec(task.id));
+    expect(spec?.gaps).toEqual([]);
+    expect(spec?.openQuestions).toEqual([]);
+    expect(spec?.revision).toBe(asked.revision);
+  });
+
+  it("records the declaring run's column, not the column the card was moved on to", async () => {
+    const task = await inSpecifying();
+    const planned = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "planning",
+        actor: LUKAS,
+      }),
+    );
+    await withService((s) =>
+      s.declareSpec({
+        taskId: task.id,
+        actor: RUN,
+        column: "specifying",
+        ...SPEC,
+      }),
+    );
+    const spec = await withService((s) => s.spec(task.id));
+    expect(spec?.column).toBe("specifying");
+    expect(spec?.revision).toBe(planned.revision);
+  });
+
+  it("records a spec once per spec id, so a replayed tool call posts nothing twice", async () => {
+    const task = await inSpecifying();
+    const post = { taskId: task.id, actor: RUN, ...SPEC };
+    const first = await withService((s) =>
+      s.declareSpec({ ...post, specId: `${RUN}:call-1` }),
+    );
+    const replayed = await withService((s) =>
+      s.declareSpec({ ...post, specId: `${RUN}:call-1` }),
+    );
+    expect(replayed.revision).toBe(first.revision);
+    expect(await eventCount(task.id)).toBe(3);
+    const second = await withService((s) =>
+      s.declareSpec({ ...post, gaps: [], specId: `${RUN}:call-2` }),
+    );
+    expect(second.revision).toBe(first.revision + 1);
+    expect((await withService((s) => s.spec(task.id)))?.gaps).toEqual([]);
+  });
+});
+
 describe("TaskService — what needs a person (LOB-77)", () => {
   /** A card walked by a person from `intake` along `path`, one declared move at a time. */
   const cardIn = async (

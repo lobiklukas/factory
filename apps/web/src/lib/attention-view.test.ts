@@ -138,4 +138,17 @@ describe("attentionLink", () => {
       search: { card: asked.task.id, run: RUN },
     });
   });
+
+  it("opens a question straight at the card's thread, where it is answered (LOB-239)", () => {
+    const question = item("q", {
+      _tag: "question",
+      question: "Which repo?",
+      since: AT,
+    });
+    expect(attentionLink(question)).toEqual({
+      boardId: BOARD,
+      search: { card: question.task.id },
+      hash: "thread",
+    });
+  });
 });

@@ -14,6 +14,9 @@ phase's probes' **11/11** (`specify-busy.json`, `specify-parked.json`, `specify-
 `web.mjs`'s **3/3** (`web.json`, `web-board.png`) folded in, twice against one `./up.sh` instance;
 `./ask.sh`, API on `:9501` across two processes, **14/14** drive checks and **11/11** probe checks
 passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
+The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`, web on `:3520`:
+`./drive.sh` **35/35** required checks, with `spec.ts`'s **9/9** (`spec-declared.json`, `spec-closed.json`) and
+`spec-pane.mjs`'s **4/4** (`spec-pane.json`, `spec-pane.png`) folded in.
 `./requires.sh` (LOB-80, 2026-10-27, `agent/LOB-80`), API on `:9522`, **24/24** checks passed
 (`requires-observed.json`). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
 `:9510`, **18/18** checks passed (`create-board.json`). Evidence: `.verify/evidence/latest/board/`.
@@ -29,6 +32,7 @@ passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `as
 | the board read back in the web  | passing | [dashboard.md](dashboard.md) |
 | specify, ask, answer (the card) | passing | [specify.md](specify.md)     |
 | build, PR + evidence, merge     | passing | [build.md](build.md)         |
+| the specifying run's spec       | passing | [specify.md](specify.md)     |
 | the ask on the task             | passing | [ask.md](ask.md)             |
 | `requires[]` on exit            | passing | [requires.md](requires.md)   |
 
