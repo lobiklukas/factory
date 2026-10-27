@@ -12,6 +12,7 @@ import type {
   TaskGraph,
 } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
+import { Option, Schema } from "effect";
 import type {
   ImageContent,
   Message,
@@ -19,6 +20,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import { PrEvidence } from "@repo/domain/Session";
 import type {
   ModelUsage,
   QueuedMessage,
@@ -355,15 +357,33 @@ export type PrDocView = {
   readonly base: string;
   readonly head: string;
   readonly openedAt: string;
+  /**
+   * What the PR says was verified (LOB-79). Absent for a PR recorded before evidence existed, and
+   * for a value that does not decode: a document is read defensively, so a stray shape drops out
+   * rather than reaching a reader as evidence.
+   */
+  readonly evidence?: PrEvidence;
 };
 
-export const projectPrDoc = (value: JsonValue | undefined): PrDocView => ({
-  url: stringAt(value, "url") ?? "",
-  number: numberAt(value, "number"),
-  base: stringAt(value, "base") ?? "",
-  head: stringAt(value, "head") ?? "",
-  openedAt: stringAt(value, "openedAt") ?? "",
-});
+const decodeEvidence = Schema.decodeUnknownOption(PrEvidence);
+
+/** The evidence a `factory.pr` document or its `factory.pr.opened` entry carries, if it decodes. */
+export const evidenceAt = (
+  parent: JsonValue | undefined,
+): PrEvidence | undefined =>
+  Option.getOrUndefined(decodeEvidence(asObject(parent)?.["evidence"]));
+
+export const projectPrDoc = (value: JsonValue | undefined): PrDocView => {
+  const evidence = evidenceAt(value);
+  return {
+    url: stringAt(value, "url") ?? "",
+    number: numberAt(value, "number"),
+    base: stringAt(value, "base") ?? "",
+    head: stringAt(value, "head") ?? "",
+    openedAt: stringAt(value, "openedAt") ?? "",
+    ...(evidence === undefined ? {} : { evidence }),
+  };
+};
 
 const ZERO_USAGE: ModelUsage = {
   input: 0,
@@ -481,7 +501,13 @@ export type SessionProjection = {
   readonly queued: readonly QueuedMessage[];
 };
 
-/** `pi.inbox` → queued messages. */
+/**
+ * `pi.inbox` → queued messages.
+ *
+ * An item's id is its submission's: a branded number in the document, sent as the opaque string
+ * `sendMessage` answers (LOB-166). Reading it only as a string dropped every real item, and a queued
+ * message a client cannot name is one it cannot withdraw.
+ */
 export const projectInbox = (
   docs: Readonly<Record<string, JsonValue>>,
 ): readonly QueuedMessage[] => {
@@ -490,7 +516,13 @@ export const projectInbox = (
   return items.flatMap((item) => {
     const obj = asObject(item);
     if (obj === undefined) return [];
-    const id = stringAt(obj, "id");
+    const raw = obj["id"];
+    const id =
+      typeof raw === "number"
+        ? String(raw)
+        : typeof raw === "string"
+          ? raw
+          : undefined;
     if (id === undefined) return [];
     const modeRaw = stringAt(obj, "mode");
     const mode =
@@ -547,8 +579,24 @@ export const diffView = (
     // that attaches afterwards reads the link from the session's summary instead.
     if (entry.kind === PR_OPENED_ENTRY_KIND) {
       const prUrl = stringAt(entry.data, "url");
-      if (prUrl !== undefined) events.push({ _tag: "prOpened", prUrl });
+      const evidence = evidenceAt(entry.data);
+      if (prUrl !== undefined)
+        events.push({
+          _tag: "prOpened",
+          prUrl,
+          ...(evidence === undefined ? {} : { evidence }),
+        });
     }
+  }
+
+  // The queue before liveness: a follower stops at the first event that says the run settled
+  // (`factory run`/`watch`), so a queue reading committed beside it must already be out, or the
+  // drain it reports is never seen (LOB-166).
+  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
+    events.push({
+      _tag: "queued",
+      queued: projectInbox(next.docs),
+    });
   }
 
   if (previous.docs[LIVE_DOC] !== next.docs[LIVE_DOC]) {
@@ -564,13 +612,6 @@ export const diffView = (
     events.push({
       _tag: "usage",
       usage: projectUsageDoc(next.docs[USAGE_DOC]),
-    });
-  }
-
-  if (previous.docs[INBOX_DOC] !== next.docs[INBOX_DOC]) {
-    events.push({
-      _tag: "queued",
-      queued: projectInbox(next.docs),
     });
   }
 

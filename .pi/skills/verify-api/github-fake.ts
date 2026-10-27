@@ -179,5 +179,5 @@ const server = Bun.serve({
 });
 
 console.log(
-  `github-fake listening on ${server.url} ledger=${ledgerPath} hangFirst=${String(hangFirst)}`,
+  `github-fake listening on ${server.url.href} ledger=${ledgerPath} hangFirst=${String(hangFirst)}`,
 );

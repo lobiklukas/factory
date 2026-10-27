@@ -88,9 +88,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFauxModelAccess,
   createModelAccess,
+  PR_EVIDENCE_EXCERPT,
   readPromptSections,
   readSessionLog,
   readVerifyRecords,
+  tailOf,
   usageCostTotal,
   type VerifyRecord,
 } from "@repo/harness";
@@ -5065,6 +5067,268 @@ describe("a run's prompt comes from its column", () => {
   }, 120_000);
 });
 
+describe("withdrawing a queued message", () => {
+  // A turn that sleeps, so a second and third message arrive while the first run is still in
+  // flight and genuinely queue (LOB-166). The faux model's own turn is too fast to queue behind.
+  const withdrawRoot = mkdtempSync(join(tmpdir(), "factory-core-withdraw-"));
+  const slow = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createFauxModelAccess({ fauxCommand: "sleep 3 && echo faux-ok" })
+        .access,
+      sessionRoot: withdrawRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await slow.dispose();
+  });
+
+  const userTexts = (snapshot: SessionSnapshot): readonly string[] =>
+    snapshot.entries
+      .filter((entry) => entry.kind === "user")
+      .map((entry) => entry.text);
+
+  it("takes a queued message out of the queue, and only that one reaches no transcript", async () => {
+    const outcome = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a queue to edit" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the first turn to start",
+        );
+        const dropped = yield* sessions.send({
+          sessionId: created.id,
+          content: "drop me",
+          whenBusy: "followUp",
+        });
+        const kept = yield* sessions.send({
+          sessionId: created.id,
+          content: "keep me",
+          whenBusy: "followUp",
+        });
+        const queuedBefore = (yield* sessions.get(created.id)).queued;
+
+        const withdrawn = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: dropped.submissionId,
+        });
+        const queuedAfter = (yield* sessions.get(created.id)).queued;
+        // The run owns the first message: it is an answer, not a withdrawal.
+        const placed = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: first.submissionId,
+        });
+        // Withdrawing twice is not withdrawing twice: the second answers that it is over.
+        const again = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: dropped.submissionId,
+        });
+        const unknown = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: created.id,
+            submissionId: "999999",
+          }),
+        );
+        const malformed = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: created.id,
+            submissionId: "not-a-submission",
+          }),
+        );
+        const unknownSession = yield* Effect.exit(
+          sessions.withdraw({
+            sessionId: SessionIdSchema.make("ses_00000000000000000000000000"),
+            submissionId: dropped.submissionId,
+          }),
+        );
+
+        // Both runs settle: the first, then the follow-up the withdrawal left in the queue.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy &&
+                  snapshot.queued.length === 0 &&
+                  userTexts(snapshot).includes("keep me") &&
+                  snapshot.entries.at(-1)?.kind === "assistant",
+              ),
+            ),
+          "the follow-up run to settle",
+        );
+        const settled = yield* sessions.get(created.id);
+        return {
+          dropped,
+          kept,
+          queuedBefore,
+          withdrawn,
+          queuedAfter,
+          placed,
+          again,
+          unknown,
+          malformed,
+          unknownSession,
+          settled,
+        };
+      }),
+    );
+
+    expect(outcome.dropped.placement).toBe("followUp");
+    expect(outcome.queuedBefore.map((q) => q.id)).toEqual([
+      outcome.dropped.submissionId,
+      outcome.kept.submissionId,
+    ]);
+    expect(outcome.queuedBefore[0]?.content).toBe("drop me");
+
+    expect(outcome.withdrawn.outcome).toBe("withdrawn");
+    expect(outcome.withdrawn.submissionId).toBe(outcome.dropped.submissionId);
+    expect(outcome.queuedAfter.map((q) => q.id)).toEqual([
+      outcome.kept.submissionId,
+    ]);
+    expect(outcome.placed.outcome).toBe("already_placed");
+    expect(outcome.again.outcome).toBe("settled");
+
+    for (const refused of [
+      outcome.unknown,
+      outcome.malformed,
+      outcome.unknownSession,
+    ]) {
+      const failure = Exit.findErrorOption(refused);
+      expect(Option.isSome(failure)).toBe(true);
+      expect(Option.getOrThrow(failure).code).toBe("not_found");
+    }
+
+    // The message left before any run took it, so it never reached the transcript; the one left in
+    // the queue did.
+    const texts = userTexts(outcome.settled);
+    expect(texts).toContain("take your time");
+    expect(texts).toContain("keep me");
+    expect(texts).not.toContain("drop me");
+  }, 120_000);
+
+  it("streams the queue shrinking to a watcher, and the steer never lands", async () => {
+    const seen = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a watched queue" });
+        yield* sessions.send({
+          sessionId: created.id,
+          content: "take your time",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+          "the turn to start",
+        );
+        const queued = yield* sessions.send({
+          sessionId: created.id,
+          content: "drop me",
+          whenBusy: "steer",
+        });
+        const readings = yield* Ref.make<ReadonlyArray<readonly string[]>>([]);
+        // Every user entry the watcher is sent. A steer the withdrawal missed would drain the queue
+        // too — placed at the next tool boundary — so the drain alone does not tell the two apart.
+        const userEntries = yield* Ref.make<readonly string[]>([]);
+        const watcher = yield* sessions.events(created.id).pipe(
+          Stream.runForEach((event) =>
+            event._tag === "snapshot" || event._tag === "queued"
+              ? Ref.update(readings, (all) => [
+                  ...all,
+                  event.queued.map((q) => q.id),
+                ])
+              : event._tag === "entry" && event.entry.kind === "user"
+                ? Ref.update(userEntries, (all) => [...all, event.entry.text])
+                : Effect.void,
+          ),
+          Effect.forkChild,
+        );
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.length > 0)),
+          "the watcher's snapshot",
+        );
+        yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: queued.submissionId,
+        });
+        yield* waitUntil(
+          Ref.get(readings).pipe(Effect.map((all) => all.at(-1)?.length === 0)),
+          "the watcher to see the queue drain",
+        );
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the turn to settle",
+        );
+        yield* Fiber.interrupt(watcher);
+        return {
+          id: queued.submissionId,
+          readings: yield* Ref.get(readings),
+          userEntries: yield* Ref.get(userEntries),
+          settled: yield* sessions.get(created.id),
+        };
+      }),
+    );
+
+    expect(seen.readings[0]).toEqual([seen.id]);
+    expect(seen.readings.at(-1)).toEqual([]);
+    expect(seen.userEntries).not.toContain("drop me");
+    expect(userTexts(seen.settled)).toEqual(["take your time"]);
+  }, 120_000);
+
+  it("answers a withdraw on a session nobody owns from the log, without opening an owner", async () => {
+    const outcome = await slow.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "an idle session" });
+        const first = yield* sessions.send({
+          sessionId: created.id,
+          content: "quick one",
+        });
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy &&
+                  snapshot.entries.at(-1)?.kind === "assistant",
+              ),
+            ),
+          "the turn to settle",
+        );
+        // Released, as an API restart or the idle sweep would leave it.
+        yield* sessions.close;
+
+        const settled = yield* sessions.withdraw({
+          sessionId: created.id,
+          submissionId: first.submissionId,
+        });
+        const unknown = yield* Effect.exit(
+          sessions.withdraw({ sessionId: created.id, submissionId: "999999" }),
+        );
+        // Still historical: neither answer took the log or opened the workspace.
+        const after = yield* sessions.get(created.id);
+        return { settled, unknown, mode: after.session.mode };
+      }),
+    );
+
+    expect(outcome.settled.outcome).toBe("settled");
+    const failure = Exit.findErrorOption(outcome.unknown);
+    expect(Option.isSome(failure)).toBe(true);
+    expect(Option.getOrThrow(failure).code).toBe("not_found");
+    expect(outcome.mode).toBe("historical");
+  }, 120_000);
+});
+
 describe("request limits", () => {
   it("refuses a message over the length cap with a typed error", async () => {
     const outcome = await program(
@@ -6107,5 +6371,251 @@ describe("the verify tool reads the session's workspace", () => {
     } finally {
       await verifyRuntime.dispose();
     }
+  }, 120_000);
+});
+
+/**
+ * The PR states what was verified (LOB-79, part 2 of LOB-16), from the run's recorded `verify`
+ * results and nothing the model wrote.
+ *
+ * Each case is a whole run through the real service: a fixture repo with a verify skill, a faux model
+ * whose `bash` turn commits a change and whose next turn calls `verify`, then the PR step against the
+ * in-process GitHub fake (`makeGithubFake`, the GitHub row of `docs/testing-third-parties.md`). The
+ * body asserted is the one GitHub was *sent*; the evidence asserted beside it is the one the log
+ * committed, read back by a reader that owns nothing.
+ */
+describe("the PR's evidence", () => {
+  const evidenceRoot = mkdtempSync(join(tmpdir(), "factory-core-evidence-"));
+
+  /** A repo whose `verify-api` skill is `drive`, committed on `main`. */
+  const fixture = (name: string, drive: string): string => {
+    const root = mkdtempSync(join(tmpdir(), `factory-repo-evidence-${name}-`));
+    const git = (command: string) =>
+      execSync(command, { cwd: root, stdio: "ignore" });
+    git("git init -b main");
+    git("git config user.email t@t.com");
+    git("git config user.name t");
+    mkdirSync(join(root, ".pi", "skills", "verify-api"), { recursive: true });
+    writeFileSync(join(root, ".pi", "skills", "verify-api", "drive.sh"), drive);
+    git("git add -A");
+    git("git commit -m base");
+    return root;
+  };
+
+  /** One run that changes `apps/api` and calls `verify`, then the PR step; the sent body and the log. */
+  const verifiedPr = async (
+    name: string,
+    drive: string,
+    number: number,
+    /** Run in the session's worktree after the run verified and before the PR opens. */
+    afterVerify?: string,
+  ) => {
+    const repoPath = fixture(name, drive);
+    const repo = RepoSlugSchema.make(`lobiklukas/evidence-${name}`);
+    const url = `https://github.com/lobiklukas/evidence-${name}/pull/${number}`;
+    const github = makeGithubFake(201, { number, url });
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      fauxCommand:
+        "mkdir -p apps/api && echo 'export const feature = 1;' > apps/api/feature.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m feature && echo committed",
+    });
+    const evidenceRuntime = ManagedRuntime.make(
+      SessionServiceLive({
+        model: faux.access,
+        sessionRoot: evidenceRoot,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      return await evidenceRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo,
+            url: `https://github.com/lobiklukas/evidence-${name}.git`,
+            localPath: repoPath,
+          });
+          const created = yield* sessions.create({ repo, baseRef: "main" });
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "make the change and verify it",
+          });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            `the ${name} run to verify and answer`,
+          );
+          if (afterVerify !== undefined) {
+            const { workspace } = yield* sessions.get(created.id);
+            execSync(afterVerify, { cwd: workspace.path, stdio: "ignore" });
+          }
+          const answer = yield* sessions
+            .openPullRequest({
+              sessionId: created.id,
+              title: `factory: ${name}`,
+              head: `factory/${created.id}`,
+              base: "main",
+            })
+            .pipe(Effect.provide(github.layer));
+          const sql = yield* SqlClient;
+          const { records, log } = yield* Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+            (storage) =>
+              Effect.all({
+                records: readVerifyRecords(storage),
+                log: readSessionLog(storage),
+              }),
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+          const sent = github.requests[0]?.body as
+            | { readonly body: string }
+            | undefined;
+          return {
+            answer,
+            requests: github.requests.length,
+            body: sent?.body ?? "",
+            records,
+            evidence: log.pr?.evidence,
+          };
+        }),
+      );
+    } finally {
+      await evidenceRuntime.dispose();
+    }
+  };
+
+  it("carries the skill name, the exit code and the output of the run's verify call", async () => {
+    const result = await verifiedPr(
+      "pass",
+      'echo "verify-api fixture: 3/3 checks passed"\n',
+      41,
+    );
+
+    expect(result.answer.outcome).toBe("opened");
+    expect(result.requests).toBe(1);
+    expect(result.body).toContain("## Verification");
+    expect(result.body).toContain("### `verify-api`: exit 0");
+    expect(result.body).toContain("- Surface: `api`");
+    expect(result.body).toContain("- Exit code: 0");
+    expect(result.body).toContain(
+      "```text\nverify-api fixture: 3/3 checks passed\n```",
+    );
+    // The body's evidence is the log's: the committed document holds the value it was rendered from.
+    expect(result.evidence).toEqual({
+      _tag: "EvidenceRecorded",
+      calls: 1,
+      changedCount: 1,
+      results: [
+        {
+          _tag: "VerificationRan",
+          surface: "api",
+          name: "verify-api",
+          source: "skill",
+          command: "bash drive.sh",
+          exitCode: 0,
+          excerpt: "verify-api fixture: 3/3 checks passed\n",
+          truncated: false,
+        },
+      ],
+      // The call measured the one path the PR publishes.
+      coverage: { published: 1, covered: 1, missed: [] },
+    });
+    expect(result.body).not.toContain("**Stale.**");
+  }, 120_000);
+
+  it("says the verdict predates a change committed after the verify call", async () => {
+    const result = await verifiedPr(
+      "stale",
+      'echo "verify-api fixture: 3/3 checks passed"\n',
+      44,
+      "mkdir -p apps/api && echo 'export const later = 2;' > apps/api/later.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m later",
+    );
+
+    expect(result.answer.outcome).toBe("opened");
+    expect(result.body).toContain("### `verify-api`: exit 0");
+    expect(result.body).toContain(
+      "**Stale.** The cited call measured 1 of the 2 path(s) this PR changes; the run changed the rest after it verified, so the verdict below predates them: `apps/api/later.ts`.",
+    );
+    expect(result.evidence).toMatchObject({
+      _tag: "EvidenceRecorded",
+      coverage: { published: 2, covered: 1, missed: ["apps/api/later.ts"] },
+    });
+  }, 120_000);
+
+  it("cuts a failing skill's long output to a bounded tail, visibly", async () => {
+    const result = await verifiedPr(
+      "fail",
+      'for i in $(seq 1 400); do echo "check $i"; done\necho "FAIL: 1 required check failed"\nexit 3\n',
+      42,
+    );
+
+    expect(result.body).toContain("### `verify-api`: exit 3 (failed)");
+    expect(result.body).toContain(
+      `Output (truncated: earlier output omitted, the last ${PR_EVIDENCE_EXCERPT.maxLines} line(s) shown):`,
+    );
+    expect(result.body).toContain("FAIL: 1 required check failed");
+    expect(result.body).not.toContain("check 1\n");
+    // Deterministic: the excerpt is exactly the PR bound's tail of the output the log recorded.
+    const [record] = result.records;
+    const recorded =
+      record?._tag === "VerifyReport" ? record.results[0] : undefined;
+    const output = recorded?._tag === "VerifyRan" ? recorded.output : "";
+    expect(output).toContain("check 300\n");
+    const excerpt = tailOf(output, PR_EVIDENCE_EXCERPT).output;
+    expect(excerpt.split("\n").filter((line) => line !== "")).toHaveLength(
+      PR_EVIDENCE_EXCERPT.maxLines,
+    );
+    expect(result.body).toContain(`\`\`\`text\n${excerpt}\`\`\``);
+    expect(result.evidence).toMatchObject({
+      _tag: "EvidenceRecorded",
+      results: [{ exitCode: 3, excerpt, truncated: true }],
+    });
+  }, 120_000);
+
+  it("says the run has no evidence when it never called verify", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/43";
+    const github = makeGithubFake(201, { number: 43, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        // A diff committed by hand: a PR exists to open, and no run ever verified it.
+        const { created } = yield* sessionWithDiff("an unverified change");
+        const answer = yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: an unverified change",
+            head: `factory/${created.id}`,
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+        const sql = yield* SqlClient;
+        const log = yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+          (storage) => readSessionLog(storage),
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+        return { answer, log };
+      }),
+    );
+
+    expect(opened(result.answer).url).toBe(url);
+    const sent = github.requests[0]?.body as { readonly body: string };
+    expect(sent.body).toContain("## Verification");
+    expect(sent.body).toContain(
+      "**No verification evidence.** Nothing in this PR was verified by a recorded run: " +
+        "the run never called the `verify` tool.",
+    );
+    expect(result.log.pr?.evidence).toEqual({
+      _tag: "EvidenceNone",
+      reason: "not-verified",
+      message: "the run never called the `verify` tool",
+    });
   }, 120_000);
 });

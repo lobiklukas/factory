@@ -65,3 +65,10 @@ change a file opens its PR rather than reading a sticky "nothing to do". It is c
 `packages/core/src/SessionService.test.ts` ("an empty diff": two runs on one unchanged checkout both
 answer `no-change` with an empty fake-GitHub ledger and one transcript line each, and a file committed
 afterwards opens the PR), and dropping the guard turns both cases red.
+
+**Its slug is its own, per run.** `pr-once.sh` binds its sessions to `lobiklukas/factory-pr-once-<run>`
+unless `PR_ONCE_REPO` names one. It used to default to `lobiklukas/factory`, which is the slug
+`docs-run.sh` registers with a real local checkout: on a database that drive had already run against,
+pr-once's sessions were handed that checkout, the branch had nothing to diff, the step answered
+`no-change`, and every check failed for a reason unrelated to the one under test. An explicit
+`PR_ONCE_REPO` must stay clear of any slug another drive on the same `DATABASE_URL` registered.

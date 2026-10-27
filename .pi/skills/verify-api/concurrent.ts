@@ -7,23 +7,29 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
+import { RepoSlug } from "@repo/domain/Session";
 import { Effect } from "effect";
 import { RpcClient } from "effect/rpc";
-import { makeChecker, protocolFor } from "./harness.ts";
+import { makeChecker, protocolFor, type CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9200";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
-const observed: { apiUrl: string; checks: Record<string, unknown> } = {
+const observed: {
+  apiUrl: string;
+  checks: Record<string, CheckRecord>;
+  workspaces: { a: string; b: string } | null;
+} = {
   apiUrl: API_URL,
   checks: {},
+  workspaces: null,
 };
 const assert = makeChecker(observed);
 const ProtocolLive = protocolFor(API_URL);
 
-const repoSlug = "lobiklukas/verify-api-fixture";
+const repoSlug = RepoSlug.make("lobiklukas/verify-api-fixture");
 const repoUrl = "https://github.com/lobiklukas/factory.git";
 const fixture = path.resolve(
   new URL(".", import.meta.url).pathname,
@@ -70,18 +76,18 @@ const program = Effect.gen(function* () {
     `b=${sb.workspace.path}`,
   );
 
-  observed.checks = { a: sa.workspace.path, b: sb.workspace.path };
+  observed.workspaces = { a: sa.workspace.path, b: sb.workspace.path };
 });
 
 const exit = await Effect.runPromiseExit(
-  program.pipe(Effect.provide(ProtocolLive)),
+  program.pipe(Effect.provide(ProtocolLive), Effect.scoped),
 );
 if (exit._tag !== "Success") {
   console.error(exit);
   process.exit(1);
 }
 const failed = Object.entries(observed.checks).filter(
-  ([, check]) => (check as { passed?: boolean }).passed === false,
+  ([, check]) => !check.passed,
 );
 await writeFile(
   path.join(EVIDENCE_DIR, "concurrent-observed.json"),
