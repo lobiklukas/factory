@@ -22,7 +22,7 @@
 // Env: MODE, DATABASE_URL (via DatabaseLive), SPEC_STATE (the log id file), SPEC_CWD, EVIDENCE_DIR.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Effect, ManagedRuntime } from "effect";
+import { Effect, ManagedRuntime, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import {
   closeHarness,
@@ -92,7 +92,7 @@ const same = (left: unknown, right: unknown): boolean =>
 
 /** The refusal as evidence: its tag and the fields a caller branches on. */
 const refusalRecord = (error: unknown) =>
-  error instanceof SpecRefused
+  Schema.is(SpecRefused)(error)
     ? {
         tag: error._tag,
         field: error.field,
@@ -129,7 +129,7 @@ const write = Effect.gen(function* () {
   observed.missing = refusalRecord(missing);
   assert(
     "a spec with no gaps field is refused with a typed error naming gaps as missing",
-    missing instanceof SpecRefused &&
+    Schema.is(SpecRefused)(missing) &&
       missing.field === "gaps" &&
       missing.reason === "missing",
     JSON.stringify(observed.missing),
@@ -145,7 +145,7 @@ const write = Effect.gen(function* () {
   observed.invalid = refusalRecord(invalid);
   assert(
     "gaps: null is refused for the same field with a different reason, so absent is its own answer",
-    invalid instanceof SpecRefused &&
+    Schema.is(SpecRefused)(invalid) &&
       invalid.field === "gaps" &&
       invalid.reason === "invalid",
     JSON.stringify(observed.invalid),
