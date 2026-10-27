@@ -13,3 +13,4 @@ export * from "./Jira";
 export * from "./GitHub";
 export * from "./DocsTrigger";
 export * from "./Slack";
+export * from "./git";

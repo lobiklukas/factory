@@ -1,0 +1,613 @@
+/**
+ * Moving a session's refs against a local bare repository, with the credential injected per call
+ * (LOB-54, docs/design.md D10/D11/D14).
+ *
+ * Nothing here is mocked and nothing leaves the machine (docs/testing-third-parties.md, `git`): the
+ * remote is a bare repository this file creates, served over git's smart-HTTP protocol by the real
+ * `git http-backend` behind an in-process `node:http` listener on an ephemeral loopback port. The
+ * listener answers `401` to any request without `x-access-token:<token>` Basic auth, which is what
+ * makes the credential load-bearing: over a plain path remote git never asks for one, so a runner
+ * that forgot to inject it would still pass. Every request's credential is recorded, so a case can
+ * say which token git actually sent.
+ *
+ * The session's checkout is the one LOB-11 cuts: `resolveWorkspace` makes the linked worktree on
+ * `factory/<session-id>` off a registered repo's `local_path`.
+ */
+import { BunServices } from "@effect/platform-bun";
+import {
+  Effect,
+  Exit,
+  FileSystem,
+  Option,
+  Path,
+  Redacted,
+  Schema,
+} from "effect";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { once } from "node:events";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RepoSlug, type SessionId } from "@repo/domain/Session";
+import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { fetchBranch, GitError, isSafeBranchName, pushBranch } from "./git";
+import { mintSessionId } from "./ids";
+import { resolveWorkspace } from "./workspace";
+
+const repo = RepoSlug.make("lobiklukas/factory");
+const TOKEN = `ghs_${randomBytes(18).toString("hex")}`;
+
+const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
+  execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t.com",
+    },
+  }).trim();
+
+const commitFile = (cwd: string, file: string, text: string): string => {
+  writeFileSync(join(cwd, file), text);
+  git(cwd, "add", file);
+  git(cwd, "commit", "-m", `write ${file}`);
+  return git(cwd, "rev-parse", "HEAD");
+};
+
+/** Every file under a directory, `.git` included: what "on disk" means for the token check. */
+const filesUnder = (root: string): ReadonlyArray<string> =>
+  readdirSync(root).flatMap((name) => {
+    const full = join(root, name);
+    return statSync(full).isDirectory() ? filesUnder(full) : [full];
+  });
+
+type Seen = { readonly user: string; readonly password: string };
+
+/**
+ * The smart-HTTP remote: `git http-backend` as a CGI behind a Basic-auth gate. `seen` records the
+ * credential of every request that carried one; `requests` counts every request at all, so a case
+ * can prove a refused call never reached the remote.
+ */
+const startRemote = async (
+  projectRoot: string,
+): Promise<{
+  readonly server: Server;
+  readonly url: string;
+  readonly seen: Array<Seen>;
+  readonly requests: { count: number };
+}> => {
+  const seen: Array<Seen> = [];
+  const requests = { count: 0 };
+  const server = createServer((req, res) => {
+    requests.count += 1;
+    const header = req.headers.authorization ?? "";
+    const decoded = header.startsWith("Basic ")
+      ? Buffer.from(header.slice(6), "base64").toString("utf8")
+      : undefined;
+    if (decoded !== undefined) {
+      const at = decoded.indexOf(":");
+      seen.push({
+        user: decoded.slice(0, at),
+        password: decoded.slice(at + 1),
+      });
+    }
+    if (decoded !== `x-access-token:${TOKEN}`) {
+      req.resume();
+      res.writeHead(401, { "WWW-Authenticate": 'Basic realm="factory-test"' });
+      res.end();
+      return;
+    }
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const cgi = spawn("git", ["http-backend"], {
+      env: {
+        ...process.env,
+        GIT_PROJECT_ROOT: projectRoot,
+        GIT_HTTP_EXPORT_ALL: "1",
+        PATH_INFO: decodeURIComponent(url.pathname),
+        QUERY_STRING: url.search.slice(1),
+        REQUEST_METHOD: req.method ?? "GET",
+        CONTENT_TYPE: req.headers["content-type"] ?? "",
+        REMOTE_USER: "x-access-token",
+        REMOTE_ADDR: "127.0.0.1",
+        GIT_PROTOCOL: String(req.headers["git-protocol"] ?? ""),
+        HTTP_CONTENT_ENCODING: String(req.headers["content-encoding"] ?? ""),
+        ...(req.headers["content-length"] === undefined
+          ? {}
+          : { CONTENT_LENGTH: req.headers["content-length"] }),
+      },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    req.pipe(cgi.stdin);
+    const chunks: Array<Buffer> = [];
+    cgi.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    cgi.on("close", () => {
+      const out = Buffer.concat(chunks);
+      const crlf = out.indexOf("\r\n\r\n");
+      const lf = out.indexOf("\n\n");
+      const split = crlf !== -1 && (lf === -1 || crlf < lf) ? crlf : lf;
+      const sep = split === crlf ? 4 : 2;
+      const head = out.subarray(0, split).toString("utf8");
+      let status = 200;
+      const headers: Record<string, string> = {};
+      for (const line of head.split(/\r?\n/)) {
+        const colon = line.indexOf(":");
+        if (colon === -1) continue;
+        const name = line.slice(0, colon).trim();
+        const value = line.slice(colon + 1).trim();
+        if (name.toLowerCase() === "status")
+          status = Number(value.split(" ")[0]);
+        else headers[name] = value;
+      }
+      res.writeHead(status, headers);
+      res.end(out.subarray(split + sep));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("the test remote did not bind a TCP port");
+  return { server, url: `http://127.0.0.1:${address.port}`, seen, requests };
+};
+
+// Hermetic: the system and global git configuration of whoever runs the suite are not read, by the
+// setup commands or by the runner's children (it extends this environment). That keeps a
+// developer's `url.insteadOf` or signing setup out of the cases, and it keeps a regression of the
+// helper reset from `approve`-ing the test token into a real keychain (`osxkeychain` is Apple Git's
+// system default); the repo-level storing helper below is what witnesses that regression instead.
+// oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+process.env["GIT_CONFIG_NOSYSTEM"] = "1";
+// oxlint-disable-next-line effecttsgo/process-env -- as above.
+process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
+
+/** Each case spawns a few dozen git processes; `bun run test` runs every package at once. */
+const GIT_CASE = { timeout: 30_000 };
+
+const root = mkdtempSync(join(tmpdir(), "factory-git-"));
+const bare = join(root, "remote.git");
+const upstream = join(root, "upstream");
+const local = join(root, "local");
+const sessionRoot = join(root, "sessions");
+const leakedStore = join(root, "leaked-credentials");
+let remote: Awaited<ReturnType<typeof startRemote>>;
+
+const withToken = (token: Option.Option<Redacted.Redacted<string>>) =>
+  Effect.provideService(
+    CredentialProvider,
+    CredentialProvider.of(staticTokenProvider(token)),
+  );
+
+const runWith = <A, E>(
+  effect: Effect.Effect<A, E, CredentialProvider | BunServices.BunServices>,
+  token: Option.Option<Redacted.Redacted<string>> = Option.some(
+    Redacted.make(TOKEN),
+  ),
+) =>
+  Effect.runPromiseExit(
+    effect.pipe(withToken(token), Effect.provide(BunServices.layer)),
+  );
+
+const isGitError = Schema.is(GitError);
+
+const gitErrorOf = <A>(exit: Exit.Exit<A, unknown>): GitError | undefined =>
+  Exit.isFailure(exit)
+    ? exit.cause.reasons.flatMap((r) =>
+        r._tag === "Fail" && isGitError(r.error) ? [r.error] : [],
+      )[0]
+    : undefined;
+
+/** A session: its id and the worktree LOB-11 cut for it on `factory/<id>`. */
+const openSession = async (): Promise<{
+  readonly id: SessionId;
+  readonly branch: string;
+  readonly worktree: string;
+}> => {
+  const workspace = await Effect.runPromise(
+    Effect.gen(function* () {
+      const id = yield* mintSessionId;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const resolved = yield* resolveWorkspace(
+        { sessionRoot, sessionId: id, repo, localPath: local, baseRef: "main" },
+        { fs, path },
+      );
+      return { id, resolved };
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  const branch = workspace.resolved.branch ?? "";
+  expect(branch).toBe(`factory/${workspace.id}`);
+  return { id: workspace.id, branch, worktree: workspace.resolved.path };
+};
+
+beforeAll(async () => {
+  git(root, "init", "--bare", "-b", "main", bare);
+  git(bare, "config", "http.receivepack", "true");
+  git(root, "clone", bare, upstream);
+  commitFile(upstream, "README.md", "seed\n");
+  git(upstream, "push", "origin", "main");
+  remote = await startRemote(root);
+  // The registered repo: a clone whose `origin` is the authenticated HTTP remote, credential-free.
+  git(root, "clone", bare, local);
+  git(local, "remote", "set-url", "origin", `${remote.url}/remote.git`);
+  // A helper that *stores*: if the runner let configured helpers see the token, git would
+  // `approve` it into this file after the first successful call.
+  git(local, "config", "credential.helper", `store --file=${leakedStore}`);
+});
+
+afterAll(() => {
+  remote?.server.close();
+  // One directory holds the remote, the registered repo and every worktree, so one removal is all.
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe(
+  "fetch, commit, push against a local bare repository",
+  GIT_CASE,
+  () => {
+    it("fetches the advanced base, commits on factory/<session-id>, and pushes it to the remote", async () => {
+      const session = await openSession();
+      const upstreamTip = commitFile(upstream, "UPSTREAM.md", "moved on\n");
+      git(upstream, "push", "origin", "main");
+      expect(
+        git(session.worktree, "rev-parse", "refs/remotes/origin/main"),
+      ).not.toBe(upstreamTip);
+
+      const before = remote.seen.length;
+      const fetched = await runWith(
+        fetchBranch({ worktree: session.worktree, repo, branch: "main" }),
+      );
+      expect(Exit.isSuccess(fetched)).toBe(true);
+      if (Exit.isSuccess(fetched)) {
+        expect(fetched.value).toEqual({
+          ref: "refs/remotes/origin/main",
+          sha: upstreamTip,
+        });
+      }
+      expect(
+        git(session.worktree, "rev-parse", "refs/remotes/origin/main"),
+      ).toBe(upstreamTip);
+
+      git(session.worktree, "merge", "--ff-only", "origin/main");
+      const head = commitFile(
+        session.worktree,
+        "WORK.md",
+        "the session's work\n",
+      );
+      expect(git(session.worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+        session.branch,
+      );
+
+      const pushed = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+      );
+      expect(Exit.isSuccess(pushed)).toBe(true);
+      if (Exit.isSuccess(pushed)) {
+        expect(pushed.value).toEqual({
+          ref: `refs/heads/${session.branch}`,
+          sha: head,
+          outcome: "created",
+        });
+      }
+      expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(head);
+
+      // The remote saw the token, as the username GitHub expects: the credential was the one
+      // resolved from the provider, not something git found on its own.
+      const used = remote.seen.slice(before);
+      expect(used.length).toBeGreaterThan(0);
+      expect(used.every((s) => s.user === "x-access-token")).toBe(true);
+      expect(used.some((s) => s.password === TOKEN)).toBe(true);
+
+      // A second commit fast-forwards the branch.
+      const next = commitFile(session.worktree, "WORK.md", "more work\n");
+      const again = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+      );
+      expect(Exit.isSuccess(again) ? again.value.outcome : undefined).toBe(
+        "updated",
+      );
+      expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(next);
+    });
+
+    it("leaves the token in neither .git/config, the stored remote URL, nor any file on disk", async () => {
+      const session = await openSession();
+      commitFile(session.worktree, "LEAK.md", "a push to inspect after\n");
+      const pushed = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+      );
+      expect(Exit.isSuccess(pushed)).toBe(true);
+
+      const commonDir = join(local, ".git");
+      const config = readFileSync(join(commonDir, "config"), "utf8");
+      expect(config).toContain(`${remote.url}/remote.git`);
+      expect(config).not.toContain(TOKEN);
+
+      const storedUrl = git(session.worktree, "remote", "get-url", "origin");
+      expect(storedUrl).toBe(`${remote.url}/remote.git`);
+      expect(storedUrl).not.toContain(TOKEN);
+      expect(
+        git(session.worktree, "config", "--get-all", "remote.origin.url"),
+      ).toBe(storedUrl);
+
+      // The configured storing helper was never handed the token.
+      expect(existsSync(leakedStore)).toBe(false);
+
+      // Every file of the registered repo (its `.git` included), every session's worktree, and the
+      // remote itself: no byte sequence equal to the token anywhere.
+      const files = [
+        ...filesUnder(local),
+        ...filesUnder(sessionRoot),
+        ...filesUnder(bare),
+      ];
+      expect(files.length).toBeGreaterThan(10);
+      const tokenBytes = Buffer.from(TOKEN);
+      const holding = files.filter((file) =>
+        readFileSync(file).includes(tokenBytes),
+      );
+      expect(holding).toEqual([]);
+    });
+  },
+);
+
+describe("a rejected push", GIT_CASE, () => {
+  it("is a typed non-fast-forward error naming the operation and the ref, whether or not the remote's commit was fetched", async () => {
+    const session = await openSession();
+    const ref = `refs/heads/${session.branch}`;
+    commitFile(session.worktree, "MINE.md", "first\n");
+    expect(
+      Exit.isSuccess(
+        await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            branch: session.branch,
+          }),
+        ),
+      ),
+    ).toBe(true);
+
+    // Someone else moves the remote branch on.
+    git(upstream, "fetch", "origin", `${ref}:${ref}`);
+    git(upstream, "checkout", "-q", session.branch);
+    const theirs = commitFile(upstream, "THEIRS.md", "theirs\n");
+    git(upstream, "push", "origin", `${ref}:${ref}`);
+    git(upstream, "checkout", "-q", "main");
+
+    // The session diverges without knowing: git says "fetch first".
+    commitFile(session.worktree, "MINE.md", "second\n");
+    const blind = gitErrorOf(
+      await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+      ),
+    );
+    expect(blind).toMatchObject({
+      _tag: "GitError",
+      operation: "push",
+      remote: "origin",
+      ref,
+      reason: "non-fast-forward",
+    });
+
+    // After fetching the remote's branch, git says "non-fast-forward": the same typed answer.
+    const fetched = await runWith(
+      fetchBranch({ worktree: session.worktree, repo, branch: session.branch }),
+    );
+    expect(Exit.isSuccess(fetched) ? fetched.value.sha : undefined).toBe(
+      theirs,
+    );
+    const informed = gitErrorOf(
+      await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+      ),
+    );
+    expect(informed).toMatchObject({
+      operation: "push",
+      ref,
+      reason: "non-fast-forward",
+    });
+
+    // The message names both, and is not git's stderr: no hints, no remote banner, no token.
+    for (const error of [blind, informed]) {
+      expect(error?.message).toContain("push");
+      expect(error?.message).toContain(ref);
+      expect(error?.message).not.toMatch(/hint:|To http|error: failed to push/);
+      expect(error?.message).not.toContain(TOKEN);
+      expect(error?.message.split("\n")).toHaveLength(1);
+    }
+    // And nothing was forced: the remote still holds their commit.
+    expect(git(bare, "rev-parse", ref)).toBe(theirs);
+  });
+
+  it("is a typed auth error when the remote refuses the credential, without echoing it", async () => {
+    const session = await openSession();
+    commitFile(session.worktree, "AUTH.md", "x\n");
+    const wrong = `ghs_${randomBytes(18).toString("hex")}`;
+    const before = remote.seen.length;
+    const error = gitErrorOf(
+      await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          branch: session.branch,
+        }),
+        Option.some(Redacted.make(wrong)),
+      ),
+    );
+    expect(error).toMatchObject({
+      operation: "push",
+      ref: `refs/heads/${session.branch}`,
+      reason: "auth",
+    });
+    expect(error?.message).not.toContain(wrong);
+    expect(remote.seen.slice(before).some((s) => s.password === wrong)).toBe(
+      true,
+    );
+
+    const fetchError = gitErrorOf(
+      await runWith(
+        fetchBranch({ worktree: session.worktree, repo, branch: "main" }),
+        Option.some(Redacted.make(wrong)),
+      ),
+    );
+    expect(fetchError).toMatchObject({
+      operation: "fetch",
+      ref: "refs/heads/main",
+      reason: "auth",
+    });
+  });
+
+  it("is a typed missing-ref error for a branch the remote does not have", async () => {
+    const session = await openSession();
+    const error = gitErrorOf(
+      await runWith(
+        fetchBranch({
+          worktree: session.worktree,
+          repo,
+          branch: "no-such-branch",
+        }),
+      ),
+    );
+    expect(error).toMatchObject({
+      operation: "fetch",
+      ref: "refs/heads/no-such-branch",
+      reason: "missing-ref",
+    });
+  });
+});
+
+describe("what is refused before git runs", GIT_CASE, () => {
+  it("fails with the provider's typed error when no token is configured, and reaches no remote", async () => {
+    const session = await openSession();
+    commitFile(session.worktree, "NOTOKEN.md", "x\n");
+    const before = remote.requests.count;
+    const exit = await runWith(
+      pushBranch({ worktree: session.worktree, repo, branch: session.branch }),
+      Option.none(),
+    );
+    const error = Exit.isFailure(exit)
+      ? exit.cause.reasons.flatMap((r) =>
+          r._tag === "Fail" ? [r.error] : [],
+        )[0]
+      : undefined;
+    expect(error).toMatchObject({ _tag: "CredentialError", code: "missing" });
+    expect(remote.requests.count).toBe(before);
+  });
+
+  it("refuses to push a branch outside factory/, or one that smuggles a second refspec", async () => {
+    const session = await openSession();
+    const before = remote.requests.count;
+    for (const branch of [
+      "main",
+      `${session.branch}:refs/heads/main`,
+      `+${session.branch}`,
+      "factory/../main",
+      "factory/-x",
+    ]) {
+      const error = gitErrorOf(
+        await runWith(pushBranch({ worktree: session.worktree, repo, branch })),
+      );
+      expect(error, branch).toMatchObject({
+        operation: "push",
+        reason: "refused",
+      });
+    }
+    expect(remote.requests.count).toBe(before);
+    expect(git(bare, "rev-parse", "refs/heads/main")).toBe(
+      git(upstream, "rev-parse", "main"),
+    );
+  });
+
+  it("refuses a remote whose stored URL already carries a credential", async () => {
+    const session = await openSession();
+    git(
+      local,
+      "remote",
+      "add",
+      "leaky",
+      remote.url.replace("http://", "http://x-access-token:stored@") +
+        "/remote.git",
+    );
+    const before = remote.requests.count;
+    const error = gitErrorOf(
+      await runWith(
+        fetchBranch({
+          worktree: session.worktree,
+          repo,
+          remote: "leaky",
+          branch: "main",
+        }),
+      ),
+    );
+    expect(error).toMatchObject({
+      operation: "fetch",
+      remote: "leaky",
+      reason: "refused",
+    });
+    expect(remote.requests.count).toBe(before);
+    git(local, "remote", "remove", "leaky");
+  });
+});
+
+describe("isSafeBranchName", () => {
+  it("accepts the branches the control plane names and nothing that reads as a refspec or option", () => {
+    for (const ok of [
+      "main",
+      "factory/ses_01abc",
+      "factory/doc-x1",
+      "release/1.2",
+    ])
+      expect(isSafeBranchName(ok), ok).toBe(true);
+    for (const bad of [
+      "",
+      "a:b",
+      "+main",
+      "-main",
+      "a..b",
+      "factory//x",
+      "/main",
+      "main/",
+      "x.lock",
+      "x.",
+      ".hidden",
+      "has space",
+      "a~1",
+      "a^",
+      "a@{1}",
+    ])
+      expect(isSafeBranchName(bad), bad).toBe(false);
+  });
+});
