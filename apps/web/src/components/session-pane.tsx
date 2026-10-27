@@ -37,6 +37,7 @@ import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CompactButton } from "@/components/compact-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
+import { visibleEntries } from "@/lib/transcript-view";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -211,6 +212,12 @@ export const SessionPane = ({
       return;
     setCompactionWindow({ ...compactionWindow, after: view.usage });
   }, [compactionWindow, sessionId, view]);
+
+  /**
+   * The entries that have a row (LOB-273). The log's `title` and text-less `system` entries are
+   * bookkeeping; `index` keeps each row's place in the full log for the compaction lookup below.
+   */
+  const rows = view === null ? [] : visibleEntries(view.entries);
 
   const attaching = AsyncResult.isInitial(result);
   const failure = AsyncResult.isFailure(result) ? result.cause : null;
@@ -475,15 +482,16 @@ export const SessionPane = ({
                   </Alert>
                 ) : null}
 
-                {view?.entries.map((entry, index) => (
+                {rows.map(({ entry, index }, position) => (
                   <MessageScrollerItem
                     key={entry.id}
                     messageId={entry.id}
-                    scrollAnchor={index === view.entries.length - 1}
+                    scrollAnchor={position === rows.length - 1}
                   >
                     <TranscriptRow
                       entry={entry}
                       spend={
+                        view !== null &&
                         compactionSummaryRow === index &&
                         compactionWindow !== null
                           ? compactionDelta(compactionWindow, view.usage)
@@ -493,7 +501,7 @@ export const SessionPane = ({
                   </MessageScrollerItem>
                 ))}
 
-                {view !== null && view.entries.length === 0 ? (
+                {view !== null && rows.length === 0 ? (
                   <Empty>
                     <EmptyTitle>Nothing in this log yet</EmptyTitle>
                     <EmptyDescription>

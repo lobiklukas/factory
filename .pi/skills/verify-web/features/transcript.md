@@ -8,6 +8,8 @@ follows the stream. `drive.mjs` expands a `toolResult` disclosure and screenshot
 - Row kinds render distinctly: `user` (a muted bubble, right-aligned), `assistant` (prose at full
   width), `system` / `reset` / `compaction` (a marker between two hairlines), `toolResult` (a
   disclosure, collapsed by default)
+- `title` (the session's name, which carries the first prompt) and a text-less `system` entry have no
+  row at all (LOB-273): the transcript shows each message once, under its real author
 - The scroller opens on the newest row (`defaultScrollPosition="end"`) and follows the stream as
   entries arrive, so a live run does not push the newest line below the fold
 - A scroll-to-end button appears only once the reader has scrolled away, and hides again at the end
@@ -40,6 +42,18 @@ surface, because that is the one line being attributed.
 The tool call itself is not labelled above its result: a `toolResult` entry follows every call and
 already carries the name inside the disclosure, so a label above it says the same fact twice. An
 in-flight call shows in the header instead.
+
+## Why the title and system entries have no row (LOB-273)
+
+`factory.title` is a log entry, projected as kind `title` with the session's name as its text. With
+no branch for it the row fell through to assistant prose, so the first prompt appeared as a plain
+paragraph (as if the agent had said it), then as the user's bubble, then an empty `SYSTEM` divider
+(the projection flattens only user, assistant and tool-result text, so a `system` entry always has
+empty text). `hasTranscriptRow` (`lib/transcript-view.ts`) names the entries that get no row; the pane
+skips them before rendering because the scroller's `gap-5` would stack an empty gap for a null row,
+and `TranscriptRow` returns nothing for them as well. A log holding only the title shows the
+"Nothing in this log yet" state, and the header still names the session. `drive.mjs` counts the
+scroller's items equal to the prompt (one, in a bubble) and requires no bare `SYSTEM` item.
 
 ## Gotchas
 
