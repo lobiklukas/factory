@@ -13,7 +13,9 @@ import {
   awaitingMove,
   blockedLabel,
   boardLanes,
+  landedOn,
   moveRefusal,
+  recordLanding,
   refusalIsCurrent,
   runSelection,
   offeredMoves,
@@ -280,6 +282,34 @@ describe("awaitingMove", () => {
     expect(awaitingMove(2, { revision: 1 })).toBe(true);
     expect(awaitingMove(2, { revision: 2 })).toBe(false);
     expect(awaitingMove(2, { revision: 5 })).toBe(false);
+  });
+});
+
+describe("recordLanding and landedOn", () => {
+  const one = Schema.decodeSync(TaskId)(`tsk_${"1".padStart(26, "0")}`);
+  const two = Schema.decodeSync(TaskId)(`tsk_${"2".padStart(26, "0")}`);
+
+  it("is one landing per card: a comment's R+2 then a move's R+3 hold until R+3", () => {
+    const answered = recordLanding(null, one, 7);
+    expect(landedOn(answered, { id: one })).toBe(7);
+    const moved = recordLanding(answered, one, 8);
+    expect(landedOn(moved, { id: one })).toBe(8);
+    expect(awaitingMove(landedOn(moved, { id: one }), { revision: 7 })).toBe(
+      true,
+    );
+  });
+
+  it("never goes back to an earlier revision a slower answer carries", () => {
+    expect(
+      landedOn(recordLanding(recordLanding(null, one, 8), one, 7), { id: one }),
+    ).toBe(8);
+  });
+
+  it("says nothing about another card the pane now shows", () => {
+    const landed = recordLanding(null, one, 7);
+    expect(landedOn(landed, { id: two })).toBeNull();
+    expect(landedOn(recordLanding(landed, two, 2), { id: two })).toBe(2);
+    expect(landedOn(null, { id: one })).toBeNull();
   });
 });
 

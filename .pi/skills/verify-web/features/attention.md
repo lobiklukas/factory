@@ -17,7 +17,8 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   `li[data-attention-reason=approval]`, text `A run asks to <action>[: <detail>]`.
 - **Answer a run's question** — the card is blocked `needs_input` (B7). The reason is the newest
   `question` comment asked since the block began (the ask tool's), or the block's note when a person
-  blocked it by hand — an answered question from an earlier block never reappears. `li[data-attention-reason=question]`, text `Asked: <question>`.
+  blocked it by hand — an answered question from an earlier block never reappears. `li[data-attention-reason=question]`, text `Asked: <question>`. Its link opens the card at `#thread`,
+  where the question is answered ([thread.md](thread.md)).
 - **Make a person's move** — the card is not blocked, its column's exit crosses a human gate
   (`planning → building` plan approval, `review → done` merge; B5), it has a run started in that
   column, no run of the card is busy (`session_activity`), and no run of the card holds an
@@ -58,7 +59,8 @@ resting card, a card blocked `dependency` in `planning`, and cards in `planning`
    to carry the action and its detail;
 5. the page's rows to be exactly `listAttention`'s, grouped approval, question, gate, with the
    dependency-blocked and resting cards absent;
-6. each row's `href` to be `/boards/<id>?card=<task>` (the approval's with `&run=<session>`); a click
+6. each row's `href` to be `/boards/<id>?card=<task>` (the approval's with `&run=<session>`, the
+   question's with `#thread`, the card pane's thread — [thread.md](thread.md)); a click
    on the gate row to open that card's pane in `planning` with the plan approval marked; the board
    header's **Needs a person** to lead back; a click on the approval row to open the run's tabs;
 7. a `commentTask` from the drive (the answer) to drop the question row without a reload;
