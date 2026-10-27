@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -534,4 +535,237 @@ describe("the dev scripts load the repo-root env file (LOB-256)", () => {
       expect(run.value).toBe("from-shell");
     }
   }, 180_000);
+});
+
+/**
+ * The names a source file reads from the environment: `process.env["X"]`, `process.env.X`, and any
+ * upper-case string literal inside a `Config.*(...)` call (`Config.String("X")`,
+ * `Config.Literals([...], "X")`, `Config.schema(Schema, "X")`, `Config.withDefault(Config.Int("X"), 1)`).
+ * Comments are dropped first, so a name only mentioned in prose is not a read.
+ *
+ * A read through a variable (`process.env[name]`) is invisible here by construction, so the source
+ * keeps every read a literal at its call site.
+ */
+const environmentReads = (source: string): readonly string[] => {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const names = new Set<string>();
+  for (const match of code.matchAll(
+    /process\.env(?:\["([A-Z][A-Z0-9_]*)"\]|\.([A-Z][A-Z0-9_]*))/g,
+  )) {
+    names.add(match[1] ?? match[2] ?? "");
+  }
+  for (const call of code.matchAll(/\bConfig\.[A-Za-z]+\(/g)) {
+    let depth = 1;
+    let end = call.index + call[0].length;
+    while (end < code.length && depth > 0) {
+      if (code[end] === "(") depth += 1;
+      if (code[end] === ")") depth -= 1;
+      end += 1;
+    }
+    for (const literal of code
+      .slice(call.index, end)
+      .matchAll(/"([A-Z][A-Z0-9_]+)"/g)) {
+      names.add(literal[1] ?? "");
+    }
+  }
+  return [...names].sort();
+};
+
+/** Every production source under `directory` (relative to the repo root), tests and builds excluded. */
+const sourceFiles = (directory: string): readonly string[] =>
+  readdirSync(`${REPO_ROOT}${directory}`, { recursive: true, encoding: "utf8" })
+    .filter(
+      (path) =>
+        /\.tsx?$/.test(path) &&
+        !/\.test\.tsx?$/.test(path) &&
+        !/(^|\/)(node_modules|dist)\//.test(path),
+    )
+    .map((path) => `${REPO_ROOT}${directory}/${path}`);
+
+/** The workspace packages a package's `dependencies` name, as directories relative to the repo root. */
+const workspaceDependencies = (directory: string): readonly string[] => {
+  const manifest = JSON.parse(
+    readFileSync(`${REPO_ROOT}${directory}/package.json`, "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  return Object.entries(manifest.dependencies ?? {})
+    .filter(([, range]) => range.startsWith("workspace:"))
+    .map(([name]) => `packages/${name.replace("@repo/", "")}`);
+};
+
+/**
+ * Where `apps/api` reads configuration: its own sources and every workspace package it boots,
+ * followed transitively through `dependencies`, so a new package is scanned without editing this list.
+ */
+const apiSourceDirectories = (): readonly string[] => {
+  const seen = new Set<string>(["apps/api"]);
+  const pending = ["apps/api"];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    for (const dependency of workspaceDependencies(next)) {
+      if (!seen.has(dependency)) {
+        seen.add(dependency);
+        pending.push(dependency);
+      }
+    }
+  }
+  return [...seen].map((directory) => `${directory}/src`);
+};
+const API_SOURCE_DIRECTORIES = apiSourceDirectories();
+
+/** The reads whose name is not in `known`, each with the file that reads it. */
+const undeclaredReads = (
+  reads: ReadonlyMap<string, string>,
+  known: ReadonlySet<string>,
+): readonly string[] =>
+  [...reads]
+    .filter(([name]) => !known.has(name))
+    .map(([name, file]) => `${name} (read in ${file.slice(REPO_ROOT.length)})`);
+
+describe("the API's environment reads (LOB-257)", () => {
+  const readsOf = (directories: readonly string[]) =>
+    new Map(
+      directories
+        .flatMap((directory) => sourceFiles(directory))
+        .flatMap((file) =>
+          environmentReads(readFileSync(file, "utf8")).map(
+            (name) => [name, file] as const,
+          ),
+        ),
+    );
+
+  const fixture = `
+    // process.env["ONLY_IN_A_COMMENT"] is prose, not a read.
+    /* Config.String("ALSO_PROSE") */
+    const a = process.env["PLAIN_BRACKET"];
+    const b = process.env.PLAIN_DOT;
+    const c = Config.option(Config.String("NESTED_STRING"));
+    const d = Config.Literals(["anthropic", "faux"], "LITERALS_NAME");
+    const e = Config.option(
+      Config.schema(
+        Schema.Struct({ cap: Schema.Number }),
+        "MULTILINE_SCHEMA",
+      ),
+    );
+    const f = Config.withDefault("");
+  `;
+
+  it("finds every read form the sources use, and nothing mentioned only in a comment", () => {
+    expect(environmentReads(fixture)).toEqual([
+      "LITERALS_NAME",
+      "MULTILINE_SCHEMA",
+      "NESTED_STRING",
+      "PLAIN_BRACKET",
+      "PLAIN_DOT",
+    ]);
+  });
+
+  it("scans every workspace package the API boots, harness included", () => {
+    expect([...API_SOURCE_DIRECTORIES].sort()).toEqual([
+      "apps/api/src",
+      "packages/core/src",
+      "packages/domain/src",
+      "packages/harness/src",
+      "packages/storage-postgres/src",
+    ]);
+  });
+
+  it("reads the real sources: the trigger, Linear, Sentry and model variables are all seen", () => {
+    // A scanner that silently matched nothing would make the guard below pass for any change.
+    const names = [...readsOf(API_SOURCE_DIRECTORIES).keys()];
+    for (const name of [
+      "TRIGGER_SECRET",
+      "TRIGGER_RULES",
+      "LINEAR_API_KEY",
+      "SENTRY_RATE_LIMIT",
+      "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+      "MODEL_BACKEND",
+      "SESSION_BUDGET",
+      "GITHUB_REVIEWER_TOKEN",
+      "DATABASE_URL",
+      "DATABASE_MAX_CONNECTIONS",
+      "ANTHROPIC_API_KEY",
+    ]) {
+      expect(names).toContain(name);
+    }
+  });
+
+  it("declares every variable the API reads on @repo/api#dev, in env or passThroughEnv", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const known = new Set([
+      ...declared(dryRun, DEV_TASK),
+      ...(taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? []),
+    ]);
+    expect(undeclaredReads(readsOf(API_SOURCE_DIRECTORIES), known)).toEqual([]);
+  }, 90_000);
+
+  it("fails on a read nobody declared: the same comparison, against a temporary read", () => {
+    const reads = new Map(
+      environmentReads(
+        `const a = process.env["PORT"]; const b = process.env["BRAND_NEW_SETTING"];`,
+      ).map((name) => [name, `${REPO_ROOT}fixture.ts`] as const),
+    );
+    expect(undeclaredReads(reads, new Set(["PORT"]))).toEqual([
+      "BRAND_NEW_SETTING (read in fixture.ts)",
+    ]);
+  });
+
+  it("lists the trigger, Linear and Sentry variables under @repo/api#dev", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const known = [
+      ...declared(dryRun, DEV_TASK),
+      ...(taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? []),
+    ];
+    for (const name of [
+      "TRIGGER_RULES",
+      "TRIGGER_SECRET",
+      "TRIGGER_SECRET_HEADER",
+      "TRIGGER_DELIVERY_HEADER",
+      "TRIGGER_MAX_BODY_BYTES",
+      "LINEAR_WEBHOOK_SECRET",
+      "LINEAR_API_KEY",
+      "LINEAR_API_URL",
+      "LINEAR_STATE_STARTED",
+      "LINEAR_STATE_IN_REVIEW",
+      "LINEAR_STATE_DONE",
+      "LINEAR_SESSION_URL_BASE",
+      "SENTRY_CLIENT_SECRET",
+      "SENTRY_RATE_LIMIT",
+      "SENTRY_RATE_WINDOW_SECONDS",
+      "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+    ]) {
+      expect(known).toContain(name);
+    }
+  }, 90_000);
+
+  it("passes every secret through without declaring it, so none enters the task hash", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const passThrough =
+      taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? [];
+    for (const name of [
+      "TRIGGER_SECRET",
+      "LINEAR_WEBHOOK_SECRET",
+      "SENTRY_CLIENT_SECRET",
+      "LINEAR_API_KEY",
+      "GITHUB_WEBHOOK_SECRET",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_OAUTH_TOKEN",
+      "ANTHROPIC_AUTH_TOKEN",
+    ]) {
+      expect(passThrough).toContain(name);
+      expect(declared(dryRun, DEV_TASK)).not.toContain(name);
+    }
+  }, 90_000);
 });

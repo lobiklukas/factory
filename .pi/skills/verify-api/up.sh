@@ -8,6 +8,10 @@
 # provider): no API key, no cost, same transcript every run. SESSION_IDLE_TIMEOUT_MS is
 # short on purpose so a drive run can reach the historical-fold read path without
 # waiting the 15 minutes a real deployment uses — see features/session-fold.md.
+#
+# API_VIA_TURBO=1 starts the API the way `bun run dev` does — `turbo run dev --filter=@repo/api`
+# in Strict Mode — instead of `bun run src/index.ts` directly, so a variable `apps/api/turbo.json`
+# does not declare is stripped before the API sees it (LOB-257). Every other drive is unchanged.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -52,7 +56,18 @@ fi
 REPLAY_MODEL="${REPLAY_MODEL:-faux/faux-2}"
 ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
 
-( cd "$ROOT/apps/api" && exec env \
+if [ "${API_VIA_TURBO:-}" = "1" ]; then
+  # The turbo binary itself, not `bun run dev`, so `$!` is the process `down.sh` signals and turbo
+  # forwards the SIGTERM to the API it spawned. `--ui=stream` because the repo's `tui` needs a tty.
+  LAUNCH_DIR="$ROOT"
+  LAUNCH=("$ROOT/node_modules/.bin/turbo" run dev --filter=@repo/api --ui=stream)
+  export DO_NOT_TRACK=1 TURBO_TELEMETRY_DISABLED=1 TURBO_NO_UPDATE_NOTIFIER=1
+else
+  LAUNCH_DIR="$ROOT/apps/api"
+  LAUNCH=(bun run src/index.ts)
+fi
+
+( cd "$LAUNCH_DIR" && exec env \
     PORT="$API_PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$API_PORT" \
@@ -61,7 +76,7 @@ ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
     SESSION_ROOT="$SESSION_ROOT" \
     SESSION_IDLE_TIMEOUT_MS="${SESSION_IDLE_TIMEOUT_MS:-2000}" \
     MAX_REQUEST_BODY_BYTES="${MAX_REQUEST_BODY_BYTES:-1048576}" \
-    bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
+    "${LAUNCH[@]}" ) > "$RUN_DIR/api.log" 2>&1 &
 echo $! > "$RUN_DIR/api.pid"
 
 # Ready means `/readyz` says so, not merely that the port answers: the server binds before its
@@ -84,3 +99,4 @@ fi
 
 echo "api  http://localhost:$API_PORT  (pid $(cat "$RUN_DIR/api.pid"))"
 echo "model backend: ${MODEL_BACKEND:-faux}"
+if [ "${API_VIA_TURBO:-}" = "1" ]; then echo "started through turbo (Strict Mode)"; fi
