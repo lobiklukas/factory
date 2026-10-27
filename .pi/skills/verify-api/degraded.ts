@@ -15,7 +15,7 @@ import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Exit } from "effect";
 import { RpcClient } from "effect/rpc";
-import { makeChecker, protocolFor } from "./harness.ts";
+import { makeChecker, probeFor, protocolFor } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9500";
@@ -36,13 +36,7 @@ const assert = makeChecker(observed);
 
 const ProtocolLive = protocolFor(API_URL);
 
-const probe = async (route: string) => {
-  const response = await fetch(`${API_URL}${route}`);
-  return {
-    status: response.status,
-    body: await response.json().catch(() => null),
-  };
-};
+const probe = probeFor(API_URL);
 
 /**
  * The failure an `Exit` carries, narrowed by inspection: `SessionError` has a `code`, an
@@ -79,14 +73,14 @@ if (MODE === "down") {
   const livez = await probe("/livez");
   assert(
     "livez stays 200 while the database is down",
-    livez.status === 200 && livez.body?.status === "ok",
+    livez.status === 200 && livez.answer?.status === "ok",
     `status=${livez.status} body=${JSON.stringify(livez.body)}`,
   );
 
   const readyz = await probe("/readyz");
-  const failing = (readyz.body?.checks ?? [])
-    .filter((check: { ok: boolean; name: string }) => !check.ok)
-    .map((check: { ok: boolean; name: string }) => check.name);
+  const failing = (readyz.answer?.checks ?? [])
+    .filter((check) => !check.ok)
+    .map((check) => check.name);
   assert(
     "readyz reports 503 while the database is down",
     readyz.status === 503,
@@ -94,7 +88,7 @@ if (MODE === "down") {
   );
   assert(
     "and names the check that failed",
-    readyz.body?.status === "unavailable" && failing.includes("postgres"),
+    readyz.answer?.status === "unavailable" && failing.includes("postgres"),
     `failing=${JSON.stringify(failing)} body=${JSON.stringify(readyz.body)}`,
   );
 
@@ -120,7 +114,7 @@ if (MODE === "down") {
   }
   assert(
     "readyz recovers to 200 without a restart",
-    readyz.status === 200 && readyz.body?.status === "ok",
+    readyz.status === 200 && readyz.answer?.status === "ok",
     `status=${readyz.status} body=${JSON.stringify(readyz.body)}`,
   );
 

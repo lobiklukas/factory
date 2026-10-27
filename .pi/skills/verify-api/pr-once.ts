@@ -112,6 +112,11 @@ const prEntries = (
 ): number =>
   entries.filter((entry) => entry.kind === "other" && entry.text === "").length;
 
+/**
+ * One PR step, narrowed to the PR it answers. Every phase here has a diff under the cap, so an
+ * `over-cap` or `no-change` answer is the step refusing work it should have done: the phase dies
+ * with it rather than reading a number and a link that answer does not carry.
+ */
 const step = (sessions: SessionServiceShape, sessionId: SessionId) =>
   sessions
     .openPullRequest({
@@ -120,7 +125,16 @@ const step = (sessions: SessionServiceShape, sessionId: SessionId) =>
       head: headFor(sessionId),
       base: "main",
     })
-    .pipe(Effect.provide(github));
+    .pipe(
+      Effect.provide(github),
+      Effect.flatMap((answer) =>
+        answer.outcome === "opened" || answer.outcome === "already-open"
+          ? Effect.succeed(answer)
+          : Effect.die(
+              new Error(`the PR step answered ${JSON.stringify(answer)}`),
+            ),
+      ),
+    );
 
 const arm = Effect.gen(function* () {
   const sessions = yield* SessionService;
