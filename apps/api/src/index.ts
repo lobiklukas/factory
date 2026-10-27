@@ -18,6 +18,7 @@ import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { WebhookLive } from "./Api/Webhook";
+import { LinearSyncLog, SessionWriteBackLive } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { DevToolsLive } from "./observability/DevTools";
@@ -208,13 +209,15 @@ const HttpLive = Effect.gen(function* () {
     );
   }
 
-  // Sessions own one log, one working directory, and (locally) the harness that drives them.
+  // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
+  // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
+  // (LOB-15).
   const SessionDeps = SessionServiceLive({
     model: createModelAccess(backend, { fauxCommand: model.fauxCommand }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,
-  });
+  }).pipe(Layer.provide(SessionWriteBackLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
   // — and the server binds — even when Postgres is unreachable. Migrations run in the background so
@@ -228,6 +231,7 @@ const HttpLive = Effect.gen(function* () {
     SessionShutdown.pipe(Layer.provideMerge(SessionDeps)),
     MigrationsDaemon,
     CredentialSelectionLog,
+    LinearSyncLog,
   ).pipe(Layer.provideMerge(Layer.mergeAll(PostgresLive, BunServices.layer)));
 
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);

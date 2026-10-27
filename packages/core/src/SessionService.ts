@@ -116,6 +116,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readVerifyRecords,
   readCurationUsage,
   readReplaySource,
   replaySession,
@@ -148,6 +149,7 @@ import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
+import { SessionWriteBack } from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { resolveWorkspace } from "./workspace";
 
@@ -481,6 +483,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const path = yield* Path.Path;
       const policy = yield* Policy;
       const skills = yield* SkillService;
+      /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
+      const writeBack = yield* SessionWriteBack;
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -1205,7 +1209,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   : costliest,
               undefined,
             );
-            const opened = yield* openPullRequest({
+            const stepped = yield* openPullRequest({
               harness: owner.harness,
               conversation: owner.root,
               sessionId: input.sessionId,
@@ -1225,7 +1229,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // it is not a requirement of the session service, so it does not leave through this
               // method's type.
               Effect.provideService(SqlClient, sql),
+              Effect.exit,
             );
+            // Every exit is reported — the PR, a refusal, an error — so a tracker can mirror it
+            // (LOB-15). The report cannot fail: the step's own answer is what returns below.
+            yield* writeBack.pullRequest({
+              sessionId: input.sessionId,
+              result: stepped,
+              evidence: readVerifyRecords(owner.storage).pipe(
+                Effect.orElseSucceed(() => []),
+              ),
+            });
+            const opened = yield* stepped;
             yield* touchActivity(input.sessionId);
             return opened;
           }),

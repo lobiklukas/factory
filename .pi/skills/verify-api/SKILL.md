@@ -40,6 +40,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A docs trigger (LOB-197)       | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main | a docs run starts without a person, off the trunk    |
 | The `verify` tool (LOB-78)     | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first        | a run's verification is a record, not prose          |
 | A Linear issue (LOB-164)       | `linear.sh`: a labeled issue opens one session on its rule's repo, the issue as its prompt; a retry, an edit open none              | work arrives from Linear exactly once                |
+| Linear write-back (LOB-15)     | `linear-writeback.sh`: started → In Progress, the PR attached and commented → In Review, a no-change run explained, merge → Done    | the loop closes in Linear, once per event            |
 | The spec document (LOB-72)     | `spec.sh`: `gaps` absent is refused naming the field, `gaps: []` commits, a second process reads it back                            | the specifier's gaps are declared, not implied       |
 
 Every check is required: the driver exits non-zero when one fails.
@@ -88,6 +89,7 @@ running, and writes its own evidence:
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ./linear.sh      # api on :9415 — Linear issue webhooks: one session per labeled issue, skips named
+./linear-writeback.sh  # fake Linear on :9416, fake GitHub on :9417 — the issue's states, PR and failure comments
 ./docs-trigger.sh  # fake GitHub on :9410 — a push and a schedule start docs runs on factory/doc-<id>
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process

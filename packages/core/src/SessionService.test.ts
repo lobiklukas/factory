@@ -98,6 +98,11 @@ import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import {
+  pullRequestReport,
+  SessionWriteBack,
+  type PullRequestReport,
+} from "./SessionWriteBack";
+import {
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
   SessionService,
@@ -2173,6 +2178,91 @@ describe("the diff cap", () => {
  * fact about a branch: a fake that answered zero would prove only that the step can read a number it
  * was handed.
  */
+/**
+ * The PR step reports its exit to the session layer's write-back (LOB-15), whatever the exit was,
+ * and the report cannot change the step's answer. The tracker is a recording fake: what it does
+ * with a report is `LinearSync.test.ts`'s, and this is only that every exit reaches it.
+ */
+describe("the PR step's write-back", () => {
+  it("reports the PR, the refusal, and the error — and the step answers as it would without it", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/36";
+    const github = makeGithubFake(201, { number: 36, url });
+    const reports: Array<{
+      readonly sessionId: SessionId;
+      readonly report: PullRequestReport;
+      readonly evidence: number;
+    }> = [];
+    const reported = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux"),
+        sessionRoot,
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.map(input.evidence, (records) => {
+                reports.push({
+                  sessionId: input.sessionId,
+                  report: pullRequestReport(input.result),
+                  evidence: records.length,
+                });
+              }),
+          }),
+        ),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    try {
+      const opened = await reported.runPromise(
+        drive({ title: "a reported PR", files: 1, lines: 2 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      const refused = await reported.runPromise(
+        drive({ title: "a reported refusal", files: 51, lines: 1 }).pipe(
+          Effect.provide(github.layer),
+        ),
+      );
+      // GitHub refuses the token: the step's own typed error, reported and then raised as before.
+      const forbidden = makeGithubFake(403, {
+        message: "Resource not accessible",
+      });
+      const failed = await reported.runPromiseExit(
+        drive({ title: "a reported error", files: 1, lines: 2 }).pipe(
+          Effect.provide(forbidden.layer),
+        ),
+      );
+
+      expect(opened.answer).toEqual({ number: 36, url, outcome: "opened" });
+      expect(refused.answer).toMatchObject({ outcome: "over-cap" });
+      expect(Exit.isFailure(failed)).toBe(true);
+      expect(reports).toEqual([
+        {
+          sessionId: opened.sessionId,
+          report: { _tag: "opened", pr: { number: 36, url } },
+          evidence: 0,
+        },
+        {
+          sessionId: refused.sessionId,
+          report: expect.objectContaining({ _tag: "failed", step: "over-cap" }),
+          evidence: 0,
+        },
+        {
+          sessionId: expect.any(String),
+          report: expect.objectContaining({
+            _tag: "failed",
+            step: "pr-error",
+            reason: expect.stringContaining("PrError"),
+          }),
+          evidence: 0,
+        },
+      ]);
+    } finally {
+      await reported.dispose();
+    }
+  }, 120_000);
+});
+
 describe("an empty diff", () => {
   it("answers no-change for two runs on an unchanged checkout, announcing each in the transcript", async () => {
     const github = makeGithubFake(201, {

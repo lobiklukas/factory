@@ -15,3 +15,5 @@ export * from "./DocsTrigger";
 export * from "./Slack";
 export * from "./git";
 export * from "./Linear";
+export * from "./LinearSync";
+export * from "./SessionWriteBack";
