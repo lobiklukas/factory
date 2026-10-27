@@ -15,7 +15,7 @@
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
 // schema, a mis-declared stream, or a lost typed error all fail here. See
 // features/session-stream.md.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
 import {
@@ -1078,6 +1078,193 @@ const program = Effect.gen(function* () {
       live: settledMission.mission ?? null,
       folded: foldedMission.mission ?? null,
       tasksAtVerify: atVerify.tasks.map((task) => task.kind),
+    },
+  });
+
+  // Feature: a mission's fan-out (LOB-193). Two workers, each a task the mission owns with a
+  // conversation of its own, and a join that either waits for both or — failFast — aborts the one
+  // still running when the other fails. Each worker's check holds on a file this driver writes, so
+  // the fan-out is read off the snapshot while both are live rather than raced; the API runs on this
+  // machine, so an absolute path is a file both ends see.
+  const holdDir = path.resolve(EVIDENCE_DIR, `mission-hold-${Date.now()}`);
+  yield* Effect.promise(() => mkdir(holdDir, { recursive: true }));
+  const holdUntil = (name: string) =>
+    `while [ ! -f ${path.join(holdDir, name)} ]; do sleep 0.01; done`;
+  const workersOf = <T extends { readonly kind: string }>(
+    tasks: readonly T[],
+  ): T[] => tasks.filter((task) => task.kind === "factory.mission.worker");
+  const fanSession = yield* client.createSession({
+    requestId: `verify-api-fanout-${Date.now()}`,
+  });
+  const fanned = yield* client.startMission({
+    sessionId: fanSession.id,
+    feature: "verify-api fan-out probe",
+    workers: [
+      { id: "a", prompt: "do part a", check: holdUntil("release") },
+      { id: "b", prompt: "do part b", check: holdUntil("release") },
+    ],
+  });
+  const bothLive = yield* waitUntil(
+    client
+      .getSession({ sessionId: fanSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          workersOf(snapshot.tasks).filter((task) => task.phase === "check")
+            .length === 2
+            ? snapshot
+            : undefined,
+        ),
+      ),
+    "both workers to reach their check",
+  );
+  const liveWorkers = workersOf(bothLive.tasks);
+  const fanMission = bothLive.tasks.find((task) => task.id === fanned.taskId);
+  assert(
+    "a mission fans out to two workers it owns, each with a conversation of its own",
+    liveWorkers.every(
+      (task) => task.owner === fanned.taskId && task.conversations.length === 1,
+    ) && new Set(liveWorkers.flatMap((task) => task.conversations)).size === 2,
+    `workers=${JSON.stringify(liveWorkers)}`,
+  );
+  assert(
+    "the mission waits on both workers, failFast by default",
+    fanMission?.status === "waiting" &&
+      fanMission.phase === "implement" &&
+      fanMission.waitingOn.join(",") ===
+        liveWorkers.map((task) => task.id).join(","),
+    `mission=${JSON.stringify(fanMission ?? null)}`,
+  );
+  yield* Effect.promise(() => writeFile(path.join(holdDir, "release"), ""));
+  const joined = yield* waitUntil(
+    client
+      .getSession({ sessionId: fanSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.length === 0 ? snapshot : undefined,
+        ),
+      ),
+    "the fanned-out mission to settle",
+  );
+  assert(
+    "the join moves on to verify once both workers are done",
+    joined.mission?.taskId === fanned.taskId &&
+      joined.mission.entered.join(",") === "plan,implement,verify",
+    `mission=${JSON.stringify(joined.mission ?? null)}`,
+  );
+
+  // failFast: `b` marks that its check started and then beats, in the session's worktree, while
+  // holding on a file this driver never writes; `a` fails only once `b`'s mark exists. So `a`'s
+  // failure finds `b`'s check running, nothing but a kill can end that check, and a beat that stops
+  // is the abort reaching `b`'s process — which the snapshot alone (no outcomes on the wire) could
+  // not tell apart from `b` failing on its own. The writes are inside the worktree because the
+  // session's policy decides every check before the mission starts, as it would decide `bash`.
+  const failSession = yield* client.createSession({
+    requestId: `verify-api-failfast-${Date.now()}`,
+  });
+  const failWorktree = (yield* client.getSession({ sessionId: failSession.id }))
+    .workspace.path;
+  const failing = yield* client.startMission({
+    sessionId: failSession.id,
+    feature: "verify-api failFast probe",
+    workers: [
+      {
+        id: "a",
+        prompt: "do part a",
+        check: "while [ ! -f .verify-b-checking ]; do sleep 0.01; done; exit 1",
+      },
+      {
+        id: "b",
+        prompt: "do part b",
+        // The beat is written before the mark `a` waits on, so it exists by the time the abort can come.
+        check: `touch .verify-b-alive; touch .verify-b-checking; ${holdUntil("never").replace("do sleep", "do touch .verify-b-alive; sleep")}`,
+      },
+    ],
+  });
+  const aborted = yield* waitUntil(
+    client
+      .getSession({ sessionId: failSession.id })
+      .pipe(
+        Effect.map((snapshot) =>
+          snapshot.tasks.length === 0 && snapshot.mission !== undefined
+            ? snapshot
+            : undefined,
+        ),
+      ),
+    "the failFast mission to settle",
+  );
+  const beatOf = () =>
+    Effect.promise(() =>
+      stat(path.join(failWorktree, ".verify-b-alive")).then(
+        (info) => info.mtimeMs,
+        () => undefined,
+      ),
+    );
+  const beatAtSettle = yield* beatOf();
+  yield* Effect.sleep("500 millis");
+  const beatLater = yield* beatOf();
+  const bChecked = yield* Effect.promise(() =>
+    stat(path.join(failWorktree, ".verify-b-checking")).then(
+      () => true,
+      () => false,
+    ),
+  );
+  assert(
+    "a failing worker stops its sibling's running check under failFast",
+    bChecked && beatAtSettle !== undefined && beatLater === beatAtSettle,
+    `bChecked=${bChecked} beatAtSettle=${beatAtSettle} beatLater=${beatLater}`,
+  );
+  assert(
+    "a mission whose worker failed stops in implement and never verifies",
+    aborted.mission?.taskId === failing.taskId &&
+      aborted.mission.phase === "implement" &&
+      aborted.mission.entered.join(",") === "plan,implement",
+    `mission=${JSON.stringify(aborted.mission ?? null)}`,
+  );
+  // A check the session's agent could not run as `bash` is refused before any task exists.
+  const rogue = yield* client
+    .startMission({
+      sessionId: failSession.id,
+      feature: "verify-api rogue check probe",
+      workers: [
+        {
+          id: "rogue",
+          prompt: "escape",
+          check: `touch ${path.join(holdDir, "escaped")}`,
+        },
+      ],
+    })
+    .pipe(Effect.result);
+  const escaped = yield* Effect.promise(() =>
+    stat(path.join(holdDir, "escaped")).then(
+      () => true,
+      () => false,
+    ),
+  );
+  assert(
+    "a worker's check that writes outside the worktree is refused by the session's policy",
+    rogue._tag === "Failure" &&
+      rogue.failure._tag === "SessionError" &&
+      rogue.failure.code === "invalid_input" &&
+      rogue.failure.message.includes("only write inside its worktree") &&
+      !escaped,
+    `rogue=${JSON.stringify(rogue._tag === "Failure" ? rogue.failure : rogue.success)} escaped=${escaped}`,
+  );
+  Object.assign(observed, {
+    missionFanOut: {
+      joined: {
+        sessionId: fanSession.id,
+        started: fanned,
+        whileWaiting: { mission: fanMission ?? null, workers: liveWorkers },
+        settled: joined.mission ?? null,
+      },
+      failFast: {
+        sessionId: failSession.id,
+        started: failing,
+        settled: aborted.mission ?? null,
+        siblingCheck: { started: bChecked, beatAtSettle, beatLater },
+        rogueCheck:
+          rogue._tag === "Failure" ? rogue.failure : { started: rogue.success },
+      },
     },
   });
 

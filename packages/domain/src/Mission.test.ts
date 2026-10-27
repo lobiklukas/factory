@@ -220,6 +220,30 @@ describe("the startMission boundary", () => {
     expect(refuses(StartMissionResult, { sessionId: A_SESSION_ID })).toBe(true);
   });
 
+  it("carries a mission's workers and its join policy, and refuses a policy the join cannot apply", () => {
+    const input = {
+      sessionId: A_SESSION_ID,
+      feature: "a mission",
+      workers: [
+        { id: "a", prompt: "do part a", check: "bun test a" },
+        { id: "b", prompt: "do part b" },
+      ],
+      join: "allSettled" as const,
+    };
+    expect(Schema.decodeSync(StartMissionInput)(input)).toEqual(input);
+    // The two policies are Pi Durable's; a third is not a rule the durable wait can apply.
+    expect(refuses(StartMissionInput, { ...input, join: "failSlow" })).toBe(
+      true,
+    );
+    // A worker is named and asked something: without either it is not a worker.
+    expect(
+      refuses(StartMissionInput, { ...input, workers: [{ id: "a" }] }),
+    ).toBe(true);
+    expect(
+      refuses(StartMissionInput, { ...input, workers: [{ prompt: "p" }] }),
+    ).toBe(true);
+  });
+
   it("round-trips through the encoding the RPC protocol uses", () => {
     const result = { sessionId: A_SESSION_ID, taskId: "7" };
     // `encodeSync` then `decodeSync` is what the HTTP protocol does at each end of a call.

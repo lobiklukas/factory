@@ -193,16 +193,50 @@ export const missionSnapshot = (
 };
 
 /**
- * What starting a mission needs: the session it runs in, and the feature it takes through the
- * phases.
+ * One independent subtask of a mission (LOB-193): a worker the implement phase fans out to, run as
+ * a child task of the mission in a conversation it owns (`packages/harness/src/mission-worker.ts`).
+ *
+ * `id` names the worker within its mission — what a failure, an abort reason and a cost breakdown
+ * are keyed by — so two workers of one mission may not share it. `prompt` is what the worker's
+ * conversation is asked. `check` is the shell command that decides whether the worker succeeded,
+ * run unattended with the session's workspace as its working directory; a worker without one
+ * succeeds once its conversation answered.
+ *
+ * A check is not a tool call, so the policy hooks never see it run. The server holds it to the
+ * session's policy instead, before the mission starts (`SessionService.startMission`): a check the
+ * session's agent could not run as `bash` — a write outside the worktree, egress past the
+ * allowlist, a push to another branch — or one that would need a person's approval is refused.
+ */
+export const MissionWorker = Schema.Struct({
+  id: Schema.String,
+  prompt: Schema.String,
+  check: Schema.optional(Schema.String),
+});
+export type MissionWorker = typeof MissionWorker.Type;
+
+/**
+ * How a mission's join treats a worker that settles other than `completed`: `failFast` aborts the
+ * workers still running, `allSettled` lets them finish. The names are Pi Durable's `JoinPolicy`,
+ * because that is the rule the durable wait applies. A mission with a failed worker fails either
+ * way; the policy decides only what happens to the others.
+ */
+export const MISSION_JOIN_POLICIES = ["failFast", "allSettled"] as const;
+export const MissionJoin = Schema.Literals(MISSION_JOIN_POLICIES);
+export type MissionJoin = typeof MissionJoin.Type;
+
+/**
+ * What starting a mission needs: the session it runs in, the feature it takes through the phases,
+ * and — optionally — the independent workers implement fans out to and the policy that joins them.
  *
  * The workspace is not here. The server resolves it from the session, so a client cannot point a
  * mission at a directory that session does not own — the same rule every other session call
- * follows.
+ * follows. A worker's `check` runs in that workspace, and is decided by that session's policy.
  */
 export const StartMissionInput = Schema.Struct({
   sessionId: SessionId,
   feature: Schema.String,
+  workers: Schema.optional(Schema.Array(MissionWorker)),
+  join: Schema.optional(MissionJoin),
 });
 export type StartMissionInput = typeof StartMissionInput.Type;
 
