@@ -10,7 +10,13 @@
  * No database and no model: the storage is Pi Durable's in-memory implementation and the model is
  * the scripted faux provider, so this runs in the default gate.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -290,5 +296,76 @@ describe("a run holding the docs skill writes documentation only", () => {
     expect(
       readFileSync(join(worktree, "packages/core/src/allowed.ts"), "utf8"),
     ).toBe("ok");
+  });
+});
+
+/**
+ * The read-only stage through the install site (LOB-74). As with the docs rule, nothing here builds
+ * a policy: the run profile is what `SessionService` hands `openSession` — the column the run
+ * started in and the role it declares — and the two cases differ only in that profile. So the
+ * refusal in one and the landed write in the other are the selection in `openSession`, and the
+ * refusal is read out of the session's log.
+ */
+describe("a run in the specifying stage writes nothing", () => {
+  const SPECIFYING_RUN: RunProfile = {
+    column: "specifying",
+    role: "specifier",
+    skills: [{ name: "specify", body: "# Specify\n\nWrite the spec." }],
+  };
+  const BUILDING_RUN: RunProfile = {
+    column: "building",
+    role: "builder",
+    skills: [{ name: "implement", body: "# Implement\n\nWrite code." }],
+  };
+
+  it("refuses the write tool in specifying, naming the stage, and lets the same call write in building", async () => {
+    const path = "stage-spec.md";
+    const calls = [{ name: "write", args: { path, content: "spec" } }];
+
+    const specifying = toolResults(
+      await transcript(calls, false, SPECIFYING_RUN),
+    );
+    expect(specifying[0]?.isError).toBe(true);
+    expect(specifying[0]?.text).toContain("Tool call blocked");
+    expect(specifying[0]?.text).toContain(`write ${path} is refused`);
+    expect(specifying[0]?.text).toContain("read-only specifying stage");
+    expect(specifying[0]?.text).toContain('column "specifying"');
+    expect(existsSync(join(worktree, path))).toBe(false);
+
+    const building = toolResults(await transcript(calls, false, BUILDING_RUN));
+    expect(building[0]?.isError).toBe(false);
+    expect(readFileSync(join(worktree, path), "utf8")).toBe("spec");
+  });
+
+  it("refuses an edit and a shell write, and still runs a shell read", async () => {
+    mkdirSync(join(worktree, "src"), { recursive: true });
+    writeFileSync(join(worktree, "src/stage.ts"), "export const a = 1;\n");
+    const entries = await transcript(
+      [
+        {
+          name: "edit",
+          args: {
+            path: "src/stage.ts",
+            edits: [{ oldText: "a = 1", newText: "a = 2" }],
+          },
+        },
+        { name: "bash", args: { command: "echo x > stage-shell.txt" } },
+        { name: "bash", args: { command: "cat src/stage.ts" } },
+      ],
+      false,
+      SPECIFYING_RUN,
+    );
+
+    const results = toolResults(entries);
+    expect(results.map((entry) => entry.isError)).toEqual([true, true, false]);
+    expect(results[0]?.text).toContain("edit src/stage.ts is refused");
+    expect(results[1]?.text).toContain(
+      "redirecting output to stage-shell.txt is refused",
+    );
+    expect(results[2]?.text).toContain("export const a = 1;");
+    expect(readFileSync(join(worktree, "src/stage.ts"), "utf8")).toBe(
+      "export const a = 1;\n",
+    );
+    expect(existsSync(join(worktree, "stage-shell.txt"))).toBe(false);
   });
 });
