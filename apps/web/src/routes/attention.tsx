@@ -181,8 +181,9 @@ const rowKey = (item: AttentionItem): string =>
 
 /**
  * One thing a person has to do: the card, why it is here, and a link that opens it in its board's
- * card pane. The reason is the server's words (the approval's action, the run's question, the gate's
- * name), so the pane says the same thing when it opens.
+ * card pane, a question's at the card's thread where the answer is typed (LOB-239). The reason is
+ * the server's words (the approval's action, the run's question, the gate's name), so the pane says
+ * the same thing when it opens.
  */
 const AttentionRow = ({
   item,
@@ -202,6 +203,7 @@ const AttentionRow = ({
         to="/boards/$boardId"
         params={{ boardId: link.boardId }}
         search={link.search}
+        {...(link.hash === undefined ? {} : { hash: link.hash })}
         aria-label={`Open card ${item.task.title}`}
         className="flex min-w-0 flex-1 flex-col gap-1 border border-border bg-card px-3 py-2 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
       >

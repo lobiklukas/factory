@@ -3,11 +3,12 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9510` / web `:3510` —
+Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9530` / web `:3530` —
 an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 91/91 required checks passed,
-from the `agent/LOB-77` worktree after merging LOB-53, against its own database on 5442). The one
-console error is the compaction block's injected 500 ([compaction.md](compaction.md)). The run
-before it failed only the busy-compaction race named under Known gaps.
+and `thread.sh` 15/15 on API `:9531` / web `:3531`, from the `agent/LOB-239` worktree against its own
+database on 5442). The one console error in `drive.mjs` is the compaction block's injected 500
+([compaction.md](compaction.md)). Two runs before it failed only the busy-compaction race named under
+Known gaps.
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
@@ -23,6 +24,7 @@ before it failed only the busy-compaction race named under Known gaps.
 | Board lanes              | passing | [board.md](board.md)                       |
 | Card pane (write path)   | passing | [card-pane.md](card-pane.md)               |
 | What needs a person      | passing | [attention.md](attention.md)               |
+| The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)       |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 | Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
 
@@ -30,7 +32,7 @@ before it failed only the busy-compaction race named under Known gaps.
 
 - **The board follows moves by polling, every 2 s.** LOB-76's card pane moves cards and starts runs;
   a move made elsewhere reaches an open board within one interval, not instantly; the attention view
-  (LOB-77) polls on the same interval. The `needs_input` walk waits on LOB-46.
+  (LOB-77) and the card's thread (LOB-239) poll on the same interval.
 - **The busy-compaction check is timing-sensitive.** "a busy session shows the pending state, never
   the verdict" needs the run to turn busy while the compaction is still `requested`; on 2026-10-27 it
   failed once (the summary settled before the run started) and passed on the next run, with no
@@ -45,12 +47,12 @@ before it failed only the busy-compaction race named under Known gaps.
 - **The rail has no attention count.** The rail links the attention view (LOB-77), and
   `listAttention` now backs the number, but a badge would poll on every page; it is left out until a
   push exists or the count is wanted badly enough to pay for the poll.
-- **The card pane has no answer box.** The attention view lists a run's question and links the card,
-  but the answer is still `factory board comment` (or `commentTask`); the pane's thread is LOB-22's
-  `needs_input` walk.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
   other, and a change to `packages/domain` or `packages/core` deserves both.
+- **A session's pages have no pane.** Neither the dashboard nor the CLI calls `listPages` or
+  `curateSession`; the surface is driven over RPC by verify-api's `./pages.sh`
+  ([pages.md](../../verify-api/features/pages.md)), so nothing here proves how a page renders.
 - The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
   either way, so the day a fold is driven the check is the header string.
