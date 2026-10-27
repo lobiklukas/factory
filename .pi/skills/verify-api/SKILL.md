@@ -39,6 +39,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A mission (LOB-230)            | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                | a mission's phase is the session's state, not a call |
 | A docs trigger (LOB-197)       | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main | a docs run starts without a person, off the trunk    |
 | The `verify` tool (LOB-78)     | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first        | a run's verification is a record, not prose          |
+| PR evidence (LOB-79)           | `pr-evidence.sh`: the body names the skill, its exit code and a bounded excerpt; a truncation is marked; no evidence is said        | the PR states what was verified, from the record     |
 | A Linear issue (LOB-164)       | `linear.sh`: a labeled issue opens one session on its rule's repo, the issue as its prompt; a retry, an edit open none              | work arrives from Linear exactly once                |
 | The spec document (LOB-72)     | `spec.sh`: `gaps` absent is refused naming the field, `gaps: []` commits, a second process reads it back                            | the specifier's gaps are declared, not implied       |
 
@@ -90,6 +91,7 @@ running, and writes its own evidence:
 ./linear.sh      # api on :9415 — Linear issue webhooks: one session per labeled issue, skips named
 ./docs-trigger.sh  # fake GitHub on :9410 — a push and a schedule start docs runs on factory/doc-<id>
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
+./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
 ```
 
@@ -163,6 +165,9 @@ order you want the evidence to end in.
   `pr-once-fake.log` — from `./pr-once.sh`: what each surviving process saw, the script's own checks,
   and the fake's ledger of every request and every PR that exists. There is no `pr-once-arm.json`:
   that phase is killed inside its call and writes nothing, which is the state it exists to reach
+- `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
+  from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
+  checks, and the fake's ledger
 
 Proof standards for this app:
 

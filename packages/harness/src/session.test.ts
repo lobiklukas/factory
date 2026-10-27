@@ -23,7 +23,10 @@ import {
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Page as CitedPage } from "@repo/domain/Page";
-import { SessionId as SessionIdSchema } from "@repo/domain/Session";
+import {
+  SessionId as SessionIdSchema,
+  type PrEvidence,
+} from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, Exit, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -858,6 +861,79 @@ describe("the PR a session opened", () => {
     await reader.dispose();
     expect(folded.pr?.url).toBe("https://github.com/lobiklukas/factory/pull/7");
     expect(folded.pr?.number).toBe(7);
+  }, 120_000);
+
+  /**
+   * The evidence the body states (LOB-79) is the PR's record too: committed on the document a later
+   * reader (a column's `requires[]` check) reads, on the entry an attached client sees, and folded
+   * back from the log by a reader that owns nothing.
+   */
+  it("attaches the evidence to the document, the prOpened event and the fold", async () => {
+    const evidenceLogId = `${prLogId}-evidence`;
+    const evidence: PrEvidence = {
+      _tag: "EvidenceRecorded",
+      calls: 1,
+      changedCount: 1,
+      results: [
+        {
+          _tag: "VerificationRan",
+          surface: "api",
+          name: "verify-api",
+          source: "skill",
+          command: "bash drive.sh",
+          exitCode: 0,
+          excerpt: "3/3 checks passed\n",
+          truncated: false,
+        },
+      ],
+    };
+    const url = "https://github.com/lobiklukas/factory/pull/8";
+    const opened = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.open(
+            sql,
+            { logId: evidenceLogId, mode: "owner" },
+            context,
+          ),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const before = yield* Effect.promise(() => root.viewState(context));
+        const beforeValue = before.value;
+        before.dispose();
+        yield* writePullRequestDoc(root, {
+          url,
+          number: 8,
+          base: "main",
+          head: "factory/ses_2",
+          openedAt: "2026-10-27T17:00:00.000Z",
+          evidence,
+        });
+        const after = yield* Effect.promise(() => root.viewState(context));
+        const afterValue = after.value;
+        after.dispose();
+        const recorded = yield* readPullRequestDoc(harness, root);
+        yield* closeHarness(harness);
+        return { recorded, events: diffView(beforeValue, afterValue) };
+      }),
+    );
+
+    expect(opened.recorded?.evidence).toEqual(evidence);
+    expect(opened.events.filter((event) => event._tag === "prOpened")).toEqual([
+      { _tag: "prOpened", prUrl: url, evidence },
+    ]);
+    const reader = await PostgresStorage.open(
+      sql,
+      { logId: evidenceLogId, mode: "reader" },
+      context,
+    );
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.pr?.evidence).toEqual(evidence);
   }, 120_000);
 });
 
