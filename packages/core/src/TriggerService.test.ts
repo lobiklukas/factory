@@ -3,8 +3,8 @@
  *
  * What only a database can prove: two deliveries with one request id create one session, and the
  * loser says `replayed`. A read-then-insert would pass a single-threaded case and fail the
- * concurrent one, so the case below fires both at once — the claim is `INSERT … ON CONFLICT DO
- * NOTHING RETURNING`, and a mutation that removes it (or that replaces it with a `SELECT` first)
+ * concurrent one, so the case below fires both at once — the claim is `INSERT … ON CONFLICT …
+ * RETURNING`, and a mutation that removes it (or that replaces it with a `SELECT` first)
  * turns "exactly one session" red.
  *
  * What a race *cannot* prove is which of two honest answers the loser gives: it reads the row the
@@ -273,6 +273,36 @@ const writeOrphanedClaim = (requestId: string, age: string) =>
           INSERT INTO webhook_deliveries (request_id, status, received_at, claimed_at)
           VALUES (${requestId}, 'received', now() - ${age}::interval, now() - ${age}::interval)
         `;
+      }),
+      DatabaseLive,
+    ),
+  );
+
+/** Push a live claim back in time, as a process that outlives the reclaim window would see it. */
+const ageClaim = (requestId: string, age: string) =>
+  Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          UPDATE webhook_deliveries SET claimed_at = now() - ${age}::interval
+          WHERE request_id = ${requestId}
+        `;
+      }),
+      DatabaseLive,
+    ),
+  );
+
+/** The delivery's recorded status, or `undefined` when it has no row. */
+const deliveryStatus = (requestId: string) =>
+  Effect.runPromise(
+    Effect.provide(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ status: string }>`
+          SELECT status FROM webhook_deliveries WHERE request_id = ${requestId}
+        `;
+        return rows[0]?.status;
       }),
       DatabaseLive,
     ),
@@ -667,6 +697,88 @@ describe("the trigger seam", () => {
         expect(created).toHaveLength(1);
       },
       { registerRepo: [repo], holdInFlight },
+    );
+  }, 60_000);
+
+  it("lets a slow process whose claim was reclaimed release only its own claim, not the reclaimer's", async () => {
+    // A process alive past the window is indistinguishable from a dead one, so its claim is taken.
+    // When it then fails, its release must not delete the row the reclaimer now holds: a third
+    // retry would claim it afresh and run `create` and `send` beside the reclaimer. Three runtimes
+    // are three processes sharing the row. Without the release's `claimed_at` guard the third
+    // delivery wins a fresh claim and opens a session.
+    const requestId = `${runId}-slow-release`;
+    const slowHold = {
+      arrived: Deferred.makeUnsafe<void>(),
+      release: Deferred.makeUnsafe<void>(),
+    };
+    const reclaimerHold = {
+      arrived: Deferred.makeUnsafe<void>(),
+      release: Deferred.makeUnsafe<void>(),
+    };
+    await withRuntime(
+      async (slowProcess) => {
+        // The slow process claims, parks in `send`, and will fail its write-back once released.
+        const slow = slowProcess.run(
+          Effect.exit(slowProcess.trigger.deliver(deliver(requestId))),
+        );
+        try {
+          await Promise.race([
+            slowProcess.run(Deferred.await(slowHold.arrived)),
+            slow,
+          ]);
+          // Its claim outlives the window without its process dying.
+          await ageClaim(requestId, "1 hour");
+
+          await withRuntime(
+            async (reclaimerProcess) => {
+              const reclaimer = reclaimerProcess.run(
+                reclaimerProcess.trigger.deliver(deliver(requestId)),
+              );
+              try {
+                await Promise.race([
+                  reclaimerProcess.run(Deferred.await(reclaimerHold.arrived)),
+                  reclaimer,
+                ]);
+
+                // The slow process wakes, fails, and releases — what it releases is the question.
+                await slowProcess.run(
+                  Deferred.succeed(slowHold.release, undefined),
+                );
+                expect((await slow)._tag).toBe("Failure");
+                expect(await deliveryStatus(requestId)).toBe("received");
+
+                const third = await withRuntime(
+                  async (thirdProcess) => {
+                    const outcome = await thirdProcess.run(
+                      thirdProcess.trigger.deliver(deliver(requestId)),
+                    );
+                    expect(thirdProcess.created).toHaveLength(0);
+                    return outcome;
+                  },
+                  { registerRepo: [repo] },
+                );
+                expect(third.replayed).toBe(true);
+                expect(third.status).toBe("received");
+              } finally {
+                await reclaimerProcess.run(
+                  Deferred.succeed(reclaimerHold.release, undefined),
+                );
+              }
+
+              const reclaimed = await reclaimer;
+              expect(reclaimed.replayed).toBe(false);
+              expect(reclaimed.status).toBe("processed");
+              expect(reclaimerProcess.created).toHaveLength(1);
+              expect(await deliveryStatus(requestId)).toBe("processed");
+            },
+            { registerRepo: [repo], holdInFlight: reclaimerHold },
+          );
+        } finally {
+          await slowProcess.run(Deferred.succeed(slowHold.release, undefined));
+          await slow;
+        }
+      },
+      { registerRepo: [repo], holdInFlight: slowHold, failWriteBackTimes: 1 },
     );
   }, 60_000);
 

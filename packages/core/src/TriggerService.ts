@@ -208,6 +208,15 @@ export type TriggerServiceOptions = {
  */
 export const TRIGGER_RECLAIM_AFTER: Duration.Input = "10 minutes";
 
+/**
+ * What a won claim returns: the row's key, and the `claimed_at` it set, as Postgres text so the
+ * release can match it exactly (a `Date` would drop the microseconds).
+ */
+type ClaimRow = {
+  readonly requestId: string;
+  readonly claim: string;
+};
+
 /** One `webhook_deliveries` row as the replay read returns it. */
 type DeliveryRow = {
   readonly status: string;
@@ -316,7 +325,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           const claimed = yield* storage(
             "claim delivery",
             delivery.keyedByWork === true
-              ? sql<{ requestId: string }>`
+              ? sql<ClaimRow>`
                   INSERT INTO webhook_deliveries (request_id, status)
                   VALUES (${requestId}, 'received')
                   ON CONFLICT (request_id) DO UPDATE
@@ -325,19 +334,20 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                         AND webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN})
                       OR (webhook_deliveries.status = 'received'
                         AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
-                  RETURNING request_id
+                  RETURNING request_id, claimed_at::text AS claim
                 `
-              : sql<{ requestId: string }>`
+              : sql<ClaimRow>`
                   INSERT INTO webhook_deliveries (request_id, status)
                   VALUES (${requestId}, 'received')
                   ON CONFLICT (request_id) DO UPDATE
                     SET claimed_at = now()
                     WHERE webhook_deliveries.status = 'received'
                       AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
-                  RETURNING request_id
+                  RETURNING request_id, claimed_at::text AS claim
                 `,
           );
-          if (claimed.length === 0) {
+          const claim = claimed[0]?.claim;
+          if (claim === undefined) {
             return yield* replay(requestId);
           }
 
@@ -442,12 +452,16 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // answer about work that never happened. `Effect.exit` is what sees all three, and the
           // release is uninterruptible so a cancelled request cannot skip its own cleanup. What it
           // cannot cover is a process that runs no cleanup at all (`SIGKILL`); the claim's
-          // `claimed_at` and the reclaim window above are what recover that row. A slow process
-          // whose claim was reclaimed meanwhile may release the reclaimer's row here: that costs
-          // the next retry a fresh claim, which reuses the session and its one prompt.
+          // `claimed_at` and the reclaim window above are what recover that row. The release is
+          // scoped to this attempt's own claim (`claimed_at` as the claim returned it, as text so
+          // its microseconds survive the round trip): a process slow enough to have been reclaimed
+          // meanwhile must not delete the reclaimer's row, or a third retry would claim it afresh
+          // and run `create` and `send` beside the reclaimer that is still working.
           const releaseClaim = storage(
             "release an unclaimed delivery",
-            sql`DELETE FROM webhook_deliveries WHERE request_id = ${requestId}`,
+            sql`DELETE FROM webhook_deliveries
+                WHERE request_id = ${requestId}
+                  AND claimed_at = ${claim}::timestamptz`,
           ).pipe(
             // The original failure is what the caller needs; a failed release must not mask it.
             // The next attempt re-claims the row if this one did land.

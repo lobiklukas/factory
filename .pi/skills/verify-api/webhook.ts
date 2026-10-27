@@ -89,6 +89,7 @@ const post = async (
   observed.deliveries.push({ route, status: response.status, answer });
   return {
     status: response.status,
+    retryAfter: response.headers.get("retry-after"),
     body: answer,
     outcome: Option.getOrNull(
       Schema.decodeUnknownOption(TriggerOutcome)(answer),
@@ -318,6 +319,37 @@ const program = Effect.gen(function* () {
       reclaimed.outcome?.sessionId !== undefined &&
       afterReclaim === afterAll + 1,
     `status=${reclaimed.status} body=${JSON.stringify(reclaimed.body)} sessions ${afterAll}→${afterReclaim}`,
+  );
+
+  // Feature: a retry inside the window is told to retry, not that it is done (LOB-216). A claim
+  // taken a moment ago may be a process still working or one just killed; either way the sender
+  // must not stop on this answer, and a `200` is where Linear stops. So the replay is `503
+  // in-progress` with `Retry-After`, and it starts nothing.
+  const inFlightId = `${requestId}-in-flight`;
+  yield* Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      await db`
+        INSERT INTO webhook_deliveries (request_id, status)
+        VALUES (${inFlightId}, 'received')
+      `;
+    } finally {
+      await db.close();
+    }
+  });
+  const inFlight = yield* Effect.promise(() =>
+    post("/webhooks/generic", generic(inFlightId)),
+  );
+  const afterInFlight = yield* countForRepo;
+  assert(
+    "a retry of a delivery claimed inside the window is 503 in-progress, so the sender retries",
+    inFlight.status === 503 &&
+      inFlight.refusal?.code === "in-progress" &&
+      inFlight.retryAfter !== null &&
+      inFlight.outcome?.status === "received" &&
+      inFlight.outcome?.replayed === true &&
+      afterInFlight === afterReclaim,
+    `status=${inFlight.status} retry-after=${inFlight.retryAfter} body=${JSON.stringify(inFlight.body)} sessions ${afterReclaim}→${afterInFlight}`,
   );
 });
 

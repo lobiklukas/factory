@@ -20,7 +20,7 @@
  */
 import { createHmac } from "node:crypto";
 import { TriggerService } from "@repo/core";
-import type { TriggerDelivery } from "@repo/domain/Trigger";
+import type { TriggerDelivery, TriggerOutcome } from "@repo/domain/Trigger";
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -32,6 +32,14 @@ const saved = new Map(SECRETS.map((name) => [name, process.env[name]]));
 /** Every delivery a route handed the seam, in order. */
 const delivered: Array<TriggerDelivery> = [];
 
+/** What the fake seam answers; a case that needs another outcome sets it. */
+const SKIPPED: TriggerOutcome = {
+  status: "skipped",
+  replayed: false,
+  reason: "fake",
+};
+let answer: TriggerOutcome = SKIPPED;
+
 const { handler, dispose } = HttpRouter.toWebHandler(
   WebhookRoutes.pipe(
     HttpRouter.provideRequest(
@@ -41,7 +49,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
           deliver: (delivery) =>
             Effect.sync(() => {
               delivered.push(delivery);
-              return { status: "skipped", replayed: false, reason: "fake" };
+              return answer;
             }),
         }),
       ),
@@ -57,7 +65,11 @@ const post = async (
   path: "/webhooks/generic" | "/webhooks/linear",
   payload: unknown,
   secret: string,
-): Promise<{ readonly status: number; readonly body: unknown }> => {
+): Promise<{
+  readonly status: number;
+  readonly body: unknown;
+  readonly retryAfter: string | null;
+}> => {
   const body = JSON.stringify(payload);
   const response = await handler(
     new Request(`http://factory.test${path}`, {
@@ -71,7 +83,11 @@ const post = async (
       body,
     }),
   );
-  return { status: response.status, body: await response.json() };
+  return {
+    status: response.status,
+    body: await response.json(),
+    retryAfter: response.headers.get("retry-after"),
+  };
 };
 
 const generic = { requestId: "lob-216-generic", label: "factory" };
@@ -94,6 +110,7 @@ const configure = (
 
 beforeEach(() => {
   delivered.length = 0;
+  answer = SKIPPED;
   // The signature header the generic body is signed into is the default one.
   delete process.env["TRIGGER_SECRET_HEADER"];
 });
@@ -158,5 +175,64 @@ describe("a trigger route with no secret", () => {
       "generic",
       "linear",
     ]);
+  });
+});
+
+describe("a replay of a delivery still in flight", () => {
+  // LOB-216: the seam answers `received` to a replay whose claim has no outcome yet — the first
+  // process may be working, or may have been killed. A `200` would end Linear's retries (it stops on
+  // any `200`), so the killed delivery's first retry, inside the reclaim window, would be its last.
+  // The route has to answer something the sender retries; removing the branch turns these red with
+  // `expected 200 to be 503`.
+  beforeEach(() => {
+    configure({
+      TRIGGER_SECRET: "generic-secret",
+      LINEAR_WEBHOOK_SECRET: "linear-secret",
+    });
+  });
+
+  it("is 503 in-progress with Retry-After on both routes, not a 200 the sender stops on", async () => {
+    answer = { status: "received", replayed: true };
+
+    for (const viaRoute of [
+      await post("/webhooks/generic", generic, "generic-secret"),
+      await post("/webhooks/linear", linear, "linear-secret"),
+    ]) {
+      expect(viaRoute.status).toBe(503);
+      expect(viaRoute.retryAfter).toBe("60");
+      expect(viaRoute.body).toMatchObject({
+        ok: false,
+        code: "in-progress",
+        status: "received",
+        replayed: true,
+      });
+    }
+    expect(delivered).toHaveLength(2);
+  });
+
+  it("leaves a replay with a recorded outcome a 200, so a finished delivery stops its retries", async () => {
+    // The control: only the in-flight answer is retryable. A replay of processed (or skipped) work
+    // is the sender's final answer, and a 503 there would make it retry forever.
+    answer = {
+      status: "processed",
+      replayed: true,
+    };
+    const processed = await post(
+      "/webhooks/generic",
+      generic,
+      "generic-secret",
+    );
+    expect(processed.status).toBe(200);
+    expect(processed.retryAfter).toBeNull();
+    expect(processed.body).toMatchObject({
+      ok: true,
+      status: "processed",
+      replayed: true,
+    });
+
+    answer = { status: "skipped", replayed: true, reason: "fake" };
+    expect(
+      (await post("/webhooks/linear", linear, "linear-secret")).status,
+    ).toBe(200);
   });
 });

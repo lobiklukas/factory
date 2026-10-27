@@ -89,7 +89,7 @@ running, and writes its own evidence:
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
-./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed
+./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight
 ./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply

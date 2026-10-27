@@ -20,7 +20,9 @@
  *    own, and the Linear adapter derives one from the issue (LOB-164), because which deliveries
  *    are the same work is a fact about the sender.
  * 4. **Delegate.** Everything about replays, refusals, mapping and sessions is
- *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip.
+ *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip. The one
+ *    outcome the route translates is a replay still `received` — work claimed with no outcome
+ *    yet — which is `503 in-progress` rather than `200`, so the sender keeps retrying (LOB-216).
  *
  * The signature scheme is shared (`hmac-sha256` over the raw body, hex, in a configurable header)
  * because that is what Linear already does; an adapter whose provider signs differently brings its
@@ -51,6 +53,13 @@ import { TriggerWriteBackLive } from "./LinearSync";
 
 /** The default cap on a trigger delivery, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 65_536;
+
+/**
+ * The `Retry-After` on a replay of a delivery still in flight, in seconds: about how long an honest
+ * claim takes to record its outcome. A sender that honours it re-reads the row then; one that keeps
+ * its own schedule (Linear) is still told to retry by the status.
+ */
+const IN_PROGRESS_RETRY_AFTER_S = 60;
 
 /** The header a generic sender signs into, when the deployment names none. */
 const DEFAULT_SECRET_HEADER = "x-trigger-signature";
@@ -283,6 +292,28 @@ const handle = (adapter: () => Adapter) =>
       );
     }
     const delivered = outcome.delivered;
+    if (delivered.replayed && delivered.status === "received") {
+      // A replay of a claim with no outcome yet is not an answer a sender may stop on: the first
+      // process may be working, or may have died (`SIGKILL`) and left a claim that only the seam's
+      // reclaim window recovers. A `200` here would end Linear's retries for good — it retries a
+      // failed delivery after 1 minute, 1 hour and 6 hours, and only on a non-`200` — so a killed
+      // delivery's first retry, which lands inside the window, would be its last (LOB-216). `503`
+      // with `Retry-After` keeps the sender retrying until a later attempt reads the recorded
+      // outcome or reclaims the stale claim; the body still says what the seam saw.
+      return HttpServerResponse.jsonUnsafe(
+        {
+          ok: false,
+          status: delivered.status,
+          replayed: true,
+          code: "in-progress",
+          error: "this delivery is claimed and has no outcome yet; retry later",
+        },
+        {
+          status: 503,
+          headers: { "retry-after": String(IN_PROGRESS_RETRY_AFTER_S) },
+        },
+      );
+    }
     return HttpServerResponse.jsonUnsafe({
       ok: true,
       status: delivered.status,
