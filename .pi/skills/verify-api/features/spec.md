@@ -66,11 +66,7 @@ and a version-1 `factory.spec` value reading as no spec).
 
 ## Running it
 
-**Known infra gap, tracked by LOB-214.** `./spec.sh` imports `@repo/harness` and
-`@repo/storage-postgres` from `.pi/skills/verify-api`, as `./pr-once.sh` imports `@repo/core`, but
-the root `package.json` declares only `@repo/domain`. So after a plain `bun install` the driver fails
-with "Cannot find module @repo/harness". This is the same gap LOB-214 records for `pr-once`. The fix
-belongs there: declare the packages the verify drivers import, as root devDependencies or in a
-package of the skill's own. It is not done here because it would change the shared lockfile. Until
-LOB-214 lands, the LOB-72 run made the two missing links by hand, as a stopgap
-(`ln -s ../../packages/harness node_modules/@repo/harness`, and the same for `storage-postgres`).
+`./spec.sh` imports `@repo/harness` and `@repo/storage-postgres` from `.pi/skills/verify-api`, as
+`./pr-once.sh` imports `@repo/core`. The root `package.json` declares them (LOB-175), so a plain
+`bun install` links them into the root `node_modules` and the driver resolves them from its own
+directory; no hand-made link is needed.
