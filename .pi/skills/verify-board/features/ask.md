@@ -44,8 +44,9 @@ factory board start --task tsk_… --prompt "go on"               # the next run
 1. **Process 1.** `FAUX_COMMAND="sleep 4; echo faux-ok"` holds the run's `bash` turn open, so the probe
    first sees the run **busy** — the control that makes the next check able to fail. `FAUX_ASK` makes
    the faux script call `ask` after that turn. `ask.ts MODE=parked` then asserts, within 5 s of the
-   block: the live owner is not busy, no tool runs and nothing is queued, the transcript ends on the
-   ask's result, and the question is on the task by the run. `factory board show` prints
+   block: the live owner is not busy, no tool runs and nothing is queued, the run's `bash` read ran
+   rather than being refused by the read-only stage, the transcript ends on the ask's result, and the
+   question is on the task by the run. `factory board show` prints
    `needs_input from specifying` and the question verbatim.
 2. **SIGTERM**, then **process 2** (a different pid). `board show` still prints the block and the
    question; `board comment` answers at the revision `show` printed and reports the block lifted;
@@ -64,5 +65,8 @@ among them), the CLI outputs `ask-*.txt`, and both processes' log `ask-api.log`.
 - What a real model asks or when: `MODEL_BACKEND=faux` scripts the ask. The tool's description is the
   model-facing contract; `packages/harness/src/ask.test.ts` proves the seam.
 - The tracker half — Linear's `elicitation` and replies arriving as session events — is LOB-14's.
-- The specifier's spec doc declaring the gaps that cause an ask (LOB-72) and the read-only stage
-  (LOB-74) are separate issues; nothing here ties an ask to `openQuestions` yet.
+- The same path on the card `./drive.sh` walks through the board, in its tmux pane, is
+  [specify.md](specify.md) (LOB-85); this script is the restart half.
+- The specifier's spec doc declaring the gaps that cause an ask (LOB-72): a run cannot write it yet
+  (no tool), so nothing ties an ask to `openQuestions`. The read-only stage's refusals (LOB-74) are
+  `.pi/skills/verify-policy`'s `stage` case.

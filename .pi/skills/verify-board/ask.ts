@@ -11,8 +11,12 @@
 //   MODE=told   SESSION_ID=… TASK_ID=…  the next run settled, its committed prompt quotes ANSWER
 //                                       verbatim after QUESTION, and it did not ask again
 //
+// `drive.sh`'s specify phase (LOB-85) runs the same three probes on the drive's own card, with
+// EVIDENCE_PREFIX=specify so its files sit beside `ask.sh`'s rather than over them.
+//
 // Env: API_URL, MODE, SESSION_ID, TASK_ID, QUESTION, ANSWER, DATABASE_URL (for `told`'s log read),
-// EVIDENCE_DIR. Writes `ask-<mode>.json` and exits non-zero when a check fails.
+// EVIDENCE_DIR, EVIDENCE_PREFIX (default `ask`). Writes `<prefix>-<mode>.json` and exits non-zero
+// when a check fails.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
@@ -34,6 +38,7 @@ const QUESTION = process.env["QUESTION"] ?? "";
 const ANSWER = process.env["ANSWER"] ?? "";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/board";
+const EVIDENCE_PREFIX = process.env["EVIDENCE_PREFIX"] ?? "ask";
 
 const observed: {
   mode: string;
@@ -107,6 +112,19 @@ const parked = Effect.gen(function* () {
     "no turn is left running and nothing is queued",
     snapshot.live.tools.length === 0 && snapshot.queued.length === 0,
     `live tools=${snapshot.live.tools.length} queued=${snapshot.queued.length}`,
+  );
+  // The card sits in `specifying`, whose role is the read-only stage (LOB-74): the run's `bash`
+  // read — the sleep that made it busy — must have run, not been refused, or the stage would be
+  // blocking the very reads a specifier asks from.
+  const read = snapshot.entries.find(
+    (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+  );
+  check(
+    "the run's read ran in the specifying stage, not refused",
+    read !== undefined &&
+      read.isError !== true &&
+      read.text.includes("faux-ok"),
+    `bash ${read === undefined ? "absent" : read.isError === true ? "refused" : "ran"}: ${read?.text.trim().slice(0, 80) ?? "-"}`,
   );
   check(
     "the run ended on its ask, with no reply after it",
@@ -200,7 +218,7 @@ else {
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 await writeFile(
-  path.join(EVIDENCE_DIR, `ask-${MODE}.json`),
+  path.join(EVIDENCE_DIR, `${EVIDENCE_PREFIX}-${MODE}.json`),
   `${JSON.stringify(observed, null, 2)}\n`,
 );
 process.exit(Object.values(observed.checks).every((c) => c.passed) ? 0 : 1);
