@@ -136,6 +136,12 @@ the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** 
 shell checks), evidence `.verify/evidence/lob-213/api/`, with the no-handler mutation run failing it.
 See [pr-rpc.md](pr-rpc.md).
 
+The pages-surface checks (LOB-220) were run from the `agent/LOB-220` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_220` on 5442, faux priced at `FAUX_COST=0.01`,
+API on `PAGES_PORT=9570`): `./pages.sh` **15/15** (12 driver checks, 3 shell checks), evidence
+`.verify/evidence/lob-220/api/`, with three mutation runs (no dedupe, a free repeat, no page fold in
+the rebuild) each failing it, in `.verify/evidence/lob-220/mutation/`. See [pages.md](pages.md).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -167,6 +173,7 @@ See [pr-rpc.md](pr-rpc.md).
 | The spec document        | passing | [spec.md](spec.md)                         |
 | A budget cap             | passing | [budget.md](budget.md)                     |
 | The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
+| The pages surface        | passing | [pages.md](pages.md)                       |
 
 ## Deliberately absent
 
