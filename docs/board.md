@@ -69,6 +69,16 @@ only model-facing seam, where `CodingTools` is the single installed extension �
 alongside the role's tool policy. The stored shape mirrors `.pi/skills/<name>/SKILL.md` so importing
 repository skills later is a copy rather than a translation.
 
+Built (LOB-74): the first role → tool-policy row. A column whose role is `specifier` is the read-only
+specifying stage (`READ_ONLY_ROLES` in `packages/harness/src/policy.ts`): `openSession` composes the
+rule into the session's `ToolTask` hook from the run's column and role, and `write`, `edit` and
+`verify` are refused, as is any `bash` command that is not on an allowlist of read commands (a read
+command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
+and the column. The allowlist reads the command's text, so it stops the accident rather than a
+determined agent (D15). Keyed by role rather than by skill or column name, so a renamed column keeps the rule and an
+edited skill body cannot drop it. The model half of the role, and any other role's tool policy, is
+LOB-207.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a

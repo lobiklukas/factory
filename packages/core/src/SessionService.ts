@@ -734,7 +734,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const declared = columns.find((column) => column.name === row.column);
           return declared === undefined
             ? undefined
-            : { name: declared.name, skills: declared.skills };
+            : {
+                name: declared.name,
+                ...(declared.role === undefined ? {} : { role: declared.role }),
+                skills: declared.skills,
+              };
         });
 
       /**
@@ -874,9 +878,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const column = yield* runColumnFor(sessionId);
           if (column === undefined || column.skills.length === 0) {
+            // No skills to read, but the role still travels: it is what makes a column a read-only
+            // stage (LOB-74), and a stage with no skill bound is still that stage.
             return column === undefined
               ? EMPTY_RUN_PROFILE
-              : { column: column.name, skills: [] };
+              : {
+                  column: column.name,
+                  ...(column.role === undefined ? {} : { role: column.role }),
+                  skills: [],
+                };
           }
           const library = yield* skills.list.pipe(
             Effect.mapError(

