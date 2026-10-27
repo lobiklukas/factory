@@ -221,8 +221,8 @@ const program = Effect.gen(function* () {
   // the rule and its `data.issue` becomes the prompt's words.
   const linearBody = {
     action: "create",
-    // Linear's delivery id header is not sent by hand here; the body's own id is the fallback the
-    // route reads, and it must be stable so a replay of this delivery would dedupe too.
+    // No `Linear-Delivery` header: the Linear adapter keys a create on its issue (LOB-164), so a
+    // replay of this delivery would dedupe without one. `linear.sh` drives that adapter in full.
     webhookId: `linear-delivery-${runId}`,
     type: "Issue",
     data: {

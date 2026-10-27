@@ -7,8 +7,38 @@
   "options": {
     "denyWarnings": true
   },
-  "ignorePatterns": [".pi", ".verify"],
+  "ignorePatterns": [
+    ".verify",
+    ".pi/skills/motel-debug",
+    ".pi/skills/verify-policy",
+    ".pi/skills/verify-web"
+  ],
   "overrides": [
+    {
+      "files": [
+        ".pi/skills/lib/*.ts",
+        ".pi/skills/verify-api/*.ts",
+        ".pi/skills/verify-board/*.ts"
+      ],
+      "plugins": [],
+      "rules": {
+        "effecttsgo/async-function": "off",
+        "effecttsgo/global-console": "off",
+        "effecttsgo/global-date": "off",
+        "effecttsgo/global-date-in-effect": "off",
+        "effecttsgo/global-fetch": "off",
+        "effecttsgo/node-builtin-import": "off",
+        "effecttsgo/prefer-schema-over-json": "off",
+        "effecttsgo/process-env": "off",
+        "effecttsgo/global-console-in-effect": "off",
+        "effecttsgo/global-random-in-effect": "off",
+        "effecttsgo/global-timers": "off",
+        "effecttsgo/new-promise": "off",
+        "effecttsgo/process-env-in-effect": "off",
+        "eslint/no-unused-vars": "off",
+        "typescript/no-base-to-string": "off"
+      }
+    },
     {
       "files": ["**/*.test.ts", "**/*.test.tsx"],
       "rules": {

@@ -14,7 +14,8 @@ adapter's session port also sees the delivery id, which is what lets
 **How a user reaches it.** A sender posts a signed JSON body. The generic adapter wants
 `{requestId, label, action?, title?, body?}` (or `requestId` in the body and a
 `x-trigger-delivery` header); the Linear adapter wants Linear's own issue webhook, whose labels pick
-the rule. Both answer `{ok, status, replayed, sessionId?, reason?}`.
+the rule — its idempotency key is the issue, not the delivery, and [linear.md](linear.md) is how
+it is driven (LOB-164). Both answer `{ok, status, replayed, sessionId?, reason?}`.
 
 **How the skill drives it.** `./webhook.sh` boots the skill's own API instance with
 `TRIGGER_RULES`, `TRIGGER_SECRET`, `LINEAR_WEBHOOK_SECRET` and `TRIGGER_MAX_BODY_BYTES=2048`, then

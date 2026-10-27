@@ -3,9 +3,9 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-06, `chrome`, headless, API `:9400` / web `:3400` —
-the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required checks passed, from the
-`ralph/LOB-57` worktree with the human's `factory-postgres-1` holding 5442).
+Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9500` / web `:3500` —
+the worktree's port block, not the usual 9100/3100; `drive.mjs` 49/49 required checks passed, from
+the `agent/LOB-65` worktree with the human's `factory-postgres-1` holding 5442).
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
@@ -17,6 +17,7 @@ the run-context ports, not the usual 9100/3100; `drive.mjs` 10/10 required check
 | Transcript               | passing | [transcript.md](transcript.md)             |
 | Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
 | Compaction from the pane | passing | [compaction.md](compaction.md)             |
+| The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 
 ## Known gaps
 

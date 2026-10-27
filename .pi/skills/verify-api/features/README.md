@@ -53,6 +53,11 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
 and the fake listens on the port the run reserves for this surface.
 
+The Linear adapter checks (LOB-164) were run from the `agent/LOB-164` worktree on 2026-10-27 (API
+on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**, evidence
+`.verify/evidence/lob-164/`, and `./webhook.sh` re-run there **12/12** because the Linear route it
+also posts to changed. See [linear.md](linear.md).
+
 The docs-run checks (LOB-228) were run from the `ralph/LOB-228` worktree on 2026-10-25
 (`DATABASE_URL` the worker's own `factory_ralph` on 5442, faux, the loopback GitHub fake on `:9410`):
 `./docs-run.sh` **13/13**, evidence `.verify/evidence/lob-228/`. Like `./pr-once.sh` it starts no API
@@ -82,6 +87,12 @@ evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API p
 was re-run there too (API on `:9550`, faux): **52/52**, evidence `.verify/evidence/lob-78/verify-api/`
 — every session now has the tool installed, and nothing the drive asserts changed.
 
+The spec-document checks (LOB-72) were run from the `agent/LOB-72` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_72` on 5442, faux, no port bound): `./spec.sh`
+**9/9** (8 driver checks across two processes, 1 shell check that they were two), evidence
+`.verify/evidence/lob-72/`. Like `./pr-once.sh` it starts no API process — the driver opens the
+harness in-process — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
+
 | Feature                  | Status  | File                               |
 | ------------------------ | ------- | ---------------------------------- |
 | Create a session         | passing | [create.md](create.md)             |
@@ -101,12 +112,14 @@ was re-run there too (API on `:9550`, faux): **52/52**, evidence `.verify/eviden
 | Jira adapter             | passing | [jira.md](jira.md)                 |
 | GitHub issues adapter    | passing | [github.md](github.md)             |
 | Slack adapter            | passing | [slack.md](slack.md)               |
+| Linear adapter           | passing | [linear.md](linear.md)             |
 | Approvals                | passing | [approvals.md](approvals.md)       |
 | Curate a session's pages | passing | [curate.md](curate.md)             |
 | A mission                | passing | [mission.md](mission.md)           |
 | A docs run               | passing | [docs-run.md](docs-run.md)         |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md) |
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)   |
+| The spec document        | passing | [spec.md](spec.md)                 |
 
 ## Deliberately absent
 

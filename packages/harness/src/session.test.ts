@@ -13,6 +13,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   createRegistry,
+  defineDoc,
   defineExtension,
   Harness as HarnessRuntime,
   hook,
@@ -24,7 +25,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Page as CitedPage } from "@repo/domain/Page";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Clock, Effect, ManagedRuntime, Random } from "effect";
+import { Clock, Effect, Exit, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
@@ -44,6 +45,7 @@ import {
   readPage,
   readPullRequestDoc,
   readSessionLog,
+  readSpec,
   resetSession,
   SESSION_PROGRESS,
   submitMessage,
@@ -51,8 +53,10 @@ import {
   writeApprovalRequested,
   writePage,
   writePullRequestDoc,
+  writeSpec,
   type SessionRef,
 } from "./session";
+import { SpecRefused } from "./spec";
 
 const runtime = ManagedRuntime.make(DatabaseLive);
 const context = BACKGROUND_CONTEXT;
@@ -1136,5 +1140,221 @@ describe("the spend a session recorded", () => {
     expect(recorded.live.usage).toEqual(recorded.folded.usage);
     // The total the list shows is both buckets, which is the number a rebuild has to reproduce.
     expect(usageCostTotal(recorded.folded.usage)).toBeCloseTo(0.02);
+  }, 120_000);
+});
+
+const specLogId = `${logId}-spec`;
+
+const openSpecStorage = (id: string, mode: "owner" | "reader") =>
+  PostgresStorage.open(sql, { logId: id, mode }, context);
+
+/** A complete card's spec: nothing missing, so nothing to ask — both said as `[]`. */
+const COMPLETE_SPEC = {
+  goal: "the specifying stage's artifact is typed",
+  acceptance: [
+    "a spec with gaps: [] round-trips",
+    "a spec missing gaps is refused",
+  ],
+  gaps: [],
+  openQuestions: [],
+};
+
+/**
+ * LOB-72, part 1 of LOB-46. B4's `specifying` exit is "a `spec` doc, gaps declared (explicitly `[]`
+ * when there are none)", so the document is typed and the rule is checked at the write, not
+ * promised by the writer.
+ */
+describe("the spec a session declared", () => {
+  it("round-trips a spec with gaps: [] and reads the same content after a reopen", async () => {
+    const written = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openSpecStorage(specLogId, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        // Never specified: the seed is not a spec, so this is "no spec", not "no gaps".
+        const before = yield* readSpec(harness, root);
+        const committed = yield* writeSpec(root, COMPLETE_SPEC);
+        const live = yield* readSpec(harness, root);
+        yield* closeHarness(harness);
+        return { before, committed, live };
+      }),
+    );
+    expect(written.before).toBeUndefined();
+    expect(written.committed).toEqual(COMPLETE_SPEC);
+    expect(written.live).toEqual(COMPLETE_SPEC);
+
+    // A fresh harness over the same log: the content is the log's, not the first process's memory.
+    const reopened = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openSpecStorage(specLogId, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        const spec = yield* readSpec(harness, root);
+        yield* closeHarness(harness);
+        return spec;
+      }),
+    );
+    expect(reopened).toEqual(COMPLETE_SPEC);
+    // `[]` survives as `[]`: an empty declaration is a value, not a field the round trip dropped.
+    expect(reopened?.gaps).toEqual([]);
+    expect(reopened?.openQuestions).toEqual([]);
+
+    // And the read-only fold the control plane uses for a session it does not own says the same.
+    const reader = await openSpecStorage(specLogId, "reader");
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.spec).toEqual(COMPLETE_SPEC);
+  }, 120_000);
+
+  it("refuses a spec with no gaps field, naming it, and commits nothing", async () => {
+    const id = `${specLogId}-refused`;
+    const { withoutGaps, nullGaps, emptyGaps, untouched, kept } =
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const storage = yield* Effect.promise(() =>
+            openSpecStorage(id, "owner"),
+          );
+          const { harness, root } = yield* openSession({
+            storage,
+            model,
+            cwd: workdir,
+          });
+          const { gaps: _gaps, ...noGaps } = COMPLETE_SPEC;
+          // Flipped, so a write that wrongly succeeds fails the test rather than passing as a value.
+          const withoutGaps = yield* Effect.flip(writeSpec(root, noGaps));
+          // Refused at the write: the log still holds no spec at all.
+          const untouched = yield* readSpec(harness, root);
+          const nullGaps = yield* Effect.flip(
+            writeSpec(root, { ...COMPLETE_SPEC, gaps: null }),
+          );
+          const emptyGaps = yield* Effect.exit(
+            writeSpec(root, { ...COMPLETE_SPEC, gaps: [] }),
+          );
+          // A later refusal leaves the accepted spec standing rather than erasing it.
+          yield* Effect.flip(writeSpec(root, noGaps));
+          const kept = yield* readSpec(harness, root);
+          yield* closeHarness(harness);
+          return { withoutGaps, nullGaps, emptyGaps, untouched, kept };
+        }),
+      );
+
+    // Absent: a typed refusal that names the field and says it is missing.
+    expect(withoutGaps).toBeInstanceOf(SpecRefused);
+    expect(withoutGaps).toMatchObject({
+      _tag: "SpecRefused",
+      field: "gaps",
+      reason: "missing",
+    });
+    expect(withoutGaps.message).toContain("`gaps` is missing");
+    expect(untouched).toBeUndefined();
+    // Present but not a list: the same field, a different reason — so absent is its own answer.
+    expect(nullGaps).toMatchObject({
+      _tag: "SpecRefused",
+      field: "gaps",
+      reason: "invalid",
+    });
+    // `[]` is the declaration of none, and it is accepted.
+    expect(Exit.isSuccess(emptyGaps)).toBe(true);
+    expect(kept).toEqual(COMPLETE_SPEC);
+
+    const reader = await openSpecStorage(id, "reader");
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.spec).toEqual(COMPLETE_SPEC);
+  }, 120_000);
+
+  it("rewrites every field, so a withdrawn gap does not survive the next spec", async () => {
+    const id = `${specLogId}-rewrite`;
+    const thin = {
+      goal: "add the board view",
+      acceptance: [],
+      gaps: ["the card names no acceptance criteria"],
+      openQuestions: ["what must the board show to be done?"],
+    };
+    const { first, second } = await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          openSpecStorage(id, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        yield* writeSpec(root, thin);
+        const first = yield* readSpec(harness, root);
+        yield* writeSpec(root, COMPLETE_SPEC);
+        const second = yield* readSpec(harness, root);
+        yield* closeHarness(harness);
+        return { first, second };
+      }),
+    );
+    expect(first).toEqual(thin);
+    expect(second).toEqual(COMPLETE_SPEC);
+  }, 120_000);
+
+  it("reads a version-1 spec as no spec, not as one declaring no gaps", async () => {
+    const id = `${specLogId}-v1`;
+    // The shape `factory.spec` had before LOB-72: one string, and no gaps anywhere in it.
+    const SpecDocV1 = defineDoc({
+      kind: "factory.spec",
+      version: 1,
+      scope: "conversation",
+      history: "latest",
+      fork: "current",
+      initial: () => ({ spec: "" }),
+    });
+    const storage = await openSpecStorage(id, "owner");
+    const v1 = await HarnessRuntime.open(
+      storage,
+      { models: model.models, registry: createRegistry() },
+      context,
+    );
+    const v1Root = await v1.root(context, {
+      agent: {
+        model: { provider: model.provider, modelId: model.modelId },
+        cwd: workdir,
+      },
+    });
+    await v1Root.commit(
+      (tx) =>
+        tx.doc(SpecDocV1, v1Root.id).then((doc) => {
+          doc.spec = "a v1 spec";
+        }),
+      context,
+    );
+    await v1.close(context);
+
+    const read = await runtime.runPromise(
+      Effect.gen(function* () {
+        const reopened = yield* Effect.promise(() =>
+          openSpecStorage(id, "owner"),
+        );
+        const { harness, root } = yield* openSession({
+          storage: reopened,
+          model,
+          cwd: workdir,
+        });
+        const spec = yield* readSpec(harness, root);
+        yield* closeHarness(harness);
+        return spec;
+      }),
+    );
+    expect(read).toBeUndefined();
+
+    const reader = await openSpecStorage(id, "reader");
+    const folded = await runtime.runPromise(readSessionLog(reader));
+    await reader.dispose();
+    expect(folded.spec).toBeUndefined();
   }, 120_000);
 });
