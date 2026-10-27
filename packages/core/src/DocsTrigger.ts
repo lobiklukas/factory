@@ -274,8 +274,9 @@ export const docsSchedule = (
  * The seam's session port, filled with `SessionService.create` on a docs branch.
  *
  * `requestId` is passed through namespaced by the seam (`trigger:<deliveryId>`) so a retry reuses
- * the session it already opened; `branch` is the one thing this port adds, and it is a refusal
- * rather than a fallback when the delivery id cannot be a branch token.
+ * the session it already opened and does not send its prompt twice; `branch` is the one thing this
+ * port adds, and it is a refusal rather than a fallback when the delivery id cannot be a branch
+ * token.
  */
 export const DocsSessionsFromSessionService = Layer.effect(
   TriggerSessions,
@@ -284,7 +285,11 @@ export const DocsSessionsFromSessionService = Layer.effect(
     return TriggerSessions.of({
       send: (input) =>
         sessions
-          .send({ sessionId: input.sessionId, content: input.content })
+          .send({
+            sessionId: input.sessionId,
+            content: input.content,
+            requestId: input.requestId,
+          })
           .pipe(
             Effect.asVoid,
             Effect.mapError(

@@ -39,7 +39,7 @@ import {
 } from "@repo/core";
 import { createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { makeChecker } from "./harness.ts";
+import { makeChecker, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
 const SESSION_ROOT = process.env["SESSION_ROOT"] ?? ".verify/run/jira/sessions";
@@ -339,17 +339,39 @@ const run = Effect.gen(function* () {
       .length === 1,
     `comments=${retryLedger.comments.filter((comment) => comment.issue === "FAC-2").length}`,
   );
+  // Read the session once it has settled: a second prompt sent while the first run is still busy
+  // waits in the inbox as a follow-up, not in the transcript, so an immediate read would count one
+  // either way. Idle with an empty inbox is when every admitted message is a user entry.
+  const retriedSessionId = retried.sessionId;
   const retriedSession =
-    retried.sessionId === undefined
+    retriedSessionId === undefined
       ? undefined
-      : yield* sessions.get(retried.sessionId);
+      : yield* waitUntil(
+          sessions
+            .get(retriedSessionId)
+            .pipe(
+              Effect.map((snapshot) =>
+                !snapshot.live.busy && snapshot.queued.length === 0
+                  ? snapshot
+                  : undefined,
+              ),
+            ),
+          "the retried session to settle",
+        );
   const prompts =
     retriedSession?.entries.filter((entry) => entry.kind === "user").length ??
     0;
   assert(
     "the retry is processed and reuses the session the failed attempt opened",
     retried.status === "processed" && (yield* sessionCount) === 2,
-    `status=${retried.status} sessions=${yield* sessionCount} prompts=${prompts} (the seam re-sends on a retry: LOB-218)`,
+    `status=${retried.status} sessions=${yield* sessionCount}`,
+  );
+  // The prompt was sent before the write-back failed, and the retry sends it again under the same
+  // delivery key; Pi Durable admits one submission per key, so the session holds it once (LOB-218).
+  assert(
+    "and sends the prompt once: the retried session holds exactly one user message",
+    prompts === 1,
+    `prompts=${prompts}`,
   );
 
   observed.comments = readLedger().comments;

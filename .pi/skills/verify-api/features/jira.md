@@ -16,7 +16,7 @@ document naming the session.
 
 **How the skill drives it.** `./jira.sh` boots `./jira-fake.ts` on the run's `API_PORT` and runs
 `bun jira.ts`, which builds the **real** seam, the real `SessionService` and the real write-back
-client over the run's Postgres — only Jira is a loopback fake. Sixteen checks:
+client over the run's Postgres — only Jira is a loopback fake. Seventeen checks:
 
 1. a `jira:issue_created` delivery starts a session and names it;
 2. the session's title is the issue's summary, and its first message is the rendered rule;
@@ -32,19 +32,26 @@ client over the run's Postgres — only Jira is a loopback fake. Sixteen checks:
 11. a delivery whose comment landed but whose acknowledgement was lost fails as `write-back`;
 12. the retry reads the issue's comments before it posts;
 13. the retry posts no second comment — the issue still carries exactly one;
-14. the retry is processed and reuses the session the failed attempt opened.
+14. the retry is processed and reuses the session the failed attempt opened;
+15. and the retry sends the prompt once: the settled session holds exactly one user message
+    (LOB-218).
 
 **What proves it works.** `.verify/evidence/lob-189/` (`jira.log`, `jira-observed.json`,
-`jira-ledger.json`): 16/16 on Postgres 5442 and faux model. `packages/core/src/Jira.test.ts`
-(13 cases) proves what the drive does not: the payload reading (ADF flattening, a payload with no
-fields, an update keeping its own name), the derived delivery id (same body → same id, re-stamped
-body → new id), the all-three-or-none config gate, the request shape, and a `403` becoming a
-`write-back` error.
+`jira-ledger.json`): 17/17 on Postgres 5442 and faux model (`.verify/evidence/lob-218/` for the
+run that added the prompt check). `packages/core/src/Jira.test.ts` (13 cases) proves what the
+drive does not: the payload reading (ADF flattening, a payload with no fields, an update keeping its
+own name), the derived delivery id (same body → same id, re-stamped body → new id), the
+all-three-or-none config gate, the request shape, and a `403` becoming a `write-back` error.
 
 **Non-vacuity.** With the write-back's read-before-post removed (`if (already && false) return;`),
 the lost-acknowledgement case fails: the retry posts a second comment and the drive reports
 `comments=2` (14/16, exit 1). The read is what makes "one comment" survive a lost response, not the
-seam's dedupe — the seam's claim was already given back by then.
+seam's dedupe — the seam's claim was already given back by then. With the seam's send keyed on a
+fresh id per attempt instead of the delivery's (`TriggerService.ts`, LOB-218), the prompt check fails
+with `prompts=2` (16/17, exit 1): the request id on `send` is what makes "one message" survive the
+same retry. The count is read once the session is idle with an empty inbox — a prompt re-sent while
+the first run is busy waits there as a follow-up, so an immediate read reported `prompts=1` either
+way.
 
 **The delivery id is derived, and that is the limit.** Linear sends a delivery id header; Jira Cloud
 does not, and the seam's dedupe is a row keyed by that id. So the adapter derives
@@ -66,4 +73,6 @@ prevented by the seam's single claim, not by this read. Both are recorded in
 **A write-back failure fails the delivery.** A refused comment is a `write-back` `TriggerError`, so
 the seam gives the claim back and the sender's retry runs the work instead of reading
 `replayed: true` about a session whose link nobody was told. Safe because the session's request id is
-`trigger:<delivery id>`, so the retry reuses the session a failed attempt opened.
+`trigger:<delivery id>`, so the retry reuses the session a failed attempt opened, and the seam sends
+its prompt under the same key, which Pi Durable admits once, so the retry does not tell the session
+twice (LOB-218).
