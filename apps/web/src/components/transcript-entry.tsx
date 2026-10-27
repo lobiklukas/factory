@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { TranscriptEntry } from "@repo/domain/Session";
-import { ChevronRightIcon, TerminalIcon } from "lucide-react";
+import { ChevronRightIcon, CircleStopIcon, TerminalIcon } from "lucide-react";
 import { cn } from "cn";
 import type { SpendDelta } from "@/lib/compaction-view";
 import { spendHeading } from "@/lib/compaction-view";
@@ -10,7 +10,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { Marker, MarkerContent } from "@/components/ui/marker";
+import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
 import { Message, MessageContent } from "@/components/ui/message";
 
 /**
@@ -101,6 +101,19 @@ export const TranscriptRow = ({
         className="gap-3 py-1 font-mono text-[10px] tracking-wide uppercase"
       >
         <MarkerContent>{entry.kind}</MarkerContent>
+      </Marker>
+    );
+  }
+
+  // A budget stop (LOB-163) is the control plane speaking, not the agent: a
+  // marker row with the line it recorded, so it never reads as a reply.
+  if (entry.kind === "budget") {
+    return (
+      <Marker variant="border" className="text-destructive" role="status">
+        <MarkerIcon>
+          <CircleStopIcon strokeWidth={1.75} />
+        </MarkerIcon>
+        <MarkerContent>{entry.text}</MarkerContent>
       </Marker>
     );
   }

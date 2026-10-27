@@ -13,8 +13,17 @@ import {
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { createModels, type Models } from "@earendil-works/pi-ai/models";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  type Models,
+  type Provider,
+} from "@earendil-works/pi-ai/models";
+import type {
+  AssistantMessage,
+  AssistantMessageEventStream,
+  Message,
+} from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
@@ -291,7 +300,66 @@ export type ModelAccessOptions = {
    * finds a second model there without an option.
    */
   readonly fauxModels?: readonly string[] | undefined;
+  /**
+   * What every faux request costs, in US dollars (LOB-163). pi-ai's faux provider reports a cost of
+   * zero whatever its model is priced at, so a session on it never spends and a budget cap could
+   * never be reached; this charges each answer a flat amount, which lands in `pi.usage` the way a
+   * real provider's cost does. Absent or `0`: free, as before.
+   */
+  readonly fauxCost?: number | undefined;
 };
+
+/** An answer with `amount` added to what it cost, as a provider reports its own price. */
+const charge = (
+  message: AssistantMessage,
+  amount: number,
+): AssistantMessage => ({
+  ...message,
+  usage: {
+    ...message.usage,
+    cost: {
+      ...message.usage.cost,
+      output: message.usage.cost.output + amount,
+      total: message.usage.cost.total + amount,
+    },
+  },
+});
+
+/**
+ * The same stream of events, with the finished answer charged `amount`. Only a finished answer is
+ * charged: an error or an aborted request is not one a provider bills for here.
+ */
+const charged = (
+  inner: AssistantMessageEventStream,
+  amount: number,
+): AssistantMessageEventStream => {
+  const outer = createAssistantMessageEventStream();
+  const events = inner[Symbol.asyncIterator]();
+  const pump = (): Promise<void> =>
+    events.next().then((step) => {
+      if (step.done === true) {
+        return inner.result().then((message) => outer.end(message));
+      }
+      const event = step.value;
+      outer.push(
+        event.type === "done"
+          ? { ...event, message: charge(event.message, amount) }
+          : event,
+      );
+      return pump();
+    });
+  pump().catch(() => outer.end());
+  return outer;
+};
+
+/** A provider whose every finished answer costs `amount` more than the provider says (`fauxCost`). */
+const pricedProvider = (provider: Provider, amount: number): Provider => ({
+  ...provider,
+  stream: (model, context, options) =>
+    charged(provider.stream(model, context, options), amount),
+  streamSimple: (model, context, options) =>
+    charged(provider.streamSimple(model, context, options), amount),
+});
 
 /** What the provider's catalog says this model's window is, or `0` when it says nothing. */
 const windowOf = (models: Models, provider: string, modelId: string): number =>
@@ -359,7 +427,11 @@ export const createFauxModelAccess = (
       : [FAUX_MODEL_ID]
     ).map((id) => ({ id, ...window })),
   });
-  models.setProvider(faux.provider);
+  models.setProvider(
+    options.fauxCost === undefined || options.fauxCost === 0
+      ? faux.provider
+      : pricedProvider(faux.provider, options.fauxCost),
+  );
   const sleepMs = options.fauxSleepMs ?? 0;
   // pi-ai consumes one queued step per request, so the script re-queues itself and never runs dry.
   // It re-queues before it sleeps: a request that arrives during the nap still finds a step.

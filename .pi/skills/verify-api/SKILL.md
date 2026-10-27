@@ -44,6 +44,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A Linear issue (LOB-164)           | `linear.sh`: a labeled issue opens one session on its rule's repo, the issue as its prompt; a retry, an edit open none                                                                 | work arrives from Linear exactly once                |
 | Linear write-back (LOB-15)         | `linear-writeback.sh`: started → In Progress, the PR attached and commented → In Review, a no-change run explained, merge → Done                                                       | the loop closes in Linear, once per event            |
 | The spec document (LOB-72)         | `spec.sh`: `gaps` absent is refused naming the field, `gaps: []` commits, a second process reads it back                                                                               | the specifier's gaps are declared, not implied       |
+| A budget cap (LOB-163)             | `budget.sh`: a one-cent cap stops the run after its tool and before the reply, the stop on the stream, the snapshot, the log and `factory run`; a later run stops at once              | a capped session cannot spend past its limit         |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -97,6 +98,7 @@ running, and writes its own evidence:
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
+./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: `openPullRequest` is not on the
@@ -169,6 +171,9 @@ order you want the evidence to end in.
   `pr-once-fake.log` — from `./pr-once.sh`: what each surviving process saw, the script's own checks,
   and the fake's ledger of every request and every PR that exists. There is no `pr-once-arm.json`:
   that phase is killed inside its call and writes nothing, which is the state it exists to reach
+- `budget.json`, `budget-transcript.txt`, `budget-cli.txt`, `budget-process.json`, `budget-api.log`
+  — from `./budget.sh`: the driver's checks with the stream's event log and each session's budget,
+  the transcripts, what `factory run --budget` printed, the script's own checks, and the API log
 - `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
   from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
   checks, and the fake's ledger

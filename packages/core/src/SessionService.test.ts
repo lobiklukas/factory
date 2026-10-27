@@ -7656,3 +7656,237 @@ describe("the PR's evidence", () => {
     });
   }, 120_000);
 });
+
+/**
+ * The budget cap through the service (LOB-163, part 3 of LOB-17).
+ *
+ * The harness suite (`packages/harness/src/budget.test.ts`) proves the stop itself on one harness;
+ * these cases prove what the service adds: `create` commits the cap a request names, or the server's
+ * default when it names none, before any message can start a run; the stop reaches the session's
+ * snapshot, its activity row and its process log; and a second process over the same database
+ * folds the same cap and stop — the cap is the log's, not an owner's memory. The faux model is priced
+ * (`fauxCost`) so a cap can be reached at all, and its call count is the witness that the stopped
+ * request was never sent.
+ */
+describe("the budget cap", () => {
+  const budgetRoot = mkdtempSync(join(tmpdir(), "factory-core-budget-"));
+  const COST = 0.01;
+
+  const budgetRuntime = (
+    faux: ReturnType<typeof createFauxModelAccess>,
+    defaultBudget?: number,
+  ) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: faux.access,
+        sessionRoot: budgetRoot,
+        ...(defaultBudget === undefined ? {} : { defaultBudget }),
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  const settled = (sessions: SessionServiceShape, id: SessionId) =>
+    waitUntil(
+      Effect.map(
+        sessions.get(id),
+        (snapshot) =>
+          snapshot.session.status === "idle" &&
+          snapshot.entries.some(
+            (entry) =>
+              entry.kind === "budget" ||
+              (entry.kind === "assistant" && entry.text !== ""),
+          ),
+      ),
+      "the run to settle",
+    );
+
+  it("stops a capped run, reports it, and a second process folds the same stop", async () => {
+    const faux = createFauxModelAccess({ fauxCost: COST });
+    const first = budgetRuntime(faux);
+    let sessionId: SessionId | undefined;
+    try {
+      const result = await first.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ budget: COST });
+          sessionId = created.id;
+          // The cap is there before any run: a fresh session reports it, unspent.
+          const fresh = yield* sessions.get(created.id);
+          yield* sessions.send({ sessionId: created.id, content: "go" });
+          yield* settled(sessions, created.id);
+          const snapshot = yield* sessions.get(created.id);
+          const sql = yield* SqlClient;
+          const activity = yield* sql<{ costTotal: number }>`
+            SELECT cost_total::float8 AS "costTotal" FROM session_activity
+            WHERE session_id = ${created.id}
+          `;
+          return { fresh, snapshot, activity };
+        }),
+      );
+
+      expect(result.fresh.budget).toEqual({ cap: COST, spent: 0 });
+      // One request was sent and paid for; the reply's was not.
+      expect(faux.faux.state.callCount).toBe(1);
+      const kinds = result.snapshot.entries
+        .map((entry) => entry.kind)
+        .filter((kind) => kind !== "system" && kind !== "title");
+      expect(kinds).toEqual(["user", "assistant", "toolResult", "budget"]);
+      expect(result.snapshot.budget?.stopped?.cap).toBe(COST);
+      expect(result.snapshot.budget?.spent).toBeCloseTo(COST, 10);
+      // The list's cost is the same spend the cap was measured against.
+      expect(result.activity[0]?.costTotal).toBeCloseTo(COST, 10);
+    } finally {
+      await first.dispose();
+    }
+
+    // A second process: no owner, so the read is a fold of the log.
+    const second = budgetRuntime(createFauxModelAccess({ fauxCost: COST }));
+    try {
+      const folded = await second.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          if (sessionId === undefined) return yield* Effect.die("no session");
+          return yield* sessions.get(sessionId);
+        }),
+      );
+      expect(folded.session.mode).toBe("historical");
+      expect(folded.budget?.cap).toBe(COST);
+      expect(folded.budget?.stopped?.spent).toBeCloseTo(COST, 10);
+      expect(
+        folded.entries.filter((entry) => entry.kind === "budget"),
+      ).toHaveLength(1);
+    } finally {
+      await second.dispose();
+    }
+  }, 120_000);
+
+  it("caps a session at the server's default when its create names none", async () => {
+    const faux = createFauxModelAccess({ fauxCost: COST });
+    const runtime = budgetRuntime(faux, COST);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const defaulted = yield* sessions.create({});
+          const named = yield* sessions.create({ budget: 5 * COST });
+          yield* sessions.send({ sessionId: defaulted.id, content: "go" });
+          yield* settled(sessions, defaulted.id);
+          return {
+            defaulted: yield* sessions.get(defaulted.id),
+            named: yield* sessions.get(named.id),
+          };
+        }),
+      );
+      expect(result.defaulted.budget?.cap).toBe(COST);
+      expect(result.defaulted.budget?.stopped).toBeDefined();
+      // A create that names its own cap keeps it: the default is only for one that names none.
+      expect(result.named.budget).toEqual({ cap: 5 * COST, spent: 0 });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("holds a fork of a stopped session to its parent's cap and spend", async () => {
+    const faux = createFauxModelAccess({ fauxCost: COST });
+    const runtime = budgetRuntime(faux, 100 * COST);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const parent = yield* sessions.create({ budget: COST });
+          yield* sessions.send({ sessionId: parent.id, content: "go" });
+          yield* settled(sessions, parent.id);
+          const sentByParent = faux.faux.state.callCount;
+          // A fork of the session the cap stopped: the operator's "keep going" must not spend.
+          const fork = yield* sessions.fork({ sessionId: parent.id });
+          const forked = yield* sessions.get(fork.id);
+          yield* sessions.send({ sessionId: fork.id, content: "keep going" });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(fork.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.budget?.stopped !== undefined,
+            ),
+            "the fork's run to be stopped",
+          );
+          const after = yield* sessions.get(fork.id);
+          return {
+            sentByParent,
+            sentByFork: faux.faux.state.callCount - sentByParent,
+            forked,
+            after,
+          };
+        }),
+      );
+      expect(result.sentByParent).toBe(1);
+      // The parent's cap, not the default, and the parent's spend carried: already reached.
+      expect(result.forked.budget?.cap).toBe(COST);
+      expect(result.forked.budget?.spent).toBeCloseTo(COST, 10);
+      expect(result.sentByFork).toBe(0);
+      expect(result.after.budget?.stopped?.spent).toBeCloseTo(COST, 10);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("gives a fork of an uncapped session the server's default", async () => {
+    // The parent is created by a server with no default, the fork by one with: the default is what a
+    // session that names no cap gets, and a fork of an uncapped parent names none.
+    const before = budgetRuntime(createFauxModelAccess({ fauxCost: COST }));
+    let parentId: SessionId | undefined;
+    try {
+      parentId = await before.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          return (yield* sessions.create({})).id;
+        }),
+      );
+    } finally {
+      await before.dispose();
+    }
+    const after = budgetRuntime(
+      createFauxModelAccess({ fauxCost: COST }),
+      3 * COST,
+    );
+    try {
+      const result = await after.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          if (parentId === undefined) return yield* Effect.die("no session");
+          const fork = yield* sessions.fork({ sessionId: parentId });
+          return {
+            parent: yield* sessions.get(parentId),
+            fork: yield* sessions.get(fork.id),
+          };
+        }),
+      );
+      expect(result.parent.budget).toBeUndefined();
+      expect(result.fork.budget).toEqual({ cap: 3 * COST, spent: 0 });
+    } finally {
+      await after.dispose();
+    }
+  }, 120_000);
+
+  it("leaves a session created without a cap uncapped, and its run answered", async () => {
+    const faux = createFauxModelAccess({ fauxCost: COST });
+    const runtime = budgetRuntime(faux);
+    try {
+      const snapshot = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({});
+          yield* sessions.send({ sessionId: created.id, content: "go" });
+          yield* settled(sessions, created.id);
+          return yield* sessions.get(created.id);
+        }),
+      );
+      expect(snapshot.budget).toBeUndefined();
+      expect(faux.faux.state.callCount).toBe(2);
+      expect(snapshot.entries.some((entry) => entry.kind === "budget")).toBe(
+        false,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});

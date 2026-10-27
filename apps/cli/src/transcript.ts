@@ -38,6 +38,10 @@ export const formatQueued = (queued: QueuedMessage): string => {
   return `[queued:${queued.mode}:${queued.id}] ${text}`.trimEnd();
 };
 
+/** An amount the way a budget line prints it: dollars, to the hundredth of a cent (LOB-163). */
+export const formatDollars = (amount: number): string =>
+  `$${amount.toFixed(4)}`;
+
 /** What a watcher prints when the queue it was showing drains. */
 export const QUEUE_EMPTY = "[queued] (empty)";
 
