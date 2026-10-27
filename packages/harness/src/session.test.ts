@@ -33,7 +33,12 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
 import { autonomyPolicy, DEFAULT_AUTONOMY, policyExtension } from "./policy";
-import { diffView, projectView, usageCostTotal } from "./projection";
+import {
+  diffView,
+  inheritedPrText,
+  projectView,
+  usageCostTotal,
+} from "./projection";
 import { PAGES_TOKEN_CAP } from "./pages";
 import {
   attempt,
@@ -57,6 +62,7 @@ import {
   writePage,
   writePullRequestDoc,
   writeSpec,
+  type OpenSession,
   type SessionRef,
 } from "./session";
 import { SpecRefused } from "./spec";
@@ -934,6 +940,124 @@ describe("the PR a session opened", () => {
     const folded = await runtime.runPromise(readSessionLog(reader));
     await reader.dispose();
     expect(folded.pr?.evidence).toEqual(evidence);
+  }, 120_000);
+
+  /**
+   * A fork does not inherit its parent's PR (LOB-211): it runs on a branch of its own, so the
+   * parent's `factory.pr` is not its record and the parent's announcement must not reach a client
+   * attached to it. The two answers a fork gives about its PR — the fold's `pr` and the `prOpened`
+   * events its transcript yields to an attach — have to agree, before and after it opens its own.
+   *
+   * The events are what an attach with nothing sent yet would be told: `diffView` over the fork's
+   * own view with an empty `sent` set, which is every entry in it.
+   */
+  it("forks without the parent's PR, and announces only the fork's own", async () => {
+    const parentLog = `${prLogId}-fork-parent`;
+    const childLog = `${prLogId}-fork-child`;
+    const parentUrl = "https://github.com/lobiklukas/factory/pull/9";
+    const forkUrl = "https://github.com/lobiklukas/factory/pull/10";
+    const owner = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "owner" }, context);
+    const reader = (id: string) =>
+      PostgresStorage.open(sql, { logId: id, mode: "reader" }, context);
+    const fold = (id: string) =>
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() => reader(id));
+        const log = yield* readSessionLog(storage);
+        yield* Effect.promise(() => storage.dispose());
+        return log;
+      });
+    const announced = (root: OpenSession["root"]) =>
+      Effect.gen(function* () {
+        const state = yield* Effect.promise(() => root.viewState(context));
+        const view = state.value;
+        state.dispose();
+        return diffView(view, view, new Set()).filter(
+          (event) => event._tag === "prOpened",
+        );
+      });
+
+    const parent = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { harness, root } = yield* openSession({
+          storage: yield* Effect.promise(() => owner(parentLog)),
+          model,
+          cwd: workdir,
+        });
+        const turn = yield* submitMessage(root, {
+          content: "before the PR",
+          requestId: "before the PR",
+        });
+        yield* Effect.promise(() => turn.submission.wait(context));
+        yield* writePullRequestDoc(root, {
+          url: parentUrl,
+          number: 9,
+          base: "main",
+          head: "factory/ses_parent",
+          openedAt: "2026-10-27T18:00:00.000Z",
+        });
+        const events = yield* announced(root);
+        yield* closeHarness(harness);
+        return { events, log: yield* fold(parentLog) };
+      }),
+    );
+    // The premise: the parent announces its PR and records it, so there is something to inherit.
+    expect(parent.events).toEqual([{ _tag: "prOpened", prUrl: parentUrl }]);
+    expect(parent.log.pr?.url).toBe(parentUrl);
+
+    const forked = await runtime.runPromise(
+      Effect.gen(function* () {
+        const opened = yield* forkSession({
+          parent: yield* Effect.promise(() => reader(parentLog)),
+          child: yield* Effect.promise(() => owner(childLog)),
+          lineage: parentLog,
+          model,
+          cwd: workdir,
+        });
+        const before = {
+          record: yield* readPullRequestDoc(opened.harness, opened.root),
+          events: yield* announced(opened.root),
+          log: yield* fold(childLog),
+        };
+        yield* writePullRequestDoc(opened.root, {
+          url: forkUrl,
+          number: 10,
+          base: "main",
+          head: "factory/ses_fork",
+          openedAt: "2026-10-27T18:05:00.000Z",
+        });
+        const after = {
+          record: yield* readPullRequestDoc(opened.harness, opened.root),
+          events: yield* announced(opened.root),
+          log: yield* fold(childLog),
+        };
+        yield* closeHarness(opened.harness);
+        return { before, after };
+      }),
+    );
+
+    // Before its own PR, the fork has none in either answer: no record its PR step would read back
+    // instead of opening one, no fold, and nothing an attached client is told.
+    expect(forked.before.record).toBeUndefined();
+    expect(forked.before.log.pr).toBeUndefined();
+    expect(forked.before.events).toEqual([]);
+    // The transcript is still the parent's entry for entry, the PR line kept as whose it was.
+    expect(forked.before.log.entries.map((entry) => entry.text)).toEqual(
+      parent.log.entries.map((entry) =>
+        entry.kind === "other" && entry.text === ""
+          ? inheritedPrText(parentUrl)
+          : entry.text,
+      ),
+    );
+    expect(forked.before.log.entries).toContainEqual(
+      expect.objectContaining({ text: inheritedPrText(parentUrl) }),
+    );
+
+    // After it opens its own, both answers name that one PR, and only that one: one `prOpened`, not
+    // the parent's beside it.
+    expect(forked.after.record?.url).toBe(forkUrl);
+    expect(forked.after.log.pr?.url).toBe(forkUrl);
+    expect(forked.after.events).toEqual([{ _tag: "prOpened", prUrl: forkUrl }]);
   }, 120_000);
 });
 

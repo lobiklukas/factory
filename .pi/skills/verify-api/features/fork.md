@@ -25,6 +25,16 @@ What a fork does **not** copy: the task binding (`factory.task`), the spec and c
 and `pi.usage`. A fork of a task-bound session therefore starts unbound, with no spend history —
 neither is transcript, and neither is in this issue's scope.
 
+Nor the PR (LOB-211). The fork runs on a branch of its own, so the parent's `factory.pr` is not its
+record: copied, it is the document the fork's PR step reads back instead of opening a PR for the
+fork's work. The parent's `factory.pr.opened` entry is copied as `factory.pr.inherited` — the same
+data under a kind `diffView` does not announce, read as "a session this one was forked from opened
+…" — so the transcript stays the parent's entry for entry while an attach to the fork yields no
+`prOpened` until the fork opens its own, and then exactly one. `readSessionLog(fork).pr` and the
+fork's `prUrl` say the same thing. The harness case `forks without the parent's PR, and announces
+only the fork's own` (`packages/harness/src/session.test.ts`) pins it; the drive below forks a
+session that opened no PR, so it does not reach this.
+
 ## How a user reaches it
 
 The `forkSession` RPC, from the CLI or the dashboard (the dashboard affordance lands with LOB-182).
