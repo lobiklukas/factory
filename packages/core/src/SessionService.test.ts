@@ -47,6 +47,7 @@ import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import type { ApprovalRequest } from "@repo/domain/Approval";
+import { ProposalsRefused } from "@repo/domain/Decomposition";
 import type {
   ListSessionsInput,
   ListSessionsOutput,
@@ -98,6 +99,7 @@ import {
   compareReplay,
   createFauxModelAccess,
   createModelAccess,
+  DECOMPOSITION_PROMPT_PREFIX,
   DEFAULT_AUTONOMY,
   mirrorComparison,
   modelAccessFor,
@@ -108,6 +110,7 @@ import {
   replaySession,
   waitForPrompt,
   writeReplayComparison,
+  MAX_DECOMPOSED_CRITERIA,
   PR_EVIDENCE_EXCERPT,
   readPromptSections,
   readSessionLog,
@@ -5468,6 +5471,504 @@ describe("the curator pass over a finished session", () => {
       // Exactly the turn's own two calls: the refused curation added none.
       expect(outcome.calls).toBe(2);
       expect(outcome.pages).toEqual([]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * Proposing child issues from a session's spec (LOB-201, part 1 of LOB-43).
+ *
+ * The spec is the one a real specifier run declares: a card in `specifying`, a run on it, and the
+ * faux script's `spec` call (`fauxSpec`), so the decomposition reads what the stage wrote rather than
+ * a document this suite planted. The cases are the issue's criteria in order:
+ *
+ * - the spec yields proposals, each with acceptance lines, committed as one document and read back
+ *   through `getSession`;
+ * - an answer with an empty acceptance list or a duplicate title is refused rather than stored;
+ * - the pass creates no tracker issue and no session: every HTTP request the process could make
+ *   lands in a ledger that stays empty, the PR write-back is never told anything, and the only rows
+ *   that change — inserted, deleted *or updated* — are the session's own log and its activity row.
+ *
+ * And the refusals made before any call, each asserted with no decomposition call and no commit:
+ * a running session, no spec, a spec with gaps, no criteria, and a spec too large to show whole.
+ *
+ * This suite's database is its own (`runDatabaseName`), and its cases run one at a time, so a
+ * table-wide fingerprint is a statement about this pass alone.
+ */
+describe("proposing child issues from a spec", () => {
+  const decomposeRoot = mkdtempSync(join(tmpdir(), "factory-core-decompose-"));
+  const PERSON = "person:lukas";
+  const SPEC = {
+    goal: "Propose child issues from a spec document",
+    acceptance: [
+      "a spec yields proposals readable through getSession",
+      "a refused proposal set is never stored",
+    ],
+    gaps: [] as string[],
+    openQuestions: [] as string[],
+  };
+
+  /** Every request the process makes over HTTP — a tracker's API included — and its answer: none. */
+  const httpLedger = () => {
+    const requests: string[] = [];
+    const layer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) =>
+        Effect.sync(() => {
+          requests.push(`${request.method} ${url.toString()}`);
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response("{}", { status: 500 }),
+          );
+        }),
+      ),
+    );
+    return { requests, layer };
+  };
+
+  /**
+   * A service whose faux specs `spec` and answers a decomposition with `decomposition`, napping
+   * `sleepMs` before each step of a turn. `decompositionCalls` counts the model calls that carried a
+   * decomposition prompt — the faux's own `callCount` also counts a run's steps, which a case that
+   * asks while a run is in flight cannot tell apart.
+   */
+  const withDecomposition = (options: {
+    readonly spec?: typeof SPEC;
+    readonly decomposition?: string;
+    readonly sleepMs?: number;
+  }) => {
+    const faux = createFauxModelAccess({
+      fauxSpec: [options.spec ?? SPEC],
+      ...(options.sleepMs === undefined
+        ? {}
+        : { fauxSleepMs: options.sleepMs }),
+      ...(options.decomposition === undefined
+        ? {}
+        : { fauxDecomposition: options.decomposition }),
+    });
+    let decompositionCalls = 0;
+    const models = faux.access.models;
+    const counted: typeof models.completeSimple = (
+      request,
+      context,
+      ...rest
+    ) => {
+      if (
+        context.messages.some(
+          (message) =>
+            message.role === "user" &&
+            typeof message.content === "string" &&
+            message.content.startsWith(DECOMPOSITION_PROMPT_PREFIX),
+        )
+      ) {
+        decompositionCalls += 1;
+      }
+      return models.completeSimple(request, context, ...rest);
+    };
+    const access = {
+      ...faux.access,
+      models: new Proxy(models, {
+        get: (target, key) => {
+          if (key === "completeSimple") return counted;
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
+    const http = httpLedger();
+    const reports: PullRequestReport[] = [];
+    const runtime = ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: access, sessionRoot: decomposeRoot }),
+        TaskServiceLive,
+      ).pipe(
+        Layer.provide(
+          Layer.succeed(SessionWriteBack, {
+            pullRequest: (input) =>
+              Effect.sync(() => {
+                reports.push(pullRequestReport(input.result));
+              }),
+          }),
+        ),
+        Layer.provideMerge(http.layer),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    return {
+      faux,
+      http,
+      reports,
+      runtime,
+      decompositionCalls: () => decompositionCalls,
+    };
+  };
+
+  /** A specifier run on a card of its own, settled, with its spec committed. */
+  const specified = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const tasks = yield* TaskService;
+    const sessions = yield* SessionService;
+    const boardId = `brd_${randomBytes(13).toString("hex")}`;
+    yield* sql`
+      INSERT INTO board_instances (id, repo, definition_id, definition_version)
+      VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+    `;
+    const created = yield* tasks.create({
+      boardId,
+      title: "a card to decompose",
+      actor: PERSON,
+    });
+    const card = yield* tasks.move({
+      taskId: created.id,
+      expectedRevision: created.revision,
+      to: "specifying",
+      actor: PERSON,
+    });
+    const run = yield* sessions.create({
+      title: card.title,
+      taskId: card.id,
+      taskColumn: card.column,
+    });
+    yield* sessions.send({ sessionId: run.id, content: "specify it" });
+    yield* waitUntil(
+      Effect.map(
+        sessions.get(run.id),
+        (snapshot) =>
+          !snapshot.live.busy &&
+          snapshot.entries.some(
+            (entry) =>
+              entry.kind === "toolResult" &&
+              entry.toolName === "spec" &&
+              entry.isError !== true,
+          ),
+      ),
+      "the specifying run to declare its spec and settle",
+    );
+    return { card: yield* tasks.get(card.id), runId: run.id };
+  });
+
+  /**
+   * A content fingerprint of every table in the schema — every row, every column — but the session's
+   * own log and its own activity row, which a decomposition writes by design (the document and the
+   * call's spend). A row count would miss an UPDATE; an `md5` over the rows in a fixed order does not.
+   * The tables are read from the catalog rather than listed, so a table a later migration adds is
+   * covered without this helper knowing its name.
+   */
+  const fingerprint = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tables = yield* sql<{ readonly name: string }>`
+        SELECT table_name AS name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+      `;
+      const own: Record<string, string> = {
+        commits: "log_id",
+        session_activity: "session_id",
+      };
+      const prints: Record<string, string> = {};
+      for (const { name } of tables) {
+        const column = own[name];
+        const rows =
+          column === undefined
+            ? yield* sql<{ readonly print: string }>`
+                SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
+                FROM ${sql(name)} t
+              `
+            : yield* sql<{ readonly print: string }>`
+                SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
+                FROM ${sql(name)} t WHERE ${sql(column)} <> ${sessionId}
+              `;
+        prints[name] = rows[0]?.print ?? "";
+      }
+      return prints;
+    });
+
+  /** What the session's own log gained after commit `seq`, as each commit's writes. */
+  const logWritesAfter = (sessionId: SessionId, seq: number) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ readonly writes: string }>`
+        SELECT writes::text AS writes FROM commits
+        WHERE log_id = ${sessionId} AND seq > ${seq} ORDER BY seq
+      `;
+      return rows.map((row) => row.writes);
+    });
+
+  const headSeq = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const [row] = yield* sql<{ readonly seq: number }>`
+        SELECT coalesce(max(seq), 0)::int AS seq FROM commits WHERE log_id = ${sessionId}
+      `;
+      return row?.seq ?? 0;
+    });
+
+  it("commits one proposal per criterion as one document, readable through getSession, and writes nowhere else", async () => {
+    const { faux, http, reports, runtime } = withDecomposition({});
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const tasks = yield* TaskService;
+          const { card, runId } = yield* specified;
+          const rowsBefore = yield* fingerprint(runId);
+          const seq = yield* headSeq(runId);
+          const calls = faux.faux.state.callCount;
+          const proposed = yield* sessions.proposeDecomposition({
+            sessionId: runId,
+          });
+          return {
+            proposed,
+            calls: faux.faux.state.callCount - calls,
+            snapshot: yield* sessions.get(runId),
+            cardAfter: yield* tasks.get(card.id),
+            card,
+            rowsBefore,
+            rowsAfter: yield* fingerprint(runId),
+            writes: yield* logWritesAfter(runId, seq),
+          };
+        }),
+      );
+
+      // At least one proposal, each with acceptance lines: here one per criterion of the spec.
+      expect(outcome.proposed.proposals.map((p) => p.title)).toEqual(
+        SPEC.acceptance,
+      );
+      for (const proposal of outcome.proposed.proposals) {
+        expect(proposal.acceptance.length).toBeGreaterThan(0);
+        expect(proposal.goal).toBe(SPEC.goal);
+      }
+      expect(outcome.calls).toBe(1);
+      // Readable back through `getSession`, as the value committed.
+      expect(outcome.snapshot.proposedIssues).toEqual(outcome.proposed);
+      // One document: of the log's new commits exactly one writes `factory.proposedIssues`.
+      expect(
+        outcome.writes.filter((writes) =>
+          writes.includes("factory.proposedIssues"),
+        ),
+      ).toHaveLength(1);
+      // No tracker issue: nothing was asked of any HTTP API, and the write-back heard nothing.
+      expect(http.requests).toEqual([]);
+      expect(reports).toEqual([]);
+      // No child session, no card, no event, no run, and no other row updated: every table's
+      // content but the session's own log and activity row is as it was.
+      expect(Object.keys(outcome.rowsBefore)).toEqual(
+        expect.arrayContaining(["sessions", "tasks", "repos", "skills"]),
+      );
+      expect(outcome.rowsAfter).toEqual(outcome.rowsBefore);
+      expect(outcome.cardAfter.revision).toBe(outcome.card.revision);
+      expect(outcome.cardAfter.column).toBe("specifying");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it.each([
+    {
+      name: "an empty acceptance list",
+      proposals: [
+        { title: "A", goal: "g", change: "c", acceptance: ["a"] },
+        { title: "B", goal: "g", change: "c", acceptance: [] },
+      ],
+      faults: [[1, "no_acceptance"]],
+    },
+    {
+      name: "a duplicate title",
+      proposals: [
+        { title: "Same", goal: "g", change: "c", acceptance: ["a"] },
+        { title: "same", goal: "g", change: "c", acceptance: ["b"] },
+      ],
+      faults: [[1, "duplicate_title"]],
+    },
+  ])(
+    "refuses $name rather than storing it",
+    async ({ proposals, faults }) => {
+      const { http, runtime } = withDecomposition({
+        decomposition: JSON.stringify({ proposals }),
+      });
+      try {
+        const outcome = await runtime.runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const { runId } = yield* specified;
+            const seq = yield* headSeq(runId);
+            const refused = yield* Effect.exit(
+              sessions.proposeDecomposition({ sessionId: runId }),
+            );
+            return {
+              refused,
+              snapshot: yield* sessions.get(runId),
+              writes: yield* logWritesAfter(runId, seq),
+            };
+          }),
+        );
+
+        const error = Option.getOrThrow(Exit.findErrorOption(outcome.refused));
+        expect(Schema.is(ProposalsRefused)(error)).toBe(true);
+        if (!Schema.is(ProposalsRefused)(error)) return;
+        expect(
+          error.faults.map((fault) => [fault.index, fault.reason]),
+        ).toEqual(faults);
+        // Nothing stored: the snapshot reports no proposals and no commit wrote the document. The
+        // call itself was made, and its spend is the one thing the log gained.
+        expect(outcome.snapshot.proposedIssues).toBeUndefined();
+        expect(
+          outcome.writes.some((writes) =>
+            writes.includes("factory.proposedIssues"),
+          ),
+        ).toBe(false);
+        expect(http.requests).toEqual([]);
+      } finally {
+        await runtime.dispose();
+      }
+    },
+    120_000,
+  );
+
+  it("refuses a session with no spec, and a spec that still declares gaps, without a call", async () => {
+    const { faux, runtime } = withDecomposition({
+      spec: {
+        ...SPEC,
+        gaps: ["which tracker the children go to"],
+        openQuestions: ["Linear or Jira?"],
+      },
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const scratch = yield* sessions.create({ title: "no spec here" });
+          const { runId } = yield* specified;
+          const calls = faux.faux.state.callCount;
+          const noSpec = yield* Effect.exit(
+            sessions.proposeDecomposition({ sessionId: scratch.id }),
+          );
+          const gaps = yield* Effect.exit(
+            sessions.proposeDecomposition({ sessionId: runId }),
+          );
+          return {
+            noSpec,
+            gaps,
+            calls: faux.faux.state.callCount - calls,
+            snapshot: yield* sessions.get(runId),
+          };
+        }),
+      );
+
+      const codeOf = (exit: typeof outcome.noSpec) => {
+        const error = Option.getOrThrow(Exit.findErrorOption(exit));
+        return error._tag === "SessionError"
+          ? `${error.code}: ${error.message}`
+          : error._tag;
+      };
+      expect(codeOf(outcome.noSpec)).toMatch(/^invalid_input: .*no spec/);
+      expect(codeOf(outcome.gaps)).toMatch(/^invalid_input: .*declares 1 gap/);
+      // Both refused before the model was asked anything.
+      expect(outcome.calls).toBe(0);
+      expect(outcome.snapshot.proposedIssues).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it.each([
+    {
+      name: "no acceptance criteria",
+      acceptance: [] as string[],
+      message: /^invalid_input: .*no acceptance criteria/,
+    },
+    {
+      name: "more criteria than one decomposition is shown whole",
+      acceptance: Array.from(
+        { length: MAX_DECOMPOSED_CRITERIA + 1 },
+        (_, index) => `criterion ${index} holds`,
+      ),
+      message: /^invalid_input: .*51 acceptance criteria; at most 50/,
+    },
+  ])(
+    "refuses a spec with $name without a call, a charge or a commit",
+    async ({ acceptance, message }) => {
+      const { decompositionCalls, runtime } = withDecomposition({
+        spec: { ...SPEC, acceptance },
+      });
+      try {
+        const outcome = await runtime.runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const { runId } = yield* specified;
+            const seq = yield* headSeq(runId);
+            const before = yield* sessions.get(runId);
+            const refused = yield* Effect.exit(
+              sessions.proposeDecomposition({ sessionId: runId }),
+            );
+            return {
+              refused,
+              before,
+              after: yield* sessions.get(runId),
+              writes: yield* logWritesAfter(runId, seq),
+            };
+          }),
+        );
+
+        const error = Option.getOrThrow(Exit.findErrorOption(outcome.refused));
+        expect(
+          error._tag === "SessionError"
+            ? `${error.code}: ${error.message}`
+            : error._tag,
+        ).toMatch(message);
+        // Refused before the model was asked anything, so nothing was billed: the log gained no
+        // commit at all — no spend, no document — and the session's usage did not move.
+        expect(decompositionCalls()).toBe(0);
+        expect(outcome.writes).toEqual([]);
+        expect(outcome.after.usage).toEqual(outcome.before.usage);
+        expect(outcome.after.proposedIssues).toBeUndefined();
+      } finally {
+        await runtime.dispose();
+      }
+    },
+    120_000,
+  );
+
+  it("refuses a running session as busy, without a call", async () => {
+    // The sleeping script holds each step of a turn open, so the second run is still in flight
+    // when the decomposition asks; the spec the first run declared is there, so without the busy
+    // check the call would be made.
+    const { decompositionCalls, runtime } = withDecomposition({
+      sleepMs: 1_000,
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const { runId } = yield* specified;
+          yield* sessions.send({ sessionId: runId, content: "and again" });
+          yield* waitUntil(
+            Effect.map(sessions.get(runId), (snapshot) => snapshot.live.busy),
+            "the second run to be in flight",
+          );
+          const refused = yield* Effect.exit(
+            sessions.proposeDecomposition({ sessionId: runId }),
+          );
+          const calls = decompositionCalls();
+          yield* waitUntil(
+            Effect.map(sessions.get(runId), (snapshot) => !snapshot.live.busy),
+            "the second run to settle",
+          );
+          return { refused, calls, snapshot: yield* sessions.get(runId) };
+        }),
+      );
+
+      const error = Option.getOrThrow(Exit.findErrorOption(outcome.refused));
+      expect(
+        error._tag === "SessionError"
+          ? `${error.code}: ${error.message}`
+          : error._tag,
+      ).toMatch(/^busy: .*is running/);
+      expect(outcome.calls).toBe(0);
+      expect(outcome.snapshot.proposedIssues).toBeUndefined();
     } finally {
       await runtime.dispose();
     }

@@ -64,6 +64,10 @@ import {
 } from "@repo/domain/Mission";
 import type { Page as CitedPage } from "@repo/domain/Page";
 import {
+  projectProposedIssues,
+  type ProposedIssues,
+} from "@repo/domain/Decomposition";
+import {
   PrEvidence as PrEvidenceSchema,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
@@ -89,6 +93,8 @@ import {
   PagePromptDoc,
   PrDoc,
   ReplayDoc,
+  PROPOSED_ISSUES_DOC_KIND,
+  ProposedIssuesDoc,
   SpecDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
@@ -2019,6 +2025,7 @@ const snapshotOf = (
   mission: MissionSnapshot | undefined,
   budgetDoc: JsonValue | undefined,
   replayDoc: JsonValue | undefined,
+  proposedIssues: ProposedIssues | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
   const budget = projectBudgetDoc(budgetDoc, projection.usage);
@@ -2053,8 +2060,23 @@ const snapshotOf = (
     ...(budget === undefined ? {} : { budget }),
     // Absent for a session no replay was ever compared with (LOB-199).
     ...(replayComparisons.length === 0 ? {} : { replayComparisons }),
+    // Absent for a session that never decomposed its spec (LOB-201).
+    ...(proposedIssues === undefined ? {} : { proposedIssues }),
   };
 };
+
+/**
+ * The proposed issues of a session this process owns (LOB-201), read through the validator the
+ * writer applied (`projectProposedIssues`), so the seed and any value a writer that bypassed it
+ * could have left read as none. The fold reads the same document from the log the same way.
+ */
+export const readProposedIssues = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<ProposedIssues | undefined, SessionError> =>
+  attempt("read proposed issues", () =>
+    harness.snapshot(ProposedIssuesDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectProposedIssues));
 
 /**
  * The budget document of a session this process owns (LOB-163), as JSON for `projectBudgetDoc` —
@@ -2177,6 +2199,7 @@ export const readLiveSnapshot = (
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
       const replay = yield* readReplayDoc(session.harness, session.root);
+      const proposed = yield* readProposedIssues(session.harness, session.root);
       return snapshotOf(
         state.value,
         tasks,
@@ -2185,6 +2208,7 @@ export const readLiveSnapshot = (
         mission,
         budget,
         replay,
+        proposed,
       );
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
@@ -2255,6 +2279,7 @@ export const liveSessionEvents = (
       const mission = yield* readMissionSnapshot(session.harness, session.root);
       const budget = yield* readBudgetDoc(session.harness, session.root);
       const replay = yield* readReplayDoc(session.harness, session.root);
+      const proposed = yield* readProposedIssues(session.harness, session.root);
       yield* Queue.offer(
         queue,
         snapshotEvent(
@@ -2266,6 +2291,7 @@ export const liveSessionEvents = (
             mission,
             budget,
             replay,
+            proposed,
           ),
         ),
       );
@@ -2286,6 +2312,9 @@ export const readHistoricalSnapshot = (
   Effect.gen(function* () {
     const log = yield* readSessionLog(storage);
     const mission = yield* readFoldedMission(storage);
+    const proposedIssues = projectProposedIssues(
+      yield* readDocument(storage, PROPOSED_ISSUES_DOC_KIND),
+    );
     const budget = projectBudgetDoc(
       yield* readDocument(storage, BUDGET_DOC_KIND),
       log.usage,
@@ -2326,6 +2355,8 @@ export const readHistoricalSnapshot = (
       ...(log.replayComparisons.length === 0
         ? {}
         : { replayComparisons: log.replayComparisons }),
+      // Proposals are document state too (LOB-201): a released session still reports them.
+      ...(proposedIssues === undefined ? {} : { proposedIssues }),
     };
   });
 

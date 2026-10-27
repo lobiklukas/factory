@@ -30,6 +30,7 @@ import {
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
 import { Effect, Schema } from "effect";
+import { MAX_PROPOSALS } from "@repo/domain/Decomposition";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
@@ -206,6 +207,79 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
 };
 
 /**
+ * How a decomposition prompt opens (LOB-201, `decompose.ts`), so the scripted model can tell a
+ * decomposition from a turn and from a curation. Here for the reason `CURATION_PROMPT_PREFIX` is.
+ */
+export const DECOMPOSITION_PROMPT_PREFIX = "<decompose>";
+
+/**
+ * The prompt's headings the derived answer reads the spec back from. `decompose.ts` writes them, and
+ * each value on one line, which is what lets a line-by-line read recover them.
+ */
+export const DECOMPOSITION_GOAL_HEADING = "## goal";
+export const DECOMPOSITION_ACCEPTANCE_HEADING = "## acceptance";
+
+/**
+ * What the scripted model answers to a decomposition prompt: one proposal per acceptance criterion
+ * of the spec the prompt carries, titled by the criterion, with the spec's goal as its goal and the
+ * criterion as its acceptance line — folded, where one proposal per criterion would break the rules
+ * (a repeated criterion, or more than `MAX_PROPOSALS`), into a proposal already made. No edges: the derived answer cannot know an order, and an
+ * edge it made up would be exactly the unreal ordering the decomposition is told not to declare.
+ *
+ * Derived rather than queued, as the curation answer is, so a drive needs no script to decompose;
+ * `fauxDecomposition` scripts the answer verbatim when a suite has to make a refusal happen.
+ */
+const derivedDecompositionAnswer = (prompt: string): AssistantMessage => {
+  let section = "";
+  let goal = "";
+  const acceptance: string[] = [];
+  for (const line of prompt.split("\n")) {
+    if (line.startsWith("## ")) {
+      section = line.trim();
+      continue;
+    }
+    if (section === DECOMPOSITION_GOAL_HEADING && line.trim() !== "") {
+      goal = line.trim();
+    }
+    if (section === DECOMPOSITION_ACCEPTANCE_HEADING && line.startsWith("- ")) {
+      acceptance.push(line.slice(2).trim());
+    }
+  }
+  // The set the validator would accept: a criterion whose title another already has (compared as
+  // the validator compares titles) joins that proposal's acceptance lines, and past
+  // `MAX_PROPOSALS` every further criterion joins the last proposal's. Each criterion is still some
+  // proposal's acceptance line, and no spec the decomposition accepts is refused for its size.
+  const proposals: {
+    title: string;
+    goal: string;
+    change: string;
+    acceptance: string[];
+    blockedBy: number[];
+  }[] = [];
+  const byTitle = new Map<string, number>();
+  for (const criterion of acceptance) {
+    const key = criterion.replaceAll(/\s+/g, " ").trim().toLowerCase();
+    const into =
+      byTitle.get(key) ??
+      (proposals.length >= MAX_PROPOSALS ? proposals.length - 1 : undefined);
+    const existing = into === undefined ? undefined : proposals[into];
+    if (existing !== undefined) {
+      existing.acceptance.push(criterion);
+      continue;
+    }
+    byTitle.set(key, proposals.length);
+    proposals.push({
+      title: criterion,
+      goal,
+      change: `Make this hold: ${criterion}`,
+      acceptance: [criterion],
+      blockedBy: [],
+    });
+  }
+  return fauxAssistantMessage(JSON.stringify({ proposals }));
+};
+
+/**
  * The answer a faux session gives, derived from its own transcript rather than from a queue: the
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
  * steps, repeatable for the life of a session, and it exercises the tool path a real turn uses.
@@ -240,6 +314,7 @@ export const fauxAnswer = (
   ask?: string,
   everyTurn = false,
   spec: readonly FauxSpecAttempt[] = [],
+  decomposition?: string,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -254,6 +329,13 @@ export const fauxAnswer = (
     return curation === undefined
       ? derivedCurationAnswer(lastUserText(messages))
       : fauxAssistantMessage(curation);
+  }
+  if (
+    lastUserText(messages).trimStart().startsWith(DECOMPOSITION_PROMPT_PREFIX)
+  ) {
+    return decomposition === undefined
+      ? derivedDecompositionAnswer(lastUserText(messages))
+      : fauxAssistantMessage(decomposition);
   }
   const turn = everyTurn ? sinceLastUser(messages) : messages;
   const output = toolResultText(turn, "bash");
@@ -293,14 +375,16 @@ export const fauxAnswer = (
 
 /**
  * Whether a request asks the script for a step of a turn, rather than for a compaction's summary or
- * a curation: the only requests the sleeping script (`fauxSleepMs`) is slow to answer. A summary
- * that slept would hold a compaction rather than a run, and a curation is not a turn at all.
+ * a curation or a decomposition: the only requests the sleeping script (`fauxSleepMs`) is slow to
+ * answer. A summary that slept would hold a compaction rather than a run, and a curation or a
+ * decomposition is not a turn at all.
  */
 export const isFauxTurnStep = (messages: readonly Message[]): boolean => {
   const text = lastUserText(messages).trimStart();
   return (
     !text.startsWith(SUMMARY_PROMPT_PREFIX) &&
-    !text.startsWith(CURATION_PROMPT_PREFIX)
+    !text.startsWith(CURATION_PROMPT_PREFIX) &&
+    !text.startsWith(DECOMPOSITION_PROMPT_PREFIX)
   );
 };
 
@@ -345,6 +429,12 @@ export type ModelAccessOptions = {
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
    */
   readonly fauxCuration?: string | undefined;
+  /**
+   * The body a scripted model answers a decomposition prompt with (LOB-201), verbatim: what the
+   * decomposition "proposes". Absent, the faux derives one proposal per acceptance criterion of the
+   * spec the prompt carries.
+   */
+  readonly fauxDecomposition?: string | undefined;
   /**
    * The context window the faux model is published with (pi-ai's default is 128k). Lowering it is
    * how a test drives a session past a compaction threshold without a 100k-token transcript.
@@ -586,6 +676,7 @@ export const createFauxModelAccess = (
         options.fauxAsk,
         options.fauxEveryTurn ?? false,
         options.fauxSpec ?? [],
+        options.fauxDecomposition,
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)
