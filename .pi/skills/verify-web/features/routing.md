@@ -41,7 +41,9 @@ Open the dashboard root. No auth, no query parameters, no seed data.
 ## Driving it with drive.mjs
 
 `drive.mjs` asserts the redirect, the copy on `/sandboxes`, the approvals inbox, and the bad-id
-refusal. The sandbox assertion is deliberately on the copy: a table appearing without a source behind
+refusal. Below `md` a session's route hides the list whatever its id decodes to (LOB-210), so the
+refused pane carries the same **Show sessions** link as a session's header: the drive requires it
+hidden at 1440 px, visible at 390 px, and opening `/sessions` (`observed.badIdBack`). The sandbox assertion is deliberately on the copy: a table appearing without a source behind
 it fails the run.
 
 The approvals block (LOB-53) flipped the old "approvals says what is missing" check rather than

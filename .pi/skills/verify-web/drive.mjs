@@ -556,20 +556,129 @@ if (childId !== "") {
       `${JSON.stringify(indexParent?.forkedFrom ?? null)}`,
   );
 
-  // Narrow width: the lineage line must not widen the page. The sidebar is a fixed 16rem, so what
-  // this proves is that the new third line truncates inside the row instead of pushing the document
-  // wider. The header's own clipping at 390 px is pre-existing (the header's last button is cut
-  // off too, because the shell has no breakpoint); its numbers are recorded, not asserted — see
-  // `.ralph/polish.md` and the ticket filed for it.
+  // Narrow width (LOB-210). At 390 px the session list and the pane take turns instead of sharing
+  // the width: a fixed 16rem list beside the rail once left the pane 86 px, so the header's actions
+  // were cut off past the viewport and the composer's placeholder wrapped one character per line.
+  // These checks are the shell's, measured on the fork's own route: the pane spans everything right
+  // of the rail, every header action's box ends inside the viewport, and the composer is a line
+  // wide enough to type in. Each of them failed on the build before LOB-210 (fork right edge 657 px,
+  // composer 22 px wide), which is what makes them a regression test rather than a description.
   await page.setViewportSize({ width: 390, height: 844 });
-  observed.narrowWidth = await page.evaluate((child) => {
-    const fork = Array.from(document.querySelectorAll("header button")).find(
-      (button) => button.getAttribute("aria-label") === "Fork from here",
+  await page.waitForTimeout(300);
+  const narrowBoxes = () =>
+    page.evaluate(() => {
+      const rect = (element) => {
+        if (!(element instanceof Element)) return null;
+        const box = element.getBoundingClientRect();
+        return {
+          left: Math.round(box.left),
+          right: Math.round(box.right),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        };
+      };
+      const action = (label) =>
+        Array.from(document.querySelectorAll("header button")).find(
+          (button) => button.getAttribute("aria-label") === label,
+        );
+      // The pane's own overflow, not the document's: the root frame is `h-dvh overflow-hidden`,
+      // so a pane whose content runs past its box is clipped there and never widens the document.
+      // The pane is the header's parent (SessionPane's root column).
+      const pane = document.querySelector("header")?.parentElement ?? null;
+      return {
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        paneScrollWidth: pane === null ? null : pane.scrollWidth,
+        paneClientWidth: pane === null ? null : pane.clientWidth,
+        headerScrollWidth:
+          document.querySelector("header")?.scrollWidth ?? null,
+        headerClientWidth:
+          document.querySelector("header")?.clientWidth ?? null,
+        rail: rect(document.querySelector("nav[aria-label='Sections']")),
+        header: rect(document.querySelector("header")),
+        aside: rect(document.querySelector("aside")),
+        forkBox: rect(action("Fork from here")),
+        compactBox: rect(
+          action("Compact session") ?? action("Compacting session"),
+        ),
+        composer: rect(document.querySelector("textarea")),
+      };
+    });
+  observed.narrowWidth = await narrowBoxes();
+  const narrowBox = observed.narrowWidth;
+  assert(
+    "the session pane spans the width beside the rail at 390px",
+    narrowBox.rail !== null &&
+      narrowBox.header !== null &&
+      narrowBox.header.left <= narrowBox.rail.right + 1 &&
+      narrowBox.header.right >= narrowBox.clientWidth - 1 &&
+      (narrowBox.aside === null || narrowBox.aside.width === 0),
+    `rail ${JSON.stringify(narrowBox.rail)}, header ${JSON.stringify(narrowBox.header)}, ` +
+      `list ${JSON.stringify(narrowBox.aside)}, viewport ${narrowBox.clientWidth}`,
+  );
+  const insideViewport = (box) =>
+    box !== null &&
+    box.width > 0 &&
+    box.left >= 0 &&
+    box.right <= narrowBox.clientWidth;
+  assert(
+    "the header's actions stay inside the viewport at 390px",
+    insideViewport(narrowBox.forkBox) && insideViewport(narrowBox.compactBox),
+    `Fork ${JSON.stringify(narrowBox.forkBox)}, Compact ${JSON.stringify(narrowBox.compactBox)}, ` +
+      `viewport ${narrowBox.clientWidth}`,
+  );
+  // "Not one character per line", measured: half the viewport is a placeholder's line, and a
+  // composer that grew past two lines of its own height is one that is wrapping its placeholder.
+  assert(
+    "the composer is a line wide enough to type in at 390px",
+    narrowBox.composer !== null &&
+      narrowBox.composer.width >= narrowBox.clientWidth / 2 &&
+      narrowBox.composer.height <= 64,
+    `composer ${JSON.stringify(narrowBox.composer)}, viewport ${narrowBox.clientWidth}`,
+  );
+  // Measured on the pane and its header rather than the document (review of LOB-210): the frame
+  // clips, so the document's scrollWidth stayed 390 on the build before LOB-210 while the header's
+  // actions ran ~570 px past its 86 px box. A box with `overflow: visible` still reports the width
+  // its content needs as scrollWidth, which is what this compares.
+  assert(
+    "the pane's content fits its own width at 390px",
+    narrowBox.paneScrollWidth !== null &&
+      narrowBox.paneScrollWidth <= narrowBox.paneClientWidth + 1 &&
+      narrowBox.headerScrollWidth !== null &&
+      narrowBox.headerScrollWidth <= narrowBox.headerClientWidth + 1,
+    `pane scrollWidth ${narrowBox.paneScrollWidth} vs clientWidth ${narrowBox.paneClientWidth}, ` +
+      `header scrollWidth ${narrowBox.headerScrollWidth} vs clientWidth ${narrowBox.headerClientWidth}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-pane-narrow.png"),
+    fullPage: true,
+  });
+
+  // The list is one link away: the header's back link opens `/sessions`, where the list is the
+  // whole width. The lineage line is read there, so the fork's third line is proven to truncate
+  // inside its row (a `truncate`d span that broke out of the row would be the same defect as
+  // widening the page, one level down) and still have a box tall enough to be read.
+  let listOpened = false;
+  try {
+    await page
+      .locator("header a[aria-label='Show sessions']")
+      .click({ timeout: 10_000 });
+    await page.waitForFunction(
+      (child) =>
+        window.location.pathname === "/sessions" &&
+        document.querySelector(`aside a[href='/sessions/${child}']`) !== null,
+      childId,
+      { timeout: 10_000 },
     );
-    const box = fork?.getBoundingClientRect();
-    // Readability, not just layout: the lineage line has to sit inside its own row (a `truncate`d
-    // span that broke out of the row would be the same defect as widening the page, one level
-    // down) and still have a box tall enough to be read.
+    listOpened = true;
+  } catch {
+    listOpened = false;
+  }
+  const listNarrow = await page.evaluate((child) => {
+    const aside = document.querySelector("aside")?.getBoundingClientRect();
+    const rail = document
+      .querySelector("nav[aria-label='Sections']")
+      ?.getBoundingClientRect();
     const row = document.querySelector(`aside a[href='/sessions/${child}']`);
     const lineage = Array.from(row?.querySelectorAll("span") ?? []).find(
       (span) => (span.textContent ?? "").startsWith("forked from "),
@@ -577,12 +686,13 @@ if (childId !== "") {
     const rowBox = row?.getBoundingClientRect();
     const lineageBox = lineage?.getBoundingClientRect();
     return {
+      path: window.location.pathname,
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
-      forkBox:
-        box === undefined
+      list:
+        aside === undefined || rail === undefined
           ? null
-          : { left: box.left, right: box.right, width: box.width },
+          : { left: aside.left, right: aside.right, railRight: rail.right },
       lineageBox:
         lineageBox === undefined || rowBox === undefined
           ? null
@@ -595,12 +705,21 @@ if (childId !== "") {
             },
     };
   }, childId);
+  observed.narrowWidth.list = listNarrow;
+  assert(
+    "the header's back link opens the full-width session list at 390px",
+    listOpened &&
+      listNarrow.list !== null &&
+      listNarrow.list.left <= listNarrow.list.railRight + 1 &&
+      listNarrow.list.right >= listNarrow.clientWidth - 1,
+    `opened ${listOpened} at ${JSON.stringify(listNarrow.path)}, list ${JSON.stringify(listNarrow.list)}`,
+  );
   assert(
     "the lineage line does not widen the page at 390px",
-    observed.narrowWidth.scrollWidth <= observed.narrowWidth.clientWidth,
-    `scrollWidth ${observed.narrowWidth.scrollWidth} vs clientWidth ${observed.narrowWidth.clientWidth}`,
+    listNarrow.scrollWidth <= listNarrow.clientWidth,
+    `scrollWidth ${listNarrow.scrollWidth} vs clientWidth ${listNarrow.clientWidth}`,
   );
-  const lineageBox = observed.narrowWidth.lineageBox;
+  const lineageBox = listNarrow.lineageBox;
   assert(
     "the lineage line stays readable inside its row at 390px",
     lineageBox !== null &&
@@ -1265,10 +1384,10 @@ assert(
 );
 
 // No horizontal overflow with the verdict on screen at a phone width. The *height* is deliberately
-// not asserted here: at 390px the dashboard's own three-column shell leaves the transcript a ~60px
-// column (measured, see `compaction-nothing-to-compact-narrow.png`), so the verdict's copy stacks one
-// word per line and no reserved height on this box could keep the tail from growing. That squeeze is
-// the shell's, not this control's; the reservation is proven above, at the drive's own widths.
+// not asserted here: the verdict's copy reflows at 390px (the pane is the width beside the rail
+// since LOB-210, ~340px, where it was a ~60px column before), and the reservation is a claim about
+// two states sharing one box, which is proven above, at the drive's own widths, where both are
+// sampled. The narrow height is recorded in `observed.shortNarrow`.
 await page.setViewportSize({ width: 390, height: 844 });
 await page.waitForTimeout(300);
 const narrow = await page.evaluate(() => {
@@ -1668,6 +1787,36 @@ assert(
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
 
+// Below `md` a session's route hides the list whatever its id decodes to (LOB-210), so the refused
+// pane carries the same `Show sessions` link as a session's header: without it a phone's only way
+// back is the rail. At 390 px the link is visible and opens `/sessions`; from `md` up it is hidden.
+const badIdBack = { wideVisible: null, narrowVisible: null, path: null };
+badIdBack.wideVisible = await page
+  .locator("a[aria-label='Show sessions']")
+  .isVisible();
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(300);
+const badIdBackLink = page.locator("a[aria-label='Show sessions']");
+badIdBack.narrowVisible = await badIdBackLink.isVisible();
+if (badIdBack.narrowVisible) {
+  await badIdBackLink.click({ timeout: 10_000 }).catch(() => undefined);
+  await page
+    .waitForFunction(() => window.location.pathname === "/sessions", null, {
+      timeout: 10_000,
+    })
+    .catch(() => undefined);
+}
+badIdBack.path = await page.evaluate(() => window.location.pathname);
+await page.setViewportSize({ width: 1440, height: 900 });
+observed.badIdBack = badIdBack;
+assert(
+  "a bad session id's pane links back to the list at 390px",
+  badIdBack.wideVisible === false &&
+    badIdBack.narrowVisible === true &&
+    badIdBack.path === "/sessions",
+  JSON.stringify(badIdBack),
+);
+
 // Back to the session for the transcript screenshot, with a tool result expanded.
 await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
 const sessionLink = page.locator("aside a[href^='/sessions/']").first();
@@ -1749,7 +1898,8 @@ const BOARD_READS = new Set([
   // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
   // this block makes, so a comment sent from here would show as an unexpected write below.
   "listTaskComments",
-  // The card pane's spec document (LOB-238): a read, fetched whenever the pane opens a card.
+  // The card pane's spec document (LOB-238): a read the pane makes on opening a card, so the
+  // write check below would otherwise count it as a write nobody clicked.
   "getTaskSpec",
   "getSession",
   "watchSession",
