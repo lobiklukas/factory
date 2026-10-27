@@ -225,6 +225,93 @@ export const SessionWorkspace = Schema.Struct({
 });
 export type SessionWorkspace = typeof SessionWorkspace.Type;
 
+/**
+ * One verification a PR cites, as the run's `verify` tool recorded it (LOB-79, part 2 of LOB-16).
+ *
+ * `name` is what ran: the skill directory's name (`verify-api`) when the surface's skill ran, or
+ * `commands.verify` when the repo's declared command did. `excerpt` is a bounded tail of the output
+ * the record holds, cut deterministically (the same record always gives the same excerpt), and
+ * `truncated` says the excerpt is shorter than what the command printed — either because the record
+ * already kept only a tail or because the excerpt cut it further. The output stays the record's: a
+ * PR quotes it, it never paraphrases it.
+ */
+export const VerificationRan = Schema.TaggedStruct("VerificationRan", {
+  surface: Schema.String,
+  name: Schema.String,
+  source: Schema.Literals(["workspace", "skill"]),
+  command: Schema.String,
+  exitCode: Schema.Int,
+  excerpt: Schema.String,
+  truncated: Schema.Boolean,
+});
+export type VerificationRan = typeof VerificationRan.Type;
+
+/** A verification that was found and could not run to an exit code (spawn failure, timeout). */
+export const VerificationUnrunnable = Schema.TaggedStruct(
+  "VerificationUnrunnable",
+  {
+    surface: Schema.String,
+    name: Schema.String,
+    source: Schema.Literals(["workspace", "skill"]),
+    command: Schema.String,
+    /** The execution environment's error code (`timeout`, `spawn_failed`, …). */
+    code: Schema.String,
+    message: Schema.String,
+    excerpt: Schema.String,
+    truncated: Schema.Boolean,
+  },
+);
+export type VerificationUnrunnable = typeof VerificationUnrunnable.Type;
+
+/** A changed surface the repo gives no way to verify: named, so its absence is on the PR. */
+export const VerificationMissing = Schema.TaggedStruct("VerificationMissing", {
+  surface: Schema.String,
+  message: Schema.String,
+});
+export type VerificationMissing = typeof VerificationMissing.Type;
+
+export const Verification = Schema.Union([
+  VerificationRan,
+  VerificationUnrunnable,
+  VerificationMissing,
+]);
+export type Verification = typeof Verification.Type;
+
+/**
+ * The run's last `verify` call, as the PR carries it: one row per verification it ran.
+ *
+ * The last call rather than every call, because a later call is the one that saw the change the PR
+ * publishes; `calls` says how many there were, so a reader knows earlier verdicts exist. `results`
+ * is never empty — a call that verified nothing is `EvidenceNone` — and mutable only so its
+ * encoding is a plain JSON value Pi Durable's documents accept.
+ */
+export const EvidenceRecorded = Schema.TaggedStruct("EvidenceRecorded", {
+  calls: Schema.Int,
+  changedCount: Schema.Int,
+  results: Schema.mutable(Schema.Array(Verification)),
+});
+export type EvidenceRecorded = typeof EvidenceRecorded.Type;
+
+/**
+ * A run with nothing to show: it never called `verify` (`not-verified`), its last call could not
+ * measure what changed (`unmeasured`), or that call found no changed path (`no-changes`). A value
+ * rather than an absent section, so a PR without evidence says so instead of looking like one whose
+ * evidence was left out.
+ */
+export const EvidenceNone = Schema.TaggedStruct("EvidenceNone", {
+  reason: Schema.Literals(["not-verified", "unmeasured", "no-changes"]),
+  message: Schema.String,
+});
+export type EvidenceNone = typeof EvidenceNone.Type;
+
+/**
+ * What a session's PR states was verified (LOB-79), derived from the run's recorded `verify` results
+ * — never from prose the model wrote. Attached to the PR's `factory.pr` document and its `prOpened`
+ * event, and rendered as the PR body's `## Verification` section.
+ */
+export const PrEvidence = Schema.Union([EvidenceRecorded, EvidenceNone]);
+export type PrEvidence = typeof PrEvidence.Type;
+
 export const SessionSnapshotFields = {
   session: SessionSummary,
   workspace: SessionWorkspace,
@@ -273,7 +360,11 @@ export const SessionEvent = Schema.Union([
   Schema.TaggedStruct("status", { status: SessionStatus }),
   Schema.TaggedStruct("queued", { queued: Schema.Array(QueuedMessage) }),
   Schema.TaggedStruct("tasks", { tasks: Schema.Array(SessionTask) }),
-  Schema.TaggedStruct("prOpened", { prUrl: Schema.String }),
+  Schema.TaggedStruct("prOpened", {
+    prUrl: Schema.String,
+    /** What the PR says was verified (LOB-79). Absent on a PR recorded before evidence existed. */
+    evidence: Schema.optional(PrEvidence),
+  }),
 ]);
 export type SessionEvent = typeof SessionEvent.Type;
 

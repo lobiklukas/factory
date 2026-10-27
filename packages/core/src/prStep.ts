@@ -47,6 +47,14 @@
  * `{outcome: "no-change"}` without reaching GitHub. Nothing is written but that entry — no
  * document, no row — so the answer describes this call's branch rather than a state a later run
  * would have to escape.
+ *
+ * The body also states what the run verified (LOB-79): the step reads the `verify` tool's records
+ * from the session's own log, `prEvidenceOf` turns the last of them into a `PrEvidence`, and the
+ * body's `## Verification` section is rendered from it — the skill or declared command, its exit
+ * code, a bounded excerpt of its output, and an explicit "no verification evidence" when there is
+ * none. Read here rather than passed in, so no caller can hand the body a verdict the log does not
+ * hold; and committed on the `factory.pr` document beside the link, so the record and the body state
+ * one verdict.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -61,6 +69,8 @@ import type { RepoSlug, SessionError, SessionId } from "@repo/domain/Session";
 import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { Conversation, Harness } from "@repo/harness";
 import {
+  prEvidenceOf,
+  readConversationVerifyRecords,
   readPullRequestDoc,
   writeNoDocumentationChange,
   writePullRequestDoc,
@@ -169,7 +179,14 @@ export const openPullRequest = (
     return { number: pr.number, url: pr.url, outcome };
   });
 
-/** The one call to GitHub, its record, and the event an attached client sees. */
+/**
+ * The one call to GitHub, its record, and the event an attached client sees.
+ *
+ * The body's evidence is read here, from the session's own log (LOB-79): the `verify` tool's
+ * recorded results, derived by `prEvidenceOf` — so every caller of the step gets the section, and
+ * no caller can hand the body a verdict of its own. The same value is committed on the `factory.pr`
+ * document and its entry, so the PR's record and its body can never state two different verdicts.
+ */
 const open = (
   input: OpenPullRequestInput,
   /** The branch's changed paths, as the step measured them; listed in the body (LOB-228). */
@@ -180,6 +197,9 @@ const open = (
   CredentialProvider | HttpClient.HttpClient
 > =>
   Effect.gen(function* () {
+    const evidence = prEvidenceOf(
+      yield* readConversationVerifyRecords(input.conversation),
+    );
     const opened = yield* createPullRequest({
       repo: input.repo,
       base: input.base,
@@ -191,6 +211,7 @@ const open = (
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.spend === undefined ? {} : { spend: input.spend }),
         ...(changed.length === 0 ? {} : { changed }),
+        evidence,
       }),
     });
 
@@ -201,6 +222,7 @@ const open = (
       base: input.base,
       head: input.head,
       openedAt: DateTime.formatIso(now),
+      evidence,
     };
     yield* writePullRequestDoc(input.conversation, record);
     return record;

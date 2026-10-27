@@ -40,6 +40,8 @@ import {
 import {
   describeVerify,
   executeVerify,
+  PR_EVIDENCE_EXCERPT,
+  prEvidenceOf,
   readVerifyRecords,
   REPO_SURFACE,
   runVerify,
@@ -637,5 +639,151 @@ describe("tailOf", () => {
       output: "ghij",
       truncated: true,
     });
+  });
+});
+
+/**
+ * The PR's evidence (LOB-79), derived from the records the tool commits. The body that renders it is
+ * `packages/core`'s; what is decided here is *which* record a PR may cite and what an empty one says.
+ */
+describe("prEvidenceOf", () => {
+  const report = (
+    results: VerifyReport["results"],
+    changedCount = 1,
+  ): VerifyRecord => ({
+    _tag: "VerifyReport",
+    changed: ["apps/api/src/feature.ts"],
+    changedCount,
+    results,
+  });
+  const ran = (exitCode: number, output: string): VerifyReport["results"] => [
+    {
+      _tag: "VerifyRan",
+      surface: "api",
+      source: "skill",
+      directory: API_SKILL,
+      command: "bash drive.sh",
+      exitCode,
+      output,
+      truncated: false,
+    },
+  ];
+
+  it("says the run never verified when there is no record", () => {
+    expect(prEvidenceOf([])).toEqual({
+      _tag: "EvidenceNone",
+      reason: "not-verified",
+      message: "the run never called the `verify` tool",
+    });
+  });
+
+  it("cites the last call, and counts the earlier ones", () => {
+    // A pass the run later broke is not a claim the PR may make, and neither is a failure it fixed.
+    const evidence = prEvidenceOf([
+      report(ran(0, "first pass\n")),
+      report(ran(3, "then it broke\n"), 2),
+    ]);
+    expect(evidence).toEqual({
+      _tag: "EvidenceRecorded",
+      calls: 2,
+      changedCount: 2,
+      results: [
+        {
+          _tag: "VerificationRan",
+          surface: "api",
+          name: "verify-api",
+          source: "skill",
+          command: "bash drive.sh",
+          exitCode: 3,
+          excerpt: "then it broke\n",
+          truncated: false,
+        },
+      ],
+    });
+  });
+
+  it("names a declared command as the repo's own, and keeps an unrunnable one's code", () => {
+    const evidence = prEvidenceOf([
+      report([
+        {
+          _tag: "VerifyUnrunnable",
+          surface: REPO_SURFACE,
+          source: "workspace",
+          directory: ".",
+          command: "bun run test",
+          code: "timeout",
+          message: "timed out after 1800s",
+          output: "partial\n",
+          truncated: true,
+        },
+        {
+          _tag: "VerifyNoEvidence",
+          surface: "web",
+          reason: "no-verify-skill",
+          message: 'no evidence for surface "web"',
+        },
+      ]),
+    ]);
+    expect(evidence).toEqual({
+      _tag: "EvidenceRecorded",
+      calls: 1,
+      changedCount: 1,
+      results: [
+        {
+          _tag: "VerificationUnrunnable",
+          surface: REPO_SURFACE,
+          name: "commands.verify",
+          source: "workspace",
+          command: "bun run test",
+          code: "timeout",
+          message: "timed out after 1800s",
+          excerpt: "partial\n",
+          // The record's own cut is carried: the excerpt is not all the command printed.
+          truncated: true,
+        },
+        {
+          _tag: "VerificationMissing",
+          surface: "web",
+          message: 'no evidence for surface "web"',
+        },
+      ],
+    });
+  });
+
+  it("says why when the last call measured nothing or found nothing changed", () => {
+    expect(
+      prEvidenceOf([
+        report(ran(0, "ok\n")),
+        { _tag: "VerifyUnmeasured", reason: "git-failed", message: "boom" },
+      ]),
+    ).toEqual({
+      _tag: "EvidenceNone",
+      reason: "unmeasured",
+      message:
+        "the last `verify` call could not measure what changed (git-failed): boom",
+    });
+    expect(prEvidenceOf([report([], 0)])).toMatchObject({
+      _tag: "EvidenceNone",
+      reason: "no-changes",
+    });
+  });
+
+  it("cuts the excerpt to the PR's bound, deterministically, and marks it", () => {
+    const output = Array.from({ length: 100 }, (_, i) => `line ${i}\n`).join(
+      "",
+    );
+    const once = prEvidenceOf([report(ran(0, output))]);
+    expect(prEvidenceOf([report(ran(0, output))])).toEqual(once);
+    expect(once).toMatchObject({
+      results: [
+        {
+          excerpt: tailOf(output, PR_EVIDENCE_EXCERPT).output,
+          truncated: true,
+        },
+      ],
+    });
+    expect(
+      tailOf(output, PR_EVIDENCE_EXCERPT).output.startsWith("line 60\n"),
+    ).toBe(true);
   });
 });

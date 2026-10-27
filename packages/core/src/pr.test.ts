@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
-import { SessionId, RepoSlug } from "@repo/domain/Session";
+import { SessionId, RepoSlug, type PrEvidence } from "@repo/domain/Session";
+import { PR_EVIDENCE_EXCERPT, prEvidenceOf, tailOf } from "@repo/harness";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
-import { buildPrBody, createPullRequest } from "./pr";
+import { buildPrBody, createPullRequest, evidenceSection } from "./pr";
 import { diffCapRefusal, parseDiffSize } from "./prStep";
 
 const makeFakeHttp = (status: number, body: unknown) => {
@@ -99,6 +100,9 @@ const makeRoutedFake = (
   return { requests, client };
 };
 
+/** A run that never called `verify`: what every body case that is not about evidence passes. */
+const UNVERIFIED: PrEvidence = prEvidenceOf([]);
+
 describe("buildPrBody", () => {
   it("carries session id, model and spend", () => {
     const body = buildPrBody({
@@ -106,6 +110,7 @@ describe("buildPrBody", () => {
       prompt: "do thing",
       model: "m",
       spend: "$0.01",
+      evidence: UNVERIFIED,
     });
     expect(body).toContain("s-1");
     expect(body).toContain("m");
@@ -118,6 +123,7 @@ describe("buildPrBody", () => {
       sessionId: "s-1" as SessionId,
       prompt: "update the docs",
       changed: ["docs/design.md", "README.md"],
+      evidence: UNVERIFIED,
     });
     expect(body).toContain("## Changed files");
     expect(body).toContain("- docs/design.md");
@@ -133,15 +139,168 @@ describe("buildPrBody", () => {
     // A plain session directory has no branch, so the `none` measurement and an empty list are the
     // same fact: a heading over no rows would be a lie about what the PR carries.
     expect(
-      buildPrBody({ sessionId: "s-1" as SessionId, prompt: "p" }),
+      buildPrBody({
+        sessionId: "s-1" as SessionId,
+        prompt: "p",
+        evidence: UNVERIFIED,
+      }),
     ).not.toContain("## Changed files");
     expect(
       buildPrBody({
         sessionId: "s-1" as SessionId,
         prompt: "p",
         changed: [],
+        evidence: UNVERIFIED,
       }),
     ).not.toContain("## Changed files");
+  });
+});
+
+/**
+ * The body's `## Verification` section (LOB-79), rendered from `verify` records shaped exactly as the
+ * tool commits them — the records go through the harness's `prEvidenceOf`, so these cases exercise
+ * the same derivation the PR step runs, not a hand-built evidence value that could drift from it.
+ */
+describe("the verification section", () => {
+  const ran = (output: string, exitCode = 0, truncated = false) =>
+    prEvidenceOf([
+      {
+        _tag: "VerifyReport",
+        changed: ["apps/api/src/feature.ts"],
+        changedCount: 1,
+        results: [
+          {
+            _tag: "VerifyRan",
+            surface: "api",
+            source: "skill",
+            directory: ".pi/skills/verify-api",
+            command: "bash drive.sh",
+            exitCode,
+            output,
+            truncated,
+          },
+        ],
+      },
+    ]);
+  const body = (evidence: PrEvidence) =>
+    buildPrBody({
+      sessionId: "s-1" as SessionId,
+      prompt: "add the feature",
+      changed: ["apps/api/src/feature.ts"],
+      evidence,
+    });
+
+  it("names the skill, its exit code and its output, between the changed files and the prompt", () => {
+    const text = body(ran("verify-api: 3/3 checks passed\n"));
+    expect(text).toContain("## Verification");
+    expect(text).toContain("### `verify-api`: exit 0");
+    expect(text).toContain("- Surface: `api`");
+    expect(text).toContain("- Exit code: 0");
+    expect(text).toContain("- Command: `bash drive.sh`");
+    expect(text).toContain("```text\nverify-api: 3/3 checks passed\n```");
+    // All of the output fit, so the body does not claim a truncation that did not happen.
+    expect(text).toContain("Output:");
+    expect(text).not.toContain("truncated");
+    expect(text.indexOf("## Changed files")).toBeLessThan(
+      text.indexOf("## Verification"),
+    );
+    expect(text.indexOf("## Verification")).toBeLessThan(
+      text.indexOf("## Prompt"),
+    );
+  });
+
+  it("says a failing verification failed, with its non-zero code", () => {
+    const text = body(ran("FAIL: 1 required check failed\n", 3));
+    expect(text).toContain("### `verify-api`: exit 3 (failed)");
+    expect(text).toContain("- Exit code: 3");
+  });
+
+  it("says so explicitly when the run has no evidence, instead of leaving the section out", () => {
+    const text = body(UNVERIFIED);
+    expect(text).toContain("## Verification");
+    expect(text).toContain(
+      "**No verification evidence.** Nothing in this PR was verified by a recorded run: " +
+        "the run never called the `verify` tool.",
+    );
+    expect(text.indexOf("## Verification")).toBeLessThan(
+      text.indexOf("## Prompt"),
+    );
+  });
+
+  it("names a surface with no verify skill rather than skipping it", () => {
+    const text = body(
+      prEvidenceOf([
+        {
+          _tag: "VerifyReport",
+          changed: ["apps/web/src/page.tsx"],
+          changedCount: 1,
+          results: [
+            {
+              _tag: "VerifyNoEvidence",
+              surface: "web",
+              reason: "no-verify-skill",
+              message:
+                'no evidence for surface "web": no .pi/skills/verify-web/ skill',
+            },
+          ],
+        },
+      ]),
+    );
+    expect(text).toContain("### `web`: no evidence");
+    expect(text).toContain('no evidence for surface "web"');
+  });
+
+  it("cuts a long output to the same tail every time, and says it was cut", () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `check ${i + 1}`);
+    const output = `${lines.join("\n")}\nFAIL: 1 required check failed\n`;
+    const first = body(ran(output, 3));
+    // Deterministic: the same record renders the same body, byte for byte.
+    expect(body(ran(output, 3))).toBe(first);
+    const evidence = ran(output, 3);
+    const result =
+      evidence._tag === "EvidenceRecorded" ? evidence.results[0] : undefined;
+    // The excerpt is exactly `tailOf` under the PR bound: the verdict kept, the start cut.
+    expect(result).toMatchObject({
+      _tag: "VerificationRan",
+      excerpt: tailOf(output, PR_EVIDENCE_EXCERPT).output,
+      truncated: true,
+    });
+    const excerpt = result?._tag === "VerificationRan" ? result.excerpt : "";
+    expect(excerpt.split("\n").filter((line) => line !== "")).toHaveLength(
+      PR_EVIDENCE_EXCERPT.maxLines,
+    );
+    expect(excerpt.endsWith("FAIL: 1 required check failed\n")).toBe(true);
+    expect(first).toContain("FAIL: 1 required check failed");
+    expect(first).not.toContain("check 1\n");
+    expect(first).not.toContain("check 361\n");
+    expect(first).toContain("check 362\n");
+    expect(first).toContain(
+      `Output (truncated: earlier output omitted, the last ${PR_EVIDENCE_EXCERPT.maxLines} line(s) shown):`,
+    );
+  });
+
+  it("bounds a long single line by characters", () => {
+    const output = `${"x".repeat(10_000)}END\n`;
+    const evidence = ran(output);
+    const result =
+      evidence._tag === "EvidenceRecorded" ? evidence.results[0] : undefined;
+    const excerpt = result?._tag === "VerificationRan" ? result.excerpt : "";
+    expect(excerpt).toHaveLength(PR_EVIDENCE_EXCERPT.maxChars);
+    expect(excerpt.endsWith("END\n")).toBe(true);
+    expect(body(evidence)).toContain("Output (truncated:");
+  });
+
+  it("marks an excerpt truncated when the record itself kept only a tail", () => {
+    // Short enough for the PR bound, but the tool already cut the run's output to its tail.
+    const text = body(ran("the last line\n", 0, true));
+    expect(text).toContain(
+      "Output (truncated: earlier output omitted, the last 1 line(s) shown):",
+    );
+  });
+
+  it("fences output that contains a fence of its own, so it cannot end the block early", () => {
+    const text = evidenceSection(ran("before\n```\nafter\n")).join("\n");
+    expect(text).toContain("````text\nbefore\n```\nafter\n````");
   });
 });
 
@@ -163,6 +322,7 @@ describe("createPullRequest", () => {
         prompt: "do thing",
         model: "m",
         spend: "$0.01",
+        evidence: UNVERIFIED,
       }),
     }).pipe(
       Effect.provide(

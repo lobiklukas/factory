@@ -78,6 +78,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { Effect, Option, Schema, Semaphore } from "effect";
+import type { PrEvidence, Verification } from "@repo/domain/Session";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const VERIFY_TOOL = "verify";
@@ -846,6 +847,101 @@ export const readVerifyRecords = (
     // Storage scans newest first.
     return verifyRecordsIn(entries.reverse());
   });
+
+/**
+ * How much of a verification's recorded output a PR quotes (LOB-79): the tail, as the record keeps
+ * one, and much shorter than the record's own bound — the PR is read by a person, and GitHub caps a
+ * body at 65,536 characters across every surface's excerpt.
+ */
+export const PR_EVIDENCE_EXCERPT = { maxChars: 2_000, maxLines: 40 } as const;
+
+/** The name a PR gives what ran: the skill directory (`verify-api`), or the repo's declared command. */
+const verificationName = (result: {
+  readonly source: "workspace" | "skill";
+  readonly directory: string;
+}): string =>
+  result.source === "workspace"
+    ? "commands.verify"
+    : (result.directory.split("/").at(-1) ?? result.directory);
+
+/**
+ * One recorded result as the PR cites it. The excerpt is `tailOf` the record's output under
+ * `PR_EVIDENCE_EXCERPT` — deterministic, so the same record always quotes the same lines — and it
+ * is `truncated` when either cut dropped something: the record's own tail, or this one.
+ */
+const verificationOf = (result: VerifyResult): Verification => {
+  switch (result._tag) {
+    case "VerifyNoEvidence":
+      return {
+        _tag: "VerificationMissing",
+        surface: result.surface,
+        message: result.message,
+      };
+    case "VerifyRan": {
+      const excerpt = tailOf(result.output, PR_EVIDENCE_EXCERPT);
+      return {
+        _tag: "VerificationRan",
+        surface: result.surface,
+        name: verificationName(result),
+        source: result.source,
+        command: result.command,
+        exitCode: result.exitCode,
+        excerpt: excerpt.output,
+        truncated: result.truncated || excerpt.truncated,
+      };
+    }
+    case "VerifyUnrunnable": {
+      const excerpt = tailOf(result.output, PR_EVIDENCE_EXCERPT);
+      return {
+        _tag: "VerificationUnrunnable",
+        surface: result.surface,
+        name: verificationName(result),
+        source: result.source,
+        command: result.command,
+        code: result.code,
+        message: result.message,
+        excerpt: excerpt.output,
+        truncated: result.truncated || excerpt.truncated,
+      };
+    }
+  }
+};
+
+/**
+ * What a PR states was verified, from a session's `verify` records, oldest first (LOB-79).
+ *
+ * The last record is the evidence: it is the call that saw the latest state of the change, and an
+ * earlier pass the run later broke is not a claim the PR may make. A run with no record, a last call
+ * that measured nothing, and a last call that found nothing changed are each an `EvidenceNone` that
+ * says which — never an empty list a body would render as silence.
+ */
+export const prEvidenceOf = (records: readonly VerifyRecord[]): PrEvidence => {
+  const last = records.at(-1);
+  if (last === undefined)
+    return {
+      _tag: "EvidenceNone",
+      reason: "not-verified",
+      message: `the run never called the \`${VERIFY_TOOL}\` tool`,
+    };
+  if (last._tag === "VerifyUnmeasured")
+    return {
+      _tag: "EvidenceNone",
+      reason: "unmeasured",
+      message: `the last \`${VERIFY_TOOL}\` call could not measure what changed (${last.reason}): ${last.message}`,
+    };
+  if (last.results.length === 0)
+    return {
+      _tag: "EvidenceNone",
+      reason: "no-changes",
+      message: `the last \`${VERIFY_TOOL}\` call found no changed paths to verify`,
+    };
+  return {
+    _tag: "EvidenceRecorded",
+    calls: records.length,
+    changedCount: last.changedCount,
+    results: last.results.map(verificationOf),
+  };
+};
 
 /** A record as the tool result's `details`: the schema's own encoding, which is plain JSON. */
 const encodeRecord = Schema.encodeSync(VerifyRecord);

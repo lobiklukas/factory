@@ -5,7 +5,12 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/http";
-import type { RepoSlug, SessionId } from "@repo/domain/Session";
+import type {
+  PrEvidence,
+  RepoSlug,
+  SessionId,
+  Verification,
+} from "@repo/domain/Session";
 import { CredentialError, CredentialProvider } from "./credentials";
 
 /** A PR could not be created. Typed, so callers handle it instead of dumping stderr. */
@@ -154,9 +159,115 @@ export type PrBodyInput = {
    * and the spend, and a reader had to open the diff to learn what the run touched.
    */
   readonly changed?: readonly string[];
+  /**
+   * What the run verified, from its recorded `verify` results (LOB-79) — never from the model's
+   * prose. Required, because the section is never omitted: a run with nothing to show passes an
+   * `EvidenceNone`, and the body says so.
+   */
+  readonly evidence: PrEvidence;
 };
 
-/** The body a factory PR carries: session id, model, spend, the changed files, and the prompt. */
+/**
+ * A code span or fence that `text` cannot close early: one backtick longer than the longest run of
+ * backticks in it (CommonMark closes a fence only on a run at least as long as the opener). Driver
+ * output and skill scripts are arbitrary text, and a stray fence in them would turn the rest of the
+ * body into code.
+ */
+const ticksFor = (text: string, minimum: number): string => {
+  const longest = Math.max(
+    0,
+    ...Array.from(text.matchAll(/`+/g), (run) => run[0].length),
+  );
+  return "`".repeat(Math.max(minimum, longest + 1));
+};
+
+const inlineCode = (text: string): string => {
+  const ticks = ticksFor(text, 1);
+  // A span whose text starts or ends with a backtick needs a space between it and the delimiter.
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+};
+
+/**
+ * An excerpt as the body shows it: fenced, and introduced by a line that says whether it is all of
+ * the output or its tail. The truncation note is outside the fence, so it can never be mistaken for
+ * a line the command printed.
+ */
+const excerptLines = (excerpt: string, truncated: boolean): string[] => {
+  const fence = ticksFor(excerpt, 3);
+  const body = excerpt.endsWith("\n") ? excerpt.slice(0, -1) : excerpt;
+  const shown = body === "" ? 0 : body.split("\n").length;
+  return [
+    truncated
+      ? `Output (truncated: earlier output omitted, the last ${shown} line(s) shown):`
+      : "Output:",
+    "",
+    `${fence}text`,
+    ...(body === "" ? [] : [body]),
+    fence,
+    "",
+  ];
+};
+
+const verificationLines = (verification: Verification): string[] => {
+  switch (verification._tag) {
+    case "VerificationRan":
+      return [
+        `### ${inlineCode(verification.name)}: exit ${verification.exitCode}${verification.exitCode === 0 ? "" : " (failed)"}`,
+        "",
+        `- Surface: ${inlineCode(verification.surface)}`,
+        `- Exit code: ${verification.exitCode}`,
+        `- Command: ${inlineCode(verification.command)}`,
+        "",
+        ...excerptLines(verification.excerpt, verification.truncated),
+      ];
+    case "VerificationUnrunnable":
+      return [
+        `### ${inlineCode(verification.name)}: could not run (${verification.code})`,
+        "",
+        `- Surface: ${inlineCode(verification.surface)}`,
+        `- Exit code: none — ${verification.message}`,
+        `- Command: ${inlineCode(verification.command)}`,
+        "",
+        ...excerptLines(verification.excerpt, verification.truncated),
+      ];
+    case "VerificationMissing":
+      return [
+        `### ${inlineCode(verification.surface)}: no evidence`,
+        "",
+        verification.message,
+        "",
+      ];
+  }
+};
+
+/**
+ * The body's `## Verification` section (LOB-79): every result of the run's last `verify` call —
+ * what ran, its exit code, and a bounded excerpt of its output — or, when there is none, a sentence
+ * saying so. Always present, so a PR without evidence reads as one, not as one whose section was
+ * dropped.
+ */
+export const evidenceSection = (evidence: PrEvidence): string[] => {
+  if (evidence._tag === "EvidenceNone")
+    return [
+      "## Verification",
+      "",
+      `**No verification evidence.** Nothing in this PR was verified by a recorded run: ${evidence.message.replace(/\.$/, "")}.`,
+      "",
+    ];
+  return [
+    "## Verification",
+    "",
+    `Recorded by the run's \`verify\` tool: its last call (${evidence.calls} in all) over ${evidence.changedCount} changed path(s).`,
+    "",
+    ...evidence.results.flatMap(verificationLines),
+  ];
+};
+
+/**
+ * The body a factory PR carries: session id, model, spend, the changed files, what was verified,
+ * and the prompt.
+ */
 export const buildPrBody = (input: PrBodyInput): string => {
   const changed = input.changed ?? [];
   const lines = [
@@ -169,6 +280,7 @@ export const buildPrBody = (input: PrBodyInput): string => {
     ...(changed.length === 0
       ? []
       : ["## Changed files", "", ...changed.map((path) => `- ${path}`), ""]),
+    ...evidenceSection(input.evidence),
     "## Prompt",
     "",
     input.prompt,

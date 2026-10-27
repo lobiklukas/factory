@@ -87,9 +87,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFauxModelAccess,
   createModelAccess,
+  PR_EVIDENCE_EXCERPT,
   readPromptSections,
   readSessionLog,
   readVerifyRecords,
+  tailOf,
   usageCostTotal,
 } from "@repo/harness";
 import { rebuildIndexes } from "./rebuild";
@@ -5785,5 +5787,218 @@ describe("the verify tool reads the session's workspace", () => {
     } finally {
       await verifyRuntime.dispose();
     }
+  }, 120_000);
+});
+
+/**
+ * The PR states what was verified (LOB-79, part 2 of LOB-16), from the run's recorded `verify`
+ * results and nothing the model wrote.
+ *
+ * Each case is a whole run through the real service: a fixture repo with a verify skill, a faux model
+ * whose `bash` turn commits a change and whose next turn calls `verify`, then the PR step against the
+ * in-process GitHub fake (`makeGithubFake`, the GitHub row of `docs/testing-third-parties.md`). The
+ * body asserted is the one GitHub was *sent*; the evidence asserted beside it is the one the log
+ * committed, read back by a reader that owns nothing.
+ */
+describe("the PR's evidence", () => {
+  const evidenceRoot = mkdtempSync(join(tmpdir(), "factory-core-evidence-"));
+
+  /** A repo whose `verify-api` skill is `drive`, committed on `main`. */
+  const fixture = (name: string, drive: string): string => {
+    const root = mkdtempSync(join(tmpdir(), `factory-repo-evidence-${name}-`));
+    const git = (command: string) =>
+      execSync(command, { cwd: root, stdio: "ignore" });
+    git("git init -b main");
+    git("git config user.email t@t.com");
+    git("git config user.name t");
+    mkdirSync(join(root, ".pi", "skills", "verify-api"), { recursive: true });
+    writeFileSync(join(root, ".pi", "skills", "verify-api", "drive.sh"), drive);
+    git("git add -A");
+    git("git commit -m base");
+    return root;
+  };
+
+  /** One run that changes `apps/api` and calls `verify`, then the PR step; the sent body and the log. */
+  const verifiedPr = async (name: string, drive: string, number: number) => {
+    const repoPath = fixture(name, drive);
+    const repo = RepoSlugSchema.make(`lobiklukas/evidence-${name}`);
+    const url = `https://github.com/lobiklukas/evidence-${name}/pull/${number}`;
+    const github = makeGithubFake(201, { number, url });
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      fauxCommand:
+        "mkdir -p apps/api && echo 'export const feature = 1;' > apps/api/feature.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m feature && echo committed",
+    });
+    const evidenceRuntime = ManagedRuntime.make(
+      SessionServiceLive({
+        model: faux.access,
+        sessionRoot: evidenceRoot,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      return await evidenceRuntime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo,
+            url: `https://github.com/lobiklukas/evidence-${name}.git`,
+            localPath: repoPath,
+          });
+          const created = yield* sessions.create({ repo, baseRef: "main" });
+          yield* sessions.send({
+            sessionId: created.id,
+            content: "make the change and verify it",
+          });
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                snapshot.session.status === "idle" &&
+                snapshot.entries.some(
+                  (entry) => entry.kind === "assistant" && entry.text !== "",
+                ),
+            ),
+            `the ${name} run to verify and answer`,
+          );
+          const answer = yield* sessions
+            .openPullRequest({
+              sessionId: created.id,
+              title: `factory: ${name}`,
+              head: `factory/${created.id}`,
+              base: "main",
+            })
+            .pipe(Effect.provide(github.layer));
+          const sql = yield* SqlClient;
+          const { records, log } = yield* Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+            (storage) =>
+              Effect.all({
+                records: readVerifyRecords(storage),
+                log: readSessionLog(storage),
+              }),
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+          const sent = github.requests[0]?.body as
+            | { readonly body: string }
+            | undefined;
+          return {
+            answer,
+            requests: github.requests.length,
+            body: sent?.body ?? "",
+            records,
+            evidence: log.pr?.evidence,
+          };
+        }),
+      );
+    } finally {
+      await evidenceRuntime.dispose();
+    }
+  };
+
+  it("carries the skill name, the exit code and the output of the run's verify call", async () => {
+    const result = await verifiedPr(
+      "pass",
+      'echo "verify-api fixture: 3/3 checks passed"\n',
+      41,
+    );
+
+    expect(result.answer.outcome).toBe("opened");
+    expect(result.requests).toBe(1);
+    expect(result.body).toContain("## Verification");
+    expect(result.body).toContain("### `verify-api`: exit 0");
+    expect(result.body).toContain("- Surface: `api`");
+    expect(result.body).toContain("- Exit code: 0");
+    expect(result.body).toContain(
+      "```text\nverify-api fixture: 3/3 checks passed\n```",
+    );
+    // The body's evidence is the log's: the committed document holds the value it was rendered from.
+    expect(result.evidence).toEqual({
+      _tag: "EvidenceRecorded",
+      calls: 1,
+      changedCount: 1,
+      results: [
+        {
+          _tag: "VerificationRan",
+          surface: "api",
+          name: "verify-api",
+          source: "skill",
+          command: "bash drive.sh",
+          exitCode: 0,
+          excerpt: "verify-api fixture: 3/3 checks passed\n",
+          truncated: false,
+        },
+      ],
+    });
+  }, 120_000);
+
+  it("cuts a failing skill's long output to a bounded tail, visibly", async () => {
+    const result = await verifiedPr(
+      "fail",
+      'for i in $(seq 1 400); do echo "check $i"; done\necho "FAIL: 1 required check failed"\nexit 3\n',
+      42,
+    );
+
+    expect(result.body).toContain("### `verify-api`: exit 3 (failed)");
+    expect(result.body).toContain(
+      `Output (truncated: earlier output omitted, the last ${PR_EVIDENCE_EXCERPT.maxLines} line(s) shown):`,
+    );
+    expect(result.body).toContain("FAIL: 1 required check failed");
+    expect(result.body).not.toContain("check 1\n");
+    // Deterministic: the excerpt is exactly the PR bound's tail of the output the log recorded.
+    const [record] = result.records;
+    const recorded =
+      record?._tag === "VerifyReport" ? record.results[0] : undefined;
+    const output = recorded?._tag === "VerifyRan" ? recorded.output : "";
+    expect(output).toContain("check 300\n");
+    const excerpt = tailOf(output, PR_EVIDENCE_EXCERPT).output;
+    expect(excerpt.split("\n").filter((line) => line !== "")).toHaveLength(
+      PR_EVIDENCE_EXCERPT.maxLines,
+    );
+    expect(result.body).toContain(`\`\`\`text\n${excerpt}\`\`\``);
+    expect(result.evidence).toMatchObject({
+      _tag: "EvidenceRecorded",
+      results: [{ exitCode: 3, excerpt, truncated: true }],
+    });
+  }, 120_000);
+
+  it("says the run has no evidence when it never called verify", async () => {
+    const url = "https://github.com/lobiklukas/factory/pull/43";
+    const github = makeGithubFake(201, { number: 43, url });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        // A diff committed by hand: a PR exists to open, and no run ever verified it.
+        const { created } = yield* sessionWithDiff("an unverified change");
+        const answer = yield* sessions
+          .openPullRequest({
+            sessionId: created.id,
+            title: "factory: an unverified change",
+            head: `factory/${created.id}`,
+            base: "main",
+          })
+          .pipe(Effect.provide(github.layer));
+        const sql = yield* SqlClient;
+        const log = yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+          (storage) => readSessionLog(storage),
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+        return { answer, log };
+      }),
+    );
+
+    expect(opened(result.answer).url).toBe(url);
+    const sent = github.requests[0]?.body as { readonly body: string };
+    expect(sent.body).toContain("## Verification");
+    expect(sent.body).toContain(
+      "**No verification evidence.** Nothing in this PR was verified by a recorded run: " +
+        "the run never called the `verify` tool.",
+    );
+    expect(result.log.pr?.evidence).toEqual({
+      _tag: "EvidenceNone",
+      reason: "not-verified",
+      message: "the run never called the `verify` tool",
+    });
   }, 120_000);
 });
