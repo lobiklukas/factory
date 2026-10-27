@@ -513,6 +513,19 @@ export const WithdrawMessageResult = Schema.Struct({
 });
 export type WithdrawMessageResult = typeof WithdrawMessageResult.Type;
 
+/**
+ * The pull request a reviewer run is opened for (LOB-36): the PR by its number and page, the ref it
+ * merges into, and the commit under review. The session's worktree is cut at `head` (its `baseRef`),
+ * and the `review` tool reviews `base...HEAD` there, so what was reviewed is this value, not a guess.
+ */
+export const ReviewTargetInput = Schema.Struct({
+  number: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  url: Schema.String,
+  base: Schema.NonEmptyString,
+  head: Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]{40}$/))),
+});
+export type ReviewTargetInput = typeof ReviewTargetInput.Type;
+
 export const CreateSessionInput = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Deduplicates a retried create: the same request id returns the same session. */
@@ -541,6 +554,12 @@ export const CreateSessionInput = Schema.Struct({
    * as unattributed. A fork and a replay take their source's actor rather than naming one.
    */
   actor: Schema.optional(SessionActor),
+  /**
+   * The pull request this session reviews (LOB-36). Requires `repo`: the PR is that repo's. The PR's
+   * `pull_request` event is what names one (`@repo/core`'s review trigger); absent, the session
+   * reviews nothing, and a reviewer run that was not given one is refused its `review` tool's call.
+   */
+  review: Schema.optional(ReviewTargetInput),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 

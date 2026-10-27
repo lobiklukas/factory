@@ -99,6 +99,7 @@ import type {
   OpenSession,
   RoleModels,
   RunColumn,
+  ReviewOptions,
   RunProfile,
   SessionRef,
   SpecOptions,
@@ -134,6 +135,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readRecordedReview,
   readVerifyRecords,
   readCurationUsage,
   readReplaySource,
@@ -152,12 +154,14 @@ import {
   writeBudget,
   writeCurationUsage,
   writeRepoBinding,
+  writeReviewTarget,
   writeTaskBinding,
   writePage,
   writeTitle,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
+import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import { BoardColumn } from "@repo/domain/Task";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import type {
@@ -426,6 +430,13 @@ export type SessionServiceOptions = {
    * session is capped only when its create asks for one or its source had one.
    */
   readonly defaultBudget?: number;
+  /**
+   * How a reviewer run's comment reaches its pull request (LOB-36, `./GitHubReview`), under the
+   * reviewer's own identity. Absent: a reviewer still reviews and its verdict is committed to its log,
+   * but nothing is posted — the post fails naming the missing identity, never falling back to the
+   * worker's.
+   */
+  readonly reviewPoster?: ReviewPoster;
 };
 
 type SessionRow = {
@@ -881,6 +892,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       });
 
       /**
+       * How a reviewer run posts its review (LOB-36): the deployment's poster, under the reviewer's
+       * own identity. Handed to every run of a card, as the spec's post is; the harness offers the
+       * tool to the reviewer role alone, and the tool reads what it reviews from the run's own log.
+       */
+      const reviewFor = (): ReviewOptions => ({
+        post: (request) =>
+          forHarness(
+            options.reviewPoster === undefined
+              ? Effect.fail({ message: NO_REVIEWER_IDENTITY })
+              : options.reviewPoster(request),
+          ),
+      });
+
+      /**
        * One `session_pages` row as the domain's page, or a storage error naming the page whose JSON
        * text does not decode. Shared by the page reads so a row is decoded one way.
        */
@@ -1109,6 +1134,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly thread?: ThreadReader;
         /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
         readonly spec?: SpecOptions;
+        /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
+        readonly review?: ReviewOptions;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -1117,11 +1144,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Opening means: resolve the workspace, create its directory, take the single-writer log, and
        * start the activity projection that keeps the list index current from the log. `open` is how
        * a fork opens the log it has just created rather than an empty one.
+       *
+       * `reviewing` says the session is a review run before its log can (LOB-36): `create` opens the
+       * owner before it commits the review target, and the run's read-only stage and tool filter are
+       * pinned at that first open. Every later acquisition reads it from the log's `factory.review`.
        */
       const acquireOwnerWith = (
         id: SessionId,
         row: SessionRow,
         open: OwnerOpening,
+        reviewing = false,
       ): Effect.Effect<LiveOwner, SessionError> =>
         gate.withPermits(1)(
           Effect.gen(function* () {
@@ -1148,7 +1180,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // resumed session re-reads the skill bodies as they are *now*, so an edit made between
             // two runs of one session reaches the next run too. Pinning a body to the run that
             // started under it is B6's "per-run version pinning", which is wave 2.
-            const run = yield* runProfileFor(id);
+            const column = yield* runProfileFor(id);
+            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
+            const reviews =
+              reviewing ||
+              (yield* readRecordedReview(storage).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
+              )) !== undefined;
+            const run: RunProfile = reviews
+              ? { ...column, reviewing: true }
+              : column;
             // The knowledge the prompt carries is read the same way, and for the same reason: a page
             // curated since this session last ran reaches its next run, and a page deleted from
             // `session_pages` stops being told. A session with none passes none, so its prompt has no
@@ -1174,6 +1215,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     thread: threadFor(card),
                     spec: specFor(id, card, run.column),
                   }),
+              ...(reviews ? { review: reviewFor() } : {}),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -1204,6 +1246,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const acquireOwner = (
         id: SessionId,
         row: SessionRow,
+        reviewing = false,
       ): Effect.Effect<LiveOwner, SessionError> =>
         acquireOwnerWith(
           id,
@@ -1218,6 +1261,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ask,
             thread,
             spec,
+            review,
           }) =>
             openSession({
               storage,
@@ -1236,6 +1280,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(ask === undefined ? {} : { ask }),
               ...(thread === undefined ? {} : { thread }),
               ...(spec === undefined ? {} : { spec }),
+              ...(review === undefined ? {} : { review }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -1244,6 +1289,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               policy: sessionPolicy,
               run,
             }),
+          reviewing,
         );
 
       const describe = (
@@ -1285,6 +1331,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return yield* describe(yield* toSessionId(already.id), already);
           }
 
+          if (input.review !== undefined && input.repo === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message:
+                "a session that reviews a pull request names the repo the pull request is in",
+            });
+          }
           const binding = yield* resolveBinding(input);
           const id = yield* mintSessionId;
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
@@ -1328,7 +1381,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   ON CONFLICT (session_id) DO NOTHING`,
             );
           }
-          const owner = yield* acquireOwner(id, row);
+          const owner = yield* acquireOwner(
+            id,
+            row,
+            input.review !== undefined,
+          );
           if (title.length > 0) {
             // The log keeps the title too, so rebuilding the index does not lose it.
             yield* writeTitle(owner.root, title);
@@ -1347,6 +1404,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
             // this session is.
             yield* writeActor(owner.root, input.actor);
+          }
+          if (input.review !== undefined && binding.repo !== undefined) {
+            // What the reviewer reviews is a fact in its log before it is told anything (LOB-36).
+            yield* writeReviewTarget(owner.root, {
+              repo: binding.repo,
+              ...input.review,
+            });
           }
           if (input.taskId !== undefined && column !== undefined) {
             yield* writeTaskBinding(owner.root, {
