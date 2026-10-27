@@ -5684,7 +5684,8 @@ describe("the verify tool reads the session's workspace", () => {
   const verifyRoot = mkdtempSync(join(tmpdir(), "factory-core-verify-"));
   const verifyRepoRoot = mkdtempSync(join(tmpdir(), "factory-repo-verify-"));
   const verifyRepo = RepoSlugSchema.make("lobiklukas/verify-fixture");
-  const declared = 'echo "declared verify for $FACTORY_VERIFY_SURFACE"';
+  const declared =
+    'echo "declared verify for $FACTORY_VERIFY_SURFACE covering $FACTORY_VERIFY_SURFACES"';
 
   beforeAll(() => {
     const git = (command: string) =>
@@ -5769,12 +5770,13 @@ describe("the verify tool reads the session's workspace", () => {
           results: [
             {
               _tag: "VerifyRan",
-              surface: "api",
+              // A declared command verifies the repo once, told which surfaces it covers.
+              surface: ".",
               source: "workspace",
               directory: ".",
               command: declared,
               exitCode: 0,
-              output: "declared verify for api\n",
+              output: "declared verify for . covering api\n",
               truncated: false,
             },
           ],

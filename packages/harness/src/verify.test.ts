@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -28,7 +28,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
-import { Effect } from "effect";
+import { Config, ConfigProvider, Effect, Fiber } from "effect";
 import { describe, expect, it } from "vitest";
 import { createFauxModelAccess } from "./models";
 import {
@@ -39,6 +39,7 @@ import {
 } from "./session";
 import {
   describeVerify,
+  executeVerify,
   readVerifyRecords,
   REPO_SURFACE,
   runVerify,
@@ -46,8 +47,10 @@ import {
   surfaceOf,
   tailOf,
   VERIFY_CHANGED_LIMIT,
+  VERIFY_NO_DATABASE,
   VERIFY_OUTPUT_TAIL,
   VERIFY_TOOL,
+  verifyLock,
   type VerifyOptions,
   type VerifyRecord,
   type VerifyReport,
@@ -241,7 +244,7 @@ describe("the verify tool, through a session's log", () => {
       [`${API_SKILL}/drive.sh`]: 'echo "from-skill"\nexit 7\n',
     });
     write(root, "apps/api/src/feature.ts", "export const feature = 4;\n");
-    const command = 'echo "from-workspace $FACTORY_VERIFY_SURFACE"';
+    const command = 'echo "from-workspace $FACTORY_VERIFY_SURFACES"';
 
     const turn = await verifiedTurn(root, { command });
 
@@ -249,7 +252,8 @@ describe("the verify tool, through a session's log", () => {
     expect(report.results).toEqual([
       {
         _tag: "VerifyRan",
-        surface: "api",
+        // The declared command verifies the repo, told the surfaces the change named.
+        surface: REPO_SURFACE,
         source: "workspace",
         directory: ".",
         command,
@@ -404,21 +408,43 @@ describe("runVerify", () => {
     expect(result.output).toContain("running down.sh after timeout\ndown\n");
   }, 15_000);
 
-  it("verifies the repo surface alongside a package surface when the change spans both", async () => {
+  it("runs a declared command once per call, told every surface the change named", async () => {
     const root = checkout({
       [`${API_SKILL}/drive.sh`]: "echo skill\n",
     });
+    const runs = join(root, "runs.log");
     write(root, "apps/api/x.ts", "x\n");
+    write(root, "apps/web/x.ts", "x\n");
     write(root, "docs/notes.md", "x\n");
 
     const report = onlyReport([
-      await verifyIn(root, { command: 'echo "for $FACTORY_VERIFY_SURFACE"' }),
+      await verifyIn(root, {
+        command: `echo run >> "${runs}"; echo "for $FACTORY_VERIFY_SURFACE covering $FACTORY_VERIFY_SURFACES"`,
+      }),
     ]);
+    // A whole-repo command is not repeated per surface: one run, one result, for the repo.
+    expect(readFileSync(runs, "utf8")).toBe("run\n");
+    expect(
+      report.results.map((result) =>
+        result._tag === "VerifyRan" ? [result.surface, result.output] : result,
+      ),
+    ).toEqual([[REPO_SURFACE, "for . covering api web .\n"]]);
+  });
+
+  it("tells a skill only its own surface", async () => {
+    const root = checkout({
+      [`${API_SKILL}/drive.sh`]:
+        'echo "$FACTORY_VERIFY_SURFACE/$FACTORY_VERIFY_SURFACES"\n',
+    });
+    write(root, "apps/api/x.ts", "x\n");
+    write(root, "apps/web/x.ts", "x\n");
+
+    const report = onlyReport([await verifyIn(root)]);
     expect(
       report.results.map((result) =>
         result._tag === "VerifyRan" ? result.output : result._tag,
       ),
-    ).toEqual(["for api\n", "for .\n"]);
+    ).toEqual(["api/api\n", "VerifyNoEvidence"]);
   });
 
   it("names changed paths outside every package as no evidence when the repo declares no command", async () => {
@@ -442,7 +468,9 @@ describe("runVerify", () => {
 
   it("never hands a verification the control plane's database, only the one it is given", async () => {
     const root = checkout({
-      [`${API_SKILL}/drive.sh`]: 'echo "db=[$DATABASE_URL]"\n',
+      // `${VAR:-default}` is how a shell consumer falls back on an unset *or blank* variable.
+      [`${API_SKILL}/drive.sh`]:
+        'echo "${DATABASE_URL:-postgres://localhost:5442/factory}"\n',
     });
     write(root, "apps/api/x.ts", "x\n");
     // The control plane's database, in the environment every session command inherits.
@@ -456,11 +484,80 @@ describe("runVerify", () => {
       ]).results;
       return result?._tag === "VerifyRan" ? result.output : result?._tag;
     };
-    expect(await outputOf({})).toBe("db=[]\n");
+    // What a consumer that reads it resolves, not only what it is set to: Effect's `Config` with a
+    // default — `@repo/storage-postgres`'s `DatabaseConfig` shape — reads a blank as missing.
+    const CONTROL_PLANE = "postgres://factory:factory@localhost:5442/factory";
+    const resolved = (url: string) =>
+      run(
+        Config.String("DATABASE_URL")
+          .pipe(Config.withDefault(CONTROL_PLANE))
+          .parse(ConfigProvider.fromEnv({ env: { DATABASE_URL: url } })),
+      );
+    const given = (await outputOf({}))?.trim() ?? "";
+    expect(given).toBe(VERIFY_NO_DATABASE);
+    expect(await resolved(given)).toBe(VERIFY_NO_DATABASE);
+    expect(new URL(given).hostname.endsWith(".invalid")).toBe(true);
+    // A blank override is no database too, never a fall back on the default.
+    expect((await outputOf({ databaseUrl: " " }))?.trim()).toBe(
+      VERIFY_NO_DATABASE,
+    );
     expect(await outputOf({ databaseUrl: "postgres://verify/own" })).toBe(
-      "db=[postgres://verify/own]\n",
+      "postgres://verify/own\n",
     );
   });
+
+  it("stops waiting for the lock when its call is aborted, and starts nothing", async () => {
+    const root = checkout({
+      [`${API_SKILL}/up.sh`]: "touch up.ran\n",
+      [`${API_SKILL}/drive.sh`]: "touch drive.ran\n",
+      [`${API_SKILL}/down.sh`]: "touch down.ran\n",
+    });
+    write(root, "apps/api/x.ts", "x\n");
+    // Another session's verification holds the lock for as long as it likes.
+    const holder = Effect.runFork(verifyLock.withPermit(Effect.never));
+    await run(Effect.sleep("20 millis"));
+    try {
+      const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
+      const call = executeVerify({
+        env: new NodeExecutionEnv({ cwd: root }),
+        options: {},
+        onOutput: () => undefined,
+        context,
+      });
+      const aborting = run(Effect.sleep("200 millis")).then(() => cancel());
+      await expect(call).rejects.toThrow("verify aborted");
+      await aborting;
+    } finally {
+      await run(Fiber.interrupt(holder));
+    }
+    // Once the lock is free, the aborted call does not wake up and run on its dead context.
+    await run(Effect.sleep("300 millis"));
+    for (const file of ["up.ran", "drive.ran", "down.ran"])
+      expect(existsSync(join(root, API_SKILL, file))).toBe(false);
+  });
+
+  it("still runs down.sh when a call is aborted mid-drive, before it lets go of the lock", async () => {
+    const root = checkout({
+      [`${API_SKILL}/up.sh`]: "echo up\n",
+      [`${API_SKILL}/drive.sh`]: "echo started\nsleep 30\n",
+      [`${API_SKILL}/down.sh`]: "touch down.ran\n",
+    });
+    write(root, "apps/api/x.ts", "x\n");
+    const { context, cancel } = withCancel(BACKGROUND_CONTEXT);
+    let output = "";
+    const call = executeVerify({
+      env: new NodeExecutionEnv({ cwd: root }),
+      options: {},
+      onOutput: (text) => {
+        output += text;
+        if (text.includes("started")) cancel();
+      },
+      context,
+    });
+    await expect(call).rejects.toThrow("verify aborted");
+    expect(existsSync(join(root, API_SKILL, "down.ran"))).toBe(true);
+    expect(output).toContain("running down.sh after");
+  }, 15_000);
 
   it("serializes verifications across calls, so two sessions never drive at once", async () => {
     const log = join(

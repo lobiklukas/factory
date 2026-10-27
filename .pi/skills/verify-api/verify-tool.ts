@@ -16,7 +16,8 @@
 //   pass       the surface's skill (`.pi/skills/verify-api/drive.sh`) exits 0 → exit 0 and its output
 //   fail       the skill prints 400 lines and exits 3 → exit 3, the output's tail, the run still idle
 //   no-skill   the change is under apps/web and the repo has no verify-web → typed no evidence
-//   declared   `.factory/config` declares `verify` and a disagreeing skill exists → the declared one
+//   declared   `.factory/config` declares `verify` and a disagreeing skill exists → the declared one,
+//              run once for the repo (`.`) and told the surfaces it covers (`api`)
 //   repo       the change is `src/app.ts`, outside every package, and the declared `verify` fails →
 //              the declared command ran once for the repo surface (`.`), exit 1, an error result
 //
@@ -29,7 +30,11 @@ import path from "node:path";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import { createFauxModelAccess, readVerifyRecords } from "@repo/harness";
+import {
+  createFauxModelAccess,
+  readVerifyRecords,
+  VERIFY_NO_DATABASE,
+} from "@repo/harness";
 import type { VerifyRecord } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { SessionService, SessionServiceLive } from "@repo/core";
@@ -43,7 +48,8 @@ const REPOS =
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api";
 
-const DECLARED = 'echo "declared verify for $FACTORY_VERIFY_SURFACE"';
+const DECLARED =
+  'echo "declared verify for $FACTORY_VERIFY_SURFACE covering $FACTORY_VERIFY_SURFACES"';
 const DECLARED_FAILING =
   'echo "repo verify for $FACTORY_VERIFY_SURFACE"; exit 1';
 
@@ -60,7 +66,9 @@ const SCENARIOS: readonly Scenario[] = [
     name: "pass",
     base: {
       ".pi/skills/verify-api/drive.sh":
-        'echo "verify-api fixture: 3/3 checks passed (surface=$FACTORY_VERIFY_SURFACE)"\n',
+        'echo "verify-api fixture: 3/3 checks passed (surface=$FACTORY_VERIFY_SURFACE)"\n' +
+        // What a consumer that falls back on a blank resolves: the control plane's database must not be it.
+        'echo "db=${DATABASE_URL:-control-plane-default}"\n',
     },
     change: "apps/api/src/feature.ts",
   },
@@ -258,6 +266,15 @@ const checks: Record<
       result?._tag === "VerifyRan" ? result.output.trim() : "no run",
     );
     assert(
+      "pass: the service hands the skill no database — not blank, not the run's own",
+      result?._tag === "VerifyRan" &&
+        result.output.includes(`db=${VERIFY_NO_DATABASE}\n`),
+      result?._tag === "VerifyRan"
+        ? (result.output.split("\n").find((line) => line.startsWith("db=")) ??
+            "no db line")
+        : "no run",
+    );
+    assert(
       "pass: the model read the same verdict",
       verifyText(entry).includes("[api] exit 0"),
       verifyText(entry).split("\n")[1] ?? "",
@@ -304,12 +321,14 @@ const checks: Record<
   declared: (entry) => {
     const result = reportOf(entry.records)?.results[0];
     assert(
-      "declared: the workspace's verify command wins over the disagreeing skill",
-      result?._tag === "VerifyRan" &&
+      "declared: the workspace's verify command wins over the disagreeing skill, once, for the repo",
+      reportOf(entry.records)?.results.length === 1 &&
+        result?._tag === "VerifyRan" &&
+        result.surface === "." &&
         result.source === "workspace" &&
         result.command === DECLARED &&
         result.exitCode === 0 &&
-        result.output === "declared verify for api\n",
+        result.output === "declared verify for . covering api\n",
       JSON.stringify(result),
     );
   },
