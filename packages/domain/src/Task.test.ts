@@ -27,7 +27,9 @@ import {
   ColumnRequirement,
   CommentKind,
   CommentTaskInput,
+  CreateBoardInput,
   DECLARED_TRANSITIONS,
+  DEFAULT_DEFINITION_ID,
   DefinitionId,
   GATED_COLUMNS,
   gatedExit,
@@ -697,5 +699,49 @@ describe("the declared transitions and human gates (B4, B5)", () => {
     for (const column of ["intake", "specifying", "building", "done", "x"]) {
       expect(gatedExit(column)).toBeUndefined();
     }
+  });
+});
+
+describe("a new board (B2, LOB-208)", () => {
+  /**
+   * `createBoard`'s payload (LOB-208) is the RPC's only check on what reaches `board_instances`:
+   * `repo` has no CHECK in 0007, so a malformed slug would be stored and then fail every read of
+   * the board. Mutation: make `repo` `Schema.String` — the first refusal goes. Make `definitionId`
+   * `Schema.String` — the second.
+   */
+  it("takes a repo and a definition id for a new board, the version optional, and refuses a malformed one", () => {
+    const decode = Schema.decodeUnknownSync(CreateBoardInput);
+    expect(
+      decode({
+        repo: "lobiklukas/factory",
+        definitionId: DEFAULT_DEFINITION_ID,
+      }),
+    ).toEqual({ repo: "lobiklukas/factory", definitionId: "default" });
+    expect(
+      decode({
+        repo: "lobiklukas/factory",
+        definitionId: "default",
+        definitionVersion: 1,
+      }).definitionVersion,
+    ).toBe(1);
+    expect(
+      refuses(CreateBoardInput, {
+        repo: "Not A Repo",
+        definitionId: "default",
+      }),
+    ).toBe(true);
+    expect(
+      refuses(CreateBoardInput, {
+        repo: "lobiklukas/factory",
+        definitionId: "Default Pipeline",
+      }),
+    ).toBe(true);
+    expect(
+      refuses(CreateBoardInput, {
+        repo: "lobiklukas/factory",
+        definitionId: "default",
+        definitionVersion: 1.5,
+      }),
+    ).toBe(true);
   });
 });

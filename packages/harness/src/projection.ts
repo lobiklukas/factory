@@ -84,6 +84,21 @@ export const TITLE_ENTRY_KIND = "factory.title";
  */
 export const PR_OPENED_ENTRY_KIND = "factory.pr.opened";
 /**
+ * What a fork's copy of its parent's `factory.pr.opened` becomes (LOB-211): the same data under a
+ * kind nothing announces. A fork does not inherit the parent's PR — it runs on a branch of its own
+ * (D10), and a `factory.pr` it inherited would be the record its own PR step reads back instead of
+ * opening one — so its transcript keeps the line, as history, but never yields a `prOpened`. It
+ * projects as transcript kind `inherited`, so a client draws it as a marker, not as agent prose.
+ *
+ * Rewritten rather than skipped because a fork's copy is the parent's transcript entry for entry:
+ * a compaction's head can name any kept entry, and a skipped one leaves a marker with nothing to
+ * point at.
+ */
+export const PR_INHERITED_ENTRY_KIND = "factory.pr.inherited";
+/** The line an inherited PR entry reads as: whose PR it is, so nobody takes it for the fork's. */
+export const inheritedPrText = (url: string): string =>
+  `a session this one was forked from opened ${url}`;
+/**
  * The entry a recorded page is announced with. Distinct from the document kind (`factory.page`), as
  * `factory.pr` is announced by `factory.pr.opened`: documents and entries are different namespaces,
  * and one name for both would make a fold over entries unable to say which it was reading.
@@ -313,6 +328,8 @@ const entryKind = (kind: string): TranscriptEntryKind => {
       return "title";
     case BUDGET_STOPPED_ENTRY_KIND:
       return "budget";
+    case PR_INHERITED_ENTRY_KIND:
+      return "inherited";
     default:
       return "other";
   }
@@ -323,15 +340,18 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title, no-change and budget entries carry no model content, so their text comes from their
-  // data — which is what makes a no-op PR step or a budget stop a readable line, not an empty entry.
+  // The title, no-change, budget and inherited-PR entries carry no model content, so their text comes
+  // from their data — which is what makes a no-op PR step or a budget stop a readable line, not an
+  // empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
       : entry.kind === NO_CHANGE_ENTRY_KIND ||
           entry.kind === BUDGET_STOPPED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")
-        : messageText(message);
+        : entry.kind === PR_INHERITED_ENTRY_KIND
+          ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")
+          : messageText(message);
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),

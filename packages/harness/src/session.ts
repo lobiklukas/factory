@@ -137,6 +137,7 @@ import {
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
   PR_OPENED_ENTRY_KIND,
+  PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
   PAGE_ENTRY_KIND,
   type PageLogRecord,
@@ -1392,6 +1393,15 @@ export const readForkSource = (
     return records.slice(0, end + 1);
   });
 
+/**
+ * The kind a copied entry is written under: its own, except a parent's PR announcement, which a
+ * fork keeps as an inherited line (LOB-211). The fork's `factory.pr` is not copied, so an announcement
+ * copied verbatim would tell an attached client about a PR the fork's own summary does not report —
+ * and a second one once the fork opens its own.
+ */
+const forkedKind = (kind: string): string =>
+  kind === PR_OPENED_ENTRY_KIND ? PR_INHERITED_ENTRY_KIND : kind;
+
 /** The draft for one copied entry, its head marker rewritten to the copy of the entry it names. */
 const draftOf = (
   entry: EntryRecord,
@@ -1411,7 +1421,7 @@ const draftOf = (
     );
   }
   return {
-    kind: entry.kind,
+    kind: forkedKind(entry.kind),
     ...(entry.model === undefined ? {} : { model: entry.model }),
     ...(entry.data === undefined ? {} : { data: entry.data }),
     ...(entry.edits === undefined ? {} : { edits: entry.edits }),
@@ -1439,7 +1449,8 @@ type ForkPreamble = {
  * The lineage and the repo binding are documents in the same commit, so a fork that exists at all
  * exists with both: there is no window in which a fork is readable but `rebuildIndexes` would fold
  * it without its parent. Documents are not entries, so the fork's transcript stays exactly the
- * parent's prefix.
+ * parent's prefix — entry for entry, with the parent's PR announcement kept as an inherited line
+ * (`forkedKind`), because the parent's `factory.pr` is the one document a fork does not take.
  */
 const copyEntries = (
   tx: Tx,

@@ -63,6 +63,10 @@ import {
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
 import {
+  DEFAULT_DEFINITION_ID,
+  DefinitionId as DefinitionIdSchema,
+} from "@repo/domain/Task";
+import {
   DatabaseConfig,
   DatabaseLive,
   PostgresStorage,
@@ -5110,21 +5114,25 @@ describe("the curator pass over a finished session", () => {
 });
 
 describe("a run's prompt comes from its column", () => {
-  /** A board instance over the definition version that binds skills to the stages (0010). */
-  const newBoard = Effect.gen(function* () {
-    const sql = yield* SqlClient;
-    const id = `brd_${randomBytes(13).toString("hex")}`;
-    yield* sql`
-      INSERT INTO board_instances (id, repo, definition_id, definition_version)
-      VALUES (
-        ${id},
-        ${`factory-test/${randomBytes(3).toString("hex")}`},
-        'default',
-        2
-      )
-    `;
-    return id;
-  });
+  /**
+   * A board instance over `version` of the default pipeline, made by `TaskService.createBoard`
+   * (LOB-208) — the one production writer of `board_instances` — rather than by an insert here.
+   * Without a version, the definition's newest.
+   */
+  const createBoard = (version?: number) =>
+    Effect.gen(function* () {
+      const tasks = yield* TaskService;
+      return yield* tasks.createBoard({
+        repo: RepoSlugSchema.make(
+          `factory-test/${randomBytes(3).toString("hex")}`,
+        ),
+        definitionId: DefinitionIdSchema.make(DEFAULT_DEFINITION_ID),
+        ...(version === undefined ? {} : { definitionVersion: version }),
+      });
+    }).pipe(Effect.provide(TaskServiceLive));
+
+  /** A board over the definition version that binds skills to the stages (0010). */
+  const newBoard = createBoard(2).pipe(Effect.map((board) => board.id));
 
   /**
    * A card in `column` on `boardId`, pinned to the definition version it started under. The id's
@@ -5215,6 +5223,51 @@ describe("a run's prompt comes from its column", () => {
     // The building run is not prompt-less: it carries its own column's skill, so the absence above
     // is the column's doing rather than a session that was told nothing at all.
     expect(prompts.building["skill_implement"]).toContain("smallest change");
+  }, 120_000);
+
+  /**
+   * The whole production path, with no SQL written by the case (LOB-208): `createBoard` makes the
+   * board at the default pipeline's newest version, `TaskService.create` puts a card on it, a person
+   * moves the card to `specifying`, and the run started there is told the column's skill — which only
+   * happens if the run-column join in `SessionService` finds the board `createBoard` wrote.
+   *
+   * Mutation: have `createBoard` pin the oldest version — version 1's columns bind no skills, so the
+   * run's prompt carries no `skill_specify`. Mutation: write the instance under another definition
+   * id — the join finds no definition row and the run is told nothing of its column.
+   */
+  it("tells a run on a card of a board createBoard made its column's skill, with no SQL", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const tasks = yield* TaskService;
+        const board = yield* createBoard();
+        const card = yield* tasks.create({
+          boardId: board.id,
+          title: "a card on a made board",
+          actor: "person:lukas",
+        });
+        const moved = yield* tasks.move({
+          taskId: card.id,
+          expectedRevision: card.revision,
+          to: "specifying",
+          actor: "person:lukas",
+        });
+        const sessionId = yield* startRun(moved.id, moved.column);
+        return {
+          board,
+          card,
+          prompt: yield* promptSections(sessionId),
+        };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+
+    // The run's prompt first: it is the claim, and the versions below only say why it holds.
+    expect(outcome.prompt["skill_specify"]).toContain(
+      "Clarify the goal, scope, acceptance criteria",
+    );
+    expect(outcome.board.definitionVersion).toBeGreaterThanOrEqual(2);
+    expect(outcome.card.definitionVersion).toBe(
+      outcome.board.definitionVersion,
+    );
   }, 120_000);
 
   it("changes the next run's prompt when a seeded body is edited", async () => {
