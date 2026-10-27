@@ -9,8 +9,11 @@ import { describe, expect, it } from "vitest";
 import type { BoardColumn } from "@repo/domain/Task";
 import type { VerifyRecord, VerifyResult } from "@repo/harness";
 import {
+  type BranchDiff,
   CHECKED_REQUIREMENTS,
   exitRequirements,
+  nonEmptyDiffVerdict,
+  prLinkVerdict,
   requirementVerdict,
   VERIFIABLE_REMEDY,
   verifiedVerdict,
@@ -26,6 +29,19 @@ const review: BoardColumn = {
     { key: "verified", description: "a passing verification" },
     { key: "review_verdict", description: "a review verdict" },
     { key: "human_merge", description: "a human merge" },
+  ],
+};
+
+/** The default pipeline's `building`, as 0007 seeds it. */
+const building: BoardColumn = {
+  name: "building",
+  kind: "working",
+  role: "builder",
+  skills: [],
+  requires: [
+    { key: "run_completed", description: "a run that completed" },
+    { key: "non_empty_diff", description: "a non-empty diff" },
+    { key: "pr_link", description: "a PR link" },
   ],
 };
 
@@ -80,10 +96,21 @@ const reason = (runs: RunEvidence[]): string => {
 
 describe("exitRequirements", () => {
   it("checks only the keys it has a checker for, in declaration order", () => {
-    expect([...CHECKED_REQUIREMENTS]).toEqual(["verified"]);
+    expect([...CHECKED_REQUIREMENTS]).toEqual([
+      "verified",
+      "non_empty_diff",
+      "pr_link",
+    ]);
     expect(exitRequirements(review, "done").map((r) => r.key)).toEqual([
       "verified",
     ]);
+    // `run_completed` has no recorded artifact yet, so it is skipped; the two that do are kept in
+    // the order building declares them, which is the order a refusal names the first unmet one.
+    expect(exitRequirements(building, "review").map((r) => r.key)).toEqual([
+      "non_empty_diff",
+      "pr_link",
+    ]);
+    expect(exitRequirements(building, "canceled")).toEqual([]);
   });
 
   it("checks nothing on the way into canceled, or for a column the definition does not name", () => {
@@ -95,7 +122,7 @@ describe("exitRequirements", () => {
     expect(
       requirementVerdict(
         { key: "review_verdict", description: "a review verdict" },
-        [],
+        { runs: [] },
       ),
     ).toEqual({ met: false, reason: '"review_verdict" has no checker' });
   });
@@ -286,5 +313,121 @@ describe("the verified requirement", () => {
     ).toBe(
       "run ses_a's latest verify call over the change: web: exit 2 (bash drive.sh in .pi/skills/verify-web)",
     );
+  });
+});
+
+/** A run that recorded a PR, or none. */
+const withPr = (sessionId: string, prUrl?: string): RunEvidence => ({
+  sessionId,
+  calls: [],
+  ...(prUrl === undefined ? {} : { prUrl }),
+});
+
+const measured = (sessionId: string, files: number): BranchDiff => ({
+  _tag: "measured",
+  sessionId,
+  base: "main",
+  head: `factory/${sessionId}`,
+  files,
+});
+
+describe("the non_empty_diff requirement", () => {
+  const key = { key: "non_empty_diff", description: "a non-empty diff" };
+
+  it("is met when the latest run's branch changes at least one file", () => {
+    expect(
+      nonEmptyDiffVerdict({
+        runs: [withPr("ses_a"), withPr("ses_b")],
+        diff: measured("ses_b", 1),
+      }),
+    ).toEqual({ met: true });
+    // And through the dispatch the service calls.
+    expect(
+      requirementVerdict(key, {
+        runs: [withPr("ses_b")],
+        diff: measured("ses_b", 3),
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet for a branch even with its base, naming the range git measured", () => {
+    expect(
+      nonEmptyDiffVerdict({
+        runs: [withPr("ses_b")],
+        diff: measured("ses_b", 0),
+      }),
+    ).toEqual({
+      met: false,
+      reason:
+        "run ses_b's branch factory/ses_b changes no file against main (git diff --numstat main...factory/ses_b is empty): commit the change on the run's branch",
+    });
+  });
+
+  it("is unmet for a card with no runs, and for a branch nothing could measure", () => {
+    expect(nonEmptyDiffVerdict({ runs: [] })).toEqual({
+      met: false,
+      reason: "the card has no runs, so no branch carries its change",
+    });
+    expect(
+      nonEmptyDiffVerdict({
+        runs: [withPr("ses_b")],
+        diff: {
+          _tag: "unmeasured",
+          sessionId: "ses_b",
+          reason: "repository o/r has no local checkout registered",
+        },
+      }),
+    ).toEqual({
+      met: false,
+      reason:
+        "run ses_b's branch could not be measured: repository o/r has no local checkout registered",
+    });
+  });
+
+  it("reads only the latest run: an older run's change does not count, nor a missing measurement", () => {
+    // The diff was measured for an older run: the card's change is the latest run's, so refused.
+    expect(
+      nonEmptyDiffVerdict({
+        runs: [withPr("ses_a"), withPr("ses_b")],
+        diff: measured("ses_a", 5),
+      }),
+    ).toEqual({ met: false, reason: "run ses_b's branch was not measured" });
+    expect(nonEmptyDiffVerdict({ runs: [withPr("ses_b")] })).toEqual({
+      met: false,
+      reason: "run ses_b's branch was not measured",
+    });
+  });
+});
+
+describe("the pr_link requirement", () => {
+  const key = { key: "pr_link", description: "a PR link" };
+  const link = "https://github.com/o/r/pull/7";
+
+  it("is met when the latest run recorded a PR", () => {
+    expect(prLinkVerdict({ runs: [withPr("ses_a", link)] })).toEqual({
+      met: true,
+    });
+    expect(
+      requirementVerdict(key, {
+        runs: [withPr("ses_a"), withPr("ses_b", link)],
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet when the latest run recorded none, even if an older run did", () => {
+    expect(
+      prLinkVerdict({ runs: [withPr("ses_a", link), withPr("ses_b")] }),
+    ).toEqual({
+      met: false,
+      reason:
+        "the card's latest run ses_b recorded no PR (no factory.pr document in its log): open its PR (factory pr ses_b) before moving the card on",
+    });
+  });
+
+  it("is unmet for a card with no runs", () => {
+    expect(prLinkVerdict({ runs: [] })).toEqual({
+      met: false,
+      reason: "the card has no runs, so none opened a PR",
+    });
   });
 });

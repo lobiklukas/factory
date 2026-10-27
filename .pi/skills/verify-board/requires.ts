@@ -9,6 +9,9 @@
 //   MODE=settled SESSION_ID=… LABEL=…  the run answered and is idle, and its log holds exactly one
 //                                      `verify` record; writes it to `requires-<label>.json` and
 //                                      checks the surface and result EXPECT names.
+//   MODE=answered SESSION_ID=… LABEL=… the run answered and is idle, and its log holds no `verify`
+//                                      record — the builder run (LOB-240), whose change is committed
+//                                      on its branch and whose PR is what `building` waits for.
 //
 // Everything a person reads — the refusal, its words, its exit code, the move that goes through —
 // is read by `requires.sh` through `factory board`.
@@ -86,6 +89,43 @@ const observed: {
 } = { sessionId: SESSION, label: LABEL, facts: {}, checks: {} };
 const check = makeChecker(observed);
 
+/** The run's `verify` records, read out of its log in Postgres rather than off the API. */
+const verifyRecords = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  return yield* Effect.acquireUseRelease(
+    Effect.promise(() => PostgresStorage.reader(sql, SESSION)),
+    (storage) => readVerifyRecords(storage),
+    (storage) => Effect.promise(() => storage.dispose()),
+  );
+}).pipe(Effect.provide(DatabaseLive));
+
+const answered = Effect.gen(function* () {
+  const client = yield* RpcClient.make(RpcApi);
+  const started = Date.now();
+  let snapshot = yield* client.getSession({ sessionId: SESSION });
+  const done = () =>
+    !snapshot.live.busy &&
+    snapshot.entries.some(
+      (entry) => entry.kind === "assistant" && entry.text !== "",
+    );
+  while (!done() && Date.now() - started < 60_000) {
+    yield* Effect.sleep(100);
+    snapshot = yield* client.getSession({ sessionId: SESSION });
+  }
+  check(
+    `the ${LABEL} run made its change and answered`,
+    done(),
+    `busy=${snapshot.live.busy} after ${Date.now() - started}ms`,
+  );
+  const records = yield* verifyRecords;
+  observed.facts["records"] = records;
+  check(
+    `the ${LABEL} run's log holds no verify record`,
+    records.length === 0,
+    `records=${records.length}`,
+  );
+});
+
 const settled = Effect.gen(function* () {
   const client = yield* RpcClient.make(RpcApi);
   const started = Date.now();
@@ -104,14 +144,7 @@ const settled = Effect.gen(function* () {
     answered(),
     `busy=${snapshot.live.busy} after ${Date.now() - started}ms`,
   );
-  const records = yield* Effect.gen(function* () {
-    const sql = yield* SqlClient;
-    return yield* Effect.acquireUseRelease(
-      Effect.promise(() => PostgresStorage.reader(sql, SESSION)),
-      (storage) => readVerifyRecords(storage),
-      (storage) => Effect.promise(() => storage.dispose()),
-    );
-  }).pipe(Effect.provide(DatabaseLive));
+  const records = yield* verifyRecords;
   observed.facts["records"] = records;
   const record = records[0];
   const result = record?._tag === "VerifyReport" ? record.results : [];
@@ -162,8 +195,8 @@ if (MODE === "seed") {
   await runScoped(seed);
   if (failed()) process.exit(1);
   process.exit(0);
-} else if (MODE === "settled") {
-  await runScoped(settled);
+} else if (MODE === "settled" || MODE === "answered") {
+  await runScoped(MODE === "settled" ? settled : answered);
   await mkdir(EVIDENCE_DIR, { recursive: true });
   await writeFile(
     path.join(EVIDENCE_DIR, `requires-${LABEL}.json`),
@@ -171,6 +204,6 @@ if (MODE === "seed") {
   );
   process.exit(failed() ? 1 : 0);
 } else {
-  console.error("requires.ts: MODE must be one of seed, settled");
+  console.error("requires.ts: MODE must be one of seed, settled, answered");
   process.exit(2);
 }

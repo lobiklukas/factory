@@ -1728,6 +1728,28 @@ export const readBudgetSource = (
   });
 
 /**
+ * The PR a log nobody owns records (LOB-177), read from its `factory.pr` document alone, without
+ * folding the rest of the log — what a board's `pr_link` requirement checks (LOB-240). `undefined`
+ * when the session opened none: the document's seed has no URL, and a fork never copies its
+ * parent's (LOB-211).
+ */
+export const readRecordedPullRequest = (
+  storage: Storage,
+): Effect.Effect<PullRequestRecord | undefined, SessionError> =>
+  Effect.map(readDocument(storage, PR_DOC_KIND), (value) => {
+    const doc = projectPrDoc(value);
+    if (doc.url === "") return undefined;
+    return {
+      url: doc.url,
+      number: doc.number,
+      base: doc.base,
+      head: doc.head,
+      openedAt: doc.openedAt,
+      ...(doc.evidence === undefined ? {} : { evidence: doc.evidence }),
+    };
+  });
+
+/**
  * Read a session nobody owns by folding its log through a reader-mode `Storage`. No `Harness` is
  * opened: Pi Durable allows exactly one owner, and this is the read-only path D7 asks for — the
  * control plane must be able to read a session without owning it.
@@ -1743,7 +1765,7 @@ export const readSessionLog = (
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
-    const prDoc = projectPrDoc(yield* readDocument(storage, PR_DOC_KIND));
+    const pr = yield* readRecordedPullRequest(storage);
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
     const actor = bindingString(
       yield* readDocument(storage, ACTOR_DOC_KIND),
@@ -1768,20 +1790,7 @@ export const readSessionLog = (
           ? {}
           : { branch: bindingString(binding, "branch") }),
       },
-      ...(prDoc.url === ""
-        ? {}
-        : {
-            pr: {
-              url: prDoc.url,
-              number: prDoc.number,
-              base: prDoc.base,
-              head: prDoc.head,
-              openedAt: prDoc.openedAt,
-              ...(prDoc.evidence === undefined
-                ? {}
-                : { evidence: prDoc.evidence }),
-            },
-          }),
+      ...(pr === undefined ? {} : { pr }),
       ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),

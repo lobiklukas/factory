@@ -142,9 +142,13 @@ the card's newest `verify` call over a change (across all its runs) must have pa
 that change touched — a passing verification of another surface does not count. "Newest" is by when
 the call was recorded, so a resumed older run's later call counts; a newest call that left no record
 (blocked or crashed) refuses the move rather than falling back to an older pass. A move into
-`canceled` is never gated. Only keys with a recorded artifact are checked (`packages/core/src/
-requirements.ts` lists why the others are not yet); the logs are read before the card is locked, at
-the revision the move expected.
+`canceled` is never gated. Since LOB-240 `building`'s `non_empty_diff` and `pr_link` are checked too,
+on every version (all of them declare both): the card's latest run's branch must change at least one
+file against its base, measured as the PR step measures it (`git diff --numstat base...head`, LOB-196),
+and that run's log must record a PR (`factory.pr`, LOB-177) — so a card cannot leave `building` with no
+change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
+lists why the others are not yet); the logs are read, and the branch measured, before the card is
+locked, at the revision the move expected.
 
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
 declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or

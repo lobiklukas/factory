@@ -122,6 +122,19 @@ export const HUMAN_GATES: Readonly<Record<string, string>> = {
  */
 export const VERIFIED_REQUIREMENT = "verified";
 
+/**
+ * The requirement a column declares when leaving it takes a change: the card's latest run's branch
+ * differs from its base, measured as the PR step measures it (LOB-196, LOB-240). The default
+ * pipeline's `building` declares it from version 1.
+ */
+export const NON_EMPTY_DIFF_REQUIREMENT = "non_empty_diff";
+
+/**
+ * The requirement a column declares when leaving it takes a PR: the card's latest run's log records
+ * one (`factory.pr`, LOB-177; LOB-240). The default pipeline's `building` declares it from version 1.
+ */
+export const PR_LINK_REQUIREMENT = "pr_link";
+
 /** The columns a card in `from` may move to, in the order the pipeline declares them. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];

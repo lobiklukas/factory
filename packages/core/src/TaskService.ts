@@ -28,13 +28,17 @@
  * under the card's pinned definition version, after the transition and the gate, and a requirement
  * that is not met refuses the move with `RequirementUnmet`, naming it. Which keys are checked, and
  * against what, is `./requirements`; `verified` reads the `verify` records in the logs of the card's
- * runs. The logs are read *before* the card is locked, not inside the transaction: a log fold is
- * unbounded work on other connections, and holding the row lock (and a pool connection) across it
- * would let a long log stall every other move of the card. The evidence is judged only for the
- * revision the caller expected — a card read at any other revision is refused as `StaleRevision`
- * before its logs are read — and the transaction's own revision check then proves the card did not
- * change while they were (every write to a card bumps its revision). A `verify` call a run records
- * in that window is concurrent with the move, which is ordered before it (`./requirements`).
+ * runs, `pr_link` the latest run's `factory.pr` document, and `non_empty_diff` the latest run's
+ * branch, measured against its base by the PR step's own `diffSize` in the run's registered checkout
+ * (a session's worktree is a linked worktree of it, so the two share every ref). The logs are read,
+ * and the branch measured, *before* the card is locked, not inside the transaction: a log fold and a
+ * `git diff` are unbounded work off the connection, and holding the row lock (and a pool connection)
+ * across them would let a long log or a large diff stall every other move of the card. The evidence
+ * is judged only for the revision the caller expected — a card read at any other revision is refused
+ * as `StaleRevision` before its logs are read — and the transaction's own revision check then proves
+ * the card did not change while they were (every write to a card bumps its revision). A `verify`
+ * call (or a PR, or a commit) a run records in that window is concurrent with the move, which is
+ * ordered before it (`./requirements`).
  *
  * **The thread is `task_events`, not a table of its own (LOB-73).** A comment is a `commented` event:
  * B3 makes a card rows plus an append-only history, and a comment is exactly that — input a person
@@ -61,6 +65,7 @@ import {
   gatedExit,
   LIST_BOARDS_LIMIT,
   humanGate,
+  NON_EMPTY_DIFF_REQUIREMENT,
   isDeclaredTransition,
   Task,
   TaskEvent,
@@ -76,10 +81,13 @@ import type {
   TaskPriority as TaskPriorityType,
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
-import { readVerifyCalls } from "@repo/harness";
+import { readRecordedPullRequest, readVerifyCalls } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 import { mintBoardId, mintTaskId } from "./ids";
+import { diffSize } from "./prStep";
 import {
+  type BranchDiff,
+  type CardEvidence,
   exitRequirements,
   requirementVerdict,
   type RunEvidence,
@@ -403,6 +411,20 @@ const TASK_COLUMNS = TASK_COLUMN_NAMES.join(", ");
 
 /** The same list qualified by `t.`, for a read that joins `tasks` to tables sharing column names. */
 const TASK_COLUMNS_T = TASK_COLUMN_NAMES.map((name) => `t.${name}`).join(", ");
+
+/**
+ * One run of a card as the exit checks read it (`cardEvidence`): its session, and the branch binding
+ * the session's index row and its repository's registration give it. `indexed` is null when the
+ * session has no row at all, which a deleted session leaves behind.
+ */
+type RunRow = {
+  readonly sessionId: string;
+  readonly indexed: string | null;
+  readonly repo: string | null;
+  readonly baseRef: string | null;
+  readonly branch: string | null;
+  readonly localPath: string | null;
+};
 
 /**
  * What `move` judged about the card's exit before locking it, at the caller's expected revision: the
@@ -818,15 +840,73 @@ export const TaskServiceLive = Layer.effect(
       });
 
     /**
+     * The latest run's branch against its base, measured the way the PR step measures it
+     * (`./requirements`): the same `diffSize`, over the same `base...head`, with the branches the
+     * step would name — the session's own branch, or `factory/<id>`, and its base ref. Measured in
+     * the run's registered checkout rather than its worktree: the worktree is a linked worktree of
+     * that checkout (`resolveWorkspace`), so the refs are the same refs, and the checkout's path is in
+     * the registry while the worktree's depends on the API's session root.
+     */
+    const branchDiff = (run: RunRow): Effect.Effect<BranchDiff> => {
+      const { sessionId } = run;
+      if (run.repo === null)
+        return Effect.succeed({
+          _tag: "unmeasured",
+          sessionId,
+          reason:
+            run.indexed === null
+              ? "its session is not in the index"
+              : "its session is bound to no repository, so it has no branch",
+        });
+      if (run.localPath === null)
+        return Effect.succeed({
+          _tag: "unmeasured",
+          sessionId,
+          reason: `repository ${run.repo} has no local checkout registered, so no branch of it can be read`,
+        });
+      const head = run.branch ?? `factory/${sessionId}`;
+      const base = run.baseRef ?? "main";
+      return diffSize({ worktree: run.localPath, base, head }).pipe(
+        Effect.map((size): BranchDiff =>
+          Option.match(size, {
+            onNone: () => ({
+              _tag: "unmeasured",
+              sessionId,
+              reason: `${run.localPath} is not the root of a git checkout`,
+            }),
+            onSome: ({ files }) => ({
+              _tag: "measured",
+              sessionId,
+              base,
+              head,
+              files,
+            }),
+          }),
+        ),
+        Effect.catchTag("PrError", (error) =>
+          Effect.succeed<BranchDiff>({
+            _tag: "unmeasured",
+            sessionId,
+            reason: `${error.message}: git diff ${error.ref} in ${run.localPath}`,
+          }),
+        ),
+      );
+    };
+
+    /**
      * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
      * truth for what it did). One batched read folds every run's log; none is opened as an owner.
+     * The latest run's branch is measured only when `measureDiff` says the move checks it.
      */
-    const runEvidence = (taskId: string) =>
+    const cardEvidence = (taskId: string, measureDiff: boolean) =>
       Effect.gen(function* () {
-        const runs = yield* sql<{ sessionId: string }>`
-          SELECT session_id FROM task_runs
-          WHERE task_id = ${taskId}
-          ORDER BY started_at, id
+        const runs = yield* sql<RunRow>`
+          SELECT tr.session_id, s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
+          FROM task_runs tr
+          LEFT JOIN sessions s ON s.id = tr.session_id
+          LEFT JOIN repos r ON r.slug = s.repo
+          WHERE tr.task_id = ${taskId}
+          ORDER BY tr.started_at, tr.id
         `;
         const ids = runs.map((run) => run.sessionId);
         const logs = yield* Effect.tryPromise({
@@ -836,23 +916,43 @@ export const TaskServiceLive = Layer.effect(
               message: `task ${taskId}: could not read its runs' logs: ${String(cause)}`,
             }),
         });
-        return yield* Effect.forEach(
+        const recorded = yield* Effect.forEach(
           ids,
           (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
             const storage = logs.get(sessionId);
-            return storage === undefined
-              ? Effect.succeed({ sessionId, calls: [] })
-              : readVerifyCalls(storage).pipe(
-                  Effect.map((calls) => ({ sessionId, calls })),
-                  Effect.mapError(
-                    (cause) =>
-                      new TaskStorageError({
-                        message: `task ${taskId}: run ${sessionId}'s verify records do not read: ${cause.message}`,
-                      }),
-                  ),
-                );
+            if (storage === undefined)
+              return Effect.succeed({ sessionId, calls: [] });
+            return Effect.gen(function* () {
+              const calls = yield* readVerifyCalls(storage).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new TaskStorageError({
+                      message: `task ${taskId}: run ${sessionId}'s verify records do not read: ${cause.message}`,
+                    }),
+                ),
+              );
+              const pr = yield* readRecordedPullRequest(storage).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new TaskStorageError({
+                      message: `task ${taskId}: run ${sessionId}'s PR record does not read: ${cause.message}`,
+                    }),
+                ),
+              );
+              return {
+                sessionId,
+                calls,
+                ...(pr === undefined ? {} : { prUrl: pr.url }),
+              };
+            });
           },
         );
+        const latest = runs.at(-1);
+        const evidence: CardEvidence =
+          measureDiff && latest !== undefined
+            ? { runs: recorded, diff: yield* branchDiff(latest) }
+            : { runs: recorded };
+        return evidence;
       });
 
     /**
@@ -880,9 +980,14 @@ export const TaskServiceLive = Layer.effect(
         const requirements = exitRequirements(column, input.to);
         if (column === undefined || requirements.length === 0)
           return { unmet: undefined };
-        const runs = yield* runEvidence(input.taskId);
+        const evidence = yield* cardEvidence(
+          input.taskId,
+          requirements.some(
+            (requirement) => requirement.key === NON_EMPTY_DIFF_REQUIREMENT,
+          ),
+        );
         for (const requirement of requirements) {
-          const verdict = requirementVerdict(requirement, runs);
+          const verdict = requirementVerdict(requirement, evidence);
           if (!verdict.met) {
             return {
               unmet: new RequirementUnmet({
