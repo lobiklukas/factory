@@ -20,7 +20,8 @@ route is its pane at that width, with a back link (`Show sessions`) at the start
 - At 390 px the session pane spans everything right of the rail, its header's actions (Compact,
   Fork) end inside the viewport, the composer is a line wide enough to type in, and the header's
   back link opens the list at the full width (LOB-210, asserted in [fork-lineage.md](fork-lineage.md)'s
-  narrow block)
+  narrow block). A refused session id's pane carries the same back link below `md`, since that
+  route hides the list whatever the id decodes to ([routing.md](routing.md))
 - `/sandboxes`, reached by URL only, renders its milestone copy rather than an empty table;
   `/approvals`, reached by URL or from a waiting session's pane, is every run's pending approvals
   (LOB-53, [routing.md](routing.md))

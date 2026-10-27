@@ -581,9 +581,19 @@ if (childId !== "") {
         Array.from(document.querySelectorAll("header button")).find(
           (button) => button.getAttribute("aria-label") === label,
         );
+      // The pane's own overflow, not the document's: the root frame is `h-dvh overflow-hidden`,
+      // so a pane whose content runs past its box is clipped there and never widens the document.
+      // The pane is the header's parent (SessionPane's root column).
+      const pane = document.querySelector("header")?.parentElement ?? null;
       return {
         scrollWidth: document.documentElement.scrollWidth,
         clientWidth: document.documentElement.clientWidth,
+        paneScrollWidth: pane === null ? null : pane.scrollWidth,
+        paneClientWidth: pane === null ? null : pane.clientWidth,
+        headerScrollWidth:
+          document.querySelector("header")?.scrollWidth ?? null,
+        headerClientWidth:
+          document.querySelector("header")?.clientWidth ?? null,
         rail: rect(document.querySelector("nav[aria-label='Sections']")),
         header: rect(document.querySelector("header")),
         aside: rect(document.querySelector("aside")),
@@ -626,10 +636,18 @@ if (childId !== "") {
       narrowBox.composer.height <= 64,
     `composer ${JSON.stringify(narrowBox.composer)}, viewport ${narrowBox.clientWidth}`,
   );
+  // Measured on the pane and its header rather than the document (review of LOB-210): the frame
+  // clips, so the document's scrollWidth stayed 390 on the build before LOB-210 while the header's
+  // actions ran ~570 px past its 86 px box. A box with `overflow: visible` still reports the width
+  // its content needs as scrollWidth, which is what this compares.
   assert(
-    "the pane does not widen the page at 390px",
-    narrowBox.scrollWidth <= narrowBox.clientWidth,
-    `scrollWidth ${narrowBox.scrollWidth} vs clientWidth ${narrowBox.clientWidth}`,
+    "the pane's content fits its own width at 390px",
+    narrowBox.paneScrollWidth !== null &&
+      narrowBox.paneScrollWidth <= narrowBox.paneClientWidth + 1 &&
+      narrowBox.headerScrollWidth !== null &&
+      narrowBox.headerScrollWidth <= narrowBox.headerClientWidth + 1,
+    `pane scrollWidth ${narrowBox.paneScrollWidth} vs clientWidth ${narrowBox.paneClientWidth}, ` +
+      `header scrollWidth ${narrowBox.headerScrollWidth} vs clientWidth ${narrowBox.headerClientWidth}`,
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "session-pane-narrow.png"),
@@ -1645,6 +1663,36 @@ assert(
   `body: ${JSON.stringify(badIdCopy.slice(0, 200))}`,
 );
 await page.screenshot({ path: path.join(EVIDENCE_DIR, "bad-session-id.png") });
+
+// Below `md` a session's route hides the list whatever its id decodes to (LOB-210), so the refused
+// pane carries the same `Show sessions` link as a session's header: without it a phone's only way
+// back is the rail. At 390 px the link is visible and opens `/sessions`; from `md` up it is hidden.
+const badIdBack = { wideVisible: null, narrowVisible: null, path: null };
+badIdBack.wideVisible = await page
+  .locator("a[aria-label='Show sessions']")
+  .isVisible();
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(300);
+const badIdBackLink = page.locator("a[aria-label='Show sessions']");
+badIdBack.narrowVisible = await badIdBackLink.isVisible();
+if (badIdBack.narrowVisible) {
+  await badIdBackLink.click({ timeout: 10_000 }).catch(() => undefined);
+  await page
+    .waitForFunction(() => window.location.pathname === "/sessions", null, {
+      timeout: 10_000,
+    })
+    .catch(() => undefined);
+}
+badIdBack.path = await page.evaluate(() => window.location.pathname);
+await page.setViewportSize({ width: 1440, height: 900 });
+observed.badIdBack = badIdBack;
+assert(
+  "a bad session id's pane links back to the list at 390px",
+  badIdBack.wideVisible === false &&
+    badIdBack.narrowVisible === true &&
+    badIdBack.path === "/sessions",
+  JSON.stringify(badIdBack),
+);
 
 // Back to the session for the transcript screenshot, with a tool result expanded.
 await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });

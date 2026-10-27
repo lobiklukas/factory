@@ -34,12 +34,15 @@ to become a _different_
 At 390 px (LOB-210) it then requires, on the fork's own route, the pane's header to span from the
 rail's right edge to the viewport's with no list beside it, the **Fork from here** and **Compact
 session** buttons' `getBoundingClientRect()` to end inside the viewport, the composer to be at least
-half the viewport wide and no taller than two of its lines, and the document not to widen. It presses
+half the viewport wide and no taller than two of its lines, and the pane's and its header's
+`scrollWidth` not to exceed their `clientWidth`. That last one is measured on the pane, not the
+document: the root frame is `h-dvh overflow-hidden`, so a pane whose content runs past its box is
+clipped and the document's `scrollWidth` stays 390 either way. It presses
 the header's **Show sessions** link and requires `/sessions` with the list at the full width beside
 the rail, the document to fit with the lineage line present, and the lineage line's own box to stay
 inside its row, so "readable" is asserted as a box rather than inferred from the page not widening.
-Against the build before LOB-210 the first three fail (pane 86 px, Fork's right edge 657 px,
-composer 22 × 418 px) and the back link does not exist. Evidence: `fork-lineage.png`,
+Against the build before LOB-210 the first four fail (pane 86 px, Fork's right edge 657 px,
+composer 22 × 418 px, the header's content 353 px in an 86 px box) and the back link does not exist. Evidence: `fork-lineage.png`,
 `session-pane-narrow.png`, `fork-lineage-narrow.png` and the recorded `narrowWidth` numbers.
 
 All of these are required checks; the run exits non-zero without them.

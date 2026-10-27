@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomRefresh, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
 import {
-  ChevronLeftIcon,
   GitForkIcon,
   GitPullRequestIcon,
   Loader2Icon,
@@ -35,11 +34,12 @@ import {
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { prLink } from "@/lib/pr-link";
+import { SessionsBackLink } from "@/components/sessions-back-link";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -297,23 +297,7 @@ export const SessionPane = ({
        */}
       <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-2 md:h-12 md:flex-nowrap md:py-0">
         <div className="flex min-w-0 items-center gap-3 max-md:basis-full">
-          {/*
-           * Back to the list (LOB-210). Below `md` the list is not beside the pane but is the whole
-           * of `/sessions`, so this is how a phone reaches it; from `md` up the list is on screen
-           * and the link is `display: none`, so it adds nothing to the tab order there. A link, not
-           * a button: it moves the route, and a reader can open the list in another tab.
-           */}
-          <Link
-            to="/sessions"
-            aria-label="Show sessions"
-            title="Show sessions"
-            className={cn(
-              buttonVariants({ variant: "ghost", size: "icon-sm" }),
-              "-ml-2 md:hidden",
-            )}
-          >
-            <ChevronLeftIcon className="size-4" strokeWidth={1.75} />
-          </Link>
+          <SessionsBackLink className="-ml-2" />
           <h1 className="truncate text-sm font-medium">
             {view?.summary.title ?? "Session"}
           </h1>
