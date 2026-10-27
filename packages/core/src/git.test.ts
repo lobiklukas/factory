@@ -15,6 +15,7 @@
  */
 import { BunServices } from "@effect/platform-bun";
 import {
+  Duration,
   Effect,
   Exit,
   FileSystem,
@@ -26,7 +27,9 @@ import {
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -41,7 +44,13 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
-import { fetchBranch, GitError, isSafeBranchName, pushBranch } from "./git";
+import {
+  fetchBranch,
+  GitError,
+  isSafeBranchName,
+  pushBranch,
+  resolveForgeUrl,
+} from "./git";
 import { mintSessionId } from "./ids";
 import { resolveWorkspace } from "./workspace";
 
@@ -165,6 +174,29 @@ const startRemote = async (
   return { server, url: `http://127.0.0.1:${address.port}`, seen, requests };
 };
 
+/** A listener that records every request it gets and answers none of them usefully. */
+const startDecoy = async (): Promise<{
+  readonly server: Server;
+  readonly url: string;
+  readonly requests: Array<string>;
+}> => {
+  const requests: Array<string> = [];
+  const server = createServer((req, res) => {
+    requests.push(
+      `${req.method} ${req.url} ${req.headers.authorization ?? ""}`,
+    );
+    req.resume();
+    res.writeHead(401, { "WWW-Authenticate": 'Basic realm="decoy"' });
+    res.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("the decoy did not bind a TCP port");
+  return { server, url: `http://127.0.0.1:${address.port}`, requests };
+};
+
 // Hermetic: the system and global git configuration of whoever runs the suite are not read, by the
 // setup commands or by the runner's children (it extends this environment). That keeps a
 // developer's `url.insteadOf` or signing setup out of the cases, and it keeps a regression of the
@@ -179,12 +211,16 @@ process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
 const GIT_CASE = { timeout: 30_000 };
 
 const root = mkdtempSync(join(tmpdir(), "factory-git-"));
-const bare = join(root, "remote.git");
+// The bare repository sits at `/<repo>.git` under the served root, because the runner sends the
+// token only to a URL whose path names the repo it was resolved for.
+const bare = join(root, "lobiklukas", "factory.git");
 const upstream = join(root, "upstream");
 const local = join(root, "local");
 const sessionRoot = join(root, "sessions");
 const leakedStore = join(root, "leaked-credentials");
 let remote: Awaited<ReturnType<typeof startRemote>>;
+/** The repo's URL on the test forge: what every call is given as `url`. */
+const forgeUrl = (): string => `${remote.url}/lobiklukas/factory.git`;
 
 const withToken = (token: Option.Option<Redacted.Redacted<string>>) =>
   Effect.provideService(
@@ -243,7 +279,7 @@ beforeAll(async () => {
   remote = await startRemote(root);
   // The registered repo: a clone whose `origin` is the authenticated HTTP remote, credential-free.
   git(root, "clone", bare, local);
-  git(local, "remote", "set-url", "origin", `${remote.url}/remote.git`);
+  git(local, "remote", "set-url", "origin", forgeUrl());
   // A helper that *stores*: if the runner let configured helpers see the token, git would
   // `approve` it into this file after the first successful call.
   git(local, "config", "credential.helper", `store --file=${leakedStore}`);
@@ -269,7 +305,12 @@ describe(
 
       const before = remote.seen.length;
       const fetched = await runWith(
-        fetchBranch({ worktree: session.worktree, repo, branch: "main" }),
+        fetchBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: "main",
+        }),
       );
       expect(Exit.isSuccess(fetched)).toBe(true);
       if (Exit.isSuccess(fetched)) {
@@ -296,6 +337,7 @@ describe(
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
       );
@@ -322,6 +364,7 @@ describe(
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
       );
@@ -338,6 +381,7 @@ describe(
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
       );
@@ -345,11 +389,11 @@ describe(
 
       const commonDir = join(local, ".git");
       const config = readFileSync(join(commonDir, "config"), "utf8");
-      expect(config).toContain(`${remote.url}/remote.git`);
+      expect(config).toContain(forgeUrl());
       expect(config).not.toContain(TOKEN);
 
       const storedUrl = git(session.worktree, "remote", "get-url", "origin");
-      expect(storedUrl).toBe(`${remote.url}/remote.git`);
+      expect(storedUrl).toBe(forgeUrl());
       expect(storedUrl).not.toContain(TOKEN);
       expect(
         git(session.worktree, "config", "--get-all", "remote.origin.url"),
@@ -386,6 +430,7 @@ describe("a rejected push", GIT_CASE, () => {
           pushBranch({
             worktree: session.worktree,
             repo,
+            url: forgeUrl(),
             branch: session.branch,
           }),
         ),
@@ -406,6 +451,7 @@ describe("a rejected push", GIT_CASE, () => {
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
       ),
@@ -413,14 +459,19 @@ describe("a rejected push", GIT_CASE, () => {
     expect(blind).toMatchObject({
       _tag: "GitError",
       operation: "push",
-      remote: "origin",
+      repo,
       ref,
       reason: "non-fast-forward",
     });
 
     // After fetching the remote's branch, git says "non-fast-forward": the same typed answer.
     const fetched = await runWith(
-      fetchBranch({ worktree: session.worktree, repo, branch: session.branch }),
+      fetchBranch({
+        worktree: session.worktree,
+        repo,
+        url: forgeUrl(),
+        branch: session.branch,
+      }),
     );
     expect(Exit.isSuccess(fetched) ? fetched.value.sha : undefined).toBe(
       theirs,
@@ -430,6 +481,7 @@ describe("a rejected push", GIT_CASE, () => {
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
       ),
@@ -462,6 +514,7 @@ describe("a rejected push", GIT_CASE, () => {
         pushBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: session.branch,
         }),
         Option.some(Redacted.make(wrong)),
@@ -479,7 +532,12 @@ describe("a rejected push", GIT_CASE, () => {
 
     const fetchError = gitErrorOf(
       await runWith(
-        fetchBranch({ worktree: session.worktree, repo, branch: "main" }),
+        fetchBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: "main",
+        }),
         Option.some(Redacted.make(wrong)),
       ),
     );
@@ -497,6 +555,7 @@ describe("a rejected push", GIT_CASE, () => {
         fetchBranch({
           worktree: session.worktree,
           repo,
+          url: forgeUrl(),
           branch: "no-such-branch",
         }),
       ),
@@ -515,7 +574,12 @@ describe("what is refused before git runs", GIT_CASE, () => {
     commitFile(session.worktree, "NOTOKEN.md", "x\n");
     const before = remote.requests.count;
     const exit = await runWith(
-      pushBranch({ worktree: session.worktree, repo, branch: session.branch }),
+      pushBranch({
+        worktree: session.worktree,
+        repo,
+        url: forgeUrl(),
+        branch: session.branch,
+      }),
       Option.none(),
     );
     const error = Exit.isFailure(exit)
@@ -538,7 +602,14 @@ describe("what is refused before git runs", GIT_CASE, () => {
       "factory/-x",
     ]) {
       const error = gitErrorOf(
-        await runWith(pushBranch({ worktree: session.worktree, repo, branch })),
+        await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch,
+          }),
+        ),
       );
       expect(error, branch).toMatchObject({
         operation: "push",
@@ -551,34 +622,271 @@ describe("what is refused before git runs", GIT_CASE, () => {
     );
   });
 
-  it("refuses a remote whose stored URL already carries a credential", async () => {
+  it("refuses a URL that is not the repo's, carries a credential, or is not https, and reaches no remote", async () => {
     const session = await openSession();
-    git(
-      local,
-      "remote",
-      "add",
-      "leaky",
-      remote.url.replace("http://", "http://x-access-token:stored@") +
-        "/remote.git",
-    );
+    commitFile(session.worktree, "URL.md", "x\n");
+    const before = remote.requests.count;
+    for (const url of [
+      // Another repo on the same forge: the token is resolved for lobiklukas/factory only.
+      `${remote.url}/someone/else.git`,
+      // A stored password, and a token placed as the username (GitHub's `https://<pat>@` form).
+      `${remote.url.replace("http://", "http://x-access-token:stored@")}/lobiklukas/factory.git`,
+      `${remote.url.replace("http://", "http://ghp_stored@")}/lobiklukas/factory.git`,
+      // Cleartext to a host that is not this machine.
+      "http://example.com/lobiklukas/factory.git",
+      // Transports that are not https at all.
+      "git@github.com:lobiklukas/factory.git",
+      "ssh://git@github.com/lobiklukas/factory.git",
+      `file://${bare}`,
+      "ext::sh -c touch% /tmp/pwned",
+      `${forgeUrl()}?x=1`,
+    ]) {
+      for (const exit of [
+        await runWith(
+          fetchBranch({
+            worktree: session.worktree,
+            repo,
+            url,
+            branch: "main",
+          }),
+        ),
+        await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            url,
+            branch: session.branch,
+          }),
+        ),
+      ]) {
+        const error = gitErrorOf(exit);
+        expect(error, url).toMatchObject({ repo, reason: "refused" });
+        expect(error?.message, url).not.toContain("stored");
+      }
+    }
+    expect(remote.requests.count).toBe(before);
+  });
+
+  it("is a typed missing-ref error, before any credential, for a branch the checkout does not have", async () => {
+    const session = await openSession();
     const before = remote.requests.count;
     const error = gitErrorOf(
       await runWith(
-        fetchBranch({
+        pushBranch({
           worktree: session.worktree,
           repo,
-          remote: "leaky",
-          branch: "main",
+          url: forgeUrl(),
+          branch: "factory/never-committed",
         }),
+        Option.none(),
       ),
     );
     expect(error).toMatchObject({
-      operation: "fetch",
-      remote: "leaky",
-      reason: "refused",
+      operation: "push",
+      ref: "refs/heads/factory/never-committed",
+      reason: "missing-ref",
     });
     expect(remote.requests.count).toBe(before);
-    git(local, "remote", "remove", "leaky");
+  });
+});
+
+describe("resolveForgeUrl", () => {
+  it("defaults to the repo on GitHub and accepts the repo's own https URL in its usual spellings", () => {
+    expect(resolveForgeUrl(repo)).toEqual({
+      ok: true,
+      forge: {
+        url: "https://github.com/lobiklukas/factory.git",
+        origin: "https://github.com",
+        scheme: "https",
+      },
+    });
+    for (const url of [
+      "https://github.com/lobiklukas/factory",
+      "https://github.com/lobiklukas/factory/",
+      "https://GitHub.com/LobikLukas/Factory.git",
+      "http://127.0.0.1:9510/lobiklukas/factory.git",
+      "http://localhost/lobiklukas/factory.git",
+    ])
+      expect(resolveForgeUrl(repo, url).ok, url).toBe(true);
+    for (const url of [
+      "https://github.com/lobiklukas/factory-evil.git",
+      "https://github.com/lobiklukas/factory/../other.git",
+      "https://evil.example/lobiklukas/factory.git",
+      "https://github.com/lobiklukas/factory.git?x",
+      "http://github.com/lobiklukas/factory.git",
+      "https://u:p@github.com/lobiklukas/factory.git",
+      "not a url",
+    ])
+      expect(resolveForgeUrl(repo, url).ok, url).toBe(false);
+  });
+});
+
+describe(
+  "what the checkout cannot make the credentialed git do",
+  GIT_CASE,
+  () => {
+    /** A script that records it ran, and with which environment, in `<root>/ran-<name>`. */
+    const recorder = (dir: string, name: string): string => {
+      const file = join(dir, name);
+      writeFileSync(file, `#!/bin/sh\nenv > "${join(root, `ran-${name}`)}"\n`);
+      chmodSync(file, 0o755);
+      return file;
+    };
+    const ran = (): ReadonlyArray<string> =>
+      readdirSync(root).filter((name) => name.startsWith("ran-"));
+
+    it("runs no hook and no fsmonitor of the checkout, so none of them sees the token", async () => {
+      const session = await openSession();
+      commitFile(session.worktree, "HOOKS.md", "x\n");
+      const hooks = join(local, ".git", "hooks");
+      const elsewhere = join(root, "agent-hooks");
+      mkdirSync(elsewhere, { recursive: true });
+      const names = [
+        "pre-push",
+        "reference-transaction",
+        "post-update",
+        "pre-auto-gc",
+        "post-checkout",
+      ];
+      for (const name of names) {
+        recorder(hooks, name);
+        recorder(elsewhere, `${name}`);
+      }
+      const fsmonitor = recorder(root, "fsmonitor");
+      try {
+        const pushed = await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: session.branch,
+          }),
+        );
+        expect(Exit.isSuccess(pushed)).toBe(true);
+        const fetched = await runWith(
+          fetchBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: "main",
+          }),
+        );
+        expect(Exit.isSuccess(fetched)).toBe(true);
+        // The same again with the hooks moved by config, the way an agent would redirect them.
+        git(local, "config", "core.hooksPath", elsewhere);
+        git(local, "config", "core.fsmonitor", fsmonitor);
+        commitFile(session.worktree, "HOOKS.md", "y\n");
+        for (const name of ran()) rmSync(join(root, name));
+        const again = await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: session.branch,
+          }),
+        );
+        expect(Exit.isSuccess(again)).toBe(true);
+        const refetched = await runWith(
+          fetchBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: "main",
+          }),
+        );
+        expect(Exit.isSuccess(refetched)).toBe(true);
+        expect(ran()).toEqual([]);
+
+        // The witness: the planted hooks are live, so their silence above is the runner's doing.
+        git(session.worktree, "update-ref", "refs/heads/witness", "HEAD");
+        expect(ran()).toContain("ran-reference-transaction");
+      } finally {
+        git(local, "config", "--unset", "core.hooksPath");
+        git(local, "config", "--unset", "core.fsmonitor");
+        for (const name of names) rmSync(join(hooks, name));
+        for (const name of ran()) rmSync(join(root, name));
+      }
+    });
+
+    it("sends the token to the given URL only, whatever the checkout's remotes, rewrites and proxy say", async () => {
+      const session = await openSession();
+      const head = commitFile(session.worktree, "DECOY.md", "x\n");
+      const decoy = await startDecoy();
+      const decoyUrl = `${decoy.url}/lobiklukas/factory.git`;
+      git(local, "remote", "set-url", "origin", decoyUrl);
+      git(local, "config", "remote.origin.pushurl", decoyUrl);
+      git(local, "config", `url.${decoy.url}/.insteadOf`, `${remote.url}/`);
+      git(local, "config", `url.${decoy.url}/.pushInsteadOf`, `${remote.url}/`);
+      git(local, "config", "http.proxy", decoy.url);
+      git(local, "config", "include.path", join(root, "no-such-include"));
+      try {
+        const pushed = await runWith(
+          pushBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: session.branch,
+          }),
+        );
+        expect(Exit.isSuccess(pushed) ? pushed.value.sha : undefined).toBe(
+          head,
+        );
+        expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(
+          head,
+        );
+        const fetched = await runWith(
+          fetchBranch({
+            worktree: session.worktree,
+            repo,
+            url: forgeUrl(),
+            branch: "main",
+          }),
+        );
+        expect(Exit.isSuccess(fetched)).toBe(true);
+        expect(decoy.requests).toEqual([]);
+      } finally {
+        git(local, "remote", "set-url", "origin", forgeUrl());
+        git(local, "config", "--unset", "remote.origin.pushurl");
+        git(local, "config", "--remove-section", `url.${decoy.url}/`);
+        git(local, "config", "--unset", "http.proxy");
+        git(local, "config", "--unset", "include.path");
+        decoy.server.close();
+      }
+    });
+  },
+);
+
+describe("a stalled remote", GIT_CASE, () => {
+  it("is a typed timeout at the deadline, not a hang", async () => {
+    const session = await openSession();
+    // Accepts the connection, reads the request, and never answers.
+    const stall = createServer(() => {});
+    stall.listen(0, "127.0.0.1");
+    await once(stall, "listening");
+    const address = stall.address();
+    if (address === null || typeof address === "string")
+      throw new Error("the stall listener did not bind a TCP port");
+    try {
+      const error = gitErrorOf(
+        await runWith(
+          fetchBranch({
+            worktree: session.worktree,
+            repo,
+            url: `http://127.0.0.1:${address.port}/lobiklukas/factory.git`,
+            branch: "main",
+            timeout: Duration.seconds(1),
+          }),
+        ),
+      );
+      expect(error).toMatchObject({
+        operation: "fetch",
+        reason: "timeout",
+      });
+      // No hang: the case's own 30 s limit is far under the 5-minute default deadline.
+    } finally {
+      stall.closeAllConnections();
+      stall.close();
+    }
   });
 });
 
