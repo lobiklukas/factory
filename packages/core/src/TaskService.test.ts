@@ -10,7 +10,8 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
@@ -21,10 +22,13 @@ import {
   DefinitionId,
   humanGate,
   LIST_BOARDS_LIMIT,
+  NON_EMPTY_DIFF_REQUIREMENT,
+  PR_LINK_REQUIREMENT,
   type AttentionItem,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
+import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import {
   TaskService,
@@ -94,6 +98,31 @@ const eventCount = (taskId: string): Promise<number> =>
         SELECT count(*)::int AS n FROM task_events WHERE task_id = ${taskId}
       `;
       return rows[0]?.n ?? -1;
+    }),
+  );
+
+/**
+ * The card placed in `review` from `building` by a direct row write, at the next revision — setup
+ * for a case about what happens *after* building's exit. Since LOB-240 that exit needs the latest
+ * run's branch to carry a change and its log to record a PR, which such a case is not about; the
+ * exit itself is proven, through the service, by the building cases below. No `moved` event is
+ * appended, so a case counting events counts the service's own writes only.
+ */
+const seatInReview = (taskId: string) =>
+  runtime.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ id: string }>`
+        UPDATE tasks SET "column" = 'review', revision = revision + 1, updated_at = now()
+        WHERE id = ${taskId} AND "column" = 'building'
+        RETURNING id
+      `;
+      if (rows.length !== 1)
+        return yield* Effect.die(
+          new Error(`task ${taskId} is not in building`),
+        );
+      const service = yield* TaskService;
+      return yield* service.get(taskId);
     }),
   );
 
@@ -244,7 +273,10 @@ describe("TaskService", () => {
         actor: LUKAS,
       }),
     );
-    const review = await withService((s) =>
+    // No gate stands on building → review, so a run's move there is judged on the column's
+    // requirements, not refused as a gate (the gate is checked first): with no run on the card,
+    // `non_empty_diff` is the one it names.
+    const ungated = await refusal((s) =>
       s.move({
         taskId: task.id,
         expectedRevision: building.revision,
@@ -252,6 +284,11 @@ describe("TaskService", () => {
         actor: RUN,
       }),
     );
+    expect(ungated).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "non_empty_diff",
+    });
+    const review = await seatInReview(task.id);
     const mergeGate = await refusal((s) =>
       s.move({
         taskId: task.id,
@@ -271,8 +308,8 @@ describe("TaskService", () => {
       }),
     );
     expect(done.column).toBe("done");
-    // created + 5 accepted moves; both refused gates added nothing.
-    expect(await eventCount(task.id)).toBe(6);
+    // created + 4 accepted moves (the seat into review writes none); every refusal added nothing.
+    expect(await eventCount(task.id)).toBe(5);
   });
 
   it("accepts every move the shared table declares out of a column, and refuses every other", async () => {
@@ -1058,14 +1095,18 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     );
     for (const to of path) {
       const at = task;
-      task = await withService((s) =>
-        s.move({
-          taskId: at.id,
-          expectedRevision: at.revision,
-          to,
-          actor: LUKAS,
-        }),
-      );
+      // `building`'s exit needs a branch and a PR (LOB-240), which these cases are not about.
+      task =
+        to === "review"
+          ? await seatInReview(at.id)
+          : await withService((s) =>
+              s.move({
+                taskId: at.id,
+                expectedRevision: at.revision,
+                to,
+                actor: LUKAS,
+              }),
+            );
     }
     return task;
   };
@@ -1497,14 +1538,53 @@ describe("TaskService — exit requirements", () => {
   const change = (path: string) =>
     `mkdir -p ${dirname(path)} && echo 'export const changed = 1;' > ${path} && echo changed`;
 
+  /** A change committed on the run's own branch: what `non_empty_diff` measures (LOB-240). */
+  const commit = (path: string) =>
+    `${change(path)} && git add -A && git commit -q -m change`;
+
   /**
-   * One run of `taskId`, started from `review`: the faux model runs `command` in the run's worktree,
-   * calls `verify`, and answers. Resolves once the answer is in, with the run's session id.
+   * GitHub's PR endpoint behind an `HttpClient.make` fake (docs/testing-third-parties.md, GitHub
+   * row): every POST answers PR 7, so the PR step commits its `factory.pr` document with no network.
+   */
+  const githubFake = Layer.merge(
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(
+              JSON.stringify({
+                number: 7,
+                url: "https://api.github.com/repos/factory-test/requires/pulls/7",
+                html_url: "https://github.com/factory-test/requires/pull/7",
+              }),
+              { status: 201, headers: { "content-type": "application/json" } },
+            ),
+          ),
+        ),
+      ),
+    ),
+    Layer.succeed(
+      CredentialProvider,
+      staticTokenProvider(Option.some(Redacted.make("tok"))),
+    ),
+  );
+
+  /**
+   * One run of `taskId`, started from `column` (`review` unless named): the faux model runs
+   * `command` in the run's worktree, calls `verify`, and answers. With `openPr` the run's PR is then
+   * opened through the PR step against the GitHub fake, which records it in the run's log. Resolves
+   * once the answer (and the PR) is in, with the run's session id.
    */
   const recordRun = async (input: {
     readonly taskId: string;
     readonly repoRoot: string;
     readonly command: string;
+    readonly column?: string;
+    readonly openPr?: boolean;
+    /** The repository's registered `local_path`, when it is not `repoRoot` itself. */
+    readonly localPath?: string;
   }): Promise<string> => {
     const faux = createFauxModelAccess({
       fauxVerify: true,
@@ -1523,13 +1603,13 @@ describe("TaskService — exit requirements", () => {
           yield* service.registerRepo({
             repo,
             url: "https://example.invalid/requires.git",
-            localPath: input.repoRoot,
+            localPath: input.localPath ?? input.repoRoot,
           });
           const created = yield* service.create({
             repo,
             baseRef: "main",
             taskId: input.taskId,
-            taskColumn: "review",
+            taskColumn: input.column ?? "review",
           });
           yield* service.send({
             sessionId: created.id,
@@ -1542,8 +1622,23 @@ describe("TaskService — exit requirements", () => {
               snapshot.entries.some(
                 (entry) => entry.kind === "assistant" && entry.text !== "",
               )
-            )
+            ) {
+              if (input.openPr === true) {
+                const answer = yield* service
+                  .openPullRequest({
+                    sessionId: created.id,
+                    title: "factory: requires",
+                  })
+                  .pipe(Effect.provide(githubFake), Effect.orDie);
+                if (answer.outcome !== "opened")
+                  return yield* Effect.die(
+                    new Error(
+                      `run ${created.id} opened no PR: ${answer.outcome}`,
+                    ),
+                  );
+              }
               return created.id;
+            }
             yield* Effect.sleep(50);
           }
           return yield* Effect.die(
@@ -1558,26 +1653,28 @@ describe("TaskService — exit requirements", () => {
 
   /** A card on a board over `version`, walked by a person from intake into review. */
   const inReview = (version: number) =>
-    newBoard(version).then((boardId) =>
-      withService((s) =>
-        Effect.gen(function* () {
-          let task = yield* s.create({
-            boardId,
-            title: "requires",
-            actor: LUKAS,
-          });
-          for (const to of ["specifying", "planning", "building", "review"]) {
-            task = yield* s.move({
-              taskId: task.id,
-              expectedRevision: task.revision,
-              to,
+    newBoard(version)
+      .then((boardId) =>
+        withService((s) =>
+          Effect.gen(function* () {
+            let task = yield* s.create({
+              boardId,
+              title: "requires",
               actor: LUKAS,
             });
-          }
-          return task;
-        }),
-      ),
-    );
+            for (const to of ["specifying", "planning", "building"]) {
+              task = yield* s.move({
+                taskId: task.id,
+                expectedRevision: task.revision,
+                to,
+                actor: LUKAS,
+              });
+            }
+            return task;
+          }),
+        ),
+      )
+      .then((task) => seatInReview(task.id));
 
   const PASSING = 'echo "fixture: all checks passed"\n';
 
@@ -1785,4 +1882,290 @@ describe("TaskService — exit requirements", () => {
     );
     expect(done.column).toBe("done");
   });
+
+  /** A card on a board over `version`, walked by a person from intake into building. */
+  const inBuilding = (version = 1) =>
+    newBoard(version).then((boardId) =>
+      withService((s) =>
+        Effect.gen(function* () {
+          let task = yield* s.create({
+            boardId,
+            title: "building",
+            actor: LUKAS,
+          });
+          for (const to of ["specifying", "planning", "building"]) {
+            task = yield* s.move({
+              taskId: task.id,
+              expectedRevision: task.revision,
+              to,
+              actor: LUKAS,
+            });
+          }
+          return task;
+        }),
+      ),
+    );
+
+  /** The card's run moving it on, as a builder run does (no gate stands on building → review). */
+  const toReview =
+    (task: { readonly id: string; readonly revision: number }) =>
+    (s: TaskServiceShape) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "review",
+        actor: RUN,
+      });
+
+  it("refuses building → review with no run, naming non_empty_diff first, and writes nothing", async () => {
+    // Every version of the default pipeline declares building's requirements, so a card on any of
+    // them is held: the definition did not change, the service started checking what it declares.
+    for (const version of [1, 3]) {
+      const task = await inBuilding(version);
+      const events = await eventCount(task.id);
+      const err = await refusal(toReview(task));
+      expect(err).toMatchObject({
+        _tag: "RequirementUnmet",
+        taskId: task.id,
+        column: "building",
+        to: "review",
+        requirement: NON_EMPTY_DIFF_REQUIREMENT,
+      });
+      expect(err.message).toBe(
+        'the move building → review needs "non_empty_diff" (a non-empty diff), which is not met: the card has no runs, so no branch carries its change',
+      );
+      const after = await withService((s) => s.get(task.id));
+      expect(after.column).toBe("building");
+      expect(after.revision).toBe(task.revision);
+      expect(await eventCount(task.id)).toBe(events);
+      // Abandoning the card is never gated on evidence.
+      const canceled = await withService((s) =>
+        s.move({
+          taskId: task.id,
+          expectedRevision: task.revision,
+          to: "canceled",
+          actor: LUKAS,
+        }),
+      );
+      expect(canceled.column).toBe("canceled");
+    }
+  });
+
+  it("refuses building → review when the latest run's branch carries no committed change", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    // The change is left in the worktree, uncommitted: verify sees it, a PR would not carry it.
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: change("apps/web/src/page.ts"),
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${run}'s branch factory/${run} changes no file against main (git diff --numstat main...factory/${run} is empty)`,
+    );
+  }, 120_000);
+
+  it("refuses building → review when the run's repository has no checkout to measure its branch in", async () => {
+    const task = await inBuilding();
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const repo = RepoSlug.make(`factory-test/requires-${hex(4)}`);
+    const run = await sessions
+      .runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          yield* service.registerRepo({
+            repo,
+            url: "https://example.invalid/requires.git",
+          });
+          const created = yield* service.create({
+            repo,
+            baseRef: "main",
+            taskId: task.id,
+            taskColumn: "building",
+          });
+          return created.id;
+        }),
+      )
+      .finally(() => sessions.dispose());
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${run}'s branch could not be measured: repository ${repo} has no local checkout registered`,
+    );
+  }, 60_000);
+
+  it("refuses building → review when the run's branch is gone from its checkout, naming the range it could not measure", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+    });
+    // The checkout no longer holds the run's branch (a re-registered checkout, a pruned ref): git
+    // cannot resolve the range, which is not a measured empty diff and not a pass either.
+    execSync(`git update-ref -d refs/heads/factory/${run}`, {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${run}'s branch could not be measured: the branch's diff could not be measured: git diff main...factory/${run} in ${repoRoot}`,
+    );
+  }, 120_000);
+
+  it("refuses building → review when the card's run has no branch: bound to no repository, or gone from the index", async () => {
+    const task = await inBuilding();
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const run = await sessions
+      .runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const created = yield* service.create({
+            taskId: task.id,
+            taskColumn: "building",
+          });
+          return created.id;
+        }),
+      )
+      .finally(() => sessions.dispose());
+    const unbound = await refusal(toReview(task));
+    expect(unbound).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(unbound.message).toContain(
+      `run ${run}'s branch could not be measured: its session is bound to no repository, so it has no branch`,
+    );
+    // The index row goes (its log stays): the run still names the session, and nothing says where
+    // its branch is.
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM sessions WHERE id = ${run}`;
+      }),
+    );
+    const unindexed = await refusal(toReview(task));
+    expect(unindexed).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(unindexed.message).toContain(
+      `run ${run}'s branch could not be measured: its session is not in the index`,
+    );
+  }, 60_000);
+
+  it("measures the branch from a local_path inside the checkout, as the worktree was cut from it", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({
+      ".pi/skills/verify-web/drive.sh": PASSING,
+      "packages/app/README.md": "# app\n",
+    });
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      localPath: join(repoRoot, "packages", "app"),
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+    });
+    // The branch was found and measured non-empty, so the refusal is the next requirement's.
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: PR_LINK_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `the card's latest run ${run} recorded no PR`,
+    );
+  }, 120_000);
+
+  it("passes non_empty_diff on a committed change, refuses on pr_link until the run's PR is recorded, then lets the move through", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+    });
+    const err = await refusal(toReview(task));
+    // The branch's change is there, so the refusal names the next requirement: the PR.
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      column: "building",
+      to: "review",
+      requirement: PR_LINK_REQUIREMENT,
+    });
+    expect(err.message).toBe(
+      `the move building → review needs "pr_link" (a PR link), which is not met: the card's latest run ${run} recorded no PR (no factory.pr document in its log): open its PR (factory pr ${run}) before moving the card on`,
+    );
+
+    // The same run's PR, opened through the PR step, is the record the requirement reads.
+    const withPr = await inBuilding();
+    await recordRun({
+      taskId: withPr.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/other.ts"),
+      openPr: true,
+    });
+    const review = await withService(toReview(withPr));
+    expect(review.column).toBe("review");
+    expect(review.revision).toBe(withPr.revision + 1);
+  }, 180_000);
+
+  it("reads the latest run only: an older run's PR does not carry a newer run's branch", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const older = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/page.ts"),
+      openPr: true,
+    });
+    const latest = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: commit("apps/web/src/next.ts"),
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: PR_LINK_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `the card's latest run ${latest} recorded no PR`,
+    );
+    expect(err.message).not.toContain(older);
+  }, 180_000);
 });

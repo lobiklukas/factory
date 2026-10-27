@@ -7,13 +7,35 @@
  * evidence, so `TaskService.move` decides only *when* to check and the rules can be read (and
  * tested) without a database.
  *
- * **Which keys are checked.** Only the keys in `CHECKED_REQUIREMENTS`. Today that is `verified`, the
- * one B8 promotes from a PR body artifact into a condition of the move. The other keys the default
+ * **Which keys are checked.** Only the keys in `CHECKED_REQUIREMENTS`: `verified`, the one B8
+ * promotes from a PR body artifact into a condition of the move, and `building`'s `non_empty_diff`
+ * and `pr_link` (LOB-240), whose evidence the PR step already records. The other keys the default
  * pipeline declares are not checked here, and each for a stated reason: `human_move` and
  * `human_merge` are B5's human gates, which `TaskService` already enforces by actor; `spec_doc`,
- * `plan_doc`, `run_completed`, `non_empty_diff`, `pr_link` and `review_verdict` have no recorded
- * artifact to check yet, and refusing every move on a key nothing can satisfy would turn the
- * pipeline off rather than gate it. A key gains a checker when its evidence is recorded.
+ * `plan_doc`, `run_completed` and `review_verdict` have no recorded artifact to check yet, and
+ * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
+ * A key gains a checker when its evidence is recorded.
+ *
+ * **What `non_empty_diff` and `pr_link` mean.** Both read the card's *latest* run — the newest
+ * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own
+ * branch, so the latest run's branch is the change the card carries now, and an older run's PR is a
+ * PR of a change a later run replaced. `non_empty_diff` is met when that branch has at least one
+ * changed file against its base, by the PR step's own measurement (`git diff --numstat
+ * base...head`, LOB-196): committed work only, three-dot from the merge base, so a branch the board
+ * measures as empty is one the step would publish as empty. The two do not agree everywhere, by
+ * design. A branch that could not be measured — a run bound to no repository, a repository with no
+ * local checkout, a ref git cannot resolve — is not a pass here, as "nothing could check this" is not
+ * one for `verified`; the PR step, given a session directory that is no checkout of its own, skips
+ * its cap and opens the PR anyway (`diffSize`). And the board measures from the repository's
+ * registered `local_path`, the step from the session's worktree: they read the same refs while the
+ * worktree is a linked worktree of that checkout, but a `local_path` re-registered after the run was
+ * cut, or a run cut before any checkout was registered, leaves the branch unfound from `local_path`,
+ * and the move is refused as unmeasured although the step could open the PR. **A known limit under
+ * D3/D4:** this check reads git refs from a checkout on the control plane's own disk. When the
+ * worktree moves into the sandbox, the measurement has to follow it (or read the recorded PR's own
+ * diff), or `non_empty_diff` refuses every move. `pr_link` is met
+ * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
+ * commits, not the index's `pr_url` column a rebuild derives from it.
  *
  * **What `verified` means.** The card's change is the newest `verify` call, over all of the card's
  * runs, that measured a change. "Newest" is by when the call's result was written (the tool
@@ -48,7 +70,11 @@
  * the remedy (`VERIFIABLE_REMEDY`) whenever a missing verification is the reason.
  */
 import type { BoardColumn, ColumnRequirement } from "@repo/domain/Task";
-import { VERIFIED_REQUIREMENT } from "@repo/domain/Task";
+import {
+  NON_EMPTY_DIFF_REQUIREMENT,
+  PR_LINK_REQUIREMENT,
+  VERIFIED_REQUIREMENT,
+} from "@repo/domain/Task";
 import {
   REPO_SURFACE,
   surfaceOf,
@@ -61,15 +87,46 @@ import {
 /** The requirement keys this module can check. Every other key is not checked yet (module doc). */
 export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   VERIFIED_REQUIREMENT,
+  NON_EMPTY_DIFF_REQUIREMENT,
+  PR_LINK_REQUIREMENT,
 ]);
 
 /**
  * One run of the card and the `verify` calls its log holds, oldest first — a call that left no
- * record included, as `undefined` (`readVerifyCalls`).
+ * record included, as `undefined` (`readVerifyCalls`) — and the PR link its `factory.pr` document
+ * records, when it opened one.
  */
 export type RunEvidence = {
   readonly sessionId: string;
   readonly calls: readonly TimedVerifyCall[];
+  readonly prUrl?: string;
+};
+
+/**
+ * The latest run's branch against its base, as the PR step measures it (module doc): how many files
+ * it changes, or why nothing could be measured.
+ */
+export type BranchDiff =
+  | {
+      readonly _tag: "measured";
+      readonly sessionId: string;
+      readonly base: string;
+      readonly head: string;
+      readonly files: number;
+    }
+  | {
+      readonly _tag: "unmeasured";
+      readonly sessionId: string;
+      readonly reason: string;
+    };
+
+/**
+ * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
+ * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run.
+ */
+export type CardEvidence = {
+  readonly runs: readonly RunEvidence[];
+  readonly diff?: BranchDiff;
 };
 
 /**
@@ -212,11 +269,63 @@ export const verifiedVerdict = (
   };
 };
 
-/** One checked requirement's verdict over the card's runs. */
+/** The `non_empty_diff` requirement over the latest run's measured branch (module doc). */
+export const nonEmptyDiffVerdict = (
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  const latest = evidence.runs.at(-1);
+  if (latest === undefined)
+    return {
+      met: false,
+      reason: "the card has no runs, so no branch carries its change",
+    };
+  const diff = evidence.diff;
+  // The evidence was gathered for this card, so a diff of another run (or none) is a caller that
+  // did not measure the latest run: refused, rather than judged on a branch the card no longer carries.
+  if (diff === undefined || diff.sessionId !== latest.sessionId)
+    return {
+      met: false,
+      reason: `run ${latest.sessionId}'s branch was not measured`,
+    };
+  if (diff._tag === "unmeasured")
+    return {
+      met: false,
+      reason: `run ${diff.sessionId}'s branch could not be measured: ${diff.reason}`,
+    };
+  return diff.files > 0
+    ? { met: true }
+    : {
+        met: false,
+        reason: `run ${diff.sessionId}'s branch ${diff.head} changes no file against ${diff.base} (git diff --numstat ${diff.base}...${diff.head} is empty): commit the change on the run's branch`,
+      };
+};
+
+/** The `pr_link` requirement over the latest run's recorded PR (module doc). */
+export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
+  const latest = evidence.runs.at(-1);
+  if (latest === undefined)
+    return { met: false, reason: "the card has no runs, so none opened a PR" };
+  return latest.prUrl === undefined
+    ? {
+        met: false,
+        reason: `the card's latest run ${latest.sessionId} recorded no PR (no factory.pr document in its log): open its PR (factory pr ${latest.sessionId}) before moving the card on`,
+      }
+    : { met: true };
+};
+
+/** One checked requirement's verdict over the card's evidence. */
 export const requirementVerdict = (
   requirement: ColumnRequirement,
-  runs: readonly RunEvidence[],
-): RequirementVerdict =>
-  requirement.key === VERIFIED_REQUIREMENT
-    ? verifiedVerdict(runs)
-    : { met: false, reason: `"${requirement.key}" has no checker` };
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  switch (requirement.key) {
+    case VERIFIED_REQUIREMENT:
+      return verifiedVerdict(evidence.runs);
+    case NON_EMPTY_DIFF_REQUIREMENT:
+      return nonEmptyDiffVerdict(evidence);
+    case PR_LINK_REQUIREMENT:
+      return prLinkVerdict(evidence);
+    default:
+      return { met: false, reason: `"${requirement.key}" has no checker` };
+  }
+};

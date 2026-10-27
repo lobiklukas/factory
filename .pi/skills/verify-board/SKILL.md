@@ -37,7 +37,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | CLI ⇄ browser (LOB-87)           | `both-ways.mjs`: an open page follows `board move`; its plan approval is what `show` prints | the CLI and the browser are one board, on the drive's own card       |
 | build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal        | the PR and its evidence are real, and only a person reaches `done`   |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                 | a run that needs a person ends, and the answer reaches the next run  |
-| `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through       | a refusal names the requirement; evidence is a condition of the move |
+| `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then through      | a refusal names the requirement; evidence is a condition of the move |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                    | the equivalence holds with both surfaces' own drives green           |
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh` and `equivalence.sh`
@@ -115,7 +115,7 @@ runs the real script against a closed port and an answering one.
 ```sh
 ./drive.sh       # requires the instance from ./up.sh
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
-./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402), three runs on one card
+./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), four runs on one card
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./equivalence.sh   # standalone, no instance up: verify-cli, verify-web, then up/drive/down here
 ```
@@ -135,8 +135,10 @@ board, a card and a run on it whose prompt carries the `specifying` column's ski
 refusals plus a malformed `--repo`. `board-create.ts` reads the newest version
 straight from the database (the oracle) and the run's prompt from its log. See `features/boards.md`.
 
-`requires.sh` (LOB-80) walks a card on the newest `default` definition into `review` and proves the
-column's `verified` requirement from the terminal: refused with no evidence, refused again when the
+`requires.sh` (LOB-80, LOB-240) walks a card on the newest `default` definition into `building` and
+proves the column's `non_empty_diff` and `pr_link` requirements from the terminal — refused with no
+run, refused again naming `pr_link` once a builder run committed a change, and let through once
+`factory pr` opened its PR on a loopback GitHub fake — and then `review`'s `verified` requirement: refused with no evidence, refused again when the
 card's latest change (`api`) is unverified even though an earlier run verified `web`, and let through
 once `api` passes. Its runs are real sessions bound to the card, verified by the real `verify` tool
 over a fixture repo; `requires.ts` seeds the card and reads each run's `verify` record back. See
@@ -208,8 +210,9 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
-- `requires-observed.json`, `requires-{web,api-unverified,api-verified}.json`, `requires-*.txt`,
-  `requires-api.log` — `requires.sh`'s checks, each run's decoded `verify` record, the CLI outputs
+- `requires-observed.json`, `requires-build.json`, `requires-{web,api-unverified,api-verified}.json`,
+  `requires-*.txt`, `requires-api.log` — `requires.sh`'s checks, each run's decoded `verify` record,
+  the CLI outputs
 - `create-board.json`, `create-board-*.txt`, `create-board-prompt.json` — `board-create.sh`'s checks,
   each command with its output, and the run's prompt sections
 - `../equivalence/observed.json`, `../equivalence/<step>.log` — `equivalence.sh`'s steps and their

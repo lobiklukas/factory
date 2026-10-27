@@ -31,7 +31,9 @@
 # person records the verdict on the card, the run's own `review → done` is refused at the merge gate,
 # and the person's merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
 # BOARD_GITHUB=off) `factory pr` fails, the drive prints that reason and exits non-zero, and the
-# phases after it run on with the link empty rather than one the drive made up.
+# phases after it run on with the link empty rather than one the drive made up. The board holds the
+# card too (LOB-240): `building` is left only with a committed change and a recorded PR, so the run's
+# move on is refused naming `pr_link` before `factory pr`, and — with no GitHub path — after it.
 #
 # The CLI and the browser are one board (LOB-87): around the move to `planning` a browser page holds
 # the card open (`both-ways.mjs`), follows the terminal's move without a reload and shows nothing of
@@ -522,6 +524,18 @@ check "the build run's branch has a non-empty diff against main" \
   "$(printf '%s\n' "$DIFF" | grep -qE "^[0-9]+[[:space:]]+[0-9]+[[:space:]]+$BUILD_CHANGED$" && echo 0 || echo 1)" \
   "$(printf '%s' "$DIFF" | head -1 | tr '\t' ' ')"
 
+# --- the building gate: the change is there, the PR is not yet (LOB-240) ---------------------------
+# `building` declares `non_empty_diff` and `pr_link`, and the service checks both on exit: the run's
+# move on before its PR is opened is refused naming the PR, not the diff — the diff is the one above —
+# and writes nothing, so the move after the PR is made at the same revision.
+PR_LINK_MESSAGE="requirement_unmet: the move building → review needs \"pr_link\" (a PR link), which is not met: the card's latest run ${BUILD_SESSION_ID:-ses_missing} recorded no PR"
+fresh
+run_cmd review-early "$FACTORY board move --task $TASK_ID --to review --expect-revision ${BUILDING_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
+capture move-review-no-pr.txt
+check "before its PR, the run's building → review is refused naming pr_link" \
+  "$([ -n "$BUILD_SESSION_ID" ] && [ "$(exit_code review-early)" != "0" ] && [ -n "$(exit_code review-early)" ] && grep -qF "$PR_LINK_MESSAGE" "$EVIDENCE_DIR/move-review-no-pr.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code review-early), $(grep -m1 -o 'needs "[a-z_]*"' "$EVIDENCE_DIR/move-review-no-pr.txt" 2>/dev/null)"
+
 # --- pr: the run's PR, opened from the terminal; the link is read, never assumed -------------------
 fresh
 run_cmd pr "$FACTORY pr ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
@@ -549,14 +563,22 @@ check "factory ls shows the build run's PR link" \
 
 # --- review: the run moves its card on, and a person records the verdict --------------------------
 # `building → review` crosses no gate, so the run that built the change may make it (B5); the drive
-# makes it with that run's id to show the difference from the merge, below.
+# makes it with that run's id to show the difference from the merge, below. With no PR (BOARD_GITHUB=
+# off) the board refuses it naming `pr_link` (LOB-240): the check fails with that refusal as its
+# detail, the card stays in `building`, and every phase after it fails on its own.
 fresh
 run_cmd review "$FACTORY board move --task $TASK_ID --to review --expect-revision ${BUILDING_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
 capture move-review.txt
 REVIEW_REVISION="$(sed -n "s/^moved $TASK_ID to review (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-review.txt")"
 check "the build run moves its card on to review (no gate on that move)" \
   "$([ "$(exit_code review)" = "0" ] && [ -n "$REVIEW_REVISION" ] && echo 0 || echo 1)" \
-  "exit=$(exit_code review), revision=${REVIEW_REVISION:-none}"
+  "exit=$(exit_code review), revision=${REVIEW_REVISION:-none}$(grep -m1 -o ' requirement_unmet: .* needs "[a-z_]*"' "$EVIDENCE_DIR/move-review.txt" 2>/dev/null)"
+if [ -z "$PR_URL" ]; then
+  # The gate is the board's, not the drive's: with no PR the card is held in building.
+  check "with no PR, the board holds the card in building, naming pr_link" \
+    "$([ "$(exit_code review)" != "0" ] && grep -qF "$PR_LINK_MESSAGE" "$EVIDENCE_DIR/move-review.txt" && echo 0 || echo 1)" \
+    "exit=$(exit_code review)"
+fi
 
 # The verdict is read off the evidence the reviewer was shown, not written in advance: approve only
 # when there is a PR, the run's verify record passed (build-built.json) and the forge's PR carries
