@@ -33,26 +33,32 @@ import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import {
-  NoWriteBack,
+  sessionRequestIdOf,
   TriggerService,
   TriggerServiceLive,
   TriggerSessions,
   triggerActorOf,
+  TriggerWriteBack,
   type TriggerServiceShape,
   type TriggerSessionsShape,
+  type TriggerWriteBackShape,
 } from "./TriggerService";
 
 const runId = randomBytes(6).toString("hex");
 
-/** One fake session, as the seam sees it: an id and the message that was sent to it. */
+/** One fake session, as the seam sees it: an id and the messages that were sent to it. */
 type Created = {
   readonly id: SessionId;
   /** The delivery's source, which the session port turns into the session's actor (LOB-162). */
   readonly source: string;
+  readonly requestId: string;
   readonly title: string;
   readonly repo: RepoSlug;
   readonly baseRef: string | undefined;
-  readonly prompt: string | undefined;
+  /** Every message the session admitted, in order: what a retry that re-sends would grow. */
+  readonly messages: Array<string>;
+  /** The send request ids it admitted, which is the dedupe Pi Durable keeps per conversation. */
+  readonly sendRequestIds: Set<string>;
 };
 
 const repo = "acme/widgets" as RepoSlug;
@@ -99,6 +105,8 @@ type Harness = {
   ) => Promise<A>;
   readonly trigger: TriggerServiceShape;
   readonly created: Array<Created>;
+  /** The session id of every write-back the seam attempted, failed ones included. */
+  readonly writeBacks: Array<SessionId>;
 };
 
 const withRuntime = async <A>(
@@ -109,6 +117,11 @@ const withRuntime = async <A>(
     readonly failCreateTimes?: number;
     /** Die (a defect, not a typed failure) on the first `create` that many times. */
     readonly dieCreateTimes?: number;
+    /**
+     * Fail the write-back this many times — *after* the prompt was sent, the failure the existing
+     * retry cases (which fail in `create`) do not reach (LOB-218).
+     */
+    readonly failWriteBackTimes?: number;
     /**
      * Park the winning delivery in `send`, i.e. after its claim and before its outcome, until
      * `release` fires: the window in which a second delivery of the same id is a replay of work
@@ -123,6 +136,8 @@ const withRuntime = async <A>(
   const created: Array<Created> = [];
   let failuresLeft = options.failCreateTimes ?? 0;
   let deathsLeft = options.dieCreateTimes ?? 0;
+  let writeBackFailuresLeft = options.failWriteBackTimes ?? 0;
+  const writeBacks: Array<SessionId> = [];
   const sessions: TriggerSessionsShape = {
     create: (input) =>
       Effect.suspend(
@@ -141,16 +156,25 @@ const withRuntime = async <A>(
             );
           }
           return Effect.sync(() => {
+            // `SessionService.create` dedupes on `sessions.request_id`, so a retry that reaches
+            // `create` again gets the session its first attempt opened. The fake keeps that, or a
+            // retry after the send could not tell "one session, one message" from two sessions.
+            const existing = created.find(
+              (entry) => entry.requestId === input.requestId,
+            );
+            if (existing !== undefined) return { id: existing.id };
             // The count is what the cases assert; the id only has to be a well-formed session id.
             const id =
               `ses_${String(created.length + 1).padStart(26, "0")}` as SessionId;
             created.push({
               id,
               source: input.source,
+              requestId: input.requestId,
               title: input.title,
               repo: input.repo,
               baseRef: input.baseRef,
-              prompt: undefined,
+              messages: [],
+              sendRequestIds: new Set(),
             });
             return { id };
           });
@@ -163,13 +187,30 @@ const withRuntime = async <A>(
           yield* Deferred.succeed(hold.arrived, undefined);
           yield* Deferred.await(hold.release);
         }
-        const index = created.findIndex(
-          (entry) => entry.id === input.sessionId,
-        );
-        const entry = created[index];
-        if (entry !== undefined) {
-          created[index] = { ...entry, prompt: input.content };
+        const entry = created.find((entry) => entry.id === input.sessionId);
+        // Pi Durable's submission dedupe: a request id this conversation already admitted returns
+        // the existing submission rather than appending a second message.
+        if (entry === undefined || entry.sendRequestIds.has(input.requestId)) {
+          return;
         }
+        entry.sendRequestIds.add(input.requestId);
+        entry.messages.push(input.content);
+      }),
+  };
+  const writeBack: TriggerWriteBackShape = {
+    write: (input) =>
+      Effect.suspend(() => {
+        writeBacks.push(input.sessionId);
+        if (writeBackFailuresLeft > 0) {
+          writeBackFailuresLeft -= 1;
+          return Effect.fail(
+            new TriggerError({
+              code: "write-back",
+              message: "the tracker answered 500",
+            }),
+          );
+        }
+        return Effect.void;
       }),
   };
 
@@ -178,7 +219,7 @@ const withRuntime = async <A>(
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
-          NoWriteBack,
+          Layer.succeed(TriggerWriteBack, TriggerWriteBack.of(writeBack)),
         ),
       ),
       Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)),
@@ -205,7 +246,7 @@ const withRuntime = async <A>(
       );
     }
     const run: Harness["run"] = (effect) => runtime.runPromise(effect);
-    return await body({ run, trigger, created });
+    return await body({ run, trigger, created, writeBacks });
   } finally {
     await runtime.dispose();
   }
@@ -475,14 +516,50 @@ describe("the trigger seam", () => {
     );
   }, 60_000);
 
+  it("does not send the prompt again when a delivery fails after the send and is retried", async () => {
+    // LOB-218: the cases above fail in `create`, before anything reached the session. This one
+    // fails in the write-back, after the prompt was sent: the claim is given back, the sender
+    // retries, and the retry runs `create` (which reuses the session) and `send` again. Without the
+    // send's request id the session holds the prompt twice.
+    const requestId = `${runId}-after-send`;
+    await withRuntime(
+      async ({ run, trigger, created, writeBacks }) => {
+        const failed = await run(
+          Effect.exit(trigger.deliver(deliver(requestId))),
+        );
+        expect(failed._tag).toBe("Failure");
+        // The failure is the write-back's, so the prompt had already been sent.
+        expect(created).toHaveLength(1);
+        expect(created[0]?.messages).toHaveLength(1);
+
+        const retried = await run(trigger.deliver(deliver(requestId)));
+        expect(retried.replayed).toBe(false);
+        expect(retried.status).toBe("processed");
+        expect(retried.sessionId).toBe(created[0]?.id);
+        // One delivery, one session, one message — however many times the sender tried.
+        expect(created).toHaveLength(1);
+        expect(created[0]?.messages).toEqual([
+          "Work on Fix the widget:\nThe widget wobbles.",
+        ]);
+        // The retry did reach the write-back again: it is the send alone that dedupes.
+        expect(writeBacks).toEqual([created[0]?.id, created[0]?.id]);
+      },
+      { registerRepo: [repo], failWriteBackTimes: 1 },
+    );
+  }, 60_000);
+
   it("sends the rendered prompt as the session's first message", async () => {
     await withRuntime(
       async ({ run, trigger, created }) => {
         const outcome = await run(trigger.deliver(deliver(`${runId}-prompt`)));
         expect(outcome.status).toBe("processed");
-        expect(created[0]?.prompt).toBe(
+        expect(created[0]?.messages).toEqual([
           "Work on Fix the widget:\nThe widget wobbles.",
-        );
+        ]);
+        // Sent under the delivery's own key, the one the session was created under.
+        expect([...(created[0]?.sendRequestIds ?? [])]).toEqual([
+          sessionRequestIdOf(`${runId}-prompt`),
+        ]);
         expect(created[0]?.repo).toBe(repo);
         expect(created[0]?.baseRef).toBe("main");
         // The port is told where the delivery came from, so the session's spend is the source's.

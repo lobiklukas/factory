@@ -81,9 +81,16 @@ export type TriggerSessionsShape = {
     readonly repo: RepoSlug;
     readonly baseRef: string | undefined;
   }) => Effect.Effect<{ readonly id: SessionId }, TriggerError>;
+  /**
+   * Send the delivery's prompt. `requestId` is the delivery's own key (the same namespaced id the
+   * session was created under), and a port must admit one message per id: the seam gives a failed
+   * delivery's claim back, so a write-back that fails *after* the send makes the sender's retry
+   * send again, and only this key keeps that retry from appending the prompt twice (LOB-218).
+   */
   readonly send: (input: {
     readonly sessionId: SessionId;
     readonly content: string;
+    readonly requestId: string;
   }) => Effect.Effect<void, TriggerError>;
 };
 
@@ -142,7 +149,8 @@ export const NoWriteBack = Layer.succeed(
 /**
  * The production wiring: the seam's two calls are `SessionService.create` and
  * `SessionService.send`, and a `SessionError` becomes a `TriggerError` here rather than leaking a
- * session-shaped failure out of the trigger path.
+ * session-shaped failure out of the trigger path. Both carry the request id: `create` dedupes on
+ * `sessions.request_id`, `send` on Pi Durable's submission `requestId`, which survives a restart.
  */
 export const TriggerSessionsFromSessionService = Layer.effect(
   TriggerSessions,
@@ -166,7 +174,11 @@ export const TriggerSessionsFromSessionService = Layer.effect(
           ),
       send: (input) =>
         sessions
-          .send({ sessionId: input.sessionId, content: input.content })
+          .send({
+            sessionId: input.sessionId,
+            content: input.content,
+            requestId: input.requestId,
+          })
           .pipe(Effect.asVoid, Effect.mapError(failSession)),
     });
   }),
@@ -303,7 +315,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // delivery a `replayed: true` answer to work that never started, which is worse than an
           // error (LOB-188 review). Releasing it is safe because the session's own `requestId` is
           // `trigger:<requestId>`, so a retry that gets as far as `sessions.create` reuses the
-          // session the failed attempt made instead of opening a second one.
+          // session the failed attempt made instead of opening a second one, and its `send` carries
+          // the same id, so a retry after a failed write-back finds its prompt already submitted
+          // instead of appending it again (LOB-218).
+          const sessionRequestId = sessionRequestIdOf(requestId);
           const claimedWork: Effect.Effect<TriggerOutcome, TriggerError> =
             Effect.gen(function* () {
               // The filter. `create` always starts work; a lifecycle action (`push`, `schedule`)
@@ -359,16 +374,19 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 deliveryId: requestId,
                 // Namespaced (`sessionRequestIdOf`): `sessions.request_id` dedupes client retries
                 // too.
-                requestId: sessionRequestIdOf(requestId),
+                requestId: sessionRequestId,
                 repo: mapping.repo,
                 baseRef: mapping.baseRef,
               });
 
               // The prompt is the session's first message, so a mapped delivery with no prompt
               // still has a session with a title rather than one that was never told why it exists.
+              // Keyed on the delivery: everything after this can fail and be retried, and the
+              // retry must not tell the session the same thing twice.
               yield* sessions.send({
                 sessionId: session.id,
                 content: mapping.prompt,
+                requestId: sessionRequestId,
               });
 
               yield* writeBack.write({ event, sessionId: session.id });

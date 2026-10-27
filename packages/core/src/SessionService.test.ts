@@ -107,11 +107,12 @@ import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { TaskService, TaskServiceLive } from "./TaskService";
-import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
+  sessionRequestIdOf,
   TriggerSessions,
   TriggerSessionsFromSessionService,
 } from "./TriggerService";
+import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
   pullRequestReport,
   SessionWriteBack,
@@ -7992,7 +7993,11 @@ describe("spend by repo and actor", () => {
             })
             .pipe(Effect.orDie)).id;
           yield* triggers
-            .send({ sessionId: triggered, content: "go" })
+            .send({
+              sessionId: triggered,
+              content: "go",
+              requestId: `trigger:spend-${tag}`,
+            })
             .pipe(Effect.orDie);
           yield* ran(triggered);
 
@@ -8143,5 +8148,65 @@ describe("spend by repo and actor", () => {
     expect(failure._tag === "Some" ? failure.value.code : "none").toBe(
       "storage",
     );
+  }, 60_000);
+});
+
+/**
+ * The trigger seam's production session port (LOB-218): its `send` carries the delivery's key to
+ * Pi Durable's submission dedupe, so a delivery the seam retries after a failed write-back leaves
+ * one user message. `TriggerService.test.ts` proves the seam passes the key; this proves the port
+ * does not drop it on the way to the real session.
+ */
+describe("the trigger port's send", () => {
+  it("admits one message per delivery, however many times the seam sends it", async () => {
+    const requestId = sessionRequestIdOf(
+      `lob-218-${randomBytes(4).toString("hex")}`,
+    );
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const port = yield* TriggerSessions;
+        const created = yield* sessions.create({ title: "triggered" });
+        const prompt = {
+          sessionId: created.id,
+          content: "fix the widget",
+          requestId,
+        };
+        yield* port.send(prompt);
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+          "the trigger's turn to settle",
+        );
+        // The retry: same delivery, same key, after the first send's run has finished.
+        yield* port.send(prompt);
+        // A different delivery to the same session is a different message.
+        yield* port.send({
+          ...prompt,
+          content: "and the gadget",
+          requestId: `${requestId}-other`,
+        });
+        // Idle with an empty inbox: a message sent while a run is busy waits there as a follow-up,
+        // not in the transcript, so a read before that would undercount a duplicate.
+        yield* waitUntil(
+          sessions
+            .get(created.id)
+            .pipe(
+              Effect.map(
+                (snapshot) =>
+                  !snapshot.live.busy && snapshot.queued.length === 0,
+              ),
+            ),
+          "the second turn to settle",
+        );
+        return yield* sessions.get(created.id);
+      }).pipe(Effect.provide(TriggerSessionsFromSessionService)),
+    );
+    expect(
+      outcome.entries
+        .filter((entry) => entry.kind === "user")
+        .map((entry) => entry.text),
+    ).toEqual(["fix the widget", "and the gadget"]);
   }, 60_000);
 });
