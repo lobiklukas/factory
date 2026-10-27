@@ -111,14 +111,17 @@ export const PullRequestStep = Schema.Union([
 export type PullRequestStep = typeof PullRequestStep.Type;
 
 /**
- * Open a session's PR (LOB-213): the session, the PR's title, and the branch it publishes onto the
- * base it targets. The repo is not here — it is the one the session is bound to, so a client cannot
- * open a session's PR on somebody else's repository.
+ * Open a session's PR (LOB-213): the session and the PR's title, and nothing else.
+ *
+ * Neither the repo nor the branches are here. The repo is the one the session is bound to, so a
+ * client cannot open a session's PR on somebody else's repository; the head is the session's own
+ * branch (`factory/<session-id>`, or the one it was created on) and the base the ref it was cut
+ * from, so a client cannot publish another session's branch — or `main` — as this session's PR
+ * (D10), and no client-chosen string reaches git's argv. The server reads all three from the
+ * session row. An excess `head` or `base` in a payload is dropped by the decode, not honoured.
  */
-export const OpenPullRequestInput = Schema.Struct({
+export const OpenPullRequestPayload = Schema.Struct({
   sessionId: SessionId,
   title: Schema.NonEmptyString,
-  head: Schema.NonEmptyString,
-  base: Schema.NonEmptyString,
 });
-export type OpenPullRequestInput = typeof OpenPullRequestInput.Type;
+export type OpenPullRequestPayload = typeof OpenPullRequestPayload.Type;

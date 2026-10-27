@@ -48,7 +48,7 @@ import {
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import {
   CredentialError,
-  OpenPullRequestInput,
+  OpenPullRequestPayload,
   PrError,
   PullRequestStep,
 } from "@repo/domain/PullRequest";
@@ -177,7 +177,7 @@ export class SessionRpc extends RpcGroup.make(
   // `already-open` without asking the forge again. An over-cap or unchanged branch is an outcome in
   // the answer, not an error; the forge's and the credential's failures cross the wire typed.
   Rpc.make("openPullRequest", {
-    payload: OpenPullRequestInput,
+    payload: OpenPullRequestPayload,
     success: PullRequestStep,
     error: Schema.Union([SessionError, PrError, CredentialError]),
   }),

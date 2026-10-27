@@ -83,11 +83,10 @@ const program = Effect.gen(function* () {
     title: TASK,
   });
   observed.sessionId = created.id;
+  // The session and the title, and nothing else: the server reads the branches off the session.
   const asked = {
     sessionId: created.id,
     title: `factory: ${TASK}`,
-    head: `factory/${created.id}`,
-    base: "main",
   };
   const opened = yield* client.openPullRequest(asked);
   observed.opened = opened;

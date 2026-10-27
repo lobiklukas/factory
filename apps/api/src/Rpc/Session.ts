@@ -44,9 +44,10 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       listPages: (input) => sessions.listPages(input),
       curateSession: (input) => sessions.curate(input),
       registerRepo: (input) => sessions.registerRepo(input),
+      // Only the session and the title: the branches are the session's own, read server-side.
       openPullRequest: (input) =>
         sessions
-          .openPullRequest(input)
+          .openPullRequest({ sessionId: input.sessionId, title: input.title })
           .pipe(
             Effect.provideService(CredentialProvider, credentials),
             Effect.provideService(HttpClient.HttpClient, forge),

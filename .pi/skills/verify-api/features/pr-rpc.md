@@ -1,12 +1,17 @@
 # The PR step over RPC (LOB-213)
 
-**What it is.** `SessionRpc.openPullRequest` — `{sessionId, title, head, base}` → the PR step's
+**What it is.** `SessionRpc.openPullRequest` — `{sessionId, title}` → the PR step's
 answer (`{number, url, outcome: "opened" | "already-open"}`, or the `over-cap` / `no-change` outcomes
 that open nothing) — and its handler in `apps/api/src/Rpc/Session.ts`, which hands
 `SessionService.openPullRequest` the forge client and the credential provider the process wired
 (`CredentialProviderLive` and `FetchHttpClient`, in `apps/api/src/index.ts`). Before it, the step had
 no caller outside tests and in-process scripts: a client asking for it answered
 `Unknown request tag`, and `sessions.pr_url` was written only by seeds.
+
+The branches are not the client's: the server publishes the session's own branch (`factory/<id>`,
+or the one it was created on) onto the base it was cut from, and a raw payload's `head` or `base`
+is dropped by the decode. Both are checked with `isSafeBranchName` before they reach git, and the
+step's `git diff --numstat` passes `--end-of-options`, so no client string is read as a git option.
 
 The failures cross the wire typed: `SessionError` (no such session, a session bound to no repo),
 `PrError` (the forge refused or failed) and `CredentialError` (no token for the repo). The schemas
@@ -26,7 +31,8 @@ never reads, then runs `pr-rpc.ts`, which speaks NDJSON RPC to that API:
 3. The same call again answers the same PR tagged `already-open`.
 4. A session bound to no repo is refused as `SessionError{invalid_input}`; an unknown id as
    `SessionError{not_found}`.
-5. The shell reads the ledger: one `POST` for the two calls, one PR for the repo, no other request.
+5. The shell reads the ledger: one `POST` for the two calls, one PR for the repo, no other request,
+   and the `POST` published `factory/<session-id>` onto `main` — branches the client never named.
 
 **What proves it works.** `.verify/evidence/lob-213/api/`: `pr-rpc.json` (both answers and the
 refusals as the client decoded them), `pr-rpc-ledger.json` (`requests: 1`, `pulls: 1`),

@@ -179,6 +179,16 @@ check "and nothing else reached the fake: no lookup, no stray route" \
     process.exit(ledger.requests.length === 1 ? 0 : 1);
   ' "$LEDGER" && echo 0 || echo 1)" "requests=$(bun -e 'console.log((await Bun.file(process.argv[1]).json()).requests.length)' "$LEDGER" 2>/dev/null)"
 
+# The client named no branch: the create the fake saw must publish the session's own onto `main`.
+SESSION="$(sed -n 's/^SESSION=//p' "$EVIDENCE_DIR/pr-rpc-session.env" 2>/dev/null)"
+PUBLISHED="$(bun -e '
+  const ledger = await Bun.file(process.argv[1]).json();
+  const post = ledger.requests.find((request) => request.method === "POST");
+  console.log(`${post?.body?.head ?? "none"} -> ${post?.body?.base ?? "none"}`);
+' "$LEDGER" 2>/dev/null)"
+check "the server chose the branches: the session's own, onto its base" \
+  "$([ -n "$SESSION" ] && [ "$PUBLISHED" = "factory/$SESSION -> main" ] && echo 0 || echo 1)" "$PUBLISHED"
+
 cp "$LEDGER" "$EVIDENCE_DIR/pr-rpc-ledger.json" 2>/dev/null || true
 cp "$LOG" "$EVIDENCE_DIR/pr-rpc-api.log"
 {

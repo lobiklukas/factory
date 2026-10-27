@@ -2200,6 +2200,79 @@ describe("the diff cap", () => {
     expect(error?.ref).toBe(`no-such-base...${result.head}`);
     expect(github.requests).toEqual([]);
   }, 120_000);
+
+  it("defaults to the session's own branch and base, and refuses a ref that reads as an option (LOB-213)", async () => {
+    const github = makeGithubFake(201, {
+      number: 37,
+      url: "https://github.com/lobiklukas/factory/pull/37",
+    });
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({
+          repo: factoryRepo,
+          url: "https://github.com/lobiklukas/factory.git",
+          localPath: repoRoot,
+        });
+        const created = yield* sessions.create({
+          repo: factoryRepo,
+          baseRef: "main",
+          title: "the branches are the session's",
+        });
+        const snapshot = yield* sessions.get(created.id);
+        commitDiff({
+          worktree: snapshot.workspace.path,
+          files: 1,
+          lines: 1,
+        });
+        // A name git would read as `--output=<file>`: before the check, `git diff --numstat` in the
+        // session's checkout created that file and measured nothing.
+        const planted = join(snapshot.workspace.path, "planted");
+        const refused = yield* Effect.flip(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: an option for a base",
+            base: `--output=${planted}`,
+          }),
+        );
+        const refusedHead = yield* Effect.flip(
+          sessions.openPullRequest({
+            sessionId: created.id,
+            title: "factory: an option for a head",
+            head: "-p",
+          }),
+        );
+        const opened = yield* sessions.openPullRequest({
+          sessionId: created.id,
+          title: "factory: the session's own branches",
+        });
+        return {
+          refused,
+          refusedHead,
+          opened,
+          planted: existsSync(`${planted}...factory/${created.id}`),
+          head: `factory/${created.id}`,
+        };
+      }).pipe(Effect.provide(github.layer)),
+    );
+
+    expect(result.refused).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(result.refusedHead).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(result.planted).toBe(false);
+    expect(result.opened).toMatchObject({ number: 37, outcome: "opened" });
+    // One request, and it published the session's own branch onto the base it was cut from.
+    expect(github.requests).toHaveLength(1);
+    expect(github.requests[0]?.body).toMatchObject({
+      head: result.head,
+      base: "main",
+    });
+  }, 120_000);
 });
 
 /**

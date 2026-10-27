@@ -318,7 +318,14 @@ export const diffSize = (input: {
           parseDiffSize(
             execFileSync(
               "git",
-              ["diff", "--numstat", `${input.base}...${input.head}`],
+              [
+                "diff",
+                "--numstat",
+                // As `publishedPaths` does: a range is never read as an option, whoever named it.
+                "--end-of-options",
+                `${input.base}...${input.head}`,
+                "--",
+              ],
               {
                 cwd: input.worktree,
                 encoding: "utf8",
