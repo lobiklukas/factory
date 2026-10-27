@@ -67,6 +67,7 @@ const scratchName = `factory_api_rpc_${run}`;
     }),
   );
   configured.pathname = `/${scratchName}`;
+  // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
   process.env["DATABASE_URL"] = configured.toString();
 }
 

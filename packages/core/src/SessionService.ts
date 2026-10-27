@@ -1445,7 +1445,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               if (!isSafeBranchName(ref)) {
                 return yield* new SessionErrorClass({
                   code: "invalid_input",
-                  message: `session ${input.sessionId}: ${name} ${JSON.stringify(ref)} is not a branch name the PR step will pass to git`,
+                  message: `session ${input.sessionId}: ${name} '${ref}' is not a branch name the PR step will pass to git`,
                 });
               }
             }
