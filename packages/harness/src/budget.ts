@@ -19,6 +19,10 @@
  *   sent, every task of the run is aborted (a running tool call included), queued messages are
  *   withdrawn, and the run settles `unanswered` with reason `aborted`. Nothing waits: the session is
  *   idle when the stop is done.
+ * - **When the stop cannot commit, it fails closed.** Pi Durable poisons a harness whose commit failed,
+ *   so a stop whose record or abort the log refused cannot be retried in this process. The hook logs
+ *   it and holds the request — the run sits busy, spending nothing — until the harness closes; the
+ *   recovered request re-checks the cap in the next process and stops there. It never sends it.
  * - **How it is reported.** Before the abort, one commit records the stop twice: a `budget` entry in
  *   the transcript (`describeBudgetStop`, the line an attached client and `factory run` print) and the
  *   stop on the `factory.budget` document, which a snapshot reports as `budget.stopped`. A recovered
@@ -26,6 +30,10 @@
  *   per generation task.
  * - **After a stop.** The session stays capped: a later message starts a run that stops before its
  *   first request, with a stop entry of its own and no spend. Raising a session's cap is not built.
+ * - **Forks and replays.** A fork keeps its parent's cap and carries its spend (`BudgetDoc.carried`),
+ *   so a fork of a session the cap stopped is stopped too; a replay keeps its source's cap but starts
+ *   at no spend, being a fresh run of the same task. A fork or a replay of an uncapped session gets
+ *   the server's default, as a create does (`inheritBudget`).
  * - **What it does not stop.** A compaction's summary request and a curation call are not generation
  *   requests, so the hook does not see them; their spend still counts toward the total it checks.
  *
@@ -36,8 +44,10 @@ import type { Context as ChordContext } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type {
   Conversation,
+  ConversationId,
   Extension,
   HookApi,
+  Tx,
 } from "@earendil-works/pi-durable";
 import {
   defineDoc,
@@ -68,7 +78,9 @@ export const BUDGET_EXTENSION = "factory.budget";
  * one never writes this document, and the hook reads the seed. The stop fields are flat rather than a
  * nested object so every field always has a value; `stoppedAt` empty means the cap never stopped a
  * run. `stoppedTask` is the generation task the stop was recorded for, which is what makes the record
- * once per task across a recovery.
+ * once per task across a recovery. `carried` is spend the session inherited rather than made: a fork
+ * starts with its parent's total (`budgetOfLog`), so forking a capped session does not reset its
+ * spend, and a fork of a stopped one is stopped too.
  */
 export const BudgetDoc = defineDoc({
   kind: BUDGET_DOC_KIND,
@@ -78,6 +90,7 @@ export const BudgetDoc = defineDoc({
   fork: "current",
   initial: () => ({
     cap: 0,
+    carried: 0,
     stoppedAt: "",
     stoppedSpent: 0,
     stoppedCap: 0,
@@ -105,6 +118,26 @@ export const describeBudgetStop = (stop: {
   `budget reached: the session has spent ${formatDollars(stop.spent)} of its ` +
   `${formatDollars(stop.cap)} cap, so the run was stopped before its next model request`;
 
+/** The cap a log is written with: the ceiling, and the spend it inherited (`BudgetDoc.carried`). */
+export type BudgetSeed = {
+  readonly cap: number;
+  readonly carried?: number;
+};
+
+/**
+ * Write a cap in a commit the caller is already making: a fork's copy and a replay's preamble put
+ * the cap in the same commit that makes the log a session, so no run can start under it uncapped.
+ */
+export const setBudget = (
+  tx: Tx,
+  conversationId: ConversationId,
+  seed: BudgetSeed,
+): Promise<void> =>
+  tx.doc(BudgetDoc, conversationId).then((doc) => {
+    doc.cap = seed.cap;
+    doc.carried = seed.carried ?? 0;
+  });
+
 /**
  * Commit a session's cap (LOB-163). Called once, at create, before any message can start a run: a
  * cap written after a run started would let that run's first request through uncounted.
@@ -116,10 +149,7 @@ export const writeBudget = (
   Effect.tryPromise({
     try: () =>
       conversation.commit(
-        (tx) =>
-          tx.doc(BudgetDoc, conversation.id).then((doc) => {
-            doc.cap = cap;
-          }),
+        (tx) => setBudget(tx, conversation.id, { cap }),
         BACKGROUND_CONTEXT,
       ),
     catch: (cause) =>
@@ -128,6 +158,32 @@ export const writeBudget = (
         message: `write budget: ${cause instanceof Error ? cause.message : String(cause)}`,
       }),
   });
+
+/**
+ * A log's budget as a fork or a replay of it reads it: its cap, absent when it has none, and its
+ * spend — `carried` plus both `pi.usage` buckets, the total the hook checks — capped or not.
+ */
+export type BudgetSource = {
+  readonly cap?: number;
+  readonly spent: number;
+};
+
+/**
+ * The cap a new log taken from `source` starts with (LOB-163), or `undefined` for none: the source's
+ * own cap when it has one, and otherwise `fallback` — the server's default, which a fork or a replay
+ * gets as a create does. `carry` is what the new log inherits of the source's spend: a fork carries
+ * all of it (its parent's carried spend included), a replay none, because a replay is a fresh run of
+ * the source's task rather than its continuation.
+ */
+export const inheritBudget = (
+  source: BudgetSource,
+  fallback: number | undefined,
+  carry: boolean,
+): BudgetSeed | undefined => {
+  const cap = source.cap ?? fallback;
+  if (cap === undefined) return undefined;
+  return { cap, carried: carry ? source.spent : 0 };
+};
 
 /** What a stop records: the generation task it stopped, and the spend and cap it was measured at. */
 type BudgetStop = {
@@ -165,23 +221,83 @@ const recordStop = (root: Conversation, stop: BudgetStop): Promise<void> =>
     BACKGROUND_CONTEXT,
   );
 
+/** What one abort of the root came to, as the asking task sees it. */
+type AbortOutcome =
+  | { readonly _tag: "stopped" }
+  | { readonly _tag: "missed"; readonly cause?: unknown };
+
 /**
- * Wait until the asking task is told to stop: its invocation's signal fires once the abort is
- * committed, which is what lets the hook's failure end the phase (Pi Durable rethrows a hook error
- * only when the invocation was aborted; any other error it reports and carries on). If the abort
- * settles without reaching this task, the wait ends too, so the hook can never hang a request.
+ * Abort the root and wait until the asking task is told to stop: its invocation's signal fires once
+ * the abort is committed, which is what lets the hook's failure end the phase (Pi Durable rethrows a
+ * hook error only when the invocation was aborted; any other error it reports and carries on to the
+ * request). An abort that settles — or is refused, a commit that failed — without reaching this task
+ * is `missed`.
  */
-const untilStopped = (
-  context: ChordContext,
-  abort: Promise<void>,
-): Effect.Effect<void> =>
+const abortOnce = (
+  root: Conversation,
+  signal: AbortSignal,
+): Effect.Effect<AbortOutcome> =>
+  Effect.callback<AbortOutcome>((resume) => {
+    let finished = false;
+    const finish = (outcome: AbortOutcome) => {
+      if (finished) return;
+      finished = true;
+      signal.removeEventListener("abort", onAbort);
+      resume(Effect.succeed(outcome));
+    };
+    const onAbort = () => finish({ _tag: "stopped" });
+    if (signal.aborted) return finish({ _tag: "stopped" });
+    signal.addEventListener("abort", onAbort, { once: true });
+    // Not awaited for its own sake: `abort` resolves once the conversation is idle, and it cannot be
+    // idle while this hook holds its request open. Its marking is what fires the signal.
+    root.abort(BACKGROUND_CONTEXT).then(
+      () => finish(signal.aborted ? { _tag: "stopped" } : { _tag: "missed" }),
+      (cause: unknown) =>
+        finish(
+          signal.aborted ? { _tag: "stopped" } : { _tag: "missed", cause },
+        ),
+    );
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
+/** Wait for the asking task's signal alone: the hold a stop falls back to when no abort reached it. */
+const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
   Effect.callback<void>((resume) => {
-    const signal = context.abortSignal;
     const done = () => resume(Effect.void);
-    if (signal?.aborted === true) return done();
-    signal?.addEventListener("abort", done, { once: true });
-    abort.then(done, done);
-    return Effect.sync(() => signal?.removeEventListener("abort", done));
+    if (signal.aborted) return done();
+    signal.addEventListener("abort", done, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", done));
+  });
+
+/**
+ * Stop the run the asking task belongs to, failing closed: the request is held until the task is
+ * aborted, never let through. An abort that did not reach the task is not retried — Pi Durable
+ * poisons a harness whose commit failed, so every later commit of this process fails the same way —
+ * so the hook logs it and holds the request until the task is aborted some other way: the harness
+ * closing, which is what a restart does, and the recovered request re-checks the cap there. A held
+ * request is a run that sits busy and spends nothing; a request let through is a broken cap.
+ */
+const stopRun = (
+  root: Conversation,
+  context: ChordContext,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const signal = context.abortSignal;
+    // Every invocation Pi Durable runs a hook in carries a signal; without one there is nothing to
+    // wait on, so the abort is the whole stop.
+    if (signal === undefined) {
+      yield* Effect.promise(() =>
+        root.abort(BACKGROUND_CONTEXT).catch(() => undefined),
+      );
+      return;
+    }
+    const outcome = yield* abortOnce(root, signal);
+    if (outcome._tag === "stopped") return;
+    yield* Effect.logError(
+      "budget stop: the run could not be aborted; its request is held until the harness closes",
+      outcome.cause,
+    );
+    yield* untilAborted(signal);
   });
 
 /**
@@ -205,16 +321,24 @@ const checkBudget = (
     const usage = yield* Effect.promise(() =>
       api.snapshot(UsageDoc, ROOT_CONVERSATION_ID, context),
     );
-    const spent = usageCostTotal(projectUsageDoc(usage));
+    // What a fork inherited from its parent counts too: a fork is the same work, carried on.
+    const spent =
+      (budget?.carried ?? 0) + usageCostTotal(projectUsageDoc(usage));
     if (spent < cap) return undefined;
     const at = DateTime.formatIso(yield* DateTime.now);
-    yield* Effect.promise(() =>
+    // A stop that cannot be recorded still stops: an unannounced stop is a worse report, but a
+    // request let through is a broken cap. The failure is logged, so the gap shows in motel.
+    yield* Effect.tryPromise(() =>
       recordStop(root, { taskId: String(api.taskId), spent, cap, at }),
+    ).pipe(
+      Effect.catch((error) =>
+        Effect.logError(
+          "budget stop: the stop could not be recorded; the run is stopped unannounced",
+          error,
+        ),
+      ),
     );
-    // Not awaited: `abort` resolves once the conversation is idle, and it cannot be idle while this
-    // hook holds its request open. Its marking is what fires the signal `untilStopped` waits on.
-    const abort = root.abort(BACKGROUND_CONTEXT);
-    yield* untilStopped(context, abort);
+    yield* stopRun(root, context);
     return yield* Effect.die(new Error(describeBudgetStop({ spent, cap })));
   });
 

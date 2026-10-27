@@ -75,7 +75,14 @@ import {
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
-import { BudgetDoc, budgetExtension } from "./budget";
+import {
+  BudgetDoc,
+  budgetExtension,
+  inheritBudget,
+  setBudget,
+  type BudgetSeed,
+  type BudgetSource,
+} from "./budget";
 import {
   verifyCallsIn,
   verifyExtension,
@@ -111,6 +118,7 @@ import {
   projectUsageDoc,
   projectView,
   sameTasks,
+  usageCostTotal,
   SESSION_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
@@ -1310,6 +1318,8 @@ const draftOf = (
 type ForkPreamble = {
   readonly parent: string;
   readonly binding?: RepoBinding;
+  /** The cap the fork inherits (LOB-163), in the same commit, so no run starts under it uncapped. */
+  readonly budget?: BudgetSeed;
 };
 
 /**
@@ -1362,6 +1372,11 @@ const copyEntries = (
             doc.baseRef = preamble.binding?.baseRef ?? "";
           }),
     )
+    .then(() =>
+      preamble.budget === undefined
+        ? undefined
+        : setBudget(tx, conversationId, preamble.budget),
+    )
     .then(() => ({ parent: preamble.parent, at }));
 };
 
@@ -1399,6 +1414,12 @@ export type ForkSessionOptions = {
   readonly pages?: readonly CitedPage[];
   /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /**
+   * The cap a fork of an uncapped parent gets (LOB-163): the server's default, as a create gets it.
+   * A capped parent's fork keeps the parent's cap and carries its spend (`inheritBudget`), so a fork
+   * is never a way around a cap — a fork of a session the cap stopped is stopped too.
+   */
+  readonly defaultBudget?: number;
 };
 
 export type ForkedSession = OpenSession & {
@@ -1419,6 +1440,11 @@ export const forkSession = (
 ): Effect.Effect<ForkedSession, SessionError> =>
   Effect.gen(function* () {
     const source = yield* readForkSource(options.parent, options.at);
+    const budget = inheritBudget(
+      yield* readBudgetSource(options.parent),
+      options.defaultBudget,
+      true,
+    );
     const opened = yield* openSession({
       storage: options.child,
       model: options.model,
@@ -1441,6 +1467,7 @@ export const forkSession = (
               ...(options.binding === undefined
                 ? {}
                 : { binding: options.binding }),
+              ...(budget === undefined ? {} : { budget }),
             }),
           BACKGROUND_CONTEXT,
         ),
@@ -1504,6 +1531,24 @@ const bindingString = (value: JsonValue | undefined, key: string): string =>
         return typeof field === "string" ? field : "";
       })()
     : "";
+
+/**
+ * A log's cap and spend, as a fork or a replay of it inherits them (LOB-163): read through the same
+ * projection a snapshot uses, so the spend a fork carries is the spend its parent reported.
+ */
+export const readBudgetSource = (
+  storage: Storage,
+): Effect.Effect<BudgetSource, SessionError> =>
+  Effect.gen(function* () {
+    const usage = projectUsageDoc(yield* readDocument(storage, USAGE_DOC));
+    const budget = projectBudgetDoc(
+      yield* readDocument(storage, BUDGET_DOC_KIND),
+      usage,
+    );
+    return budget === undefined
+      ? { spent: usageCostTotal(usage) }
+      : { cap: budget.cap, spent: budget.spent };
+  });
 
 /**
  * Read a session nobody owns by folding its log through a reader-mode `Storage`. No `Harness` is

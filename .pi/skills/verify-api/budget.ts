@@ -143,16 +143,24 @@ const program = Effect.gen(function* () {
     `placement=${sent.placement}`,
   );
   const stopped = yield* settled(created.id, (s) => stops(s).length > 0);
+  // The stop's entry, and the first idle status after it: the order a watcher sees the stop in.
+  const stopIndex = (all: ReadonlyArray<SessionEvent>) =>
+    all.findIndex(
+      (event) => event._tag === "entry" && event.entry.kind === "budget",
+    );
+  const idleAfter = (all: ReadonlyArray<SessionEvent>, from: number) =>
+    from < 0
+      ? -1
+      : all.findIndex(
+          (event, index) =>
+            index > from && event._tag === "status" && event.status === "idle",
+        );
   yield* waitUntil(
     Ref.get(collected).pipe(
-      Effect.map((all) =>
-        all.some(
-          (event) => event._tag === "entry" && event.entry.kind === "budget",
-        ),
-      ),
+      Effect.map((all) => idleAfter(all, stopIndex(all)) !== -1),
     ),
-    "the stop as a stream event",
-  );
+    "the stop, then idle, as stream events",
+  ).pipe(Effect.ignore);
   yield* Fiber.interrupt(watcher);
   const events = yield* Ref.get(collected);
   observed.events = events.map((event) =>
@@ -203,13 +211,8 @@ const program = Effect.gen(function* () {
     `budget=${JSON.stringify(stopped.budget)}`,
   );
   assert(
-    "a watcher attached before the send received the stop as it happened",
-    events.some(
-      (event) => event._tag === "entry" && event.entry.kind === "budget",
-    ) &&
-      events.some(
-        (event) => event._tag === "status" && event.status === "idle",
-      ),
+    "a watcher attached before the send received the stop, then status idle",
+    idleAfter(events, stopIndex(events)) > stopIndex(events),
     `events=${observed.events.join(",")}`,
   );
 

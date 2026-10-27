@@ -358,8 +358,9 @@ export type SessionServiceOptions = {
    */
   readonly writeBackBudget?: Duration.Input;
   /**
-   * The spend ceiling a session gets when its create names none (LOB-163), in US dollars. Absent:
-   * a session is capped only when its create asks for one.
+   * The spend ceiling a session gets when its create names none (LOB-163), in US dollars — and a
+   * fork or a replay of an uncapped session too (a capped one's keeps its source's cap). Absent: a
+   * session is capped only when its create asks for one or its source had one.
    */
   readonly defaultBudget?: number;
 };
@@ -1552,6 +1553,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     model: options.model,
                     cwd,
                     policy: sessionPolicy,
+                    // A fork keeps its parent's cap and carries its spend; an uncapped parent's
+                    // fork gets the default a create would (LOB-163).
+                    ...(options.defaultBudget === undefined
+                      ? {}
+                      : { defaultBudget: options.defaultBudget }),
                   }),
                 (parentStorage) =>
                   Effect.promise(() => parentStorage.dispose()),
@@ -1639,6 +1645,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 run,
                 verify,
                 approvalAsker: askerFor(id),
+                // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
+                // the default a create would (LOB-163).
+                ...(options.defaultBudget === undefined
+                  ? {}
+                  : { defaultBudget: options.defaultBudget }),
               }),
           ).pipe(
             Effect.tapError(() =>

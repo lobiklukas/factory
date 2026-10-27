@@ -415,7 +415,10 @@ server's `SESSION_BUDGET`), committed to its log as `factory.budget`. A `beforeR
 `pi.usage` total has reached the cap, the stop is recorded (a `budget` transcript entry and
 `budget.stopped` on the snapshot) and the root conversation is aborted, as an interrupt would, so the
 request is never sent. A request already in flight is paid for, so a session ends above its cap by at
-most one request. The full stop semantics are that module's header.
+most one request. A stop the log refuses to commit fails closed: the request is held, not sent. A
+fork keeps its parent's cap and carries its spend; a replay keeps its source's cap at no spend; a fork
+or a replay of an uncapped session gets `SESSION_BUDGET`, as a create does. The full stop semantics
+are that module's header.
 
 **R5 — `Sandbox` CRD is `v1beta1`.** We inherit a SIG Apps controller and its API may shift.
 Accepted because it replaces exactly the boring, bug-prone machinery (stable identity, pause

@@ -531,7 +531,7 @@ export const sameTasks = (
 
 /**
  * `factory.budget` and the session's spend → its budget (LOB-163), or `undefined` for a session with
- * no cap. The seed's cap is `0`, which is "no cap": `SessionBudgetCap` refuses a zero, so no session
+ * no cap. `spent` is the log's own `pi.usage` total plus what it inherited (`carried`, a fork's). The seed's cap is `0`, which is "no cap": `SessionBudgetCap` refuses a zero, so no session
  * asked for one. The stop is reported only once one was recorded (`stoppedAt` set).
  */
 export const projectBudgetDoc = (
@@ -543,7 +543,8 @@ export const projectBudgetDoc = (
   const at = stringAt(value, "stoppedAt") ?? "";
   return {
     cap,
-    spent: usageCostTotal(usage),
+    // A fork's inherited spend counts as the hook counts it (`BudgetDoc.carried`).
+    spent: numberAt(value, "carried") + usageCostTotal(usage),
     ...(at === ""
       ? {}
       : {

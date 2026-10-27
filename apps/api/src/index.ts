@@ -142,8 +142,10 @@ const ModelConfig = Config.all({
 });
 
 /**
- * The spend ceiling a session gets when its create names none (LOB-163), in US dollars. Unset: no
- * default, so only a create that asks for a cap gets one. A value that is not a positive number fails
+ * The spend ceiling a session gets when its create names none (LOB-163), in US dollars — and a fork
+ * or a replay of an uncapped session, which names none either (a capped one's keeps its source's
+ * cap). Unset: no default, so only a create that asks for a cap, or a fork or replay of a capped
+ * session, gets one. A value that is not a positive number fails
  * the boot rather than silently leaving every session uncapped.
  */
 const SessionBudgetConfig = Config.option(
