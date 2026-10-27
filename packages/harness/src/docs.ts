@@ -14,15 +14,43 @@ export const PAGE_PROMPT_DOC_KIND = "factory.pages.prompt";
 export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 
+/** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
+const unspecified = () => ({
+  goal: "",
+  acceptance: [] as string[],
+  gaps: [] as string[],
+  openQuestions: [] as string[],
+});
+
+/**
+ * The specifying stage's artifact (LOB-72): goal, acceptance criteria, declared gaps and open
+ * questions. The shape and its rule — `gaps` declared, `[]` when there are none — are `./spec`'s;
+ * this token is only where the value is stored, and `writeSpec` is its only writer, so nothing
+ * reaches it without passing that rule.
+ *
+ * The seed is not a spec: its `goal` is empty, which the validator refuses, so a session that never
+ * specified reads as no spec rather than as one declaring no gaps.
+ *
+ * Version 2 because version 1 was a single `spec` string that nothing ever wrote. A version-1 value
+ * would still have to migrate somewhere, and it migrates to the seed rather than to a spec: it holds
+ * no gaps, and turning that into `gaps: []` would record "no gaps" for a specifier that declared none
+ * — the one answer this document exists to refuse.
+ */
 export const SpecDoc = defineDoc({
   kind: SPEC_DOC_KIND,
-  version: 1,
+  version: 2,
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ spec: "" }),
+  initial: unspecified,
+  migrate: unspecified,
 });
 
+/**
+ * Legacy: a free-text criteria string that nothing writes. `SpecDoc`'s `acceptance` is the source of
+ * truth for a session's acceptance criteria (LOB-72); write criteria there, never here. Kept only so
+ * `readSessionLog` still folds a log that happens to hold one.
+ */
 export const CriteriaDoc = defineDoc({
   kind: CRITERIA_DOC_KIND,
   version: 1,
