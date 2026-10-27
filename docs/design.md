@@ -437,7 +437,14 @@ and resume, warm pools) we would otherwise own.
 
 **R6 — The fold is on the critical read path.** D8 means a paused session's history is served by
 folding the log. Bounded by compaction, cacheable, but it needs a benchmark before it becomes
-the default path for a large session.
+the default path for a large session. The storage open is bounded (LOB-186): `Storage.open`
+restores the log's checkpoint and folds only the commits after it, with the full fold as the
+fallback — on a 10 250-commit log, 37–46 ms and 250 commits read against 167–204 ms and 10 250.
+Those are storage numbers, not session-open numbers. What stays O(log): the fold's size in memory
+and the bytes of the checkpoint itself; the harness projection, because a historical session read
+(`SessionService.withReader` → `readSessionLog`) still pages every entry of the restored fold and
+projects all of them; and `PostgresStorage.readers`, which never reads a checkpoint (the index
+rebuild and the board's run evidence).
 
 ---
 

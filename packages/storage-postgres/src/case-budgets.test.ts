@@ -74,6 +74,9 @@ const GUARDED = [
   // inside the default today, unlike the two files above it, so it is not red yet; the class and
   // the cost are why it is guarded rather than listed as unchecked.
   "ralph-parallel.test.ts",
+  // Every case spawns `bash` on a sourced `.pi/ralph/loop.sh` against a scratch git remote, and the
+  // first drives three runs beside a live fake `pi` session (LOB-120).
+  "ralph-live-session.test.ts",
   "case-budgets.test.ts",
   // Every case spawns `bun run` — a turbo dry run or a whole `tsc` over `.pi` (LOB-176).
   "pi-type-check.test.ts",

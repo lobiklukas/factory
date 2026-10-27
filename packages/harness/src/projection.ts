@@ -20,7 +20,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
-import { PrEvidence } from "@repo/domain/Session";
+import { PrEvidence, ReplayComparison } from "@repo/domain/Session";
 import type {
   ModelUsage,
   QueuedMessage,
@@ -55,10 +55,14 @@ export const ACTOR_DOC_KIND = "factory.actor";
 /** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
 export const FORK_DOC_KIND = "factory.fork";
 /**
- * The link a replay's log records (LOB-198): the session it replays, itself, and both models.
+ * The link a replay's log records (LOB-198): the session it replays, itself, and both models — and,
+ * once the replay's task settles, the comparison of the two runs (LOB-199).
  *
- * It lives in the *replay's* log, never the source's: replaying must not change the recorded run it
- * replays, so the source stays byte-identical and this document is the only place the pair is named.
+ * The link lives in the *replay's* log only: replaying must not change the recorded run it replays,
+ * so the source's transcript, spend and lineage are never written. The comparison is the one
+ * exception, and it is a document rather than a run: the source's `factory.replay` carries only
+ * `comparisons` (its link fields stay empty, so the source never reads as a replay), keyed by the
+ * replay it names, which is how either session reports the pairing on its own.
  */
 export const REPLAY_DOC_KIND = "factory.replay";
 
@@ -80,6 +84,30 @@ export const projectReplayDoc = (
   model: stringAt(value, "model") ?? "",
   from: stringAt(value, "from") ?? "",
 });
+
+const decodeComparison = Schema.decodeUnknownOption(ReplayComparison);
+
+const compareText = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
+/**
+ * `factory.replay`'s `comparisons` → every comparison that decodes, oldest first (LOB-199).
+ *
+ * The document keys them by counterpart, and key order is not a contract, so they are sorted by when
+ * they were taken and then by counterpart: two projections of one document compare equal. A value
+ * that does not decode drops out rather than failing the read — the projection's rule for every
+ * document — and a document written before comparisons existed holds none.
+ */
+export const projectReplayComparisons = (
+  value: JsonValue | undefined,
+): readonly ReplayComparison[] =>
+  Object.values(objectAt(value, "comparisons") ?? {})
+    .flatMap((entry) => Option.toArray(decodeComparison(entry)))
+    .sort(
+      (left, right) =>
+        compareText(left.at, right.at) ||
+        compareText(left.counterpart.session, right.counterpart.session),
+    );
 
 export const TITLE_ENTRY_KIND = "factory.title";
 /**

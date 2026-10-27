@@ -10,6 +10,7 @@ export * from "./review";
 export * from "./readiness";
 export * from "./replay";
 export * from "./curate";
+export * from "./decompose";
 export * from "./mission";
 export * from "./verify";
 export * from "./ask";

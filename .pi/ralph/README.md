@@ -57,6 +57,28 @@ RALPH_PUSH=0 bun run ralph:run   # commit locally, no push, no PR
 
 Exit codes: `0` done, `1` driver error (die), `2` worker reported `BLOCKED` (infrastructure: Linear, Docker, auth), `3` too many iterations without a valid control line or too many failed iterations, `64` usage error (no/unknown subcommand, `RALPH_WORKER` not a positive integer, or the driver read from stdin). Logs: `.ralph/logs/` and `.ralph/runs.jsonl` in the worktree.
 
+## What the loop touches
+
+The loop works in its own git worktree (`RALPH_WORKTREE`, default `../factory-ralph`), on its own ports
+(`RALPH_API_PORT`/`RALPH_WEB_PORT`, 9400/3400) and in its own database _name_ (`RALPH_DB`, default `factory_ralph`)
+on the Postgres server your checkout already runs: `DATABASE_URL` is `localhost:5442/$RALPH_DB`, and 5442 is
+normally your `factory-postgres-1`. It does use your checkout's compose project and that server. `ensure_db` pins
+`PG_ROOT` to your checkout and sources its `.pi/skills/lib/postgres.sh`, so when nothing answers 5442 it runs
+`docker compose up -d --wait postgres` in your checkout's compose project. It then creates `RALPH_DB` with
+`docker exec` into whichever container publishes 5442, or with `docker compose exec` in your checkout's project
+when no container does. Every session it starts gets `COMPOSE_PROJECT_NAME=factory`, the project a checkout in a
+`factory` directory owns, so an agent's `docker compose` targets it too. `setup` fetches `origin` and adds the
+worktree through your checkout's git directory, and copies your `.env` into a worktree that has none. It never
+writes the `factory` database: its one statement there is `ensure_db`'s read of `pg_database`, asking whether
+`RALPH_DB` exists, and sessions get `DATABASE_URL` for `RALPH_DB`. It never writes `main`: the driver commits and
+pushes only `ralph/*` branches, the worker's rules forbid pushing `main`, and its work reaches `main` only by
+merging a PR: GitHub auto-merge, or a human for a PR labelled `needs-human-merge`. It also writes `.ralph/` (and
+`.ralph` for `split`) into your checkout's `.git/info/exclude` (a linked worktree's `info/exclude` is the shared
+one), adds a second worktree `${RALPH_WORKTREE}-split` through your checkout for `split`, and leaves
+`ralph-setup-*` and `ralph-leftover-*` entries in the shared stash, so they show in your `git stash list`. After a
+compose start that leaves nothing answering 5442 it removes only your checkout's project's `Created` postgres
+container, never a running one.
+
 ## Repository settings (once)
 
 Auto-merge needs a required check, and GitHub Free allows branch protection only on a public repository.
@@ -87,9 +109,9 @@ bun run ralph parallel status
 bun run ralph parallel stop
 ```
 
-Worker N gets its own worktree (`<repo>-ralph-N`), database (`factory_ralph_N`) and ports (`9400`/`3400` plus 10
-per worker), and shares worker 1's `progress.md`, `polish.md` and `research/`. Before taking an issue a worker
-runs `.pi/ralph/claim.sh claim LOB-n` (an atomic `mkdir` under `$RALPH_SHARED/claims`, stale after
+Worker N gets its own worktree (`<repo>-ralph-N`), database name (`factory_ralph_N`, on the same server) and ports
+(`9400`/`3400` plus 10 per worker), and shares worker 1's `progress.md`, `polish.md` and `research/`. Before taking
+an issue a worker runs `.pi/ralph/claim.sh claim LOB-n` (an atomic `mkdir` under `$RALPH_SHARED/claims`, stale after
 `RALPH_CLAIM_TTL`, 3 h). The driver releases a worker's claims for issues with no open PR. Only worker 1 arms
 auto-merge (`RALPH_MERGE`).
 

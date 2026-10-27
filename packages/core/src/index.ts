@@ -16,6 +16,7 @@ export * from "./GitHubReview";
 export * from "./DocsTrigger";
 export * from "./ReviewTrigger";
 export * from "./Slack";
+export * from "./Sentry";
 export * from "./git";
 export * from "./Linear";
 export * from "./LinearSync";
