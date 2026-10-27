@@ -1626,6 +1626,8 @@ const BOARD_READS = new Set([
   // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
   // this block makes, so a comment sent from here would show as an unexpected write below.
   "listTaskComments",
+  // The card pane's Spec section (LOB-238): a read, polled with the board.
+  "getTaskSpec",
   "getSession",
   "watchSession",
   "listApprovals",
