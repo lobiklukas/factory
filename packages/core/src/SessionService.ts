@@ -99,6 +99,8 @@ import {
   // owns which half.
   startMission as beginMission,
   type AutonomyConfig,
+  type ApprovalAnswer,
+  type ApprovalAsker,
   type SessionPolicy,
   type VerifyOptions,
 } from "@repo/harness";
@@ -973,6 +975,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               cwd,
               pages,
               verify,
+              // A gated call (D15, LOB-52) records its ask through this session's approvals
+              // service, so the request lands in the same log and index the pending list reads.
+              ask: askerFor(id),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -1301,6 +1306,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     run,
                     pages,
                     verify,
+                    ask: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
                       ? {}
@@ -1399,6 +1405,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 policy: sessionPolicy,
                 run,
                 verify,
+                ask: askerFor(id),
               }),
           ).pipe(
             Effect.tapError(() =>
@@ -1618,6 +1625,49 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }),
           );
         });
+
+      /**
+       * A session's approval channel (D15, LOB-52): a gated tool call asks through the same approvals
+       * service the RPC group uses, so the request is one row and one log entry whether a caller
+       * asked over RPC or the agent hit a gate.
+       *
+       * The answer is where the request stands. A request already decided is answered from its
+       * decision and records nothing, so the agent retrying an approved call runs it and retrying a
+       * denied one is refused; one still pending is answered `pending` by `requestApproval`'s own
+       * idempotence (the row is keyed by the request id), so a re-ask records no second request.
+       */
+      const askerFor =
+        (sessionId: SessionId): ApprovalAsker =>
+        (ask) =>
+          Effect.gen(function* () {
+            const known = yield* recordOf(sessionId, ask.requestId);
+            if (known?.decision !== undefined) {
+              return {
+                _tag: known.decision.decision,
+                actor: known.decision.actor,
+              } satisfies ApprovalAnswer;
+            }
+            yield* requestApproval({
+              sessionId,
+              requestId: ask.requestId,
+              action: ask.action,
+              detail: ask.detail,
+            });
+            return { _tag: "pending" } satisfies ApprovalAnswer;
+          }).pipe(
+            Effect.withSpan("SessionService.askApproval", {
+              attributes: { sessionId, requestId: ask.requestId },
+            }),
+            // The hook has nowhere to put an error: an ask that could not be recorded never
+            // happened, so the gated call stays blocked, nothing is memoized, and the next
+            // attempt asks again.
+            Effect.catch((error) =>
+              Effect.succeed({
+                _tag: "unrecorded",
+                reason: error.message,
+              } satisfies ApprovalAnswer),
+            ),
+          );
 
       const decideApproval = (
         input: DecideApprovalInput,

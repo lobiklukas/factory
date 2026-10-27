@@ -82,6 +82,14 @@ const lastUserText = (messages: readonly Message[]): string => {
   return "";
 };
 
+/** The messages after the user's newest one: what the current turn has done so far. */
+const sinceLastUser = (messages: readonly Message[]): readonly Message[] => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return messages.slice(index + 1);
+  }
+  return messages;
+};
+
 /** How a compaction task opens the conversation it wants summarized. */
 const SUMMARY_PROMPT_PREFIX = "<conversation>";
 
@@ -131,12 +139,17 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * `verify` adds a step between the two (LOB-78): after the `bash` result the script calls the
  * `verify` tool, and the reply is what that tool reported — the shape of a run that makes a change,
  * verifies it, and says what the verification found.
+ *
+ * `everyTurn` makes every turn call `bash`, not only the first (LOB-52): the shape of an agent that
+ * retries a call it was blocked on once it is told to go ahead, which is how a gated call is driven
+ * past its approval.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
   command: string = FAUX_COMMAND,
   curation?: string,
   verify = false,
+  everyTurn = false,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -152,7 +165,8 @@ export const fauxAnswer = (
       ? derivedCurationAnswer(lastUserText(messages))
       : fauxAssistantMessage(curation);
   }
-  const output = toolResultText(messages, "bash");
+  const turn = everyTurn ? sinceLastUser(messages) : messages;
+  const output = toolResultText(turn, "bash");
   if (output === undefined) {
     // `toolUse` is what a real provider reports for a tool-calling answer; without it the
     // generation treats the call as a final answer and never runs the tool.
@@ -161,7 +175,7 @@ export const fauxAnswer = (
     });
   }
   if (verify) {
-    const verified = toolResultText(messages, VERIFY_TOOL);
+    const verified = toolResultText(turn, VERIFY_TOOL);
     if (verified === undefined) {
       return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
         stopReason: "toolUse",
@@ -181,6 +195,8 @@ export type ModelAccessOptions = {
   readonly fauxCommand?: string | undefined;
   /** Whether the faux script calls `verify` after its `bash` turn (LOB-78, `fauxAnswer`). */
   readonly fauxVerify?: boolean | undefined;
+  /** Whether the faux script calls `bash` on every turn rather than the first (LOB-52, `fauxAnswer`). */
+  readonly fauxEveryTurn?: boolean | undefined;
   /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
@@ -277,6 +293,7 @@ export const createFauxModelAccess = (
       fauxCommand,
       options.fauxCuration,
       options.fauxVerify ?? false,
+      options.fauxEveryTurn ?? false,
     );
   };
   faux.setResponses([repeat]);

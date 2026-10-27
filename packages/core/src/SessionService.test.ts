@@ -87,6 +87,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFauxModelAccess,
   createModelAccess,
+  DEFAULT_AUTONOMY,
   readPromptSections,
   readSessionLog,
   readVerifyRecords,
@@ -5435,6 +5436,133 @@ describe("the autonomy configuration reaches the session's policy", () => {
       "pushing refs/heads/factory/ses_1 is refused",
     );
     expect(result?.text).toContain("refs/heads/sandbox/");
+  });
+});
+
+/**
+ * A gated call asks through the approvals service (D15, LOB-52).
+ *
+ * The faux run calls `bash` with a command the deployment gates, so the session's policy asks
+ * instead of running it. What the suite holds the service to: the ask is the same row and log entry
+ * an RPC `requestApproval` writes, so the pending list and the snapshot both carry it; the turn ends
+ * rather than waiting on a person; a second turn that retries the same call records no second
+ * request — in the index *or* in the log, which is counted as committed rows because the fold would
+ * hide a duplicate; and once a person approves, the same call runs.
+ */
+describe("a gated call asks through the approvals service", () => {
+  const gateRoot = mkdtempSync(join(tmpdir(), "factory-core-gate-"));
+  const command = "sleep 0 && echo gated-ran";
+  // The stock faux script calls `bash` on a session's first turn only; this one calls it on every
+  // turn, which is what an agent retrying a gated call looks like.
+  const faux = createFauxModelAccess({
+    fauxCommand: command,
+    fauxEveryTurn: true,
+  });
+  const runtime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: faux.access,
+      sessionRoot: gateRoot,
+      autonomy: { ...DEFAULT_AUTONOMY, approvalRequired: ["sleep"] },
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+
+  afterAll(async () => {
+    await runtime.dispose();
+  });
+
+  /** How many commits in a session's log hold an approval request: the log, not its fold. */
+  const requestCommits = (sessionId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ count: number }>`
+        SELECT count(*)::int AS count FROM commits
+        WHERE log_id = ${sessionId} AND writes::text LIKE '%factory.approval.requested%'
+      `;
+      return rows[0]?.count ?? 0;
+    });
+
+  const turn = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const sent = yield* sessions.send({ sessionId, content: "publish" });
+      expect(sent.placement).toBe("run");
+      yield* waitUntil(
+        sessions
+          .get(sessionId)
+          .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+        "the turn to settle",
+      );
+      return yield* sessions.get(sessionId);
+    });
+
+  it("asks once, parks idle, re-asks nothing, and runs the call once it is approved", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "gated" });
+        const first = yield* turn(created.id);
+        const pendingFirst = yield* sessions.listApprovals(created.id);
+        const commitsFirst = yield* requestCommits(created.id);
+        const second = yield* turn(created.id);
+        const pendingSecond = yield* sessions.listApprovals(created.id);
+        const commitsSecond = yield* requestCommits(created.id);
+        const requestId = pendingSecond.approvals[0]?.requestId ?? "";
+        yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId,
+          decision: "approved",
+          actor: "ops@example",
+        });
+        const third = yield* turn(created.id);
+        const pendingThird = yield* sessions.listApprovals(created.id);
+        return {
+          first,
+          second,
+          third,
+          pendingFirst,
+          pendingSecond,
+          pendingThird,
+          commitsFirst,
+          commitsSecond,
+          commitsThird: yield* requestCommits(created.id),
+        };
+      }),
+    );
+
+    const results = (snapshot: SessionSnapshot) =>
+      snapshot.entries.filter((entry) => entry.kind === "toolResult");
+
+    // The first turn asked, and the call did not run.
+    expect(outcome.pendingFirst.approvals).toHaveLength(1);
+    expect(outcome.pendingFirst.approvals[0]).toMatchObject({
+      action: "sleep",
+      detail: command,
+    });
+    expect(outcome.pendingFirst.approvals[0]?.requestId).toMatch(
+      /^ask-bash-[0-9a-f]{32}$/,
+    );
+    expect(outcome.first.approvals).toEqual(outcome.pendingFirst.approvals);
+    expect(outcome.first.session.status).toBe("idle");
+    const asked = results(outcome.first)[0];
+    expect(asked?.isError).toBe(true);
+    expect(asked?.text).toContain("one has been asked for");
+    expect(asked?.text).not.toContain("gated-ran");
+    expect(outcome.commitsFirst).toBe(1);
+
+    // The second turn retried the same call: still one request, in the index and in the log.
+    expect(outcome.pendingSecond.approvals).toEqual(
+      outcome.pendingFirst.approvals,
+    );
+    expect(outcome.commitsSecond).toBe(1);
+    expect(results(outcome.second)).toHaveLength(2);
+    expect(results(outcome.second)[1]?.isError).toBe(true);
+
+    // Approved: the same call runs, and asks nothing new.
+    expect(outcome.pendingThird.approvals).toEqual([]);
+    expect(outcome.commitsThird).toBe(1);
+    const ran = results(outcome.third)[2];
+    expect(ran?.isError).toBe(false);
+    expect(ran?.text).toContain("gated-ran");
   });
 });
 
