@@ -2194,6 +2194,444 @@ assert(
 );
 observed.board = boardObserved;
 
+// Feature: what needs a person (LOB-77). See features/attention.md.
+//
+// The attention view lists the cards a person has to act on — a run's pending approval, a run's
+// unanswered question, a done run at a human gate — each with the reason and a link to its card.
+// The drive seeds its own board (`seed-attention.ts`) so the checks are about this run's cards only:
+// first with nothing that needs a person (a resting card, and a card blocked on a dependency whose
+// run is idle at the plan approval), which must read as an explicit empty state; then a run that asks
+// a question, a run that asks for an approval, and a run that works and then stops at the plan
+// approval. The oracle for every row is the API's `listAttention`, asked from here.
+const attentionObserved = {};
+const seedAttention = (env) => {
+  const run = spawnSync(
+    "bun",
+    [path.join(ROOT, ".pi/skills/verify-web/seed-attention.ts")],
+    {
+      cwd: ROOT,
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
+  try {
+    return { status: run.status, value: JSON.parse((run.stdout ?? "").trim()) };
+  } catch {
+    return {
+      status: run.status,
+      value: null,
+      stderr: (run.stderr ?? "").trim().slice(0, 300),
+    };
+  }
+};
+const attentionSeed = seedAttention({ MODE: "board" });
+attentionObserved.seed = attentionSeed;
+const att = attentionSeed.value ?? {};
+const attBoard = typeof att.boardId === "string" ? att.boardId : "";
+const attCards = await rpcFromDrive("listTasks", { boardId: attBoard });
+assert(
+  "an attention board with five cards was seeded",
+  attentionSeed.status === 0 &&
+    attBoard.startsWith("brd_") &&
+    attCards.exit === "Success" &&
+    (attCards.value ?? []).length === 5 &&
+    (attCards.value ?? []).some(
+      (task) =>
+        task.id === att.waiting && task.blocked?.reason === "dependency",
+    ),
+  attentionSeed.status === 0
+    ? `board ${attBoard}: ${JSON.stringify((attCards.value ?? []).map((task) => [task.column, task.blocked?.reason ?? null]))}`
+    : `seed exit ${String(attentionSeed.status)}: ${attentionSeed.stderr ?? ""}`,
+);
+
+/** `createSession` with the card named, as the card pane's Start run and `factory board start` do. */
+const startRunOn = async (taskId, column) => {
+  const created = await rpcFromDrive("createSession", {
+    title: `attention run ${column}`,
+    taskId,
+    taskColumn: column,
+  });
+  return typeof created.value?.id === "string" ? created.value.id : "";
+};
+
+/** The attention rows as the page renders them, in page order. */
+const readAttention = (target) =>
+  target.evaluate(() => ({
+    empty: document.querySelector("[data-attention-empty]") !== null,
+    emptyText: (
+      document.querySelector("[data-attention-empty]")?.textContent ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim(),
+    groups: Array.from(document.querySelectorAll("[data-attention-group]")).map(
+      (group) => group.getAttribute("data-attention-group"),
+    ),
+    rows: Array.from(document.querySelectorAll("li[data-attention]")).map(
+      (row) => ({
+        card: row.getAttribute("data-attention"),
+        reason: row.getAttribute("data-attention-reason"),
+        group:
+          row
+            .closest("[data-attention-group]")
+            ?.getAttribute("data-attention-group") ?? null,
+        text: (
+          row.querySelector("[data-attention-text]")?.textContent ?? ""
+        ).trim(),
+        href: row.querySelector("a")?.getAttribute("href") ?? null,
+        all: (row.textContent ?? "").replace(/\s+/g, " ").trim(),
+      }),
+    ),
+  }));
+const rowFor = (view, card, reason) =>
+  view.rows.find((row) => row.card === card && row.reason === reason);
+const waitForAttention = (predicate, arg, timeout) =>
+  page.waitForFunction(predicate, arg, { timeout }).then(
+    () => true,
+    () => false,
+  );
+
+// 1. Nothing needs a person yet. The dependency-blocked card gets its idle run in `planning` first,
+// so it would be at the plan approval if the block were ignored: its absence is the claim that a
+// card blocked on something other than a person is not listed.
+const waitingRun = await startRunOn(att.waiting, "planning");
+await page.goto(`${WEB_URL}/attention?board=${attBoard}`, {
+  waitUntil: "domcontentloaded",
+});
+const emptyShown = await waitForAttention(
+  () => document.querySelector("[data-attention-empty]") !== null,
+  null,
+  20_000,
+);
+const cleanView = await readAttention(page);
+const cleanTruth = await rpcFromDrive("listAttention", { boardId: attBoard });
+attentionObserved.clean = {
+  waitingRun,
+  view: cleanView,
+  server: cleanTruth.value,
+};
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "attention-empty.png") });
+assert(
+  "a board where nothing needs a person shows an explicit empty state",
+  emptyShown &&
+    waitingRun.startsWith("ses_") &&
+    cleanView.rows.length === 0 &&
+    cleanView.emptyText.includes("Nothing needs a person") &&
+    cleanTruth.exit === "Success" &&
+    (cleanTruth.value ?? []).length === 0,
+  `empty ${emptyShown}; rows ${cleanView.rows.length}; text ${JSON.stringify(cleanView.emptyText.slice(0, 80))}; listAttention ${JSON.stringify(cleanTruth.value)}`,
+);
+
+// 2. Three runs. The gated card's run is given a turn — the faux command sleeps, so it is busy for
+// the next ~12 s — and the asked and approval cards' runs ask a person for something.
+const QUESTION = "Which Postgres major does this card target?";
+const APPROVAL_ACTION = "push refs/heads/attention";
+const gatedRun = await startRunOn(att.gated, "planning");
+const gatedSent = await rpcFromDrive("sendMessage", {
+  sessionId: gatedRun,
+  content: "Write the plan.",
+});
+const askedRun = await startRunOn(att.asked, "specifying");
+const askOut = seedAttention({
+  MODE: "ask",
+  TASK_ID: att.asked,
+  SESSION_ID: askedRun,
+  QUESTION,
+});
+const approvalRun = await startRunOn(att.approval, "building");
+const approvalAsked = await rpcFromDrive("requestApproval", {
+  sessionId: approvalRun,
+  requestId: `verify-web-attention-${Date.now()}`,
+  action: APPROVAL_ACTION,
+  detail: "one commit, fast-forward",
+});
+attentionObserved.runs = {
+  gatedRun,
+  gatedSent: gatedSent.exit,
+  askedRun,
+  ask: askOut,
+  approvalRun,
+  approvalAsked: approvalAsked.exit,
+};
+
+// While the gated card's run is busy it is not at the gate: the run is still working.
+const rowsReady = await waitForAttention(
+  ({ asked, approval }) =>
+    document.querySelector(
+      `li[data-attention='${asked}'][data-attention-reason='question']`,
+    ) !== null &&
+    document.querySelector(
+      `li[data-attention='${approval}'][data-attention-reason='approval']`,
+    ) !== null,
+  { asked: att.asked, approval: att.approval },
+  20_000,
+);
+const whileBusy = await readAttention(page);
+const busySnapshot = await rpcFromDrive("getSession", { sessionId: gatedRun });
+const busyTruth = await rpcFromDrive("listAttention", { boardId: attBoard });
+attentionObserved.whileBusy = {
+  view: whileBusy,
+  busy: busySnapshot.value?.live?.busy ?? null,
+};
+assert(
+  "a card whose run is still working is not at the gate",
+  rowsReady &&
+    busySnapshot.value?.live?.busy === true &&
+    whileBusy.rows.every((row) => row.card !== att.gated) &&
+    (busyTruth.value ?? []).every((item) => item.task.id !== att.gated),
+  `rows ready ${rowsReady}; gated run busy ${String(busySnapshot.value?.live?.busy)}; page rows ${JSON.stringify(whileBusy.rows.map((row) => [row.card, row.reason]))}`,
+);
+
+// The run finishes, and the card is at the plan approval — without a reload.
+await page.evaluate(() => {
+  window.__attentionNoReload = "kept";
+});
+const gateShown = await waitForAttention(
+  (gated) =>
+    document.querySelector(
+      `li[data-attention='${gated}'][data-attention-reason='gate']`,
+    ) !== null,
+  att.gated,
+  60_000,
+);
+const attSeeded = await readAttention(page);
+const seededTruth = await rpcFromDrive("listAttention", { boardId: attBoard });
+const idleSnapshot = await rpcFromDrive("getSession", { sessionId: gatedRun });
+const keptPage = await page.evaluate(
+  () => window.__attentionNoReload === "kept",
+);
+attentionObserved.seeded = {
+  view: attSeeded,
+  server: (seededTruth.value ?? []).map((item) => [
+    item.task.id,
+    item.reason._tag,
+  ]),
+  gatedIdle: idleSnapshot.value?.live?.busy === false,
+  keptPage,
+};
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "attention.png") });
+
+const gateRow = rowFor(attSeeded, att.gated, "gate");
+const askRow = rowFor(attSeeded, att.asked, "question");
+const approvalRow = rowFor(attSeeded, att.approval, "approval");
+assert(
+  "a done run at the plan approval is listed, with the gate as its reason",
+  gateShown &&
+    keptPage &&
+    idleSnapshot.value?.live?.busy === false &&
+    gateRow !== undefined &&
+    gateRow.group === "gate" &&
+    gateRow.text.includes("plan approval") &&
+    gateRow.text.includes("planning → building"),
+  `shown ${gateShown}; no reload ${keptPage}; row ${JSON.stringify(gateRow ?? null)}`,
+);
+assert(
+  "a run's unanswered question is listed with the question as its reason",
+  askOut.status === 0 &&
+    askOut.value?.blocked === "needs_input" &&
+    askRow !== undefined &&
+    askRow.group === "question" &&
+    askRow.text === `Asked: ${QUESTION}`,
+  `ask ${JSON.stringify(askOut.value ?? askOut.stderr ?? null)}; row ${JSON.stringify(askRow ?? null)}`,
+);
+assert(
+  "a run's pending approval is listed with the action it asks for",
+  approvalAsked.exit === "Success" &&
+    approvalRow !== undefined &&
+    approvalRow.group === "approval" &&
+    approvalRow.text.includes(APPROVAL_ACTION) &&
+    approvalRow.text.includes("one commit, fast-forward"),
+  `requestApproval ${String(approvalAsked.exit)}; row ${JSON.stringify(approvalRow ?? null)}`,
+);
+const pageRows = attSeeded.rows.map((row) => `${row.card}:${row.reason}`);
+const serverRows = (seededTruth.value ?? []).map(
+  (item) => `${item.task.id}:${item.reason._tag}`,
+);
+assert(
+  "a card blocked on a dependency and a resting card are not listed, and the page is the server's list",
+  attSeeded.rows.every(
+    (row) => row.card !== att.waiting && row.card !== att.resting,
+  ) &&
+    pageRows.length === 3 &&
+    JSON.stringify(pageRows) === JSON.stringify(serverRows) &&
+    JSON.stringify(attSeeded.groups) ===
+      JSON.stringify(["approval", "question", "gate"]),
+  `page ${JSON.stringify(pageRows)}; listAttention ${JSON.stringify(serverRows)}; groups ${JSON.stringify(attSeeded.groups)}`,
+);
+assert(
+  "each row links to its card, and an approval's to the run that asked",
+  gateRow?.href === `/boards/${attBoard}?card=${att.gated}` &&
+    askRow?.href === `/boards/${attBoard}?card=${att.asked}` &&
+    approvalRow?.href ===
+      `/boards/${attBoard}?card=${att.approval}&run=${approvalRun}`,
+  `hrefs ${JSON.stringify([gateRow?.href, askRow?.href, approvalRow?.href])}`,
+);
+
+// The link works: a click opens the card in its board's pane, and the approval's opens its run.
+let gateLinkOpened = false;
+try {
+  await page
+    .locator(
+      `li[data-attention='${att.gated}'][data-attention-reason='gate'] a`,
+    )
+    .click();
+  await page.waitForSelector(`aside[data-card-pane='${att.gated}']`, {
+    timeout: 15_000,
+  });
+  gateLinkOpened = true;
+} catch {
+  // Recorded below.
+}
+const gateLanded = new URL(page.url());
+const gatePane = await readPane(page);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "attention-card.png"),
+});
+assert(
+  "the gate row's link opens the card's pane on its board",
+  gateLinkOpened &&
+    gateLanded.pathname === `/boards/${attBoard}` &&
+    gateLanded.searchParams.get("card") === att.gated &&
+    gatePane?.card === att.gated &&
+    gatePane?.column === "planning" &&
+    (gatePane?.moves ?? []).some(
+      (move) => move.to === "building" && move.gate === "plan approval",
+    ),
+  `opened ${gateLinkOpened}; at ${gateLanded.pathname}${gateLanded.search}; pane ${JSON.stringify(gatePane === null ? null : { card: gatePane.card, column: gatePane.column, moves: gatePane.moves.map((move) => [move.to, move.gate]) })}`,
+);
+
+// The board's own header leads back to its attention view.
+let boardBack = false;
+try {
+  await page.locator("[data-board-attention]").click();
+  await page.waitForFunction(
+    (board) =>
+      window.location.pathname === "/attention" &&
+      new URLSearchParams(window.location.search).get("board") === board &&
+      document.querySelector("li[data-attention]") !== null,
+    attBoard,
+    { timeout: 15_000 },
+  );
+  boardBack = true;
+} catch {
+  // Recorded below.
+}
+let approvalLinkOpened = false;
+try {
+  await page
+    .locator(
+      `li[data-attention='${att.approval}'][data-attention-reason='approval'] a`,
+    )
+    .click();
+  await page.waitForSelector(
+    `aside[data-card-pane='${att.approval}'] [role='tab']`,
+    { timeout: 15_000 },
+  );
+  approvalLinkOpened =
+    new URL(page.url()).searchParams.get("run") === approvalRun;
+} catch {
+  // Recorded below.
+}
+assert(
+  "the board links its attention view, and the approval row opens the run that asked",
+  boardBack && approvalLinkOpened,
+  `board → attention ${boardBack}; approval → ${new URL(page.url()).pathname}${new URL(page.url()).search}`,
+);
+
+// An answer is a person's comment on the card (B7); once it lands the card no longer needs anyone,
+// and the open view drops it without a reload.
+await page.goto(`${WEB_URL}/attention?board=${attBoard}`, {
+  waitUntil: "domcontentloaded",
+});
+await waitForAttention(
+  () => document.querySelector("li[data-attention]") !== null,
+  null,
+  15_000,
+);
+await page.evaluate(() => {
+  window.__attentionNoReload = "answer";
+});
+const askedNow = await rpcFromDrive("getTask", { taskId: att.asked });
+const answered = await rpcFromDrive("commentTask", {
+  taskId: att.asked,
+  expectedRevision: askedNow.value?.revision ?? -1,
+  body: "Postgres 16.",
+  actor: "person:verify-web",
+});
+const answerDropped = await waitForAttention(
+  (asked) =>
+    document.querySelector(`li[data-attention='${asked}']`) === null &&
+    document.querySelector("li[data-attention]") !== null,
+  att.asked,
+  15_000,
+);
+const afterAnswer = await readAttention(page);
+const answerKept = await page.evaluate(
+  () => window.__attentionNoReload === "answer",
+);
+attentionObserved.afterAnswer = afterAnswer;
+assert(
+  "an answered question leaves the view without a reload",
+  answered.exit === "Success" &&
+    answered.value?.blocked === undefined &&
+    answerDropped &&
+    answerKept &&
+    afterAnswer.rows.length === 2,
+  `commentTask ${String(answered.exit)}; dropped ${answerDropped}; no reload ${answerKept}; rows ${JSON.stringify(afterAnswer.rows.map((row) => [row.card, row.reason]))}`,
+);
+
+// Every board: the rail's own section, where the rows name their board's repository.
+let railOpened = false;
+try {
+  await page.getByRole("link", { name: "Needs a person" }).first().click();
+  await page.waitForFunction(
+    (gated) =>
+      window.location.pathname === "/attention" &&
+      window.location.search === "" &&
+      document.querySelector(
+        `li[data-attention='${gated}'][data-attention-reason='gate']`,
+      ) !== null,
+    att.gated,
+    { timeout: 15_000 },
+  );
+  railOpened = true;
+} catch {
+  // Recorded below.
+}
+const everywhere = await readAttention(page);
+const everywhereGate = rowFor(everywhere, att.gated, "gate");
+attentionObserved.everywhere = {
+  rows: everywhere.rows.length,
+  gate: everywhereGate ?? null,
+};
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "attention-all.png"),
+});
+assert(
+  "the rail opens every board's attention view, and its rows name their repository",
+  railOpened &&
+    everywhereGate !== undefined &&
+    everywhereGate.all.includes(att.repo) &&
+    everywhere.rows.every((row) => row.card !== att.waiting),
+  `rail ${railOpened}; ${everywhere.rows.length} row(s); gate row ${JSON.stringify(everywhereGate?.all ?? null)}`,
+);
+
+// A board the server does not hold is named as missing, not shown as "nothing needs a person".
+await page.goto(`${WEB_URL}/attention?board=brd_0123456789abcdefghjkmnpqrs`, {
+  waitUntil: "domcontentloaded",
+});
+const missingShown = await waitForAttention(
+  () => document.body.innerText.includes("No such board"),
+  null,
+  15_000,
+);
+assert(
+  "an attention view of a board that does not exist says so",
+  missingShown && (await page.locator("[data-attention-empty]").count()) === 0,
+  `missing shown ${missingShown}`,
+);
+observed.attention = attentionObserved;
+
 // Feature: the session's PR link (LOB-65). No RPC opens a PR, so `seed-pr.ts` is the in-process
 // caller of the real PR step — against a loopback GitHub fake, on this API's database and session
 // root — and it exits before the page attaches, so the anchor below is the API's read of the session.

@@ -3,9 +3,9 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9530` / web `:3530` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 72/72 required checks passed,
-from the `agent/LOB-76` worktree, against its own database on 5442).
+Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9510` / web `:3510` —
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 88/88 required checks passed,
+from the `agent/LOB-77` worktree, against its own database on 5442).
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
@@ -19,13 +19,14 @@ from the `agent/LOB-76` worktree, against its own database on 5442).
 | Compaction from the pane | passing | [compaction.md](compaction.md)             |
 | Board lanes              | passing | [board.md](board.md)                       |
 | Card pane (write path)   | passing | [card-pane.md](card-pane.md)               |
+| What needs a person      | passing | [attention.md](attention.md)               |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 
 ## Known gaps
 
 - **The board follows moves by polling, every 2 s.** LOB-76's card pane moves cards and starts runs;
-  a move made elsewhere reaches an open board within one interval, not instantly. The attention view
-  is LOB-77, and the `needs_input` walk waits on LOB-46.
+  a move made elsewhere reaches an open board within one interval, not instantly; the attention view
+  (LOB-77) polls on the same interval. The `needs_input` walk waits on LOB-46.
 - **The busy-compaction check is timing-sensitive.** "a busy session shows the pending state, never
   the verdict" needs the run to turn busy while the compaction is still `requested`; on 2026-10-27 it
   failed once (the summary settled before the run started) and passed on the next run, with no
@@ -35,9 +36,12 @@ from the `agent/LOB-76` worktree, against its own database on 5442).
   routes still render their milestone copy (M4, M3) for an old link, and `drive.mjs` asserts it.
   That copy predates the run pane: the card's Approvals pane reads and decides through the live
   `ApprovalsRpc` (driven in `card-pane.md`); what M3 still owes is a hook that makes a run ask.
-- **The rail has no attention count.** The rail is the natural place to say "two cards need a person",
-  and the board (LOB-22) is what produces that number. Nothing backs it today, so a badge would be
-  fiction.
+- **The rail has no attention count.** The rail links the attention view (LOB-77), and
+  `listAttention` now backs the number, but a badge would poll on every page; it is left out until a
+  push exists or the count is wanted badly enough to pay for the poll.
+- **The card pane has no answer box.** The attention view lists a run's question and links the card,
+  but the answer is still `factory board comment` (or `commentTask`); the pane's thread is LOB-22's
+  `needs_input` walk.
 - The session API is covered here only through the dashboard. Its contract is proven by
   `.pi/skills/verify-api`, which drives the real Effect RPC client directly; neither replaces the
   other, and a change to `packages/domain` or `packages/core` deserves both.

@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
+import { Route as AttentionRouteImport } from './routes/attention'
 import { Route as SandboxesRouteImport } from './routes/sandboxes'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as BoardsIndexRouteImport } from './routes/boards.index'
@@ -26,6 +27,11 @@ const IndexRoute = IndexRouteImport.update({
 const ApprovalsRoute = ApprovalsRouteImport.update({
   id: '/approvals',
   path: '/approvals',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AttentionRoute = AttentionRouteImport.update({
+  id: '/attention',
+  path: '/attention',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SandboxesRoute = SandboxesRouteImport.update({
@@ -62,6 +68,7 @@ const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
+  '/attention': typeof AttentionRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/boards/$boardId': typeof BoardsBoardIdRoute
@@ -72,6 +79,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
+  '/attention': typeof AttentionRoute
   '/sandboxes': typeof SandboxesRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
@@ -82,6 +90,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
+  '/attention': typeof AttentionRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/boards/$boardId': typeof BoardsBoardIdRoute
@@ -94,6 +103,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/approvals'
+    | '/attention'
     | '/sandboxes'
     | '/sessions'
     | '/boards/$boardId'
@@ -104,6 +114,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/approvals'
+    | '/attention'
     | '/sandboxes'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
@@ -113,6 +124,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/approvals'
+    | '/attention'
     | '/sandboxes'
     | '/sessions'
     | '/boards/$boardId'
@@ -124,6 +136,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ApprovalsRoute: typeof ApprovalsRoute
+  AttentionRoute: typeof AttentionRoute
   SandboxesRoute: typeof SandboxesRoute
   SessionsRoute: typeof SessionsRouteWithChildren
   BoardsBoardIdRoute: typeof BoardsBoardIdRoute
@@ -144,6 +157,13 @@ declare module '@tanstack/react-router' {
       path: '/approvals'
       fullPath: '/approvals'
       preLoaderRoute: typeof ApprovalsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/attention': {
+      id: '/attention'
+      path: '/attention'
+      fullPath: '/attention'
+      preLoaderRoute: typeof AttentionRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sandboxes': {
@@ -208,6 +228,7 @@ const SessionsRouteWithChildren = SessionsRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApprovalsRoute: ApprovalsRoute,
+  AttentionRoute: AttentionRoute,
   SandboxesRoute: SandboxesRoute,
   SessionsRoute: SessionsRouteWithChildren,
   BoardsBoardIdRoute: BoardsBoardIdRoute,

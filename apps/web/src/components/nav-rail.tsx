@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { KanbanSquareIcon, TerminalIcon } from "lucide-react";
+import { BellIcon, KanbanSquareIcon, TerminalIcon } from "lucide-react";
 import { cn } from "cn";
 import { FactoryMark } from "@/components/factory-mark";
 import {
@@ -21,6 +21,8 @@ const SECTIONS = [
   // means something only for one run, so a top-level list with no card around it is the wrong
   // question. Their routes stay, so an old link still says what it used to.
   { to: "/boards", label: "Boards", icon: KanbanSquareIcon },
+  // What needs a person, across every board (LOB-77): the question the board exists to answer.
+  { to: "/attention", label: "Needs a person", icon: BellIcon },
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
 ] as const;
 

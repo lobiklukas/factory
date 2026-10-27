@@ -62,7 +62,11 @@ the board, and requires one lane per column in definition order and the card in 
 the human gate marked, a stale-revision move refused in the service's words with the card left in
 place, a `factory board move` followed without a reload (and the card's new lane on reload and in a
 fresh browser context), a pane move that `factory board show` prints, and a run started from the
-card (`features/card-pane.md`). Exit code is non-zero when a required check fails. Each run
+card (`features/card-pane.md`). It then seeds a second board (`seed-attention.ts`) and requires
+`/attention` to show an explicit empty state while nothing on it needs a person, then a run's
+pending approval, a run's question and a done run at the plan approval, each with its reason and a
+link that opens the card, and never a card blocked on a dependency (`features/attention.md`). Exit
+code is non-zero when a required check fails. Each run
 seeds a new board, so the drive can be rerun against the same instance; run it with the
 `DATABASE_URL` `./up.sh` started the API with.
 
@@ -82,6 +86,9 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
   after the CLI move
 - `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png` — the card pane in `intake`, with
   the stale-revision refusal, and with a run started from it
+- `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png` — the attention
+  view of the seeded board with nothing waiting, with its three rows, the card a row opened, and
+  every board's view
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
   transcript and mode label, console errors, and HTTP responses ≥ 400
 
@@ -112,13 +119,14 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File        | Purpose                                                           |
-| ----------- | ----------------------------------------------------------------- |
-| `up.sh`     | Launch isolated API + web, wait for readiness                     |
-| `down.sh`   | Stop only what `up.sh` started                                    |
-| `doctor.sh` | Read-only health check of the instance                            |
-| `drive.mjs` | Browser drive + evidence capture                                  |
-| `features/` | Feature map: what each user-facing feature is and how to prove it |
+| File                | Purpose                                                           |
+| ------------------- | ----------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                     |
+| `down.sh`           | Stop only what `up.sh` started                                    |
+| `doctor.sh`         | Read-only health check of the instance                            |
+| `drive.mjs`         | Browser drive + evidence capture                                  |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask              |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it |
 
 ## Feature map
 
