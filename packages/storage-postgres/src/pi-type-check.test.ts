@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -90,24 +97,63 @@ describe("the gate's type-check covers the .pi skills", () => {
     "fails on a type error in a skill it has never seen",
     { timeout: 90_000 },
     () => {
-      // A new directory, so the case proves the include glob and not a list of today's files. It is
-      // removed whatever happens: a probe left behind would fail the next gate on purpose-built noise.
-      const directory = mkdtempSync(
-        path.join(REPO_ROOT, ".pi", "skills", "type-check-probe-"),
+      // A new directory, so the case proves the include glob and not a list of today's files. The
+      // probe never enters the checkout: a deliberately broken file under `.pi/skills` would fail a
+      // `type-check`, `lint` or `format:check` running beside this suite, and would outlive a
+      // SIGKILLed vitest. Instead `.pi/tsconfig.json` is mirrored into a temporary `.pi/` with its
+      // `include` and `compilerOptions` verbatim, `extends` rebased and `typeRoots` named, so the glob under test
+      // is the gate's own; the gate's tsc is run over the mirror exactly as `type-check:pi` runs it.
+      const manifest = JSON.parse(
+        readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"),
+      ) as { readonly scripts: Readonly<Record<string, string>> };
+      expect(manifest.scripts["type-check:pi"]).toBe(
+        "tsc -p .pi/tsconfig.json",
       );
-      const probe = path.join(directory, "probe.ts");
+      const config = JSON.parse(
+        readFileSync(path.join(REPO_ROOT, ".pi", "tsconfig.json"), "utf8"),
+      ) as {
+        readonly extends: string;
+        readonly $schema?: string;
+        readonly compilerOptions: Readonly<Record<string, unknown>>;
+      };
+
+      const mirror = mkdtempSync(path.join(tmpdir(), "pi-type-check-"));
       try {
+        const piDir = path.join(mirror, ".pi");
+        const skillDir = path.join(piDir, "skills", "type-check-probe");
+        mkdirSync(skillDir, { recursive: true });
+        const { $schema: _schema, ...rest } = config;
+        writeFileSync(
+          path.join(piDir, "tsconfig.json"),
+          JSON.stringify({
+            ...rest,
+            extends: path.resolve(REPO_ROOT, ".pi", config.extends),
+            compilerOptions: {
+              ...config.compilerOptions,
+              // A temporary directory has no `node_modules` above it; this names the one tsc walks
+              // up to from the real `.pi/`, so `types: ["bun"]` resolves as it does in the gate.
+              typeRoots: [path.join(REPO_ROOT, "node_modules", "@types")],
+            },
+          }),
+        );
+        const probe = path.join(skillDir, "probe.ts");
         writeFileSync(
           probe,
           'export const deliberatelyNotAType: number = "not a number";\n',
         );
-        const result = runScript("type-check:pi");
+        const result = spawnSync(
+          path.join(REPO_ROOT, "node_modules", ".bin", "tsc"),
+          ["-p", path.join(".pi", "tsconfig.json")],
+          // `tsc` prints paths relative to its cwd, so the mirror root stands in for the repo root.
+          { cwd: mirror, encoding: "utf8", timeout: 60_000 },
+        );
+        expect(result.error).toBeUndefined();
         expect(result.status).not.toBe(0);
         expect(result.stdout).toContain(
-          `${path.relative(REPO_ROOT, probe)}(1,14): error TS2322`,
+          `${path.relative(mirror, probe)}(1,14): error TS2322`,
         );
       } finally {
-        rmSync(directory, { recursive: true, force: true });
+        rmSync(mirror, { recursive: true, force: true });
       }
     },
   );
