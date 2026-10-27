@@ -18,30 +18,47 @@ import { createHmac } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
-import { Effect } from "effect";
+import { RepoSlug } from "@repo/domain/Session";
+import { TriggerOutcome } from "@repo/domain/Trigger";
+import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
-import { makeChecker, protocolFor } from "./harness.ts";
+import { makeChecker, protocolFor, type CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
 const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest";
-const REPO = process.env["TRIGGER_REPO"] ?? "acme/verify-api-trigger";
+const REPO = RepoSlug.make(
+  process.env["TRIGGER_REPO"] ?? "acme/verify-api-trigger",
+);
 const SECRET = process.env["TRIGGER_SECRET"] ?? "";
 const SIGNATURE_HEADER = "x-trigger-signature";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
-const observed = {
+const observed: {
+  apiUrl: string;
+  repo: RepoSlug;
+  checks: Record<string, CheckRecord>;
+  deliveries: Array<{ route: string; status: number; answer: unknown }>;
+} = {
   apiUrl: API_URL,
   repo: REPO,
   checks: {},
   deliveries: [],
 };
+
+/** The refusal a route answers before the seam (`apps/api/src/Api/Webhook.ts`): a typed code. */
+const Refusal = Schema.Struct({ code: Schema.String });
 const assert = makeChecker(observed);
 
 const sign = (body: string): string =>
   createHmac("sha256", SECRET).update(body).digest("hex");
 
-/** One signed POST to a trigger route, as a sender would write it. */
+/**
+ * One signed POST to a trigger route, as a sender would write it. `body` is the answer as it
+ * arrived, for the evidence; `outcome` and `refusal` are that answer decoded as the seam's
+ * `TriggerOutcome` or a route's refusal, `null` when it is not one — so a wrong shape fails the
+ * check that reads it.
+ */
 const post = async (
   route: string,
   body: unknown,
@@ -60,9 +77,16 @@ const post = async (
     },
     body: raw,
   });
-  const answer = await response.json().catch(() => null);
+  const answer: unknown = await response.json().catch(() => null);
   observed.deliveries.push({ route, status: response.status, answer });
-  return { status: response.status, body: answer };
+  return {
+    status: response.status,
+    body: answer,
+    outcome: Option.getOrNull(
+      Schema.decodeUnknownOption(TriggerOutcome)(answer),
+    ),
+    refusal: Option.getOrNull(Schema.decodeUnknownOption(Refusal)(answer)),
+  };
 };
 
 const generic = (
@@ -106,12 +130,12 @@ const program = Effect.gen(function* () {
   assert(
     "a signed delivery starts a session",
     first.status === 200 &&
-      first.body?.status === "processed" &&
-      first.body?.replayed === false &&
-      typeof first.body?.sessionId === "string",
+      first.outcome?.status === "processed" &&
+      first.outcome?.replayed === false &&
+      first.outcome?.sessionId !== undefined,
     `status=${first.status} body=${JSON.stringify(first.body)}`,
   );
-  const sessionId = first.body?.sessionId;
+  const sessionId = first.outcome?.sessionId;
 
   const second = yield* Effect.promise(() =>
     post("/webhooks/generic", generic(requestId)),
@@ -119,8 +143,8 @@ const program = Effect.gen(function* () {
   assert(
     "the same delivery again is a replay",
     second.status === 200 &&
-      second.body?.replayed === true &&
-      second.body?.status === "processed",
+      second.outcome?.replayed === true &&
+      second.outcome?.status === "processed",
     `status=${second.status} body=${JSON.stringify(second.body)}`,
   );
 
@@ -132,7 +156,7 @@ const program = Effect.gen(function* () {
   );
 
   // The prompt is the session's first message, rendered from the rule's template.
-  if (typeof sessionId === "string") {
+  if (sessionId !== undefined) {
     const snapshot = yield* client.getSession({ sessionId });
     const firstUser = snapshot.entries.find((entry) => entry.kind === "user");
     assert(
@@ -153,8 +177,8 @@ const program = Effect.gen(function* () {
   assert(
     "an action that is not a create is skipped with its reason",
     filtered.status === 200 &&
-      filtered.body?.status === "skipped" &&
-      String(filtered.body?.reason ?? "").includes('action "update"'),
+      filtered.outcome?.status === "skipped" &&
+      (filtered.outcome?.reason ?? "").includes('action "update"'),
     `status=${filtered.status} body=${JSON.stringify(filtered.body)}`,
   );
 
@@ -163,8 +187,8 @@ const program = Effect.gen(function* () {
   );
   assert(
     "a replay of a skipped delivery stays skipped",
-    filteredReplay.body?.replayed === true &&
-      filteredReplay.body?.status === "skipped",
+    filteredReplay.outcome?.replayed === true &&
+      filteredReplay.outcome?.status === "skipped",
     `body=${JSON.stringify(filteredReplay.body)}`,
   );
 
@@ -178,8 +202,8 @@ const program = Effect.gen(function* () {
   assert(
     "an unmappable delivery is skipped, naming the labels",
     unmapped.status === 200 &&
-      unmapped.body?.status === "skipped" &&
-      unmapped.body?.reason === "no rule matches labels [nobody]",
+      unmapped.outcome?.status === "skipped" &&
+      unmapped.outcome?.reason === "no rule matches labels [nobody]",
     `status=${unmapped.status} body=${JSON.stringify(unmapped.body)}`,
   );
 
@@ -213,7 +237,7 @@ const program = Effect.gen(function* () {
   );
   assert(
     "a body over the cap is refused before any session exists",
-    oversized.status === 413 && oversized.body?.code === "body-too-large",
+    oversized.status === 413 && oversized.refusal?.code === "body-too-large",
     `status=${oversized.status} body=${JSON.stringify(oversized.body)}`,
   );
 
@@ -245,7 +269,7 @@ const program = Effect.gen(function* () {
   );
   assert(
     "the linear adapter delegates to the same seam",
-    linear.status === 200 && linear.body?.status === "processed",
+    linear.status === 200 && linear.outcome?.status === "processed",
     `status=${linear.status} body=${JSON.stringify(linear.body)}`,
   );
 

@@ -27,14 +27,17 @@ import path from "node:path";
 import { Effect, Fiber, Layer, ManagedRuntime, Option, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import type { SessionId } from "@repo/domain/Session";
+import type { SessionError, SessionId } from "@repo/domain/Session";
 import type { TriggerDelivery } from "@repo/domain/Trigger";
 import { createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
+  type CredentialError,
   CredentialProvider,
   DocsSessionsFromSessionService,
+  type PrError,
   SessionService,
   SessionServiceLive,
   NoWriteBack,
@@ -269,6 +272,9 @@ const push = Effect.gen(function* () {
 // ---------------------------------------------------------------------------------------------
 
 const schedule = Effect.gen(function* () {
+  // Read once and handed over as a plain function, because the schedule's
+  // `deliver` may carry no requirements (`DocsScheduleOptions`).
+  const trigger = yield* TriggerService;
   const before = yield* Effect.promise(() => sessionCount());
   const everyMs = 400;
   // The real schedule, forked and interrupted: it delivers through the same seam the push did, so
@@ -277,11 +283,7 @@ const schedule = Effect.gen(function* () {
     docsSchedule({
       everyMs,
       repo: REPO,
-      deliver: (delivery) =>
-        Effect.gen(function* () {
-          const trigger = yield* TriggerService;
-          return yield* trigger.deliver(delivery);
-        }),
+      deliver: trigger.deliver,
     }),
   );
   yield* Effect.sleep(`${everyMs * 3} millis`);
@@ -323,11 +325,7 @@ const schedule = Effect.gen(function* () {
     docsSchedule({
       everyMs: undefined,
       repo: REPO,
-      deliver: (delivery) =>
-        Effect.gen(function* () {
-          const trigger = yield* TriggerService;
-          return yield* trigger.deliver(delivery);
-        }),
+      deliver: trigger.deliver,
     }),
   );
   yield* Effect.sleep(`${everyMs * 2} millis`);
@@ -418,7 +416,14 @@ const ledger = Effect.gen(function* () {
 });
 
 try {
-  for (const phase of [push, schedule, ledger]) {
+  const phases: ReadonlyArray<
+    Effect.Effect<
+      void,
+      SqlError | SessionError | CredentialError | PrError,
+      SessionService | TriggerService | SqlClient
+    >
+  > = [push, schedule, ledger];
+  for (const phase of phases) {
     try {
       await runtime.runPromise(phase);
     } catch (error) {

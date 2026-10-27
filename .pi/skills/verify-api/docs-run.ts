@@ -28,7 +28,7 @@ import { FetchHttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
 import type { SessionId } from "@repo/domain/Session";
-import { createFauxModelAccess } from "@repo/harness";
+import { createFauxModelAccess, type FauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
   CredentialProvider,
@@ -113,12 +113,18 @@ const assert = makeChecker(observed);
  *
  * Built here rather than imported because `@earendil-works/pi-ai` is not resolvable from `.pi` (it
  * is `@repo/harness`'s dependency, not the root's) — and the shape is pi-ai's own faux default,
- * which `models.ts` relies on for every drive that runs without a key.
+ * which `models.ts` relies on for every drive that runs without a key. Its types are read off
+ * `FauxModelAccess` for the same reason, so a change to pi-ai's message shape fails type-check here.
  */
+type FauxStep = Parameters<FauxModelAccess["faux"]["setResponses"]>[0][number];
+type FauxFactory = Extract<FauxStep, (...args: never) => unknown>;
+type FauxAssistant = Awaited<ReturnType<FauxFactory>>;
+type FauxContent = FauxAssistant["content"][number];
+
 const assistant = (
-  content: readonly unknown[],
+  content: FauxContent[],
   stopReason: "stop" | "toolUse" = "stop",
-) => ({
+): FauxAssistant => ({
   role: "assistant",
   content,
   api: "faux",
@@ -136,14 +142,18 @@ const assistant = (
   timestamp: Date.now(),
 });
 
-const toolCall = (name: string, args: Record<string, unknown>, id: string) => ({
+const toolCall = (
+  name: string,
+  args: Extract<FauxContent, { type: "toolCall" }>["arguments"],
+  id: string,
+): FauxContent => ({
   type: "toolCall",
   id,
   name,
   arguments: args,
 });
 
-const text = (value: string) => ({ type: "text", text: value });
+const text = (value: string): FauxContent => ({ type: "text", text: value });
 
 type FauxMessage = {
   readonly role: string;

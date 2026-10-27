@@ -39,8 +39,8 @@ import { createHmac, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
-import { RepoSlug } from "@repo/domain/Session";
-import { Effect } from "effect";
+import { RepoSlug, SessionId } from "@repo/domain/Session";
+import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 
@@ -168,10 +168,10 @@ const program = Effect.gen(function* () {
     description: "The widget wobbles when it spins.",
   });
   const first = yield* Effect.promise(() => deliver("create", created));
-  const sessionId =
-    typeof first.body?.["sessionId"] === "string"
-      ? first.body["sessionId"]
-      : undefined;
+  // Decoded, not trusted: an id the API answered in the wrong shape fails this check, not a later one.
+  const sessionId = Option.getOrUndefined(
+    Schema.decodeUnknownOption(SessionId)(first.body?.["sessionId"]),
+  );
   assert(
     "a labeled Linear issue starts a session",
     first.status === 200 &&

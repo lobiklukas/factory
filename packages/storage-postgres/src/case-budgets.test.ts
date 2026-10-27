@@ -75,6 +75,8 @@ const GUARDED = [
   // the cost are why it is guarded rather than listed as unchecked.
   "ralph-parallel.test.ts",
   "case-budgets.test.ts",
+  // Every case spawns `bun run` — a turbo dry run or a whole `tsc` over `.pi` (LOB-176).
+  "pi-type-check.test.ts",
 ] as const;
 
 /**
