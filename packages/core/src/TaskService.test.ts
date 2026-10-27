@@ -4,16 +4,25 @@
  * Postgres only, not mocked: `docker compose up -d --wait postgres`. Each case makes its own board
  * instance over the seeded `default` definition, so cases never share a card.
  */
+import { BunServices } from "@effect/platform-bun";
+import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
+import { RepoSlug } from "@repo/domain/Session";
 import {
   declaredTransitions,
   humanGate,
   LIST_BOARDS_LIMIT,
+  VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
+import { createFauxModelAccess } from "@repo/harness";
+import { SessionService, SessionServiceLive } from "./SessionService";
 import {
   TaskService,
   TaskServiceLive,
@@ -58,14 +67,14 @@ const refusal = (
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 
 /** A board instance bound to a fresh repository, over the seeded default definition. */
-const newBoard = (): Promise<string> =>
+const newBoard = (version = 1): Promise<string> =>
   runtime.runPromise(
     Effect.gen(function* () {
       const sql = yield* SqlClient;
       const id = `brd_${hex(13)}`;
       yield* sql`
         INSERT INTO board_instances (id, repo, definition_id, definition_version)
-        VALUES (${id}, ${`factory-test/${hex(6)}`}, 'default', 1)
+        VALUES (${id}, ${`factory-test/${hex(6)}`}, 'default', ${version})
       `;
       return id;
     }),
@@ -724,5 +733,277 @@ describe("TaskService — the ask and the thread", () => {
     expect(await eventCount(task.id)).toBe(2);
     const none = await refusal((s) => s.comments(`tsk_${hex(13)}`));
     expect(none._tag).toBe("TaskNotFound");
+  });
+});
+
+/**
+ * A column's exit requirements against what the card's runs recorded (LOB-80; docs/board.md B5, B8).
+ *
+ * The evidence is real: each run is a session opened through `SessionService` with the card named —
+ * the path `factory board start` takes, so its `task_runs` row and its log are production writes —
+ * in a worktree of a fixture repo, and the faux model makes a change and calls the `verify` tool,
+ * which runs the fixture's skill. What `TaskService.move` reads back is that log, in Postgres.
+ */
+describe("TaskService — exit requirements", () => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "factory-task-requires-"));
+
+  /** A fixture checkout with `files` committed on `main`; a run's worktree is cut from it. */
+  const fixtureRepo = (files: Record<string, string>): string => {
+    const root = mkdtempSync(join(tmpdir(), "factory-task-requires-repo-"));
+    const git = (command: string) =>
+      execSync(command, { cwd: root, stdio: "ignore" });
+    git("git init -q -b main");
+    git("git config user.email requires@localhost");
+    git("git config user.name requires");
+    writeFileSync(join(root, "README.md"), "# fixture\n");
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), content);
+    }
+    git("git add -A");
+    git("git commit -q -m base");
+    return root;
+  };
+
+  /** The run's change: one new file, left in the worktree for `verify` to measure. */
+  const change = (path: string) =>
+    `mkdir -p ${dirname(path)} && echo 'export const changed = 1;' > ${path} && echo changed`;
+
+  /**
+   * One run of `taskId`, started from `review`: the faux model runs `command` in the run's worktree,
+   * calls `verify`, and answers. Resolves once the answer is in, with the run's session id.
+   */
+  const recordRun = async (input: {
+    readonly taskId: string;
+    readonly repoRoot: string;
+    readonly command: string;
+  }): Promise<string> => {
+    const faux = createFauxModelAccess({
+      fauxVerify: true,
+      fauxCommand: input.command,
+    });
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const repo = RepoSlug.make(`factory-test/requires-${hex(4)}`);
+    try {
+      return await sessions.runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          yield* service.registerRepo({
+            repo,
+            url: "https://example.invalid/requires.git",
+            localPath: input.repoRoot,
+          });
+          const created = yield* service.create({
+            repo,
+            baseRef: "main",
+            taskId: input.taskId,
+            taskColumn: "review",
+          });
+          yield* service.send({
+            sessionId: created.id,
+            content: "make the change and verify it",
+          });
+          for (let attempt = 0; attempt < 400; attempt += 1) {
+            const snapshot = yield* service.get(created.id);
+            if (
+              snapshot.session.status === "idle" &&
+              snapshot.entries.some(
+                (entry) => entry.kind === "assistant" && entry.text !== "",
+              )
+            )
+              return created.id;
+            yield* Effect.sleep(50);
+          }
+          return yield* Effect.die(
+            new Error(`run ${created.id} did not verify and answer`),
+          );
+        }),
+      );
+    } finally {
+      await sessions.dispose();
+    }
+  };
+
+  /** A card on a board over `version`, walked by a person from intake into review. */
+  const inReview = (version: number) =>
+    newBoard(version).then((boardId) =>
+      withService((s) =>
+        Effect.gen(function* () {
+          let task = yield* s.create({
+            boardId,
+            title: "requires",
+            actor: LUKAS,
+          });
+          for (const to of ["specifying", "planning", "building", "review"]) {
+            task = yield* s.move({
+              taskId: task.id,
+              expectedRevision: task.revision,
+              to,
+              actor: LUKAS,
+            });
+          }
+          return task;
+        }),
+      ),
+    );
+
+  const PASSING = 'echo "fixture: all checks passed"\n';
+
+  it("seeds version 3 of the default pipeline with verified first in review's requires", async () => {
+    const boardId = await newBoard(3);
+    const board = await withService((s) => s.getBoard(boardId));
+    const review = board.definition.columns.find((c) => c.name === "review");
+    expect(review?.requires.map((r) => r.key)).toEqual([
+      VERIFIED_REQUIREMENT,
+      "review_verdict",
+      "human_merge",
+    ]);
+    // Every other column is version 2's, unchanged (0018 reads it back rather than copying it).
+    const v2 = await withService((s) =>
+      Effect.flatMap(
+        Effect.promise(() => newBoard(2)),
+        (id) => s.getBoard(id),
+      ),
+    );
+    expect(
+      board.definition.columns.map((c) =>
+        c.name === "review" ? { ...c, requires: c.requires.slice(1) } : c,
+      ),
+    ).toEqual(v2.definition.columns);
+  });
+
+  it("refuses a review exit with no recorded evidence, naming the requirement, and writes nothing", async () => {
+    const task = await inReview(3);
+    const events = await eventCount(task.id);
+    const err = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(err._tag).toBe("RequirementUnmet");
+    expect(err).toMatchObject({
+      taskId: task.id,
+      column: "review",
+      to: "done",
+      requirement: VERIFIED_REQUIREMENT,
+    });
+    expect(err.message).toBe(
+      'the move review → done needs "verified" (a passing verification of every surface the card\'s change touched), which is not met: the card has no runs, so nothing verified its change',
+    );
+    const after = await withService((s) => s.get(task.id));
+    expect(after.column).toBe("review");
+    expect(after.revision).toBe(task.revision);
+    expect(await eventCount(task.id)).toBe(events);
+    // Abandoning the card is never gated on evidence.
+    const canceled = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "canceled",
+        actor: LUKAS,
+      }),
+    );
+    expect(canceled.column).toBe("canceled");
+  });
+
+  it("lets the same exit through once a run of the card verified the surface it changed", async () => {
+    const task = await inReview(3);
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-api/drive.sh": PASSING });
+    const refused = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(refused._tag).toBe("RequirementUnmet");
+    await recordRun({
+      taskId: task.id,
+      repoRoot,
+      command: change("apps/api/src/feature.ts"),
+    });
+    const done = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(done.column).toBe("done");
+    expect(done.revision).toBe(task.revision + 1);
+  }, 120_000);
+
+  it("is not satisfied by evidence from a different surface than the change touched", async () => {
+    const task = await inReview(3);
+    // The fixture can verify `web` and nothing else.
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const webRun = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      command: change("apps/web/src/page.ts"),
+    });
+    // The control: the same `web` run on a card of its own is evidence that meets the requirement,
+    // so the refusal below is about the surface, not about the `web` verification failing.
+    const control = await inReview(3);
+    await recordRun({
+      taskId: control.id,
+      repoRoot,
+      command: change("apps/web/src/page.ts"),
+    });
+    const controlDone = await withService((s) =>
+      s.move({
+        taskId: control.id,
+        expectedRevision: control.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(controlDone.column).toBe("done");
+
+    // The card's change then moves to `api`, which the fixture cannot verify.
+    const apiRun = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      command: change("apps/api/src/feature.ts"),
+    });
+    const err = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(err._tag).toBe("RequirementUnmet");
+    expect(err).toMatchObject({ requirement: VERIFIED_REQUIREMENT });
+    expect(err.message).toContain('needs "verified"');
+    expect(err.message).toContain(
+      `run ${apiRun}'s latest verify call over the change: api: no verification (`,
+    );
+    expect(err.message).not.toContain(webRun);
+    const after = await withService((s) => s.get(task.id));
+    expect(after.column).toBe("review");
+  }, 180_000);
+
+  it("keeps a card pinned to version 1 on the exit it started under", async () => {
+    const task = await inReview(1);
+    const done = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(done.column).toBe("done");
   });
 });

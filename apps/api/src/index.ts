@@ -125,6 +125,12 @@ const ModelConfig = Config.all({
    * verification that proves the parked run (`.pi/skills/verify-board/ask.sh`) sets it.
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
+  /**
+   * Whether the faux script calls `verify` after its `bash` turn (LOB-78's `fauxVerify`). Off by
+   * default; `.pi/skills/verify-board/requires.sh` sets it so a run on a card records the evidence
+   * a column's `verified` requirement checks (LOB-80).
+   */
+  fauxVerify: Config.Boolean("FAUX_VERIFY").pipe(Config.withDefault(false)),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -263,6 +269,7 @@ const HttpLive = Effect.gen(function* () {
       fauxCommand: model.fauxCommand,
       fauxEveryTurn: model.fauxEveryTurn,
       fauxAsk: Option.getOrUndefined(model.fauxAsk),
+      fauxVerify: model.fauxVerify,
     }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,

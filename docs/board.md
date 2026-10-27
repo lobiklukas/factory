@@ -93,6 +93,14 @@ card carries the thread as its `task_thread` prompt section.
 artifact a reviewer may skip into a condition of the move. A skill's output is what a gate checks, so
 the verify-skill convention becomes mechanism.
 
+Built (LOB-80): `TaskService.move` checks the leaving column's `requires[]` under the card's pinned
+definition version, after the declared transition and the human gate, and refuses with
+`RequirementUnmet` naming the key. The default pipeline's `review` declares `verified` from version 3:
+the card's newest `verify` call over a change (across all its runs) must have passed for every surface
+that change touched — a passing verification of another surface does not count. A move into
+`canceled` is never gated. Only keys with a recorded artifact are checked (`packages/core/src/
+requirements.ts` lists why the others are not yet); the logs are read before the card is locked.
+
 ## B9 — Ordering and caps
 
 Within a column: dependency readiness, then a `priority` flag (`urgent | normal`), then FIFO. No
