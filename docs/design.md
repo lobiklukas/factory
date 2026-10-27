@@ -409,6 +409,13 @@ reviewed, and tested — and this is the same class of risk as a relay bug would
 **R4 — Cost attribution.** Inference spend dominates infrastructure by an order of magnitude,
 and per-session attribution is what makes it manageable. Pi Durable's `UsageDoc` gives us the
 raw material; turning it into per-repo, per-user reporting is ours to build.
+_As built (LOB-163)._ A session may carry a spend ceiling (`createSession({ budget })`, or the
+server's `SESSION_BUDGET`), committed to its log as `factory.budget`. A `beforeRequest` hook in
+`packages/harness/src/budget.ts` checks it before every model request a run sends: once the session's
+`pi.usage` total has reached the cap, the stop is recorded (a `budget` transcript entry and
+`budget.stopped` on the snapshot) and the root conversation is aborted, as an interrupt would, so the
+request is never sent. A request already in flight is paid for, so a session ends above its cap by at
+most one request. The full stop semantics are that module's header.
 
 **R5 — `Sandbox` CRD is `v1beta1`.** We inherit a SIG Apps controller and its API may shift.
 Accepted because it replaces exactly the boring, bug-prone machinery (stable identity, pause
