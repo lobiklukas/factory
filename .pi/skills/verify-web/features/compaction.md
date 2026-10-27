@@ -30,7 +30,7 @@ at or after the press:
 ## How a user reaches it
 
 Open a session. The header reads left to right: the status chip, the read-path label, the live tool,
-this session's usage (`46,120 tokens`), **Compact**, **Fork**, and the Forget icon. Press Compact.
+this session's usage (`46,120 tokens`), **Compact**, and **Fork**. Press Compact.
 
 - While the pane is attaching, or the session is running, the button is disabled and its `title` and
   `aria-describedby` target say why: `Attaching to the session`, `Wait for this run to finish before

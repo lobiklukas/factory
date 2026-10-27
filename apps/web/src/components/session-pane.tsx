@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useAtom, useAtomSet } from "@effect/atom-react";
+import { useAtom, useAtomRefresh, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
 import {
@@ -8,7 +8,6 @@ import {
   Loader2Icon,
   Minimize2Icon,
   SquareIcon,
-  XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
@@ -31,7 +30,7 @@ import {
   sessionAtom,
   type SessionView,
 } from "@/lib/atoms/session-atom";
-import { forgetSession, recordSession } from "@/lib/atoms/session-registry";
+import { sessionListAtom } from "@/lib/atoms/session-list";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -128,8 +127,7 @@ export const SessionPane = ({
   const send = useAtomSet(sendMessageAtom);
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
-  const record = useAtomSet(recordSession);
-  const forget = useAtomSet(forgetSession);
+  const refreshList = useAtomRefresh(sessionListAtom);
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [forking, setForking] = useState(false);
@@ -154,12 +152,13 @@ export const SessionPane = ({
   const queued =
     view === null ? [] : view.queued.filter((q) => !withdrawn.has(q.id));
 
-  // The registry is written here rather than in the atom: writing an atom from
-  // an atom needs an `AtomRegistry` in context, and the pane is already the
-  // place that knows what the stream last reported.
+  // The sidebar is the server's list, so the pane does not write to it; it asks
+  // for a re-read when the status it is streaming changes, which keeps the row of
+  // the session on screen from lagging the header beside it.
+  const status = view?.summary.status;
   useEffect(() => {
-    if (view !== null) record(view.summary);
-  }, [record, view]);
+    if (status !== undefined) refreshList();
+  }, [refreshList, status]);
 
   /**
    * Freeze a compaction's end reading once its spend has landed (LOB-223).
@@ -394,9 +393,8 @@ export const SessionPane = ({
               setForking(true);
               void fork(sessionId)
                 .then((summary) => {
-                  // The child is recorded before navigating: the registry is what the sidebar
-                  // lists, and the pane the route moves to would record it one render later.
-                  record(summary);
+                  // The sidebar re-reads the server's list on its own (`SESSIONS_KEY`), so the
+                  // route is the only thing to move.
                   void navigate({
                     to: "/sessions/$sessionId",
                     params: { sessionId: summary.id },
@@ -417,15 +415,6 @@ export const SessionPane = ({
               <GitForkIcon className="size-4" strokeWidth={1.75} />
             )}
             Fork
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Forget this session"
-            onClick={() => forget(sessionId)}
-          >
-            <XIcon className="size-4" strokeWidth={1.75} />
           </Button>
         </div>
       </header>

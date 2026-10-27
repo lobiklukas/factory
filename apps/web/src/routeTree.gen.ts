@@ -13,6 +13,8 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as SandboxesRouteImport } from './routes/sandboxes'
 import { Route as SessionsRouteImport } from './routes/sessions'
+import { Route as BoardsIndexRouteImport } from './routes/boards.index'
+import { Route as BoardsBoardIdRouteImport } from './routes/boards.$boardId'
 import { Route as SessionsIndexRouteImport } from './routes/sessions.index'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions.$sessionId'
 
@@ -36,6 +38,16 @@ const SessionsRoute = SessionsRouteImport.update({
   path: '/sessions',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BoardsIndexRoute = BoardsIndexRouteImport.update({
+  id: '/boards/',
+  path: '/boards/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BoardsBoardIdRoute = BoardsBoardIdRouteImport.update({
+  id: '/boards/$boardId',
+  path: '/boards/$boardId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -52,14 +64,18 @@ export interface FileRoutesByFullPath {
   '/approvals': typeof ApprovalsRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
+  '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/sandboxes': typeof SandboxesRoute
+  '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/boards': typeof BoardsIndexRoute
   '/sessions': typeof SessionsIndexRoute
 }
 export interface FileRoutesById {
@@ -68,7 +84,9 @@ export interface FileRoutesById {
   '/approvals': typeof ApprovalsRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
+  '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
 }
 export interface FileRouteTypes {
@@ -78,17 +96,28 @@ export interface FileRouteTypes {
     | '/approvals'
     | '/sandboxes'
     | '/sessions'
+    | '/boards/$boardId'
     | '/sessions/$sessionId'
+    | '/boards/'
     | '/sessions/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/approvals' | '/sandboxes' | '/sessions/$sessionId' | '/sessions'
+  to:
+    | '/'
+    | '/approvals'
+    | '/sandboxes'
+    | '/boards/$boardId'
+    | '/sessions/$sessionId'
+    | '/boards'
+    | '/sessions'
   id:
     | '__root__'
     | '/'
     | '/approvals'
     | '/sandboxes'
     | '/sessions'
+    | '/boards/$boardId'
     | '/sessions/$sessionId'
+    | '/boards/'
     | '/sessions/'
   fileRoutesById: FileRoutesById
 }
@@ -97,6 +126,8 @@ export interface RootRouteChildren {
   ApprovalsRoute: typeof ApprovalsRoute
   SandboxesRoute: typeof SandboxesRoute
   SessionsRoute: typeof SessionsRouteWithChildren
+  BoardsBoardIdRoute: typeof BoardsBoardIdRoute
+  BoardsIndexRoute: typeof BoardsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -127,6 +158,20 @@ declare module '@tanstack/react-router' {
       path: '/sessions'
       fullPath: '/sessions'
       preLoaderRoute: typeof SessionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/boards/': {
+      id: '/boards/'
+      path: '/boards'
+      fullPath: '/boards/'
+      preLoaderRoute: typeof BoardsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/boards/$boardId': {
+      id: '/boards/$boardId'
+      path: '/boards/$boardId'
+      fullPath: '/boards/$boardId'
+      preLoaderRoute: typeof BoardsBoardIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sessions/': {
@@ -165,6 +210,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApprovalsRoute: ApprovalsRoute,
   SandboxesRoute: SandboxesRoute,
   SessionsRoute: SessionsRouteWithChildren,
+  BoardsBoardIdRoute: BoardsBoardIdRoute,
+  BoardsIndexRoute: BoardsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -53,8 +53,11 @@ needed. Environment: `WEB_URL`, `API_URL`, `EVIDENCE_DIR`.
 
 It asserts the shell renders, asserts the browser can reach the API from the page's own origin,
 and clicks **Start a session**, requiring the transcript to reach the answer the agent's `bash`
-tool produced and the card to label its read path. Exit code is non-zero when a required check
-fails.
+tool produced and the card to label its read path. It then opens the board `./up.sh` seeded and
+requires one lane per column in definition order, the seeded card in `intake`, and — after a
+`factory board move` made outside the browser — the card in its new lane on reload and in a fresh
+browser context (`features/board.md`). Exit code is non-zero when a required check fails.
+Environment adds `BOARD_FILE` (default `.verify/run/board.json`).
 
 The dashboard drives the API, and the API needs Postgres on host port 5442: `./up.sh` asks the port
 first and runs `docker compose up -d --wait postgres` only when nothing answers, so it starts from a
@@ -68,6 +71,8 @@ storage are real.
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
 
 - `dashboard.png` — full-page screenshot after the drive
+- `boards.png`, `board.png`, `board-after-move.png` — the boards list and the seeded board before and
+  after the CLI move
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
   transcript and mode label, console errors, and HTTP responses ≥ 400
 

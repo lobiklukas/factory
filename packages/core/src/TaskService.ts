@@ -25,8 +25,10 @@ import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
   BoardColumn,
+  BoardInstance,
   BoardInstanceId,
   BoardView,
+  LIST_BOARDS_LIMIT,
   Task,
   TaskEvent,
   TaskId,
@@ -165,6 +167,8 @@ export type ListTasksInput = {
 export type TaskServiceShape = {
   /** The board and the definition version it binds (B2), in one read: lanes and cards agree. */
   readonly getBoard: (boardId: string) => Effect.Effect<BoardView, TaskError>;
+  /** Every board instance, newest first, capped at `LIST_BOARDS_LIMIT` (LOB-75). */
+  readonly listBoards: Effect.Effect<ReadonlyArray<BoardInstance>, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   readonly get: (taskId: string) => Effect.Effect<Task, TaskError>;
   readonly list: (
@@ -226,6 +230,7 @@ export const TaskServiceLive = Layer.effect(
 
     const decodeTask = Schema.decodeUnknownEffect(Task);
     const decodeBoard = Schema.decodeUnknownEffect(BoardView);
+    const decodeInstance = Schema.decodeUnknownEffect(BoardInstance);
     const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(TaskEvent));
 
     const toTask = (row: TaskRow): Effect.Effect<Task, TaskStorageError> =>
@@ -392,6 +397,43 @@ export const TaskServiceLive = Layer.effect(
           );
         }),
       );
+
+    /**
+     * Which boards exist, newest first (LOB-75). The id breaks a tie on `created_at`, so two
+     * instances made in the same transaction still list in one stable order.
+     */
+    const listBoards: Effect.Effect<
+      ReadonlyArray<BoardInstance>,
+      TaskError
+    > = withStorage(
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          id: string;
+          repo: string;
+          definitionId: string;
+          definitionVersion: number;
+          createdAt: Date | string;
+        }>`
+            SELECT id, repo,
+                   definition_id AS "definitionId",
+                   definition_version AS "definitionVersion",
+                   created_at AS "createdAt"
+            FROM board_instances
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${LIST_BOARDS_LIMIT}
+          `;
+        return yield* Effect.forEach(rows, (row) =>
+          decodeInstance({ ...row, createdAt: iso(row.createdAt) }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `board ${row.id} does not decode: ${String(cause)}`,
+                }),
+            ),
+          ),
+        );
+      }),
+    );
 
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
       withStorage(
@@ -597,6 +639,7 @@ export const TaskServiceLive = Layer.effect(
 
     return {
       getBoard,
+      listBoards,
       create,
       get,
       list,

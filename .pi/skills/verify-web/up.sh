@@ -68,5 +68,19 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+# One board and one card in `intake`, for the board lanes (LOB-75). The board skill's seed is the
+# only writer of board fixtures (`.pi/skills/verify-board/seed.ts`), so this reuses it rather than
+# growing a second one; it writes through the real `TaskService` against the API's DATABASE_URL.
+#
+# It is evaluated from `apps/api` rather than run by path: bun's isolated linker (bun.lock
+# `configVersion: 1`) links `@repo/core` and `@repo/storage-postgres` only into the workspaces that
+# depend on them, and a file under `.pi/` resolves bare imports from its own directory upwards, where
+# the root `node_modules` holds neither. The seed has no relative imports, so its text runs as-is.
+if ! ( cd "$ROOT/apps/api" && exec bun -e "$(cat "$ROOT/.pi/skills/verify-board/seed.ts")" ) \
+    > "$RUN_DIR/board.json"; then
+  echo "board seed failed — see $RUN_DIR/board.json" >&2
+  exit 1
+fi
+
 echo "api  http://localhost:$API_PORT  (pid $(cat "$RUN_DIR/api.pid"))"
 echo "web  http://localhost:$WEB_PORT  (pid $(cat "$RUN_DIR/web.pid"))"

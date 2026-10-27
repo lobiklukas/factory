@@ -1,4 +1,4 @@
-import { SessionRpc } from "@repo/domain/Rpc";
+import { RpcApi } from "@repo/domain/Rpc";
 import { Context, Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
@@ -12,10 +12,14 @@ const ProtocolLive = EffectRpcClient.layerProtocolHttp({
   Layer.provide(RpcSerialization.layerNdjson),
 );
 
+/**
+ * The dashboard's one client over the API's whole RPC surface: sessions, approvals, and the board's
+ * `TasksRpc` group (LOB-75), the same `RpcApi` the server mounts at `/rpc`.
+ */
 export class RpcClient extends Context.Service<RpcClient>()("RpcClient", {
   make: Effect.gen(function* () {
     return {
-      client: yield* EffectRpcClient.make(SessionRpc),
+      client: yield* EffectRpcClient.make(RpcApi),
     } as const;
   }),
 }) {

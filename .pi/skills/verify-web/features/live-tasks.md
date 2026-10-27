@@ -37,7 +37,7 @@ enough to read. The drive then requires:
 2. that the same session, once the run settles, has zero task rows and says `No tasks`;
 3. that the run settled **without a reload**: a `window` marker set before the run is still there
    afterwards, so "updates without a reload" is a fact rather than an inference;
-4. that Tab from the header's Forget button reaches the task list (`aria-label="Live task rows"`,
+4. that Tab from the header's last control (Fork, since LOB-75 removed Forget) reaches the task list (`aria-label="Live task rows"`,
    which is also a named focusable region);
 5. that at 1280×800 neither the document nor the panel overflows sideways, and no row's cells run
    into each other (a row whose middle column cannot shrink overlaps rather than scrolling, so
