@@ -25,6 +25,9 @@ import type {
   SandboxUnsupported,
 } from "./Sandbox";
 
+/** The output `exec` keeps of one command when its options name no cap: 16 MiB. */
+export const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 /** How one command runs. Paths are relative to the sandbox's workdir. */
 export type ExecOptions = {
   /** Where the command starts; the workdir when absent. */
@@ -33,6 +36,12 @@ export type ExecOptions = {
   readonly env?: Readonly<Record<string, string>>;
   /** Seconds before the command is killed and the call fails with `timeout`. */
   readonly timeout?: number;
+  /**
+   * The most output kept, in UTF-8 bytes across stdout and stderr together; `DEFAULT_MAX_OUTPUT_BYTES`
+   * when absent. Output past it is dropped and the result says `truncated`; the command runs on.
+   * It bounds what one command can make the caller hold, since `exec` keeps all it keeps in memory.
+   */
+  readonly maxOutputBytes?: number;
 };
 
 export type SandboxRuntimeShape = {
@@ -43,6 +52,8 @@ export type SandboxRuntimeShape = {
   /**
    * Run one command to completion. A string runs through the sandbox's shell; an array runs its
    * first element with the rest as unparsed arguments. Interrupting the effect kills the command.
+   * Its output is kept up to `maxOutputBytes`; the harness's `ExecutionEnv` is the way to stream
+   * or spill more.
    */
   readonly exec: (
     sandbox: Sandbox,

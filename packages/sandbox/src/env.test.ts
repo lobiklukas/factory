@@ -4,17 +4,18 @@
  */
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type {
-  BinaryReader,
-  DirReader,
-  ExecutionError,
+import {
+  type BinaryReader,
+  type DirReader,
+  type ExecutionError,
+  err,
   FileError,
-  Result,
-  ShellExecOptions,
-  ShellExecResult,
+  type Result,
+  type ShellExecOptions,
+  type ShellExecResult,
 } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { Effect } from "effect";
@@ -23,7 +24,7 @@ import { SandboxExecutionEnv } from "./env";
 import { SandboxId } from "./Sandbox";
 
 const context = BACKGROUND_CONTEXT;
-const sandboxId = SandboxId.make("sbx_envtest");
+const sandboxId = SandboxId.make("sbx-envtest");
 
 /** A Node environment that keeps the handles it hands out, so a test can probe them later. */
 class RecordingEnv extends NodeExecutionEnv {
@@ -75,6 +76,25 @@ class DeafEnv extends NodeExecutionEnv {
     _callContext: Context,
   ): Promise<Result<ShellExecResult, ExecutionError>> {
     return super.exec(command, options, BACKGROUND_CONTEXT);
+  }
+}
+
+/** A wrapped environment whose next `failures` removals fail, as a busy or locked path would. */
+class FlakyRemoveEnv extends NodeExecutionEnv {
+  failures = 0;
+
+  override remove(
+    path: string,
+    options: { recursive?: boolean; force?: boolean } | undefined,
+    callContext: Context,
+  ): Promise<Result<void, FileError>> {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      return Promise.resolve(
+        err(new FileError("permission_denied", "locked for the test", path)),
+      );
+    }
+    return super.remove(path, options, callContext);
   }
 }
 
@@ -139,16 +159,45 @@ describe("a sandbox's environment", () => {
       { spill: { afterBytes: 10, afterLines: 2 } },
       context,
     );
-    const paths = [dir, file].map((result) => (result.ok ? result.value : ""));
-    const spillPath = spilled.ok ? spilled.value.spillPath : undefined;
-    expect(spillPath).toBeDefined();
-    for (const path of [...paths, spillPath ?? ""])
-      expect(existsSync(path)).toBe(true);
+    const [dirPath, filePath] = [dir, file].map((result) =>
+      result.ok ? result.value : "",
+    );
+    const spillPath = spilled.ok ? (spilled.value.spillPath ?? "") : "";
+    expect(spillPath).not.toBe("");
+    // A file and its directory each: the directories were made for them and go with them.
+    const made = [
+      dirPath ?? "",
+      filePath ?? "",
+      dirname(filePath ?? ""),
+      spillPath,
+      dirname(spillPath),
+    ];
+    for (const path of made) expect(existsSync(path)).toBe(true);
+    expect(made.some((path) => path === tmpdir())).toBe(false);
 
     await env.destroy(context);
 
-    for (const path of [...paths, spillPath ?? ""])
-      expect(existsSync(path)).toBe(false);
+    for (const path of made) expect(existsSync(path)).toBe(false);
+    expect(existsSync(tmpdir())).toBe(true);
+  });
+
+  it("keeps what it could not remove, and a later destroy removes it", async () => {
+    const flaky = new FlakyRemoveEnv({ cwd: workdir });
+    const wrapped = new SandboxExecutionEnv(flaky, sandboxId);
+    const dir = await wrapped.createTempDir("sandbox-probe-", context);
+    const path = dir.ok ? dir.value : "";
+    flaky.failures = 1;
+
+    await expect(wrapped.destroy(context)).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+    expect(existsSync(path)).toBe(true);
+    // Still destroyed to every caller while its cleanup is unfinished.
+    expect(code(await wrapped.exists(".", context))).toBe("aborted");
+
+    await wrapped.destroy(context);
+    expect(existsSync(path)).toBe(false);
+    await wrapped.destroy(context);
   });
 
   it("refuses every operation once destroyed, and destroying again does nothing", async () => {

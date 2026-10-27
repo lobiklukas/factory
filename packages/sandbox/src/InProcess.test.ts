@@ -4,6 +4,7 @@
  * host.
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -63,7 +64,7 @@ describe("the suites it runs", () => {
     expect(env.length).toBe(21);
     expect(
       createSandboxRuntimeConformance({ expect }, InProcess.layer()).length,
-    ).toBe(18);
+    ).toBe(19);
   });
 });
 
@@ -154,7 +155,12 @@ describe("the in-process capability descriptor", () => {
         return yield* runtime.exec(sandbox, "sleep 1; printf finished");
       }),
     );
-    expect(result).toEqual({ exitCode: 0, stdout: "finished", stderr: "" });
+    expect(result).toEqual({
+      exitCode: 0,
+      stdout: "finished",
+      stderr: "",
+      truncated: false,
+    });
   });
 });
 
@@ -252,5 +258,74 @@ describe("the adapter's lifetime", () => {
       }),
     );
     expect(cwd.endsWith("/sub")).toBe(true);
+  });
+});
+
+// A directory its owner may not write: removing the workdir under it fails, as a busy or
+// permission-damaged workdir would. Root ignores the mode, so the cases need another user.
+const asRoot = process.getuid?.() === 0;
+
+/** A workdir the host cannot remove until `unlock` runs. */
+const lock = (workdir: string): (() => void) => {
+  const locked = join(workdir, "locked");
+  mkdirSync(locked);
+  writeFileSync(join(locked, "f.txt"), "x");
+  chmodSync(locked, 0o500);
+  return () => chmodSync(locked, 0o700);
+};
+
+describe.skipIf(asRoot)("a destroy whose cleanup fails", () => {
+  it("fails with SandboxFileError, and a retry finishes the cleanup", async () => {
+    const root = mkdtempSync(join(scratch, "failing-"));
+    const { workdir, failed, during, retried } = await withRuntime(
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.create;
+          const unlock = lock(sandbox.workdir);
+          const failed = yield* Effect.flip(runtime.destroy(sandbox));
+          // Half destroyed is destroyed to every other operation.
+          const during = yield* Effect.flip(runtime.readFile(sandbox, "x"));
+          unlock();
+          yield* runtime.destroy(sandbox);
+          return {
+            workdir: sandbox.workdir,
+            failed,
+            during,
+            retried: existsSync(sandbox.workdir),
+          };
+        }),
+      { root },
+    );
+    expect(failed).toMatchObject({
+      _tag: "SandboxFileError",
+      code: "permission_denied",
+    });
+    expect(during._tag).toBe("SandboxNotFound");
+    expect(retried).toBe(false);
+    expect(existsSync(workdir)).toBe(false);
+  });
+
+  it("releasing the runtime destroys every other sandbox, and finishes a half-destroyed one", async () => {
+    const root = mkdtempSync(join(scratch, "failing-"));
+    let unlockStuck = () => {};
+    const { stuck, half, other } = await withRuntime(
+      (runtime) =>
+        Effect.gen(function* () {
+          const stuck = yield* runtime.create;
+          const half = yield* runtime.create;
+          const other = yield* runtime.create;
+          unlockStuck = lock(stuck.workdir);
+          const unlockHalf = lock(half.workdir);
+          yield* Effect.flip(runtime.destroy(half));
+          unlockHalf();
+          return { stuck, half, other };
+        }),
+      { root },
+    );
+    // The stuck one could not be removed, and that stopped neither of the others.
+    expect(existsSync(stuck.workdir)).toBe(true);
+    expect(existsSync(half.workdir)).toBe(false);
+    expect(existsSync(other.workdir)).toBe(false);
+    unlockStuck();
   });
 });

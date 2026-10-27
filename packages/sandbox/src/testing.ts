@@ -153,7 +153,12 @@ export const createSandboxRuntimeConformance = <E>(
               "the workdir is absolute",
             );
             const listing = yield* runtime.exec(sandbox, ["ls", "-A"]);
-            assert.deepEqual(listing, { exitCode: 0, stdout: "", stderr: "" });
+            assert.deepEqual(listing, {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              truncated: false,
+            });
             // Canonical: the directory a command starts in is the one the handle names.
             const pwd = yield* runtime.exec(sandbox, "pwd -P");
             assert.strictEqual(pwd.stdout.trim(), sandbox.workdir);
@@ -221,6 +226,7 @@ export const createSandboxRuntimeConformance = <E>(
             exitCode: 7,
             stdout: "out",
             stderr: "err",
+            truncated: false,
           });
         }),
     ),
@@ -259,6 +265,33 @@ export const createSandboxRuntimeConformance = <E>(
         );
         assert.strictEqual(variable.stdout, "probe-value");
       }),
+    ),
+
+    createCase(
+      "exec keeps output up to maxOutputBytes and says it dropped the rest",
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* scopedSandbox(runtime);
+          // Two-byte characters: the cap falls inside one, which is dropped whole.
+          const capped = yield* runtime.exec(sandbox, "printf 'éééééééééé'", {
+            maxOutputBytes: 7,
+          });
+          assert.deepEqual(capped, {
+            exitCode: 0,
+            stdout: "ééé",
+            stderr: "",
+            truncated: true,
+          });
+          const fits = yield* runtime.exec(sandbox, "printf 'éé'", {
+            maxOutputBytes: 4,
+          });
+          assert.deepEqual(fits, {
+            exitCode: 0,
+            stdout: "éé",
+            stderr: "",
+            truncated: false,
+          });
+        }),
     ),
 
     createCase("a missing program fails with spawn_error", (runtime) =>
@@ -387,7 +420,7 @@ export const createSandboxRuntimeConformance = <E>(
     createCase("a sandbox this runtime never created is not found", (runtime) =>
       Effect.gen(function* () {
         const stranger: Sandbox = {
-          id: SandboxId.make("sbx_neverminted"),
+          id: SandboxId.make("sbx-neverminted"),
           workdir: "/nonexistent",
         };
         const outcomes = yield* Effect.all([

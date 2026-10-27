@@ -422,13 +422,14 @@ owned conversations), automations, AutoWiki, Agent Readiness scoring, Slack/Line
 delegation, any diff or review UI (review is GitHub's, per D16), and the Cloudflare executor
 (interface only, per D6).
 
-Of the design's component inventory (§3), these do not exist yet, and none of them is an oversight:
+Of the design's component inventory (§3), these do not exist yet, and none of them is an oversight.
+`packages/sandbox` does (LOB-88): the `SandboxRuntime` interface, its capability descriptor, and
+the in-process runtime with its `ExecutionEnv` adapter; nothing outside its tests uses it yet.
 
 | Package                       | Status                                                       |
 | ----------------------------- | ------------------------------------------------------------ |
 | `packages/bus`                | Not built; needs presence first — task 7.                    |
 | `packages/storage-projection` | Not built; the fold lives in `PostgresStorage` — task 8.     |
-| `packages/sandbox`            | M4.                                                          |
 | `packages/sandbox-kubernetes` | M4.                                                          |
 | `infra`                       | M3 (Docker) and M7 (GKE); nothing is provisioned until then. |
 

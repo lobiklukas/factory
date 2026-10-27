@@ -13,7 +13,7 @@
  */
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { FileError, Result } from "@earendil-works/pi-durable/env";
+import { FileError, type Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { Clock, Effect, Layer, Random, Ref, type Scope } from "effect";
 import {
@@ -26,6 +26,7 @@ import {
 import {
   type Sandbox,
   type SandboxCapabilities,
+  SandboxFileError,
   SandboxId,
   SandboxNotFound,
   SandboxUnsupported,
@@ -52,13 +53,13 @@ export type InProcessOptions = {
   readonly shellEnv?: NodeJS.ProcessEnv;
 };
 
-/** `sbx_`, the creation time and forty random bits, base 36. */
+/** `sbx-`, the creation time and forty random bits, base 36. */
 const mintSandboxId: Effect.Effect<SandboxId> = Effect.gen(function* () {
   const millis = yield* Clock.currentTimeMillis;
   const high = yield* Random.nextIntBetween(0, 2 ** 20);
   const low = yield* Random.nextIntBetween(0, 2 ** 20);
   return SandboxId.make(
-    `sbx_${millis.toString(36)}${high.toString(36).padStart(4, "0")}${low.toString(36).padStart(4, "0")}`,
+    `sbx-${millis.toString(36)}${high.toString(36).padStart(4, "0")}${low.toString(36).padStart(4, "0")}`,
   );
 });
 
@@ -111,8 +112,24 @@ export const make = (
         }),
       );
 
-    const destroyLive = (entry: Live, context: Context) =>
-      Effect.promise(() => entry.env.destroy(context)).pipe(
+    // Sandboxes whose destroy began but did not finish: no operation finds them, a retried
+    // destroy and the layer's release finish them.
+    const dying = yield* Ref.make<ReadonlyMap<SandboxId, Live>>(new Map());
+
+    const destroyLive = (
+      entry: Live,
+      context: Context,
+    ): Effect.Effect<void, SandboxFileError> =>
+      Effect.tryPromise({
+        try: () => entry.env.destroy(context),
+        catch: (cause) =>
+          new SandboxFileError({
+            sandboxId: entry.sandbox.id,
+            path: cause instanceof FileError ? (cause.path ?? "") : "",
+            code: cause instanceof FileError ? cause.code : "unknown",
+            message: cause instanceof Error ? cause.message : String(cause),
+          }),
+      }).pipe(
         Effect.andThen(
           fileIn(entry.sandbox.id, entry.sandbox.workdir, (removeContext) =>
             host.remove(
@@ -121,6 +138,18 @@ export const make = (
               removeContext,
             ),
           ),
+        ),
+      );
+
+    /** Destroy one entry; one that fails stays in `dying` for the next attempt. */
+    const finish = (entry: Live): Effect.Effect<void, SandboxFileError> =>
+      destroyLive(entry, BACKGROUND_CONTEXT).pipe(
+        Effect.tap(() =>
+          Ref.update(dying, (sandboxes) => {
+            const next = new Map(sandboxes);
+            next.delete(entry.sandbox.id);
+            return next;
+          }),
         ),
       );
 
@@ -154,29 +183,36 @@ export const make = (
     const destroy = Effect.fn("SandboxRuntime.InProcess.destroy")(function* (
       sandbox: Sandbox,
     ) {
-      // Forget it first, so no operation can find it while its files are being removed.
+      // Move it out of `live` first, so no operation can find it while its files are being removed.
       const entry = yield* Ref.modify(live, (sandboxes) => {
         const next = new Map(sandboxes);
         next.delete(sandbox.id);
         return [sandboxes.get(sandbox.id), next] as const;
       });
-      if (entry === undefined) return;
-      yield* destroyLive(entry, BACKGROUND_CONTEXT);
+      if (entry !== undefined) {
+        yield* Ref.update(dying, (sandboxes) =>
+          new Map(sandboxes).set(sandbox.id, entry),
+        );
+      }
+      const pending = entry ?? (yield* Ref.get(dying)).get(sandbox.id);
+      if (pending === undefined) return;
+      yield* finish(pending);
     }, Effect.uninterruptible);
 
-    // Releasing the runtime destroys what is still alive, before the root is removed.
+    // Releasing the runtime destroys what is still alive or half destroyed, before the root is
+    // removed. Each one on its own: a failure or a defect in one leaves the others to run.
     yield* Effect.addFinalizer(() =>
-      Ref.get(live).pipe(
-        Effect.flatMap((sandboxes) =>
-          Effect.forEach(
-            [...sandboxes.values()],
-            (entry) =>
-              destroyLive(entry, BACKGROUND_CONTEXT).pipe(Effect.ignore),
-            { discard: true },
-          ),
-        ),
-        Effect.andThen(Ref.set(live, new Map())),
-      ),
+      Effect.gen(function* () {
+        const alive = yield* Ref.getAndSet(live, new Map());
+        const dyingNow = yield* Ref.get(dying);
+        const all = new Map([...dyingNow, ...alive]);
+        yield* Ref.set(dying, all);
+        yield* Effect.forEach(
+          [...all.values()],
+          (entry) => Effect.exit(finish(entry)),
+          { discard: true },
+        );
+      }),
     );
 
     const unsupported = (operation: "pause" | "resume") => (sandbox: Sandbox) =>

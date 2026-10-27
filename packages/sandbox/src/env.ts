@@ -7,12 +7,13 @@
  * means to it. Once the sandbox is destroyed every operation is refused with `aborted`; commands
  * still running are aborted; readers and watchers opened through it are closed; and the temporary
  * files it made outside the workdir (`createTempDir`, `createTempFile`, exec spill files) are
- * removed. Everything else is the wrapped environment's own behaviour, which is why Pi Durable's
+ * removed, with the directories made to hold them. Everything else is the wrapped environment's own behaviour, which is why Pi Durable's
  * conformance suite runs against the wrapper and not against what it wraps.
  *
  * The wrapper adds no boundary: an absolute path or a command reaches whatever the wrapped
  * environment reaches. What that is, is the runtime's descriptor's `isolation` field.
  */
+import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import {
   BACKGROUND_CONTEXT,
@@ -44,17 +45,33 @@ import {
   SandboxFileError,
   type SandboxId,
 } from "./Sandbox";
-import type { ExecOptions } from "./SandboxRuntime";
+import { DEFAULT_MAX_OUTPUT_BYTES, type ExecOptions } from "./SandboxRuntime";
+
+/** A POSIX path's directory; `undefined` for the root or a path with no directory part. */
+const parentOf = (path: string): string | undefined => {
+  const slash = path.replace(/\/+$/, "").lastIndexOf("/");
+  return slash <= 0 ? undefined : path.slice(0, slash);
+};
 
 /** Anything opened through the environment that holds a resource until it is closed. */
 type Closable = { close(context: Context): Promise<void> };
+
+/**
+ * How a temporary path is removed. `"tree"`: a directory made for it alone, removed with what it
+ * holds. `"file"`: a file the wrapped environment placed itself (an exec spill file); its directory
+ * is removed too once the file was the last thing in it, which is the case for Pi Durable's
+ * `NodeExecutionEnv`, whose every temporary file sits in a fresh directory of its own.
+ */
+type Temporary = "tree" | "file";
 
 export class SandboxExecutionEnv implements ExecutionEnv {
   /** The wrapped environment's file namespace: wrapping a sandbox's environment changes no files. */
   readonly id: string;
   private readonly lifetime = new AbortController();
   private readonly opened = new Set<Closable>();
-  private readonly temporary = new Set<string>();
+  private readonly temporary = new Map<string, Temporary>();
+  /** The cleanup in progress or done; cleared when it fails, so a later `destroy` retries it. */
+  private cleaning: Promise<void> | undefined;
 
   constructor(
     private readonly inner: ExecutionEnv,
@@ -79,27 +96,73 @@ export class SandboxExecutionEnv implements ExecutionEnv {
   /**
    * Refuse everything from now on, abort what runs, close what is open, and remove the temporary
    * files. The workdir itself belongs to the runtime, which removes it after this resolves.
-   * Idempotent.
+   * Idempotent once it has resolved; when it rejects (a temporary path could not be removed), the
+   * paths still there are kept and the next call tries them again.
    */
   destroy(context: Context): Promise<void> {
-    if (this.destroyed) return Promise.resolve();
     this.lifetime.abort();
+    if (this.cleaning !== undefined) return this.cleaning;
     // Mandatory cleanup: a caller's cancellation must not leave a handle open or a file behind.
-    const cleanup = withoutAbortSignal(context);
+    const cleaning = this.clean(withoutAbortSignal(context)).catch(
+      (error: unknown) => {
+        this.cleaning = undefined;
+        throw error;
+      },
+    );
+    this.cleaning = cleaning;
+    return cleaning;
+  }
+
+  private clean(context: Context): Promise<void> {
     const handles = [...this.opened];
     this.opened.clear();
-    const paths = [...this.temporary];
-    this.temporary.clear();
-    return Promise.all(handles.map((handle) => handle.close(cleanup)))
-      .then(() => this.inner.cleanup(cleanup))
+    const failures: FileError[] = [];
+    return Promise.all(handles.map((handle) => handle.close(context)))
+      .then(() => this.inner.cleanup(context))
       .then(() =>
         Promise.all(
-          paths.map((path) =>
-            this.inner.remove(path, { recursive: true, force: true }, cleanup),
+          [...this.temporary].map(([path, kind]) =>
+            this.removeTemporary(path, kind, context).then((removed) => {
+              if (removed.ok) this.temporary.delete(path);
+              else failures.push(removed.error);
+            }),
           ),
         ),
       )
-      .then(() => undefined);
+      .then(() => {
+        if (failures[0] !== undefined) throw failures[0];
+      });
+  }
+
+  /** Remove one temporary path, and a spill file's directory once it is empty. */
+  private removeTemporary(
+    path: string,
+    kind: Temporary,
+    context: Context,
+  ): Promise<Result<void, FileError>> {
+    return this.inner
+      .remove(path, { recursive: true, force: true }, context)
+      .then((removed) => {
+        const parent = parentOf(path);
+        if (
+          !removed.ok ||
+          kind === "tree" ||
+          parent === undefined ||
+          parent === this.inner.cwd
+        ) {
+          return removed;
+        }
+        return this.inner.listDir(parent, context).then((listing) =>
+          // Gone already, or holding something else: either way not this file's to remove.
+          !listing.ok || listing.value.length > 0
+            ? ok(undefined)
+            : this.inner.remove(
+                parent,
+                { recursive: true, force: true },
+                context,
+              ),
+        );
+      });
   }
 
   // --- guards -------------------------------------------------------------------------------
@@ -157,18 +220,16 @@ export class SandboxExecutionEnv implements ExecutionEnv {
    * Remember a temporary path outside the workdir, so `destroy` removes it. One that appears after
    * the destroy began (the spill file of a command it aborted) is removed at once.
    */
-  private remember(path: string | undefined): Promise<void> {
+  private remember(path: string | undefined, kind: Temporary): Promise<void> {
     if (path === undefined) return Promise.resolve();
     if (this.destroyed) {
-      return this.inner
-        .remove(
-          path,
-          { recursive: true, force: true },
-          withoutAbortSignal(BACKGROUND_CONTEXT),
-        )
-        .then(() => undefined);
+      return this.removeTemporary(
+        path,
+        kind,
+        withoutAbortSignal(BACKGROUND_CONTEXT),
+      ).then(() => undefined);
     }
-    this.temporary.add(path);
+    this.temporary.set(path, kind);
     return Promise.resolve();
   }
 
@@ -194,6 +255,7 @@ export class SandboxExecutionEnv implements ExecutionEnv {
       .then((result) =>
         this.remember(
           result.ok ? result.value.spillPath : result.error.spillPath,
+          "file",
         ).then(() => result),
       );
   }
@@ -428,26 +490,32 @@ export class SandboxExecutionEnv implements ExecutionEnv {
       this.inner
         .createTempDir(prefix, this.scoped(context))
         .then((result) =>
-          this.remember(result.ok ? result.value : undefined).then(
+          this.remember(result.ok ? result.value : undefined, "tree").then(
             () => result,
           ),
         ),
     );
   }
 
+  /**
+   * An empty file in a temporary directory made for it alone, as `NodeExecutionEnv` does it, but
+   * made here, so the wrapper knows the directory is its own to remove.
+   */
   createTempFile(
     options: { prefix?: string; suffix?: string } | undefined,
     context: Context,
   ): Promise<Result<string, FileError>> {
-    return this.file(undefined, () =>
-      this.inner
-        .createTempFile(options, this.scoped(context))
-        .then((result) =>
-          this.remember(result.ok ? result.value : undefined).then(
-            () => result,
-          ),
-        ),
-    );
+    return this.createTempDir("tmp-", context).then((dir) => {
+      if (!dir.ok) return dir;
+      const name = `${options?.prefix ?? ""}${randomUUID()}${options?.suffix ?? ""}`;
+      return this.joinPath([dir.value, name], context).then((path) =>
+        !path.ok
+          ? path
+          : this.writeFile(path.value, "", context).then((written) =>
+              written.ok ? ok(path.value) : written,
+            ),
+      );
+    });
   }
 }
 
@@ -458,8 +526,9 @@ const interruptible = (signal: AbortSignal): Context =>
   withAbortSignal(signal, BACKGROUND_CONTEXT);
 
 /**
- * Run one command to completion and collect both streams. Interruption aborts the call, which
- * kills the command; a destroyed sandbox's environment fails it with `aborted`.
+ * Run one command to completion and collect both streams, up to `maxOutputBytes` between them.
+ * Interruption aborts the call, which kills the command; a destroyed sandbox's environment fails
+ * it with `aborted`.
  */
 export const execIn = (
   env: ExecutionEnv,
@@ -469,12 +538,28 @@ export const execIn = (
 ): Effect.Effect<ExecResult, SandboxExecError> =>
   Effect.gen(function* () {
     const output = { stdout: "", stderr: "" };
+    const cap = Math.max(0, options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+    let kept = 0;
+    let truncated = false;
     const shellOptions: ShellExecOptions = {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.env === undefined ? {} : { env: { ...options.env } }),
       ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
       onOutput: (text, _context, info) => {
-        output[info.stream] += text;
+        if (truncated) return;
+        const bytes = Buffer.byteLength(text);
+        if (kept + bytes <= cap) {
+          output[info.stream] += text;
+          kept += bytes;
+          return;
+        }
+        // The part that fits, without a character cut in half: streaming decode holds it back.
+        output[info.stream] += new TextDecoder().decode(
+          Buffer.from(text).subarray(0, cap - kept),
+          { stream: true },
+        );
+        kept = cap;
+        truncated = true;
       },
     };
     const result = yield* Effect.promise((signal) =>
@@ -487,7 +572,7 @@ export const execIn = (
         message: result.error.message,
       });
     }
-    return { exitCode: result.value.exitCode, ...output };
+    return { exitCode: result.value.exitCode, ...output, truncated };
   });
 
 const fileResult = <T>(

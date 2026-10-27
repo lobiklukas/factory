@@ -8,9 +8,12 @@
  */
 import { Schema } from "effect";
 
-/** `sbx_` then lowercase base-36: safe as a directory name, a pod name and a URL segment. */
+/**
+ * `sbx-` then lowercase base-36: safe as a directory name, a URL segment and a Kubernetes object
+ * name (an RFC 1123 label: lowercase alphanumerics and `-`, at most 63 characters).
+ */
 export const SandboxId = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^sbx_[0-9a-z]+$/)),
+  Schema.check(Schema.isPattern(/^sbx-[0-9a-z]{1,59}$/)),
   Schema.brand("SandboxId"),
 );
 export type SandboxId = typeof SandboxId.Type;
@@ -61,6 +64,8 @@ export const ExecResult = Schema.Struct({
   exitCode: Schema.Int,
   stdout: Schema.String,
   stderr: Schema.String,
+  /** Output past `ExecOptions.maxOutputBytes` was dropped: what is here is how it began. */
+  truncated: Schema.Boolean,
 });
 export type ExecResult = typeof ExecResult.Type;
 
