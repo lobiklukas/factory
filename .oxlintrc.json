@@ -15,7 +15,11 @@
   ],
   "overrides": [
     {
-      "files": [".pi/skills/verify-api/*.ts", ".pi/skills/verify-board/*.ts"],
+      "files": [
+        ".pi/skills/lib/*.ts",
+        ".pi/skills/verify-api/*.ts",
+        ".pi/skills/verify-board/*.ts"
+      ],
       "plugins": [],
       "rules": {
         "effecttsgo/async-function": "off",
@@ -28,6 +32,7 @@
         "effecttsgo/process-env": "off",
         "effecttsgo/global-console-in-effect": "off",
         "effecttsgo/global-random-in-effect": "off",
+        "effecttsgo/global-timers": "off",
         "effecttsgo/new-promise": "off",
         "effecttsgo/process-env-in-effect": "off",
         "eslint/no-unused-vars": "off",

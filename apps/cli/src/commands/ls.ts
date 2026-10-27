@@ -1,15 +1,45 @@
 import { Console, Effect, Option } from "effect";
 import { Command, Flag } from "effect/cli";
+import type { SessionListEntry } from "@repo/domain/Session";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
 import { SessionClient } from "../rpc";
 
 /**
+ * What the `pr` column says for a session no PR was opened for (LOB-65).
+ *
+ * The same `-` the `repo` column already prints for an unbound session, so the table has one
+ * spelling for "nothing here" — and never an empty cell, which on a two-space-separated line would
+ * shift every column after it and read as the title.
+ */
+export const NO_PR = "-";
+
+/** The header `factory ls` prints above its rows: one name per column, in row order. */
+export const LS_HEADER = "id  status  repo  last-activity  cost  pr  title";
+
+/**
+ * One `factory ls` row.
+ *
+ * The title is last because it is the only field that may contain spaces: everything before it is
+ * one token, so a script can split the line on whitespace and read the PR link as the sixth field.
+ */
+export const lsRow = (session: SessionListEntry): string =>
+  [
+    session.id,
+    session.status,
+    session.repo ?? "-",
+    session.lastActivityAt,
+    String(session.costTotal),
+    session.prUrl ?? NO_PR,
+    session.title,
+  ].join("  ");
+
+/**
  * `factory ls` — the server's list of sessions, newest activity first.
  *
- * One row per session with the fields the index already carries (id, status, repo, title, last
- * activity, spend); nothing here folds a log. When the server has more than a page it returns a
- * keyset cursor, which is echoed so `--cursor` can ask for the next page.
+ * One row per session with the fields the index already carries (id, status, repo, last activity,
+ * spend, the PR link once one was opened, title); nothing here folds a log. When the server has more
+ * than a page it returns a keyset cursor, which is echoed so `--cursor` can ask for the next page.
  */
 export const lsCommand = Command.make(
   "ls",
@@ -42,18 +72,9 @@ export const lsCommand = Command.make(
       if (output.sessions.length === 0) {
         yield* Console.log("no sessions");
       } else {
-        yield* Console.log("id  status  repo  last-activity  cost  title");
+        yield* Console.log(LS_HEADER);
         for (const session of output.sessions) {
-          yield* Console.log(
-            [
-              session.id,
-              session.status,
-              session.repo ?? "-",
-              session.lastActivityAt,
-              String(session.costTotal),
-              session.title,
-            ].join("  "),
-          );
+          yield* Console.log(lsRow(session));
         }
       }
 

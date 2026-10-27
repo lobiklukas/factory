@@ -4,8 +4,8 @@ One file per user-facing feature. Each answers: what it is, how a user reaches i
 it with the harness, and what observable end state proves it works.
 
 Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9540` / web `:3540` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 54/54 required checks passed,
-from the `agent/LOB-75` worktree against its own database on 5442).
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 59/59 required checks passed,
+from the `agent/LOB-75` worktree after merging LOB-65, against its own database on 5442).
 
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
@@ -18,6 +18,7 @@ from the `agent/LOB-75` worktree against its own database on 5442).
 | Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
 | Compaction from the pane | passing | [compaction.md](compaction.md)             |
 | Board lanes (read-only)  | passing | [board.md](board.md)                       |
+| The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 
 ## Known gaps
 

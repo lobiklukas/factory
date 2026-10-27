@@ -6,7 +6,8 @@
 //   WEB_URL       default http://localhost:3100
 //   API_URL       default http://localhost:9100
 //   EVIDENCE_DIR  default .verify/evidence/latest
-//   DATABASE_URL  the API's database; the board block seeds its own board into it
+//   DATABASE_URL  the API's database, inherited: the board block seeds its own board into it, and
+//                 the PR-link check seeds a session through it (LOB-65, `.pi/skills/lib/seed-pr.ts`)
 //
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
@@ -333,6 +334,14 @@ assert(
   sessionPath.replace("/sessions/", "") !== "" &&
     headerText.includes(sessionPath.replace("/sessions/", "")),
   `header: ${JSON.stringify(headerText)}`,
+);
+// A session with no PR has no PR anchor (LOB-65): the link is the recorded `prUrl`, and this session
+// never opened one. The seeded case below is the other half.
+const noPrAnchors = await page.locator("[data-pr-link]").count();
+assert(
+  "a session with no PR shows no PR link",
+  noPrAnchors === 0,
+  `${noPrAnchors} PR anchor(s) in the pane`,
 );
 
 // The created session is in the sidebar: the create invalidates the server's list
@@ -1392,7 +1401,7 @@ if ((await sessionLink.count()) > 0) {
 // as-is. It writes to this process's `DATABASE_URL`, which must be the one the API was started
 // with; a mismatch is caught below, because the API then does not hold the board.
 const boardObserved = {};
-let seeded = null;
+let boardSeed = null;
 const seed = spawnSync(
   "bun",
   [
@@ -1407,24 +1416,24 @@ boardObserved.seed = {
   stderr: (seed.stderr ?? "").trim().slice(0, 300),
 };
 try {
-  seeded = JSON.parse(boardObserved.seed.stdout);
+  boardSeed = JSON.parse(boardObserved.seed.stdout);
 } catch (error) {
   boardObserved.seedError = String(error).slice(0, 200);
 }
-const boardId = typeof seeded?.boardId === "string" ? seeded.boardId : "";
-const cardId = typeof seeded?.taskId === "string" ? seeded.taskId : "";
+const boardId = typeof boardSeed?.boardId === "string" ? boardSeed.boardId : "";
+const cardId = typeof boardSeed?.taskId === "string" ? boardSeed.taskId : "";
 const truth = await rpcFromDrive("getBoard", { boardId });
 assert(
   "a board and a card were seeded",
   seed.status === 0 &&
     boardId.startsWith("brd_") &&
     cardId.startsWith("tsk_") &&
-    seeded?.revision === 1 &&
+    boardSeed?.revision === 1 &&
     truth.exit === "Success",
-  seed.status !== 0 || seeded === null
+  seed.status !== 0 || boardSeed === null
     ? `seed exit ${String(seed.status)}: ${boardObserved.seed.stderr || boardObserved.seed.stdout || boardObserved.seedError}`
     : truth.exit === "Success"
-      ? JSON.stringify(seeded)
+      ? JSON.stringify(boardSeed)
       : `seeded ${boardId}, but the API's getBoard says ${String(truth.exit)} — is DATABASE_URL the one ./up.sh started the API with?`,
 );
 
@@ -1551,7 +1560,7 @@ assert(
   "the seeded card is visible in intake",
   cardShown &&
     JSON.stringify(before.cardLanes) === JSON.stringify(["intake"]) &&
-    (before.cardText[0] ?? "").includes(seeded?.title ?? "\u0000"),
+    (before.cardText[0] ?? "").includes(boardSeed?.title ?? "\u0000"),
   `card ${cardId} in ${JSON.stringify(before.cardLanes)}: ${JSON.stringify(before.cardText)}`,
 );
 await page.screenshot({
@@ -1580,7 +1589,7 @@ const move = spawnSync(
     "--to",
     "specifying",
     "--expect-revision",
-    String(seeded?.revision ?? 1),
+    String(boardSeed?.revision ?? 1),
     "--api",
     API_URL,
   ],
@@ -1597,7 +1606,7 @@ assert(
   "factory board move moved the card on the server",
   move.status === 0 &&
     moved.value?.column === "specifying" &&
-    moved.value?.revision === (seeded?.revision ?? 1) + 1,
+    moved.value?.revision === (boardSeed?.revision ?? 1) + 1,
   `exit ${String(move.status)}, server says ${JSON.stringify(moved.value?.column ?? null)} r${String(moved.value?.revision ?? null)}; ${boardObserved.move.stderr || boardObserved.move.stdout}`,
 );
 
@@ -1667,6 +1676,88 @@ assert(
   `body: ${JSON.stringify(badBoardCopy.slice(0, 200))}`,
 );
 observed.board = boardObserved;
+
+// Feature: the session's PR link (LOB-65). No RPC opens a PR, so `seed-pr.ts` is the in-process
+// caller of the real PR step — against a loopback GitHub fake, on this API's database and session
+// root — and it exits before the page attaches, so the anchor below is the API's read of the session.
+// The href is compared with the link the session *recorded*, read back through the API from the page.
+// See features/pr-link.md.
+// This runs after the transcript screenshot on purpose: opening the seeded session records it at
+// the top of the newest-first sidebar, and the transcript step above clicks the first sidebar link.
+const seedOut = path.join(ROOT, ".verify/run/web-pr-seed.json");
+const seedRun = spawnSync(
+  "bun",
+  [path.join(ROOT, ".pi/skills/lib/seed-pr.ts")],
+  {
+    env: {
+      ...process.env,
+      PR_SEED_OUT: seedOut,
+      SESSION_ROOT: path.join(ROOT, ".verify/run/sessions"),
+      PR_SEED_TITLE: "verify-web pr probe",
+    },
+    encoding: "utf8",
+    timeout: 120_000,
+  },
+);
+await writeFile(
+  path.join(EVIDENCE_DIR, "pr-seed.txt"),
+  `${seedRun.stdout ?? ""}${seedRun.stderr ?? ""}`,
+);
+const seeded = await readFile(seedOut, "utf8")
+  .then((text) => JSON.parse(text))
+  .catch(() => ({ sessionId: "", prUrl: null }));
+assert(
+  "a session with a recorded PR was seeded",
+  seedRun.status === 0 && seeded.sessionId !== "" && seeded.prUrl !== null,
+  `exit=${seedRun.status} id=${seeded.sessionId} prUrl=${seeded.prUrl}`,
+);
+const prRead =
+  seeded.sessionId === ""
+    ? { value: null }
+    : await callRpcOnce("getSession", { sessionId: seeded.sessionId });
+const recordedPrUrl = prRead.value?.session?.prUrl ?? null;
+assert(
+  "the API reads the PR link the session recorded",
+  recordedPrUrl !== null && recordedPrUrl === seeded.prUrl,
+  `getSession prUrl=${recordedPrUrl} seeded=${seeded.prUrl}`,
+);
+const prAnchor = page.locator("header [data-pr-link]");
+let prHref = null;
+let prAnchorText = "";
+let prTarget = null;
+if (seeded.sessionId !== "") {
+  await page.goto(`${WEB_URL}/sessions/${seeded.sessionId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await prAnchor
+    .first()
+    .waitFor({ timeout: 20_000 })
+    .catch(() => undefined);
+  if ((await prAnchor.count()) > 0) {
+    prHref = await prAnchor.first().getAttribute("href");
+    prTarget = await prAnchor.first().getAttribute("target");
+    prAnchorText = (await prAnchor.first().innerText()).trim();
+  }
+  await page.screenshot({ path: path.join(EVIDENCE_DIR, "pr-link.png") });
+}
+observed.prLink = {
+  sessionId: seeded.sessionId,
+  seededPrUrl: seeded.prUrl,
+  recordedPrUrl,
+  href: prHref,
+  target: prTarget,
+  text: prAnchorText,
+};
+assert(
+  "the pane header links the recorded PR",
+  recordedPrUrl !== null && prHref === recordedPrUrl,
+  `href=${prHref} recorded=${recordedPrUrl} text=${JSON.stringify(prAnchorText)}`,
+);
+assert(
+  "and the link opens beside the live pane, not over it",
+  prTarget === "_blank",
+  `target=${prTarget}`,
+);
 
 observed.consoleErrors = consoleErrors;
 observed.failedResponses = failedResponses;

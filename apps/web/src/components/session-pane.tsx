@@ -5,6 +5,7 @@ import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
 import {
   GitForkIcon,
+  GitPullRequestIcon,
   Loader2Icon,
   Minimize2Icon,
   SquareIcon,
@@ -31,6 +32,7 @@ import {
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
+import { prLink } from "@/lib/pr-link";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -97,6 +99,32 @@ const StatusChip = ({ view }: { readonly view: SessionView }) => (
     ))}
   </div>
 );
+
+/**
+ * The session's PR, beside its name (LOB-65).
+ *
+ * The link is what the session recorded (`summary.prUrl`), so it appears on attach for a PR opened
+ * earlier and mid-stream when a `prOpened` event lands. A session with no PR shows nothing here —
+ * the header is the session's identity, and a "no PR" chip on every new session would be noise. It
+ * opens in a new tab: the pane is a live stream, and navigating away from it would drop the attach.
+ */
+const PrAnchor = ({ prUrl }: { readonly prUrl: string | undefined }) => {
+  const link = prLink(prUrl);
+  if (link === null) return null;
+  return (
+    <a
+      data-pr-link
+      href={link.href}
+      target="_blank"
+      rel="noreferrer"
+      title={link.href}
+      className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
+    >
+      <GitPullRequestIcon className="size-3.5" strokeWidth={1.75} aria-hidden />
+      {link.label}
+    </a>
+  );
+};
 
 /**
  * The pane while it attaches.
@@ -266,6 +294,7 @@ export const SessionPane = ({
           <span className="truncate font-mono text-[10px] text-muted-foreground">
             {sessionId}
           </span>
+          <PrAnchor prUrl={view?.summary.prUrl} />
         </div>
         <div className="flex items-center gap-2">
           {attaching ? (

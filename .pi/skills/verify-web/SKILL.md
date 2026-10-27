@@ -49,7 +49,10 @@ node drive.mjs   # requires the instance from ./up.sh to be running
 ```
 
 Uses the locally installed Chrome (`channel: "chrome"`), so no Playwright browser download is
-needed. Environment: `WEB_URL`, `API_URL`, `EVIDENCE_DIR`.
+needed. Environment: `WEB_URL`, `API_URL`, `EVIDENCE_DIR`, and the same `DATABASE_URL` `up.sh` ran
+with — the PR-link check (`features/pr-link.md`) seeds a session through it with
+`.pi/skills/lib/seed-pr.ts`, whose loopback GitHub fake takes `PR_SEED_GITHUB_PORT` (default `0`:
+the OS chooses).
 
 It asserts the shell renders, asserts the browser can reach the API from the page's own origin,
 and clicks **Start a session**, requiring the transcript to reach the answer the agent's `bash`

@@ -6,7 +6,8 @@
 # process would prove the client and nothing about the command — argument parsing, when the stream
 # ends, what the transcript looks like, and the exit code a script would branch on.
 #
-# Requires the instance from ./up.sh (API on :9300, MODEL_BACKEND=faux).
+# Requires the instance from ./up.sh (API on :9300, MODEL_BACKEND=faux), and the same DATABASE_URL in
+# this shell as up.sh had: the PR-link checks seed a session through that database (LOB-65).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -23,6 +24,8 @@ ANSWER="faux-ok (re: $PROMPT)"
 IDLE_MS="$(cat "$RUN_DIR/cli-idle-ms" 2>/dev/null || echo 5000)"
 # 26 Crockford base32 characters that no session was minted with.
 UNKNOWN_ID="ses_00000000000000000000000000"
+# What `factory ls` prints in the `pr` column for a session with no PR (apps/cli/src/commands/ls.ts).
+NO_PR="-"
 
 mkdir -p "$EVIDENCE_DIR"
 
@@ -55,8 +58,13 @@ write_checks() {
 
 t() { tmux -S "$SOCK" "$@"; }
 
-# The pane, with trailing whitespace stripped so a `grep -q '^mode: live$'` is exact.
-pane() { t capture-pane -p -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]]*$//'; }
+# The pane, with trailing whitespace stripped so a `grep -q '^mode: live$'` is exact. `-J` joins a
+# line the terminal wrapped, so an `ls` row longer than the pane is still one row to `awk`.
+pane() { t capture-pane -p -J -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]]*$//'; }
+
+# The `pr` field of one session's `ls` row: everything before the title is one token, and the PR
+# link is the sixth (LOB-65). Empty when the file has no row for the id.
+pr_field() { awk -v id="$2" '$1 == id { print $6; exit }' "$EVIDENCE_DIR/$1"; }
 
 capture() { pane > "$EVIDENCE_DIR/$1"; }
 
@@ -134,6 +142,13 @@ check "ls lists the session this run created" \
 check "ls reads the title from the index" \
   "$(grep -qF "$PROMPT" "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
   "title present"
+check "ls prints a pr column" \
+  "$(grep -q '^id  status  repo  last-activity  cost  pr  title$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
+  "header names pr"
+RUN_PR="$(pr_field ls.txt "$SESSION_ID")"
+check "a session with no PR shows the placeholder, not an empty cell" \
+  "$([ "$RUN_PR" = "$NO_PR" ] && echo 0 || echo 1)" \
+  "pr=${RUN_PR:-<empty>}"
 
 # --- watch, live: this process owns the session ---------------------------------------------------
 fresh
@@ -158,6 +173,35 @@ check "the fold prints the same answer" \
   "$(grep -qF "answer: $ANSWER" "$EVIDENCE_DIR/watch-historical.txt" && echo 0 || echo 1)" \
   "answer matches"
 
+# --- ls, with a PR: the link the session recorded (LOB-65) ----------------------------------------
+# The API has no RPC that opens a PR, so the seed is the in-process caller of the real PR step,
+# against a loopback GitHub fake, on this API's database and session root. It exits before `ls`
+# runs, so the row below is the API's read of the index, not the seed's. It runs after both watches
+# because it takes seconds, and the live watch has to land inside the short idle window up.sh set.
+SEED_OUT="$RUN_DIR/cli-pr-seed.json"
+rm -f "$SEED_OUT"
+env PR_SEED_OUT="$SEED_OUT" SESSION_ROOT="$RUN_DIR/sessions" PR_SEED_TITLE="verify-cli pr probe" \
+  bun "$ROOT/.pi/skills/lib/seed-pr.ts" > "$EVIDENCE_DIR/pr-seed.txt" 2>&1
+SEED_RC=$?
+SEED_ID="$(bun -e 'console.log((await Bun.file(process.argv[1]).json()).sessionId ?? "")' "$SEED_OUT" 2>/dev/null)"
+SEED_URL="$(bun -e 'console.log((await Bun.file(process.argv[1]).json()).prUrl ?? "")' "$SEED_OUT" 2>/dev/null)"
+check "a session with a recorded PR was seeded" \
+  "$([ "$SEED_RC" = "0" ] && [ -n "$SEED_ID" ] && [ -n "$SEED_URL" ] && echo 0 || echo 1)" \
+  "exit=$SEED_RC id=${SEED_ID:-none} prUrl=${SEED_URL:-none}"
+
+fresh
+run_cmd lspr "$FACTORY ls --api $API_URL" || true
+capture ls-pr.txt
+SEED_PR="$(pr_field ls-pr.txt "$SEED_ID")"
+check "factory ls exits 0 with a PR in the list" "$([ "$(exit_code lspr)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code lspr)"
+check "ls shows the recorded PR URL for the session that has one" \
+  "$([ -n "$SEED_URL" ] && [ "$SEED_PR" = "$SEED_URL" ] && echo 0 || echo 1)" \
+  "pr=${SEED_PR:-<empty>}"
+RUN_PR_AFTER="$(pr_field ls-pr.txt "$SESSION_ID")"
+check "and still the placeholder for the session that has none" \
+  "$([ "$RUN_PR_AFTER" = "$NO_PR" ] && echo 0 || echo 1)" \
+  "pr=${RUN_PR_AFTER:-<empty>}"
+
 # --- typed errors: a script can branch on the code, not on prose ----------------------------------
 fresh
 run_cmd unknown "$FACTORY watch $UNKNOWN_ID --api $API_URL" || true
@@ -174,6 +218,8 @@ check "and the command exits non-zero" \
   printf '{\n'
   printf '  "apiUrl": "%s",\n' "$API_URL"
   printf '  "sessionId": "%s",\n' "$SESSION_ID"
+  printf '  "prSessionId": "%s",\n' "$SEED_ID"
+  printf '  "prUrl": "%s",\n' "$SEED_URL"
   printf '  "prompt": "%s",\n' "$PROMPT"
   printf '  "idleTimeoutMs": %s,\n' "$IDLE_MS"
   printf '  "checks": {\n'
