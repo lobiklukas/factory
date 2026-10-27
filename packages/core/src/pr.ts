@@ -5,7 +5,12 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/http";
-import type { RepoSlug, SessionId } from "@repo/domain/Session";
+import type {
+  PrEvidence,
+  RepoSlug,
+  SessionId,
+  Verification,
+} from "@repo/domain/Session";
 import { CredentialError, CredentialProvider } from "./credentials";
 
 /** A PR could not be created. Typed, so callers handle it instead of dumping stderr. */
@@ -154,26 +159,282 @@ export type PrBodyInput = {
    * and the spend, and a reader had to open the diff to learn what the run touched.
    */
   readonly changed?: readonly string[];
+  /**
+   * What the run verified, from its recorded `verify` results (LOB-79) — never from the model's
+   * prose. Required, because the section is never omitted: a run with nothing to show passes an
+   * `EvidenceNone`, and the body says so.
+   */
+  readonly evidence: PrEvidence;
 };
 
-/** The body a factory PR carries: session id, model, spend, the changed files, and the prompt. */
+/**
+ * A code span or fence that `text` cannot close early: one backtick longer than the longest run of
+ * backticks in it (CommonMark closes a fence only on a run at least as long as the opener). Driver
+ * output and skill scripts are arbitrary text, and a stray fence in them would turn the rest of the
+ * body into code.
+ */
+const ticksFor = (text: string, minimum: number): string => {
+  const longest = Math.max(
+    0,
+    ...Array.from(text.matchAll(/`+/g), (run) => run[0].length),
+  );
+  return "`".repeat(Math.max(minimum, longest + 1));
+};
+
+const inlineCode = (text: string): string => {
+  const ticks = ticksFor(text, 1);
+  // A span whose text starts or ends with a backtick needs a space between it and the delimiter.
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+};
+
+/**
+ * An excerpt as the body shows it: fenced, and introduced by a line that says whether it is all of
+ * the output or its tail. The truncation note is outside the fence, so it can never be mistaken for
+ * a line the command printed.
+ */
+const excerptLines = (excerpt: string, truncated: boolean): string[] => {
+  const fence = ticksFor(excerpt, 3);
+  const body = excerpt.endsWith("\n") ? excerpt.slice(0, -1) : excerpt;
+  const shown = body === "" ? 0 : body.split("\n").length;
+  return [
+    truncated
+      ? `Output (truncated: earlier output omitted, the last ${shown} line(s) shown):`
+      : "Output:",
+    "",
+    `${fence}text`,
+    ...(body === "" ? [] : [body]),
+    fence,
+    "",
+  ];
+};
+
+/** How long a tool-authored message may be on the body; longer ones keep their start. */
+export const PR_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * A tool-authored message (a verification's `message`, git's stderr) as the body shows it: one line,
+ * at most `PR_MESSAGE_MAX_CHARS`, in a code span. The message is the tool's text, not Markdown — a
+ * newline followed by `## Prompt` would otherwise start a section, a fence would swallow the body,
+ * and an `@name` in stderr would notify someone — and a code span is the one inline construct
+ * nothing inside it can escape (`inlineCode` sizes its delimiters past any run of backticks in it).
+ */
+const toolText = (message: string): string => {
+  const line = message.replace(/\s+/g, " ").trim();
+  return inlineCode(
+    line.length <= PR_MESSAGE_MAX_CHARS
+      ? line
+      : `${line.slice(0, PR_MESSAGE_MAX_CHARS - 1)}…`,
+  );
+};
+
+/** A verification's heading and facts, without its output. */
+const verificationHead = (verification: Verification): string[] => {
+  switch (verification._tag) {
+    case "VerificationRan":
+      return [
+        `### ${inlineCode(verification.name)}: exit ${verification.exitCode}${verification.exitCode === 0 ? "" : " (failed)"}`,
+        "",
+        `- Surface: ${inlineCode(verification.surface)}`,
+        `- Exit code: ${verification.exitCode}`,
+        `- Command: ${inlineCode(verification.command)}`,
+        "",
+      ];
+    case "VerificationUnrunnable":
+      return [
+        `### ${inlineCode(verification.name)}: could not run (${inlineCode(verification.code)})`,
+        "",
+        `- Surface: ${inlineCode(verification.surface)}`,
+        `- Exit code: none — ${toolText(verification.message)}`,
+        `- Command: ${inlineCode(verification.command)}`,
+        "",
+      ];
+    case "VerificationMissing":
+      return [
+        `### ${inlineCode(verification.surface)}: no evidence`,
+        "",
+        toolText(verification.message),
+        "",
+      ];
+  }
+};
+
+/** A verification as the body shows it in full: its facts, then its excerpt when it has one. */
+const verificationLines = (verification: Verification): string[] =>
+  verification._tag === "VerificationMissing"
+    ? verificationHead(verification)
+    : [
+        ...verificationHead(verification),
+        ...excerptLines(verification.excerpt, verification.truncated),
+      ];
+
+/** A verification whose excerpt the section's bound left out: its facts, and a line saying so. */
+const verificationBrief = (verification: Verification): string[] =>
+  verification._tag === "VerificationMissing"
+    ? verificationHead(verification)
+    : [
+        ...verificationHead(verification),
+        "Output not quoted: the section reached its size bound. The session's log holds it.",
+        "",
+      ];
+
+/** Whether a verification failed: a non-zero exit or one that could not run. Quoted first. */
+const failed = (verification: Verification): boolean =>
+  verification._tag === "VerificationUnrunnable" ||
+  (verification._tag === "VerificationRan" && verification.exitCode !== 0);
+
+/** The characters `lines` take once joined with newlines, counting the one after the last. */
+const sizeOf = (lines: readonly string[]): number =>
+  lines.reduce((total, line) => total + line.length + 1, 0);
+
+/**
+ * GitHub refuses a PR body over 65,536 characters, and the step then opens no PR at all. The body is
+ * kept under this, with room: the sections a run controls (the changed files, the evidence, the
+ * prompt) are each bounded so the whole is.
+ */
+export const PR_BODY_MAX_CHARS = 60_000;
+
+/**
+ * The `## Verification` section's share of `PR_BODY_MAX_CHARS`. Each excerpt is already bounded
+ * (`PR_EVIDENCE_EXCERPT`); this bounds how many of them a run with many surfaces quotes.
+ */
+export const PR_EVIDENCE_SECTION_MAX_CHARS = 30_000;
+
+/** How many changed files the body lists before it says how many more there are. */
+export const PR_CHANGED_LIST_MAX = 300;
+
+/** The cited call's freshness, said on the body: later calls that left no record, missed paths. */
+const caveatLines = (
+  evidence: Extract<PrEvidence, { _tag: "EvidenceRecorded" }>,
+): string[] => {
+  const lines: string[] = [];
+  if (evidence.unrecordedAfter !== undefined && evidence.unrecordedAfter > 0)
+    lines.push(
+      `**Not the run's last call.** The ${evidence.unrecordedAfter} \`verify\` call(s) after it left no record (blocked or crashed), so the verdict below is from an earlier call.`,
+      "",
+    );
+  const coverage = evidence.coverage;
+  if (coverage === undefined) return lines;
+  const missedCount = coverage.published - coverage.covered;
+  if (missedCount > 0) {
+    const more = missedCount - coverage.missed.length;
+    lines.push(
+      `**Stale.** The cited call measured ${coverage.covered} of the ${coverage.published} path(s) this PR changes; the run changed the rest after it verified, so the verdict below predates them: ${coverage.missed.map(inlineCode).join(", ")}${more > 0 ? `, and ${more} more` : ""}.`,
+      "",
+    );
+  } else
+    lines.push(
+      `It measured all ${coverage.published} path(s) this PR changes. Paths, not contents: an edit to one of them after the call is not detected.`,
+      "",
+    );
+  return lines;
+};
+
+/**
+ * The body's `## Verification` section (LOB-79): every result of the run's last recorded `verify`
+ * call — what ran, its exit code, and a bounded excerpt of its output — or, when there is none, a
+ * sentence saying so. Always present, so a PR without evidence reads as one, not as one whose section
+ * was dropped. A cited call that is not the run's last, or that did not measure every path the PR
+ * changes, says so above its results.
+ *
+ * At most `maxChars`: every result keeps its facts, failing ones get their excerpts first, then the
+ * rest in order while they fit; a result left without one says so. A run with so many results that
+ * even their facts do not fit lists what fits and counts the rest.
+ */
+export const evidenceSection = (
+  evidence: PrEvidence,
+  maxChars: number = PR_EVIDENCE_SECTION_MAX_CHARS,
+): string[] => {
+  if (evidence._tag === "EvidenceNone")
+    return [
+      "## Verification",
+      "",
+      `**No verification evidence.** Nothing in this PR was verified by a recorded run: ${evidence.message.replace(/\.$/, "")}.`,
+      "",
+      ...(evidence.detail === undefined
+        ? []
+        : [`The tool said: ${toolText(evidence.detail)}`, ""]),
+    ];
+  const head = [
+    "## Verification",
+    "",
+    `Recorded by the run's \`verify\` tool: its last recorded call (${evidence.calls} in all) over ${evidence.changedCount} changed path(s).`,
+    "",
+    ...caveatLines(evidence),
+  ];
+  const { results } = evidence;
+  const full = results.map(verificationLines);
+  const brief = results.map(verificationBrief);
+  const quoted = results.map(() => false);
+  let size = sizeOf(head) + brief.reduce((total, b) => total + sizeOf(b), 0);
+  const order = [
+    ...results.flatMap((v, i) => (failed(v) ? [i] : [])),
+    ...results.flatMap((v, i) => (failed(v) ? [] : [i])),
+  ];
+  for (const i of order) {
+    const grown = size - sizeOf(brief[i] ?? []) + sizeOf(full[i] ?? []);
+    if (grown <= maxChars) {
+      quoted[i] = true;
+      size = grown;
+    }
+  }
+  const shown = results.map((_, i) => (quoted[i] ? full[i] : brief[i]) ?? []);
+  if (size <= maxChars) return [...head, ...shown.flat()];
+  // Even the facts alone do not fit: list what does, keeping room for the line that counts the rest.
+  const lines = [...head];
+  for (const [i, rendered] of shown.entries()) {
+    const note = [
+      `${results.length - i} more result(s) not shown: the section reached its size bound. The session's log holds every one.`,
+      "",
+    ];
+    if (sizeOf(lines) + sizeOf(rendered) + sizeOf(note) > maxChars) {
+      lines.push(...note);
+      break;
+    }
+    lines.push(...rendered);
+  }
+  return lines;
+};
+
+/** The changed files as the body lists them: at most `PR_CHANGED_LIST_MAX`, then a count. */
+const changedLines = (changed: readonly string[]): string[] => {
+  if (changed.length === 0) return [];
+  const shown = changed.slice(0, PR_CHANGED_LIST_MAX);
+  const more = changed.length - shown.length;
+  return [
+    "## Changed files",
+    "",
+    ...shown.map((path) => `- ${path}`),
+    ...(more > 0 ? [`- …and ${more} more`] : []),
+    "",
+  ];
+};
+
+/**
+ * The body a factory PR carries: session id, model, spend, the changed files, what was verified,
+ * and the prompt — at most `PR_BODY_MAX_CHARS`, the prompt (last, and the one section nothing else
+ * bounds) cut to fit with a line saying so.
+ */
 export const buildPrBody = (input: PrBodyInput): string => {
-  const changed = input.changed ?? [];
-  const lines = [
+  const head = [
     "## Factory session",
     "",
     `- Session: ${input.sessionId}`,
     ...(input.model === undefined ? [] : [`- Model: ${input.model}`]),
     ...(input.spend ? [`- Spend: ${input.spend}`] : []),
     "",
-    ...(changed.length === 0
-      ? []
-      : ["## Changed files", "", ...changed.map((path) => `- ${path}`), ""]),
+    ...changedLines(input.changed ?? []),
+    ...evidenceSection(input.evidence),
     "## Prompt",
     "",
-    input.prompt,
-  ];
-  return lines.join("\n");
+    "",
+  ].join("\n");
+  const budget = PR_BODY_MAX_CHARS - head.length;
+  if (input.prompt.length <= budget) return head + input.prompt;
+  const note = (shown: number) =>
+    `\n\n_(Prompt truncated: the first ${shown} of ${input.prompt.length} characters shown.)_`;
+  const shown = Math.max(0, budget - note(input.prompt.length).length);
+  return head + input.prompt.slice(0, shown) + note(shown);
 };
 
 export type CreatePullRequestInput = {

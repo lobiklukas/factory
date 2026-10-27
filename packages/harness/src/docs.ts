@@ -3,6 +3,7 @@
  * (LOB-23). Each is a `defineDoc` token so reads and writes go through the typed surface
  * instead of raw string kinds.
  */
+import type { JsonValue } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 
 export const SPEC_DOC_KIND = "factory.spec";
@@ -60,13 +61,27 @@ export const CriteriaDoc = defineDoc({
   initial: () => ({ criteria: "" }),
 });
 
+/**
+ * The PR a session opened (LOB-177), and since LOB-79 the evidence its body states: the encoded
+ * `PrEvidence` the body's `## Verification` section was rendered from, so a later reader (a column's
+ * `requires[]` check, LOB-80) reads the same verdict the reviewer did. `null` in the seed and in a
+ * document written before evidence existed; readers decode it and treat anything else as absent,
+ * which is why adding it needs no version bump.
+ */
 export const PrDoc = defineDoc({
   kind: PR_DOC_KIND,
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ url: "", number: 0, base: "", head: "", openedAt: "" }),
+  initial: () => ({
+    url: "",
+    number: 0,
+    base: "",
+    head: "",
+    openedAt: "",
+    evidence: null as JsonValue,
+  }),
 });
 
 export const RetryDoc = defineDoc({
