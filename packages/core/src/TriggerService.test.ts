@@ -374,12 +374,10 @@ const holdKeyUntilContended = (
                     ),
                 }),
               );
-              return yield* Effect.fail(new ReleaseKey());
+              return yield* new ReleaseKey();
             }),
           )
-          .pipe(
-            Effect.catchTag("ReleaseKey", () => Effect.void),
-          );
+          .pipe(Effect.catchTag("ReleaseKey", () => Effect.void));
       }),
       DatabaseLive,
     ),
