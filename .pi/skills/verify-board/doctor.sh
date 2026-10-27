@@ -87,6 +87,24 @@ fi
 webcode="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://localhost:$WEB_PORT/" || echo 000)"
 if [ "$webcode" = "200" ]; then note "web :$WEB_PORT GET /:" "200"; else note "web :$WEB_PORT GET /:" "$webcode"; fail=1; fi
 
+# The forge the build phase opens its PR on (LOB-86): the loopback fake, unless ./up.sh was told
+# BOARD_GITHUB=off — then the doctor says so, because a drive against it is meant to fail.
+github_mode="$(cat "$RUN_DIR/github-mode" 2>/dev/null || echo missing)"
+if [ "$github_mode" = "fake" ]; then
+  github_pid="$(cat "$RUN_DIR/github.pid" 2>/dev/null || true)"
+  if [ -n "$github_pid" ] && kill -0 "$github_pid" 2>/dev/null && [ -s "$RUN_DIR/github-ledger.json" ]; then
+    note "github fake:" "pid $github_pid alive, ledger $RUN_DIR/github-ledger.json"
+  else
+    note "github fake:" "${github_pid:-no pid} not alive or no ledger — see $RUN_DIR/github.log"
+    fail=1
+  fi
+elif [ "$github_mode" = "off" ]; then
+  note "github:" "off (BOARD_GITHUB=off): the drive's PR phase will fail, by design"
+else
+  note "github:" "no record of a forge — run ./up.sh"
+  fail=1
+fi
+
 if command -v tmux >/dev/null 2>&1; then
   note "tmux:" "$(tmux -V)"
 else

@@ -87,11 +87,12 @@ const writeExecutable = (file: string, body: string): void => {
 /**
  * A scratch repo holding only the doctor. With `healthy`, everything but the database is as
  * `./up.sh` leaves it: recorded api and web pids that are alive (this test process), an `lsof` that
- * names the api pid as the port's owner, a `curl` that reads 200, a `tmux`, and a seeded board.
+ * names the api pid as the port's owner, a `curl` that reads 200, a `tmux`, a seeded board, and the
+ * GitHub fake's record (LOB-86) — a live pid and a ledger — unless `githubPid` names another.
  */
 const stage = (
   healthy: boolean,
-  options: { readonly webPortOwner?: string } = {},
+  options: { readonly webPortOwner?: string; readonly githubPid?: string } = {},
 ): { root: string; bin: string } => {
   const root = mkdtempSync(path.join(tmpdir(), "factory-verify-board-doctor-"));
   created.push(root);
@@ -107,6 +108,12 @@ const stage = (
     writeFileSync(path.join(run, "api.pid"), pid);
     writeFileSync(path.join(run, "web.pid"), pid);
     writeFileSync(path.join(run, "board.json"), '{"boardId":"brd_scratch"}\n');
+    writeFileSync(path.join(run, "github-mode"), "fake\n");
+    writeFileSync(path.join(run, "github.pid"), options.githubPid ?? pid);
+    writeFileSync(
+      path.join(run, "github-ledger.json"),
+      '{"requests":[],"pulls":[]}\n',
+    );
     // The dashboard's port (3400: the test unsets WEB_PORT and stages no `web-port`) can be
     // answered by a different owner than the API's, standing in for a stranger holding it.
     const webOwner = options.webPortOwner ?? pid;
@@ -203,6 +210,28 @@ describe("verify-board's doctor and the database", () => {
       try {
         const result = runDoctor(bin, root, database.port);
         expect(result.stdout).toMatch(/web port 3400:\s+owned by 1, not under/);
+        expect(result.stdout).not.toContain("doctor: OK");
+        expect(result.status).toBe(1);
+      } finally {
+        await database.close();
+      }
+    },
+  );
+
+  it(
+    "fails when the GitHub fake ./up.sh recorded is no longer running",
+    { timeout: 30_000 },
+    async () => {
+      // Mutation checked: dropping the doctor's GitHub block makes it say OK here — every other
+      // part of the instance is healthy — and the drive's PR phase would then fail for a reason the
+      // doctor had called healthy. A pid that cannot be alive stands in for the dead fake.
+      const { root, bin } = stage(true, { githubPid: "2147483646" });
+      const database = await answeringPort();
+      try {
+        const result = runDoctor(bin, root, database.port);
+        expect(result.stdout).toMatch(
+          /github fake:\s+2147483646 not alive or no ledger/,
+        );
         expect(result.stdout).not.toContain("doctor: OK");
         expect(result.status).toBe(1);
       } finally {
