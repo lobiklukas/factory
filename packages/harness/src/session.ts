@@ -87,6 +87,8 @@ import {
   PageDoc,
   PagePromptDoc,
   PrDoc,
+  REVIEW_DOC_KIND,
+  ReviewDoc,
   SpecDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
@@ -112,6 +114,11 @@ import {
   type ThreadReader,
 } from "./ask";
 import { commitSpec, specExtension, type SpecOptions } from "./specify";
+import {
+  reviewExtension,
+  type ReviewOptions,
+  type ReviewTarget,
+} from "./review";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -358,6 +365,12 @@ export type OpenSessionOptions = {
    * the same card, a scratch session — is not offered it.
    */
   readonly spec?: SpecOptions;
+  /**
+   * How a review run posts its review on the pull request (LOB-36, `./review`): the control plane's
+   * callback that posts one comment under the reviewer's own identity. The `review` tool is installed
+   * only when this is given *and* the run is a review (`RunProfile.reviewing`).
+   */
+  readonly review?: ReviewOptions;
 };
 
 export type OpenSession = {
@@ -436,6 +449,11 @@ export const openSession = (
     // than a file so the read-only stage can make it. Only the role that writes the spec gets it.
     if (options.spec !== undefined && role.writesSpec) {
       registry.install(specExtension(options.spec));
+    }
+    // The reviewer's review (LOB-36): committed to the log and posted on the PR, the one thing the
+    // read-only reviewing stage may say outside its log. Only a review run gets it.
+    if (options.review !== undefined && role.writesReview) {
+      registry.install(reviewExtension(options.review));
     }
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
@@ -1036,6 +1054,73 @@ export const readPage = (
       content: doc.content,
       links: doc.links,
       sources: doc.sources,
+    };
+  });
+
+/**
+ * Commit the pull request and head a reviewer run is opened for (LOB-36), as `factory.review`'s target.
+ * Written by the control plane at create, before the run is told anything, so the review the tool
+ * commits later is about a head the log already names rather than one the model chose.
+ */
+export const writeReviewTarget = (
+  conversation: Conversation,
+  target: ReviewTarget,
+): Effect.Effect<void, SessionError> =>
+  attempt("write review target", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(ReviewDoc, conversation.id).then((doc) => {
+          doc.repo = target.repo;
+          doc.number = target.number;
+          doc.url = target.url;
+          doc.base = target.base;
+          doc.head = target.head;
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/** A reviewer run's target and, once the `review` tool ran, its verdict (`factory.review`). */
+export type RecordedReview = {
+  readonly target: ReviewTarget;
+  /** Absent until the tool committed one. */
+  readonly verdict?: "pass" | "fail";
+  /** `unposted`, `clean`, `posted` or `stale`; absent with the verdict. */
+  readonly outcome?: string;
+  /** The comment's link when `posted`, the head the PR moved to when `stale`. */
+  readonly outcomeDetail?: string;
+};
+
+/**
+ * The review a log records, read from its `factory.review` document alone — `undefined` for a run that
+ * was opened for no pull request. Works on a log nobody owns, as `readRecordedPullRequest` does.
+ */
+export const readRecordedReview = (
+  storage: Storage,
+): Effect.Effect<RecordedReview | undefined, SessionError> =>
+  Effect.map(readDocument(storage, REVIEW_DOC_KIND), (value) => {
+    const text = (key: string): string => {
+      const field = value?.[key];
+      return typeof field === "string" ? field : "";
+    };
+    const number = value?.["number"];
+    if (text("head") === "" || typeof number !== "number") return undefined;
+    const verdict = text("verdict");
+    return {
+      target: {
+        repo: text("repo"),
+        number,
+        url: text("url"),
+        base: text("base"),
+        head: text("head"),
+      },
+      ...(verdict === "pass" || verdict === "fail"
+        ? {
+            verdict,
+            outcome: text("outcome"),
+            outcomeDetail: text("outcomeDetail"),
+          }
+        : {}),
     };
   });
 

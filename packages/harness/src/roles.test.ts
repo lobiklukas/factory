@@ -173,6 +173,33 @@ describe("resolveRole", () => {
     expect(writesSpec(run("odd", "constructor"))).toBe(false);
     expect(writesSpec(undefined)).toBe(false);
   });
+
+  it("offers the review tool to a review run alone, and makes it read-only whatever its role (LOB-36)", () => {
+    const resolved = (profile: RunProfile | undefined) =>
+      resolveRole(profile, deployment.access, roles);
+    const reviewing = (profile: RunProfile): RunProfile => ({
+      ...profile,
+      reviewing: true,
+    });
+
+    const review = resolved(reviewing(run("review", "reviewer")));
+    expect(review.writesReview).toBe(true);
+    expect(review.withheldTools).toBe(STAGE_REFUSED_TOOLS);
+    expect(review.stage?.stage).toBe("reviewing");
+    expect(review.writesSpec).toBe(false);
+    // The column's role still picks the model: a review on a board whose column is called something
+    // else, under another role, is still read-only and still reviews.
+    expect(
+      resolved(reviewing(run("second-look", "auditor"))).writesReview,
+    ).toBe(true);
+    // A person's run in the review column is not a review.
+    const person = resolved(run("review", "reviewer"));
+    expect(person.writesReview).toBe(false);
+    expect(person.stage).toBeUndefined();
+    expect(resolved(run("specifying", "specifier")).writesReview).toBe(false);
+    expect(resolved(run("building", "builder")).writesReview).toBe(false);
+    expect(resolved(undefined).writesReview).toBe(false);
+  });
 });
 
 describe("the deployment's role table", () => {

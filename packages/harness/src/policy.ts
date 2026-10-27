@@ -1449,14 +1449,33 @@ export type ReadOnlyStage = {
 };
 
 /**
+ * The stage a review run is (LOB-36): a session opened to review one pull request reads the change
+ * and says what it found, and changes nothing — whatever column it runs in. Keyed by the run being a
+ * review rather than by its role, because a person may still start a write-capable run in the review
+ * column (a fix-up that makes and verifies a change, B8), and that run is not a review.
+ */
+export const REVIEWING_STAGE = "reviewing";
+
+/**
  * The read-only stage a run is in, or `undefined` when its column's role writes (or it has no
- * column at all — a scratch session is not a stage).
+ * column at all — a scratch session is not a stage). A review run (`reviewing`) is always the
+ * reviewing stage, with its column and role when it has them.
  */
 export const readOnlyStageOf = (
   run:
-    | { readonly column?: string | undefined; readonly role?: string }
+    | {
+        readonly column?: string | undefined;
+        readonly role?: string;
+        readonly reviewing?: boolean;
+      }
     | undefined,
 ): ReadOnlyStage | undefined => {
+  if (run?.reviewing === true)
+    return {
+      stage: REVIEWING_STAGE,
+      column: run.column ?? "none",
+      role: run.role ?? "none",
+    };
   if (run?.column === undefined || run.role === undefined) return undefined;
   const stage = READ_ONLY_ROLES.get(run.role);
   return stage === undefined

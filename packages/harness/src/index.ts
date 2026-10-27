@@ -6,6 +6,7 @@ export * from "./projection";
 export * from "./session";
 export * from "./spec";
 export * from "./specify";
+export * from "./review";
 export * from "./readiness";
 export * from "./replay";
 export * from "./curate";

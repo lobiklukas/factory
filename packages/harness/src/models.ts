@@ -33,6 +33,7 @@ import { Effect, Schema } from "effect";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
+import { REVIEW_TOOL } from "./review";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -117,6 +118,25 @@ const nextSpecAttempt = (
       ? undefined
       : { ...last, gaps: [], openQuestions: [] };
   }
+  return attempts[results.length];
+};
+
+/**
+ * The `review` call the faux script makes next, or `undefined` when it is done reviewing (LOB-36):
+ * only a run offered the tool reviews, it tries the attempts in order — one per refusal, so a first
+ * attempt the rubric refuses is the model that got it wrong and the next is its retry — and it stops
+ * at the first accepted one. Counted per turn, so a second message makes it review again.
+ */
+const nextReviewAttempt = (
+  messages: readonly Message[],
+  attempts: readonly FauxSpecAttempt[],
+): FauxSpecAttempt | undefined => {
+  if (attempts.length === 0 || !offersTool(messages, REVIEW_TOOL))
+    return undefined;
+  // Per turn: a reviewer told something new reviews again, which is what the tool's one-review rule
+  // has to refuse.
+  const results = toolResultErrors(sinceLastUser(messages), REVIEW_TOOL);
+  if (results.some((isError) => !isError)) return undefined;
   return attempts[results.length];
 };
 
@@ -231,6 +251,10 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * `spec` adds the specifier's declaration before the ask (LOB-238): a run offered the `spec` tool
  * calls it with the scripted attempts until one is accepted (`nextSpecAttempt`), and only then asks
  * — a run declares what it is missing before it asks a person for it.
+ *
+ * `review` is the reviewer's verdict (LOB-36), in the same place: after the `bash` turn that read the
+ * diff, a run offered the `review` tool calls it with the scripted attempts until one is accepted
+ * (`nextReviewAttempt`).
  */
 export const fauxAnswer = (
   messages: readonly Message[],
@@ -240,6 +264,7 @@ export const fauxAnswer = (
   ask?: string,
   everyTurn = false,
   spec: readonly FauxSpecAttempt[] = [],
+  review: readonly FauxSpecAttempt[] = [],
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -273,6 +298,12 @@ export const fauxAnswer = (
   const specAttempt = nextSpecAttempt(messages, spec);
   if (specAttempt !== undefined) {
     return fauxAssistantMessage(fauxToolCall(SPEC_TOOL, specAttempt), {
+      stopReason: "toolUse",
+    });
+  }
+  const reviewAttempt = nextReviewAttempt(messages, review);
+  if (reviewAttempt !== undefined) {
+    return fauxAssistantMessage(fauxToolCall(REVIEW_TOOL, reviewAttempt), {
       stopReason: "toolUse",
     });
   }
@@ -340,6 +371,12 @@ export type ModelAccessOptions = {
    * before it was refused. Absent or empty: never specs.
    */
   readonly fauxSpec?: readonly FauxSpecAttempt[] | undefined;
+  /**
+   * The `review` calls the faux script makes, in order, when the run was offered the tool (LOB-36,
+   * `fauxAnswer`): each is the tool's arguments verbatim, and the next is sent only when the one
+   * before it was refused. Absent or empty: never reviews.
+   */
+  readonly fauxReview?: readonly FauxSpecAttempt[] | undefined;
   /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
@@ -586,6 +623,7 @@ export const createFauxModelAccess = (
         options.fauxAsk,
         options.fauxEveryTurn ?? false,
         options.fauxSpec ?? [],
+        options.fauxReview ?? [],
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)
