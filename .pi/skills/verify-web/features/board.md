@@ -56,10 +56,11 @@ Evidence: `boards.png`, `board.png`, `board-after-move.png`, and `observed.board
 
 - **The lanes never write.** The moves the drive makes in the page are the card pane's
   ([card-pane.md](card-pane.md)); the final check counts the page's writes against what was clicked.
-- **The drive evaluates the seed from `apps/api`.** bun's isolated linker links `@repo/core` only into
-  the workspaces that depend on it, so `bun run .pi/skills/verify-board/seed.ts` cannot resolve it from
-  `.pi/`. The seed has no relative imports, so `bun -e "$(cat seed.ts)"` with `apps/api` as the
-  working directory runs it unchanged.
+- **The drive runs the board skill's seed by path** (`bun run .pi/skills/verify-board/seed.ts`), as
+  `verify-board/up.sh` does. bun's isolated linker links a workspace package only into the packages
+  that declare it, so this works because the root `package.json` declares `@repo/core` and
+  `@repo/storage-postgres` (LOB-175); a driver that imports a workspace package the root does not
+  declare needs it added there, not a resolution workaround.
 - **`/boards` lists every board in the database**, test boards included, capped at the 100 newest
   (`LIST_BOARDS_LIMIT`); at the cap the page says older boards are not listed. The seeded board is
   first because it is newest. The `listBoards` test dates its rows a day ahead to be the newest, and
