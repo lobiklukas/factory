@@ -53,6 +53,13 @@ The lifecycle-action checks (LOB-235) were added to `./webhook.sh` and run from 
 before LOB-235 failed its first new check: a generic `push` on the `docs` label was recorded
 `processed` with `rule "docs" mapped it to …`.
 
+The dev task's environment (LOB-257) was proved by `API_VIA_TURBO=1 ./webhook.sh`, run from the
+`agent/LOB-257` worktree on 2026-10-28 (API on `:9510`, started through `turbo run dev
+--filter=@repo/api` in Strict Mode, the worktree's own database on 5442): **17/17**, evidence
+`.verify/evidence/lob-257/webhook/`. The same drive against `apps/api/turbo.json` from before
+LOB-257 failed the first check with `503 not-configured (TRIGGER_SECRET)`: Strict Mode had stripped
+the secret (`webhook-before/`).
+
 The Sentry receiver checks (LOB-81) were run from the `agent/LOB-81` worktree on 2026-10-27 (API on
 `:9510`, faux, the worktree's own database on 5442): `./sentry.sh` **22/22** (14 checks on the first
 process, 4 on the restarted one, 4 shell checks; re-run after the cap moved past normalization), evidence `.verify/evidence/lob-81/`, with a mutation
