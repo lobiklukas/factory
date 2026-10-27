@@ -308,8 +308,7 @@ export type SessionServiceShape = {
    *
    * A page is committed to the log — the `factory.page` document a reader asks for by name, and the
    * entry a fold and a rebuild can see — and its row is written in the same effect so `listPages`
-   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller, exactly as
-   * the PR step's is `openPullRequest` and no `SessionRpc` member.
+   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller.
    */
   readonly recordPage: (
     input: RecordPageInput,
