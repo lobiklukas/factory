@@ -125,8 +125,11 @@ The drive cannot stop a mission between two of its commits, so the claim itself 
 
 The mission fan-out checks (LOB-193) were run from the `agent/LOB-193` worktree on 2026-10-27 (API
 on `:9530`, faux, Postgres on 5442, `DATABASE_URL=…/factory_agent_lob_193`): `bun drive.ts`
-**62/62** with the fan-out block added (two workers held live and joined; a failing worker under
-`failFast` leaving no task and the mission in `implement`), evidence `.verify/evidence/lob-193/verify-api/`.
+**64/64** with the fan-out block added (two workers held live and joined; a failing worker under
+`failFast` stopping its sibling's running check, whose beat is written before the mark the failing
+worker waits on, and leaving the mission in `implement`; a check that writes outside the worktree
+refused by the session's policy), re-run after the review fixes, evidence
+`.verify/evidence/lob-193-r2/verify-api/`.
 The abort reason on the aborted worker, `allSettled`, and the join reading only once both workers
 are terminal are proven from the task graph in `packages/harness/src/mission.fanout.test.ts` — see
 `mission.md`.

@@ -1114,7 +1114,8 @@ const program = Effect.gen(function* () {
       {
         id: "b",
         prompt: "do part b",
-        check: `touch .verify-b-checking; ${holdUntil("never").replace("do sleep", "do touch .verify-b-alive; sleep")}`,
+        // The beat is written before the mark `a` waits on, so it exists by the time the abort can come.
+        check: `touch .verify-b-alive; touch .verify-b-checking; ${holdUntil("never").replace("do sleep", "do touch .verify-b-alive; sleep")}`,
       },
     ],
   });

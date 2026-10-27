@@ -335,8 +335,10 @@ describe("a mission's fan-out", () => {
           {
             id: "b",
             prompt: "do part b",
+            // The beat is written before the start mark, so once `a` sees `b.started` (and the
+            // abort can follow) the beat file already exists.
             check:
-              "touch b.started; while [ ! -f b.release ]; do touch b.alive; sleep 0.01; done",
+              "touch b.alive; touch b.started; while [ ! -f b.release ]; do touch b.alive; sleep 0.01; done",
           },
         ]),
       );
@@ -552,6 +554,35 @@ describe("a mission's fan-out", () => {
       await Effect.runPromise(closeHarness(harness));
     }
   }, 120_000);
+
+  it("still commits a worker's abort when reading why it was aborted fails", async () => {
+    type Abort = typeof MissionWorkerTask.definition.abort;
+    const committed: unknown[] = [];
+    const task = {
+      id: 7,
+      owner: 3,
+      input: { worker: { id: "b", prompt: "p" }, workspace: { path: "/w" } },
+      state: { status: "running", checkpoint: { phase: "check" } },
+    } as unknown as Parameters<Abort>[0];
+    const runtime = {
+      getTask: () => Promise.reject(new Error("storage is down")),
+      commit: (next: () => unknown) => {
+        committed.push(next());
+        return Promise.resolve();
+      },
+    } as unknown as Parameters<Abort>[1];
+    await MissionWorkerTask.definition.abort(task, runtime, context);
+    // The reason falls back to the phase it can show; the abort itself is not lost.
+    expect(committed).toEqual([
+      {
+        status: "terminal",
+        outcome: {
+          status: "aborted",
+          reason: 'the worker "b" was aborted in check',
+        },
+      },
+    ]);
+  });
 
   it("reads a waiting checkpoint back through migrate", () => {
     const migrate = (input: JsonValue, checkpoint: JsonValue, from: number) =>

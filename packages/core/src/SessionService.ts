@@ -1882,20 +1882,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
-       * Start a mission: one feature taken through plan, implement and verify as one durable task
-       * (LOB-230, part 2 of LOB-192).
-       *
-       * The call admits the task and answers its id; the phase it reaches is read off the session's
-       * snapshot, where the mission's committed document reports it. The workspace is resolved here
-       * rather than sent by the client, so a mission can only run where its session runs — the same
-       * rule verify follows when it runs the repo's own command.
-       *
-       * An empty feature is refused rather than started: a mission's feature is the one thing its
-       * phases and its result are about, and a blank one would settle a result nobody can read.
-       * Workers (LOB-193) are refused the same way, before a task exists: a worker with no id or no
-       * prompt, or two that share an id, would fan out into work nobody can attribute.
-       */
-      /**
        * Hold every worker's `check` to the decision an agent's `bash` call gets (D11, D15), before any
        * task exists.
        *
@@ -1940,6 +1926,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
         });
 
+      /**
+       * Start a mission: one feature taken through plan, implement and verify as one durable task
+       * (LOB-230, part 2 of LOB-192).
+       *
+       * The call admits the task and answers its id; the phase it reaches is read off the session's
+       * snapshot, where the mission's committed document reports it. The workspace is resolved here
+       * rather than sent by the client, so a mission can only run where its session runs — the same
+       * rule verify follows when it runs the repo's own command.
+       *
+       * An empty feature is refused rather than started: a mission's feature is the one thing its
+       * phases and its result are about, and a blank one would settle a result nobody can read.
+       * Workers (LOB-193) are refused the same way, before a task exists: a worker with no id or no
+       * prompt, or two that share an id, would fan out into work nobody can attribute.
+       */
       const startMission = (
         input: StartMissionInput,
       ): Effect.Effect<StartMissionResult, SessionError> =>

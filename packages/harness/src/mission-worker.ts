@@ -196,12 +196,12 @@ const abortReason = (
   >,
   runtime: WorkerRuntime,
   context: Context,
-): Effect.Effect<string> =>
-  Effect.gen(function* () {
-    const plain = `the worker "${task.input.worker.id}" was aborted in ${task.state.checkpoint.phase}`;
+): Effect.Effect<string> => {
+  const plain = `the worker "${task.input.worker.id}" was aborted in ${task.state.checkpoint.phase}`;
+  return Effect.gen(function* () {
     const ownerId = task.owner;
     if (ownerId === undefined) return plain;
-    const owner = yield* Effect.promise(() =>
+    const owner = yield* attempt("read the mission that owns the worker", () =>
       runtime.getTask(ownerId, context),
     );
     // The mission's own abort reaches its workers first (bottom-up): every sibling is aborted with
@@ -219,7 +219,7 @@ const abortReason = (
     const settled: { readonly worker: string; readonly status: string }[] = [];
     for (const sibling of owner.state.on) {
       if (sibling === task.id) continue;
-      const record = yield* Effect.promise(() =>
+      const record = yield* attempt("read a sibling worker", () =>
         runtime.getTask(sibling, context),
       );
       const outcome = record?.state.outcome;
@@ -234,7 +234,9 @@ const abortReason = (
     return cause === undefined
       ? plain
       : `${plain}: the worker "${cause.worker}" settled ${cause.status} and the mission joins its workers failFast`;
-  });
+    // The reason is a courtesy; the abort is not. A read that fails must not keep it uncommitted.
+  }).pipe(Effect.orElseSucceed(() => plain));
+};
 
 /**
  * One worker: open a conversation, talk in it, check the result.
