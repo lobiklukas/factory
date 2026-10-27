@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a card, move it, and assert the three refusals (undeclared transition, stale revision, a run crossing a human gate) through `factory board ls|show|move|comment|start` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run, through `factory board ls|show|move|comment|start` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard; includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -28,6 +28,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                         | a script can tell a refusal from a success                           |
 | refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                            | the refusal is typed, not generic prose                              |
 | `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                 | a run is one session, bound to the card                              |
+| specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told      | the drive's own card is specified and answered before `planning`     |
 | refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim           | only a person crosses plan approval, and the refusal names the gate  |
 | the refusals wrote nothing       | `board show` after them: the last accepted column and revision                        | a refused move is not a half-applied one                             |
 | the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                 | the browser shows what the CLI left, and offers a person the gate    |
@@ -35,12 +36,13 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through | a refusal names the requirement; evidence is a condition of the move |
 
 Every check is required: `drive.sh`, `ask.sh` and `requires.sh` each exit non-zero when one
-fails, and `drive.sh` folds `create.ts`'s and `web.mjs`'s exit codes into its own.
+fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s (its specify phase) and `web.mjs`'s exit codes
+into its own.
 
 ## Launch
 
 ```sh
-./up.sh          # api on :9400, web on :3400, faux model, one board seeded
+./up.sh          # api on :9400, web on :3400, faux model (sleeps, then asks), one board seeded
 ./doctor.sh      # read-only; fails loudly when Postgres on 5442 is down
 ./down.sh        # stops only what up.sh started, plus the drive's tmux server
 ```
@@ -59,7 +61,14 @@ part-way, because the checks find the drive's card by id in its lane rather than
 card; `ask.sh` calls `seed.ts` without
 `SEED_CARD=0` and gets a board and a card from the service (so `task_events` gets its `created` row).
 `MODEL_BACKEND=faux` keeps `board start` offline: the session, its worktree and its `factory.task`
-document are real; only the model behind it is scripted.
+document are real; only the model behind it is scripted. The script is the specify phase's
+(LOB-85): `FAUX_COMMAND="sleep 8; echo faux-ok"` holds a run's turn open so it is provably busy, and
+`FAUX_ASK` is the question a run asks when its prompt carries no task thread yet, recorded in
+`.verify/run/faux-ask` for `drive.sh`. `FAUX_ASK` can be overridden; `FAUX_COMMAND` is fixed, and an
+exported one is ignored, because the probes need its sleep (the busy control) and its `faux-ok` (the
+read was not refused). The 8 s leaves the busy probe, which starts after `board start` returns, the
+tmux round-trip and a cold `bun`, several seconds of margin under load. A run on an answered card
+never asks.
 
 The dashboard (`apps/web`'s `bun run dev`, pid in `.verify/run/web.pid`) points at this API, whose
 `ALLOWED_ORIGINS` names the web origin. `up.sh` waits for both. Override the ports with `API_PORT` and
@@ -101,7 +110,11 @@ Environment: `API_URL` (default `http://localhost:9400`), `WEB_URL` (default the
 
 The phases, in order: **create** (`create.ts`, over RPC) → `ls` → `show` → a declared move to
 `specifying` → the **stale** refusal (the revision the card had before that move) → the **undeclared**
-refusal (`specifying → done`) → `start` (the run, `ses_…`) → a person's move to `planning` → the
+refusal (`specifying → done`) → `start` (the run, `ses_…`, sent a prompt) → **specify**: the run is
+busy, then asks and is parked (`ask.ts`), `show` prints the `needs_input` block and the question,
+`comment` answers and lifts it, `show` prints the answer, a second `start` opens the next run and its
+recorded prompt quotes the answer verbatim (`ask.ts`; see `features/specify.md`) → a person's move to
+`planning` at the revision `show` printed → the
 **human-gate** refusal (`planning → building` with `--actor <that ses_…>`) → `show` again (the
 refusals wrote nothing) → **web** (`web.mjs` in headless Chrome: the card's lane, the pane's revision,
 `building` offered and marked `plan approval`).
@@ -118,11 +131,15 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 
 - `create.json` — the created card, its `getTask` read-back, and the create phase's checks
 - `ls.txt`, `show.txt`, `move.txt`, `move-stale.txt`, `move-undeclared.txt`, `start.txt`,
-  `move-planning.txt`, `move-gate.txt`, `show-after.txt` — raw panes, one per phase
+  `show-asked.txt`, `comment.txt`, `show-answered.txt`, `start-next.txt`, `move-planning.txt`,
+  `move-gate.txt`, `show-after.txt` — raw panes, one per phase
+- `specify-busy.json`, `specify-parked.json`, `specify-told.json` — the specify phase's probes:
+  their checks and facts, the next run's recorded `task_thread` section among them
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
-- `observed.json` — every check with its detail, the board id, the card id and the session id.
-  `drive.sh` deletes `create.json`, `web.json`, `web-board.png` and `observed.json` before it starts,
+- `observed.json` — every check with its detail, the board id, the card id and both session ids.
+  `drive.sh` deletes `create.json`, `specify-*.json`, `web.json`, `web-board.png` and
+  `observed.json` before it starts,
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
@@ -169,10 +186,14 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
   (`human_gate_required`), not a bug. The drive proves it with the run's own id and does not cross
   the gate as a person afterwards: that half is `packages/core`'s `TaskService` case, and stopping
   in `planning` leaves the dashboard phase a card whose next move is the gate the run was refused.
-- **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; `ask.sh`
-  passes one so the run takes a turn.
+- **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; the drive
+  and `ask.sh` pass one so the run takes a turn.
 - **The faux asks only once per card.** `FAUX_ASK` makes the script call `ask` when the run was
   offered the tool and its prompt has no `task_thread` yet, so the run after an answer replies instead.
+  A phase that starts a run on a card nobody has answered yet will park it; that is the script, not a
+  bug.
+- **The answer is typed as a `$'…'` word.** It carries a newline and an em dash so a trimmed or
+  re-encoded answer is caught; the pane's shell (bash or zsh) turns the escapes into one argument.
 - **`board start` does not move the card.** The lane a run works in is where the card already sits;
   the card moves when a person moves it, with the run's evidence in hand.
 - **5442 is a shared port.** `up.sh` asks the port instead of running compose blind; the regression is
