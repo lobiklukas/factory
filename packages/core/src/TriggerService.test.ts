@@ -38,6 +38,7 @@ import {
   Layer,
   ManagedRuntime,
   Schedule,
+  Schema,
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
@@ -318,9 +319,7 @@ const deliveryStatus = (requestId: string) =>
   );
 
 /** How the key holder below ends its transaction: failing with this rolls its row back. */
-class ReleaseKey {
-  readonly _tag = "ReleaseKey";
-}
+class ReleaseKey extends Schema.TaggedError<ReleaseKey>()("ReleaseKey", {}) {}
 
 /**
  * Hold `requestId`'s key in an uncommitted insert until `contenders` other backends are queued
@@ -379,10 +378,7 @@ const holdKeyUntilContended = (
             }),
           )
           .pipe(
-            Effect.catchIf(
-              (failure): failure is ReleaseKey => failure instanceof ReleaseKey,
-              () => Effect.void,
-            ),
+            Effect.catchTag("ReleaseKey", () => Effect.void),
           );
       }),
       DatabaseLive,
