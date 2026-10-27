@@ -3,7 +3,8 @@
  * `POST /webhooks/github`: one GitHub webhook, two events, picked by `X-GitHub-Event`.
  *
  * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
- *   merge moves it to done, an unmerged close explains itself — and (LOB-36) starts the reviewer run
+ *   merge moves it to done, an unmerged close explains itself — a merge tears the PR's sessions'
+ *   worktrees and branches down (LOB-268), and (LOB-36) starts the reviewer run
  *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
  *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
  *   review under `review`; a failed mirror's status wins, then a failed review's.
@@ -41,6 +42,7 @@ import {
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
   handlePullRequestReviewWebhook,
+  releaseMergedDelivery,
 } from "@repo/core";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
@@ -131,6 +133,15 @@ export const GitHubWebhookLive = HttpRouter.add(
       return HttpServerResponse.setStatus(
         HttpServerResponse.jsonUnsafe(mirrored.body),
         mirrored.status,
+      );
+    }
+    // A merge is a terminal event (LOB-268): the PR's sessions' worktrees and branches are torn
+    // down, now that the work is on the base. Only a delivery the mirror accepted gets here, so the
+    // signature was checked; a redelivery finds them released and answers the first release.
+    const released = yield* releaseMergedDelivery(raw);
+    if (released > 0) {
+      yield* Effect.logInfo(
+        `github: a merged pull request released ${released} session workspace(s)`,
       );
     }
     // A head the registered checkout lacks (a push nobody made here) is fetched with the worker's

@@ -108,6 +108,18 @@ export const DECLARED_TRANSITIONS: Readonly<
   review: ["done", "canceled"],
 };
 
+/**
+ * The default definition's terminal columns (B4): a card in one is finished, and its runs' worktrees
+ * and branches are torn down when it gets there (LOB-268). Hard-coded beside `DECLARED_TRANSITIONS`
+ * for the same reason that table is: `BoardColumn.kind` says it per definition, and this is the
+ * default one's answer until a reader of moves resolves the card's definition.
+ */
+export const TERMINAL_COLUMNS: ReadonlyArray<string> = ["done", "canceled"];
+
+/** Whether a card in `column` is finished: `done` or `canceled`. */
+export const isTerminalColumn = (column: string): boolean =>
+  TERMINAL_COLUMNS.includes(column);
+
 /** B5's two human gates, keyed by `from→to`, with the name a refusal (and the card pane) gives them. */
 export const HUMAN_GATES: Readonly<Record<string, string>> = {
   "planning→building": "plan approval",

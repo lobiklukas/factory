@@ -41,8 +41,6 @@ import {
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { HttpClient } from "effect/http";
-// oxlint-disable-next-line node-builtin-import
-import { execSync, execFileSync } from "node:child_process"; // eslint-disable-line
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -61,6 +59,7 @@ import type {
   ListSessionsInput,
   ListSessionsOutput,
   RegisterRepoInput,
+  ReleaseWorkspaceResult,
   ReplayComparison,
   ReplaySessionInput,
   RepoSummary,
@@ -81,12 +80,15 @@ import type {
   SpendRow,
   WithdrawMessageInput,
   WithdrawMessageResult,
+  WorkspaceRelease,
+  WorkspaceReleaseReason,
 } from "@repo/domain/Session";
 import {
   RepoSlug,
   SessionActor,
   SessionError as SessionErrorClass,
   SessionId as SessionIdSchema,
+  WorkspaceRelease as WorkspaceReleaseSchema,
 } from "@repo/domain/Session";
 import type {
   MissionWorker,
@@ -204,7 +206,7 @@ import {
   SessionWriteBack,
 } from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
-import { resolveWorkspace } from "./workspace";
+import { removeWorkspace, resolveWorkspace } from "./workspace";
 
 /** Longest title we derive from a first message, in characters. */
 const TITLE_MAX = 80;
@@ -403,7 +405,26 @@ export type SessionServiceShape = {
     SessionError | PrError | CredentialError,
     CredentialProvider | HttpClient.HttpClient
   >;
-  /** Close every harness this process owns. */
+  /**
+   * Tear the session's worktree and branch down, on a terminal event (LOB-268): its card reached
+   * `done` or `canceled`, its PR merged, or an operator discarded it. Nothing else removes them —
+   * the idle sweep and `close` release the harness and the log handle and leave the work for the
+   * next run.
+   *
+   * A run in flight is interrupted and the owner released first, so nothing is writing into the
+   * directory while it goes. The release is recorded on the session before the filesystem is
+   * touched, and from then on a read resolves the workspace without cutting a new one and `send`,
+   * `reset` and `startMission` are refused. Idempotent: a repeat answers `first: false` with the
+   * first call's reason, and still finishes a teardown a crash cut short.
+   */
+  readonly releaseWorkspace: (input: {
+    readonly sessionId: SessionId;
+    readonly reason: WorkspaceReleaseReason;
+  }) => Effect.Effect<ReleaseWorkspaceResult, SessionError>;
+  /**
+   * Close every harness this process owns: the idle sweep's release, for every owner at once, on
+   * shutdown. The worktrees and branches stay (LOB-268), so a restarted process resumes on them.
+   */
   readonly close: Effect.Effect<void>;
 };
 
@@ -489,6 +510,9 @@ type SessionRow = {
   /** Who the session's spend is attributed to, when anyone was (LOB-162). */
   readonly actor: string | null;
   readonly createdAt: string;
+  /** When the worktree and branch were torn down, and on which terminal event (LOB-268). */
+  readonly workspaceReleasedAt: string | null;
+  readonly workspaceReleaseReason: string | null;
 };
 type RepoRow = {
   readonly slug: string;
@@ -1056,14 +1080,46 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         });
 
+      /** A release the index recorded, checked: a reason this build does not know is a broken row. */
+      const decodeRelease = (marked: {
+        readonly reason: string | null;
+        readonly at: string | null;
+      }): Effect.Effect<WorkspaceRelease, SessionError> =>
+        Schema.decodeUnknownEffect(WorkspaceReleaseSchema)(marked).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SessionErrorClass({
+                code: "storage",
+                message: `the sessions table holds an invalid workspace release: ${String(cause)}`,
+              }),
+          ),
+        );
+
+      const releaseOf = (
+        row: SessionRow,
+      ): Effect.Effect<WorkspaceRelease | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (row.workspaceReleasedAt === null) return undefined;
+          return yield* decodeRelease({
+            reason: row.workspaceReleaseReason,
+            at: row.workspaceReleasedAt,
+          });
+        });
+
+      /**
+       * The session's workspace. A released one (LOB-268) resolves where it was without cutting it
+       * again, and says so; `released` is passed by a caller that has just read it under the gate.
+       */
       const workspaceFor = (
         row: SessionRow,
+        released?: WorkspaceRelease,
       ): Effect.Effect<SessionWorkspace, SessionError> =>
         Effect.gen(function* () {
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
           const localPath = yield* localPathFor(repo);
-          return yield* resolveWorkspace(
+          const release = released ?? (yield* releaseOf(row));
+          const workspace = yield* resolveWorkspace(
             {
               sessionRoot: options.sessionRoot,
               sessionId: row.id,
@@ -1071,6 +1127,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: row.baseRef ?? undefined,
               ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
+              cut: release === undefined,
             },
             { fs, path },
           ).pipe(
@@ -1082,6 +1139,26 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
             ),
           );
+          return release === undefined
+            ? workspace
+            : { ...workspace, released: release };
+        });
+
+      /**
+       * Refuse to start work on a session whose workspace was torn down (LOB-268): the branch is gone,
+       * and a run there would start over on an empty one at the base. Reads, approvals, pages and
+       * the curator still reach it; a new run is a new session.
+       */
+      const refuseReleased = (
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const release = yield* releaseOf(row);
+          if (release === undefined) return;
+          return yield* new SessionErrorClass({
+            code: "invalid_input",
+            message: `session ${row.id} is finished: its workspace was released (${release.reason}) at ${release.at}, so it takes no new run`,
+          });
         });
 
       const localPathFor = (
@@ -1214,15 +1291,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               return touched;
             }
 
-            const workspace = yield* workspaceFor(row);
-            yield* Effect.mapError(
-              fs.makeDirectory(workspace.path, { recursive: true }),
-              (cause) =>
-                new SessionErrorClass({
-                  code: "harness",
-                  message: `create ${workspace.path}: ${String(cause)}`,
-                }),
-            );
+            // Read again under the gate rather than trusted from `row`: a release that committed
+            // after the caller read the row must not be undone by cutting the worktree back
+            // (LOB-268). A released session still opens — its log takes approvals, pages and a
+            // curator's charge — but in no directory, because there is none to work in.
+            const released = yield* releaseOf(yield* requireSession(id));
+            const workspace = yield* workspaceFor(row, released);
+            if (released === undefined) {
+              yield* Effect.mapError(
+                fs.makeDirectory(workspace.path, { recursive: true }),
+                (cause) =>
+                  new SessionErrorClass({
+                    code: "harness",
+                    message: `create ${workspace.path}: ${String(cause)}`,
+                  }),
+              );
+            }
             const storage = yield* openStorage(id, "owner");
             // The run's prompt comes from its column (B6), read on every owner acquisition: a
             // resumed session re-reads the skill bodies as they are *now*, so an edit made between
@@ -1438,6 +1522,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             forkedFrom: null,
             actor: input.actor ?? null,
             createdAt: "",
+            workspaceReleasedAt: null,
+            workspaceReleaseReason: null,
           };
           // The index row is written before the log because it carries the request-id dedupe key.
           // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
@@ -1544,6 +1630,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
 
           const row = yield* requireSession(input.sessionId);
+          yield* refuseReleased(row);
           const owner = yield* acquireOwner(input.sessionId, row);
 
           // The first message names the session when nothing else has.
@@ -1821,6 +1908,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             forkedFrom: input.sessionId,
             actor: parent.actor,
             createdAt: "",
+            workspaceReleasedAt: null,
+            workspaceReleaseReason: null,
           };
           // The entries, the lineage and the repo binding land in one commit: a fork that exists
           // at all exists with everything `rebuildIndexes` folds, so there is no window in which a
@@ -1937,6 +2026,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             forkedFrom: null,
             actor: source.actor,
             createdAt: "",
+            workspaceReleasedAt: null,
+            workspaceReleaseReason: null,
           };
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
           // the title and the binding are written with the lineage, and the source's prompt is what
@@ -2102,6 +2193,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
+          yield* refuseReleased(row);
           const handoff = input.handoff?.trim();
           const owner = yield* acquireOwner(input.sessionId, row);
           yield* resetSession(
@@ -2227,6 +2319,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ids.add(worker.id);
           }
           const row = yield* requireSession(input.sessionId);
+          yield* refuseReleased(row);
           const workspace = yield* workspaceFor(row);
           yield* refuseUnpolicedChecks(
             input.sessionId,
@@ -3222,7 +3315,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             pr_url,
             forked_from,
             actor,
-            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+            to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
+            workspace_release_reason
           FROM sessions
           WHERE id = ${sessionId}
         `;
@@ -3238,7 +3333,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             pr_url,
             forked_from,
             actor,
-            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+            to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
+            workspace_release_reason
           FROM sessions
           WHERE request_id = ${requestId}
         `;
@@ -3272,7 +3369,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             pr_url,
             forked_from,
             actor,
-            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+            to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
+            workspace_release_reason
         `;
 
       const readRepo = (slug: string) =>
@@ -3335,6 +3434,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }),
         );
 
+      /**
+       * Release what this process holds for a session: the projection, the harness and the log
+       * handle. Only that — the worktree and the branch are the session's, not the owner's, and stay
+       * for its next run (LOB-268); `releaseWorkspace` is the one place they are torn down.
+       */
       const releaseOwner = (
         sessionId: SessionId,
         owner: LiveOwner,
@@ -3344,50 +3448,115 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* FiberMap.remove(projectors, sessionId);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
           yield* Effect.promise(() => owner.storage.dispose());
-          // Idempotent worktree + branch teardown (LOB-67). Failures are ignored so a second
-          // release (or a crash-recovery sweep) succeeds.
-          const ws = owner.workspace;
-          if (ws.repo !== undefined) {
-            const dir = ws.path;
-            const branch = ws.branch ?? `factory/${sessionId}`;
-            yield* Effect.try({
-              try: () => {
-                // Delete the branch first (best-effort), then remove the worktree.
-                try {
-                  const common = execSync("git rev-parse --git-common-dir", {
-                    cwd: dir,
-                    encoding: "utf8",
-                    stdio: ["ignore", "pipe", "ignore"],
-                  }).trim();
-                  execFileSync(
-                    "git",
-                    ["--git-dir", common, "branch", "-D", branch],
-                    { stdio: "ignore" },
-                  );
-                } catch {
-                  // branch may already be gone
-                }
-                try {
-                  execFileSync(
-                    "git",
-                    ["-C", dir, "worktree", "remove", "--force", dir],
-                    { stdio: "ignore" },
-                  );
-                } catch {
-                  // worktree may already be gone
-                }
-                // Remove orphan directory if any.
-                try {
-                  execFileSync("rm", ["-rf", dir], { stdio: "ignore" });
-                } catch {
-                  // ignore
-                }
-              },
-              catch: () => undefined,
-            }).pipe(Effect.ignore);
-          }
           // Nobody owns the session now, so the list's honest status is idle (D8).
           yield* setActivityStatus(sessionId, "idle");
+        });
+
+      /**
+       * Record the release once: the first terminal event's reason and time are kept, and a repeat
+       * reads them back. The update is conditional, so of two concurrent releases one marks the row
+       * and the other — blocked on its lock, then matching nothing — reads what the first wrote, in
+       * a statement of its own so its snapshot is taken after that commit.
+       */
+      const markReleased = (
+        sessionId: SessionId,
+        reason: WorkspaceReleaseReason,
+      ) =>
+        Effect.gen(function* () {
+          type Marked = {
+            readonly reason: string;
+            readonly at: string;
+          };
+          const marked = yield* paper(
+            "record the workspace release",
+            sql<Marked>`
+              UPDATE sessions
+              SET workspace_released_at = now(), workspace_release_reason = ${reason}
+              WHERE id = ${sessionId} AND workspace_released_at IS NULL
+              RETURNING
+                workspace_release_reason AS reason,
+                to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+            `,
+          );
+          const first = marked[0];
+          if (first !== undefined) return { ...first, first: true };
+          const earlier = yield* paper(
+            "read the workspace release",
+            sql<Marked>`
+              SELECT
+                workspace_release_reason AS reason,
+                to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+              FROM sessions
+              WHERE id = ${sessionId} AND workspace_released_at IS NOT NULL
+            `,
+          );
+          const kept = earlier[0];
+          return kept === undefined ? undefined : { ...kept, first: false };
+        });
+
+      const releaseWorkspace = (input: {
+        readonly sessionId: SessionId;
+        readonly reason: WorkspaceReleaseReason;
+      }): Effect.Effect<ReleaseWorkspaceResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Under the owners' gate, so no acquisition opens an owner between the two: one that
+          // already read the row waits here, and opens after the mark, which it reads (below).
+          const { marked, owner } = yield* gate.withPermits(1)(
+            Effect.gen(function* () {
+              const marked = yield* markReleased(input.sessionId, input.reason);
+              const owner = yield* Ref.modify(live, (current) => [
+                HashMap.get(current, input.sessionId),
+                HashMap.remove(current, input.sessionId),
+              ]);
+              return { marked, owner };
+            }),
+          );
+          if (marked === undefined) {
+            return yield* new SessionErrorClass({
+              code: "storage",
+              message: `session ${input.sessionId}: the workspace release did not record`,
+            });
+          }
+          const release = yield* decodeRelease(marked);
+          if (Option.isSome(owner)) {
+            // A run still going is stopped, not abandoned in a directory about to vanish: the log
+            // settles the interrupted turn, and the session's transcript says where it ended.
+            const busy = yield* isBusy(
+              owner.value.harness,
+              owner.value.root,
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (busy) {
+              yield* interruptConversation(owner.value.root).pipe(
+                Effect.ignore,
+              );
+            }
+            yield* releaseOwner(input.sessionId, owner.value);
+          }
+          // Every time, not only the first: a teardown a crash cut short is finished by the repeat.
+          const workspace = yield* workspaceFor(row, release);
+          const repo =
+            row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+          yield* removeWorkspace(
+            {
+              directory: workspace.path,
+              ...(workspace.branch === undefined
+                ? {}
+                : { branch: workspace.branch }),
+              localPath: yield* localPathFor(repo),
+            },
+            { fs, path },
+          );
+          if (marked.first) {
+            yield* Effect.logInfo(
+              `session ${input.sessionId}: workspace released (${release.reason}); removed ${workspace.path}${workspace.branch === undefined ? "" : ` and ${workspace.branch}`}`,
+            );
+          }
+          return {
+            sessionId: input.sessionId,
+            release,
+            first: marked.first,
+          };
         });
 
       const closeAll = Effect.gen(function* () {
@@ -3474,6 +3643,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         curate,
         proposeDecomposition,
         openPullRequest: openPr,
+        releaseWorkspace,
         close: closeAll,
       });
     }),

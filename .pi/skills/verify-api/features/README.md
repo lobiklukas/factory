@@ -206,6 +206,13 @@ the task they copied), the drive was rerun on `:9540`: **61/61**, evidence
 `.verify/evidence/lob-199/review/`. A first rerun at load average 88 failed only those four
 live-stream checks.
 
+The workspace-lifecycle checks (LOB-268) were added to `./sigterm.sh` and run from the
+`agent/LOB-268` worktree on 2026-10-28 (`SIGTERM_PORT=9540`, faux, the worktree's own database on
+5442): **22/22** (15 driver checks across the two phases, 7 shell checks of the process and of the
+branch and worktree on disk while no process ran), evidence `.verify/evidence/lob-268/api/`. With the
+old teardown put back into the owner's release, seven checks fail — the branch is gone after the
+shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md](lifecycle.md).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -253,5 +260,6 @@ live-stream checks.
 - **A migration that has not been applied.** `/readyz` names a missing migration in principle, and
   `degraded.sh` proves the database-down branch; dropping a migration row to prove the middle branch
   would corrupt the ledger this repo's suites share.
-- **Isolation, sandboxes, worktrees.** Nothing in this surface touches a cluster; sessions run in a
-  scratch directory under `SESSION_ROOT` (M6 owns per-session git worktrees).
+- **Isolation, sandboxes.** Nothing in this surface touches a cluster; sessions run in a
+  directory under `SESSION_ROOT` — a linked git worktree when the repo is registered with a
+  checkout, which `./sigterm.sh` registers (LOB-268), and a scratch directory otherwise.

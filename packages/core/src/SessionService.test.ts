@@ -135,6 +135,10 @@ import {
 } from "./TriggerService";
 import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
 import {
+  releaseFinishedCard,
+  releaseMergedPullRequest,
+} from "./WorkspaceRelease";
+import {
   pullRequestReport,
   SessionWriteBack,
   type PullRequestReport,
@@ -9665,4 +9669,381 @@ describe("the trigger port's send", () => {
         .map((entry) => entry.text),
     ).toEqual(["fix the widget", "and the gadget"]);
   }, 60_000);
+});
+
+/**
+ * A session's worktree and branch outlive its owner (LOB-268).
+ *
+ * The idle sweep and a shutdown release the harness and the log handle, and nothing more: the run's
+ * commits and its uncommitted edits are where it left them, and its next run — in this process or
+ * in the next one — starts on them. The teardown is a terminal event's alone (the card's `done` or
+ * `canceled`, the PR's merge, an operator's discard), and it is idempotent.
+ *
+ * Each case cuts its worktrees from a checkout of its own, so a branch it asserts on is one only it
+ * made. The faux run's one `bash` call prints the branch's last commit subject and the uncommitted
+ * file, which is how "the next run sees the commit" is read: from the tool result the run got.
+ */
+describe("a session's workspace outlives its owner (LOB-268)", () => {
+  const keptRoot = mkdtempSync(join(tmpdir(), "factory-core-kept-"));
+  const keptRepoRoot = mkdtempSync(join(tmpdir(), "factory-repo-kept-"));
+  const keptRepo = RepoSlugSchema.make(
+    `lobiklukas/kept-${randomBytes(4).toString("hex")}`,
+  );
+  const SUBJECT = "kept work";
+  const NOTES = "an edit nobody committed";
+  const COMMAND = "git log -1 --format=%s && cat NOTES.md";
+
+  const git = (cwd: string, command: string) =>
+    execSync(command, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  /** The sha a branch names in the checkout, or `undefined` once it is gone. */
+  const branchSha = (branch: string): string | undefined => {
+    try {
+      return git(keptRepoRoot, `git rev-parse --verify --quiet ${branch}`);
+    } catch {
+      return undefined;
+    }
+  };
+
+  beforeAll(() => {
+    git(keptRepoRoot, "git init -b main");
+    git(keptRepoRoot, "git config user.email t@t.com");
+    git(keptRepoRoot, "git config user.name t");
+    git(keptRepoRoot, "git commit --allow-empty -m base");
+  });
+
+  const keptRuntime = (
+    extra: {
+      readonly idleTimeoutMs?: number;
+      readonly sweepIntervalMs?: number;
+    } = {},
+  ) =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({
+          model: createFauxModelAccess({ fauxCommand: COMMAND }).access,
+          sessionRoot: keptRoot,
+          ...extra,
+        }),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A session on the case's repo, with a commit and an uncommitted edit in its worktree. */
+  const sessionWithWork = (
+    input: { readonly taskId?: string; readonly taskColumn?: string } = {},
+  ) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* sessions.registerRepo({ repo: keptRepo, localPath: keptRepoRoot });
+      const created = yield* sessions.create({
+        title: "work to keep",
+        repo: keptRepo,
+        baseRef: "main",
+        ...input,
+      });
+      const workspace = (yield* sessions.get(created.id)).workspace;
+      writeFileSync(join(workspace.path, "WORK.md"), "committed\n");
+      git(workspace.path, "git add WORK.md");
+      git(
+        workspace.path,
+        `git -c user.email=t@t.com -c user.name=t commit -q -m "${SUBJECT}"`,
+      );
+      writeFileSync(join(workspace.path, "NOTES.md"), `${NOTES}\n`);
+      return {
+        id: created.id,
+        path: workspace.path,
+        branch: workspace.branch ?? "",
+        sha: git(workspace.path, "git rev-parse HEAD"),
+      };
+    });
+
+  /** Send the next run and answer the output of its one `bash` call. */
+  const nextRunSees = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* sessions.send({ sessionId, content: "what is on the branch?" });
+      yield* waitUntil(
+        Effect.map(
+          sessions.get(sessionId),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.some(
+              (entry) =>
+                entry.kind === "toolResult" && entry.toolName === "bash",
+            ),
+        ),
+        "the next run's bash call",
+      );
+      const snapshot = yield* sessions.get(sessionId);
+      return snapshot.entries
+        .filter(
+          (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+        )
+        .map((entry) => entry.text)
+        .join("\n");
+    });
+
+  it("keeps the branch and the worktree through the idle sweep, and the next run sees the commit", async () => {
+    const runtime = keptRuntime({ idleTimeoutMs: 200, sweepIntervalMs: 50 });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          // Untouched for many idle windows: no read here, because a read is use and would keep the
+          // owner open. The sweep runs every 50 ms and releases after 200.
+          yield* Effect.sleep(1_500);
+          const released = yield* sessions.get(work.id);
+          const kept = {
+            branch: branchSha(work.branch),
+            head: git(work.path, "git rev-parse HEAD"),
+            notes: existsSync(join(work.path, "NOTES.md")),
+          };
+          const seen = yield* nextRunSees(work.id);
+          yield* sessions.close;
+          return { work, released, kept, seen };
+        }),
+      );
+      // The sweep did release the owner: this read is a fold of the log.
+      expect(outcome.released.session.mode).toBe("historical");
+      expect(outcome.released.workspace.released).toBeUndefined();
+      // And left the work: the branch names the commit, and the worktree is on it with the edit.
+      expect(outcome.work.branch).toBe(`factory/${outcome.work.id}`);
+      expect(outcome.kept.branch).toBe(outcome.work.sha);
+      expect(outcome.kept.head).toBe(outcome.work.sha);
+      expect(outcome.kept.notes).toBe(true);
+      // The next run started on it, not on a fresh branch at the base.
+      expect(outcome.seen).toContain(SUBJECT);
+      expect(outcome.seen).toContain(NOTES);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("keeps every session's branch through a shutdown and a restart, and the next process's run sees the commit", async () => {
+    const before = keptRuntime();
+    const works = await before
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const first = yield* sessionWithWork();
+          const second = yield* sessionWithWork();
+          // What the API's shutdown finalizer runs on SIGTERM.
+          yield* sessions.close;
+          return [first, second];
+        }),
+      )
+      .finally(() => before.dispose());
+
+    for (const work of works) {
+      expect(branchSha(work.branch)).toBe(work.sha);
+      expect(existsSync(join(work.path, "NOTES.md"))).toBe(true);
+    }
+
+    const after = keptRuntime();
+    try {
+      const seen = await after.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const answers = [];
+          for (const work of works) answers.push(yield* nextRunSees(work.id));
+          yield* sessions.close;
+          return answers;
+        }),
+      );
+      for (const answer of seen) {
+        expect(answer).toContain(SUBJECT);
+        expect(answer).toContain(NOTES);
+      }
+      for (const work of works) expect(branchSha(work.branch)).toBe(work.sha);
+    } finally {
+      await after.dispose();
+    }
+  }, 120_000);
+
+  it("tears the worktree and branch down on a discard, once, and the released session cuts none again", async () => {
+    const runtime = keptRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          const first = yield* sessions.releaseWorkspace({
+            sessionId: work.id,
+            reason: "discarded",
+          });
+          const gone = {
+            directory: existsSync(work.path),
+            branch: branchSha(work.branch),
+            listed: git(keptRepoRoot, "git worktree list --porcelain"),
+          };
+          // A second terminal event: no error, and the first release is what it answers.
+          const repeat = yield* sessions.releaseWorkspace({
+            sessionId: work.id,
+            reason: "canceled",
+          });
+          // A read resolves where the workspace was without cutting it again.
+          const read = yield* sessions.get(work.id);
+          const afterRead = {
+            directory: existsSync(work.path),
+            branch: branchSha(work.branch),
+          };
+          const refused = yield* sessions
+            .send({ sessionId: work.id, content: "more" })
+            .pipe(Effect.flip);
+          return { work, first, gone, repeat, read, afterRead, refused };
+        }),
+      );
+      expect(outcome.first.first).toBe(true);
+      expect(outcome.first.release.reason).toBe("discarded");
+      expect(outcome.gone.directory).toBe(false);
+      expect(outcome.gone.branch).toBeUndefined();
+      expect(outcome.gone.listed).not.toContain(outcome.work.path);
+      expect(outcome.repeat).toEqual({ ...outcome.first, first: false });
+      expect(outcome.read.workspace.released).toEqual(outcome.first.release);
+      expect(outcome.read.workspace.path).toBe(outcome.work.path);
+      expect(outcome.afterRead.directory).toBe(false);
+      expect(outcome.afterRead.branch).toBeUndefined();
+      expect(outcome.refused.code).toBe("invalid_input");
+      expect(outcome.refused.message).toContain("discarded");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("interrupts a run in flight before it tears the worktree down", async () => {
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({ fauxCommand: "sleep 30" }).access,
+        sessionRoot: keptRoot,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          yield* sessions.send({ sessionId: work.id, content: "take a while" });
+          yield* waitUntil(
+            Effect.map(sessions.get(work.id), (snapshot) => snapshot.live.busy),
+            "the run to be in flight",
+          );
+          const released = yield* sessions.releaseWorkspace({
+            sessionId: work.id,
+            reason: "discarded",
+          });
+          const read = yield* sessions.get(work.id);
+          return { work, released, read };
+        }),
+      );
+      expect(outcome.released.first).toBe(true);
+      // The owner is gone, not left running a turn in a directory that no longer exists.
+      expect(outcome.read.session.mode).toBe("historical");
+      expect(existsSync(outcome.work.path)).toBe(false);
+      expect(branchSha(outcome.work.branch)).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("tears a card's runs down when the card is canceled, and not on a move that leaves it open", async () => {
+    const runtime = keptRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const tasks = yield* TaskService;
+          const boardId = `brd_${randomBytes(13).toString("hex")}`;
+          yield* sql`
+            INSERT INTO board_instances (id, repo, definition_id, definition_version)
+            VALUES (${boardId}, ${keptRepo}, 'default', 1)
+          `;
+          const card = yield* tasks.create({
+            boardId,
+            title: "a card to cancel",
+            actor: "person:lukas",
+          });
+          const work = yield* sessionWithWork({
+            taskId: card.id,
+            taskColumn: card.column,
+          });
+          const specifying = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: card.revision,
+            to: "specifying",
+            actor: "person:lukas",
+          });
+          const open = yield* releaseFinishedCard(specifying);
+          const keptWhileOpen = branchSha(work.branch);
+          const canceled = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: specifying.revision,
+            to: "canceled",
+            actor: "person:lukas",
+          });
+          const finished = yield* releaseFinishedCard(canceled);
+          const again = yield* releaseFinishedCard(canceled);
+          return { work, open, keptWhileOpen, finished, again };
+        }),
+      );
+      expect(outcome.open).toEqual([]);
+      expect(outcome.keptWhileOpen).toBe(outcome.work.sha);
+      expect(
+        outcome.finished.map((result) => [
+          result.sessionId,
+          result.release.reason,
+          result.first,
+        ]),
+      ).toEqual([[outcome.work.id, "canceled", true]]);
+      expect(existsSync(outcome.work.path)).toBe(false);
+      expect(branchSha(outcome.work.branch)).toBeUndefined();
+      // Idempotent: the same card again releases nothing new.
+      expect(outcome.again.map((result) => result.first)).toEqual([false]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("tears a PR's sessions down when the PR merges, and not when it closes unmerged", async () => {
+    const runtime = keptRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const work = yield* sessionWithWork();
+          const pr = {
+            number: 7,
+            url: `https://github.com/${keptRepo}/pull/7`,
+          };
+          yield* sql`UPDATE sessions SET pr_url = ${pr.url} WHERE id = ${work.id}`;
+          const closed = yield* releaseMergedPullRequest({
+            _tag: "closed",
+            pr,
+          });
+          const keptWhileClosed = branchSha(work.branch);
+          const merged = yield* releaseMergedPullRequest({
+            _tag: "merged",
+            pr,
+          });
+          const redelivered = yield* releaseMergedPullRequest({
+            _tag: "merged",
+            pr,
+          });
+          return { work, closed, keptWhileClosed, merged, redelivered };
+        }),
+      );
+      expect(outcome.closed).toBe(0);
+      expect(outcome.keptWhileClosed).toBe(outcome.work.sha);
+      expect(outcome.merged).toBe(1);
+      expect(existsSync(outcome.work.path)).toBe(false);
+      expect(branchSha(outcome.work.branch)).toBeUndefined();
+      expect(outcome.redelivered).toBe(0);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
 });
