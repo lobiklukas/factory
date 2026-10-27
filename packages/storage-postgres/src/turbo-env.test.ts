@@ -258,6 +258,8 @@ describe("the dev tasks' environment", () => {
     "MAX_REQUEST_BODY_BYTES",
     "MODEL_BACKEND",
     "FAUX_COMMAND",
+    "FAUX_EVERY_TURN",
+    "APPROVAL_REQUIRED",
     "FAUX_ASK",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",

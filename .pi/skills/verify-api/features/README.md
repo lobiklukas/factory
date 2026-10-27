@@ -53,6 +53,12 @@ The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` wor
 `.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
 and the fake listens on the port the run reserves for this surface.
 
+The approval-restart checks (LOB-52) were run from the `agent/LOB-52` worktree on 2026-10-27 (API
+on `:9501`, faux, the worktree's own database on 5442): `./approval-restart.sh` **22/22**, evidence
+`.verify/evidence/lob-52/api/approval-restart-*`; `bun drive.ts` (`:9500`) **52/52** and
+`./sigterm.sh` (`:9502`) re-run there, because the policy hook every tool call passes through
+changed. See [approvals.md](approvals.md).
+
 The Linear adapter checks (LOB-164) were run from the `agent/LOB-164` worktree on 2026-10-27 (API
 on `:9520`, faux, the worktree's own database on 5442): `./linear.sh` **14/14**, evidence
 `.verify/evidence/lob-164/`, and `./webhook.sh` re-run there **12/12** because the Linear route it

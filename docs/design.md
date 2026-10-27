@@ -222,6 +222,8 @@ Pi Durable's hooks (`hook(ToolTask, { beforeTool, afterTool })`, plus `beforeReq
 `afterResponse` / `onYield` / `afterTools` on `GenerationTask`) are where policy, approval,
 and intent live. `api.memo()` makes an approval durable across a restart, so a paused sandbox
 can still ask and a resumed one does not re-ask.
+An approval covers one run of the call it names, not the command for the rest of the session: the
+same call after that run asks a person again, while a denial stands (LOB-52).
 But hooks run in the same process and trust domain as the tools they gate, and pi's own
 `docs/security.md` is explicit: _"Watching the transcript, using project trust, and reviewing
 changes do not create a security boundary,"_ and _"Keep credentials outside the environment

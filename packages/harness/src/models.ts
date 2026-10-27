@@ -83,6 +83,14 @@ const lastUserText = (messages: readonly Message[]): string => {
   return "";
 };
 
+/** The messages after the user's newest one: what the current turn has done so far. */
+const sinceLastUser = (messages: readonly Message[]): readonly Message[] => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return messages.slice(index + 1);
+  }
+  return messages;
+};
+
 /** Whether a system message in the transcript offered `toolName` to the model. */
 const offersTool = (messages: readonly Message[], toolName: string): boolean =>
   messages.some(
@@ -157,6 +165,10 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * `verify` tool, and the reply is what that tool reported — the shape of a run that makes a change,
  * verifies it, and says what the verification found.
  *
+ * `everyTurn` makes every turn call `bash`, not only the first (LOB-52): the shape of an agent that
+ * retries a call it was blocked on once it is told to go ahead, which is how a gated call is driven
+ * past its approval.
+ *
  * `ask` adds the parked run (LOB-73): after the `bash` result, a run that was offered the `ask` tool
  * and whose prompt carries no task thread yet asks `ask`, verbatim. The tool ends the run, so there
  * is no reply. A run whose prompt *does* carry the thread — the run after a person answered — does
@@ -168,6 +180,7 @@ export const fauxAnswer = (
   curation?: string,
   verify = false,
   ask?: string,
+  everyTurn = false,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -183,7 +196,8 @@ export const fauxAnswer = (
       ? derivedCurationAnswer(lastUserText(messages))
       : fauxAssistantMessage(curation);
   }
-  const output = toolResultText(messages, "bash");
+  const turn = everyTurn ? sinceLastUser(messages) : messages;
+  const output = toolResultText(turn, "bash");
   if (output === undefined) {
     // `toolUse` is what a real provider reports for a tool-calling answer; without it the
     // generation treats the call as a final answer and never runs the tool.
@@ -191,7 +205,7 @@ export const fauxAnswer = (
       stopReason: "toolUse",
     });
   }
-  const verified = verify ? toolResultText(messages, VERIFY_TOOL) : undefined;
+  const verified = verify ? toolResultText(turn, VERIFY_TOOL) : undefined;
   if (verify && verified === undefined) {
     return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
       stopReason: "toolUse",
@@ -217,6 +231,8 @@ export type ModelAccessOptions = {
   readonly fauxCommand?: string | undefined;
   /** Whether the faux script calls `verify` after its `bash` turn (LOB-78, `fauxAnswer`). */
   readonly fauxVerify?: boolean | undefined;
+  /** Whether the faux script calls `bash` on every turn rather than the first (LOB-52, `fauxAnswer`). */
+  readonly fauxEveryTurn?: boolean | undefined;
   /**
    * The question the faux script asks with the `ask` tool after its `bash` turn (LOB-73,
    * `fauxAnswer`), when the run was offered the tool and carries no task thread. Absent: never asks.
@@ -319,6 +335,7 @@ export const createFauxModelAccess = (
       options.fauxCuration,
       options.fauxVerify ?? false,
       options.fauxAsk,
+      options.fauxEveryTurn ?? false,
     );
   };
   faux.setResponses([repeat]);

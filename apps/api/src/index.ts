@@ -9,6 +9,7 @@ import {
 import { Api } from "@repo/domain/Api";
 import {
   createModelAccess,
+  DEFAULT_AUTONOMY,
   FAUX_COMMAND,
   type ModelBackend,
 } from "@repo/harness";
@@ -72,6 +73,32 @@ const PrCapConfig = Config.all({
 });
 
 /**
+ * Which commands need a person's approval before they run (D15, LOB-52).
+ *
+ * `APPROVAL_REQUIRED` is a comma-separated list of command prefixes — `npm publish,terraform apply`
+ * — matched against each simple command a `bash` call runs. Empty by default: a gate is a
+ * deployment's choice, and an ungated deployment is the boundary D11 already draws. Every other
+ * autonomy rule keeps D11's defaults.
+ *
+ * A gate's first word is a command name (`/usr/bin/npm` gates as `npm`), and flags may sit between
+ * its words (`npm --registry x publish`, `terraform -chdir=infra apply`); `sudo`, `env`, `timeout`,
+ * `xargs`, compound keywords and `sh -c '…'` are read through. A gate is a prompt, not a boundary
+ * (D15): it does not see a command spelled through a variable, an alias, `eval`, a script that runs
+ * it, or another interpreter. One approval covers one run of the call it names; the next identical
+ * call asks again. A denial stands for that exact call for the rest of the session.
+ */
+const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
+  Config.withDefault(""),
+  Config.map((value) => ({
+    ...DEFAULT_AUTONOMY,
+    approvalRequired: value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  })),
+);
+
+/**
  * Which model a session runs against.
  *
  * `MODEL_BACKEND` wins when set. Otherwise a key decides: a real provider when one is configured,
@@ -85,6 +112,13 @@ const ModelConfig = Config.all({
   /** What the faux script runs. A verification run scripts a command that sleeps. */
   fauxCommand: Config.String("FAUX_COMMAND").pipe(
     Config.withDefault(FAUX_COMMAND),
+  ),
+  /**
+   * Whether the faux script calls `FAUX_COMMAND` on every turn rather than the first: a run that
+   * retries a gated call after its approval (LOB-52).
+   */
+  fauxEveryTurn: Config.Boolean("FAUX_EVERY_TURN").pipe(
+    Config.withDefault(false),
   ),
   /**
    * The question the faux script asks with the `ask` tool (LOB-73). Unset, the script never asks: a
@@ -206,6 +240,7 @@ const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const model = yield* ModelConfig;
   const prCap = yield* PrCapConfig;
+  const autonomy = yield* ApprovalGateConfig;
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
@@ -226,11 +261,13 @@ const HttpLive = Effect.gen(function* () {
   const SessionDeps = SessionServiceLive({
     model: createModelAccess(backend, {
       fauxCommand: model.fauxCommand,
+      fauxEveryTurn: model.fauxEveryTurn,
       fauxAsk: Option.getOrUndefined(model.fauxAsk),
     }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,
+    autonomy,
   }).pipe(Layer.provide(SessionWriteBackLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
@@ -264,6 +301,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - request body cap ${config.maxRequestBodySize} bytes`,
+  );
+  yield* Effect.logInfo(
+    `  - commands that wait for an approval: ${autonomy.approvalRequired.length === 0 ? "none" : autonomy.approvalRequired.join(", ")}`,
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,

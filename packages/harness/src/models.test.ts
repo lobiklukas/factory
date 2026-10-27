@@ -6,8 +6,9 @@
  * threshold commits one summary and heads the context with it — is
  * `session.test.ts`'s "compaction" block, and the RPC path is `.pi/skills/verify-api`.
  */
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { compactionPolicyFor, createModelAccess } from "./models";
+import { compactionPolicyFor, createModelAccess, fauxAnswer } from "./models";
 
 /** pi-durable's pinned defaults, which a large window must keep to the token. */
 const PINNED = {
@@ -68,5 +69,49 @@ describe("createModelAccess", () => {
     expect(
       createModelAccess("faux", { contextWindow: 8_000 }).contextWindow,
     ).toBe(8_000);
+  });
+});
+
+describe("the faux script's turns", () => {
+  const user = (text: string): Message => ({
+    role: "user",
+    content: text,
+    timestamp: 0,
+  });
+  const bashResult = (text: string): Message => ({
+    role: "toolResult",
+    toolCallId: "call_1",
+    toolName: "bash",
+    content: [{ type: "text", text }],
+    isError: false,
+    timestamp: 0,
+  });
+  const callsBash = (message: AssistantMessage): boolean =>
+    message.content.some((part) => part.type === "toolCall");
+
+  // A second turn after a bash result: the stock script answers from it, `everyTurn` calls again.
+  const secondTurn = [user("one"), bashResult("blocked"), user("two")];
+
+  it("calls bash on a session's first turn only, by default", () => {
+    expect(callsBash(fauxAnswer([user("one")], "echo x"))).toBe(true);
+    expect(callsBash(fauxAnswer(secondTurn, "echo x"))).toBe(false);
+  });
+
+  it("calls bash on every turn with everyTurn, and answers once it ran", () => {
+    expect(
+      callsBash(
+        fauxAnswer(secondTurn, "echo x", undefined, false, undefined, true),
+      ),
+    ).toBe(true);
+    const answered = fauxAnswer(
+      [...secondTurn, bashResult("ran")],
+      "echo x",
+      undefined,
+      false,
+      undefined,
+      true,
+    );
+    expect(callsBash(answered)).toBe(false);
+    expect(answered.content).toEqual([{ type: "text", text: "ran (re: two)" }]);
   });
 });
