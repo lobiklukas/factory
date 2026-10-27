@@ -10,9 +10,12 @@ import { BoardInstanceId, DefinitionId, TaskId } from "@repo/domain/Task";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  awaitingMove,
   blockedLabel,
   boardLanes,
   moveRefusal,
+  refusalIsCurrent,
+  runSelection,
   offeredMoves,
   runStart,
 } from "./board-view";
@@ -204,33 +207,82 @@ describe("moveRefusal", () => {
   it("keeps the service's message verbatim under a heading per refusal", () => {
     const message =
       "task tsk_x is at revision 3, not 1: someone moved it first";
-    expect(moveRefusal({ _tag: "StaleRevision", message }, "fallback")).toEqual(
-      {
-        tag: "StaleRevision",
-        title: "Someone changed this card first",
-        message,
-      },
-    );
+    expect(
+      moveRefusal({ _tag: "StaleRevision", message, actual: 3 }, "fallback", 1),
+    ).toEqual({
+      tag: "StaleRevision",
+      title: "Someone changed this card first",
+      message,
+      atRevision: 3,
+    });
     expect(
       moveRefusal(
         { _tag: "HumanGateRequired", message: "crosses the merge gate" },
         "",
-      ).title,
-    ).toBe("Only a person can make this move");
+        2,
+      ),
+    ).toMatchObject({
+      title: "Only a person can make this move",
+      atRevision: 2,
+    });
   });
 
   it("does not dress a failure that is not a typed refusal up as one", () => {
-    expect(moveRefusal(undefined, "connection refused")).toEqual({
+    expect(moveRefusal(undefined, "connection refused", 4)).toEqual({
       tag: "Unknown",
       title: "The move did not go through",
       message: "connection refused",
+      atRevision: 4,
     });
     expect(
-      moveRefusal({ _tag: "RpcClientError", message: "" }, "timed out"),
+      moveRefusal({ _tag: "RpcClientError", message: "" }, "timed out", 4),
     ).toEqual({
       tag: "RpcClientError",
       title: "The move did not go through",
       message: "timed out",
+      atRevision: 4,
     });
+  });
+});
+
+describe("refusalIsCurrent", () => {
+  const stale = moveRefusal(
+    { _tag: "StaleRevision", message: "at 3, not 1", actual: 3 },
+    "",
+    1,
+  );
+
+  it("keeps a stale refusal through the refetch that shows the revision it named", () => {
+    expect(refusalIsCurrent(stale, { revision: 1 })).toBe(true);
+    expect(refusalIsCurrent(stale, { revision: 3 })).toBe(true);
+  });
+
+  it("drops the refusal once the card moves past it", () => {
+    expect(refusalIsCurrent(stale, { revision: 4 })).toBe(false);
+    expect(refusalIsCurrent(null, { revision: 1 })).toBe(false);
+  });
+});
+
+describe("awaitingMove", () => {
+  it("holds the moves until the board shows the revision the move landed at", () => {
+    expect(awaitingMove(null, { revision: 1 })).toBe(false);
+    expect(awaitingMove(2, { revision: 1 })).toBe(true);
+    expect(awaitingMove(2, { revision: 2 })).toBe(false);
+    expect(awaitingMove(2, { revision: 5 })).toBe(false);
+  });
+});
+
+describe("runSelection", () => {
+  const runs = [{ sessionId: "ses_a" }, { sessionId: "ses_b" }];
+
+  it("opens a run only when the card lists it", () => {
+    expect(runSelection(undefined, runs, false)).toBe("none");
+    expect(runSelection("ses_a", runs, false)).toBe("member");
+    expect(runSelection("ses_other", runs, false)).toBe("foreign");
+  });
+
+  it("waits rather than refusing while the card's runs are still being read", () => {
+    expect(runSelection("ses_a", undefined, false)).toBe("loading");
+    expect(runSelection("ses_new", runs, true)).toBe("loading");
   });
 });

@@ -1894,6 +1894,13 @@ assert(
     followedPane?.revision === 4,
   `card in specifying: ${followed}, no reload: ${stayedPut}, pane ${String(followedPane?.column)} r${String(followedPane?.revision)}`,
 );
+// The stale refusal described revision 3; the card is at 4 now, so the pane no longer shows it
+// over the new column's moves.
+assert(
+  "the stale refusal is dropped once the card moves on",
+  followedPane !== null && followedPane.refusal === null,
+  `refusal after the CLI move ${JSON.stringify(followedPane?.refusal ?? null)}`,
+);
 // The pane re-offers from the new column, still exactly what that column declares.
 const declaredSpecifying = declaredOutOf("specifying");
 assert(
@@ -2050,11 +2057,91 @@ assert(
   `rail ${JSON.stringify(rail)}; run tabs ${JSON.stringify(runTabs)}`,
 );
 
+// The run's Approvals pane is a write path: a pending approval is listed with Approve/Deny, and the
+// click is `decideApproval` as a person (`dashboard`). The request is made from the drive through
+// the API's own `requestApproval` — what a gated action does — and the oracle for the decision is
+// the API's `listApprovals`, asked from here, not the page.
+const approvalRequestId = `verify-web-approval-${Date.now()}`;
+const decidePayloads = [];
+const recordDecide = (request) => {
+  if (!/\/rpc\/?$/.test(request.url()) || request.method() !== "POST") return;
+  for (const line of (request.postData() ?? "").split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (message?._tag === "Request" && message.tag === "decideApproval")
+        decidePayloads.push(message.payload);
+    } catch {
+      // Not an envelope line.
+    }
+  }
+};
+page.on("request", recordDecide);
+const asked =
+  runId === null
+    ? { exit: null }
+    : await rpcFromDrive("requestApproval", {
+        sessionId: runId,
+        requestId: approvalRequestId,
+        action: "verify-web: push the branch",
+        detail: "seeded by the drive",
+      });
+let approvalListed = false;
+let approvalCleared = false;
+try {
+  await page
+    .locator("aside[data-card-pane] [role='tab']", { hasText: "Approvals" })
+    .click();
+  await page.waitForSelector(
+    `aside[data-card-pane] [data-approval='${approvalRequestId}']`,
+    { timeout: 15_000 },
+  );
+  approvalListed = true;
+  await page
+    .locator(
+      `aside[data-card-pane] [data-approval='${approvalRequestId}'] [data-decide='approved']`,
+    )
+    .click();
+  await page.waitForSelector("aside[data-card-pane] [data-no-approvals]", {
+    timeout: 15_000,
+  });
+  approvalCleared = true;
+} catch (error) {
+  paneObserved.approvalError = String(error).slice(0, 300);
+}
+page.off("request", recordDecide);
+const pendingAfter =
+  runId === null
+    ? { exit: null, value: null }
+    : await rpcFromDrive("listApprovals", { sessionId: runId });
+paneObserved.approvals = {
+  asked: asked.exit,
+  listed: approvalListed,
+  cleared: approvalCleared,
+  decide: decidePayloads,
+  pendingAfter: pendingAfter.value,
+};
+assert(
+  "a run's pending approval is decided from the card's Approvals pane",
+  asked.exit === "Success" &&
+    approvalListed &&
+    approvalCleared &&
+    decidePayloads.length === 1 &&
+    decidePayloads[0]?.requestId === approvalRequestId &&
+    decidePayloads[0]?.decision === "approved" &&
+    decidePayloads[0]?.actor === "dashboard" &&
+    pendingAfter.exit === "Success" &&
+    (pendingAfter.value?.approvals ?? []).length === 0,
+  `requested ${String(asked.exit)}; listed ${approvalListed}, cleared ${approvalCleared}; sent ${JSON.stringify(decidePayloads)}; API pending ${JSON.stringify(pendingAfter.value?.approvals ?? null)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "card-pane-approvals.png"),
+});
+
 // The lanes still hold no control that can change a card, and the only writes the board pages sent
 // are the two moves the walk clicked (the refused one and the accepted one) and the run start. The
 // tags are the requests' own, so a write wired to any other element would be caught here.
 page.off("request", recordRpcTags);
-const BOARD_WRITES = new Set(["moveTask", "createSession"]);
+const BOARD_WRITES = new Set(["moveTask", "createSession", "decideApproval"]);
 const boardWrites = boardRpcTags.filter((tag) => !BOARD_READS.has(tag));
 boardObserved.rpcTags = boardRpcTags;
 assert(
@@ -2063,8 +2150,34 @@ assert(
     afterReload.controls === 0 &&
     boardWrites.every((tag) => BOARD_WRITES.has(tag)) &&
     boardWrites.filter((tag) => tag === "moveTask").length === 2 &&
-    boardWrites.filter((tag) => tag === "createSession").length === 1,
+    boardWrites.filter((tag) => tag === "createSession").length === 1 &&
+    boardWrites.filter((tag) => tag === "decideApproval").length === 1,
   `controls ${before.controls}/${afterReload.controls}; writes ${JSON.stringify(boardWrites)}`,
+);
+
+// `?run=` opens only a run of the selected card: a well-formed session id that is not one of its
+// runs is named as such, and no transcript, composer or approvals are opened under the card.
+const foreignRun = "ses_0123456789abcdefghjkmnpqrs";
+await page.goto(
+  `${WEB_URL}/boards/${boardId}?card=${cardId}&run=${foreignRun}`,
+  { waitUntil: "domcontentloaded" },
+);
+const foreignShown = await page
+  .waitForSelector(`aside[data-card-pane] [data-run-foreign='${foreignRun}']`, {
+    timeout: 15_000,
+  })
+  .then(
+    () => true,
+    () => false,
+  );
+const foreignPanes = await page.evaluate(
+  () => document.querySelectorAll("aside[data-card-pane] [role='tab']").length,
+);
+paneObserved.foreignRun = { shown: foreignShown, tabs: foreignPanes };
+assert(
+  "a run that is not the card's is not opened in its pane",
+  foreignShown && foreignPanes === 0,
+  `foreign note shown: ${foreignShown}; run tabs ${foreignPanes}`,
 );
 observed.cardPane = paneObserved;
 

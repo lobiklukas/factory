@@ -33,6 +33,8 @@ from the `agent/LOB-76` worktree, against its own database on 5442).
   the race, not a regression.
 - **`/sandboxes` and `/approvals` are off the rail.** They became panes of a card's run (LOB-76); the
   routes still render their milestone copy (M4, M3) for an old link, and `drive.mjs` asserts it.
+  That copy predates the run pane: the card's Approvals pane reads and decides through the live
+  `ApprovalsRpc` (driven in `card-pane.md`); what M3 still owes is a hook that makes a run ask.
 - **The rail has no attention count.** The rail is the natural place to say "two cards need a person",
   and the board (LOB-22) is what produces that number. Nothing backs it today, so a badge would be
   fiction.

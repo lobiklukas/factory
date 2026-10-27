@@ -314,17 +314,25 @@ describe("TaskService", () => {
 
     const first = `ses_${"0".repeat(10)}${hex(8)}`;
     const second = `ses_${"1".repeat(10)}${hex(8)}`;
-    await runtime.runPromise(
+    // Insert and read in one transaction. These sessions have no commits, and a concurrent
+    // `rebuildIndexes` (SessionService.test.ts shares this database) deletes every `task_runs` row
+    // whose session has none — but it cannot see rows this transaction has not committed yet.
+    const runs = await runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
-        yield* sql`
-          INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
-          VALUES (${first}, ${task.id}, ${first}, 'specifying', now() - interval '1 minute'),
-                 (${second}, ${task.id}, ${second}, 'planning', now())
-        `;
+        const service = yield* TaskService;
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+              VALUES (${first}, ${task.id}, ${first}, 'specifying', now() - interval '1 minute'),
+                     (${second}, ${task.id}, ${second}, 'planning', now())
+            `;
+            return yield* service.listRuns(task.id);
+          }),
+        );
       }),
     );
-    const runs = await withService((s) => s.listRuns(task.id));
     expect(runs.map((run) => [run.sessionId, run.column])).toEqual([
       [second, "planning"],
       [first, "specifying"],

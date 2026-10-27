@@ -23,9 +23,12 @@ import {
   taskRunsAtom,
 } from "@/lib/atoms/board-atom";
 import {
+  awaitingMove,
   blockedLabel,
   moveRefusal,
   offeredMoves,
+  refusalIsCurrent,
+  runSelection,
   runStart,
   type MoveRefusal,
 } from "@/lib/board-view";
@@ -51,6 +54,12 @@ export const DASHBOARD_ACTOR = "dashboard";
  * an accessible name that says a person is approving something. The click sends the revision this
  * pane rendered; a refusal is shown with the service's own words, and the card is not moved here
  * either way — the lanes move it when the server's next answer says it moved.
+ *
+ * Two things follow the card rather than the click. A refusal is shown only while the card is still
+ * at the revision the server refused at: once it moves on (a CLI move, a poll), the refusal is about
+ * a card that is gone. And after a move lands the buttons stay disabled until the board read shows
+ * the revision the server answered, so a second click cannot send the old revision and be refused as
+ * stale for the person's own move.
  */
 const Moves = ({
   boardId,
@@ -65,7 +74,10 @@ const Moves = ({
   const refreshBoard = useAtomRefresh(boardAtom(boardId));
   const [pending, setPending] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<MoveRefusal | null>(null);
+  const [landedAt, setLandedAt] = useState<number | null>(null);
   const moves = offeredMoves(task, definition);
+  const settling = awaitingMove(landedAt, task);
+  const shown = refusalIsCurrent(refusal, task) ? refusal : null;
 
   return (
     <section aria-label="Moves" className="flex flex-col gap-2">
@@ -94,26 +106,31 @@ const Moves = ({
                     ? `Move to ${offered.to}`
                     : `Move to ${offered.to}: the ${offered.gate} gate, a person's move`
                 }
-                disabled={pending !== null}
+                disabled={pending !== null || settling}
                 aria-busy={pending === offered.to}
                 className="w-full justify-start"
                 onClick={() => {
+                  const sent = task.revision;
                   setPending(offered.to);
                   setRefusal(null);
                   void move({
                     taskId: task.id,
-                    expectedRevision: task.revision,
+                    expectedRevision: sent,
                     to: offered.to,
                     actor: DASHBOARD_ACTOR,
                   })
                     .then((exit) => {
-                      if (Exit.isSuccess(exit)) return;
+                      if (Exit.isSuccess(exit)) {
+                        setLandedAt(exit.value.revision);
+                        return;
+                      }
                       setRefusal(
                         moveRefusal(
                           Option.getOrUndefined(
                             Cause.findErrorOption(exit.cause),
                           ),
                           Cause.pretty(exit.cause),
+                          sent,
                         ),
                       );
                       // The view the click was made from is stale or wrong: read the server's
@@ -141,16 +158,12 @@ const Moves = ({
           ))}
         </ul>
       )}
-      {refusal === null ? null : (
-        <Alert
-          variant="destructive"
-          role="alert"
-          data-move-refusal={refusal.tag}
-        >
-          <AlertTitle>{refusal.title}</AlertTitle>
+      {shown === null ? null : (
+        <Alert variant="destructive" role="alert" data-move-refusal={shown.tag}>
+          <AlertTitle>{shown.title}</AlertTitle>
           <AlertDescription>
             <span className="font-mono text-[11px] break-words">
-              {refusal.message}
+              {shown.message}
             </span>
           </AlertDescription>
         </Alert>
@@ -182,6 +195,8 @@ const Runs = ({
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
   const allowed = runStart(task, definition);
+  // The last answer stays on screen through a failed refresh; only a first read that fails says so.
+  const listed = Option.getOrUndefined(AsyncResult.value(runs));
 
   return (
     <section aria-label="Runs" className="flex flex-col gap-2">
@@ -234,19 +249,21 @@ const Runs = ({
           {allowed.reason}.
         </p>
       )}
-      {AsyncResult.isInitial(runs) ? (
-        <Spinner className="size-3.5 text-muted-foreground" />
-      ) : AsyncResult.isFailure(runs) ? (
-        <p className="text-xs text-destructive">
-          The runs did not load: {Cause.pretty(runs.cause)}
-        </p>
-      ) : runs.value.length === 0 ? (
+      {listed === undefined ? (
+        AsyncResult.isFailure(runs) ? (
+          <p className="text-xs text-destructive">
+            The runs did not load: {Cause.pretty(runs.cause)}
+          </p>
+        ) : (
+          <Spinner className="size-3.5 text-muted-foreground" />
+        )
+      ) : listed.length === 0 ? (
         <p className="text-xs text-muted-foreground" data-no-runs>
           No run has been started against this card.
         </p>
       ) : (
         <ul aria-label="Runs of this card" className="flex flex-col">
-          {runs.value.map((run) => (
+          {listed.map((run) => (
             <li key={run.sessionId} data-run={run.sessionId}>
               <Link
                 to="/boards/$boardId"
@@ -281,6 +298,9 @@ const Runs = ({
 const ApprovalsPane = ({ sessionId }: { readonly sessionId: SessionId }) => {
   const pending = useAtomValue(approvalsAtom(sessionId));
   const decide = useAtomSet(decideApprovalAtom, { mode: "promiseExit" });
+  // The request a decision is in flight for: its buttons stay disabled until the RPC answers, so a
+  // double click cannot send two decisions.
+  const [deciding, setDeciding] = useState<string | null>(null);
 
   if (AsyncResult.isInitial(pending)) {
     return <Spinner className="m-4 size-3.5 text-muted-foreground" />;
@@ -320,19 +340,25 @@ const ApprovalsPane = ({ sessionId }: { readonly sessionId: SessionId }) => {
                 type="button"
                 size="sm"
                 variant={decision === "approved" ? "default" : "outline"}
+                data-decide={decision}
+                disabled={deciding === request.requestId}
+                aria-busy={deciding === request.requestId}
                 onClick={() => {
+                  setDeciding(request.requestId);
                   void decide({
                     sessionId,
                     requestId: request.requestId,
                     decision,
                     actor: DASHBOARD_ACTOR,
-                  }).then((exit) => {
-                    if (Exit.isFailure(exit)) {
-                      toast.error("The decision was not recorded", {
-                        description: Cause.pretty(exit.cause),
-                      });
-                    }
-                  });
+                  })
+                    .then((exit) => {
+                      if (Exit.isFailure(exit)) {
+                        toast.error("The decision was not recorded", {
+                          description: Cause.pretty(exit.cause),
+                        });
+                      }
+                    })
+                    .finally(() => setDeciding(null));
                 }}
               >
                 {decision === "approved" ? "Approve" : "Deny"}
@@ -399,6 +425,12 @@ export const CardPane = ({
   readonly run: SessionId | undefined;
 }) => {
   const blocked = blockedLabel(task);
+  const runs = useAtomValue(taskRunsAtom(task.id));
+  const selection = runSelection(
+    run,
+    Option.getOrUndefined(AsyncResult.value(runs)),
+    AsyncResult.isWaiting(runs),
+  );
   return (
     <aside
       aria-label="Card"
@@ -450,9 +482,21 @@ export const CardPane = ({
           selected={run}
         />
       </div>
-      {run === undefined ? (
+      {run === undefined || selection === "none" ? (
         <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">
           Pick a run to see its transcript, steer it, and answer its approvals.
+        </p>
+      ) : selection === "loading" ? (
+        <div className="border-t border-border px-4 py-3">
+          <Spinner className="size-3.5 text-muted-foreground" />
+        </div>
+      ) : selection === "foreign" ? (
+        <p
+          className="border-t border-border px-4 py-3 text-xs text-muted-foreground"
+          data-run-foreign={run}
+        >
+          {run} is not a run of this card, so its transcript, composer and
+          approvals are not opened here.
         </p>
       ) : (
         <RunPanes key={run} sessionId={run} />

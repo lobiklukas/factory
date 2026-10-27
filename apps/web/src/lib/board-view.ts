@@ -143,6 +143,11 @@ export type MoveRefusal = {
   readonly tag: string;
   readonly title: string;
   readonly message: string;
+  /**
+   * The card revision the server held when it refused: a `StaleRevision`'s `actual`, otherwise the
+   * revision the click sent. The refusal describes that revision and no later one.
+   */
+  readonly atRevision: number;
 };
 
 const REFUSAL_TITLES: Readonly<Record<string, string>> = {
@@ -154,17 +159,74 @@ const REFUSAL_TITLES: Readonly<Record<string, string>> = {
 };
 
 export const moveRefusal = (
-  error: { readonly _tag: string; readonly message: string } | undefined,
+  error:
+    | {
+        readonly _tag: string;
+        readonly message: string;
+        readonly actual?: unknown;
+      }
+    | undefined,
   fallback: string,
+  sentRevision: number,
 ): MoveRefusal =>
   error === undefined
     ? {
         tag: "Unknown",
         title: "The move did not go through",
         message: fallback,
+        atRevision: sentRevision,
       }
     : {
         tag: error._tag,
         title: REFUSAL_TITLES[error._tag] ?? "The move did not go through",
         message: error.message.length > 0 ? error.message : fallback,
+        atRevision:
+          error._tag === "StaleRevision" &&
+          typeof error.actual === "number" &&
+          error.actual > sentRevision
+            ? error.actual
+            : sentRevision,
       };
+
+/**
+ * Whether a refusal still describes the card on screen. Once the card's revision passes the one the
+ * server refused at, the card has moved on — a CLI move, another browser, a run — and the refusal is
+ * about a card that no longer exists, so the pane drops it rather than showing it over the new
+ * column's moves.
+ */
+export const refusalIsCurrent = (
+  refusal: MoveRefusal | null,
+  task: Pick<Task, "revision">,
+): refusal is MoveRefusal =>
+  refusal !== null && task.revision <= refusal.atRevision;
+
+/**
+ * Whether the pane is still waiting for the board read to show a move it made. A move lands before
+ * the refetch does; until the card on screen reaches the revision the server answered, a second click
+ * would send the old revision and be refused as stale for the person's own move.
+ */
+export const awaitingMove = (
+  landedAt: number | null,
+  task: Pick<Task, "revision">,
+): boolean => landedAt !== null && task.revision < landedAt;
+
+/**
+ * Whether the run the URL names (`?run=`) is one of this card's runs (LOB-76), so the pane opens a
+ * session's transcript, composer and approvals only under the card it was started against.
+ *
+ * `runs` is the card's `listTaskRuns` answer so far, or `undefined` before the first one lands;
+ * `refreshing` says another read is in flight. A run missing from a list that is being re-read — the
+ * one a click just started, say — is `loading`, not `foreign`, until the read settles without it.
+ */
+export type RunSelection = "none" | "loading" | "member" | "foreign";
+
+export const runSelection = (
+  run: string | undefined,
+  runs: ReadonlyArray<{ readonly sessionId: string }> | undefined,
+  refreshing: boolean,
+): RunSelection => {
+  if (run === undefined) return "none";
+  if (runs === undefined) return "loading";
+  if (runs.some((listed) => listed.sessionId === run)) return "member";
+  return refreshing ? "loading" : "foreign";
+};

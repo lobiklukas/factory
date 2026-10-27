@@ -49,9 +49,6 @@ import { mintTaskId } from "./ids";
 /** Every new card starts in the default definition's first column (B4). */
 export const INITIAL_COLUMN = "intake";
 
-/** Re-exported for the callers that read the rule from the service that enforces it. */
-export { isDeclaredTransition };
-
 /** A run's actor is its session id (B1: a run is exactly one session). Any other actor is a person. */
 export const isRunActor = (actor: Actor): boolean =>
   Schema.is(SessionId)(actor);

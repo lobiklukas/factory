@@ -76,10 +76,15 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
     );
   }
 
-  if (AsyncResult.isFailure(result)) {
-    const error = Cause.findErrorOption(result.cause);
-    const missing =
-      Option.isSome(error) && error.value._tag === "BoardNotFound";
+  // A failed poll keeps the last good board on screen, with a marker, rather than tearing down the
+  // lanes and the open card pane (its transcript stream, composer draft, refusal). Only a first read
+  // that fails, or a board the server says is gone, replaces the page with the error.
+  const error = AsyncResult.isFailure(result)
+    ? Cause.findErrorOption(result.cause)
+    : Option.none();
+  const missing = Option.isSome(error) && error.value._tag === "BoardNotFound";
+  const last = Option.getOrUndefined(AsyncResult.value(result));
+  if (AsyncResult.isFailure(result) && (missing || last === undefined)) {
     return (
       <EmptyPane
         icon={<KanbanSquareIcon strokeWidth={1.75} />}
@@ -94,7 +99,9 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
     );
   }
 
-  const { instance, definition, tasks } = result.value;
+  if (last === undefined) return null;
+  const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
+  const { instance, definition, tasks } = last;
   const selected =
     card === undefined ? undefined : tasks.find((task) => task.id === card);
   return (
@@ -111,6 +118,16 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           <span className="font-mono text-[10px] text-muted-foreground">
             {definition.name} v{definition.version} · {instance.id}
           </span>
+          {stale === undefined ? null : (
+            <span
+              role="status"
+              data-board-stale
+              title={Cause.pretty(stale)}
+              className="text-[11px] text-destructive"
+            >
+              Reconnecting: showing the last answer the server gave
+            </span>
+          )}
           <span className="ml-auto text-[11px] text-muted-foreground">
             {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
             to move it or start a run
