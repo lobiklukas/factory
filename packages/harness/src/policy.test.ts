@@ -37,7 +37,7 @@ const write = (path: string): ToolCall => call("write", { path, content: "x" });
 
 const refusal = (toolCall: ToolCall): string => {
   const decision = decideToolCall(rules, toolCall);
-  if (decision._tag === "allow") {
+  if (decision._tag !== "block") {
     throw new Error(`expected a refusal for ${JSON.stringify(toolCall)}`);
   }
   return decision.reason;
@@ -272,7 +272,7 @@ describe("the docs rule narrows what a documentation run writes", () => {
   const docs = docsPolicy(autonomyPolicy(DEFAULT_AUTONOMY, "/work/ses_1"));
   const docsRefusal = (toolCall: ToolCall): string => {
     const decision = Effect.runSync(docs.decide(toolCall));
-    if (decision._tag === "allow") {
+    if (decision._tag !== "block") {
       throw new Error(`expected a refusal for ${JSON.stringify(toolCall)}`);
     }
     return decision.reason;

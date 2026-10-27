@@ -43,7 +43,7 @@ const decision = (toolCall: ToolCall) => decideToolCall(rules, toolCall);
 /** The refusal for a call, or a failure naming the call that was allowed. */
 const refusal = (toolCall: ToolCall): string => {
   const settled = decision(toolCall);
-  if (settled._tag === "allow") {
+  if (settled._tag !== "block") {
     throw new Error(`expected a refusal for ${JSON.stringify(toolCall)}`);
   }
   return settled.reason;

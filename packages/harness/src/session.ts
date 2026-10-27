@@ -76,6 +76,7 @@ import {
   DOCS_SKILL,
   docsPolicy,
   policyExtension,
+  type ApprovalAsker,
   type SessionPolicy,
 } from "./policy";
 import {
@@ -229,6 +230,12 @@ export type OpenSessionOptions = {
    */
   readonly policy?: SessionPolicy;
   /**
+   * How a gated call asks a person (D15, LOB-52). The recorder is the control plane's approvals
+   * service, so it is handed in here rather than imported. A session with no asker still gates: a
+   * gated call is blocked with a sentence saying there is nobody to ask, never run ungated.
+   */
+  readonly ask?: ApprovalAsker;
+  /**
    * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
    * by the control plane from the card's pinned board definition. Absent: no card, or a column that
    * names no skills, so nothing is injected.
@@ -323,6 +330,7 @@ export const openSession = (
         skills.some((skill) => skill.name === DOCS_SKILL)
           ? docsPolicy(policy)
           : policy,
+        options.ask,
       ),
     );
 
@@ -1152,6 +1160,8 @@ export type ForkSessionOptions = {
   readonly model: ModelAccess;
   readonly cwd: string;
   readonly policy?: SessionPolicy;
+  /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.ask`. */
+  readonly ask?: ApprovalAsker;
   /**
    * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
    * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
@@ -1194,6 +1204,7 @@ export const forkSession = (
       model: options.model,
       cwd: options.cwd,
       ...(options.policy === undefined ? {} : { policy: options.policy }),
+      ...(options.ask === undefined ? {} : { ask: options.ask }),
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.pages === undefined ? {} : { pages: options.pages }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
