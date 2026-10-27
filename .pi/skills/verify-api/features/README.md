@@ -53,6 +53,13 @@ The lifecycle-action checks (LOB-235) were added to `./webhook.sh` and run from 
 before LOB-235 failed its first new check: a generic `push` on the `docs` label was recorded
 `processed` with `rule "docs" mapped it to …`.
 
+The Sentry receiver checks (LOB-81) were run from the `agent/LOB-81` worktree on 2026-10-27 (API on
+`:9510`, faux, the worktree's own database on 5442): `./sentry.sh` **22/22** (14 checks on the first
+process, 4 on the restarted one, 4 shell checks; re-run after the cap moved past normalization), evidence `.verify/evidence/lob-81/`, with a mutation
+run failing it (`mutation-key-by-request-id/`). `./webhook.sh` (17/17) and `./linear.sh` (14/14) were
+re-run there too, because the route they drive gained the refusal log and the shared signature
+verdict. See `sentry.md`.
+
 The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
 (`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
 `./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver
@@ -188,6 +195,7 @@ with the no-replay-document mutation run failing exactly the log check (57/58). 
 | GitHub issues adapter    | passing | [github.md](github.md)                     |
 | Slack adapter            | passing | [slack.md](slack.md)                       |
 | Linear adapter           | passing | [linear.md](linear.md)                     |
+| Sentry receiver          | passing | [sentry.md](sentry.md)                     |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md) |
 | Approvals                | passing | [approvals.md](approvals.md)               |
 | Curate a session's pages | passing | [curate.md](curate.md)                     |
