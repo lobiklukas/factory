@@ -22,8 +22,8 @@ row must still read `-`. The seed binds a fresh repo slug per run, so no two run
 `ls` prints nothing but what `listSessions` returned: the CLI has no local registry, so a row can
 only come from the server's index.
 
-No RPC opens a PR — the PR step's callers are in-process — which is why the session is seeded
-rather than created through `factory run`. The seed is a caller of the real step, not a write to the
+The session is seeded rather than created through `factory run` because the API this drive starts
+has no fake GitHub wired in, so its `openPullRequest` member (LOB-213) would reach no forge. The seed is a caller of the real step, not a write to the
 row: the link `ls` prints is the one the step recorded in the log and the index.
 
 **What it does not prove.** Paging against a large table (asserted in `packages/core` by counting

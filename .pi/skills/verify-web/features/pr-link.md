@@ -28,8 +28,8 @@ opens the PR in a new tab.
 2. Near the end, the drive seeds a session with `.pi/skills/lib/seed-pr.ts`: the real
    `SessionService` and PR step, on the API's `DATABASE_URL` and `SESSION_ROOT`
    (`.verify/run/sessions`), against the loopback GitHub fake from `verify-api`. The seed exits before
-   the page attaches, so it no longer owns the log. No RPC opens a PR, which is why this is a seed
-   rather than a button.
+   the page attaches, so it no longer owns the log. It is a seed rather than a button because the
+   API the drive starts has no fake GitHub wired in for its `openPullRequest` member (LOB-213).
 3. It reads the session back **from the page** with `getSession` and requires the API's `prUrl` to be
    the one the seed recorded.
 4. It opens `/sessions/<seeded id>`, waits for `header [data-pr-link]`, and requires the anchor's
