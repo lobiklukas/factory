@@ -40,6 +40,8 @@ transcript, approvals and sandbox as panes (LOB-76, part 2 of LOB-22).
   and Sandbox (none: runs execute in-process, B12).
   `/sandboxes` and `/approvals` left the rail for these; the routes stay (`/approvals` is every run's
   pending list since LOB-53, see [routing.md](routing.md)).
+- **Thread.** The card's question, answers and notes, oldest first and verbatim, with a composer
+  that answers a `needs_input` block (LOB-239). See [thread.md](thread.md), driven by `thread.sh`.
 - Selection is in the URL only; nothing is kept in the browser's storage.
 
 ## How to get to it (user POV)
@@ -74,7 +76,8 @@ The block runs after the lane checks, on the card the drive seeded in `intake`. 
     a click on Approve to send one `decideApproval` (`approved`, actor `dashboard`), the pane to
     show `[data-no-approvals]`, and `listApprovals` from the drive to be empty;
 12. no button, role-button or draggable in the lanes, and the page's writes to be exactly the two
-    clicked moves, the one run start and the one decision;
+    clicked moves, the one run start and the one decision (the thread's `listTaskComments` is a
+    read; its `commentTask` is not clicked here);
 13. `?card=<id>&run=<a session id that is not one of its runs>` to render `[data-run-foreign]` and
     no run tabs.
 
@@ -96,5 +99,5 @@ Evidence: `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png`,
   terminal by `.pi/skills/verify-cli/approve.sh` (LOB-53). The CLI half of "a move in `factory board move` appears in the
   browser, and the reverse" is driven here through the real CLI entry point (`apps/cli/src/index.ts`
   over the real API), not in `verify-cli`.
-- **The `needs_input` walk is not here.** Answering a block needs LOB-46's spec stage; the parent
-  (LOB-22) owns that walk.
+- **The `needs_input` walk is not here.** It needs a run that asks (`FAUX_ASK`), which `up.sh`'s
+  instance does not run; `thread.sh` drives it on its own instance ([thread.md](thread.md)).

@@ -96,6 +96,7 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
   also do. That `openSession` composes the stage and it refuses writes is `packages/core`'s
   `SessionService.test.ts` ("refuses a specifying run's write …") and `.pi/skills/verify-policy`'s
   `stage` case.
-- **The thread in the dashboard.** The card pane does not render the thread; the web phase reads the
-  card after it has left `specifying`.
+- **The thread in the dashboard.** This drive answers through `factory board comment`, and its web
+  phase reads the card after it has left `specifying`. Answering in the card pane's thread (LOB-239)
+  is `.pi/skills/verify-web/thread.sh`'s ([thread.md](../../verify-web/features/thread.md)).
 - What a real model asks, or when: `MODEL_BACKEND=faux` scripts it.
