@@ -32,6 +32,18 @@ adopted), its in-process repeat is `already-open` (the log answered it), and the
 first call is `opened` again, because the guard is that session's own `factory.pr` and not a lock.
 The tags are recorded with the rest of the observations in each phase file.
 
+**It starts from where it lives (LOB-214).** The driver runs as `bun .pi/skills/verify-api/pr-once.ts`,
+so every module it imports resolves through the root `node_modules`, which holds exactly what the
+root `package.json` declares. Before LOB-175 declared `@repo/core`, `@repo/harness` and
+`@repo/storage-postgres` there, the arm phase died on its first import (`Cannot find module
+'@effect/platform-bun'` on a tree that had not been installed, then `'@repo/harness'`) and the script
+could only say that the arm phase never reached GitHub. `packages/storage-postgres/src/pi-resolution.test.ts`
+now asks Bun to resolve every bare import of every `.pi/skills` driver from that driver's own
+directory, so an undeclared or unlinked package fails `bun run test` naming the file and the module
+rather than a drive. Re-recorded from the script itself on `main@6ab7c00`:
+`API_PORT=9570 ./pr-once.sh` exits 0 with all 18 checks passing, evidence `.verify/evidence/lob-214/`
+(the phase files carry the `opened` / `already-open` / `opened` tags).
+
 **Non-vacuity.** A hand mutation run: with `prStep.ts`'s `recorded ?? …` guard removed, the replay's
 repeat posts a second time and the script exits non-zero. Recorded in
 `.verify/evidence/lob-179/mutation.md`; the script itself cannot perform that edit.
