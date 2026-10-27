@@ -87,6 +87,7 @@ import type {
   StartMissionInput,
   StartMissionResult,
 } from "@repo/domain/Mission";
+import type { OpenPullRequestPayload } from "@repo/domain/PullRequest";
 import type {
   AskOptions,
   Conversation,
@@ -162,6 +163,7 @@ import type {
   RecordPageInput,
 } from "@repo/domain/Page";
 import { PageStrings } from "@repo/domain/Page";
+import { isSafeBranchName } from "./git";
 import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
@@ -308,8 +310,7 @@ export type SessionServiceShape = {
    *
    * A page is committed to the log — the `factory.page` document a reader asks for by name, and the
    * entry a fold and a rebuild can see — and its row is written in the same effect so `listPages`
-   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller, exactly as
-   * the PR step's is `openPullRequest` and no `SessionRpc` member.
+   * needs no fold. There is no RPC member for this yet: part 2's curator is its caller.
    */
   readonly recordPage: (
     input: RecordPageInput,
@@ -355,11 +356,19 @@ export type SessionServiceShape = {
   readonly close: Effect.Effect<void>;
 };
 
-export type OpenPullRequestArgs = {
-  readonly sessionId: SessionId;
-  readonly title: string;
-  readonly head: string;
-  readonly base: string;
+/**
+ * What `openPullRequest` takes: the wire payload (`OpenPullRequestPayload` — the session and the
+ * title), plus the two branches an in-process caller may name. The RPC handler never passes them,
+ * so a client always gets the session's own branch onto the base it was cut from (LOB-213); a test
+ * or a drive that needs another head (two sessions measuring one branch) names it here. Either way
+ * both are checked with `isSafeBranchName` before they reach git, so a name that would read as an
+ * option is a `SessionError{invalid_input}`, not an argument.
+ */
+export type OpenPullRequestArgs = OpenPullRequestPayload & {
+  /** The branch the PR publishes. Default: the session's own (`factory/<id>`, or its named one). */
+  readonly head?: string;
+  /** The ref it targets. Default: the base the session was cut from. */
+  readonly base?: string;
 };
 
 export class SessionService extends Context.Service<
@@ -1421,6 +1430,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               });
             }
             const owner = yield* acquireOwner(input.sessionId, row);
+            // The branches come from the session unless an in-process caller named them; the wire
+            // never does (LOB-213). Checked here rather than trusted: both reach git's argv.
+            const head =
+              input.head ??
+              owner.workspace.branch ??
+              `factory/${input.sessionId}`;
+            const base =
+              input.base ?? owner.workspace.baseRef ?? row.baseRef ?? "main";
+            for (const [name, ref] of [
+              ["head", head],
+              ["base", base],
+            ] as const) {
+              if (!isSafeBranchName(ref)) {
+                return yield* new SessionErrorClass({
+                  code: "invalid_input",
+                  message: `session ${input.sessionId}: ${name} '${ref}' is not a branch name the PR step will pass to git`,
+                });
+              }
+            }
             yield* touch(input.sessionId);
             const snapshot = yield* readLiveSnapshot(
               owner,
@@ -1442,8 +1470,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               sessionId: input.sessionId,
               repo,
               title: input.title,
-              head: input.head,
-              base: input.base,
+              head,
+              base,
               // The branch is measured where it was cut: the session's own working directory.
               worktree: owner.workspace.path,
               cap: options.prCap ?? DEFAULT_DIFF_CAP,

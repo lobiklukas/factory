@@ -120,6 +120,12 @@ the hook installed and a fork writes its parent's cap, and nothing the drive ass
 [budget.md](budget.md), which names what the drive does not reach (forks and replays, the dashboard
 row).
 
+The PR-step RPC checks (LOB-213) were run from the `agent/LOB-213` worktree on 2026-10-27
+(`DATABASE_URL` the worktree's own `factory_agent_lob_213` on 5442, faux, API on `PR_RPC_PORT=9520`,
+the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** (7 driver checks, 5
+shell checks), evidence `.verify/evidence/lob-213/api/`, with the no-handler mutation run failing it.
+See [pr-rpc.md](pr-rpc.md).
+
 | Feature                  | Status  | File                                       |
 | ------------------------ | ------- | ------------------------------------------ |
 | Create a session         | passing | [create.md](create.md)                     |
@@ -150,6 +156,7 @@ row).
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)           |
 | The spec document        | passing | [spec.md](spec.md)                         |
 | A budget cap             | passing | [budget.md](budget.md)                     |
+| The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
 
 ## Deliberately absent
 

@@ -3,9 +3,9 @@
 //   bun .pi/skills/lib/seed-pr.ts
 //
 // `verify-cli` and `verify-web` prove that a session's PR link reaches the operator — a column in
-// `factory ls`, an anchor in the session pane's header. Neither can get a PR out of the API they
-// drive: the PR step is `SessionService.openPullRequest`, and no RPC member calls it (its callers
-// are the docs run and the board's start, both in-process). So this script is the in-process caller.
+// `factory ls`, an anchor in the session pane's header. The API they drive has an `openPullRequest`
+// member since LOB-213, but it reaches whatever forge that API was started against, and those drives
+// start theirs with no fake GitHub wired in. So this script is the in-process caller.
 // It builds the real `SessionService` on the run's `DATABASE_URL` and `SESSION_ROOT`, creates a
 // session bound to a repo, runs the real PR step against the loopback GitHub fake that
 // `verify-api` already owns, reads the session back, and exits. The API the drive is talking to then
