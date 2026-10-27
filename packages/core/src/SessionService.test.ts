@@ -46,6 +46,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { BunServices } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
+import type { ApprovalRequest } from "@repo/domain/Approval";
 import type {
   ListSessionsInput,
   ListSessionsOutput,
@@ -112,6 +113,7 @@ import {
   type SessionWriteBackShape,
 } from "./SessionWriteBack";
 import {
+  approvalResumeMessage,
   MAX_MESSAGE_CHARS,
   MAX_PAGE_SIZE,
   SessionService,
@@ -4154,6 +4156,145 @@ describe("approvals", () => {
 });
 
 /**
+ * The operator's inbox (LOB-53): every session's pending requests from one read, which is what the
+ * dashboard's `/approvals` pane and `factory approvals` list. Other cases in this file leave requests
+ * pending in the same database, so each assertion is about this case's sessions.
+ */
+describe("every session's pending approvals", () => {
+  it("lists the pending requests of every session, newest first, and drops a decided one", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const first = yield* sessions.create({ title: "inbox one" });
+        const second = yield* sessions.create({ title: "inbox two" });
+        const a = yield* sessions.requestApproval({
+          sessionId: first.id,
+          requestId: "inbox-a",
+          action: "push",
+        });
+        const b = yield* sessions.requestApproval({
+          sessionId: second.id,
+          requestId: "inbox-b",
+          action: "publish",
+          detail: "npm publish",
+        });
+        const c = yield* sessions.requestApproval({
+          sessionId: first.id,
+          requestId: "inbox-c",
+          action: "deploy",
+        });
+        const mine = new Set<string>([first.id, second.id]);
+        const ours = (output: { approvals: readonly ApprovalRequest[] }) =>
+          output.approvals.filter((request) => mine.has(request.sessionId));
+        const before = ours(yield* sessions.listPendingApprovals({}));
+        yield* sessions.decideApproval({
+          sessionId: second.id,
+          requestId: "inbox-b",
+          decision: "approved",
+          actor: "ops",
+        });
+        const after = ours(yield* sessions.listPendingApprovals({}));
+        const clamped = yield* sessions.listPendingApprovals({ limit: 0 });
+        const capped = yield* sessions.listPendingApprovals({
+          limit: MAX_PAGE_SIZE + 50,
+        });
+        return { a, b, c, before, after, clamped, capped };
+      }),
+    );
+    // Across sessions, newest ask first — not grouped by session.
+    expect(outcome.before).toEqual([outcome.c, outcome.b, outcome.a]);
+    expect(outcome.after).toEqual([outcome.c, outcome.a]);
+    // A page is at least one row and at most the service's page cap.
+    expect(outcome.clamped.approvals).toHaveLength(1);
+    expect(outcome.capped.approvals.length).toBeLessThanOrEqual(MAX_PAGE_SIZE);
+    // A page of one is the newest ask: stale requests cannot push a run that just parked off it.
+    expect(outcome.clamped.approvals[0]).toEqual(outcome.c);
+    // `total` counts every pending request, so a cut page says it was cut.
+    expect(outcome.clamped.total).toBeGreaterThanOrEqual(2);
+    expect(outcome.clamped.total).toBeGreaterThan(
+      outcome.clamped.approvals.length,
+    );
+    expect(outcome.capped.total).toBeGreaterThanOrEqual(
+      outcome.capped.approvals.length,
+    );
+  });
+
+  it("decides without touching the session when the caller does not ask to resume it", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "no resume" });
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "quiet",
+          action: "push",
+        });
+        const decision = yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "quiet",
+          decision: "approved",
+          actor: "ops",
+          resume: false,
+        });
+        return { decision, snapshot: yield* sessions.get(created.id) };
+      }),
+    );
+    expect(outcome.decision.resumedWith).toBeUndefined();
+    expect(outcome.decision.resumeFailed).toBeUndefined();
+    expect(
+      outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+  });
+
+  it("answers a recorded decision whose resume failed with resumeFailed, not a failure", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "resume fails" });
+        // An action long enough that the follow-up naming it is over the message limit, so the
+        // send after the commit is refused.
+        yield* sessions.requestApproval({
+          sessionId: created.id,
+          requestId: "unsendable",
+          action: "x".repeat(MAX_MESSAGE_CHARS),
+        });
+        const decide = sessions.decideApproval({
+          sessionId: created.id,
+          requestId: "unsendable",
+          decision: "approved",
+          actor: "ops",
+          resume: true,
+        });
+        const decision = yield* decide;
+        // The retry a caller is told to make: the same decision again, idempotent.
+        const again = yield* decide;
+        return {
+          decision,
+          again,
+          pending: yield* sessions.listApprovals(created.id),
+          snapshot: yield* sessions.get(created.id),
+        };
+      }),
+    );
+    // The decision is on file and no longer pending...
+    expect(outcome.decision).toMatchObject({
+      requestId: "unsendable",
+      decision: "approved",
+      actor: "ops",
+    });
+    expect(outcome.pending.approvals).toEqual([]);
+    // ...and the answer says the session was not resumed, with the send's own code.
+    expect(outcome.decision.resumedWith).toBeUndefined();
+    expect(outcome.decision.resumeFailed?.code).toBe("invalid_input");
+    expect(outcome.again.decidedAt).toBe(outcome.decision.decidedAt);
+    expect(outcome.again.resumeFailed?.code).toBe("invalid_input");
+    expect(
+      outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+  });
+});
+
+/**
  * An approval is durable across release (LOB-147): the request is committed into the log, and both
  * answers to "what is waiting" are folds of it — the snapshot folds the entries, the list reads the
  * `session_approvals` row that indexes them, and `rebuildIndexes` re-derives the row from the log.
@@ -6382,6 +6523,113 @@ describe("a gated call asks through the approvals service", () => {
     expect(askedAgain?.text).toContain("one has been asked for");
     expect(askedAgain?.text).toContain(`${outcome.requestId}-2`);
     expect(askedAgain?.text).not.toContain("gated-ran");
+  });
+
+  /** A snapshot once the session is idle and its transcript holds `results` tool results. */
+  const settledWith = (sessionId: SessionId, results: number) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* waitUntil(
+        sessions
+          .get(sessionId)
+          .pipe(
+            Effect.map(
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.filter((entry) => entry.kind === "toolResult")
+                  .length >= results,
+            ),
+          ),
+        `${results} tool results and an idle session`,
+      );
+      return yield* sessions.get(sessionId);
+    });
+
+  it("resumes the parked run with the decision, runs the call, and resumes once however often it is repeated", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "gated, resumed" });
+        yield* turn(created.id);
+        const request = (yield* sessions.listApprovals(created.id))
+          .approvals[0];
+        const decide = sessions.decideApproval({
+          sessionId: created.id,
+          requestId: request?.requestId ?? "",
+          decision: "approved",
+          actor: "ops@example",
+          resume: true,
+        });
+        // No message from a person: the decision itself wakes the run.
+        const decision = yield* decide;
+        const resumed = yield* settledWith(created.id, 2);
+        const again = yield* decide;
+        const after = yield* sessions.get(created.id);
+        return {
+          request,
+          decision,
+          again,
+          resumed,
+          after,
+          pending: yield* sessions.listApprovals(created.id),
+        };
+      }),
+    );
+    const users = (snapshot: SessionSnapshot) =>
+      snapshot.entries.filter((entry) => entry.kind === "user");
+    const results = (snapshot: SessionSnapshot) =>
+      snapshot.entries.filter((entry) => entry.kind === "toolResult");
+
+    expect(outcome.request).toBeDefined();
+    if (outcome.request === undefined) throw new Error("unreachable");
+    expect(outcome.decision.resumedWith).toBeDefined();
+    // The follow-up is the decision, in the words the agent reads.
+    expect(users(outcome.resumed).map((entry) => entry.text)).toEqual([
+      "publish",
+      approvalResumeMessage(outcome.request, outcome.decision),
+    ]);
+    // The resumed run retried the call, and it ran.
+    const ran = results(outcome.resumed)[1];
+    expect(ran?.isError).toBe(false);
+    expect(ran?.text).toContain("gated-ran");
+    expect(outcome.pending.approvals).toEqual([]);
+    // A repeated decision is the same decision and the same follow-up: the session resumed once.
+    expect(outcome.again.resumedWith).toBe(outcome.decision.resumedWith);
+    expect(users(outcome.after)).toHaveLength(2);
+    expect(results(outcome.after)).toHaveLength(2);
+  });
+
+  it("resumes a denied run with the denial, and the call stays refused", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          title: "gated, denied, resumed",
+        });
+        yield* turn(created.id);
+        const request = (yield* sessions.listApprovals(created.id))
+          .approvals[0];
+        const decision = yield* sessions.decideApproval({
+          sessionId: created.id,
+          requestId: request?.requestId ?? "",
+          decision: "denied",
+          actor: "ops@example",
+          resume: true,
+        });
+        return { decision, resumed: yield* settledWith(created.id, 2) };
+      }),
+    );
+    expect(outcome.decision.resumedWith).toBeDefined();
+    const users = outcome.resumed.entries.filter(
+      (entry) => entry.kind === "user",
+    );
+    expect(users[1]?.text).toMatch(/^Denied: `sleep` \(request ask-bash-/);
+    const refused = outcome.resumed.entries.filter(
+      (entry) => entry.kind === "toolResult",
+    )[1];
+    expect(refused?.isError).toBe(true);
+    expect(refused?.text).toContain("was denied by ops@example");
+    expect(refused?.text).not.toContain("gated-ran");
   });
 
   it("refuses the same call for the rest of the session once it is denied, asking nothing new", async () => {

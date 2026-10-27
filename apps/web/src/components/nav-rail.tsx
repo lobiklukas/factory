@@ -19,7 +19,8 @@ const SECTIONS = [
   // The board leads (LOB-75): the cockpit is the board (docs/board.md), and sessions are the runs
   // a card owns. Sandboxes and approvals left the rail for panes inside a card's run (LOB-76): each
   // means something only for one run, so a top-level list with no card around it is the wrong
-  // question. Their routes stay, so an old link still says what it used to.
+  // question. Their routes stay: `/sandboxes` says what it used to, and `/approvals` is every run's
+  // pending approvals (LOB-53), linked from a session parked on one rather than from the rail.
   { to: "/boards", label: "Boards", icon: KanbanSquareIcon },
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
 ] as const;

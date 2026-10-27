@@ -3,6 +3,10 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory approvals` / `approve` / `deny` were verified **2026-10-27** from the `agent/LOB-53`
+worktree: `./drive.sh` (API on `:9530`) **21/21**, its last check being `./approve.sh` (API on
+`:9531`) at **18/18**.
+
 `factory send --when-busy steer` / `--when-busy reject` were verified **2026-10-27** from the
 `agent/LOB-167` worktree with `./steer.sh` (API on `:9541`, `FAUX_SLEEP_MS=8000`) — **13/13** checks.
 A mutation run with the nap off (`STEER_SLEEP_MS=0`) failed 9 of them.
@@ -24,6 +28,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | Typed errors                            | passing | [errors.md](errors.md)     |
 | `factory send` / `factory withdraw`     | passing | [withdraw.md](withdraw.md) |
 | `factory send --when-busy steer/reject` | passing | [steer.md](steer.md)       |
+| `factory approve` / `deny`              | passing | [approve.md](approve.md)   |
 
 ## Deliberately absent
 
