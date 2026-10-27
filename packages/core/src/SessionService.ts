@@ -20,10 +20,12 @@
  * seam that changes and `SessionBus` is how streams keep working.
  */
 import {
+  Cause,
   Clock,
   Context,
   DateTime,
   Effect,
+  Exit,
   FiberMap,
   FileSystem,
   HashMap,
@@ -80,6 +82,7 @@ import type {
   StartMissionResult,
 } from "@repo/domain/Mission";
 import type {
+  AskOptions,
   Conversation,
   Harness,
   ModelAccess,
@@ -135,6 +138,8 @@ import {
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { BoardColumn } from "@repo/domain/Task";
+import type { TaskComment } from "@repo/domain/Task";
+import { TaskService, TaskServiceLive } from "./TaskService";
 import type {
   CurateSessionInput,
   CurateSessionResult,
@@ -481,6 +486,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const path = yield* Path.Path;
       const policy = yield* Policy;
       const skills = yield* SkillService;
+      const tasks = yield* TaskService;
+      // The services this layer was built with, for the one callback a harness calls back into from a
+      // Promise (the `ask` tool, LOB-73): it runs with the same SQL client the rest of the service uses.
+      const context = yield* Effect.context<never>();
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
@@ -659,6 +668,75 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ? undefined
             : { name: declared.name, skills: declared.skills };
         });
+
+      /**
+       * The card this session is a run of (B1), or `undefined` for a session with no card. Read from
+       * the run row `create` writes before the harness opens, like the run's column.
+       */
+      const runTaskFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        paper(
+          "read run task",
+          sql<{ taskId: string }>`
+            SELECT task_id FROM task_runs WHERE session_id = ${sessionId}
+          `,
+        ).pipe(Effect.map((rows) => rows[0]?.taskId));
+
+      /**
+       * The card's thread, as the run's prompt carries it (B7, LOB-73). Read on every owner
+       * acquisition, as the skills and the pages are: a run reopened after a person answered is told
+       * the answer, not the thread as it stood when the run first opened.
+       */
+      const threadFor = (
+        taskId: string | undefined,
+      ): Effect.Effect<readonly TaskComment[], SessionError> =>
+        taskId === undefined
+          ? Effect.succeed([])
+          : tasks.comments(taskId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SessionErrorClass({
+                    code: "storage",
+                    message: `read the thread of ${taskId}: ${cause.message}`,
+                  }),
+              ),
+            );
+
+      /**
+       * How a run asks (B7, LOB-73): a `question` comment and a `needs_input` block on its card, made
+       * by the run itself — its actor is its session id, which is what makes it a run (B5). The ask id
+       * is the session and the tool call, so a call replayed after a crash records nothing twice.
+       *
+       * A refusal reaches the model as the tool's error, in the service's own words, and the run is
+       * not ended: a question that was never recorded must not park a run nobody will answer.
+       */
+      const askFor = (sessionId: SessionId, taskId: string): AskOptions => ({
+        ask: ({ question, callId }) =>
+          Effect.runPromiseExitWith(context)(
+            tasks.ask({
+              taskId,
+              question,
+              actor: sessionId,
+              askId: `${sessionId}:${callId}`,
+            }),
+          ).then((exit) => {
+            if (Exit.isSuccess(exit)) {
+              const card = exit.value;
+              return {
+                taskId: card.id,
+                column: card.blocked?.column ?? card.column,
+                revision: card.revision,
+              };
+            }
+            const failure = Cause.findErrorOption(exit.cause);
+            throw new Error(
+              Option.isSome(failure)
+                ? failure.value.message
+                : Cause.pretty(exit.cause),
+            );
+          }),
+      });
 
       /**
        * One `session_pages` row as the domain's page, or a storage error naming the page whose JSON
@@ -877,6 +955,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * its changes are measured against, from the workspace resolved for this acquisition.
          */
         readonly verify: VerifyOptions;
+        /** How the run asks on its card (LOB-73); absent for a session with no card. */
+        readonly ask?: AskOptions;
+        /** The card's thread (LOB-73), oldest first; empty for a session with no card. */
+        readonly thread: readonly TaskComment[];
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /**
@@ -922,6 +1004,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // `session_pages` stops being told. A session with none passes none, so its prompt has no
             // `pages` section and its log records no page prompt (LOB-205).
             const pages = yield* pagesFor(id);
+            // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
+            // of a card. A fork or a replay has no run row of its own, so it gets neither.
+            const card = yield* runTaskFor(id);
+            const thread = yield* threadFor(card);
             const opened = yield* open({
               storage,
               cwd: workspace.path,
@@ -932,6 +1018,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 command: workspace.commands.verify,
                 baseRef: workspace.baseRef,
               },
+              thread,
+              ...(card === undefined ? {} : { ask: askFor(id, card) }),
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
@@ -966,13 +1054,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquireOwnerWith(
           id,
           row,
-          ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
+          ({
+            storage,
+            cwd,
+            policy: sessionPolicy,
+            run,
+            pages,
+            verify,
+            ask,
+            thread,
+          }) =>
             openSession({
               storage,
               model: options.model,
               cwd,
               pages,
               verify,
+              thread,
+              ...(ask === undefined ? {} : { ask }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230).
               tasks: [MissionTask],
@@ -2324,4 +2423,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
     // The run's prompt is assembled from the factory's skill records (B6), so the service reads
     // them through `SkillService` rather than a second reader of the `skills` table.
     Layer.provide(SkillServiceLive),
+    // A run's thread and its ask are the card's (B7, LOB-73), so the service reads and writes them
+    // through `TaskService` rather than a second writer of `task_events`.
+    Layer.provide(TaskServiceLive),
   );

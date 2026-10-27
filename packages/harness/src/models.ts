@@ -20,6 +20,7 @@ import {
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
 import { VERIFY_TOOL } from "./verify";
+import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -82,6 +83,30 @@ const lastUserText = (messages: readonly Message[]): string => {
   return "";
 };
 
+/** Whether a system message in the transcript offered `toolName` to the model. */
+const offersTool = (messages: readonly Message[], toolName: string): boolean =>
+  messages.some(
+    (message) =>
+      message.role === "system" &&
+      (message.toolsAdded ?? []).some((tool) => tool.name === toolName),
+  );
+
+/**
+ * Whether the prompt section `key` is in effect, folded the way the transcript folds sections: a
+ * later system message replaces a section by name, and a `null` removes it.
+ */
+const sectionInEffect = (
+  messages: readonly Message[],
+  key: string,
+): boolean => {
+  let shown = false;
+  for (const message of messages) {
+    if (message.role !== "system" || message.sections === undefined) continue;
+    if (key in message.sections) shown = message.sections[key] !== null;
+  }
+  return shown;
+};
+
 /** How a compaction task opens the conversation it wants summarized. */
 const SUMMARY_PROMPT_PREFIX = "<conversation>";
 
@@ -131,12 +156,18 @@ const derivedCurationAnswer = (prompt: string): AssistantMessage => {
  * `verify` adds a step between the two (LOB-78): after the `bash` result the script calls the
  * `verify` tool, and the reply is what that tool reported — the shape of a run that makes a change,
  * verifies it, and says what the verification found.
+ *
+ * `ask` adds the parked run (LOB-73): after the `bash` result, a run that was offered the `ask` tool
+ * and whose prompt carries no task thread yet asks `ask`, verbatim. The tool ends the run, so there
+ * is no reply. A run whose prompt *does* carry the thread — the run after a person answered — does
+ * not ask again and replies as usual, which is how one script plays both runs of the story.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
   command: string = FAUX_COMMAND,
   curation?: string,
   verify = false,
+  ask?: string,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -160,19 +191,24 @@ export const fauxAnswer = (
       stopReason: "toolUse",
     });
   }
-  if (verify) {
-    const verified = toolResultText(messages, VERIFY_TOOL);
-    if (verified === undefined) {
-      return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
-        stopReason: "toolUse",
-      });
-    }
-    return fauxAssistantMessage(
-      `${verified.trim()} (re: ${lastUserText(messages).trim()})`,
-    );
+  const verified = verify ? toolResultText(messages, VERIFY_TOOL) : undefined;
+  if (verify && verified === undefined) {
+    return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
+      stopReason: "toolUse",
+    });
+  }
+  if (
+    ask !== undefined &&
+    offersTool(messages, ASK_TOOL) &&
+    !sectionInEffect(messages, THREAD_SECTION_KEY) &&
+    toolResultText(messages, ASK_TOOL) === undefined
+  ) {
+    return fauxAssistantMessage(fauxToolCall(ASK_TOOL, { question: ask }), {
+      stopReason: "toolUse",
+    });
   }
   return fauxAssistantMessage(
-    `${output.trim()} (re: ${lastUserText(messages).trim()})`,
+    `${(verified ?? output).trim()} (re: ${lastUserText(messages).trim()})`,
   );
 };
 
@@ -181,6 +217,11 @@ export type ModelAccessOptions = {
   readonly fauxCommand?: string | undefined;
   /** Whether the faux script calls `verify` after its `bash` turn (LOB-78, `fauxAnswer`). */
   readonly fauxVerify?: boolean | undefined;
+  /**
+   * The question the faux script asks with the `ask` tool after its `bash` turn (LOB-73,
+   * `fauxAnswer`), when the run was offered the tool and carries no task thread. Absent: never asks.
+   */
+  readonly fauxAsk?: string | undefined;
   /**
    * The body a scripted model answers a curation prompt with (LOB-206), verbatim: what the curator
    * "proposes". Absent, the faux derives one page per tool the transcript shows a result from.
@@ -277,6 +318,7 @@ export const createFauxModelAccess = (
       fauxCommand,
       options.fauxCuration,
       options.fauxVerify ?? false,
+      options.fauxAsk,
     );
   };
   faux.setResponses([repeat]);

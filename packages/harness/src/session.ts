@@ -70,6 +70,8 @@ import {
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import { verifyExtension, type VerifyOptions } from "./verify";
+import { askExtension, threadExtension, type AskOptions } from "./ask";
+import type { TaskComment } from "@repo/domain/Task";
 import {
   autonomyPolicy,
   DEFAULT_AUTONOMY,
@@ -257,6 +259,17 @@ export type OpenSessionOptions = {
    * measures only uncommitted work.
    */
   readonly verify?: VerifyOptions;
+  /**
+   * How this run asks a person (LOB-73, `./ask`): the control plane's callback that records the
+   * question on the run's card and blocks it `needs_input`. Absent: a session with no card, which
+   * has nobody to ask on, so it gets no `ask` tool at all.
+   */
+  readonly ask?: AskOptions;
+  /**
+   * The card's thread (LOB-73), read by the control plane at open: every comment, oldest first,
+   * rendered verbatim as the `task_thread` section. Absent or empty: no section.
+   */
+  readonly thread?: readonly TaskComment[];
 };
 
 export type OpenSession = {
@@ -301,10 +314,17 @@ export const openSession = (
     const pages = options.pages ?? [];
     const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
+    // The card's thread beside them (B7, LOB-73): what earlier runs asked and what a person answered,
+    // so a run that follows a parked one starts from the answer rather than from the bare card.
+    const thread = options.thread ?? [];
+    if (thread.length > 0) registry.install(threadExtension(thread));
     registry.install(CodingTools);
     // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
     // its own surface rather than prose about it.
     registry.install(verifyExtension(options.verify));
+    // The ask on the task (B7, LOB-73): only a run bound to a card can ask, because the question is
+    // recorded on the card — a scratch session has nobody to ask on and no tool to ask with.
+    if (options.ask !== undefined) registry.install(askExtension(options.ask));
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
     const tasks = options.tasks ?? [];

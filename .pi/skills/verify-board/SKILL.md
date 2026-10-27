@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board from the CLI (`factory board ls|show|move|start` in apps/cli) against a real control plane in a real tmux terminal. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board from the CLI (`factory board ls|show|move|comment|start` in apps/cli) against a real control plane in a real tmux terminal, including the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -17,17 +17,18 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 ## What it proves
 
-| Feature                 | Check in the driver                                        | Why it matters                                      |
-| ----------------------- | ---------------------------------------------------------- | --------------------------------------------------- |
-| `board ls` (B9, LOB-61) | every lane printed, in definition order, exit 0            | the lane order is the definition's, not the DB's    |
-| a card in its lane      | the seeded card is the row under `intake`                  | lanes and cards come from one read, so they agree   |
-| `board show`            | revision and title printed, exit 0                         | one card as the server has it                       |
-| `board move` (B5)       | a declared move prints the new column and revision, exit 0 | the write path is real, at the revision it expected |
-| a stale revision (B3)   | the service's message verbatim, non-zero exit              | a script can tell a refusal from a success          |
-| an undeclared move (B5) | names both columns verbatim, non-zero exit                 | the refusal is typed, not generic prose             |
-| `board start` (B1)      | a `ses_…` id, and the card's column on stdout, exit 0      | a run is one session, bound to the card             |
+| Feature                  | Check in the driver                                                         | Why it matters                                                      |
+| ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `board ls` (B9, LOB-61)  | every lane printed, in definition order, exit 0                             | the lane order is the definition's, not the DB's                    |
+| a card in its lane       | the seeded card is the row under `intake`                                   | lanes and cards come from one read, so they agree                   |
+| `board show`             | revision and title printed, exit 0                                          | one card as the server has it                                       |
+| `board move` (B5)        | a declared move prints the new column and revision, exit 0                  | the write path is real, at the revision it expected                 |
+| a stale revision (B3)    | the service's message verbatim, non-zero exit                               | a script can tell a refusal from a success                          |
+| an undeclared move (B5)  | names both columns verbatim, non-zero exit                                  | the refusal is typed, not generic prose                             |
+| `board start` (B1)       | a `ses_…` id, and the card's column on stdout, exit 0                       | a run is one session, bound to the card                             |
+| the ask on the task (B7) | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt | a run that needs a person ends, and the answer reaches the next run |
 
-Every check is required: `drive.sh` exits non-zero when one fails.
+Every check is required: `drive.sh` and `ask.sh` each exit non-zero when one fails.
 
 ## Launch
 
@@ -53,7 +54,13 @@ its `created` row). It prints one JSON line into `.verify/run/board.json`, which
 
 ```sh
 ./drive.sh       # requires the instance from ./up.sh
+./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
 ```
+
+`ask.sh` (LOB-73) is two processes on purpose: the run asks in the first, the API is sent SIGTERM,
+and the answer and the next run happen in the second — the question and the block are rows, so a
+restart between ask and answer must lose neither. Its two non-CLI facts (is the session busy, what
+was the next run's recorded prompt) are probed by `ask.ts`. See `features/ask.md`.
 
 Environment: `API_URL` (default `http://localhost:9400`), `EVIDENCE_DIR`.
 
@@ -69,6 +76,8 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 
 - `ls.txt`, `show.txt`, `move.txt`, `move-stale.txt`, `move-undeclared.txt`, `start.txt` — raw panes
 - `observed.json` — every check with its detail, the board id, the card id and the session id
+- `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
+  its probes' facts, the CLI outputs and both processes' log
 
 Proof standards for this surface:
 
@@ -103,6 +112,10 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
 - **The actor decides the gates.** `--actor` defaults to `cli`, a person. A session id is a run, and
   a run cannot cross `planning → building` or `review → done` (B5) — that is a different refusal
   (`human_gate_required`), not a bug.
+- **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; `ask.sh`
+  passes one so the run takes a turn.
+- **The faux asks only once per card.** `FAUX_ASK` makes the script call `ask` when the run was
+  offered the tool and its prompt has no `task_thread` yet, so the run after an answer replies instead.
 - **`board start` does not move the card.** The lane a run works in is where the card already sits;
   the card moves when a person moves it, with the run's evidence in hand.
 - **5442 is a shared port.** `up.sh` asks the port instead of running compose blind; the regression is

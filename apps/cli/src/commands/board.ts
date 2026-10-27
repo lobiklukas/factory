@@ -1,7 +1,7 @@
 import { Console, Effect, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
 import { BoardInstanceId, TaskId } from "@repo/domain/Task";
-import type { Task } from "@repo/domain/Task";
+import type { Task, TaskComment } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
@@ -9,9 +9,9 @@ import { BoardClient } from "../rpc";
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
  *
- * The four verbs are the ones a person needs to work a card from a terminal: read the lanes and
- * what sits in them (`ls`), read one card (`show`), move it (`move`), and start the run that
- * advances it (`start`). Nothing here folds a log or reads the database; every answer is the
+ * The verbs are the ones a person needs to work a card from a terminal: read the lanes and what
+ * sits in them (`ls`), read one card and its thread (`show`), move it (`move`), answer what a parked
+ * run asked (`comment`, LOB-73), and start the run that advances it (`start`). Nothing here folds a log or reads the database; every answer is the
  * server's, which is what keeps `factory board ls` and the RPC list in agreement.
  *
  * **Refusals are printed, not swallowed.** The board's refusals are typed values that name what
@@ -107,7 +107,19 @@ const lsCommand = Command.make(
   ]),
 );
 
-/** `factory board show <task>` — one card, as the server has it. */
+/**
+ * One comment of a card's thread: a header naming what it is and who wrote it, then the body with
+ * every line indented under it — the body's own lines, unwrapped, so what is printed is what was typed.
+ */
+export const threadLines = (comment: TaskComment): ReadonlyArray<string> => [
+  `  [${comment.kind}] ${comment.actor} (revision ${comment.revision})`,
+  ...comment.body.split("\n").map((line) => `    ${line}`),
+];
+
+/**
+ * `factory board show <task>` — one card, as the server has it, and its thread (B7): the question a
+ * parked run asked and the answer a person gave are read here, on the task, not in a transcript.
+ */
 const showCommand = Command.make(
   "show",
   {
@@ -127,6 +139,7 @@ const showCommand = Command.make(
       }
       const { client } = yield* BoardClient;
       const card = yield* client.getTask({ taskId });
+      const thread = yield* client.listTaskComments({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
       yield* Console.log(`board     ${card.boardId}`);
@@ -138,10 +151,14 @@ const showCommand = Command.make(
         `blocked   ${
           card.blocked === undefined
             ? "-"
-            : `${card.blocked.reason} since ${card.blocked.since}`
+            : `${card.blocked.reason} from ${card.blocked.column} since ${card.blocked.since}`
         }`,
       );
       yield* Console.log(`title     ${card.title}`);
+      yield* Console.log(`thread    ${thread.length}`);
+      for (const comment of thread) {
+        for (const line of threadLines(comment)) yield* Console.log(line);
+      }
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -206,6 +223,71 @@ const moveCommand = Command.make(
 );
 
 /**
+ * `factory board comment` — add to a card's thread (B7, LOB-73).
+ *
+ * From a person on a card blocked `needs_input`, the comment is the answer: it lifts the block in the
+ * same transaction, and the next run started on the card reads it in its prompt. Anywhere else it is
+ * a note. `--expect-revision` is required for the reason it is on `move`: an answer typed against a
+ * card someone else already answered must be refused, not silently appended.
+ */
+const commentCommand = Command.make(
+  "comment",
+  {
+    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
+    body: Flag.String("body").pipe(
+      Flag.withDescription("The comment, verbatim — the answer to a question"),
+    ),
+    expectRevision: Flag.Int("expect-revision").pipe(
+      Flag.withDescription("The revision this comment expects"),
+    ),
+    actor: actorFlag,
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({ task, body, expectRevision, actor, api }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
+      const { client } = yield* BoardClient;
+      const before = yield* client.getTask({ taskId });
+      const after = yield* client.commentTask({
+        taskId,
+        expectedRevision: expectRevision,
+        body,
+        actor,
+      });
+      yield* Console.log(
+        `commented on ${after.id} (revision ${after.revision})`,
+      );
+      if (before.blocked !== undefined && after.blocked === undefined) {
+        yield* Console.log(
+          `answered: ${after.id} is no longer blocked (${before.blocked.reason} from ${before.blocked.column})`,
+        );
+      }
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "Comment on a card; on a card blocked needs_input, the answer",
+  ),
+  Command.withExamples([
+    {
+      command:
+        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16."',
+      description: "Answer the question a parked run asked",
+    },
+  ]),
+);
+
+/**
  * `factory board start` — open the run that advances a card.
  *
  * A run is exactly one Pi Durable session (B1), so starting one is `createSession` with the card
@@ -223,9 +305,15 @@ const startCommand = Command.make(
       ),
       Flag.optional,
     ),
+    prompt: Flag.String("prompt").pipe(
+      Flag.withDescription(
+        "The first message the run is sent; without it the run opens and waits",
+      ),
+      Flag.optional,
+    ),
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, api }) {
+  Effect.fnUntraced(function* ({ task, column, prompt, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -247,6 +335,15 @@ const startCommand = Command.make(
       });
       yield* Console.log(`session ${session.id}`);
       yield* Console.log(`task    ${card.id} in ${taskColumn}`);
+      if (Option.isSome(prompt)) {
+        // Sent, not followed: the run is headless (B7), so the command returns as soon as the turn
+        // is accepted, and the card — not this terminal — is where the run's outcome is read.
+        yield* client.sendMessage({
+          sessionId: session.id,
+          content: prompt.value,
+        });
+        yield* Console.log(`sent    ${prompt.value}`);
+      }
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -263,7 +360,13 @@ const startCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Read and move cards on a board: lanes, one card, a move, a run",
+    "Read and move cards on a board: lanes, one card, a move, a comment, a run",
   ),
-  Command.withSubcommands([lsCommand, showCommand, moveCommand, startCommand]),
+  Command.withSubcommands([
+    lsCommand,
+    showCommand,
+    moveCommand,
+    commentCommand,
+    startCommand,
+  ]),
 );

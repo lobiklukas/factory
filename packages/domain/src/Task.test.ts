@@ -25,8 +25,10 @@ import {
   BlockReason,
   ColumnKind,
   ColumnRequirement,
+  CommentKind,
   DefinitionId,
   Task,
+  TaskComment,
   TaskBlocked,
   TaskEvent,
   TaskId,
@@ -561,5 +563,62 @@ describe("a card, a run and an event", () => {
     ).toBe(true);
     // And a version the database's `CHECK (version >= 1)` mirrors but the contract does not.
     expect(refuses(BoardDefinition, { ...stored, version: 0 })).toBe(false);
+  });
+});
+
+/**
+ * The thread on a card (B7, LOB-73): a comment is a `commented` event, and what it is in the thread
+ * — a run's question, a person's answer, a note — is recorded with it rather than inferred later.
+ */
+describe("a card's thread", () => {
+  const aComment = {
+    _tag: "commented",
+    taskId: A_TASK_ID,
+    actor: A_SESSION_ID,
+    body: "Which repo?",
+    revision: 2,
+  };
+
+  it("closes the comment kinds at three", () => {
+    expect(CommentKind.literals).toEqual(["question", "answer", "note"]);
+    expect(refuses(CommentKind, "reply")).toBe(true);
+  });
+
+  it("records a comment's kind and ask id on the event, and reads one without them as before", () => {
+    expect(refuses(TaskEvent, aComment)).toBe(false);
+    expect(
+      refuses(TaskEvent, {
+        ...aComment,
+        kind: "question",
+        askId: `${A_SESSION_ID}:call-1`,
+      }),
+    ).toBe(false);
+    expect(refuses(TaskEvent, { ...aComment, kind: "reply" })).toBe(true);
+    // Encoding keeps both fields: a stored event that lost its ask id could not be deduplicated.
+    const encoded = Schema.encodeSync(TaskEvent)(
+      Schema.decodeUnknownSync(TaskEvent)({
+        ...aComment,
+        kind: "question",
+        askId: "ses:call",
+      }),
+    );
+    expect(encoded).toMatchObject({ kind: "question", askId: "ses:call" });
+  });
+
+  it("gives every comment a reader gets a kind", () => {
+    const comment = {
+      taskId: A_TASK_ID,
+      kind: "answer",
+      actor: "person:lukas",
+      body: "lobiklukas/factory",
+      revision: 4,
+      createdAt: AN_INSTANT,
+    };
+    expect(refuses(TaskComment, comment)).toBe(false);
+    const { kind: _kind, ...withoutKind } = comment;
+    expect(refuses(TaskComment, withoutKind)).toBe(true);
+    expect(refuses(TaskComment, { ...comment, taskId: A_SESSION_ID })).toBe(
+      true,
+    );
   });
 });

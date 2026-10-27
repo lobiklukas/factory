@@ -13,16 +13,20 @@ import {
   BoardInstance,
   BoardNotFound,
   BoardView,
+  CommentTaskInput,
   CreateTaskInput,
+  EmptyComment,
   GetBoardInput,
   GetTaskInput,
   HumanGateRequired,
   ListBoardsInput,
+  ListTaskCommentsInput,
   ListTasksInput,
   MoveTaskInput,
   NotBlocked,
   StaleRevision,
   Task,
+  TaskComment,
   TaskNotFound,
   TaskStorageError,
   UndeclaredTransition,
@@ -185,6 +189,7 @@ const TaskErrorSchema = Schema.Union([
   HumanGateRequired,
   AlreadyBlocked,
   NotBlocked,
+  EmptyComment,
   TaskStorageError,
 ]);
 
@@ -232,6 +237,19 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("unblockTask", {
     payload: UnblockTaskInput,
     success: Task,
+    error: TaskErrorSchema,
+  }),
+  // The thread on a card (B7, LOB-73): a comment, and — from a person, on a card blocked
+  // `needs_input` — the answer that lifts the block. The question half is the run's own `ask` tool,
+  // which writes in-process; there is no RPC for a client to ask on a run's behalf.
+  Rpc.make("commentTask", {
+    payload: CommentTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  Rpc.make("listTaskComments", {
+    payload: ListTaskCommentsInput,
+    success: Schema.Array(TaskComment),
     error: TaskErrorSchema,
   }),
 ) {}

@@ -258,6 +258,7 @@ describe("the dev tasks' environment", () => {
     "MAX_REQUEST_BODY_BYTES",
     "MODEL_BACKEND",
     "FAUX_COMMAND",
+    "FAUX_ASK",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
     "PR_CAP_MAX_FILES",

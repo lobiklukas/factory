@@ -80,6 +80,11 @@ const ModelConfig = Config.all({
   fauxCommand: Config.String("FAUX_COMMAND").pipe(
     Config.withDefault(FAUX_COMMAND),
   ),
+  /**
+   * The question the faux script asks with the `ask` tool (LOB-73). Unset, the script never asks: a
+   * verification that proves the parked run (`.pi/skills/verify-board/ask.sh`) sets it.
+   */
+  fauxAsk: Config.option(Config.String("FAUX_ASK")),
   apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
@@ -210,7 +215,10 @@ const HttpLive = Effect.gen(function* () {
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them.
   const SessionDeps = SessionServiceLive({
-    model: createModelAccess(backend, { fauxCommand: model.fauxCommand }),
+    model: createModelAccess(backend, {
+      fauxCommand: model.fauxCommand,
+      fauxAsk: Option.getOrUndefined(model.fauxAsk),
+    }),
     sessionRoot: model.sessionRoot,
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,

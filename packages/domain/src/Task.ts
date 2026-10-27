@@ -177,6 +177,37 @@ export const TaskBlocked = Schema.Struct({
 export type TaskBlocked = typeof TaskBlocked.Type;
 
 /**
+ * What one comment is in a task's thread (B7, LOB-73).
+ *
+ * - `question` — what a run asked when it ended parked: the comment half of a `needs_input` block.
+ * - `answer` — a person's comment on a card blocked `needs_input`, which is what lifts the block.
+ * - `note` — any other comment.
+ *
+ * The thread is the card's `commented` events in order, so the kind is recorded when the comment is
+ * written rather than inferred on read: whether a comment answered a question depends on the card's
+ * state at the time, which a later reader no longer has.
+ */
+export const CommentKind = Schema.Literals(["question", "answer", "note"]);
+export type CommentKind = typeof CommentKind.Type;
+
+/**
+ * One comment on a task, as a reader gets it (B7, LOB-73).
+ *
+ * The store is `task_events` itself — a comment is a `commented` event — so `revision` is the
+ * revision the comment was written at and `createdAt` is the event row's. Bodies are verbatim: a
+ * thread is quoted into the next run's prompt as it was typed (`@repo/harness`'s thread section).
+ */
+export const TaskComment = Schema.Struct({
+  taskId: TaskId,
+  kind: CommentKind,
+  actor: Schema.String,
+  body: Schema.String,
+  revision: Schema.Int,
+  createdAt: Timestamp,
+});
+export type TaskComment = typeof TaskComment.Type;
+
+/**
  * One card on a board (B1, B3).
  *
  * `column` is a *name*, not a position: B9 rejects a drag-ordered queue as a second source of
@@ -262,6 +293,13 @@ export const TaskEvent = Schema.TaggedUnion({
     actor: Actor,
     body: Schema.String,
     revision: Schema.Int,
+    /** What the comment is in the thread (LOB-73). Absent reads as a `note`. */
+    kind: Schema.optional(CommentKind),
+    /**
+     * The ask a run's question came from — `<session id>:<tool call id>` — so a replayed tool call
+     * finds the question it already recorded instead of asking twice (LOB-73).
+     */
+    askId: Schema.optional(Schema.String),
   },
   priorityChanged: {
     taskId: TaskId,
@@ -350,6 +388,12 @@ export class TaskStorageError extends Schema.TaggedError<TaskStorageError>()(
   { message: Schema.String },
 ) {}
 
+/** A comment, a question or an answer with nothing in it (LOB-73): a thread entry must say something. */
+export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
+  "EmptyComment",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -358,6 +402,7 @@ export type TaskError =
   | HumanGateRequired
   | AlreadyBlocked
   | NotBlocked
+  | EmptyComment
   | TaskStorageError;
 
 export const CreateTaskInput = Schema.Struct({
@@ -401,3 +446,19 @@ export const UnblockTaskInput = Schema.Struct({
   actor: Schema.String,
 });
 export type UnblockTaskInput = typeof UnblockTaskInput.Type;
+
+/**
+ * A comment on a card (B7, LOB-73). A person's comment on a card blocked `needs_input` is the answer,
+ * and lifts the block in the same transaction; any other comment is a note.
+ */
+export const CommentTaskInput = Schema.Struct({
+  taskId: TaskId,
+  expectedRevision: Schema.Int,
+  body: Schema.String,
+  actor: Schema.String,
+});
+export type CommentTaskInput = typeof CommentTaskInput.Type;
+
+/** A card's thread, oldest first (B7, LOB-73). */
+export const ListTaskCommentsInput = Schema.Struct({ taskId: TaskId });
+export type ListTaskCommentsInput = typeof ListTaskCommentsInput.Type;
