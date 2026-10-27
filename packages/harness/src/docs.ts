@@ -46,6 +46,11 @@ export const SpecDoc = defineDoc({
   migrate: unspecified,
 });
 
+/**
+ * Legacy: a free-text criteria string that nothing writes. `SpecDoc`'s `acceptance` is the source of
+ * truth for a session's acceptance criteria (LOB-72); write criteria there, never here. Kept only so
+ * `readSessionLog` still folds a log that happens to hold one.
+ */
 export const CriteriaDoc = defineDoc({
   kind: CRITERIA_DOC_KIND,
   version: 1,

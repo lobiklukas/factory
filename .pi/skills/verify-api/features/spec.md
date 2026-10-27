@@ -16,6 +16,9 @@ whoever writes it (LOB-72, part 1 of LOB-46).
   `SpecRefused{field: "gaps", reason: "invalid"}`. `gaps: []` is accepted. So absent and empty are
   two answers, and the error says which field. The same holds for `goal`, `acceptance` and
   `openQuestions`.
+- A value wrong in several places is refused once, with every faulted field in `fields`. An absent
+  `gaps` leads as `field` even when `goal` is wrong too, so a caller is not told about `gaps` only
+  on its second try.
 - A refusal commits nothing: the log keeps the spec it held before.
 - `readSpec(harness, conversation)` reads the document back, `undefined` when the session never
   specified — the document's seed has an empty goal, which is not a spec, so "never specified" and
@@ -63,9 +66,11 @@ and a version-1 `factory.spec` value reading as no spec).
 
 ## Running it
 
-`./spec.sh` imports `@repo/harness` and `@repo/storage-postgres` from `.pi/skills/verify-api`, as
-`./pr-once.sh` imports `@repo/core`. Both need those workspace packages linked into the root
-`node_modules/@repo/`. An isolated `bun install` (bun 1.3, `configVersion: 1`) links only the root's
-own dependencies there (`@repo/domain`), and then the driver fails with "Cannot find module". The
-LOB-72 run linked the two packages by hand (`ln -s ../../packages/harness node_modules/@repo/harness`,
-and the same for `storage-postgres`).
+**Known infra gap, tracked by LOB-214.** `./spec.sh` imports `@repo/harness` and
+`@repo/storage-postgres` from `.pi/skills/verify-api`, as `./pr-once.sh` imports `@repo/core`, but
+the root `package.json` declares only `@repo/domain`. So after a plain `bun install` the driver fails
+with "Cannot find module @repo/harness". This is the same gap LOB-214 records for `pr-once`. The fix
+belongs there: declare the packages the verify drivers import, as root devDependencies or in a
+package of the skill's own. It is not done here because it would change the shared lockfile. Until
+LOB-214 lands, the LOB-72 run made the two missing links by hand, as a stopgap
+(`ln -s ../../packages/harness node_modules/@repo/harness`, and the same for `storage-postgres`).

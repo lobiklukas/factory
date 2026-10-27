@@ -78,6 +78,40 @@ describe("decodeSpec", () => {
     });
   });
 
+  it("names a missing gaps field even when other fields are wrong too, and lists every fault", () => {
+    // Under first-error decoding both of these were refused for `goal` and never mentioned `gaps`.
+    const noGoalNoGaps = refused({ acceptance: [], openQuestions: [] });
+    expect(noGoalNoGaps).toMatchObject({ field: "gaps", reason: "missing" });
+    expect(noGoalNoGaps.fields).toEqual(["goal", "gaps"]);
+    expect(noGoalNoGaps.message).toContain("`[]` when there are none");
+    expect(noGoalNoGaps.message).toContain("`goal`");
+
+    const emptyGoalNoGaps = refused({
+      goal: "",
+      acceptance: [],
+      openQuestions: [],
+    });
+    expect(emptyGoalNoGaps).toMatchObject({ field: "gaps", reason: "missing" });
+    expect(emptyGoalNoGaps.fields).toEqual(["goal", "gaps"]);
+  });
+
+  it("leads with the first fault in field order when gaps is not missing", () => {
+    const error = refused({
+      goal: "",
+      acceptance: [""],
+      gaps: [],
+      openQuestions: [],
+    });
+    expect(error).toMatchObject({ field: "goal", reason: "invalid" });
+    expect(error.fields).toEqual(["goal", "acceptance.0"]);
+    expect(error.message).toContain("`acceptance.0`");
+  });
+
+  it("lists only the one field when only one is wrong", () => {
+    const { gaps: _gaps, ...input } = SPEC;
+    expect(refused(input).fields).toEqual(["gaps"]);
+  });
+
   it("refuses a value that is not an object at all, naming the spec", () => {
     expect(refused(null)).toMatchObject({ field: "spec", reason: "invalid" });
     expect(refused([SPEC])).toMatchObject({ field: "spec", reason: "invalid" });

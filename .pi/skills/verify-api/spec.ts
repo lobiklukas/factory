@@ -97,6 +97,7 @@ const refusalRecord = (error: unknown) =>
         tag: error._tag,
         field: error.field,
         reason: error.reason,
+        fields: error.fields,
         message: error.message,
       }
     : { tag: "not a SpecRefused", value: String(error) };

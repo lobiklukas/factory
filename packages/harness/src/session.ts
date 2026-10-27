@@ -1219,7 +1219,10 @@ export type SessionLog = {
    * validator `writeSpec` applies, so a value the stage would refuse never folds back as a spec.
    */
   readonly spec?: Spec;
-  /** The acceptance criteria committed to the log, when present. */
+  /**
+   * The legacy `factory.criteria` string, when a log holds one. Nothing writes it; `spec.acceptance`
+   * is the source of truth for acceptance criteria (see `CriteriaDoc`).
+   */
   readonly criteria?: string;
   /** The session this log was forked from, when it was forked (LOB-180). */
   readonly forkedFrom?: string;
