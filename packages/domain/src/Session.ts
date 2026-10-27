@@ -278,29 +278,69 @@ export const Verification = Schema.Union([
 export type Verification = typeof Verification.Type;
 
 /**
- * The run's last `verify` call, as the PR carries it: one row per verification it ran.
+ * Whether the cited `verify` call saw the paths the PR publishes (LOB-79): `published` is how many
+ * the PR's `base...head` diff names, `covered` how many of those the call measured, and `missed` the
+ * first few it did not (sorted; at most `EVIDENCE_MISSED_LIMIT`). A missed path is one the run
+ * changed after it verified, so the verdict predates it. Paths, not contents: a later edit to a path
+ * the call did measure is not seen here.
+ */
+export const EvidenceCoverage = Schema.Struct({
+  published: Schema.Int,
+  covered: Schema.Int,
+  missed: Schema.mutable(Schema.Array(Schema.String)),
+});
+export type EvidenceCoverage = typeof EvidenceCoverage.Type;
+
+/** How many of the PR's paths the cited call missed an `EvidenceCoverage` names. */
+export const EVIDENCE_MISSED_LIMIT = 20;
+
+/**
+ * The run's last recorded `verify` call, as the PR carries it: one row per verification it ran.
  *
  * The last call rather than every call, because a later call is the one that saw the change the PR
- * publishes; `calls` says how many there were, so a reader knows earlier verdicts exist. `results`
- * is never empty — a call that verified nothing is `EvidenceNone` — and mutable only so its
- * encoding is a plain JSON value Pi Durable's documents accept.
+ * publishes; `calls` says how many there were (recorded or not), so a reader knows earlier verdicts
+ * exist. `results` is never empty — a call that verified nothing is `EvidenceNone` — and mutable only
+ * so its encoding is a plain JSON value Pi Durable's documents accept.
  */
 export const EvidenceRecorded = Schema.TaggedStruct("EvidenceRecorded", {
   calls: Schema.Int,
   changedCount: Schema.Int,
   results: Schema.mutable(Schema.Array(Verification)),
+  /**
+   * How many `verify` calls after the cited one left no record (blocked or crashed). Absent means
+   * none: the cited call is the run's last. Otherwise the body says so, because the newest call is
+   * the one that would have seen the latest change, and it has nothing to show.
+   */
+  unrecordedAfter: Schema.optionalKey(Schema.Int),
+  /**
+   * How the cited call's measured paths compare with the paths the PR publishes. Absent when the
+   * PR's paths were not measured (a session directory that is not its own checkout).
+   */
+  coverage: Schema.optionalKey(EvidenceCoverage),
 });
 export type EvidenceRecorded = typeof EvidenceRecorded.Type;
 
 /**
- * A run with nothing to show: it never called `verify` (`not-verified`), its last call could not
- * measure what changed (`unmeasured`), or that call found no changed path (`no-changes`). A value
- * rather than an absent section, so a PR without evidence says so instead of looking like one whose
- * evidence was left out.
+ * A run with nothing to show: it never called `verify` (`not-verified`), every call it made left no
+ * record because it was blocked or crashed (`unrecorded`), its last recorded call could not measure
+ * what changed (`unmeasured`), or that call found no changed path (`no-changes`). A value rather than
+ * an absent section, so a PR without evidence says so instead of looking like one whose evidence was
+ * left out.
  */
 export const EvidenceNone = Schema.TaggedStruct("EvidenceNone", {
-  reason: Schema.Literals(["not-verified", "unmeasured", "no-changes"]),
+  reason: Schema.Literals([
+    "not-verified",
+    "unrecorded",
+    "unmeasured",
+    "no-changes",
+  ]),
+  /** Why, in the factory's words: a sentence the body renders as Markdown. */
   message: Schema.String,
+  /**
+   * What the tool itself said, when it said something (`unmeasured`: git's stderr, the directory it
+   * could not measure). Tool-authored, so the body quotes it as code rather than as Markdown.
+   */
+  detail: Schema.optionalKey(Schema.String),
 });
 export type EvidenceNone = typeof EvidenceNone.Type;
 

@@ -52,7 +52,8 @@
  * from the session's own log, `prEvidenceOf` turns the last of them into a `PrEvidence`, and the
  * body's `## Verification` section is rendered from it — the skill or declared command, its exit
  * code, a bounded excerpt of its output, and an explicit "no verification evidence" when there is
- * none. Read here rather than passed in, so no caller can hand the body a verdict the log does not
+ * none. The cited call's measured paths are compared with the PR's own, so a verdict that predates
+ * part of the change says so. Read here rather than passed in, so no caller can hand the body a verdict the log does not
  * hold; and committed on the `factory.pr` document beside the link, so the record and the body state
  * one verdict.
  */
@@ -70,7 +71,7 @@ import { SessionError as SessionErrorClass } from "@repo/domain/Session";
 import type { Conversation, Harness } from "@repo/harness";
 import {
   prEvidenceOf,
-  readConversationVerifyRecords,
+  readConversationVerifyCalls,
   readPullRequestDoc,
   writeNoDocumentationChange,
   writePullRequestDoc,
@@ -197,8 +198,16 @@ const open = (
   CredentialProvider | HttpClient.HttpClient
 > =>
   Effect.gen(function* () {
+    // The cited call's measured paths are compared with the paths this PR publishes, so a run that
+    // verified and then changed more is said on the body rather than cited as if it saw them. Not
+    // the numstat list above: that spells a rename `{old => new}`, the record spells the new path.
+    const published = publishedPaths(input);
     const evidence = prEvidenceOf(
-      yield* readConversationVerifyRecords(input.conversation),
+      yield* readConversationVerifyCalls(input.conversation),
+      {
+        worktree: input.worktree,
+        ...(Option.isSome(published) ? { published: published.value } : {}),
+      },
     );
     const opened = yield* createPullRequest({
       repo: input.repo,
@@ -330,6 +339,42 @@ export const diffSize = (input: {
     ),
     Option.some,
   );
+};
+
+/**
+ * The paths the PR publishes (`base...head`), as `git diff --name-only -z` spells them — the
+ * spelling the `verify` record's `changed` uses, so the two compare path for path (LOB-79). `none`
+ * when the directory is not its own checkout or git cannot answer: the evidence then carries no
+ * coverage rather than a comparison against a guess. `diffSize` already measured this range, so a
+ * failure here is not a reason to refuse the PR.
+ */
+export const publishedPaths = (input: {
+  readonly worktree: string;
+  readonly base: string;
+  readonly head: string;
+}): Option.Option<readonly string[]> => {
+  if (!existsSync(join(input.worktree, ".git"))) return Option.none();
+  try {
+    const stdout = execFileSync(
+      "git",
+      [
+        "diff",
+        "--name-only",
+        "-z",
+        "--end-of-options",
+        `${input.base}...${input.head}`,
+        "--",
+      ],
+      {
+        cwd: input.worktree,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    return Option.some(stdout.split("\0").filter((path) => path !== ""));
+  } catch {
+    return Option.none();
+  }
 };
 
 /**

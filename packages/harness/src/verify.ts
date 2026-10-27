@@ -78,7 +78,12 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { Effect, Option, Schema, Semaphore } from "effect";
-import type { PrEvidence, Verification } from "@repo/domain/Session";
+import {
+  EVIDENCE_MISSED_LIMIT,
+  type EvidenceCoverage,
+  type PrEvidence,
+  type Verification,
+} from "@repo/domain/Session";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const VERIFY_TOOL = "verify";
@@ -810,6 +815,22 @@ export const describeVerify = (record: VerifyRecord): string => {
 const decodeRecord = Schema.decodeUnknownOption(VerifyRecord);
 
 /**
+ * Every `verify` call a transcript holds a result for, oldest first: its decoded record, or
+ * `undefined` when the result's `details` are not one (a blocked or crashed call). The PR's
+ * evidence reads this rather than `verifyRecordsIn`, so a newest call that left no record is
+ * counted and said, not silently replaced by an older one (LOB-79).
+ */
+export const verifyCallsIn = (
+  entries: readonly EntryRecord[],
+): readonly (VerifyRecord | undefined)[] =>
+  entries.flatMap((entry) => {
+    const message = entry.model?.[0];
+    if (message?.role !== "toolResult" || message.toolName !== VERIFY_TOOL)
+      return [];
+    return [Option.getOrUndefined(decodeRecord(message.details))];
+  });
+
+/**
  * Every `verify` result a transcript holds, oldest first, decoded from the tool results' `details`.
  * A result whose details are not a record (a blocked or crashed call) is skipped: it carries no
  * evidence, and its text is still in the transcript for a reader.
@@ -817,12 +838,9 @@ const decodeRecord = Schema.decodeUnknownOption(VerifyRecord);
 export const verifyRecordsIn = (
   entries: readonly EntryRecord[],
 ): readonly VerifyRecord[] =>
-  entries.flatMap((entry) => {
-    const message = entry.model?.[0];
-    if (message?.role !== "toolResult" || message.toolName !== VERIFY_TOOL)
-      return [];
-    return Option.toArray(decodeRecord(message.details));
-  });
+  verifyCallsIn(entries).filter(
+    (record): record is VerifyRecord => record !== undefined,
+  );
 
 /** Every `verify` record in a session's log, read straight from its storage, oldest first. */
 export const readVerifyRecords = (
@@ -907,39 +925,110 @@ const verificationOf = (result: VerifyResult): Verification => {
   }
 };
 
+/** What `prEvidenceOf` compares the record with, and what it keeps off a PR. */
+export type PrEvidenceOptions = {
+  /**
+   * The paths the PR publishes, as `git diff --name-only` spells them (the spelling the record's
+   * `changed` uses). Absent: the PR's paths were not measured, and the evidence carries no
+   * `coverage`.
+   */
+  readonly published?: readonly string[] | undefined;
+  /**
+   * The session's worktree on the control-plane host. A tool message that names it (`… is not a
+   * checkout root`, git's stderr) names `<worktree>` instead on the PR: the host's layout is not
+   * the reviewer's business, and a public PR is not where it should appear.
+   */
+  readonly worktree?: string | undefined;
+};
+
+/** `text` with every occurrence of the worktree's absolute path replaced by `<worktree>`. */
+const redactWorktree = (text: string, worktree: string | undefined): string =>
+  worktree === undefined || worktree === ""
+    ? text
+    : text.split(worktree).join("<worktree>");
+
+/** Which of the PR's paths the record measured; `missed` sorted and cut to `EVIDENCE_MISSED_LIMIT`. */
+const coverageOf = (
+  record: VerifyReport,
+  published: readonly string[],
+): EvidenceCoverage => {
+  const measured = new Set(record.changed);
+  const missed = [...new Set(published)]
+    .filter((path) => !measured.has(path))
+    .sort();
+  const unique = new Set(published).size;
+  return {
+    published: unique,
+    covered: unique - missed.length,
+    missed: missed.slice(0, EVIDENCE_MISSED_LIMIT),
+  };
+};
+
 /**
- * What a PR states was verified, from a session's `verify` records, oldest first (LOB-79).
+ * What a PR states was verified, from a session's `verify` calls, oldest first (LOB-79) — each a
+ * decoded record, or `undefined` for a call that left none (`verifyCallsIn`).
  *
- * The last record is the evidence: it is the call that saw the latest state of the change, and an
- * earlier pass the run later broke is not a claim the PR may make. A run with no record, a last call
- * that measured nothing, and a last call that found nothing changed are each an `EvidenceNone` that
- * says which — never an empty list a body would render as silence.
+ * The last recorded call is the evidence: it is the call that saw the latest state of the change,
+ * and an earlier pass the run later broke is not a claim the PR may make. A run with no call, one
+ * whose every call left no record, a last call that measured nothing, and a last call that found
+ * nothing changed are each an `EvidenceNone` that says which — never an empty list a body would
+ * render as silence. A cited call is never quietly stale: calls after it that left no record are
+ * counted on `unrecordedAfter`, and with `published` its measured paths are compared with the PR's
+ * on `coverage`, so the body can say the verdict predates part of what it publishes.
  */
-export const prEvidenceOf = (records: readonly VerifyRecord[]): PrEvidence => {
-  const last = records.at(-1);
+export const prEvidenceOf = (
+  calls: readonly (VerifyRecord | undefined)[],
+  options: PrEvidenceOptions = {},
+): PrEvidence => {
+  const index = calls.findLastIndex((call) => call !== undefined);
+  const last = index === -1 ? undefined : calls[index];
+  const unrecordedAfter = calls.length - 1 - index;
   if (last === undefined)
-    return {
-      _tag: "EvidenceNone",
-      reason: "not-verified",
-      message: `the run never called the \`${VERIFY_TOOL}\` tool`,
-    };
+    return calls.length === 0
+      ? {
+          _tag: "EvidenceNone",
+          reason: "not-verified",
+          message: `the run never called the \`${VERIFY_TOOL}\` tool`,
+        }
+      : {
+          _tag: "EvidenceNone",
+          reason: "unrecorded",
+          message: `none of the run's ${calls.length} \`${VERIFY_TOOL}\` call(s) left a record (blocked or crashed)`,
+        };
+  const later =
+    unrecordedAfter === 0
+      ? ""
+      : `, and the ${unrecordedAfter} call(s) after it left no record (blocked or crashed)`;
   if (last._tag === "VerifyUnmeasured")
     return {
       _tag: "EvidenceNone",
       reason: "unmeasured",
-      message: `the last \`${VERIFY_TOOL}\` call could not measure what changed (${last.reason}): ${last.message}`,
+      message: `the last recorded \`${VERIFY_TOOL}\` call could not measure what changed (${last.reason})${later}`,
+      detail: redactWorktree(last.message, options.worktree),
     };
   if (last.results.length === 0)
     return {
       _tag: "EvidenceNone",
       reason: "no-changes",
-      message: `the last \`${VERIFY_TOOL}\` call found no changed paths to verify`,
+      message: `the last recorded \`${VERIFY_TOOL}\` call found no changed paths to verify${later}`,
     };
   return {
     _tag: "EvidenceRecorded",
-    calls: records.length,
+    calls: calls.length,
     changedCount: last.changedCount,
-    results: last.results.map(verificationOf),
+    results: last.results.map((result) => {
+      const verification = verificationOf(result);
+      return verification._tag === "VerificationRan"
+        ? verification
+        : {
+            ...verification,
+            message: redactWorktree(verification.message, options.worktree),
+          };
+    }),
+    ...(unrecordedAfter === 0 ? {} : { unrecordedAfter }),
+    ...(options.published === undefined
+      ? {}
+      : { coverage: coverageOf(last, options.published) }),
   };
 };
 

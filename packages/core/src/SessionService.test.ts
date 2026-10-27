@@ -5819,7 +5819,13 @@ describe("the PR's evidence", () => {
   };
 
   /** One run that changes `apps/api` and calls `verify`, then the PR step; the sent body and the log. */
-  const verifiedPr = async (name: string, drive: string, number: number) => {
+  const verifiedPr = async (
+    name: string,
+    drive: string,
+    number: number,
+    /** Run in the session's worktree after the run verified and before the PR opens. */
+    afterVerify?: string,
+  ) => {
     const repoPath = fixture(name, drive);
     const repo = RepoSlugSchema.make(`lobiklukas/evidence-${name}`);
     const url = `https://github.com/lobiklukas/evidence-${name}/pull/${number}`;
@@ -5861,6 +5867,10 @@ describe("the PR's evidence", () => {
             ),
             `the ${name} run to verify and answer`,
           );
+          if (afterVerify !== undefined) {
+            const { workspace } = yield* sessions.get(created.id);
+            execSync(afterVerify, { cwd: workspace.path, stdio: "ignore" });
+          }
           const answer = yield* sessions
             .openPullRequest({
               sessionId: created.id,
@@ -5929,6 +5939,29 @@ describe("the PR's evidence", () => {
           truncated: false,
         },
       ],
+      // The call measured the one path the PR publishes.
+      coverage: { published: 1, covered: 1, missed: [] },
+    });
+    expect(result.body).not.toContain("**Stale.**");
+  }, 120_000);
+
+  it("says the verdict predates a change committed after the verify call", async () => {
+    const result = await verifiedPr(
+      "stale",
+      'echo "verify-api fixture: 3/3 checks passed"\n',
+      44,
+      "mkdir -p apps/api && echo 'export const later = 2;' > apps/api/later.ts && " +
+        "git add -A && git -c user.email=t@t.com -c user.name=t commit -q -m later",
+    );
+
+    expect(result.answer.outcome).toBe("opened");
+    expect(result.body).toContain("### `verify-api`: exit 0");
+    expect(result.body).toContain(
+      "**Stale.** The cited call measured 1 of the 2 path(s) this PR changes; the run changed the rest after it verified, so the verdict below predates them: `apps/api/later.ts`.",
+    );
+    expect(result.evidence).toMatchObject({
+      _tag: "EvidenceRecorded",
+      coverage: { published: 2, covered: 1, missed: ["apps/api/later.ts"] },
     });
   }, 120_000);
 

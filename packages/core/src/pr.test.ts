@@ -6,9 +6,20 @@ import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { SessionId, RepoSlug, type PrEvidence } from "@repo/domain/Session";
-import { PR_EVIDENCE_EXCERPT, prEvidenceOf, tailOf } from "@repo/harness";
+import {
+  PR_EVIDENCE_EXCERPT,
+  prEvidenceOf,
+  tailOf,
+  type VerifyRecord,
+} from "@repo/harness";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
-import { buildPrBody, createPullRequest, evidenceSection } from "./pr";
+import {
+  buildPrBody,
+  createPullRequest,
+  evidenceSection,
+  PR_BODY_MAX_CHARS,
+  PR_CHANGED_LIST_MAX,
+} from "./pr";
 import { diffCapRefusal, parseDiffSize } from "./prStep";
 
 const makeFakeHttp = (status: number, body: unknown) => {
@@ -301,6 +312,132 @@ describe("the verification section", () => {
   it("fences output that contains a fence of its own, so it cannot end the block early", () => {
     const text = evidenceSection(ran("before\n```\nafter\n")).join("\n");
     expect(text).toContain("````text\nbefore\n```\nafter\n````");
+  });
+
+  it("quotes a tool's message as one code-span line, so it cannot restructure the body", () => {
+    // git's stderr is arbitrary text: a newline and a heading would start a section, a fence would
+    // swallow the prompt, and an @-mention would notify someone.
+    const stderr = "fatal: bad revision\n## Prompt\n```\n@someone <!-- hidden";
+    const unmeasured = prEvidenceOf([
+      { _tag: "VerifyUnmeasured", reason: "git-failed", message: stderr },
+    ]);
+    const text = body(unmeasured);
+    expect(text).toContain(
+      // The span's delimiter outruns the message's own ``` run, so nothing in it can close it.
+      "The tool said: ````fatal: bad revision ## Prompt ``` @someone <!-- hidden````",
+    );
+    expect(
+      text.split("\n").filter((line) => line === "## Prompt"),
+    ).toHaveLength(1);
+    const missing = body(
+      prEvidenceOf([
+        {
+          _tag: "VerifyReport",
+          changed: ["x.ts"],
+          changedCount: 1,
+          results: [
+            {
+              _tag: "VerifyNoEvidence",
+              surface: "repo",
+              reason: "no-surface",
+              message: "no evidence for `x.ts`\n# heading",
+            },
+          ],
+        },
+      ]),
+    );
+    expect(missing).toContain("``no evidence for `x.ts` # heading``");
+    expect(missing).not.toContain("\n# heading");
+  });
+
+  it("says when the cited call did not measure every path the PR changes", () => {
+    const record: VerifyRecord = {
+      _tag: "VerifyReport",
+      changed: ["apps/api/src/feature.ts"],
+      changedCount: 1,
+      results: [
+        {
+          _tag: "VerifyRan",
+          surface: "api",
+          source: "skill",
+          directory: ".pi/skills/verify-api",
+          command: "bash drive.sh",
+          exitCode: 0,
+          output: "ok\n",
+          truncated: false,
+        },
+      ],
+    };
+    const stale = body(
+      prEvidenceOf([record], {
+        published: ["apps/api/src/feature.ts", "apps/api/src/later.ts"],
+      }),
+    );
+    expect(stale).toContain(
+      "**Stale.** The cited call measured 1 of the 2 path(s) this PR changes; the run changed the rest after it verified, so the verdict below predates them: `apps/api/src/later.ts`.",
+    );
+    const fresh = body(
+      prEvidenceOf([record], { published: ["apps/api/src/feature.ts"] }),
+    );
+    expect(fresh).not.toContain("**Stale.**");
+    expect(fresh).toContain("It measured all 1 path(s) this PR changes.");
+    // A newest call that left no record is said, not hidden behind the older one.
+    expect(body(prEvidenceOf([record, undefined]))).toContain(
+      "**Not the run's last call.** The 1 `verify` call(s) after it left no record",
+    );
+  });
+
+  it("bounds the section, quoting failing results first and naming the rest", () => {
+    const result = (surface: string, exitCode: number) =>
+      ({
+        _tag: "VerifyRan",
+        surface,
+        source: "skill",
+        directory: `.pi/skills/verify-${surface}`,
+        command: "bash drive.sh",
+        exitCode,
+        output: `${"y".repeat(5_000)}\n`,
+        truncated: false,
+      }) as const;
+    const evidence = prEvidenceOf([
+      {
+        _tag: "VerifyReport",
+        changed: ["a"],
+        changedCount: 1,
+        results: [
+          ...Array.from({ length: 30 }, (_, i) => result(`ok${i}`, 0)),
+          result("broken", 1),
+        ],
+      },
+    ]);
+    const lines = evidenceSection(evidence, 10_000);
+    const text = lines.join("\n");
+    expect(text.length).toBeLessThanOrEqual(10_000);
+    // The failing one is quoted even though it is last; every result keeps its heading.
+    const broken = text.slice(text.indexOf("### `verify-broken`"));
+    expect(broken).toContain("```text\n");
+    expect(text).toContain("### `verify-ok29`: exit 0");
+    expect(text).toContain(
+      "Output not quoted: the section reached its size bound.",
+    );
+    // Too many results for even their facts: what fits, then a count of the rest.
+    const tiny = evidenceSection(evidence, 1_500).join("\n");
+    expect(tiny.length).toBeLessThanOrEqual(1_500);
+    expect(tiny).toMatch(/\d+ more result\(s\) not shown/);
+  });
+
+  it("keeps the whole body under GitHub's cap by cutting the prompt", () => {
+    const text = buildPrBody({
+      sessionId: "s-1" as SessionId,
+      prompt: "p".repeat(100_000),
+      changed: Array.from({ length: 1_000 }, (_, i) => `f${i}.ts`),
+      evidence: UNVERIFIED,
+    });
+    expect(text.length).toBeLessThanOrEqual(PR_BODY_MAX_CHARS);
+    expect(text).toContain(`- …and ${1_000 - PR_CHANGED_LIST_MAX} more`);
+    expect(text).toMatch(
+      /_\(Prompt truncated: the first \d+ of 100000 characters shown\.\)_$/,
+    );
   });
 });
 

@@ -760,12 +760,97 @@ describe("prEvidenceOf", () => {
       _tag: "EvidenceNone",
       reason: "unmeasured",
       message:
-        "the last `verify` call could not measure what changed (git-failed): boom",
+        "the last recorded `verify` call could not measure what changed (git-failed)",
+      // The tool's own words are kept apart from the factory's: the body quotes them as code.
+      detail: "boom",
     });
     expect(prEvidenceOf([report([], 0)])).toMatchObject({
       _tag: "EvidenceNone",
       reason: "no-changes",
     });
+  });
+
+  it("keeps the worktree's host path off the PR", () => {
+    const worktree = "/srv/factory/sessions/abc";
+    expect(
+      prEvidenceOf(
+        [
+          {
+            _tag: "VerifyUnmeasured",
+            reason: "no-checkout",
+            message: `${worktree} is not a checkout root, so the run's changes cannot be measured`,
+          },
+        ],
+        { worktree },
+      ),
+    ).toMatchObject({
+      detail:
+        "<worktree> is not a checkout root, so the run's changes cannot be measured",
+    });
+    const evidence = prEvidenceOf(
+      [
+        report([
+          {
+            _tag: "VerifyUnrunnable",
+            surface: "api",
+            source: "skill",
+            directory: API_SKILL,
+            command: "bash drive.sh",
+            code: "spawn_failed",
+            message: `spawn bash ENOENT in ${worktree}/${API_SKILL}`,
+            output: "",
+            truncated: false,
+          },
+        ]),
+      ],
+      { worktree },
+    );
+    expect(evidence).toMatchObject({
+      results: [{ message: `spawn bash ENOENT in <worktree>/${API_SKILL}` }],
+    });
+  });
+
+  it("counts a newest call that left no record instead of citing an older one as the last", () => {
+    // A blocked or crashed call has no decodable details: `verifyCallsIn` gives it as `undefined`.
+    const evidence = prEvidenceOf([report(ran(0, "pass\n")), undefined]);
+    expect(evidence).toMatchObject({
+      _tag: "EvidenceRecorded",
+      calls: 2,
+      unrecordedAfter: 1,
+    });
+    expect(prEvidenceOf([report(ran(0, "pass\n"))])).not.toHaveProperty(
+      "unrecordedAfter",
+    );
+    expect(prEvidenceOf([undefined, undefined])).toEqual({
+      _tag: "EvidenceNone",
+      reason: "unrecorded",
+      message:
+        "none of the run's 2 `verify` call(s) left a record (blocked or crashed)",
+    });
+  });
+
+  it("compares the cited call's measured paths with the PR's", () => {
+    // The record measured one path; the run then committed two more before the PR opened.
+    const stale = prEvidenceOf([report(ran(0, "pass\n"))], {
+      published: ["docs/later.md", "apps/api/src/feature.ts", "apps/api/b.ts"],
+    });
+    expect(stale).toMatchObject({
+      coverage: {
+        published: 3,
+        covered: 1,
+        missed: ["apps/api/b.ts", "docs/later.md"],
+      },
+    });
+    const fresh = prEvidenceOf([report(ran(0, "pass\n"))], {
+      published: ["apps/api/src/feature.ts"],
+    });
+    expect(fresh).toMatchObject({
+      coverage: { published: 1, covered: 1, missed: [] },
+    });
+    // Unmeasured PR paths are no comparison at all, not a "covers nothing".
+    expect(prEvidenceOf([report(ran(0, "pass\n"))])).not.toHaveProperty(
+      "coverage",
+    );
   });
 
   it("cuts the excerpt to the PR's bound, deterministically, and marks it", () => {

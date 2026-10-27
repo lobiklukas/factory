@@ -74,8 +74,8 @@ import {
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
+  verifyCallsIn,
   verifyExtension,
-  verifyRecordsIn,
   type VerifyOptions,
   type VerifyRecord,
 } from "./verify";
@@ -640,14 +640,15 @@ export const readPullRequestDoc = (
   });
 
 /**
- * Every `verify` record in a session this process owns, oldest first, read through its
- * conversation (LOB-79): what the PR step derives the body's evidence from. `readVerifyRecords` is
- * the same read for a log nobody owns.
+ * Every `verify` call in a session this process owns, oldest first, read through its conversation
+ * (LOB-79): its record, or `undefined` for a call that left none (blocked or crashed). What the PR
+ * step derives the body's evidence from, so a newest call without a record is said rather than
+ * skipped. `readVerifyRecords` reads the records alone from a log nobody owns.
  */
-export const readConversationVerifyRecords = (
+export const readConversationVerifyCalls = (
   conversation: Conversation,
-): Effect.Effect<readonly VerifyRecord[], SessionError> =>
-  Effect.map(readConversationEntries(conversation), verifyRecordsIn);
+): Effect.Effect<readonly (VerifyRecord | undefined)[], SessionError> =>
+  Effect.map(readConversationEntries(conversation), verifyCallsIn);
 
 /**
  * Commit the session's spec (LOB-72), after `decodeSpec` accepts it.
