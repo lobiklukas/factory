@@ -456,46 +456,64 @@ describe("a mission", () => {
       }
     })();
 
-    harness.resume();
-    await eventually("verify to start", () =>
-      existsSync(join(dir, "verify.started")),
-    );
-    // Held in verify until the sampler has read that window, so the case cannot pass by missing it.
-    await eventually("a sample taken while verify runs", () =>
-      samples.some((sample) => sample.checkpoint === "verify"),
-    );
-    writeFileSync(join(dir, "verify.release"), "");
-    const settled = await harness.waitForTask(mission, context);
-    sampling = false;
-    await sampler;
+    // Released, the sampler stopped and the harness closed however the case ends: a failed wait or
+    // assertion must not leave the verify shell polling for its release file, or the sampler
+    // reading a harness nobody closes.
+    try {
+      harness.resume();
+      await eventually("verify to start", () =>
+        existsSync(join(dir, "verify.started")),
+      );
+      // Held in verify until the sampler has read that window, so the case cannot pass by missing it.
+      await eventually("a sample taken while verify runs", () =>
+        samples.some((sample) => sample.checkpoint === "verify"),
+      );
+      writeFileSync(join(dir, "verify.release"), "");
+      const settled = await harness.waitForTask(mission, context);
+      sampling = false;
+      await sampler;
 
-    expect(settled.state.outcome).toMatchObject({ status: "completed" });
-    // The claim: no sample names a phase other than the checkpoint's. The one allowance is a mission
-    // whose document was never written — created without the start's seed and not yet past plan —
-    // which reads as no phase at all rather than as a wrong one.
-    expect(
-      samples.filter(
-        (sample) =>
-          sample.doc !== sample.checkpoint &&
-          !(sample.doc === undefined && sample.checkpoint === "plan"),
-      ),
-    ).toEqual([]);
-    expect(
-      samples.some(
-        (sample) => sample.checkpoint === "verify" && sample.doc === "verify",
-      ),
-    ).toBe(true);
-    expect(
-      await Effect.runPromise(readMission(harness, root.id, mission)),
-    ).toEqual({
-      phase: "verify",
-      definitionVersion: MISSION_VERSION,
-      entered: ["plan", "implement", "verify"],
-    });
-    await Effect.runPromise(closeHarness(harness));
+      expect(settled.state.outcome).toMatchObject({ status: "completed" });
+      // The claim: no sample names a phase other than the checkpoint's. The one allowance is a
+      // mission whose document was never written — created without the start's seed and not yet
+      // past plan — which reads as no phase at all rather than as a wrong one.
+      expect(
+        samples.filter(
+          (sample) =>
+            sample.doc !== sample.checkpoint &&
+            !(sample.doc === undefined && sample.checkpoint === "plan"),
+        ),
+      ).toEqual([]);
+      expect(
+        samples.some(
+          (sample) => sample.checkpoint === "verify" && sample.doc === "verify",
+        ),
+      ).toBe(true);
+      expect(
+        await Effect.runPromise(readMission(harness, root.id, mission)),
+      ).toEqual({
+        phase: "verify",
+        definitionVersion: MISSION_VERSION,
+        entered: ["plan", "implement", "verify"],
+      });
+    } finally {
+      writeFileSync(join(dir, "verify.release"), "");
+      sampling = false;
+      // Already awaited on the success path; here only so a failed sampler cannot skip the close.
+      await sampler.catch(() => undefined);
+      await Effect.runPromise(closeHarness(harness));
+    }
   }, 120_000);
 
   it.each([
+    {
+      // The seed v1's `startMission` wrote is the document v1's plan commit leaves, value for value;
+      // only the live checkpoint tells this mission, still in plan, from the next case's.
+      killed: "between its start and plan's commit",
+      checkpoint: "plan",
+      written: { phase: "plan", entered: ["plan"] },
+      reads: { phase: "plan", entered: ["plan"] },
+    },
     {
       killed: "between plan's commit and implement's",
       checkpoint: "implement",

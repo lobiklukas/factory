@@ -139,6 +139,45 @@ describe("reading a mission out of the documents it commits", () => {
     ).toBeUndefined();
   });
 
+  /**
+   * The v1 seed and a v1 plan commit are the same document, so the table reads both `implement`. A
+   * reader holding the live task's checkpoint passes it, and the checkpoint decides; a reader with
+   * none — the folded path, or a mission that settled before plan ran — keeps the table's answer.
+   */
+  it("reads a document version 1 wrote by the live checkpoint when there is one", () => {
+    const seed = { phase: "plan", entered: ["plan"], definitionVersion: 1 };
+    expect(readMissionDoc(seed, { phase: "plan" })).toEqual({
+      phase: "plan",
+      entered: ["plan"],
+    });
+    expect(readMissionDoc(seed, { phase: "implement" })).toEqual({
+      phase: "implement",
+      entered: ["plan", "implement"],
+    });
+    expect(missionSnapshot("7", seed, { phase: "plan" })).toEqual({
+      taskId: "7",
+      phase: "plan",
+      entered: ["plan"],
+    });
+    // No checkpoint, or one that names no phase, is the table's reading.
+    for (const checkpoint of [undefined, null, {}, { phase: "planning" }])
+      expect(readMissionDoc(seed, checkpoint)).toEqual({
+        phase: "implement",
+        entered: ["plan", "implement"],
+      });
+    // A current document names its checkpoint's phase by construction, so it is read as written.
+    expect(
+      readMissionDoc(
+        {
+          phase: "implement",
+          entered: ["plan", "implement"],
+          definitionVersion: MISSION_VERSION,
+        },
+        { phase: "plan" },
+      ),
+    ).toEqual({ phase: "implement", entered: ["plan", "implement"] });
+  });
+
   it("reads a document the current version wrote, or one with no version, as written", () => {
     for (const phase of MISSION_PHASES) {
       const entered = MISSION_PHASES.slice(

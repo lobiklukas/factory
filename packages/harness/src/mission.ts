@@ -36,7 +36,12 @@ import {
 } from "@repo/domain/Mission";
 import { SessionWorkspace, type SessionError } from "@repo/domain/Session";
 import { MissionBindingDoc, MissionDoc } from "./docs";
-import { attempt, type Harness, type LiveSession } from "./session";
+import {
+  attempt,
+  missionCheckpoint,
+  type Harness,
+  type LiveSession,
+} from "./session";
 
 /**
  * The phases a mission passes through, in the order it passes through them.
@@ -371,9 +376,10 @@ export type MissionRecord = {
  * not entered a phase: either the document was never written or it still holds its seed. A renamed
  * or foreign phase reads the same way, because a phase this definition does not know is not a phase
  * it can resume; in `entered` such a value is dropped rather than guessed at, and the phase the
- * mission is in is the one that decides. A document an older definition wrote is read forward
- * through `readMissionDoc`, the same reader the session snapshot uses, so a v1 document reads the
- * phase its checkpoint is in rather than the one before it.
+ * mission is in is the one that decides. A document an older definition wrote is read through
+ * `readMissionDoc`, the same reader the session snapshot uses, with the task's own checkpoint when
+ * the task is still live — the one witness that tells a v1 seed (`plan`) from a v1 plan commit
+ * (`implement`), which the two documents cannot — and forward through the version table otherwise.
  */
 export const readMission = (
   harness: Harness,
@@ -389,8 +395,14 @@ export const readMission = (
         BACKGROUND_CONTEXT,
       ),
     );
-    const record = doc === undefined ? undefined : readMissionDoc(doc);
-    if (doc === undefined || record === undefined) return undefined;
+    if (doc === undefined) return undefined;
+    const checkpoint = yield* missionCheckpoint(
+      harness,
+      taskId,
+      doc.definitionVersion,
+    );
+    const record = readMissionDoc(doc, checkpoint);
+    if (record === undefined) return undefined;
     return { ...record, definitionVersion: doc.definitionVersion };
   });
 
