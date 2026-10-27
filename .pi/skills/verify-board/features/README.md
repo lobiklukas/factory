@@ -8,8 +8,9 @@ Status reflects the last verified runs: **2026-10-27**, `agent/LOB-84`, `MODEL_B
 (`observed.json` beside the raw panes), with `create.ts`'s **2/2** (`create.json`) and `web.mjs`'s
 **3/3** (`web.json`, `web-board.png`) folded in, twice against one `./up.sh` instance; `./ask.sh`, API
 on `:9561` across two processes, **14/14** drive checks and **10/10** probe checks passed
-(`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`). Evidence:
-`.verify/evidence/latest/board/`.
+(`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
+`./requires.sh` (LOB-80, 2026-10-27, `agent/LOB-80`), API on `:9522`, **24/24** checks passed
+(`requires-observed.json`). Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                         | Status  | File                         |
 | ------------------------------- | ------- | ---------------------------- |
@@ -20,6 +21,7 @@ on `:9561` across two processes, **14/14** drive checks and **10/10** probe chec
 | `factory board start`           | passing | [start.md](start.md)         |
 | the board read back in the web  | passing | [dashboard.md](dashboard.md) |
 | the ask on the task             | passing | [ask.md](ask.md)             |
+| `requires[]` on exit            | passing | [requires.md](requires.md)   |
 
 ## Deliberately absent
 

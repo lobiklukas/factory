@@ -126,6 +126,12 @@ const ModelConfig = Config.all({
    */
   fauxAsk: Config.option(Config.String("FAUX_ASK")),
   /**
+   * Whether the faux script calls `verify` after its `bash` turn (LOB-78's `fauxVerify`). Off by
+   * default; `.pi/skills/verify-board/requires.sh` sets it so a run on a card records the evidence
+   * a column's `verified` requirement checks (LOB-80).
+   */
+  fauxVerify: Config.Boolean("FAUX_VERIFY").pipe(Config.withDefault(false)),
+  /**
    * How long the sleeping faux script naps before each step of a turn, in milliseconds (LOB-167): a
    * run that is busy long enough for a steer, a follow-up, or a refused `whenBusy: "reject"` to
    * arrive while it is in flight (`.pi/skills/verify-cli/steer.sh`). `0`: the script answers at once.
@@ -269,6 +275,7 @@ const HttpLive = Effect.gen(function* () {
       fauxCommand: model.fauxCommand,
       fauxEveryTurn: model.fauxEveryTurn,
       fauxAsk: Option.getOrUndefined(model.fauxAsk),
+      fauxVerify: model.fauxVerify,
       fauxSleepMs: model.fauxSleepMs,
     }),
     sessionRoot: model.sessionRoot,

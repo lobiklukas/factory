@@ -18,23 +18,24 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 ## What it proves
 
-| Feature                          | Check in the driver                                                         | Why it matters                                                      |
-| -------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it    | a trigger's card is a real row the board reads back                 |
-| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                             | the lane order is the definition's, not the DB's                    |
-| a card in its lane               | the created card is the row under `intake`                                  | lanes and cards come from one read, so they agree                   |
-| `board show`                     | revision and title printed, exit 0                                          | one card as the server has it                                       |
-| `board move` (B5)                | a declared move prints the new column and revision, exit 0                  | the write path is real, at the revision it expected                 |
-| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                               | a script can tell a refusal from a success                          |
-| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                  | the refusal is typed, not generic prose                             |
-| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                       | a run is one session, bound to the card                             |
-| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim | only a person crosses plan approval, and the refusal names the gate |
-| the refusals wrote nothing       | `board show` after them: the last accepted column and revision              | a refused move is not a half-applied one                            |
-| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`       | the browser shows what the CLI left, and offers a person the gate   |
-| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt | a run that needs a person ends, and the answer reaches the next run |
+| Feature                          | Check in the driver                                                                   | Why it matters                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it              | a trigger's card is a real row the board reads back                  |
+| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                       | the lane order is the definition's, not the DB's                     |
+| a card in its lane               | the created card is the row under `intake`                                            | lanes and cards come from one read, so they agree                    |
+| `board show`                     | revision and title printed, exit 0                                                    | one card as the server has it                                        |
+| `board move` (B5)                | a declared move prints the new column and revision, exit 0                            | the write path is real, at the revision it expected                  |
+| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                         | a script can tell a refusal from a success                           |
+| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                            | the refusal is typed, not generic prose                              |
+| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                 | a run is one session, bound to the card                              |
+| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim           | only a person crosses plan approval, and the refusal names the gate  |
+| the refusals wrote nothing       | `board show` after them: the last accepted column and revision                        | a refused move is not a half-applied one                             |
+| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                 | the browser shows what the CLI left, and offers a person the gate    |
+| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt           | a run that needs a person ends, and the answer reaches the next run  |
+| `requires[]` on exit (B8)        | `requires.sh`: refused with no evidence, refused over another surface's, then through | a refusal names the requirement; evidence is a condition of the move |
 
-Every check is required: `drive.sh` and `ask.sh` each exit non-zero when one fails, and `drive.sh`
-folds `create.ts`'s and `web.mjs`'s exit codes into its own.
+Every check is required: `drive.sh`, `ask.sh` and `requires.sh` each exit non-zero when one
+fails, and `drive.sh` folds `create.ts`'s and `web.mjs`'s exit codes into its own.
 
 ## Launch
 
@@ -80,7 +81,15 @@ runs the real script against a closed port and an answering one.
 ```sh
 ./drive.sh       # requires the instance from ./up.sh
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
+./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402), three runs on one card
 ```
+
+`requires.sh` (LOB-80) walks a card on the newest `default` definition into `review` and proves the
+column's `verified` requirement from the terminal: refused with no evidence, refused again when the
+card's latest change (`api`) is unverified even though an earlier run verified `web`, and let through
+once `api` passes. Its runs are real sessions bound to the card, verified by the real `verify` tool
+over a fixture repo; `requires.ts` seeds the card and reads each run's `verify` record back. See
+`features/requires.md`.
 
 `ask.sh` (LOB-73) is two processes on purpose: the run asks in the first, the API is sent SIGTERM,
 and the answer and the next run happen in the second — the question and the block are rows, so a
@@ -117,6 +126,8 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
+- `requires-observed.json`, `requires-{web,api-unverified,api-verified}.json`, `requires-*.txt`,
+  `requires-api.log` — `requires.sh`'s checks, each run's decoded `verify` record, the CLI outputs
 
 Proof standards for this surface:
 

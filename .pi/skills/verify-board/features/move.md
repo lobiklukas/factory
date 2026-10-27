@@ -54,3 +54,7 @@ building run's evidence.
 That the run exists: the service treats any well-formed `ses_…` id as a run actor (TaskService's
 `isRunActor`) and does not look the session up. The drive uses the id `board start` printed so it
 does not invent one, not because the refusal depends on it.
+
+Nor does it prove `requires[]`: the drive's card is on definition version 1, which declares no
+checked requirement; `review`'s `verified` (version 3) is `./requires.sh`'s, in
+[requires.md](requires.md).
