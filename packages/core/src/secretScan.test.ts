@@ -153,7 +153,11 @@ describe("scanAddedLines", () => {
   it("lets the allow marker opt a pattern out in a file the base marks, never a stored value", () => {
     const marked = new Set(["f"]);
     expect(
-      scanAddedLines(at(`${githubToken()} // ${SECRET_SCAN_ALLOW}`), [], marked),
+      scanAddedLines(
+        at(`${githubToken()} // ${SECRET_SCAN_ALLOW}`),
+        [],
+        marked,
+      ),
     ).toEqual([]);
     expect(
       scanAddedLines(at(`${FAKE} // ${SECRET_SCAN_ALLOW}`), KNOWN, marked)[0]
