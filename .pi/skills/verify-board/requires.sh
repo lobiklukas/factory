@@ -19,6 +19,10 @@
 #                      builder run commits a change on its branch and settles, and its PR is opened
 #                      on a loopback GitHub fake with no call (C18) — `factory pr` answers it
 #                      `already-open`
+#   0a. a faulted run  a run of the card on the faux model whose requests fail (F6's `fail`) ends on
+#                      its model's error: `board move --to review` is refused naming "run_completed"
+#                      with the checklist's words for a faulted run (`board show`'s, verbatim), and
+#                      the card stays put; its settle's thread note is the revision it moved on
 #   0b. a second run   a second builder run on the card (C19) is cut on the first run's branch at its
 #                      commit, commits on top of it, and its settle adopts the card's PR: the fake is
 #                      asked for no second PR, `factory pr` answers it `already-open`, and the move
@@ -90,7 +94,10 @@ LEDGER="$RUN_DIR/github-ledger.json"
 # `non_empty_diff` has a diff to measure, the PR something to carry, and a second building run on the
 # card's branch (C19) a commit of its own on top of the first's. No `verify` call (LOB-240).
 BUILD_CHANGE="mkdir -p apps/web/src && n=\$(ls apps/web/src/built-*.ts 2>/dev/null | wc -l | tr -d ' ') && n=\$((n+1)) && echo \"export const built\$n = \$n;\" > apps/web/src/built-\$n.ts && git add apps/web/src/built-\$n.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m \"build the card (\$n)\" && echo built"
-FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: false } }))')"
+# `faulted` is a model whose every request fails (F6's `fail`): the run of 0a, created on it, ends on
+# its model's error, the faulted latest run `run_completed` refuses.
+FAULTED_MODEL="faux/faulted"
+FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: false }, faulted: { fail: "model_error" } }))')"
 # The reviewer's `review` calls (see the header): a fail that names a file only head B changes, then
 # a clean pass.
 REGRESSION="apps/web/src/regress.ts"
@@ -213,7 +220,7 @@ grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null ||
     MODEL_BACKEND=faux \
     FAUX_COMMAND="bash $CHANGE_SCRIPT" \
     FAUX_VERIFY=true \
-    ROLE_MODELS="builder=faux/builder" \
+    ROLE_MODELS="builder=faux/builder,faulted=$FAULTED_MODEL" \
     FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \
     GITHUB_API_URL="http://127.0.0.1:$GITHUB_PORT" \
     GITHUB_TOKEN="verify-board-fake-token" \
@@ -341,6 +348,38 @@ check "factory pr answers the PR the settled run opened, already-open" \
   "$([ "$rc" = "0" ] && [ -n "$PR_URL" ] && grep -qx "pr       $PR_URL" "$EVIDENCE_DIR/requires-pr.txt" && grep -qx "outcome  already-open" "$EVIDENCE_DIR/requires-pr.txt" && echo 0 || echo 1)" \
   "exit=$rc $(head -3 "$EVIDENCE_DIR/requires-pr.txt" | tr '\n' ' ')"
 
+# --- 0a. a faulted run: refused, then met by the next run (F6) ---------------------------------------
+# A run of the card in building on the faux model that fails every request (`FAUX_MODEL_SCRIPTS`'s
+# `fail`), sent a message: its turn ends on the model's error, so the card's latest building run did
+# not complete, and the move is refused with the checklist's words for a faulted run. The second
+# builder run (0b) is the run that completes after it, and the move then goes through (below).
+MODE=faulted API_URL="$API_URL" TASK_ID="$TASK_ID" MODEL="$FAULTED_MODEL" LABEL=faulted \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$PROBE" > "$RUN_DIR/probe-faulted.log" 2>&1
+probe_rc=$?
+cat "$RUN_DIR/probe-faulted.log"
+FAULTED_SESSION="$(grep -o 'ses_[0-9a-z]\{26\}' "$RUN_DIR/probe-faulted.log" | head -1)"
+check "a run of the card on the failing faux model ends idle on its model's error (probe)" \
+  "$([ "$probe_rc" = "0" ] && [ -n "$FAULTED_SESSION" ] && echo 0 || echo 1)" \
+  "exit=$probe_rc session=${FAULTED_SESSION:-none}"
+# Its settle opens no PR, and says so on the card's thread (C18): a note, a revision on.
+rc="$(cli requires-show-faulted.txt board show --task "$TASK_ID")"
+check "the faulted run's settle notes on the card that its model answer failed, a revision on" \
+  "$([ "$rc" = "0" ] && grep -qx "revision  $((REVISION + 1))" "$EVIDENCE_DIR/requires-show-faulted.txt" && grep -qF "its model answer failed" "$EVIDENCE_DIR/requires-show-faulted.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(grep -m1 '^revision' "$EVIDENCE_DIR/requires-show-faulted.txt")"
+REVISION=$((REVISION + 1))
+FAULTED_REASON="the card's latest run ${FAULTED_SESSION:-none} faulted: its last model answer is an error or an abort (send it on to retry, or start another run)"
+check "board show's checklist names the faulted run as run_completed's unmet reason" \
+  "$(grep -qxF "    $FAULTED_REASON" "$EVIDENCE_DIR/requires-show-faulted.txt" && echo 0 || echo 1)" \
+  "$(grep -A1 'run_completed:' "$EVIDENCE_DIR/requires-show-faulted.txt" | tr '\n' ' ' | cut -c1-140)"
+rc="$(cli requires-building-faulted.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION")"
+check "with the latest run faulted, building → review is refused with the checklist's reason verbatim" \
+  "$([ "$rc" != "0" ] && grep -qxF "error: requirement_unmet: the move building → review needs \"run_completed\" (a run that completed), which is not met: $FAULTED_REASON" "$EVIDENCE_DIR/requires-building-faulted.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-building-faulted.txt" | cut -c1-140)"
+rc="$(cli requires-show-faulted-after.txt board show --task "$TASK_ID")"
+check "the refused card is still in building at the same revision" \
+  "$([ "$rc" = "0" ] && grep -qx "column    building" "$EVIDENCE_DIR/requires-show-faulted-after.txt" && grep -qx "revision  $REVISION" "$EVIDENCE_DIR/requires-show-faulted-after.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+
 # --- 0b. a second building run continues the card's branch and its PR (C19) -------------------------
 # A later run on the card is bound to the branch the first building run cut, at its commit, and its
 # settle adopts the card's PR: the forge is asked for no second one, and `factory pr` answers the
@@ -389,16 +428,17 @@ rc="$(cli requires-move-review.txt board move --task "$TASK_ID" --to review --ex
 if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to review (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-move-review.txt"; then
   REVISION=$((REVISION + 1))
 fi
-check "with a completed run, the card's change and its PR, the run's building → review goes through" \
-  "$([ "$REVISION" = "7" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
+check "with a completed run after the faulted one, the card's change and its PR, the run's building → review goes through" \
+  "$([ "$REVISION" = "8" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
 
 # --- 1. no evidence: refused, naming the requirement -------------------------------------------------
 rc="$(cli requires-refused-none.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
 check "with no evidence, review → done is refused as requirement_unmet" \
   "$(grep -qF 'error: requirement_unmet: the move review → done needs "verified"' "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
   "$(head -1 "$EVIDENCE_DIR/requires-refused-none.txt" | cut -c1-120)"
+# Three runs: the two builder runs and the faulted one between them (0a).
 check "and the refusal says what is missing, not just denied" \
-  "$(grep -qF "which is not met: none of the card's 2 run(s) recorded a verify call over a change (0 call(s) recorded)" "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
+  "$(grep -qF "which is not met: none of the card's 3 run(s) recorded a verify call over a change (0 call(s) recorded)" "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
   "reason verbatim"
 check "and it exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)" "exit=$rc"
 rc="$(cli requires-show-refused.txt board show --task "$TASK_ID")"
