@@ -55,7 +55,7 @@ with — the PR-link check (`features/pr-link.md`) seeds a session through it wi
 the OS chooses).
 
 It asserts the shell renders, asserts the browser can reach the API from the page's own origin,
-and clicks **Start a session**, requiring the transcript to reach the answer the agent's `bash`
+and opens **New session**, types a prompt of its own and submits the form (E6), requiring the transcript to reach the answer the agent's `bash`
 tool produced and the card to label its read path. It then seeds its own board and card, opens
 the board, and requires one lane per column in definition order and the card in `intake`
 (`features/board.md`). It then opens the card pane and requires only the column's declared moves,
@@ -198,6 +198,21 @@ and stops both. It requires no banner after the page's own `getServerInfo` read 
 message is sent, so no request leaves the machine), and `factory status` / `factory ls` against it
 (`features/backend-badge.md`). Evidence goes to `.verify/evidence/latest/backend/`.
 
+### The New session form
+
+```sh
+SESSION_NEW_API_PORT=9461 SESSION_NEW_WEB_PORT=3461 ./session-new.sh   # its own instance and throwaway checkouts; leaves nothing running
+```
+
+A session on a repo needs real git checkouts on the API's disk, so `session-new.sh` starts its own
+API and dashboard and `session-new.mjs` makes two (E6). It requires **New session** to open a form and
+create nothing, an empty prompt to send no `createSession` (the page's own requests are the oracle),
+the typed multi-line prompt to be the session's first user entry verbatim, a session on a picked repo
+and base ref to be listed with both and to work in a `factory/<session-id>` worktree cut from that
+ref, a repo whose base ref the checkout lacks to be refused inline in the server's words and to leave
+no `sessions` row (read from the table over TCP), and an answer to a form the person closed to be a
+toast rather than lost or pulled into a later form (`features/session-new.md`). Evidence goes to `.verify/evidence/latest/session-new/`.
+
 ### The New session model picker
 
 ```sh
@@ -206,7 +221,7 @@ MODEL_API_PORT=9451 MODEL_WEB_PORT=3451 ./model.sh   # its own instance with DEF
 
 The models a server serves are deployment settings, so `model.sh` starts its own API and dashboard
 with `DEFAULT_MODEL=faux/faux-cheap` and `ROLE_MODELS=specifier=faux/faux-spec`. `model.mjs` requires
-the sidebar's **Model** picker to offer the server's default and then exactly `getServerInfo.models`,
+the New session form's **Model** picker to offer the server's default and then exactly `getServerInfo.models`,
 a session started on `faux/faux-spec` to name it and to have sent every request to it (its
 `usage.models`, read over the API), and one started on the server's default to run `faux/faux-cheap`
 (`features/model-picker.md`). Evidence goes to `.verify/evidence/latest/model/`.
@@ -301,6 +316,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |
 | `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`)        |
+| `session-new.sh`    | The New session form's own instance, checkouts and drive (`session-new.mjs`)     |
 | `pr.sh`             | Open pull request's own instance, fake GitHub and drive (`pr.mjs`)               |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it                |
 

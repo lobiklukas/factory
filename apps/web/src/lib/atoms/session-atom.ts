@@ -1,5 +1,6 @@
 import type {
   CompactSessionInput,
+  CreateSessionInput,
   ReadSessionHistoryInput,
   SessionEvent,
   SessionId,
@@ -11,11 +12,10 @@ import type {
   TranscriptEntry,
   WithdrawMessageInput,
 } from "@repo/domain/Session";
-import { Effect, Stream } from "effect";
+import { Cause, Effect, Exit, Option, Stream } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
-import { DASHBOARD_ACTOR } from "../approvals-view";
 import { SESSIONS_KEY } from "./session-list";
 
 /**
@@ -119,38 +119,65 @@ export const sessionAtom = runtime.fn((sessionId: SessionId) =>
 );
 
 /**
- * Creates a session and drives it with the first message, in one round trip. `SESSIONS_KEY` makes
- * the sidebar re-read the server's list once the session exists.
+ * Creates a session and drives it with the first message, in one round trip: what the New session
+ * form submits (E6). `create` is `createSession`'s payload exactly as the form built it
+ * (`newSessionInput`), and `content` the operator's prompt, sent verbatim. `SESSIONS_KEY` makes the
+ * sidebar re-read the server's list once the session exists.
+ *
+ * A refused create fails, with the server's typed refusal, and nothing exists. A create that lands
+ * and a first message that is refused is not that: the session exists, so the answer is the session
+ * and the refusal (`sendFailure`), and the form opens the session and says its prompt was not sent
+ * rather than claiming no session was made.
  */
 export const startSessionAtom = runtime.fn(
-  (input: {
-    readonly content: string;
-    readonly title?: string | undefined;
-    /** The model the picker chose (LOB-274); absent, the server's default. */
-    readonly model?: string | undefined;
-    /** The spend cap (LOB-163): the predicted high when the form asked for it (LOB-38). */
-    readonly budget?: number | undefined;
-  }) =>
+  (input: StartSessionInput) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
-      // `title` is optional on the wire (CreateSessionInput), and the control plane
-      // names a session from its first message, so omitting the key is the honest
-      // default rather than sending an empty string. The spend is the dashboard's (LOB-162).
-      // `model` likewise: absent is the server's choice, not the default's key echoed back.
-      const session = yield* rpc.client.createSession({
-        actor: DASHBOARD_ACTOR,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(input.model === undefined ? {} : { model: input.model }),
-        ...(input.budget === undefined ? {} : { budget: input.budget }),
-      });
-      yield* rpc.client.sendMessage({
-        sessionId: session.id,
-        content: input.content,
-      });
-      return session;
+      return yield* startSession(rpc.client, input);
     }),
   { reactivityKeys: [SESSIONS_KEY] },
 );
+
+/** What the New session form submits: `createSession`'s payload, then the first message. */
+export type StartSessionInput = {
+  readonly create: CreateSessionInput;
+  readonly content: string;
+};
+
+/** The two calls a start makes: the dashboard's RPC client, or a fake in a test. */
+export type StartSessionCalls<E extends { readonly message: string }> = {
+  readonly createSession: (
+    input: CreateSessionInput,
+  ) => Effect.Effect<SessionSummary, E>;
+  readonly sendMessage: (input: {
+    readonly sessionId: SessionId;
+    readonly content: string;
+  }) => Effect.Effect<unknown, E>;
+};
+
+/** `startSessionAtom`'s work, over the calls it is given. */
+export const startSession = <E extends { readonly message: string }>(
+  calls: StartSessionCalls<E>,
+  input: StartSessionInput,
+): Effect.Effect<
+  { readonly session: SessionSummary; readonly sendFailure?: string },
+  E
+> =>
+  Effect.gen(function* () {
+    const session = yield* calls.createSession(input.create);
+    const sent = yield* calls
+      .sendMessage({ sessionId: session.id, content: input.content })
+      .pipe(Effect.exit);
+    return Exit.isSuccess(sent)
+      ? { session }
+      : {
+          session,
+          sendFailure: Option.match(Cause.findErrorOption(sent.cause), {
+            onNone: () => Cause.pretty(sent.cause),
+            onSome: (error) => error.message,
+          }),
+        };
+  });
 
 /**
  * Forks a session at its last entry (LOB-180's RPC, LOB-182's action).

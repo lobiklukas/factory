@@ -6,7 +6,7 @@
 //
 //   offer     the picker's options are the server's default, then exactly `getServerInfo.models`,
 //             in its order; the first names the deployment's default, the role's model names its role
-//   pick      picking `faux/faux-spec` and pressing **New session** opens a session whose summary
+//   pick      picking `faux/faux-spec` in the **New session** form and submitting it opens a session whose summary
 //             names faux/faux-spec, whose every request went to it (`usage.models`, the oracle read
 //             over the RPC, never the page), and whose transcript reaches the faux answer
 //   default   the server's default creates a session on the deployment's `DEFAULT_MODEL`, not on the
@@ -23,6 +23,9 @@ const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/model";
 const DEFAULT_MODEL = "faux/faux-cheap";
 const PICKED = "faux/faux-spec";
+// The prompt the drive types into the New session form (E6). It never names the faux answer, so the
+// `faux-ok` the transcript is waited for is the agent's, not the prompt's.
+const PROMPT = "Run the repository's check and say what it printed.";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 // A failure shot from an earlier run must not sit beside this run's passing evidence.
@@ -104,6 +107,8 @@ const options = () =>
 /** Pick `value`, press New session, and answer the id of the session the page navigated to. */
 const startOn = async (value) => {
   await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  // The picker is in the New session form (E6), which a press opens and only a submit acts on.
+  await page.getByRole("button", { name: "New session" }).click();
   await page.waitForSelector(
     "select#new-session-model option[value='faux/faux-1']",
     {
@@ -112,7 +117,8 @@ const startOn = async (value) => {
     },
   );
   await picker().selectOption(value);
-  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator("#new-session-prompt").fill(PROMPT);
+  await page.locator("[data-session-submit]").click();
   await page.waitForURL(/\/sessions\/ses_[0-9a-z]{26}$/, { timeout: 15_000 });
   return /\/sessions\/(ses_[0-9a-z]{26})$/.exec(page.url())?.[1];
 };
@@ -133,6 +139,7 @@ try {
 
   // --- offer: the server's catalog, its default first ------------------------------------------
   await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "New session" }).click();
   await page.waitForSelector(
     "select#new-session-model option[value='faux/faux-1']",
     {
