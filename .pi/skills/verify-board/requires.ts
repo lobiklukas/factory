@@ -8,7 +8,8 @@
 //                                      that repo through the real `TaskService`. Prints one JSON line.
 //   MODE=settled SESSION_ID=… LABEL=…  the run answered and is idle, and its log holds exactly one
 //                                      `verify` record; writes it to `requires-<label>.json` and
-//                                      checks the surface and result EXPECT names.
+//                                      checks it holds exactly the results EXPECT names, one per
+//                                      surface (a comma-separated list, in any order).
 //   MODE=answered SESSION_ID=… LABEL=… the run answered and is idle, and its log holds no `verify`
 //                                      record — the builder run (LOB-240), whose change is committed
 //                                      on its branch and whose PR is what `building` waits for.
@@ -16,7 +17,7 @@
 // Everything a person reads — the refusal, its words, its exit code, the move that goes through —
 // is read by `requires.sh` through `factory board`.
 //
-// Env: API_URL, MODE, REPO_ROOT, SESSION_ID, LABEL, EXPECT (`<surface>:<tag>[:<exit>]`),
+// Env: API_URL, MODE, REPO_ROOT, SESSION_ID, LABEL, EXPECT (`<surface>:<tag>[:<exit>]`[,…]),
 // DATABASE_URL, EVIDENCE_DIR. Exits non-zero when a check fails.
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -148,7 +149,6 @@ const settled = Effect.gen(function* () {
   observed.facts["records"] = records;
   const record = records[0];
   const result = record?._tag === "VerifyReport" ? record.results : [];
-  const [surface, tag, exit] = EXPECT.split(":");
   observed.facts["changed"] =
     record?._tag === "VerifyReport" ? record.changed : [];
   check(
@@ -158,20 +158,19 @@ const settled = Effect.gen(function* () {
       record.changedCount > 0,
     `records=${records.length} changed=${record?._tag === "VerifyReport" ? record.changed.join(" ") : "-"}`,
   );
-  const only = result.length === 1 ? result[0] : undefined;
+  // One result per surface, compared as a set: a run on the card's branch (C19) also measures the
+  // change the runs before it committed there, so its record names every surface the card touched.
+  const spelled = result.map(
+    (r) =>
+      `${r.surface}:${r._tag}${r._tag === "VerifyRan" ? `:${r.exitCode}` : ""}`,
+  );
+  const expected = EXPECT.split(",");
   check(
     `the ${LABEL} record is ${EXPECT}`,
-    only !== undefined &&
-      only.surface === surface &&
-      only._tag === tag &&
-      (exit === undefined ||
-        (only._tag === "VerifyRan" && String(only.exitCode) === exit)),
-    result
-      .map(
-        (r) =>
-          `${r.surface}:${r._tag}${r._tag === "VerifyRan" ? `:${r.exitCode}` : ""}`,
-      )
-      .join(" ") || "no results",
+    EXPECT !== "" &&
+      spelled.length === expected.length &&
+      [...spelled].sort().join(",") === [...expected].sort().join(","),
+    spelled.join(" ") || "no results",
   );
 });
 
