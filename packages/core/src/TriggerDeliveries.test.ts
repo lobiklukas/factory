@@ -204,11 +204,7 @@ describe("listTriggerDeliveries", () => {
   }, 60_000);
 
   it("lists a row whose source or session this build cannot read, without those facts, and the rest of the page", async () => {
-    const sql = await runtime.runPromise(
-      Effect.gen(function* () {
-        return yield* SqlClient;
-      }),
-    );
+    const sql = await runtime.runPromise(Effect.service(SqlClient));
     const odd = mine("odd-row");
     await runtime.runPromise(
       sql`INSERT INTO webhook_deliveries (request_id, status, skip_reason, source, session_id)
