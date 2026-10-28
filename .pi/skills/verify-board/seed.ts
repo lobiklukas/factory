@@ -4,9 +4,9 @@
 // through `createBoard` (LOB-208), the writer `factory board create` reaches, not an insert here.
 //
 // A card has to exist before any command can be proven: `factory board ls` prints lanes from the
-// definition and cards from the rows, and `board move` needs a revision to expect. No command
-// creates a card here: `drive.sh` adds its own with `factory board add` (LOB-261), and this skill
-// drives the reading and moving that a person does by hand.
+// definition and cards from the rows, and `board move` needs a revision to expect. This seed makes
+// its card through the service, not a command; `factory board add` is the command (LOB-261), which
+// `drive.sh` and the getting-started guide's walk (`guide.sh`, G1) use for theirs.
 //
 // `SEED_CARD=0` seeds the board alone (LOB-84): `./up.sh` does, because `drive.sh` creates its own
 // card with `factory board add` — the command a person types — so every drive starts from a card

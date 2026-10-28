@@ -58,8 +58,9 @@ version therefore always declares its own moves and its initial column.
 Built (D6): the dashboard authors one too. **Edit as new version** on a board's settings page opens
 `/boards/<id>/settings/edit` on the board's pinned version. There an admin adds, removes, reorders and
 renames columns, sets kinds and roles, binds skills from `listSkills`, and requires keys and roles from
-`getDefinitionVocabulary` (the keys and roles `defineBoard` accepts; pickers only, no free text). They
-also edit moves and gates. A diff against the pinned version shows before Save, which calls
+`getDefinitionVocabulary` (the keys and roles `defineBoard` accepts; pickers, except a role, which
+may be typed when the deployment has no `ROLE_MODELS` table, F4). They also edit moves and gates, each
+column's autonomy and WIP limit, and the version's run caps (F2, F3). A diff against the pinned version shows before Save, which calls
 `defineBoard`: the page says "v<n> created", shows each `InvalidDefinition` fault next to its field,
 and leaves the board on its pin (`.pi/skills/verify-web/features/definition-edit.md`). The draft
 carries each column as stored, so a field the editor has no control for is kept.

@@ -95,7 +95,7 @@ import {
   prEvidenceOf,
   readConversationVerifyCalls,
   readPullRequestDoc,
-  writeNoDocumentationChange,
+  writeNoChange,
   writePullRequestDoc,
   type InjectedSecrets,
   type PullRequestRecord,
@@ -243,7 +243,7 @@ export const openPullRequest = (
     // reading a sticky "nothing to do". `none` (a directory that is not its own checkout) is not
     // this case: nothing was measured, so nothing can be said to be empty.
     if (Option.isSome(measured) && measured.value.files === 0) {
-      yield* writeNoDocumentationChange(input.conversation, input.base);
+      yield* writeNoChange(input.conversation, input.base);
       return { outcome: "no-change" };
     }
     // Nothing is written on this path — no document, no row — so a session refused here has the
