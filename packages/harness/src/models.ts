@@ -21,20 +21,28 @@ import {
 import type {
   AssistantMessage,
   AssistantMessageEventStream,
+  AuthContext,
   Message,
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+
 import {
   DEFAULT_COMPACTION_POLICY,
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { MAX_PROPOSALS } from "@repo/domain/Decomposition";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
 import { REVIEW_TOOL } from "./review";
+
+/** pi-ai's credential lookup, so a caller can read the variables a request would authenticate from. */
+export {
+  defaultProviderAuthContext,
+  type AuthContext,
+} from "@earendil-works/pi-ai";
 
 export type ModelBackend = "anthropic" | "faux";
 
@@ -501,6 +509,12 @@ export type ModelAccessOptions = {
    * and commits a change and then verifies it. A model with no entry runs the process's script.
    */
   readonly fauxModelScripts?: FauxModelScripts | undefined;
+  /**
+   * Where the real provider reads its credentials from (LOB-258). Absent: pi-ai's default, which
+   * reads `process.env` and treats an empty or whitespace-only value as unset. A test passes its own
+   * so it can say which variables are set without touching the process's environment.
+   */
+  readonly authContext?: AuthContext | undefined;
 };
 
 /** What one faux model's script does differently from the process's (`fauxModelScripts`). */
@@ -739,8 +753,11 @@ export const createModelAccess = (
   options: ModelAccessOptions = {},
 ): ModelAccess => {
   if (backend === "faux") return createFauxModelAccess(options).access;
-  const models = createModels();
-
+  const models = createModels(
+    options.authContext === undefined
+      ? undefined
+      : { authContext: options.authContext },
+  );
   models.setProvider(anthropicProvider());
   return {
     backend,
@@ -750,6 +767,67 @@ export const createModelAccess = (
     contextWindow: windowOf(models, "anthropic", DEFAULT_ANTHROPIC_MODEL),
   };
 };
+
+/**
+ * The variables pi-ai's Anthropic provider authenticates from, in the order it tries them (LOB-258).
+ *
+ * Read from the installed pi-ai 1.0.3 (`providers/anthropic.js`): `ANTHROPIC_AUTH_TOKEN` is sent as
+ * `Authorization: Bearer` (a gateway or proxy token), `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
+ * are sent as the key, and workload identity federation needs all three of its variables, with the
+ * service account and workspace optional beside them. A stored credential would come first, but a
+ * process here keeps none: its credential store is pi-ai's in-memory default, empty at boot.
+ */
+export const ANTHROPIC_AUTH_VARIABLES = {
+  tokens: [
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+  ],
+  federation: [
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_IDENTITY_TOKEN_FILE",
+  ],
+  federationOptional: [
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+  ],
+} as const;
+
+/** What authenticated a model access: a label naming its source, never the credential itself. */
+export type ModelAuth = {
+  /** pi-ai's label: the variable's name (`ANTHROPIC_API_KEY`) or the mode (`workload identity federation`). */
+  readonly source: string;
+  readonly type: "api_key" | "oauth";
+};
+
+/** pi-ai could not tell whether a provider has a credential (its credential store failed). */
+export class ModelAuthCheckFailed extends Schema.TaggedError<ModelAuthCheckFailed>()(
+  "ModelAuthCheckFailed",
+  { provider: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * Whether an access's provider has a credential, by pi-ai's own resolution (`checkAuth`): the same
+ * code a request authenticates through, so a backend chosen on it is one a request can use. `None`
+ * when nothing resolves. No credential is refreshed, exchanged or sent anywhere.
+ */
+export const checkModelAuth = Effect.fn("Models.checkAuth")(function* (
+  access: ModelAccess,
+) {
+  const check = yield* Effect.tryPromise({
+    try: () => access.models.checkAuth(access.provider),
+    catch: (cause) =>
+      new ModelAuthCheckFailed({
+        provider: access.provider,
+        message: cause instanceof Error ? cause.message : String(cause),
+      }),
+  });
+  return Option.map(Option.fromUndefinedOr(check), (found): ModelAuth => ({
+    source: found.source ?? access.provider,
+    type: found.type,
+  }));
+});
 
 /** The largest share of the window one of pi-durable's thresholds may take. */
 const WINDOW_SHARE = 0.25;

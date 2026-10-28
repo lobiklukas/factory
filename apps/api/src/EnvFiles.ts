@@ -80,13 +80,3 @@ export const describeLoadedEnvFiles = (files: readonly string[]) =>
   files.length === 0
     ? "env files loaded: none (the process environment only)"
     : `env files loaded: ${files.join(", ")} (paths only; values are never logged)`;
-
-/**
- * The warning logged when the model backend is faux. A key that is absent and a backend someone chose
- * are different facts: the second is not a problem to warn about, and the first sends the operator to
- * the env file.
- */
-export const describeFauxBackend = (chosenByEnv: boolean) =>
-  chosenByEnv
-    ? "sessions run against the faux provider and produce scripted answers (chosen by MODEL_BACKEND=faux)"
-    : "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers";

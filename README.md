@@ -87,6 +87,7 @@ bun run dev
   loaded (paths only, never values) and the backend it chose: look for `model backend: anthropic`.
   `ANTHROPIC_API_KEY` is optional: with no key, `MODEL_BACKEND` falls back to pi-ai's deterministic
   faux provider and sessions still run offline with scripted answers (`model backend: faux`).
+  Other credential modes work too; see [Model credentials](#model-credentials).
 
 **Docker caveat, because it bites on this machine.** Docker Desktop and Colima can both be running,
 each with its own `factory-postgres-1`, and only one publishes host port 5442. Ask the port which
@@ -96,6 +97,35 @@ one answers rather than assuming a Docker context, and create or inspect databas
 ```sh
 lsof -nP -iTCP:5442 -sTCP:LISTEN
 ```
+
+### Model credentials
+
+The API picks the backend by asking pi-ai whether an Anthropic credential resolves (`checkAuth`),
+through the same lookup a request authenticates with, so every mode pi-ai accepts counts (LOB-258).
+Set one; pi-ai tries them in this order:
+
+| Mode                         | Variables                                                                                                                                                               |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bearer token                 | `ANTHROPIC_AUTH_TOKEN`, sent as `Authorization: Bearer` (a gateway or proxy token)                                                                                      |
+| OAuth token                  | `ANTHROPIC_OAUTH_TOKEN`, sent as the key (pi-ai sends an `sk-ant-oat…` access token as a bearer)                                                                        |
+| API key                      | `ANTHROPIC_API_KEY`, an Anthropic Console key: the usual choice                                                                                                         |
+| Workload identity federation | all of `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN_FILE` (`ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` optional) |
+
+An empty or whitespace-only value counts as unset. The boot line names what authenticated —
+`model backend: anthropic (auth: ANTHROPIC_OAUTH_TOKEN)` — and never a value. `MODEL_BACKEND=faux`
+logs `model backend: faux (selected by MODEL_BACKEND)`. `MODEL_BACKEND=anthropic` with nothing that
+resolves exits non-zero at boot with `AnthropicCredentialMissing`, listing the variables above,
+instead of serving until the first request fails. All of them are in `apps/api/turbo.json`'s
+`passThroughEnv`, so `bun run dev` hands them to the API without putting them in a task hash.
+
+**Out of scope: `CLAUDE_CODE_OAUTH_TOKEN` and a Claude Pro/Max login.** pi-ai does not read
+`CLAUDE_CODE_OAUTH_TOKEN`, and its Pro/Max login is a stored OAuth credential, which this API never
+stores: it boots with pi-ai's empty in-memory credential store. A subscription is one person's seat
+for interactive use, not a credential for a service that runs sessions unattended on several
+people's behalf, so the supported modes are the ones above. `ANTHROPIC_OAUTH_TOKEN` is accepted
+because pi-ai accepts it, but the API never mints, refreshes or stores one: an access token expires,
+and nothing here renews it. When `CLAUDE_CODE_OAUTH_TOKEN` is set and nothing else resolves, the
+boot says it is not read.
 
 ## The gate
 
