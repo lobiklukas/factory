@@ -267,7 +267,8 @@ const TITLE_CUT_MARKER = "…";
  * The card title and body a delivery's title and description become (F10): a card's title is held to
  * `MAX_TASK_TITLE_CHARS` and refused blank (`TaskService.cardTitle`), and an outside item's is not,
  * so a delivery is fitted here rather than turned into a refusal. A title over the cap is cut to its
- * head and a marker, exactly at the cap, and the whole title opens the body, so nothing the source
+ * head and a marker, at most the cap (a head that ends in whitespace, or in half a surrogate pair,
+ * loses it, so the cut title can be a character or two short), and the whole title opens the body, so nothing the source
  * said is lost; a blank one is `fallback` (the item's source and key), which says which item the card
  * is about. The body is then `cardBodyOf`'s. `titleCut` is the original title's length, when it was
  * cut.
@@ -960,7 +961,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           } ${card.id} (${externalRef}) on board ${board.id}${
             text.titleCut === undefined
               ? ""
-              : `; its title was cut to ${MAX_TASK_TITLE_CHARS} of ${text.titleCut} characters, and the whole title opens its body`
+              : `; its title was cut to ${text.title.length} of ${text.titleCut} characters, and the whole title opens its body`
           }${
             text.bodyCut === undefined
               ? ""

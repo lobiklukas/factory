@@ -258,8 +258,8 @@ const ModelConfig = Config.all({
   fauxSleepMs: Config.Int("FAUX_SLEEP_MS").pipe(Config.withDefault(0)),
   /**
    * Fail the faux's requests on demand (F6): `model_error` ends every step of a turn with a provider
-   * error Pi Durable does not retry, and `model_error:<n>` lets a session's model answer `n` times
-   * first. What a drive needs to make a faulted run (`verify-board/requires.sh`'s `run_completed`,
+   * error Pi Durable does not retry, and `model_error:<n>` fails once a request's context holds `n`
+   * model answers (a compaction can lower that count). What a drive needs to make a faulted run (`verify-board/requires.sh`'s `run_completed`,
    * `verify-api/notify.sh`'s `failed:` message); one model's script can fail alone
    * (`FAUX_MODEL_SCRIPTS`'s `fail`). Unset: the faux never fails. Anything else fails the boot.
    */

@@ -553,6 +553,64 @@ describe("a repository's policy from .factory/config at the base", () => {
   }, 180_000);
 
   /**
+   * A review run (LOB-36) is the read-only reviewing stage, and a mission's check on it meets that
+   * stage as the reviewer's own `bash` does (F1): one that writes is refused naming the stage, one
+   * that only reads is admitted.
+   *
+   * Mutation: leave `reviewing` out of the mission's `readOnlyStageOf` — the writing check is
+   * admitted and may write the worktree under review.
+   */
+  it("refuses a mission check that writes on a review run, naming the reviewing stage, and admits one that reads (F1)", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo, localPath } = yield* register("mission-review", {
+          "README.md": "hi\n",
+        });
+        const head = execSync("git rev-parse HEAD", {
+          cwd: localPath,
+          encoding: "utf8",
+        }).trim();
+        const reviewRun = (n: number) =>
+          sessions.create({
+            repo,
+            baseRef: head,
+            branch: BranchName.make(`factory/review-${RUN}-mission-${n}`),
+            review: {
+              number: n,
+              url: `https://example.invalid/pull/${n}`,
+              base: "main",
+              head,
+            },
+          });
+        const attempt = (sessionId: SessionId, check: string) =>
+          Effect.result(
+            sessions.startMission({
+              sessionId,
+              feature: "a review with a check",
+              workers: [{ id: "w", prompt: "check the change", check }],
+            }),
+          );
+        const writing = yield* reviewRun(11);
+        const writes = yield* attempt(writing.id, "touch check-wrote-here");
+        const snapshot = yield* sessions.get(writing.id);
+        const reads = yield* attempt((yield* reviewRun(12)).id, "ls");
+        return { writes, snapshot, reads };
+      }),
+    );
+
+    expect(
+      outcome.writes._tag === "Failure" && outcome.writes.failure,
+    ).toMatchObject({
+      code: "invalid_input",
+      message: `the mission worker "w"'s check is refused: the review run is the read-only reviewing stage, where a check may only read (running touch is not a read)`,
+    });
+    expect(outcome.snapshot.mission).toBeUndefined();
+    expect(outcome.snapshot.tasks).toEqual([]);
+    expect(outcome.reads._tag).toBe("Success");
+  }, 180_000);
+
+  /**
    * Mutation: drop `strict: true` from the mission's read — a base that names no commit waives the
    * repository's policy for the mission's checks. Mutation: degrade a released session's rejected
    * config to a warning for every open — the unreleased reopen runs under none of it.

@@ -728,9 +728,11 @@ const program = Effect.gen(function* () {
       longFiled.body?.["status"] === "processed" &&
       longFiled.body?.["taskId"] === longCard?.id &&
       String(longFiled.body?.["reason"] ?? "").includes(
-        `its title was cut to ${MAX_TASK_TITLE_CHARS} of ${longIssue.title.length} characters`,
+        `its title was cut to ${longCard?.title.length} of ${longIssue.title.length} characters`,
       ) &&
-      longCard?.title.length === MAX_TASK_TITLE_CHARS &&
+      longCard !== undefined &&
+      longCard.title.length <= MAX_TASK_TITLE_CHARS &&
+      longCard.title.length >= MAX_TASK_TITLE_CHARS - 2 &&
       longCard.title.endsWith("…") &&
       longCard.title.startsWith(`A title past the cap ${STAMP}: `) &&
       longCard.body === `Title: ${longIssue.title}\n\n${longIssue.description}`,
