@@ -1,5 +1,5 @@
 import { BunServices } from "@effect/platform-bun";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -110,6 +110,37 @@ describe.concurrent("the API's boot, per Anthropic auth mode (LOB-258)", () => {
     ]) {
       expect(output).toContain(name);
     }
+    expect(output).not.toContain("Listening on");
+  }, 30_000);
+
+  it("boots on anthropic from workload identity federation when the token file exists", async () => {
+    const token = join(scratch, "identity-token");
+    writeFileSync(token, "dummy-identity-token-0123456789");
+    const { code, output } = await boot({
+      MODEL_BACKEND: "anthropic",
+      ANTHROPIC_FEDERATION_RULE_ID: "dummy-rule",
+      ANTHROPIC_ORGANIZATION_ID: "dummy-org",
+      ANTHROPIC_IDENTITY_TOKEN_FILE: token,
+    });
+    expect(code, output).toBeNull();
+    expect(output).toContain(
+      "model backend: anthropic (MODEL_BACKEND; auth: workload identity federation)",
+    );
+    expect(output).not.toContain("dummy-identity-token-0123456789");
+  }, 30_000);
+
+  it("exits non-zero when MODEL_BACKEND forces anthropic on a federation whose token file does not exist", async () => {
+    const missing = join(scratch, "no-such-identity-token");
+    const { code, output } = await boot({
+      MODEL_BACKEND: "anthropic",
+      ANTHROPIC_FEDERATION_RULE_ID: "dummy-rule",
+      ANTHROPIC_ORGANIZATION_ID: "dummy-org",
+      ANTHROPIC_IDENTITY_TOKEN_FILE: missing,
+    });
+    expect(code, output).not.toBeNull();
+    expect(code, output).not.toBe(0);
+    expect(output).toContain("AnthropicIdentityTokenFileMissing");
+    expect(output).toContain(missing);
     expect(output).not.toContain("Listening on");
   }, 30_000);
 

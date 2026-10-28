@@ -2,12 +2,17 @@
 # Prove the model backend is chosen by what pi-ai can authenticate with, and that a wrong choice
 # fails the boot (LOB-258).
 #
-#   ./backend-boot.sh                         # api on :9426 (BACKEND_BOOT_PORT)
+#   DATABASE_URL=postgres://…/factory_<slug> ./backend-boot.sh   # api on :9426 (BACKEND_BOOT_PORT)
 #
-# Four boots, one after another, each on the same port and each stopped before the next:
+# DATABASE_URL is required, so a run never migrates the shared default database (each boot runs the
+# migrations against it): point it at this worktree's own database.
+#
+# Five boots, one after another, each on the same port and each stopped before the next:
 #   1. MODEL_BACKEND=faux          → ready, and the log says faux was selected by MODEL_BACKEND.
 #   2. MODEL_BACKEND=anthropic, the only key whitespace → the process exits non-zero before it
 #      binds, with AnthropicCredentialMissing listing every accepted variable.
+#   2b. MODEL_BACKEND=anthropic, federation naming a token file that does not exist → exits non-zero
+#      before it binds, with AnthropicIdentityTokenFileMissing naming the path.
 #   3. a dummy ANTHROPIC_OAUTH_TOKEN alone → ready on anthropic, the log names the variable and never
 #      its value.
 #   4. the same through turbo (`turbo run dev --filter=@repo/api`, Strict Mode) with a dummy
@@ -26,7 +31,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PORT="${BACKEND_BOOT_PORT:-9426}"
 RUN_DIR="$ROOT/.verify/run/backend-boot"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
-DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory}"
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "backend-boot.sh needs DATABASE_URL naming this worktree's own database (never the shared default)" >&2
+  exit 1
+fi
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 
@@ -112,16 +120,21 @@ check "faux: selected by MODEL_BACKEND" "$(has "$LOG" "model backend: faux (sele
 check "faux: the key's value is not logged" "$(lacks "$LOG" "dummy-key-faux-must-ignore")" "no line carries it"
 stop
 
+# Wait up to 20s for the boot to exit on its own; sets `code` (empty when it did not).
+exited() {
+  code=""
+  for _ in $(seq 1 100); do
+    if ! kill -0 "$PID" 2>/dev/null; then
+      wait "$PID"; code=$?; PID=""; break
+    fi
+    sleep 0.2
+  done
+}
+
 # 2. MODEL_BACKEND=anthropic with nothing that resolves.
 LOG="$EVIDENCE_DIR/backend-boot-forced-missing.log"
 start "$LOG" MODEL_BACKEND=anthropic "ANTHROPIC_API_KEY=   " "${API[@]}"
-code=""
-for _ in $(seq 1 100); do
-  if ! kill -0 "$PID" 2>/dev/null; then
-    wait "$PID"; code=$?; PID=""; break
-  fi
-  sleep 0.2
-done
+exited
 check "forced anthropic, no credential: exits" "$([ -n "$code" ] && echo 0 || echo 1)" "exit ${code:-none within 20s}"
 check "forced anthropic, no credential: non-zero" "$([ -n "$code" ] && [ "$code" -ne 0 ] && echo 0 || echo 1)" "exit ${code:-none}"
 check "forced anthropic, no credential: typed error" "$(has "$LOG" "AnthropicCredentialMissing")" "AnthropicCredentialMissing in the log"
@@ -129,6 +142,19 @@ missing=""
 for name in "${ACCEPTED[@]}"; do grep -qF "$name" "$LOG" || missing="$missing $name"; done
 check "forced anthropic, no credential: lists accepted variables" "$([ -z "$missing" ] && echo 0 || echo 1)" "${missing:-all ${#ACCEPTED[@]} named}"
 check "forced anthropic, no credential: never listened" "$(lacks "$LOG" "Listening on")" "no Listening line"
+stop
+
+# 2b. MODEL_BACKEND=anthropic, federation whose identity token file does not exist.
+LOG="$EVIDENCE_DIR/backend-boot-forced-federation-no-file.log"
+NO_FILE="$RUN_DIR/no-such-identity-token"
+rm -f "$NO_FILE"
+start "$LOG" MODEL_BACKEND=anthropic ANTHROPIC_FEDERATION_RULE_ID=dummy-rule \
+  ANTHROPIC_ORGANIZATION_ID=dummy-org "ANTHROPIC_IDENTITY_TOKEN_FILE=$NO_FILE" "${API[@]}"
+exited
+check "forced federation, no token file: non-zero exit" "$([ -n "$code" ] && [ "$code" -ne 0 ] && echo 0 || echo 1)" "exit ${code:-none within 20s}"
+check "forced federation, no token file: typed error" "$(has "$LOG" "AnthropicIdentityTokenFileMissing")" "AnthropicIdentityTokenFileMissing in the log"
+check "forced federation, no token file: names the path" "$(has "$LOG" "$NO_FILE")" "the path in the error"
+check "forced federation, no token file: never listened" "$(lacks "$LOG" "Listening on")" "no Listening line"
 stop
 
 # 3. A dummy ANTHROPIC_OAUTH_TOKEN alone.

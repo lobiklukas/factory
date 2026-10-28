@@ -772,7 +772,7 @@ export const createModelAccess = (
  * The variables pi-ai's Anthropic provider authenticates from, in the order it tries them (LOB-258).
  *
  * Read from the installed pi-ai 1.0.3 (`providers/anthropic.js`): `ANTHROPIC_AUTH_TOKEN` is sent as
- * `Authorization: Bearer` (a gateway or proxy token), `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
+ * `Authorization: Bearer` to api.anthropic.com (no base URL is honoured), `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
  * are sent as the key, and workload identity federation needs all three of its variables, with the
  * service account and workspace optional beside them. A stored credential would come first, but a
  * process here keeps none: its credential store is pi-ai's in-memory default, empty at boot.

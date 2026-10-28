@@ -20,12 +20,14 @@ import { Effect, Option, Schema } from "effect";
  *
  * `MODEL_BACKEND` still wins. Forcing `anthropic` with nothing that resolves is a configuration
  * error, so the boot fails with `AnthropicCredentialMissing` rather than serving until the first
- * request does; forcing `faux` is a choice and is never second-guessed.
+ * request does; forcing `faux` is a choice and is never second-guessed. pi-ai accepts federation on
+ * any non-empty `ANTHROPIC_IDENTITY_TOKEN_FILE`, so the file's existence is checked here: missing, a
+ * forced anthropic fails with `AnthropicIdentityTokenFileMissing` and an inferred one runs faux.
  */
 
 /**
  * A variable an operator may have set expecting it to authenticate, which pi-ai never reads.
- * Claude Code's own subscription token: a Pro/Max login is not a credential this API uses.
+ * Claude Code's own subscription token: pi-ai never reads it, and this API stores no Pro/Max login.
  */
 export const UNREAD_ANTHROPIC_VARIABLES = ["CLAUDE_CODE_OAUTH_TOKEN"] as const;
 
@@ -49,6 +51,23 @@ export class AnthropicCredentialMissing extends Schema.TaggedError<AnthropicCred
   },
 ) {}
 
+/**
+ * `MODEL_BACKEND=anthropic`, and workload identity federation is the only mode that resolves, but
+ * `ANTHROPIC_IDENTITY_TOKEN_FILE` names a file that does not exist. pi-ai accepts any non-empty path,
+ * so without this check the boot would succeed and every request would fail on the exchange.
+ */
+export class AnthropicIdentityTokenFileMissing extends Schema.TaggedError<AnthropicIdentityTokenFileMissing>()(
+  "AnthropicIdentityTokenFileMissing",
+  {
+    message: Schema.String,
+    /** The path `ANTHROPIC_IDENTITY_TOKEN_FILE` names: a location, not a credential. */
+    path: Schema.String,
+  },
+) {}
+
+/** pi-ai's label for the federation mode, the only one that authenticates from a file. */
+const FEDERATION_SOURCE = "workload identity federation";
+
 export type ModelBackendChoice =
   | {
       readonly backend: "anthropic";
@@ -62,6 +81,11 @@ export type ModelBackendChoice =
       readonly forced: boolean;
       /** Variables pi-ai never reads that were set anyway (names only), when none resolved. */
       readonly unread: readonly string[];
+      /**
+       * Federation resolved, but `ANTHROPIC_IDENTITY_TOKEN_FILE` names a file that does not exist:
+       * the path, so the warning sends the operator to it. Absent otherwise.
+       */
+      readonly missingIdentityTokenFile?: string;
     };
 
 /** The variables in `UNREAD_ANTHROPIC_VARIABLES` that are set (names only). */
@@ -76,11 +100,31 @@ const unreadVariablesSet = Effect.fn("ModelBackend.unreadVariablesSet")(
   },
 );
 
+/**
+ * The path `ANTHROPIC_IDENTITY_TOKEN_FILE` names, when it does not exist. A cheap, offline structural
+ * check: the file's contents are never read, so whether the token is valid is still the exchange's
+ * to say on the first request.
+ */
+const missingIdentityTokenFile = Effect.fn(
+  "ModelBackend.missingIdentityTokenFile",
+)(function* (context: AuthContext) {
+  const path = yield* Effect.promise(() =>
+    context.env("ANTHROPIC_IDENTITY_TOKEN_FILE"),
+  );
+  if (path === undefined || path.trim() === "") return Option.none<string>();
+  const exists = yield* Effect.promise(() => context.fileExists(path));
+  return exists ? Option.none<string>() : Option.some(path);
+});
+
+/** The warning for a federation whose identity token file does not exist. */
+export const describeMissingIdentityTokenFile = (path: string) =>
+  `ANTHROPIC_IDENTITY_TOKEN_FILE names ${path}, which does not exist, so workload identity federation cannot authenticate`;
+
 /** The note added when a variable pi-ai never reads is set and nothing else authenticated. */
 export const describeUnreadVariables = (names: readonly string[]) =>
   names.length === 0
     ? ""
-    : `${names.join(", ")} is set but not read: a Claude Pro/Max login is not a credential this API uses (README, "Model credentials")`;
+    : `${names.join(", ")} is set but not read: pi-ai never reads it and this API stores no Claude Pro/Max login (README, "Model credentials")`;
 
 /**
  * Pick the backend: `MODEL_BACKEND` when set, otherwise anthropic when pi-ai resolves a credential
@@ -103,6 +147,24 @@ export const selectModelBackend = Effect.fn("ModelBackend.select")(
     const auth = yield* checkModelAuth(
       createModelAccess("anthropic", { authContext: context }),
     );
+    const missingFile =
+      Option.isSome(auth) && auth.value.source === FEDERATION_SOURCE
+        ? yield* missingIdentityTokenFile(context)
+        : Option.none<string>();
+    if (Option.isSome(missingFile)) {
+      if (Option.isSome(input.forced)) {
+        return yield* new AnthropicIdentityTokenFileMissing({
+          message: `MODEL_BACKEND=anthropic, and workload identity federation is the only credential that resolves, but ${describeMissingIdentityTokenFile(missingFile.value)}. Point it at the identity token file, set one of ${ANTHROPIC_AUTH_VARIABLES.tokens.join(", ")}, or unset MODEL_BACKEND to run the faux provider.`,
+          path: missingFile.value,
+        });
+      }
+      return {
+        backend: "faux",
+        forced: false,
+        unread: yield* unreadVariablesSet(context),
+        missingIdentityTokenFile: missingFile.value,
+      } satisfies ModelBackendChoice;
+    }
     if (Option.isSome(auth)) {
       return {
         backend: "anthropic",
@@ -152,6 +214,11 @@ export const modelBackendWarnings = (
     ? []
     : [
         describeFauxBackend(choice.forced),
+        ...(choice.missingIdentityTokenFile === undefined
+          ? []
+          : [
+              describeMissingIdentityTokenFile(choice.missingIdentityTokenFile),
+            ]),
         ...(choice.unread.length === 0
           ? []
           : [describeUnreadVariables(choice.unread)]),

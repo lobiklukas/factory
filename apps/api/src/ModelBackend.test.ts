@@ -4,6 +4,7 @@ import type { AuthContext } from "@repo/harness";
 import {
   ACCEPTED_ANTHROPIC_VARIABLES,
   describeFauxBackend,
+  describeMissingIdentityTokenFile,
   describeModelBackend,
   modelBackendWarnings,
   selectModelBackend,
@@ -15,15 +16,18 @@ import {
  * value is a dummy and nothing is sent anywhere. `boot.test.ts` proves the same against a real boot.
  */
 
-/** A lookup over `env`, recording each name it is asked for. */
-const contextOf = (env: Readonly<Record<string, string>>) => {
+/** A lookup over `env` and the paths in `files`, recording each name it is asked for. */
+const contextOf = (
+  env: Readonly<Record<string, string>>,
+  files: readonly string[] = [],
+) => {
   const asked: string[] = [];
   const context: AuthContext = {
     env: async (name) => {
       asked.push(name);
       return env[name];
     },
-    fileExists: async () => false,
+    fileExists: async (path) => files.includes(path),
   };
   return { context, asked };
 };
@@ -31,19 +35,21 @@ const contextOf = (env: Readonly<Record<string, string>>) => {
 const select = (
   forced: "anthropic" | "faux" | undefined,
   env: Readonly<Record<string, string>>,
+  files: readonly string[] = [],
 ) =>
   Effect.runPromiseExit(
     selectModelBackend({
       forced: Option.fromUndefinedOr(forced),
-      authContext: contextOf(env).context,
+      authContext: contextOf(env, files).context,
     }),
   );
 
 const chosen = async (
   forced: "anthropic" | "faux" | undefined,
   env: Readonly<Record<string, string>>,
+  files: readonly string[] = [],
 ) => {
-  const exit = await select(forced, env);
+  const exit = await select(forced, env, files);
   if (!Exit.isSuccess(exit)) throw new Error(`select failed: ${String(exit)}`);
   return exit.value;
 };
@@ -75,14 +81,52 @@ describe("selectModelBackend", () => {
     }
   });
 
-  it("picks anthropic from workload identity federation", async () => {
-    const choice = await chosen(undefined, {
-      ANTHROPIC_FEDERATION_RULE_ID: "dummy-rule",
-      ANTHROPIC_ORGANIZATION_ID: "dummy-org",
-      ANTHROPIC_IDENTITY_TOKEN_FILE: "/dummy/token",
-    });
+  const FEDERATION = {
+    ANTHROPIC_FEDERATION_RULE_ID: "dummy-rule",
+    ANTHROPIC_ORGANIZATION_ID: "dummy-org",
+    ANTHROPIC_IDENTITY_TOKEN_FILE: "/dummy/token",
+  } as const;
+
+  it("picks anthropic from workload identity federation when the token file exists", async () => {
+    const choice = await chosen(undefined, FEDERATION, ["/dummy/token"]);
     expect(describeModelBackend(choice)).toBe(
       "model backend: anthropic (auth: workload identity federation)",
+    );
+    expect(modelBackendWarnings(choice)).toEqual([]);
+  });
+
+  it("refuses a forced anthropic whose federation names a token file that does not exist", async () => {
+    const exit = await select("anthropic", FEDERATION);
+    expect(Exit.isFailure(exit)).toBe(true);
+    const failure = Option.getOrUndefined(Exit.findErrorOption(exit));
+    expect(failure?._tag).toBe("AnthropicIdentityTokenFileMissing");
+    if (failure?._tag !== "AnthropicIdentityTokenFileMissing") return;
+    expect(failure.path).toBe("/dummy/token");
+    expect(failure.message).toContain(
+      "ANTHROPIC_IDENTITY_TOKEN_FILE names /dummy/token, which does not exist",
+    );
+  });
+
+  it("falls back to faux when an inferred federation's token file does not exist, and says which file", async () => {
+    const choice = await chosen(undefined, FEDERATION);
+    expect(choice).toEqual({
+      backend: "faux",
+      forced: false,
+      unread: [],
+      missingIdentityTokenFile: "/dummy/token",
+    });
+    const warnings = modelBackendWarnings(choice);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toBe(describeMissingIdentityTokenFile("/dummy/token"));
+  });
+
+  it("never checks the token file when a token variable resolves first", async () => {
+    const choice = await chosen("anthropic", {
+      ...FEDERATION,
+      ANTHROPIC_API_KEY: "dummy-key",
+    });
+    expect(describeModelBackend(choice)).toBe(
+      "model backend: anthropic (MODEL_BACKEND; auth: ANTHROPIC_API_KEY)",
     );
   });
 

@@ -106,7 +106,7 @@ Set one; pi-ai tries them in this order:
 
 | Mode                         | Variables                                                                                                                                                               |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bearer token                 | `ANTHROPIC_AUTH_TOKEN`, sent as `Authorization: Bearer` (a gateway or proxy token)                                                                                      |
+| Bearer token                 | `ANTHROPIC_AUTH_TOKEN`, sent to api.anthropic.com as `Authorization: Bearer`; `ANTHROPIC_BASE_URL` is not honoured, so a gateway's token will not work                  |
 | OAuth token                  | `ANTHROPIC_OAUTH_TOKEN`, sent as the key (pi-ai sends an `sk-ant-oat…` access token as a bearer)                                                                        |
 | API key                      | `ANTHROPIC_API_KEY`, an Anthropic Console key: the usual choice                                                                                                         |
 | Workload identity federation | all of `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN_FILE` (`ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` optional) |
@@ -115,17 +115,19 @@ An empty or whitespace-only value counts as unset. The boot line names what auth
 `model backend: anthropic (auth: ANTHROPIC_OAUTH_TOKEN)` — and never a value. `MODEL_BACKEND=faux`
 logs `model backend: faux (selected by MODEL_BACKEND)`. `MODEL_BACKEND=anthropic` with nothing that
 resolves exits non-zero at boot with `AnthropicCredentialMissing`, listing the variables above,
-instead of serving until the first request fails. All of them are in `apps/api/turbo.json`'s
+instead of serving until the first request fails. Federation whose `ANTHROPIC_IDENTITY_TOKEN_FILE`
+names a file that does not exist is refused the same way (`AnthropicIdentityTokenFileMissing`,
+naming the path); unforced, it runs faux and the warning names the file. All of them are in `apps/api/turbo.json`'s
 `passThroughEnv`, so `bun run dev` hands them to the API without putting them in a task hash.
 
 **Out of scope: `CLAUDE_CODE_OAUTH_TOKEN` and a Claude Pro/Max login.** pi-ai does not read
 `CLAUDE_CODE_OAUTH_TOKEN`, and its Pro/Max login is a stored OAuth credential, which this API never
-stores: it boots with pi-ai's empty in-memory credential store. A subscription is one person's seat
-for interactive use, not a credential for a service that runs sessions unattended on several
-people's behalf, so the supported modes are the ones above. `ANTHROPIC_OAUTH_TOKEN` is accepted
-because pi-ai accepts it, but the API never mints, refreshes or stores one: an access token expires,
-and nothing here renews it. When `CLAUDE_CODE_OAUTH_TOKEN` is set and nothing else resolves, the
-boot says it is not read.
+stores: it boots with pi-ai's empty in-memory credential store. When `CLAUDE_CODE_OAUTH_TOKEN` is
+set and nothing else resolves, the boot says it is not read. A subscription's OAuth access token
+(`sk-ant-oat…`) passed as `ANTHROPIC_OAUTH_TOKEN` does work, only because pi-ai accepts it (it sends
+it as a bearer with Claude Code's client headers). It is not recommended for a service that runs
+sessions unattended: the API never mints, refreshes or stores one, so it stops working when the
+access token expires. Use `ANTHROPIC_API_KEY` or federation for anything long-running.
 
 ## The gate
 
