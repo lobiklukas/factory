@@ -13,7 +13,8 @@ import type {
   DefinitionVocabulary,
   RequirementOption,
 } from "@repo/domain/Task";
-import { columnTransitions, initialColumnOf } from "@repo/domain/Task";
+import { RunCap, columnTransitions, initialColumnOf } from "@repo/domain/Task";
+import { Result, Schema } from "effect";
 import { NONE } from "./board-settings-view";
 
 /**
@@ -1114,42 +1115,39 @@ export type DefineRefusal = {
 };
 
 /**
- * The faults a payload the server's schema refused names: the server decodes a `defineBoard` body
- * before it reads it, so a limit of `0` or `1.5` is refused as a decode failure whose text is
- * `<message>\n  at ["columns"][0]["wipLimit"]`, one such pair for each field. Each becomes a fault at
- * that field's path (`columns[0].wipLimit`), in the server's words, so it is shown beside the field
- * like any other — the refusal stays the server's, this only reads where it points.
+ * The limits of the draft that `RunCap` — the domain schema the server decodes a `defineBoard` body
+ * with — refuses: a WIP limit or a cap that is not a whole number of at least one. The RPC client
+ * encodes a payload with that same schema before it sends one, so such a body never leaves the page;
+ * rather than a stack of schema text, each one is a fault at the path the server would name
+ * (`columns[1].wipLimit`, `caps.task`), in the schema's own words, shown beside its field like any
+ * other fault. Nothing else is judged here: what a version may declare is the server's call.
  */
-export const payloadFaults = (
-  defect: unknown,
-): ReadonlyArray<DefinitionFault> =>
-  typeof defect !== "string"
-    ? []
-    : [...defect.matchAll(/^(.+)\n[ \t]+at ((?:\[[^\]]+\])+)\s*$/gm)].flatMap(
-        ([, message, path]) =>
-          message === undefined || path === undefined
-            ? []
-            : [
-                {
-                  field: [...path.matchAll(/\[("?)([^\]"]+)\1\]/g)]
-                    .map(([, quote, part], at) =>
-                      quote === ""
-                        ? `[${part}]`
-                        : at === 0
-                          ? `${part}`
-                          : `.${part}`,
-                    )
-                    .join(""),
-                  message,
-                },
-              ],
-      );
+export const limitFaults = (
+  draft: DefinitionDraft,
+): ReadonlyArray<DefinitionFault> => {
+  const refusal = (value: number | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    const decoded = Schema.decodeUnknownResult(RunCap)(value);
+    return Result.isFailure(decoded) ? decoded.failure.message : undefined;
+  };
+  return [
+    ...draft.columns.flatMap((entry, index) => {
+      const message = refusal(entry.column.wipLimit);
+      return message === undefined
+        ? []
+        : [{ field: `columns[${index}].wipLimit`, message }];
+    }),
+    ...CAP_KINDS.flatMap((kind) => {
+      const message = refusal(draft.caps?.[kind]);
+      return message === undefined ? [] : [{ field: `caps.${kind}`, message }];
+    }),
+  ];
+};
 
 /**
  * What a failed `defineBoard` shows. `InvalidDefinition` carries every fault, each placed next to its
- * field; a body the server's schema refused (`defect`, a number below the minimum) is placed by the
- * path its message names; any other typed refusal (a storage error) is the server's words; anything
- * else (a dropped connection) falls back to the cause.
+ * field; any other typed refusal (a storage error) is the server's words; anything else (a dropped
+ * connection) falls back to the cause.
  */
 export const defineRefusal = (
   error:
@@ -1160,20 +1158,15 @@ export const defineRefusal = (
       }
     | undefined,
   fallback: string,
-  defect?: unknown,
-): DefineRefusal => {
-  if (error === undefined || error.message.length === 0) {
-    const faults = error === undefined ? payloadFaults(defect) : [];
-    return faults.length > 0
-      ? { tag: "InvalidPayload", message: fallback, faults }
-      : { tag: error?._tag ?? "Unknown", message: fallback, faults: [] };
-  }
-  return {
-    tag: error._tag,
-    message: error.message,
-    faults: error._tag === "InvalidDefinition" ? (error.problems ?? []) : [],
-  };
-};
+): DefineRefusal =>
+  error === undefined || error.message.length === 0
+    ? { tag: error?._tag ?? "Unknown", message: fallback, faults: [] }
+    : {
+        tag: error._tag,
+        message: error.message,
+        faults:
+          error._tag === "InvalidDefinition" ? (error.problems ?? []) : [],
+      };
 
 /**
  * What the page says once the save answered: a version written is "v<n> created", and the board

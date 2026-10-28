@@ -229,8 +229,13 @@ pins a board to it. `definition-edit.mjs` opens **Edit as new version** from the
 and checks that the skill and requires pickers offer exactly `listSkills`' and
 `getDefinitionVocabulary`'s names, with no text field for either. It adds a column and is refused,
 with the server's fault next to the column's moves, then completes it and saves. It requires "v2
-created", version 2 in `listDefinitions` with the draft's columns and the untouched WIP limit and
-caps, and the board still pinned to v1 (`features/definition-edit.md`). Evidence goes to
+created", version 2 in `listDefinitions` with the draft's columns, and the board still pinned to v1.
+It also edits a column's autonomy, WIP limit and the run caps (F2, F3: a blank gate and a non-positive
+limit refused beside their fields, the values stored, shown on a v2 board's settings page and
+printed by `factory board definition show`, emptied fields removing the limits), and a second
+instance with no role table lets a typed new role through (F4, `definition-edit-roles.mjs`; that
+pair of ports is the first's + 1). `board-settings.mjs` also re-pins a board with Upgrade and requires
+the same page, unreloaded, to show the new version (F9) (`features/definition-edit.md`). Evidence goes to
 `.verify/evidence/latest/definition-edit/`.
 
 ### Skill pages

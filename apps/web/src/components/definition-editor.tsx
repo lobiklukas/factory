@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
-import { Cause, Exit, Option, Result } from "effect";
+import { Cause, Exit, Option } from "effect";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -38,6 +38,7 @@ import {
   definitionDiff,
   draftOf,
   gatesOf,
+  limitFaults,
   moveColumn,
   parseLimit,
   placeFaults,
@@ -818,8 +819,23 @@ export const DefinitionEditor = ({
     if (pending) return;
     const sent = draft.columns.map((entry) => entry.key);
     const sentDraft = draft;
-    setPending(true);
     setSaved(null);
+    // A limit the domain schema refuses cannot be encoded into a request: it is shown beside its
+    // field as the server would place it, and nothing is sent.
+    const limits = limitFaults(sentDraft);
+    if (limits.length > 0) {
+      setRefused({
+        refusal: {
+          tag: "InvalidLimit",
+          message: limits.map((fault) => fault.message).join("; "),
+          faults: limits,
+        },
+        sent,
+        draft: sentDraft,
+      });
+      return;
+    }
+    setPending(true);
     void define(defineInputOf(pinned, sentDraft))
       .then((exit) => {
         if (Exit.isSuccess(exit)) {
@@ -831,7 +847,6 @@ export const DefinitionEditor = ({
           refusal: defineRefusal(
             Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
             Cause.pretty(exit.cause),
-            Result.getOrUndefined(Cause.findDefect(exit.cause)),
           ),
           sent,
           draft: sentDraft,

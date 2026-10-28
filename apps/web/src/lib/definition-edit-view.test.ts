@@ -19,8 +19,8 @@ import {
   draftOf,
   gatesOf,
   moveColumn,
+  limitFaults,
   parseLimit,
-  payloadFaults,
   placeFaults,
   removeColumn,
   removeGate,
@@ -662,61 +662,41 @@ describe("limits and caps (F3)", () => {
   });
 });
 
-describe("a body the server's schema refuses (F3)", () => {
-  const DEFECT =
-    'Expected a value greater than or equal to 1\n  at ["columns"][0]["wipLimit"]';
-
-  /** Mutation: read the first path only, or leave the quotes in the field. */
-  it("reads each refused field's path and message out of the server's decode failure", () => {
-    expect(payloadFaults(DEFECT)).toEqual([
+describe("limits the domain schema refuses (F3)", () => {
+  /**
+   * Mutation: judge only the WIP limits (or only the caps), check `> 0` instead of the schema's
+   * whole-number minimum of one, or index the column by key rather than position — the fault would
+   * land beside another column's field.
+   */
+  it("names each refused limit at the path the server would, in the schema's words", () => {
+    let draft = draftOf(PINNED);
+    expect(limitFaults(draft)).toEqual([]);
+    draft = setWipLimit(draft, keyOf(draft, "doing"), 0);
+    draft = setWipLimit(draft, keyOf(draft, "canceled"), 1.5);
+    draft = setCap(draft, "task", -2);
+    draft = setCap(draft, "repo", 4);
+    expect(limitFaults(draft)).toEqual([
       {
-        field: "columns[0].wipLimit",
+        field: "columns[1].wipLimit",
+        message: "Expected a value greater than or equal to 1",
+      },
+      { field: "columns[3].wipLimit", message: "Expected an integer" },
+      {
+        field: "caps.task",
         message: "Expected a value greater than or equal to 1",
       },
     ]);
-    expect(
-      payloadFaults(
-        `${DEFECT}\nExpected an integer, got 1.5\n  at ["caps"]["task"]`,
-      ),
-    ).toEqual([
-      {
-        field: "columns[0].wipLimit",
-        message: "Expected a value greater than or equal to 1",
-      },
-      { field: "caps.task", message: "Expected an integer, got 1.5" },
-    ]);
-    expect(payloadFaults("connection reset")).toEqual([]);
-    expect(payloadFaults(undefined)).toEqual([]);
   });
 
-  it("places them beside the field like any fault, and says what was refused", () => {
-    const refusal = defineRefusal(undefined, "pretty cause", DEFECT);
-    expect(refusal).toEqual({
-      tag: "InvalidPayload",
-      message: "pretty cause",
-      faults: [
-        {
-          field: "columns[0].wipLimit",
-          message: "Expected a value greater than or equal to 1",
-        },
-      ],
-    });
-    const draft = draftOf(PINNED);
+  it("places them beside the field like any fault", () => {
+    const draft = setWipLimit(draftOf(PINNED), "c0", 0);
     const placed = placeFaults(
-      refusal.faults,
+      limitFaults(draft),
       draft.columns.map((entry) => entry.key),
       draft,
     );
-    expect(
-      placed.slots.get(columnSlot(keyOf(draft, "todo"), "wipLimit")),
-    ).toHaveLength(1);
+    expect(placed.slots.get(columnSlot("c0", "wipLimit"))).toHaveLength(1);
     expect(placed.unplaced).toEqual([]);
-    // A typed refusal keeps its own words, and an unrecognised defect is the cause's.
-    expect(
-      defineRefusal({ _tag: "TaskStorageError", message: "down" }, "x", DEFECT)
-        .faults,
-    ).toEqual([]);
-    expect(defineRefusal(undefined, "reset", "reset").faults).toEqual([]);
   });
 });
 

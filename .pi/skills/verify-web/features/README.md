@@ -62,7 +62,7 @@ the pane re-reads on the 10 s `EXIT_POLL`.
 shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
 `drive.mjs` re-passed (API `:9541` / web `:3541`), its lane-control count leaving the settings disclosure out.
 
-`definition-edit.sh` (edit a board definition as a new version, D6) last passed **18/18** on 2026-10-28
+`definition-edit.sh` (edit a board definition as a new version, D6; autonomy, limits, caps and typed roles, F2-F4) last passed **31/31** and **7/7** (roles) on 2026-10-28 from `agent/F2-F3-F4-F9`, API `:9560` / web `:3560`; before that **18/18** on 2026-10-28
 from the `agent/D6` worktree, API `:9512` / web `:3512`; `board-settings.sh` re-passed there beside it.
 
 `skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
