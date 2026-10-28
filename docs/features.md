@@ -138,7 +138,8 @@ research adds is the contract detail the design leaves out and the evidence that
 > `.pi/skills/verify-policy/features/refusals.md` states them in prose. What remains of A3 is the
 > approval half — LOB-50 (contract and pending list), LOB-52 (durability via `api.memo`, riding this
 > hook) and LOB-53 (CLI and dashboard consumers) — and D15's enforcement outside the agent, which is
-> LOB-51/LOB-54 (credentials) and LOB-30 (rulesets).
+> LOB-51/LOB-54 (credentials). LOB-30 shipped the rulesets declared as code, read back and probed
+> against a loopback forge; what remains of it is the operator's live run against GitHub itself.
 
 ---
 

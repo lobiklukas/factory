@@ -2,9 +2,10 @@ import { RepoSlug, SessionActor, SessionBudgetCap } from "@repo/domain/Session";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
-import { reportFailures } from "../errors";
+import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
+import { predictedCap, predictionLine } from "./cost";
 import { runModelLines } from "./status";
 
 /**
@@ -20,6 +21,12 @@ import { runModelLines } from "./status";
  * run proves the read path as well as the write. The `model` line is the model the session is pinned
  * to (LOB-272), and under the faux backend a `warning: faux backend` line follows it: a scripted answer
  * reads exactly like a real one, so the run says which it is getting.
+ *
+ * Before anything is created, the run prints what it is predicted to cost (LOB-38): a range from the
+ * completed sessions most like the task (`factory cost predict`'s line). The prediction is advice, so
+ * a server that cannot answer it costs the run that line and nothing else — unless
+ * `--cap-at-prediction` asked to cap the session at the range's high, which then has no cap to set
+ * and refuses before a session exists, as it does with too little history to predict from.
  */
 export const runCommand = Command.make(
   "run",
@@ -42,6 +49,12 @@ export const runCommand = Command.make(
       ),
       Flag.withSchema(SessionBudgetCap),
       Flag.optional,
+    ),
+    capAtPrediction: Flag.Boolean("cap-at-prediction").pipe(
+      Flag.withDescription(
+        "Cap the session's spend at the predicted range's high (instead of --budget)",
+      ),
+      Flag.withDefault(false),
     ),
     model: Flag.String("model").pipe(
       Flag.withDescription(
@@ -66,10 +79,17 @@ export const runCommand = Command.make(
     repo,
     baseRef,
     budget,
+    capAtPrediction,
     model,
     actor,
     api,
   }) {
+    if (capAtPrediction && Option.isSome(budget)) {
+      return yield* reportFailure(
+        "invalid_input",
+        "--cap-at-prediction and --budget both set the cap; pass one",
+      );
+    }
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -87,10 +107,35 @@ export const runCommand = Command.make(
       if (Option.isSome(budget)) input.budget = budget.value;
       if (Option.isSome(model)) input.model = model.value;
 
+      // What the run is predicted to cost, before it exists (LOB-38). Only a cap that needs it makes
+      // a failed prediction the run's failure.
+      const asked = client.predictCost({
+        prompt: task,
+        ...(input.repo === undefined ? {} : { repo: input.repo }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+      });
+      const prediction = capAtPrediction
+        ? yield* asked
+        : yield* asked.pipe(Effect.option, Effect.map(Option.getOrUndefined));
+      if (prediction !== undefined) {
+        yield* Console.log(predictionLine(prediction));
+      }
+      let capped = false;
+      if (capAtPrediction && prediction !== undefined) {
+        const cap = predictedCap(prediction);
+        if ("refused" in cap) {
+          return yield* reportFailure("invalid_input", cap.refused);
+        }
+        input.budget = cap.cap;
+        capped = true;
+      }
+
       const session = yield* client.createSession(input);
       yield* Console.log(`session ${session.id}`);
-      if (Option.isSome(budget)) {
-        yield* Console.log(`budget ${formatDollars(budget.value)}`);
+      if (input.budget !== undefined) {
+        yield* Console.log(
+          `budget ${formatDollars(input.budget)}${capped ? " (the predicted high)" : ""}`,
+        );
       }
 
       // A server that cannot answer `getServerInfo` costs the run its warning, never the run.
@@ -144,6 +189,11 @@ export const runCommand = Command.make(
     {
       command: 'factory run "fix the flaky test" --budget 2',
       description: "Run a task that stops once it has spent $2",
+    },
+    {
+      command: 'factory run "fix the flaky test" --cap-at-prediction',
+      description:
+        "Run a task capped at the high end of what runs like it have cost",
     },
     {
       command:

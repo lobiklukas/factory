@@ -323,6 +323,16 @@ Residual risk: the app can still create new branches, and ruleset configuration 
 security surface, so it must be code. Alchemy's GitHub provider covers repositories,
 Actions secrets/variables, and webhooks, but not rulesets — that is a custom provider or
 Terraform's `github_repository_ruleset`.
+_As built (LOB-30)._ The rulesets are declared in `infra/src/rulesets/policy.ts` (the default
+branch, as `~DEFAULT_BRANCH`, PR-only with one approval from someone other than the last pusher, plus `deletion` and `non_fast_forward`;
+`factory/**` with `deletion` and `non_fast_forward`; `bypass_actors` empty) and reconciled by a
+custom provider in plain Effect over the REST API (`bun run rulesets plan|apply|verify`), not by
+Alchemy yet: Alchemy v2 is a prerelease that needs a newer `effect` than the repo pins, so
+`infra/alchemy.run.ts` will wrap the same functions when it lands. `verify` reads every ruleset back
+and fails on a missing one, any drift, or any bypass actor; `probe` pushes a force-push and a
+deletion at `factory/ruleset-probe` as the factory's own credential and fails unless the forge
+refuses both with `GH013`. The operator token (`GITHUB_RULESETS_TOKEN`) must not be the factory's.
+`.github/workflows/rulesets.yml` runs `verify` daily once the `RULESETS_ADMIN_TOKEN` secret exists.
 
 ### D16 — Review happens in GitHub
 
@@ -410,7 +420,7 @@ can only reach in the skip direction).
 | `apps/api`                    | HTTP + RPC surface for CLI and web                                         | `HttpApi` / `RpcServer`                                            |
 | `apps/cli`                    | Interactive and headless operator client                                   | —                                                                  |
 | `apps/web`                    | Dashboard: sessions, live transcript, steering, approvals                  | —                                                                  |
-| `infra`                       | `alchemy.run.ts` composition root                                          | Alchemy `Stack`                                                    |
+| `infra`                       | `alchemy.run.ts` composition root; the GitHub rulesets of D15 (LOB-30)     | Alchemy `Stack`; `planRulesets` / `applyPlan` / `verifyRulesets`   |
 
 ### What we do not build
 
@@ -491,6 +501,9 @@ green local suite will say nothing about sandboxing. Treat M7 as the real isolat
 **R3 — Ruleset configuration is now a security surface.** The enforcement in D15 lives partly
 in GitHub settings. Get it wrong and the boundary silently is not there. It needs to be code,
 reviewed, and tested — and this is the same class of risk as a relay bug would have been.
+_Mitigated (LOB-30)._ See D15's as-built note: the rulesets are code, `verify` is the read-back, and
+`.pi/skills/verify-rulesets` proves both against a loopback forge. What is not proven locally is
+GitHub's own enforcement; `probe` against a real repository is the operator's run.
 
 **R4 — Cost attribution.** Inference spend dominates infrastructure by an order of magnitude,
 and per-session attribution is what makes it manageable. Pi Durable's `UsageDoc` gives us the
@@ -508,6 +521,15 @@ are that module's header.
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (LOB-38)._ The spend history predicts what the next session will cost. `predictCost`
+classifies the prompt's first line into a task shape, then takes the completed sessions most like it.
+The comparables come from the first tier with three sessions: repo+model+shape, then repo+model,
+model+shape, model, shape and all; only the newest fifty count. The answer is their p10 / median /
+p90, read from the same index the list reads, never a fold.
+`factory run` prints the range before it creates a session; `--cap-at-prediction`, or the dashboard's
+**Cap at predicted high**, sets the session's cap to the high. `backtestCost` predicts every completed
+session from the ones that had finished before it was created, and the median relative error is published on `/spend` and
+by `factory cost backtest`. The rules are in `docs/cost-prediction.md`.
 _As built (LOB-20)._ The actor is the one the control plane authenticated, not the one the caller
 typed. Every RPC group carries one middleware, `ControlPlaneAuth` (`@repo/domain/Auth`), which reads
 `Authorization: Bearer <token>`, looks it up in the deployment's token table and hands the handler a
