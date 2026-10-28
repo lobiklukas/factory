@@ -6,7 +6,7 @@
 import type { JsonValue } from "@earendil-works/chord";
 import type { TaskId } from "@earendil-works/pi-durable";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
-import { REPLAY_DOC_KIND } from "./projection";
+import { MERGE_DOC_KIND, REPLAY_DOC_KIND } from "./projection";
 
 export const SPEC_DOC_KIND = "factory.spec";
 export const CRITERIA_DOC_KIND = "factory.criteria";
@@ -87,6 +87,32 @@ export const PrDoc = defineDoc({
     head: "",
     openedAt: "",
     evidence: null as JsonValue,
+  }),
+});
+
+/**
+ * The merge of the session's PR, and its revert (LOB-44): written by the GitHub webhook when the PR
+ * it recorded in `factory.pr` merges, and again when a merged PR's body says it reverts that one
+ * (`Reverts owner/repo#N`, what GitHub's revert button writes). The first merge and the first revert
+ * stand: a redelivered event rewrites nothing. A fork never takes it — a fork copies entries and
+ * writes its own lineage, so the merge stays the session's whose PR it was.
+ *
+ * `rebuildIndexes` folds it into `sessions.pr_merged_at` and `pr_reverted_at`, which is where the
+ * outcome metrics read delegation-to-merge lead time, recovery and defect pressure from.
+ */
+export const MergeDoc = defineDoc({
+  kind: MERGE_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    url: "",
+    number: 0,
+    mergedAt: "",
+    commit: "",
+    revertedBy: "",
+    revertedAt: "",
   }),
 });
 

@@ -33,7 +33,8 @@
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the
  * actor its spend is attributed to (`factory.actor`, LOB-162), the model the root conversation is
- * pinned to (`pi.agent`, LOB-269), the PR link (`factory.pr`), the approvals a session asked for and the decisions that settled them
+ * pinned to (`pi.agent`, LOB-269), the PR link (`factory.pr`), when it merged and was reverted
+ * (`factory.merge`, LOB-44), the approvals a session asked for and the decisions that settled them
  * (`factory.approval.requested` / `.decided` / `.used` → `session_approvals`), spend (`pi.usage`),
  * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
  * in a process that owns nothing (D8).
@@ -101,6 +102,9 @@ type FoldedRow = {
   /** The model the root is pinned to, `provider/modelId` (LOB-269), when the log has a root. */
   readonly model: string | null;
   readonly prUrl: string | null;
+  /** When that PR merged and when a revert undid it (LOB-44), from `factory.merge`. */
+  readonly prMergedAt: string | null;
+  readonly prRevertedAt: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
   readonly costTotal: number;
@@ -160,6 +164,7 @@ export const rebuildIndexes: Effect.Effect<
     taskId: string;
     sessionId: string;
     column: string;
+    startedAt: string;
   }[] = [];
   const pages: {
     sessionId: string;
@@ -200,6 +205,11 @@ export const rebuildIndexes: Effect.Effect<
       actor: sessionLog.actor ?? null,
       model: sessionLog.model ?? null,
       prUrl: sessionLog.pr?.url ?? null,
+      prMergedAt:
+        sessionLog.merge === undefined || sessionLog.merge.mergedAt === ""
+          ? null
+          : sessionLog.merge.mergedAt,
+      prRevertedAt: sessionLog.merge?.revert?.at ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
       costTotal,
@@ -244,6 +254,8 @@ export const rebuildIndexes: Effect.Effect<
         taskId: sessionLog.task.taskId,
         sessionId: log.logId,
         column: sessionLog.task.column,
+        // A run is its session (B1), created when the run starts: its first commit is the start.
+        startedAt: log.createdAt,
       });
     }
   }
@@ -261,7 +273,8 @@ export const rebuildIndexes: Effect.Effect<
   // values are *all* null (it has no element to infer a type from), and a batch of scratch sessions
   // is exactly that for `repo` and `base_ref` — and a batch of sessions that are not forks, or have
   // no PR, or no actor, is exactly that for `forked_from`, `pr_url` and `actor` (and a batch of logs
-  // with no root for `model`). An empty string is never a legal slug, session id, URL, actor or
+  // with no root for `model`, and of unmerged PRs for `pr_merged_at` and `pr_reverted_at`, which
+  // cross as text and are cast after the sentinel is gone). An empty string is never a legal slug, session id, URL, actor or
   // `provider/modelId`, so the sentinel cannot collide with a real value.
   //
   // `cost_total` crosses as text too: the client could not encode a number array holding an unpriced
@@ -273,7 +286,7 @@ export const rebuildIndexes: Effect.Effect<
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, created_at)
       SELECT
         id,
         title,
@@ -284,6 +297,8 @@ export const rebuildIndexes: Effect.Effect<
         NULLIF(actor, ''),
         NULLIF(model, ''),
         NULLIF(pr_url, ''),
+        NULLIF(pr_merged_at, '')::timestamptz,
+        NULLIF(pr_reverted_at, '')::timestamptz,
         created_at
       FROM unnest(
         ${ids}::text[],
@@ -295,8 +310,10 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.actor ?? "")}::text[],
         ${batch.map((row) => row.model ?? "")}::text[],
         ${batch.map((row) => row.prUrl ?? "")}::text[],
+        ${batch.map((row) => row.prMergedAt ?? "")}::text[],
+        ${batch.map((row) => row.prRevertedAt ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      ) AS folded(id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, created_at)
+      ) AS folded(id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
@@ -306,6 +323,8 @@ export const rebuildIndexes: Effect.Effect<
         actor = EXCLUDED.actor,
         model = EXCLUDED.model,
         pr_url = EXCLUDED.pr_url,
+        pr_merged_at = EXCLUDED.pr_merged_at,
+        pr_reverted_at = EXCLUDED.pr_reverted_at,
         created_at = EXCLUDED.created_at
     `;
     yield* sql`
@@ -379,11 +398,15 @@ export const rebuildIndexes: Effect.Effect<
     `;
   }
 
-  // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links.
+  // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links. A row the
+  // rebuild re-creates starts at its session's first commit rather than at the rebuild; its
+  // `finished_at` is no fact any log holds (LOB-44, docs/design.md D7), so it stays NULL, and the
+  // outcome metrics' factory time reads such a run as ending at its session's last activity —
+  // refolded from the log above.
   for (const run of taskRuns) {
     yield* sql`
-      INSERT INTO task_runs (id, task_id, session_id, "column")
-      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column})
+      INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column}, ${run.startedAt}::timestamptz)
       ON CONFLICT (session_id) DO NOTHING
     `;
   }

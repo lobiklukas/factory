@@ -48,6 +48,13 @@ export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
 /**
+ * The merge of the PR a session opened, as GitHub's webhook reported it (LOB-44), and the revert
+ * that undid it when one merged later. A document of its own rather than fields on `factory.pr`,
+ * because the PR step writes that record and reads it back before it calls GitHub: a merge is a
+ * fact about what happened to the PR afterwards, written by a different writer (the webhook).
+ */
+export const MERGE_DOC_KIND = "factory.merge";
+/**
  * Who a session's spend is attributed to (LOB-162): the actor `createSession` was given, or the one
  * a fork or a replay took from its source. The `sessions.actor` column is its index.
  */
@@ -492,6 +499,33 @@ export const projectPrDoc = (value: JsonValue | undefined): PrDocView => {
     ...(evidence === undefined ? {} : { evidence }),
   };
 };
+
+/**
+ * What `factory.merge` records (LOB-44): the PR that merged and when, and the revert that undid it.
+ * An empty string is a field the document does not hold: `mergedAt` empty is "no merge recorded",
+ * and `revertedAt` empty is "not reverted" — the seed is both.
+ */
+export type MergeDocView = {
+  readonly url: string;
+  readonly number: number;
+  readonly mergedAt: string;
+  /** The merge commit GitHub reported (`merge_commit_sha`), empty when it named none. */
+  readonly commit: string;
+  /** The PR that reverted this one, by its page. */
+  readonly revertedBy: string;
+  readonly revertedAt: string;
+};
+
+export const projectMergeDoc = (
+  value: JsonValue | undefined,
+): MergeDocView => ({
+  url: stringAt(value, "url") ?? "",
+  number: numberAt(value, "number"),
+  mergedAt: stringAt(value, "mergedAt") ?? "",
+  commit: stringAt(value, "commit") ?? "",
+  revertedBy: stringAt(value, "revertedBy") ?? "",
+  revertedAt: stringAt(value, "revertedAt") ?? "",
+});
 
 const ZERO_USAGE: ModelUsage = {
   input: 0,
