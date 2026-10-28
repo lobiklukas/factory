@@ -84,9 +84,11 @@
  * open, then the record's commit moves to the new tip and the answer is `updated`. Before this the
  * recorded PR was the answer whatever the branch had grown to, so a session that settled again with
  * more commits left them unpublished, and nothing but a later run of its card ever pushed them. A
- * refusal (`over-cap`, `non-fast-forward`, `secret-found`) is answered as an open's is and writes
- * nothing, so the record stays at the commit the forge holds; a branch still at that commit is the
- * retry it always was, answered from the log without measuring, pushing or reaching any forge.
+ * refusal (`over-cap`, `non-fast-forward`, `secret-found`) is answered as an open's is, naming the PR
+ * it left as it was (`pullRequest`), and writes nothing, so the record stays at the commit the forge
+ * holds; a branch still at that commit is the retry it always was, answered from the log without
+ * measuring, pushing or reaching any forge. A step with no push updates nothing: it answers the PR as
+ * it stands, because a record moved without a push would name a commit the forge does not have.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -219,18 +221,38 @@ export const openPullRequest = (
     // before C19) is treated as moved, so its first update records one. A branch still at the
     // published commit is the retry it always was: answered from the log, measuring and pushing
     // nothing, reaching no forge.
+    //
+    // Only a step that can push updates: with no push (a repo with no forge URL a token may go to,
+    // a deployment with no remote) nothing would reach the PR, and no GitHub call catches it as an
+    // open's would — a record moved anyway would name a commit the forge does not have, and
+    // `pr_link` would be met for work that never reached the PR. Such a step answers the PR as it
+    // stands, as it did before F14, and leaves the record where it was.
     const moved =
       recorded !== undefined &&
       commit !== undefined &&
       recorded.commit !== commit;
-    const publishing = recorded === undefined || moved;
+    const updating = moved && input.push !== undefined;
+    if (moved && !updating) {
+      yield* Effect.logInfo(
+        `session ${input.sessionId}: ${input.head} moved past the commit ${recorded.url} was published at, but this step has no push, so the PR is left where it was`,
+      );
+    }
+    const publishing = recorded === undefined || updating;
+    // A refusal of a recorded PR's update names the PR it left as it was (F14), so no reader tells
+    // an operator "no PR was opened" about a session whose PR is open.
+    const leftAsItWas = <A extends object>(
+      answer: A,
+    ): A | (A & { readonly pullRequest: string }) =>
+      recorded === undefined
+        ? answer
+        : { ...answer, pullRequest: recorded.url };
     // Read before the call, so the tag names the path this invocation took rather than what the
     // document ends the turn holding: a first open that lost its index row is still "opened".
     // A card's PR this run adopts (C19) is one already open, so it is not "opened" either.
     const outcome =
       recorded === undefined && input.adopt === undefined
         ? "opened"
-        : moved
+        : updating
           ? "updated"
           : "already-open";
     // Measured only when the step would publish: a recorded PR whose branch has not moved is the
@@ -278,7 +300,7 @@ export const openPullRequest = (
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR; a recorded PR
     // refused an update (F14) keeps its record, at the commit it was published at.
-    if (Option.isSome(refused)) return refused.value;
+    if (Option.isSome(refused)) return leftAsItWas(refused.value);
     // The scan before the push (S-agent-secrets): every line the branch's commits add, for a stored
     // value or a credential's shape. Like the cap it writes nothing, so a refused session reads as
     // one with no PR; unlike the cap it reads the history, because that is what a push publishes.
@@ -323,18 +345,18 @@ export const openPullRequest = (
         ...(published === undefined ? {} : { exclude: [published] }),
         known: input.secrets?.known ?? [],
       });
-      if (Option.isSome(found)) return found.value;
+      if (Option.isSome(found)) return leftAsItWas(found.value);
     }
     // Published only when the step publishes, and only a branch the step measured: a directory that
     // is not its own checkout has no branch to push. A rejected push writes nothing, so the session
     // reads as it did before the step — no PR, or its PR at the commit it was published at.
     if (publishing && Option.isSome(measured) && input.push !== undefined) {
       const pushed = yield* publish(input.push(commit), input.head);
-      if (pushed !== undefined) return pushed;
+      if (pushed !== undefined) return leftAsItWas(pushed);
     }
     const pr =
       recorded !== undefined
-        ? moved && commit !== undefined
+        ? updating && commit !== undefined
           ? yield* updateRecordedPr(input.conversation, recorded, commit)
           : recorded
         : input.adopt === undefined

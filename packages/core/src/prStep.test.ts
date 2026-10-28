@@ -28,6 +28,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CredentialProvider } from "./credentials";
 import { startGitRemote } from "./git-remote.test-fake";
+import { DEFAULT_DIFF_CAP } from "./pr";
 import { gitRepoRemote } from "./RepoRemote";
 import { SessionService, SessionServiceLive } from "./SessionService";
 
@@ -391,13 +392,14 @@ const recordedPr = (sessionId: SessionId) =>
  * A session on a fresh repo with its PR opened through the step at a first commit: the session, its
  * worktree, and the commit the PR was published at.
  */
-const openedSession = (title: string) =>
+const openedSession = (title: string, push = true) =>
   Effect.gen(function* () {
     const fixture = makeRepo();
     const sessions = yield* SessionService;
+    // With no URL, and a checkout whose `origin` is a path, the step has nowhere to push.
     yield* sessions.registerRepo({
       repo: fixture.repo,
-      url: fixture.url,
+      url: push ? fixture.url : "",
       localPath: fixture.checkout,
     });
     const created = yield* sessions.create({ repo: fixture.repo, title });
@@ -500,6 +502,85 @@ describe(
     });
 
     /**
+     * Mutation: move the record whether or not a push ran — the answer is `updated`, the record
+     * names the second commit, and a "pushed" line claims a push the forge never took.
+     */
+    it("with no push, leaves the PR and its record where they were and claims no push", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession(
+            "a session with no forge",
+            false,
+          );
+          const second = commitFile(session.worktree, "SECOND.md", "more\n");
+          const again = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            second,
+            again,
+            snapshot: yield* sessions.get(session.id),
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(link(result.again).outcome).toBe("already-open");
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBeUndefined();
+      expect(
+        result.snapshot.entries.filter((entry) =>
+          entry.text.startsWith("pushed "),
+        ),
+      ).toEqual([]);
+    });
+
+    /**
+     * Mutation: answer a recorded PR's update without measuring it — a branch past the cap is
+     * pushed. Mutation: drop the PR from the refusal — a reader says "no PR was opened".
+     */
+    it("caps the later commits under the open's cap, pushes none of them, and keeps the PR at its commit", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that grows too far");
+          commitFile(
+            session.worktree,
+            "LONG.md",
+            "x\n".repeat(DEFAULT_DIFF_CAP.maxLines + 1),
+          );
+          const creates = opened.length;
+          const refused = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            refused,
+            creates: opened.length - creates,
+            prUrl: (yield* sessions.get(session.id)).session.prUrl,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(result.refused).toEqual({
+        outcome: "over-cap",
+        limit: "lines",
+        cap: DEFAULT_DIFF_CAP.maxLines,
+        measured: DEFAULT_DIFF_CAP.maxLines + 2,
+        pullRequest: link(result.answer).url,
+      });
+      expect(result.creates).toBe(0);
+      expect(result.prUrl).toBe(link(result.answer).url);
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBe(result.first);
+    });
+
+    /**
      * Mutation: force the update's push — the remote's commit is overwritten.
      * Mutation: record the new tip before the push answers — the record names a commit the forge
      * does not hold.
@@ -543,9 +624,11 @@ describe(
           };
         }),
       );
+      // Naming the PR it left as it was, so no reader says "no PR was opened" (F14).
       expect(result.refused).toEqual({
         outcome: "non-fast-forward",
         head: result.head,
+        pullRequest: link(result.answer).url,
       });
       expect(shaOf(result.fixture.bare, `refs/heads/${result.head}`)).toBe(
         result.theirs,

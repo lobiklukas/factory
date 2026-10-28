@@ -17,7 +17,7 @@
 import { BunServices } from "@effect/platform-bun";
 import { type ChildProcess, execSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,7 @@ import {
 } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import type { SettleDecision } from "./prOnSettle";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -93,9 +93,17 @@ const decisions: Array<{
   readonly decision: SettleDecision;
 }> = [];
 
+/** Every directory a case made — checkouts and session roots — removed with the suite. */
+const directories: string[] = [];
+const tempDir = (prefix: string): string => {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  directories.push(directory);
+  return directory;
+};
+
 /** A checkout whose `main` carries an `f16-files` marker of `files` (none for 0). */
 const fixtureRepo = (files: number): string => {
-  const root = mkdtempSync(join(tmpdir(), "factory-f16-repo-"));
+  const root = tempDir("factory-f16-repo-");
   const git = (command: string) =>
     execSync(command, { cwd: root, stdio: "ignore" });
   git("git init -b main");
@@ -282,6 +290,28 @@ const sweptAmong = (ids: ReadonlyArray<SessionId>) =>
 
 const CASE = 180_000;
 
+afterAll(async () => {
+  // The rows point at session roots this suite deletes, so they leave with them rather than waiting
+  // for another suite's rebuild to find them (as `prStep.test.ts`'s do). The logs' `commits` stay:
+  // that table is append-only and refuses a DELETE.
+  const repos = `f16-${runId}/%`;
+  await onBoot(
+    tempDir("factory-f16-cleanup-"),
+    false,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`DELETE FROM task_runs WHERE session_id IN (SELECT id FROM sessions WHERE repo LIKE ${repos})`;
+      yield* sql`DELETE FROM board_instances WHERE repo LIKE ${repos}`;
+      yield* sql`DELETE FROM log_checkpoints WHERE log_id IN (SELECT id FROM sessions WHERE repo LIKE ${repos})`;
+      yield* sql`DELETE FROM sessions WHERE repo LIKE ${repos}`;
+      yield* sql`DELETE FROM repos WHERE slug LIKE ${repos}`;
+    }),
+  );
+  for (const directory of directories) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 60_000);
+
 describe("a settle no process saw gets its PR step at boot (F16)", () => {
   const fixture = fileURLToPath(
     new URL("./SessionService.prOnBoot.kill-fixture.ts", import.meta.url),
@@ -349,7 +379,7 @@ describe("a settle no process saw gets its PR step at boot (F16)", () => {
   it(
     "a card run killed inside its settle's PR step opens its PR once at the next boot, and not again at the one after",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "factory-f16-kill-"));
+      const root = tempDir("factory-f16-kill-");
       const repo = `f16-${runId}/killed`;
       const doomed = await Effect.runPromise(
         startDoomed(root, repo, fixtureRepo(0)),
@@ -424,7 +454,7 @@ describe("a settle no process saw gets its PR step at boot (F16)", () => {
   it(
     "a settle whose step already said no-change or not-opened is not announced again at boot; one whose tip moved since is stepped",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "factory-f16-announced-"));
+      const root = tempDir("factory-f16-announced-");
       const live = await onBoot(
         root,
         true,
@@ -496,6 +526,86 @@ describe("a settle no process saw gets its PR step at boot (F16)", () => {
   );
 
   /**
+   * Mutation: read the announcement from the newest run's tail alone — the second run, answered
+   * live as `unchanged` (no entry), leaves a tail with none, so the boot steps the session and says
+   * "nothing to publish" a second time for the same tip.
+   */
+  it(
+    "a no-change announced by an earlier run still covers a later run that settled on the same tip",
+    async () => {
+      const root = tempDir("factory-f16-two-runs-");
+      const live = await onBoot(
+        root,
+        true,
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const even = yield* buildRun(yield* register(0, "two-runs"));
+          yield* settled(even.sessionId);
+          yield* decided(even.sessionId);
+          // A second run that changes no code: answered from memory, so it writes nothing.
+          yield* service.send({ sessionId: even.sessionId, content: "again" });
+          yield* decided(even.sessionId, 2);
+          return even;
+        }),
+      );
+      const booted = await onBoot(
+        root,
+        true,
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const stepped = yield* sweptAmong([live.sessionId]);
+          return { stepped, snapshot: yield* service.get(live.sessionId) };
+        }),
+      );
+
+      expect(decisionsOf(live.sessionId)).toEqual(["no-change", "unchanged"]);
+      expect(booted.stepped).toEqual([]);
+      expect(said(booted.snapshot, "nothing to publish")).toHaveLength(1);
+    },
+    CASE,
+  );
+
+  /**
+   * Mutation: drop the hand-over check from the sweep — the earlier run, whose branch the card's
+   * later run took over, is stepped: a PR is opened from the card's branch into its stale log.
+   */
+  it(
+    "leaves a card run a later run of the card took the branch over from",
+    async () => {
+      const root = tempDir("factory-f16-handed-");
+      const made = await onBoot(
+        root,
+        false,
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const first = yield* buildRun(yield* register(1, "handed"));
+          yield* settled(first.sessionId);
+          // The card's next run binds the card's branch, and the first run's worktree lets go of it.
+          const later = yield* service.create({
+            taskId: first.taskId,
+            taskColumn: "building",
+          });
+          return { first: first.sessionId, later: later.id };
+        }),
+      );
+      const swept = await onBoot(
+        root,
+        true,
+        Effect.gen(function* () {
+          const stepped = yield* sweptAmong([made.first, made.later]);
+          return { stepped, prUrl: yield* prUrlOf(made.first) };
+        }),
+      );
+
+      expect(swept.stepped).toEqual([]);
+      expect(swept.prUrl).toBeNull();
+      expect(decisionsOf(made.first)).toEqual([]);
+      expect(createsFor(made.first)).toBe(0);
+    },
+    CASE,
+  );
+
+  /**
    * Mutation: drop the declaration check from the sweep (step every row the SQL finds) — the replay
    * and the parked run are stepped (a PR, or a note). Mutation: drop `forked_from IS NULL` — the fork
    * is stepped. Mutation: drop the task-run/trigger provenance from the query and the declaration —
@@ -504,7 +614,7 @@ describe("a settle no process saw gets its PR step at boot (F16)", () => {
   it(
     "leaves a person's session, a fork, a replay, a released workspace and a parked run untouched",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "factory-f16-untouched-"));
+      const root = tempDir("factory-f16-untouched-");
       // A process with no forge pair settles every run and steps none, as a death before every step.
       const made = await onBoot(
         root,

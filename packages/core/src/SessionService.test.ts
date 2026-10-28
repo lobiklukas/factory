@@ -3170,7 +3170,9 @@ describe("the diff cap", () => {
     }
   }, 120_000);
 
-  it("caps a recorded PR's later commits too, keeping the PR, and re-measures nothing when the branch has not moved (F14)", async () => {
+  // A deployment with no push (no `repoRemote` here) cannot publish a recorded PR's later commits,
+  // so it measures none of them: the cap on an update is `prStep.test.ts`'s, where the step pushes.
+  it("does not re-measure a recorded PR's branch when the step has no push to publish it with (F14)", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/35";
     const github = makeGithubFake(201, { number: 35, url });
     const result = await program(
@@ -3201,8 +3203,8 @@ describe("the diff cap", () => {
         const first = yield* sessions.openPullRequest(asked);
         // Asked again on the same commit: the log answers, nothing is measured.
         const repeated = yield* sessions.openPullRequest(asked);
-        // The branch then grows past the cap. Since F14 a recorded PR takes the branch's later
-        // commits, under the same cap: they are refused, and the PR stays the session's.
+        // The branch then grows past the cap. With no push the step updates nothing, so the PR
+        // stands as recorded and nothing is measured to refuse it.
         commitDiff({
           worktree: openedOnce.workspace.path,
           files: 1,
@@ -3224,15 +3226,13 @@ describe("the diff cap", () => {
       url,
       outcome: "already-open",
     });
-    expect(result.grown).toEqual({
-      outcome: "over-cap",
-      limit: "lines",
-      cap: DEFAULT_DIFF_CAP.maxLines,
-      measured: DEFAULT_DIFF_CAP.maxLines + 1,
+    expect(opened(result.grown)).toEqual({
+      number: 35,
+      url,
+      outcome: "already-open",
     });
     expect(result.prUrl).toBe(url);
-    // One POST for all three: the retry was answered by the log, and the refused update asks
-    // GitHub for nothing.
+    // One POST for all three: both retries were answered by the log.
     expect(github.requests).toHaveLength(1);
   }, 120_000);
 

@@ -89,6 +89,12 @@ export const OverCapPullRequest = Schema.Struct({
   limit: DiffCapLimit,
   cap: Schema.Finite,
   measured: Schema.Finite,
+  /**
+   * The PR this refusal left as it was (F14): set when the session already had one open and the
+   * step was pushing later commits onto it, so a reader says "nothing was pushed to <pr>" rather
+   * than "no PR was opened". Absent for a refused open.
+   */
+  pullRequest: Schema.optional(Schema.String),
 });
 export type OverCapPullRequest = typeof OverCapPullRequest.Type;
 
@@ -124,6 +130,12 @@ export type NoChangePullRequest = typeof NoChangePullRequest.Type;
 export const NonFastForwardPullRequest = Schema.Struct({
   outcome: Schema.Literal("non-fast-forward"),
   head: Schema.String,
+  /**
+   * The PR this refusal left as it was (F14): set when the session already had one open and the
+   * step was pushing later commits onto it, so a reader says "nothing was pushed to <pr>" rather
+   * than "no PR was opened". Absent for a refused open.
+   */
+  pullRequest: Schema.optional(Schema.String),
 });
 export type NonFastForwardPullRequest = typeof NonFastForwardPullRequest.Type;
 
@@ -158,6 +170,12 @@ export const SecretFoundPullRequest = Schema.Struct({
   outcome: Schema.Literal("secret-found"),
   findings: Schema.Array(SecretFinding),
   count: Schema.Int,
+  /**
+   * The PR this refusal left as it was (F14): set when the session already had one open and the
+   * step was pushing later commits onto it, so a reader says "nothing was pushed to <pr>" rather
+   * than "no PR was opened". Absent for a refused open.
+   */
+  pullRequest: Schema.optional(Schema.String),
 });
 export type SecretFoundPullRequest = typeof SecretFoundPullRequest.Type;
 
@@ -201,13 +219,13 @@ export const pullRequestRefusal = (
 ): string => {
   switch (step.outcome) {
     case "secret-found":
-      return `the branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed and no pull request was opened; take it out of the branch's history`;
+      return `the branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed and ${step.pullRequest === undefined ? "no pull request was opened" : `${step.pullRequest} was left as it was`}; take it out of the branch's history`;
     case "over-cap":
-      return `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`;
+      return `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so ${step.pullRequest === undefined ? "no pull request was opened" : `nothing was pushed to ${step.pullRequest}`}`;
     case "no-change":
       return "the run changed no file against its base branch, so there is nothing to open a pull request for";
     case "non-fast-forward":
-      return `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so no pull request was opened`;
+      return `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so ${step.pullRequest === undefined ? "no pull request was opened" : `nothing was pushed to ${step.pullRequest}`}`;
   }
 };
 

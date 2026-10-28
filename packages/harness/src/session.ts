@@ -3136,20 +3136,29 @@ export const readRunTurn = (
   });
 
 /**
- * What the newest run's settle already announced about its PR (F16): the newest no-change or
- * not-opened entry after that run's newest user input, as the commit it was decided at — `""` for an
- * entry that names none (written before the field existed) — or `undefined` when the run's tail
- * holds neither, which is a settle whose step never said anything: the process died first. Read
- * newest first and only as far back as the run's start, as `readRunTurn` reads, from a log nobody
- * owns, so a boot can decide without opening an owner.
+ * What the log's settles already announced about its PR (F16): the newest no-change or not-opened
+ * entry, as the commit it was decided at, read newest first from a log nobody owns, so a boot can
+ * decide without opening an owner. `undefined` when the log holds neither — a settle whose step never
+ * said anything, because the process died first.
+ *
+ * The whole log, not only the newest run's tail: a settle the live process answered as `unchanged`
+ * (its branch still at the commit an earlier run's settle found even) writes nothing, so the
+ * announcement that covers the newest run can be an earlier run's. Its commit is what makes it
+ * comparable with the branch's tip whatever run wrote it.
+ *
+ * An entry that names no commit — written before the field existed, or a stopped run's, which
+ * decided nothing about its tip — answers `""` when it is in the newest run's tail (after its newest
+ * user input), which is the same settle as far as anyone can tell, and `undefined` when it is an
+ * earlier run's: nothing says the newest run was answered.
  */
 export const readSettleAnnouncement = (
   storage: Storage,
 ): Effect.Effect<string | undefined, SessionError> =>
   Effect.gen(function* () {
     let cursor: Cursor | undefined;
+    let earlierRun = false;
     for (;;) {
-      const page = yield* attempt("scan the run's entries", () =>
+      const page = yield* attempt("scan the log's entries", () =>
         storage.scanEntries(
           { conversationId: ROOT_CONVERSATION_ID },
           RUN_ENDING_PAGE,
@@ -3158,7 +3167,10 @@ export const readSettleAnnouncement = (
         ),
       );
       for (const entry of page.items) {
-        if (entry.kind === "pi.user") return undefined;
+        if (entry.kind === "pi.user") {
+          earlierRun = true;
+          continue;
+        }
         if (
           entry.kind === NO_CHANGE_ENTRY_KIND ||
           entry.kind === PR_NOT_OPENED_ENTRY_KIND
@@ -3168,7 +3180,8 @@ export const readSettleAnnouncement = (
             data !== null && typeof data === "object" && !Array.isArray(data)
               ? (data as JsonRecord)["commit"]
               : undefined;
-          return typeof commit === "string" ? commit : "";
+          if (typeof commit === "string" && commit !== "") return commit;
+          return earlierRun ? undefined : "";
         }
       }
       cursor = page.next;
