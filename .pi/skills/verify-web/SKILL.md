@@ -169,6 +169,38 @@ and `DefinitionNotFound` (the page's own request rewritten in flight to name a d
 not exist) to be shown verbatim with nothing written (`features/board-create.md`). `drive.mjs` makes
 its own board through the same form. Evidence goes to `.verify/evidence/latest/board-create/`.
 
+### The first run
+
+```sh
+FIRST_RUN_API_PORT=9562 FIRST_RUN_WEB_PORT=3562 ./first-run.sh   # its own instance and empty database; leaves nothing running
+```
+
+A new operator's path needs a database with nothing in it, so `first-run.sh` starts its own API and
+dashboard on a throwaway database it mints on `DATABASE_URL`'s server and drops on exit.
+`first-run.mjs` walks the path through the browser alone (C9): `/` opens `/boards`, whose checklist
+shows nothing ticked; every empty state (`/attention`, `/approvals`, `/sandboxes`, `/spend`,
+`/sessions`) names a press in the UI and none says to type `factory <command>`; then each step's own
+link registers a throwaway checkout, creates a board on it, adds a card and (after moving the card out
+of intake) starts a run, with the checklist ticking one step at a time, equal to the RPC reads. It ends
+on routing: `/` and the logo open the only board's lanes, and the list once a second board exists
+(`features/first-run.md`). Evidence goes to `.verify/evidence/latest/first-run/`.
+
+### Board settings
+
+```sh
+BOARD_SETTINGS_API_PORT=9471 BOARD_SETTINGS_WEB_PORT=3471 ./board-settings.sh   # its own instance with a role model; leaves nothing running
+```
+
+A column's model is deployment configuration, so `board-settings.sh` starts its own API
+(`ROLE_MODELS=specifier=faux/faux-spec`) and dashboard and makes two boards over the RPC, one on the
+default definition's newest version and one pinned to v2. `board-settings.mjs` opens each board's
+**Settings** page from its header and requires every column read back from the page — kind, role,
+model and its source, skills, requirements marked checked or "not yet checked", moves out and human
+gates — to equal `getDefinition` for the board's version; `planning → building` to be the gate "plan
+approval" and `specifying`'s role `specifier`; the v2 board to say v3 exists; each lane header's
+disclosure to show its column's same facts; and a malformed or missing board to be refused
+(`features/board-settings.md`). Evidence goes to `.verify/evidence/latest/board-settings/`.
+
 ### The dashboard's credential
 
 ```sh
@@ -238,6 +270,21 @@ one `interruptSession`, the header to go idle within 5 s, no `faux-ok` two naps 
 `interrupted` row, a follow-up that answers, and a press held in the browser until the run settled to
 raise a toast in the server's words (`features/interrupt.md`). Evidence goes to
 `.verify/evidence/latest/interrupt/`.
+
+### The card face
+
+```sh
+CARD_FACE_API_PORT=9581 CARD_FACE_WEB_PORT=3581 ./card-face.sh   # its own instance with FAUX_SLEEP_MS; leaves nothing running
+```
+
+A card shows its newest run's state, the PR its runs opened and their summed spend (C10), from the
+board's one `listBoardCards` read. `card-face.sh` starts its own API and dashboard with
+`FAUX_SLEEP_MS` (default `5000`); `card-face.mjs` seeds a board (`seed-card-face.ts`), starts runs over
+the RPC, and requires `busy` within one poll interval of a run starting, the summed spend to equal the
+sum the drive reads off `listTaskRuns` and `listSessions`, a PR link to appear within one poll interval
+of the session recording it, `idle` once the run settles, no per-card read in the page's RPC tags, and
+nine cards to cost no more calls per window than three (`features/card-face.md`). Evidence goes to
+`.verify/evidence/latest/card-face/`.
 
 ### Open pull request
 
@@ -312,6 +359,8 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `seed-spend.ts`     | The spend drive's board and the two cards its runs start from                    |
 | `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)          |
 | `board-create.sh`   | The New board form's own instance, empty database and drive (`board-create.mjs`) |
+| `first-run.sh`      | The first run's own instance, empty database and drive (`first-run.mjs`)         |
+| `board-settings.sh` | The settings page's own instance (a role model) and drive (`board-settings.mjs`) |
 | `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |

@@ -1,13 +1,15 @@
 # Routing
 
-**Status: passing.** `/` redirects to `/sessions`, each section route renders inside the rail's
+**Status: passing.** `/` opens the boards (C9), each section route renders inside the rail's
 frame, and a session id that the control plane could not have minted is refused in the route rather
 than sent to the API.
 
 ## Sub-features
 
-- `/` redirects to `/sessions`: it is the only section with a real read behind it, and a redirect
-  beats an empty first impression
+- `/` (and the logo, which links to it) opens `/boards/<id>` when exactly one board exists and
+  `/boards` with none or several: the board is the primary surface, and the page that decides reads
+  `listBoards` afresh on every visit. A list that fails to load lands on `/boards`, which shows the
+  failure. See [first-run.md](first-run.md)
 - `/sessions` renders the list beside the pane; `/sessions/<id>` attaches to that session
 - `/boards` lists the boards and `/boards/<id>` renders one board's lanes (LOB-75, [board.md](board.md));
   `/boards/not-a-board` is refused by `Schema.decodeUnknownOption(BoardInstanceId)` the same way.
@@ -40,7 +42,8 @@ Open the dashboard root. No auth, no query parameters, no seed data.
 
 ## Driving it with drive.mjs
 
-`drive.mjs` asserts the redirect, the copy on `/sandboxes`, the approvals inbox, and the bad-id
+`drive.mjs` asserts where `/` lands for the number of boards its database holds (`first-run.sh`
+proves 0, 1 and several), the redirect, the copy on `/sandboxes`, the approvals inbox, and the bad-id
 refusal. Below `md` a session's route hides the list whatever its id decodes to (LOB-210), so the
 refused pane carries the same **Show sessions** link as a session's header: the drive requires it
 hidden at 1440 px, visible at 390 px, and opening `/sessions` (`observed.badIdBack`). The sandbox assertion is deliberately on the copy: a table appearing without a source behind

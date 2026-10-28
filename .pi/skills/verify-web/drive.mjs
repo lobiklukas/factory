@@ -94,16 +94,28 @@ const assert = (name, condition, detail) => {
   return Boolean(condition);
 };
 
-// Feature: the root redirects to the sessions section. See features/routing.md.
+// Feature: the root opens on boards (C9): the only board's lanes, or the list with none or several.
+// See features/routing.md and features/first-run.md. The checks here do not assume how many boards
+// the instance's database holds; `first-run.sh` proves the 0, 1 and several cases on its own database.
 await page.goto(WEB_URL, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
+await page.waitForFunction(() => window.location.pathname !== "/", null, {
+  timeout: 15_000,
+});
 const redirected = new URL(page.url()).pathname;
 observed.redirected = redirected;
+const boardsAtRoot = await rpcFromDrive("listBoards", {});
+const expectedRoot =
+  boardsAtRoot.value?.length === 1
+    ? `/boards/${boardsAtRoot.value[0].id}`
+    : "/boards";
 assert(
-  "root redirects to sessions",
-  redirected === "/sessions",
-  `after goto ${WEB_URL} the path is ${JSON.stringify(redirected)}`,
+  "root opens the only board, or the boards list",
+  boardsAtRoot.exit === "Success" && redirected === expectedRoot,
+  `after goto ${WEB_URL} the path is ${JSON.stringify(redirected)}; ${boardsAtRoot.value?.length ?? "?"} board(s) so ${JSON.stringify(expectedRoot)}`,
 );
+await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
 
 // The sidebar is the server's list (LOB-75 deleted the browser-local registry): once it has
 // loaded, its rows are `listSessions`' first page in the server's order, or its empty state when the
@@ -1979,7 +1991,11 @@ boardObserved.definitionOrder = definitionOrder;
 const BOARD_READS = new Set([
   "listBoards",
   "getBoard",
+  // A lane's settings disclosure (LOB-245) reads the board's configuration when it is opened.
+  "getBoardConfig",
   "listTasks",
+  // The board page reads its cards with `listBoardCards` (C10): the face's run status, PR and spend.
+  "listBoardCards",
   "listSessions",
   "listTaskRuns",
   // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
@@ -1997,6 +2013,8 @@ const BOARD_READS = new Set([
   "getServerInfo",
   // The New session form's cost estimate (LOB-38) is a read: it spends nothing and opens nothing.
   "predictCost",
+  // The getting-started checklist (C9) reads the registry beside the boards, cards and runs.
+  "listRepos",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
@@ -2028,8 +2046,10 @@ const readLanes = (target) =>
       cardText: cards.map((card) =>
         (card.textContent ?? "").replace(/\s+/g, " ").trim(),
       ),
+      // A lane header's settings disclosure (LOB-245) is the one button a lane holds: it opens what the
+      // column does, read-only, and writes nothing — the write check below would catch it if it did.
       controls: document.querySelectorAll(
-        "[aria-label='Lanes'] button, [aria-label='Lanes'] [role='button'], [aria-label='Lanes'] [draggable='true']",
+        "[aria-label='Lanes'] button:not([data-lane-settings-toggle]), [aria-label='Lanes'] [role='button']:not([data-lane-settings-toggle]), [aria-label='Lanes'] [draggable='true']",
       ).length,
     };
   }, cardId);
@@ -2313,7 +2333,9 @@ const holdBoardReads = async (route) => {
   const body = route.request().postData() ?? "";
   if (
     freezeReads &&
-    (body.includes('"tag":"getBoard"') || body.includes('"tag":"listTasks"'))
+    (body.includes('"tag":"getBoard"') ||
+      body.includes('"tag":"listBoardCards"') ||
+      body.includes('"tag":"listTasks"'))
   ) {
     held.push(route);
     return;
