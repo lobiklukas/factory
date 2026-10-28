@@ -106,3 +106,76 @@ export const inspectCheckout = (
           ...(workTree === undefined ? {} : { workTree }),
         })),
       );
+
+/**
+ * One hook-free `git` in `directory` that answers its trimmed stdout, or `undefined` when git
+ * failed, could not run, or outlived the deadline. The probes below are read-only questions about a
+ * checkout, and "git could not say" is an answer to each of them.
+ */
+const gitAnswer = (
+  directory: string,
+  args: ReadonlyArray<string>,
+): Effect.Effect<string | undefined> =>
+  Effect.callback<string | undefined>((resume, signal) => {
+    execFile(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        directory,
+        ...args,
+      ],
+      { encoding: "utf8", signal, timeout: GIT_TIMEOUT_MS },
+      (error, stdout) =>
+        resume(Effect.succeed(error === null ? stdout.trim() : undefined)),
+    );
+  });
+
+/** Whether `ref` (a full ref name) resolves to a commit in the repository `directory` is in. */
+export const refExists = (
+  directory: string,
+  ref: string,
+): Effect.Effect<boolean> =>
+  gitAnswer(directory, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    "--end-of-options",
+    `${ref}^{commit}`,
+  ]).pipe(Effect.map((sha) => sha !== undefined && sha !== ""));
+
+/**
+ * The branch a checkout's repo treats as its default, read from the checkout alone (C17): what a
+ * registration with no `--base-ref` records when the forge cannot be asked. In order: the branch
+ * `origin/HEAD` names (what `git clone` records as the remote's default), a local `main`, a local
+ * `master`, the branch the checkout has checked out. `undefined` when none of them answers — a
+ * detached checkout of a repo with neither name — and the caller keeps its own default.
+ */
+export const checkoutDefaultBranch = (
+  checkout: string,
+): Effect.Effect<string | undefined> =>
+  Effect.gen(function* () {
+    const remoteHead = yield* gitAnswer(checkout, [
+      "symbolic-ref",
+      "--quiet",
+      "refs/remotes/origin/HEAD",
+    ]);
+    const fromOrigin = remoteHead?.startsWith("refs/remotes/origin/")
+      ? remoteHead.slice("refs/remotes/origin/".length)
+      : undefined;
+    if (fromOrigin !== undefined && fromOrigin !== "") return fromOrigin;
+    for (const name of ["main", "master"]) {
+      if (yield* refExists(checkout, `refs/heads/${name}`)) return name;
+    }
+    const head = yield* gitAnswer(checkout, [
+      "symbolic-ref",
+      "--quiet",
+      "HEAD",
+    ]);
+    return head?.startsWith("refs/heads/")
+      ? head.slice("refs/heads/".length)
+      : undefined;
+  });

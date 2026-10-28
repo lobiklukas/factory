@@ -7,6 +7,7 @@ import {
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
   gitRepoMirror,
+  gitRepoRemote,
   PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
@@ -731,8 +732,13 @@ const HttpLive = Effect.gen(function* () {
   );
 
   // A repo registered with only a URL is cloned into `<SESSION_ROOT>/.cache` with the worker's read
-  // credential, and its sessions' worktrees are cut from that clone (LOB-265).
-  const repoMirror = yield* gitRepoMirror({ root: model.sessionRoot }).pipe(
+  // credential, and its sessions' worktrees are cut from that clone (LOB-265). A repo with a checkout
+  // and a forge URL has its base fetched into the checkout before a worktree is cut, and its
+  // session's branch pushed before the PR step opens the PR (C17). One provider answers both.
+  const [repoMirror, repoRemote] = yield* Effect.all([
+    gitRepoMirror({ root: model.sessionRoot }),
+    gitRepoRemote,
+  ]).pipe(
     Effect.provide(Layer.mergeAll(CredentialProviderLive, BunServices.layer)),
   );
 
@@ -761,6 +767,7 @@ const HttpLive = Effect.gen(function* () {
   const SessionDeps = SessionServiceLive({
     reviewPoster,
     repoMirror,
+    repoRemote,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,

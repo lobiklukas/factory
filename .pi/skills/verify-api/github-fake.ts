@@ -16,7 +16,13 @@
 //   GITHUB_FAKE_LEDGER     ledger file path, required
 //   GITHUB_FAKE_HANG_FIRST "1" holds the first create request open, never answering it — the
 //                          window a killed process leaves behind
+//   GITHUB_FAKE_GIT_ROOT   a directory of bare repositories (`<root>/<owner>/<repo>.git`), the
+//                          git side of the same forge (C17). When set, a create whose head that
+//                          repository does not hold is refused `422` as GitHub refuses it, and a PR
+//                          records the head's sha at the moment it was opened (`headSha`)
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 type Ledger = {
   readonly requests: ReadonlyArray<{
@@ -30,12 +36,41 @@ type Ledger = {
     readonly url: string;
     readonly head: string;
     readonly base: string;
+    /** The head's sha on the git side when the PR was opened, under `GITHUB_FAKE_GIT_ROOT`. */
+    readonly headSha?: string;
   }>;
 };
 
 const port = Number(process.env["GITHUB_FAKE_PORT"] ?? "9411");
 const ledgerPath = process.env["GITHUB_FAKE_LEDGER"];
 const hangFirst = process.env["GITHUB_FAKE_HANG_FIRST"] === "1";
+const gitRoot = process.env["GITHUB_FAKE_GIT_ROOT"];
+
+/** The sha the forge's git side holds for `branch`, or `undefined` when it holds no such branch. */
+const headOnForge = (
+  owner: string,
+  repo: string,
+  branch: string,
+): string | undefined => {
+  if (gitRoot === undefined || gitRoot === "") return undefined;
+  try {
+    return execFileSync(
+      "git",
+      [
+        "--git-dir",
+        join(gitRoot, owner, `${repo}.git`),
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        `refs/heads/${branch}^{commit}`,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+  } catch {
+    return undefined;
+  }
+};
 
 if (ledgerPath === undefined || ledgerPath === "") {
   console.error("GITHUB_FAKE_LEDGER is required: the ledger is the evidence");
@@ -141,12 +176,22 @@ const server = Bun.serve({
           ],
         });
       }
+      const headSha = headOnForge(owner, repo, head);
+      if (gitRoot !== undefined && gitRoot !== "" && headSha === undefined) {
+        // GitHub's answer for a head the repository does not have: the bug C17 fixes is exactly a
+        // create that reached this branch.
+        return json(422, {
+          message: "Validation Failed",
+          errors: [{ resource: "PullRequest", field: "head", code: "invalid" }],
+        });
+      }
       const number = read().pulls.length + 1;
       const created = {
         number,
         url: `https://github.com/${owner}/${repo}/pull/${number}`,
         head,
         base,
+        ...(headSha === undefined ? {} : { headSha }),
       };
       write({ ...read(), pulls: [...read().pulls, created] });
       if (hangFirst && !hung) {

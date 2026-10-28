@@ -9,9 +9,9 @@ import { SessionClient } from "../rpc";
 /**
  * What `factory pr` prints for the PR step's answer: the link, or the reason there is none.
  *
- * Only an answer that carries a link is a success. `over-cap` and `no-change` are outcomes rather
- * than errors on the wire — the step ran, measured and decided — but the command was asked for a
- * PR and none exists, so it reports the outcome as the code a script branches on and exits
+ * Only an answer that carries a link is a success. `over-cap`, `no-change` and `non-fast-forward`
+ * (C17) are outcomes rather than errors on the wire — the step ran, measured and decided — but the
+ * command was asked for a PR and none exists, so it reports the outcome as the code a script branches on and exits
  * non-zero, as `withdraw` does for a message it could not take back. A caller that read only the
  * exit code must never be able to mistake "nothing was opened" for a link.
  */
@@ -47,6 +47,12 @@ export const prAnswer = (
         _tag: "NotOpened",
         code: "no_change",
         message: `session ${sessionId}'s branch has no change against its base; no PR was opened`,
+      };
+    case "non-fast-forward":
+      return {
+        _tag: "NotOpened",
+        code: "non_fast_forward",
+        message: `session ${sessionId}'s branch ${step.head} is behind the remote's: the remote has commits it does not, and the push is never forced; integrate them and run factory pr again. No PR was opened`,
       };
   }
 };

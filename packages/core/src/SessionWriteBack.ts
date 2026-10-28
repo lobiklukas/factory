@@ -100,7 +100,7 @@ export type PullRequestReport =
   | {
       readonly _tag: "failed";
       /** Which way the step failed; a tracker dedupes its explanation by it. */
-      readonly step: "over-cap" | "no-change" | "pr-error";
+      readonly step: "over-cap" | "no-change" | "non-fast-forward" | "pr-error";
       /** One sentence a person reading the issue can act on. */
       readonly reason: string;
     }
@@ -138,6 +138,12 @@ export const pullRequestReport = (
           step: "no-change",
           reason:
             "the run changed no file against its base branch, so there is nothing to open a pull request for",
+        };
+      case "non-fast-forward":
+        return {
+          _tag: "failed",
+          step: "non-fast-forward",
+          reason: `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so no pull request was opened`,
         };
     }
   }

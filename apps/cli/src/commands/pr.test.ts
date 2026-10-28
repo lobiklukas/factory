@@ -43,6 +43,21 @@ describe("prAnswer", () => {
     expect(JSON.stringify(answer)).not.toContain("https://");
   });
 
+  it("refuses a branch the forge would not take as non_fast_forward, naming it, with no link", () => {
+    const answer = prAnswer(SESSION, {
+      outcome: "non-fast-forward",
+      head: `factory/${SESSION}`,
+    });
+    expect(answer).toMatchObject({
+      _tag: "NotOpened",
+      code: "non_fast_forward",
+    });
+    if (answer._tag !== "NotOpened") return;
+    expect(answer.message).toContain(`factory/${SESSION}`);
+    expect(answer.message).toContain("No PR was opened");
+    expect(JSON.stringify(answer)).not.toContain("https://");
+  });
+
   it("refuses an over-cap diff as over_cap, naming the limit and the numbers", () => {
     expect(
       prAnswer(SESSION, {

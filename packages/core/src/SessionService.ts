@@ -259,6 +259,7 @@ import {
 } from "@repo/domain/PlanFreshness";
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
+import { baseTrackingRef, forgeUrlOf, type RepoRemote } from "./RepoRemote";
 import { mintSessionId } from "./ids";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
@@ -271,7 +272,7 @@ import {
 } from "./metrics";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
-import { openPullRequest } from "./prStep";
+import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   backtestCost,
   predictCost,
@@ -288,7 +289,12 @@ import {
   proposalIssueBody,
 } from "./ProposalTracker";
 import { SkillService, SkillServiceLive } from "./SkillService";
-import { inspectCheckout, workTreeRoot } from "./repos";
+import {
+  checkoutDefaultBranch,
+  inspectCheckout,
+  refExists,
+  workTreeRoot,
+} from "./repos";
 import {
   removeWorkspace,
   resolveWorkspace,
@@ -736,6 +742,14 @@ export type SessionServiceOptions = {
    * Absent: such a repo opens its sessions in an empty directory with a warning, as before.
    */
   readonly repoMirror?: RepoMirror;
+  /**
+   * The deployment's git path to a repo's forge for a repo with a checkout (C17): the base is fetched
+   * into the checkout before a session's worktree is cut, the session's branch is pushed before the
+   * PR step opens its PR, and a registration with no base ref asks the forge for its default branch.
+   * Used only for a repo whose registered URL is one a token may be sent to (`forgeUrlOf`). Absent:
+   * worktrees are cut from the checkout's local base and nothing is pushed, as before.
+   */
+  readonly repoRemote?: RepoRemote;
   /**
    * The runtime every session's commands run through (LOB-244), in a sandbox bound to its working
    * directory: the deployment's, selected by its configuration. Absent: each session's own
@@ -1653,8 +1667,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         resolution: {
           readonly cut: boolean;
           readonly released?: WorkspaceRelease | undefined;
-          /** The mirror's tip, fetched before the owners' gate was taken (`mirrorStartFor`). */
-          readonly mirrorStart?: string | undefined;
+          /**
+           * The base's tip, fetched before the owners' gate was taken (`fetchedStartFor`): the
+           * mirror's for a URL-only repo, the checkout's `refs/remotes/factory/<base>` otherwise.
+           */
+          readonly fetchedStart?: string | undefined;
         },
       ): Effect.Effect<SessionWorkspace, SessionError> =>
         Effect.gen(function* () {
@@ -1676,11 +1693,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: row.baseRef ?? undefined,
               ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
+              ...(localPath === undefined ||
+              resolution.fetchedStart === undefined
+                ? {}
+                : { startPoint: resolution.fetchedStart }),
               ...mirrorSource(
                 repo,
                 registered,
                 row.baseRef ?? "main",
-                resolution.mirrorStart,
+                resolution.fetchedStart,
               ),
               cut: resolution.cut && release === undefined,
             },
@@ -1804,6 +1825,70 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             );
           if (occupied) return undefined;
           return yield* source.mirror.sync.pipe(Effect.mapError(cloneFailure));
+        });
+
+      /**
+       * Fetch the base from the repo's forge into its registered checkout before a session's
+       * worktree is cut there (C17), outside the owners' gate for the reason `mirrorStartFor` is, and
+       * answer the tracking ref to cut at. Nothing to fetch for a repo with no checkout (the mirror's
+       * case), no forge URL a token may go to, a deployment with no remote, a base that is a commit
+       * id, or a session whose directory or branch already exists — that branch is reused, so the
+       * base it would be cut at is moot.
+       *
+       * A failed fetch is logged and the worktree is cut from the checkout's local base, as it was
+       * before: the checkout is the operator's, a real if possibly stale start, and a forge that is
+       * down for a minute should not stop every session on the repo opening. The PR step is where a
+       * stale base would show — its push answers `non-fast-forward` only for the session's own
+       * branch, and GitHub measures the PR against the remote's base either way.
+       */
+      const baseStartFor = (
+        row: SessionRow,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
+          const remote = options.repoRemote;
+          if (remote === undefined || row.repo === null) return undefined;
+          const baseRef = row.baseRef;
+          if (baseRef === null || isCommitId(baseRef)) return undefined;
+          if (!isSafeBranchName(baseRef)) return undefined;
+          if ((yield* releaseOf(row)) !== undefined) return undefined;
+          const repo = yield* toRepoSlug(row.repo);
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          const checkout = registered?.localPath ?? undefined;
+          if (registered === undefined || checkout === undefined)
+            return undefined;
+          const url = forgeUrlOf(repo, registered.url);
+          if (url === undefined) return undefined;
+          const occupied = yield* fs
+            .readDirectory(
+              sessionDirectory(path, options.sessionRoot, row.id, repo),
+            )
+            .pipe(
+              Effect.map((entries) => entries.length > 0),
+              Effect.orElseSucceed(() => false),
+            );
+          if (occupied) return undefined;
+          const branch = row.branch ?? `factory/${row.id}`;
+          if (yield* refExists(checkout, `refs/heads/${branch}`))
+            return undefined;
+          return yield* remote
+            .fetchBase({ repo, url, checkout, branch: baseRef })
+            .pipe(
+              Effect.map(() => baseTrackingRef(baseRef)),
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  `session ${row.id}: could not fetch ${baseRef} from ${repo}'s forge, so its worktree is cut from the checkout's local ${baseRef}: ${error.message}`,
+                ).pipe(Effect.as(undefined)),
+              ),
+            );
+        });
+
+      /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
+      const fetchedStartFor = (
+        row: SessionRow,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
+          const mirrored = yield* mirrorStartFor(row);
+          return mirrored ?? (yield* baseStartFor(row));
         });
 
       /** Whether the factory's mirror of the repo has been cloned: read from the disk, never stored. */
@@ -1992,6 +2077,41 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           });
         });
 
+      /**
+       * The branch a repo registered with no base ref starts its sessions from (C17): what the forge's
+       * `HEAD` names, when the deployment has a remote and the URL is one a token may go to, else what
+       * the checkout says (`checkoutDefaultBranch`), else nothing — and the caller keeps `main`. A
+       * forge that cannot be asked is logged and the checkout answers instead: a registration is not
+       * refused for a question with a local answer.
+       */
+      const defaultBranchOf = (
+        repo: RepoSlug,
+        url: string,
+        localPath: string | null,
+      ): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const forgeUrl = forgeUrlOf(repo, url);
+          if (options.repoRemote !== undefined && forgeUrl !== undefined) {
+            const named = yield* options.repoRemote
+              .defaultBranch({ repo, url: forgeUrl })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `repo ${repo}: could not ask its forge for the default branch, so the checkout answers: ${error.message}`,
+                  ).pipe(Effect.as(undefined)),
+                ),
+              );
+            if (named !== undefined) return named;
+          }
+          const local =
+            localPath === null
+              ? undefined
+              : yield* checkoutDefaultBranch(localPath);
+          return local !== undefined && isSafeBranchName(local)
+            ? local
+            : undefined;
+        });
+
       const registerRepo = (
         input: RegisterRepoInput,
       ): Effect.Effect<RepoSummary, SessionError | RepoCloneFailed> =>
@@ -2010,17 +2130,31 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             });
           }
           const existing = (yield* paper("read repo", readRepo(input.repo)))[0];
+          const url = input.url ?? existing?.url ?? "";
+          const localPath =
+            input.localPath === undefined
+              ? (existing?.localPath ?? null)
+              : input.localPath;
+          // A row with neither a URL nor a checkout is a placeholder a session create registered
+          // (`resolveBinding`), and its `main` was a guess, not an operator's choice: the first
+          // registration that names a source replaces it with what the repo itself says (C17).
+          const guessed =
+            existing === undefined ||
+            (existing.url === "" && existing.localPath === null);
+          const defaultBaseRef =
+            input.defaultBaseRef ??
+            (guessed
+              ? yield* defaultBranchOf(input.repo, url, localPath)
+              : undefined) ??
+            existing?.defaultBaseRef ??
+            "main";
           const rows = yield* paper(
             "register repo",
             upsertRepo({
               slug: input.repo,
-              url: input.url ?? existing?.url ?? "",
-              defaultBaseRef:
-                input.defaultBaseRef ?? existing?.defaultBaseRef ?? "main",
-              localPath:
-                input.localPath === undefined
-                  ? (existing?.localPath ?? null)
-                  : input.localPath,
+              url,
+              defaultBaseRef,
+              localPath,
             }),
           );
           const row = rows[0];
@@ -2152,7 +2286,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         row: SessionRow,
         open: OwnerOpening,
         acquisition: OwnerAcquisition,
-        mirrorStart: string | undefined,
+        fetchedStart: string | undefined,
       ): Effect.Effect<LiveOwner, SessionError> => {
         /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
         let claimed: number | undefined;
@@ -2201,7 +2335,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const workspace = yield* workspaceFor(row, {
               cut: released === undefined,
               released,
-              mirrorStart,
+              fetchedStart,
             });
             if (released === undefined) {
               yield* Effect.mapError(
@@ -2350,7 +2484,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * session whose workspace was released (LOB-268) it is refused, from the release read under
        * the gate, rather than handed a directory-less owner to prompt.
        *
-       * A URL-only repo's mirror is fetched first, outside the gate (`mirrorStartFor`).
+       * The base is fetched first, outside the gate (`fetchedStartFor`): into a URL-only repo's
+       * mirror, or into a checkout whose repo has a forge URL (C17).
        */
       const acquireOwnerWith = (
         id: SessionId,
@@ -2359,21 +2494,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquisition: OwnerAcquisition = {},
       ): Effect.Effect<LiveOwner, SessionError> =>
         Effect.gen(function* () {
-          // The network part of opening a URL-only repo's session, outside the gate (see
-          // `mirrorStartFor`); an owner that is already open needs none of it. A server at capacity
+          // The network part of opening a repo's session, outside the gate (see
+          // `fetchedStartFor`); an owner that is already open needs none of it. A server at capacity
           // refuses before the fetch rather than after it; the gate still decides (LOB-70).
           const alreadyOpen = HashMap.has(yield* Ref.get(live), id);
           if (!alreadyOpen && (yield* needsSlot(acquisition)))
             yield* refuseOverCapacity(acquisition.admission !== "background");
-          const mirrorStart = alreadyOpen
+          const fetchedStart = alreadyOpen
             ? undefined
-            : yield* mirrorStartFor(row);
+            : yield* fetchedStartFor(row);
           return yield* acquireUnderGate(
             id,
             row,
             open,
             acquisition,
-            mirrorStart,
+            fetchedStart,
           );
         });
 
@@ -2911,6 +3046,50 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * How the PR step publishes a session's branch (C17): the push to the repo's forge, when the
+       * deployment has a remote and the registry a URL a token may go to, and the base's fetched
+       * tip to measure the branch against, when the worktree's repository holds one. Only a session
+       * directory that is its own checkout is asked — a plain one is a directory under the session
+       * root, where git would answer for the enclosing repository instead (`diffSize`).
+       */
+      const publishingFor = (
+        repo: RepoSlug,
+        worktree: string,
+        head: string,
+        base: string,
+      ): Effect.Effect<
+        Pick<OpenPullRequestInput, "push" | "measureBase">,
+        SessionError
+      > =>
+        Effect.gen(function* () {
+          const checkout = yield* fs
+            .exists(path.join(worktree, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) return {};
+          const tracking = baseTrackingRef(base);
+          const measureBase = (yield* refExists(worktree, tracking))
+            ? { measureBase: tracking }
+            : {};
+          const remote = options.repoRemote;
+          if (remote === undefined) return measureBase;
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          const url =
+            registered === undefined
+              ? undefined
+              : forgeUrlOf(repo, registered.url);
+          if (url === undefined) {
+            yield* Effect.logInfo(
+              `repo ${repo} has no forge URL a token may be sent to, so the PR step pushes nothing: ${head} must already be on the forge (register one with \`factory repo add ${repo} --url <https url>\`)`,
+            );
+            return measureBase;
+          }
+          return {
+            ...measureBase,
+            push: remote.push({ repo, url, worktree, branch: head }),
+          };
+        });
+
+      /**
        * Open the session's PR, or hand back the one its log already records.
        *
        * The owner is what makes the step able to commit the document at all (Pi Durable allows one
@@ -2955,6 +3134,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               }
             }
             yield* touch(input.sessionId);
+            const worktree = owner.workspace.path;
+            const publishing = yield* publishingFor(repo, worktree, head, base);
             const snapshot = yield* readLiveSnapshot(
               owner,
               refOf(input.sessionId, row, owner.workspace, owner.model),
@@ -2978,7 +3159,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               head,
               base,
               // The branch is measured where it was cut: the session's own working directory.
-              worktree: owner.workspace.path,
+              worktree,
+              ...publishing,
               cap: options.prCap ?? DEFAULT_DIFF_CAP,
               // The title is the session's own first line, which is the prompt a PR body carries.
               prompt: row.title,
