@@ -42,6 +42,9 @@ worktree: `./drive.sh` (API on `:9530`) **21/21**, its last check being `./appro
 `agent/LOB-167` worktree with `./steer.sh` (API on `:9541`, `FAUX_SLEEP_MS=8000`) — **13/13** checks.
 A mutation run with the nap off (`STEER_SLEEP_MS=0`) failed 9 of them.
 
+`factory interrupt` was verified **2026-10-28** from the `agent/C8` worktree with `./interrupt.sh`
+(API on `:9542`, `FAUX_SLEEP_MS=15000`) — **10/10** checks.
+
 `factory send` / `factory withdraw` were verified **2026-10-27** from the `agent/LOB-166` worktree
 with `./withdraw.sh` (API on `:9561`) — **13/13** checks — and `./drive.sh` re-run there (API on
 `:9560`) at 20/20.
@@ -66,6 +69,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | Typed errors                                      | passing | [errors.md](errors.md)                                                |
 | `factory send` / `factory withdraw`               | passing | [withdraw.md](withdraw.md)                                            |
 | `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                  |
+| `factory interrupt`                               | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                         |
 | `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                              |
 | `factory discard`                                 | passing | [discard.md](discard.md)                                              |
 | `factory replay`                                  | passing | [replay.md](replay.md)                                                |
@@ -97,6 +101,6 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
   more parser. The flag is exercised in the examples and by `--help`.
 - **Interactive steering.** There is no REPL: `run` sends one task and follows it, `watch` attaches
   to one session, and `send` hands a running session one more message (LOB-166) — a steer, a
-  follow-up, or a reject (LOB-167, `steer.sh`).
+  follow-up, or a reject (LOB-167, `steer.sh`); `interrupt` stops it (C8, `interrupt.sh`).
 - **Completions and wizard mode.** `effect/cli` provides them; they are the framework's behavior,
   not this app's.

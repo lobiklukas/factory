@@ -221,6 +221,7 @@ export const TranscriptEntryKind = Schema.Literals([
   "compaction",
   "title",
   "budget",
+  "interrupted",
   "inherited",
   "other",
 ]);
@@ -718,6 +719,28 @@ export const WithdrawMessageResult = Schema.Struct({
   outcome: WithdrawOutcome,
 });
 export type WithdrawMessageResult = typeof WithdrawMessageResult.Type;
+
+/**
+ * What interrupting a session came to (C8). `interrupted` stopped a run: it settled without an
+ * answer, its queued messages were withdrawn, and the turn carries one `interrupted` entry — committed
+ * before the abort, so what Pi Durable writes for work the abort stopped mid-way (a tool call's
+ * aborted result, a partial answer) follows it. `not_running` means there was no run to stop — the
+ * session was already idle — so nothing changed. An outcome in the answer rather than an error, as a withdraw's is: the log moved before
+ * the request did, and the caller asked for a state the session is already in.
+ */
+export const InterruptOutcome = Schema.Literals(["interrupted", "not_running"]);
+export type InterruptOutcome = typeof InterruptOutcome.Type;
+
+/**
+ * The session as the interrupt left it (`session.status` is the settled status), what the call came
+ * to, and the server's sentence for it — what the dashboard's toast and `factory interrupt` print.
+ */
+export const InterruptSessionResult = Schema.Struct({
+  session: SessionSummary,
+  outcome: InterruptOutcome,
+  message: Schema.String,
+});
+export type InterruptSessionResult = typeof InterruptSessionResult.Type;
 
 /**
  * The pull request a reviewer run is opened for (LOB-36): the PR by its number and page, the ref it

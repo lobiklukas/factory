@@ -211,6 +211,19 @@ a session started on `faux/faux-spec` to name it and to have sent every request 
 `usage.models`, read over the API), and one started on the server's default to run `faux/faux-cheap`
 (`features/model-picker.md`). Evidence goes to `.verify/evidence/latest/model/`.
 
+### Interrupting a busy run
+
+```sh
+INTERRUPT_API_PORT=9461 INTERRUPT_WEB_PORT=3461 ./interrupt.sh   # its own instance with FAUX_SLEEP_MS; leaves nothing running
+```
+
+A run is only busy long enough to press if the scripted model naps, so `interrupt.sh` starts its own
+API and dashboard with `FAUX_SLEEP_MS` (default `4000`). `interrupt.mjs` requires one press to send
+one `interruptSession`, the header to go idle within 5 s, no `faux-ok` two naps later, the turn's
+`interrupted` row, a follow-up that answers, and a press held in the browser until the run settled to
+raise a toast in the server's words (`features/interrupt.md`). Evidence goes to
+`.verify/evidence/latest/interrupt/`.
+
 ### Open pull request
 
 ```sh
