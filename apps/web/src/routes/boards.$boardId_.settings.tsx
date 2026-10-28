@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause, Option, Schema } from "effect";
-import { SlidersHorizontalIcon } from "lucide-react";
+import { PencilRulerIcon, SlidersHorizontalIcon } from "lucide-react";
 import { BoardInstanceId, type DefinitionConfig } from "@repo/domain/Task";
 import { boardConfigAtom, definitionsAtom } from "@/lib/atoms/board-atom";
 import {
@@ -86,7 +86,8 @@ const NewerVersions = ({
  * description `getDefinition` answers for that version), every column in order with what it does.
  *
  * Read-only. A version is never edited in place (docs/board.md B2): a change to a board's pipeline is
- * a new version, and the page says when one exists. Nothing here is this browser's: a reload is a
+ * a new version, and the page says when one exists. "Edit as new version" opens the editor (D6) on
+ * its own page, which authors one; nothing on this page writes. Nothing here is this browser's: a reload is a
  * fresh read of both calls.
  */
 const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
@@ -175,6 +176,15 @@ const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           requirement marked checked is one a move out of the column is refused
           over today.
         </p>
+        <Link
+          to="/boards/$boardId/settings/edit"
+          params={{ boardId }}
+          data-settings-edit
+          className="inline-flex items-center gap-1.5 self-start border border-border px-2.5 py-1 text-xs font-medium hover:bg-muted"
+        >
+          <PencilRulerIcon className="size-3.5" strokeWidth={1.75} />
+          Edit as new version
+        </Link>
       </header>
       <ol
         aria-label="Columns"
