@@ -2,7 +2,8 @@
 
 **Status: passing.** D4, 2026-10-28, `agent/D4`: `./define.sh` exit 0, **29/29**, twice against one
 `./up.sh` instance (API on `:9510`, web on `:3510`, the GitHub fake on `:9513`), with
-`./definitions.sh` green beside it. F5-F7-F8 added the round trip and author checks (see below).
+`./definitions.sh` green beside it. F5-F7-F8 added the round trip and author checks (see below): `./define.sh` exit 0, **39/39**
+(API `:9570`).
 
 ## What it is
 
