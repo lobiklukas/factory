@@ -475,6 +475,12 @@ export type TaskServiceShape = {
     },
     TaskError
   >;
+  /**
+   * Every role a definition version the factory holds declares on a column (D6), whichever version:
+   * the roles `defineBoard` accepts as known beside the harness's own and the deployment's table, so
+   * an editor can offer them. A row whose `columns` is not an array contributes nothing.
+   */
+  readonly declaredRoles: Effect.Effect<ReadonlySet<string>, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   /**
    * Make a card for an outside item unless the board already has one for it (LOB-254): the door a
@@ -1245,6 +1251,22 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    // A row whose `columns` is not an array (0007 leaves it unconstrained) contributes nothing
+    // rather than failing the read.
+    const declaredRoles: Effect.Effect<
+      ReadonlySet<string>,
+      TaskError
+    > = withStorage(
+      sql<{ readonly role: string }>`
+          SELECT DISTINCT c ->> 'role' AS role
+          FROM board_definitions d
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(d.columns) = 'array' THEN d.columns ELSE '[]'::jsonb END
+          ) AS c
+          WHERE jsonb_typeof(c) = 'object' AND c ->> 'role' IS NOT NULL
+        `,
+    ).pipe(Effect.map((rows) => new Set(rows.map((row) => row.role))));
+
     /**
      * A new version of a definition (D4). The rules come first and touch nothing (`./boardDefine`);
      * then one transaction takes an advisory lock on the definition's id, reads its newest version and
@@ -1269,21 +1291,11 @@ export const TaskServiceLive = Layer.effect(
         // The roles the definitions the factory holds already declare are accepted as known (the
         // default pipeline's `planner` and `builder` among them): `ROLE_MODELS` is a partial override
         // table, so re-authoring a version under one that names only `reviewer` must not be refused
-        // for the roles the version it replaces runs with today. A row whose `columns` is not an
-        // array (0007 leaves it unconstrained) contributes nothing rather than failing the read.
-        const declared = yield* withStorage(
-          sql<{ readonly role: string }>`
-            SELECT DISTINCT c ->> 'role' AS role
-            FROM board_definitions d
-            CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(d.columns) = 'array' THEN d.columns ELSE '[]'::jsonb END
-            ) AS c
-            WHERE jsonb_typeof(c) = 'object' AND c ->> 'role' IS NOT NULL
-          `,
-        );
+        // for the roles the version it replaces runs with today.
+        const declared = yield* declaredRoles;
         const knownRoles: ReadonlySet<string> = new Set([
           ...(library.knownRoles ?? HARNESS_ROLES),
-          ...declared.map((row) => row.role),
+          ...declared,
         ]);
         const faults = authoredDefinitionFaults(authored, {
           ...library,
@@ -2855,6 +2867,7 @@ export const TaskServiceLive = Layer.effect(
       listDefinitions,
       getDefinition,
       defineBoard,
+      declaredRoles,
       create,
       file,
       get,

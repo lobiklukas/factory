@@ -124,6 +124,11 @@ const SHELL_READS = new Set([
   // The sidebar's board and session lists.
   "listBoards",
   "listSessions",
+  // The board page's getting-started checklist (C9) polls these; a poll in flight when the drive
+  // presses Settings lands after the URL changed. Reads all the same.
+  "listRepos",
+  "listTasks",
+  "listTaskRuns",
 ]);
 const settingsRpcTags = [];
 page.on("request", (request) => {
