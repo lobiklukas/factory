@@ -3,7 +3,10 @@
 # session pane's header and on its run's row in the card pane; pressing it opens the PR through
 # `openPullRequest` and shows the link in both panes without a reload; a second press makes no
 # second request to the forge; and a refusal — an empty branch, a diff over the cap, no credential —
-# is shown in the server's words with the button disabled.
+# is shown in the server's words with the button disabled. A forge refusal that repeats (a 422 naming
+# the PR already open) is not offered as a retry and links that PR, one that passes (a 502) is; a
+# refusal is dropped once the server reports the session moved on, with no pane watching a run; and a
+# card's run older than the newest 50 sessions still has its row control.
 #
 # This script owns its own API, dashboard and loopback GitHub fake (its own ports, session root,
 # fixture checkouts, ledger, logs and pid files), so the instance ./up.sh starts is not touched and
@@ -56,7 +59,15 @@ ensure_postgres || exit 1
 # anything else (the `empty` checkout) changes nothing. One instance, three behaviours, because
 # under faux a model *is* its script and FAUX_COMMAND is the same for every session.
 COMMIT="git add -A && git -c user.email=verify-pr@localhost -c user.name=verify-pr commit -q -m run"
-FAUX_COMMAND="case \"\$(cat .verify-pr 2>/dev/null)\" in change) echo change > change.txt; $COMMIT;; big) seq 1 2600 > big.txt; $COMMIT;; esac; echo faux-ok"
+FAUX_COMMAND="case \"\$(cat .verify-pr 2>/dev/null)\" in change|dup|flaky) echo change > change.txt; $COMMIT;; big) seq 1 2600 > big.txt; $COMMIT;; esac; echo faux-ok"
+
+# Forge answers scripted by the PR's title (C7b), from the same fake that opens PRs for every other
+# session: `dup` is the refusal that repeats, a 422 whose reason names a PR already open for the head,
+# and `flaky` the one that passes, a 502. The sessions of those two kinds run the `change` script.
+FORGE_REFUSALS='[
+  {"title":"verify-pr dup","status":422,"body":{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for verify-pr:factory/dup: https://github.com/verify-pr/dup/pull/99"}]}},
+  {"title":"verify-pr flaky","status":502,"body":{"message":"Bad Gateway"}}
+]'
 
 run_mode() { # fake | off
   local mode="$1"
@@ -67,7 +78,8 @@ run_mode() { # fake | off
   : > "$RUN_DIR/api.log"
 
   if [ "$mode" = "fake" ]; then
-    ( exec env GITHUB_FAKE_PORT="$GH_PORT" GITHUB_FAKE_LEDGER="$ledger" bun "$FAKE" ) \
+    ( exec env GITHUB_FAKE_PORT="$GH_PORT" GITHUB_FAKE_LEDGER="$ledger" \
+        GITHUB_FAKE_REFUSE="$FORGE_REFUSALS" bun "$FAKE" ) \
       > "$RUN_DIR/github.log" 2>&1 &
     echo $! > "$RUN_DIR/github.pid"
     for _ in $(seq 1 60); do

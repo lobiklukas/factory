@@ -1600,6 +1600,40 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }),
         });
 
+      /**
+       * Whether this process serves the model a session is pinned to (E9): the catalog it was booted
+       * with (`options.model`) holds it. A pin outlives the backend that chose it, so a faux session
+       * is still pinned to `faux/faux-1` after the API restarts on anthropic, and its next request
+       * would fail inside pi-ai with an untyped `Unknown provider`.
+       */
+      const modelServed = (key: string): boolean =>
+        modelAccessFor(options.model, key) !== undefined;
+
+      /** The summary's and the list's `modelAvailable`: absent for a row that names no model. */
+      const modelAvailability = (
+        model: string | null,
+      ): { readonly modelAvailable?: boolean } =>
+        model === null ? {} : { modelAvailable: modelServed(model) };
+
+      /**
+       * Refuse a send to a session pinned to a model this process does not serve (E9): typed, naming
+       * the model, before an owner is acquired, a title is written or a message is submitted — so no
+       * run starts and the log is as it was. The read is the index row's `model`; a row with none has
+       * no root yet (its first open pins the deployment's model, which is served by construction).
+       */
+      const refuseUnservedModel = (
+        sessionId: SessionId,
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        row.model === null || modelServed(row.model)
+          ? Effect.void
+          : Effect.fail(
+              new SessionErrorClass({
+                code: "model_unavailable",
+                message: `session ${sessionId} is pinned to model ${row.model}, which this process does not serve (its ${options.model.backend} backend serves ${modelKey(options.model)} by default), so no run was started. Replay the session onto a model this process serves (replaySession).`,
+              }),
+            );
+
       const summarize = (
         id: SessionId,
         row: SessionRow,
@@ -1626,6 +1660,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             ...(forkedFrom === undefined ? {} : { forkedFrom }),
             ...(row.model === null ? {} : { model: row.model }),
+            ...modelAvailability(row.model),
           };
         });
 
@@ -1649,6 +1684,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ? { forkedFrom }
             : {}),
           ...(model === null ? {} : { model }),
+          serves: modelServed,
         };
       };
 
@@ -4212,6 +4248,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4243,6 +4280,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -5592,6 +5630,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<CompactSessionResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           const instructions = input.instructions?.trim();
           const owner = yield* acquireOwner(input.sessionId, row);
           const taskId = yield* compactSession(
@@ -5724,6 +5763,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
+          yield* refuseUnservedModel(input.sessionId, row);
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
@@ -7208,6 +7248,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ${cursor?.at ?? null}::timestamptz IS NULL
                 OR (a.last_activity_at, s.id) < (${cursor?.at ?? null}::timestamptz, ${cursor?.id ?? null}::text)
               )
+              AND (${input.sessionId ?? null}::text IS NULL OR s.id = ${input.sessionId ?? null}::text)
+              AND (
+                ${input.taskId ?? null}::text IS NULL
+                OR EXISTS (
+                  SELECT 1 FROM task_runs tr
+                  WHERE tr.session_id = s.id AND tr.task_id = ${input.taskId ?? null}::text
+                )
+              )
               ORDER BY a.last_activity_at DESC, s.id DESC
               LIMIT ${limit + 1}
             `,
@@ -7246,6 +7294,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : { baseRef: row.baseRef }),
               ...(forkedFrom === undefined ? {} : { forkedFrom }),
               ...(row.model === null ? {} : { model: row.model }),
+              ...modelAvailability(row.model),
               ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             });
           }
