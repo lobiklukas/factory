@@ -11,7 +11,7 @@
 //                             verified by `verify-web`, exit 0 — the evidence the PR body and the
 //                             `review` column's `verified` requirement both read
 //   MODE=pr SESSION_ID=… PR_URL=… LEDGER=… REPO=…
-//                             the link `factory pr` printed is the fake GitHub's: its ledger holds
+//                             the link the browser's Open pull request showed is the fake GitHub's: its ledger holds
 //                             exactly one create request for the card's repo, publishing the run's
 //                             own branch onto `main`, and the PR it answered has that link. The body
 //                             that request carried lists the changed path under `## Changed files`
@@ -19,7 +19,7 @@
 //                             code; `getSession` reads the same link back
 //
 // The ledger is the oracle for "a real PR link": a URL the drive (or a broken command) made up is
-// not in it, so the `pr` mode fails on it. An empty PR_URL — `factory pr` printed no link — fails
+// not in it, so the `pr` mode fails on it. An empty PR_URL — the page showed no link — fails
 // every check that needs one, naming why; nothing here substitutes a link the forge did not answer.
 //
 // Env: API_URL, MODE, SESSION_ID, PR_URL, LEDGER, REPO, CHANGED (the path the builder writes),
@@ -160,7 +160,7 @@ const sectionOf = (body: string, heading: string): string => {
 
 const pr = Effect.gen(function* () {
   check(
-    "factory pr printed a link (the PR path exists)",
+    "the browser showed a link (the PR path exists)",
     PR_URL !== "",
     PR_URL === "" ? "no link: see pr.txt for the reason" : PR_URL,
   );

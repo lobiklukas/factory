@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomRefresh, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import { GitForkIcon, GitPullRequestIcon, Loader2Icon } from "lucide-react";
+import { GitForkIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
@@ -29,12 +29,12 @@ import {
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
-import { prLink } from "@/lib/pr-link";
 import { sessionModel } from "@/lib/server-info-view";
 import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { CompactButton } from "@/components/compact-button";
 import { InterruptButton } from "@/components/interrupt-button";
+import { PrControl, PrReason } from "@/components/open-pull-request";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { visibleEntries } from "@/lib/transcript-view";
@@ -110,32 +110,6 @@ const StatusChip = ({ view }: { readonly view: SessionView }) => (
     ))}
   </div>
 );
-
-/**
- * The session's PR, beside its name (LOB-65).
- *
- * The link is what the session recorded (`summary.prUrl`), so it appears on attach for a PR opened
- * earlier and mid-stream when a `prOpened` event lands. A session with no PR shows nothing here —
- * the header is the session's identity, and a "no PR" chip on every new session would be noise. It
- * opens in a new tab: the pane is a live stream, and navigating away from it would drop the attach.
- */
-const PrAnchor = ({ prUrl }: { readonly prUrl: string | undefined }) => {
-  const link = prLink(prUrl);
-  if (link === null) return null;
-  return (
-    <a
-      data-pr-link
-      href={link.href}
-      target="_blank"
-      rel="noreferrer"
-      title={link.href}
-      className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline"
-    >
-      <GitPullRequestIcon className="size-3.5" strokeWidth={1.75} aria-hidden />
-      {link.label}
-    </a>
-  );
-};
 
 /**
  * The pane while it attaches.
@@ -317,6 +291,15 @@ export const SessionPane = ({
     view !== null && view.live.busy,
   );
 
+  /** What the PR control reads (C7): shared by the header's button and the line under it. */
+  const prSession = {
+    id: sessionId,
+    title: view?.summary.title,
+    repo: view?.summary.repo,
+    status: view?.summary.status,
+    prUrl: view?.summary.prUrl,
+  };
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {/*
@@ -328,13 +311,20 @@ export const SessionPane = ({
       <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-2 md:h-12 md:flex-nowrap md:py-0">
         <div className="flex min-w-0 items-center gap-3 max-md:basis-full">
           <SessionsBackLink className="-ml-2" />
-          <h1 className="truncate text-sm font-medium">
+          <h1
+            className="truncate text-sm font-medium"
+            title={view?.summary.title}
+          >
             {view?.summary.title ?? "Session"}
           </h1>
           <span className="truncate font-mono text-[10px] text-muted-foreground">
             {sessionId}
           </span>
-          <PrAnchor prUrl={view?.summary.prUrl} />
+          {/*
+           * The session's PR: the link once there is one, and until then the control that opens it
+           * (C7) — for a repo-bound, idle session; a refusal is shown beside the disabled button.
+           */}
+          <PrControl variant="header" session={prSession} />
           {/* The model this session is pinned to (LOB-272): faux/faux-1 is a scripted answer. */}
           {sessionModel(view?.summary.model) === null ? null : (
             <span
@@ -473,6 +463,7 @@ export const SessionPane = ({
           </Button>
         </div>
       </header>
+      <PrReason session={prSession} />
       <CheckoutWarning warning={view?.workspaceWarning} />
 
       {/*

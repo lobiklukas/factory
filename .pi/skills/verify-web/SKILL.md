@@ -224,6 +224,21 @@ one `interruptSession`, the header to go idle within 5 s, no `faux-ok` two naps 
 raise a toast in the server's words (`features/interrupt.md`). Evidence goes to
 `.verify/evidence/latest/interrupt/`.
 
+### Open pull request
+
+```sh
+PR_API_PORT=9442 PR_WEB_PORT=3442 PR_GITHUB_PORT=9443 ./pr.sh   # its own instance and loopback GitHub fake, twice; leaves nothing running
+```
+
+A PR is opened by a person's press in the session pane's header or on a card's run row (C7), so
+`pr.sh` starts its own API (`GITHUB_API_URL` the fake, a `GITHUB_TOKEN` the fake never reads),
+dashboard and `github-fake.ts`, plus three fixture checkouts whose marker file makes the instance's
+one scripted command commit a small change, a change over the diff cap, or nothing. `pr.mjs` presses
+the control and requires the link in both panes without a reload, one create request in the fake's
+ledger for a double press and for a repeat over RPC, and each refusal in the server's words with the
+button disabled. It then runs again with no credential and requires the missing-token message
+(`features/pr-open.md`). Evidence goes to `.verify/evidence/latest/pr/{fake,off}/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -286,6 +301,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |
 | `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`)        |
+| `pr.sh`             | Open pull request's own instance, fake GitHub and drive (`pr.mjs`)               |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it                |
 
 ## Feature map
