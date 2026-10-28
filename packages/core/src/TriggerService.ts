@@ -82,6 +82,7 @@ import {
   type TriggerOutcome,
   type TriggerRule,
 } from "@repo/domain/Trigger";
+import { triggerErrorOfSession } from "./admission";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
@@ -324,8 +325,8 @@ export const NoWriteBack = Layer.succeed(
  * One write-back per source: an event is answered by the client of the system it came from, and by
  * nobody else's. A Jira comment for a GitHub issue would be a request to the wrong API, so the
  * choice cannot be left to each client to refuse (LOB-259); a source with no layer — the generic
- * webhook, Sentry, a deployment that configured no client for it — writes nothing, as `NoWriteBack`
- * does.
+ * webhook, a deployment that configured no client for it (Sentry's needs `SENTRY_API_TOKEN`,
+ * LOB-83) — writes nothing, as `NoWriteBack` does.
  *
  * Each layer is built once, when this one is, and read back as the source's client.
  */
@@ -354,15 +355,16 @@ export const TriggerWriteBackBySource = <R>(
 /**
  * The production wiring: the seam's two calls are `SessionService.create` and
  * `SessionService.send`, and a `SessionError` becomes a `TriggerError` here rather than leaking a
- * session-shaped failure out of the trigger path. Both carry the request id: `create` dedupes on
- * `sessions.request_id`, `send` on Pi Durable's submission `requestId`, which survives a restart.
+ * session-shaped failure out of the trigger path (`triggerErrorOfSession`). Both carry the request
+ * id: `create` dedupes on `sessions.request_id`, `send` on Pi Durable's submission `requestId`, which
+ * survives a restart.
  */
 export const TriggerSessionsFromSessionService = Layer.effect(
   TriggerSessions,
   Effect.gen(function* () {
     const sessions = yield* SessionService;
-    const failSession = (cause: { readonly message: string }): TriggerError =>
-      new TriggerError({ code: "session-create", message: cause.message });
+    // `at_capacity` stays `at-capacity` (LOB-70), which a route answers `503` rather than `500`.
+    const failSession = triggerErrorOfSession;
     return TriggerSessions.of({
       create: (input) =>
         sessions

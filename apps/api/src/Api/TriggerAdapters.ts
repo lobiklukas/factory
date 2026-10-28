@@ -7,10 +7,12 @@
  * environment once, when the module loads, so whether a client is on is decided before any layer is
  * built; no config, no client. The seam has one `TriggerWriteBack` and routes share one seam, so the
  * clients are put behind `TriggerWriteBackBySource`, which hands an event to the client of the
- * system it came from. The generic and Sentry sources write nothing back.
+ * system it came from. The generic source writes nothing back.
  *
  *   Jira      JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN (all three, or no client)  an issue comment
  *             JIRA_SESSION_URL_BASE  where a comment links a session
+ *   Sentry    SENTRY_API_TOKEN (no token, no client)  one note on the alert's Sentry issue (LOB-83)
+ *             SENTRY_API_URL  the API root (default https://sentry.io), SENTRY_SESSION_URL_BASE
  *   GitHub    GITHUB_SESSION_URL_BASE  where a comment links a session. The comment is posted with
  *             the credential seam's token (GITHUB_TOKEN or the App), the PR client's own
  *   Slack     SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_CHANNELS (all three, or no client)
@@ -30,6 +32,8 @@ import {
   JiraWriteBack,
   type LinearIssueSync,
   NoWriteBack,
+  sentryApiConfigFromEnv,
+  SentryWriteBack,
   SessionWriteBacksAll,
   slackConfigFromEnv,
   type SlackEnv,
@@ -49,6 +53,12 @@ export const jiraConfig = jiraConfigFromEnv({
   sessionUrlBase: process.env["JIRA_SESSION_URL_BASE"],
 });
 
+export const sentryApiConfig = sentryApiConfigFromEnv({
+  apiUrl: process.env["SENTRY_API_URL"],
+  authToken: process.env["SENTRY_API_TOKEN"],
+  sessionUrlBase: process.env["SENTRY_SESSION_URL_BASE"],
+});
+
 /** The Slack environment as the process holds it *now*: the route reads its filter per request. */
 export const slackEnv = (): SlackEnv => ({
   apiUrl: process.env["SLACK_API_URL"],
@@ -64,8 +74,8 @@ export const slackApp = slackConfigFromEnv(slackEnv());
 const githubSessionUrlBase = process.env["GITHUB_SESSION_URL_BASE"]?.trim();
 
 /**
- * The trigger seam's write-back, per source: Linear's when a key is configured, Jira's and Slack's
- * when their clients are, and GitHub's always — a GitHub delivery needs no config of its own beyond
+ * The trigger seam's write-back, per source: Linear's when a key is configured, Jira's, Slack's and
+ * Sentry's when their clients are, and GitHub's always — a GitHub delivery needs no config of its own beyond
  * the credential the PR step already needs, and one without it fails at the comment (`write-back`),
  * which the delivery's `500` names.
  */
@@ -81,6 +91,12 @@ export const TriggerWriteBacksLive = TriggerWriteBackBySource<
     slackApp === undefined
       ? NoWriteBack
       : SlackWriteBack(slackApp.config).pipe(
+          Layer.provide(FetchHttpClient.layer),
+        ),
+  sentry:
+    sentryApiConfig === undefined
+      ? NoWriteBack
+      : SentryWriteBack(sentryApiConfig).pipe(
           Layer.provide(FetchHttpClient.layer),
         ),
   github: GitHubWriteBack(
@@ -112,6 +128,11 @@ export const TriggerAdaptersLog = Layer.effectDiscard(
       jiraConfig === undefined
         ? "jira write-back: off (JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN are not all set)"
         : `jira write-back: on — comments on issues at ${jiraConfig.baseUrl} (POST /webhooks/jira, JIRA_WEBHOOK_SECRET)`,
+    );
+    yield* Effect.logInfo(
+      sentryApiConfig === undefined
+        ? "sentry write-back: off (SENTRY_API_TOKEN is not set)"
+        : `sentry write-back: on — one note naming the session on the alert's Sentry issue at ${sentryApiConfig.baseUrl} (best effort: a failed note is logged, never the delivery's failure)`,
     );
     yield* Effect.logInfo(
       slackApp === undefined

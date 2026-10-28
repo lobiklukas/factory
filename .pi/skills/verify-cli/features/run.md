@@ -5,7 +5,10 @@ transcript until the run settles, and print the answer. `--repo <owner/name>` bi
 repository (registering it on first use), `--base-ref` picks the ref it starts from.
 
 **How a user reaches it.** `factory run "fix the flaky test" --repo lobiklukas/factory`. The command
-prints the session id first, then `model <provider/model>` (and `warning: faux backend …` under the faux
+prints what the run is predicted to cost first (`predicted $… to $…, median $…, from N sessions (…)`,
+or `predicted: no estimate (…)`; LOB-38, absent when the server cannot answer the prediction), then
+the session id, then `budget $…` when a cap was set (`--budget`, or `--cap-at-prediction`'s
+`(the predicted high)`), then `model <provider/model>` (and `warning: faux backend …` under the faux
 backend, LOB-272, [status.md](status.md)), then the workspace the server resolved (path, and repo/base ref when
 bound), then the transcript as it commits, then `answer: …`.
 

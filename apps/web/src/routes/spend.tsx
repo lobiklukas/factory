@@ -5,6 +5,8 @@ import { Cause, Option } from "effect";
 import { CoinsIcon } from "lucide-react";
 import type { SpendRow } from "@repo/domain/Session";
 import { spendAtom } from "@/lib/atoms/spend-atom";
+import { costBacktestAtom } from "@/lib/atoms/cost-atom";
+import { backtestHeadline } from "@/lib/cost-view";
 import {
   actorLabel,
   formatSpendDollars,
@@ -31,6 +33,10 @@ export const Route = createFileRoute("/spend")({
  * added in the browser, so the three blocks always agree. An actor is who the session's creator
  * said it was (`cli`, `dashboard`, `trigger:<source>`): identity beyond that string is LOB-20's,
  * and a session nobody was attributed to is listed as `unattributed`, never guessed.
+ *
+ * Under the header sits what the cost prediction (LOB-38) has been worth: the backtest's median
+ * error over this control plane's own completed sessions, published here on purpose — a number in
+ * front of every reader of the spend is the one that gets better.
  */
 function SpendRoute() {
   const result = useAtomValue(spendAtom);
@@ -88,6 +94,7 @@ function SpendRoute() {
           {sessionCount(last.sessions)}
         </span>
       </header>
+      <PredictionAccuracy />
       {last.rows.length === 0 ? (
         <div data-spend-empty className="flex min-h-0 flex-1 flex-col">
           <EmptyPane
@@ -119,6 +126,42 @@ function SpendRoute() {
     </div>
   );
 }
+
+/**
+ * The backtest headline (LOB-38): how far the median prediction landed from what each completed
+ * session cost, when predicted from only the sessions before it. Its own read, so a backtest that
+ * fails to load costs this strip and never the spend under it.
+ */
+const PredictionAccuracy = () => {
+  const result = useAtomValue(costBacktestAtom);
+  const report = Option.getOrUndefined(AsyncResult.value(result));
+  if (report === undefined) {
+    return AsyncResult.isFailure(result) ? (
+      <p
+        role="status"
+        data-cost-backtest-failed
+        className="border-b border-border px-4 py-2 text-[11px] text-destructive"
+      >
+        The prediction backtest did not load: {Cause.pretty(result.cause)}
+      </p>
+    ) : null;
+  }
+  const { headline, detail } = backtestHeadline(report);
+  return (
+    <section
+      aria-label="Cost prediction"
+      data-cost-backtest=""
+      data-cost-backtest-error={report.medianRelativeError}
+      data-cost-backtest-scored={report.scored}
+      data-cost-backtest-meaningful={report.meaningful ? "true" : "false"}
+      className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-4 py-2"
+    >
+      <h2 className="text-xs font-medium">Cost prediction</h2>
+      <span className="font-mono text-xs tabular-nums">{headline}</span>
+      <span className="text-[11px] text-muted-foreground">{detail}</span>
+    </section>
+  );
+};
 
 /**
  * One roll-up: a line per repo (or per actor) with its cost, its session count, and a bar for its

@@ -63,11 +63,22 @@ import {
   planFreshnessConfigOf,
   releaseMergedDelivery,
   TriggerService,
+  type GitHubWebhookAnswer,
 } from "@repo/core";
 import { TriggerSeamLive } from "./Webhook";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
 const GITHUB_DELIVERY_HEADER = "x-github-delivery";
+
+/**
+ * A handler's answer as a response: its status, its body and its headers — the `Retry-After` an
+ * `at-capacity` refusal carries (LOB-70), so a sender told `503` is also told when.
+ */
+const respond = (answer: GitHubWebhookAnswer) =>
+  HttpServerResponse.jsonUnsafe(answer.body, {
+    status: answer.status,
+    ...(answer.headers === undefined ? {} : { headers: answer.headers }),
+  });
 
 /** The default cap on a GitHub webhook body, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
@@ -179,10 +190,7 @@ const GitHubWebhookRoute = HttpRouter.add(
         rules: read.rules,
         mention: mention(),
       });
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(answered.body),
-        answered.status,
-      );
+      return respond(answered);
     }
     if (event === "push") {
       const pushed = yield* handleDocsPushWebhook({
@@ -191,10 +199,7 @@ const GitHubWebhookRoute = HttpRouter.add(
         signature,
         delivery: req.headers[GITHUB_DELIVERY_HEADER],
       });
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(pushed.body),
-        pushed.status,
-      );
+      return respond(pushed);
     }
     const mirrored = yield* handleGitHubPullRequestWebhook({
       secret,
@@ -233,13 +238,10 @@ const GitHubWebhookRoute = HttpRouter.add(
     // Only a signed `pull_request` the mirror read reaches the review: every refusal before it (no
     // secret, a bad signature, another event, a payload naming no PR) is the mirror's answer alone.
     if (event !== "pull_request" || mirrored.status !== 200) {
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(
-          planFreshness === undefined
-            ? mirrored.body
-            : { ...mirrored.body, planFreshness },
-        ),
-        mirrored.status,
+      return respond(
+        planFreshness === undefined
+          ? mirrored
+          : { ...mirrored, body: { ...mirrored.body, planFreshness } },
       );
     }
     // A head the registered checkout lacks (a push nobody made here) is fetched with the worker's
@@ -250,16 +252,18 @@ const GitHubWebhookRoute = HttpRouter.add(
       signature,
       fetch: yield* gitReviewFetch,
     });
-    return HttpServerResponse.setStatus(
-      HttpServerResponse.jsonUnsafe({
+    return respond({
+      body: {
         ...mirrored.body,
         review: reviewed.body,
         ...(planFreshness === undefined ? {} : { planFreshness }),
-      }),
-      reviewed.status === 200 || reviewed.status === 400
-        ? 200
-        : reviewed.status,
-    );
+      },
+      status:
+        reviewed.status === 200 || reviewed.status === 400
+          ? 200
+          : reviewed.status,
+      ...(reviewed.headers === undefined ? {} : { headers: reviewed.headers }),
+    });
   }),
 );
 

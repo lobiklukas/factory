@@ -995,6 +995,11 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  * - `harness` — Pi Durable rejected the operation (bad input, closed harness, failed submit).
  * - `repo_clone_failed` — a session's worktree could not be cut because the factory's clone of its
  *   repo could not be made or brought up to date (LOB-265); the message names the repo and the reason.
+ * - `at_capacity` — admission control (LOB-70): the request would open one more session than the
+ *   server runs at once, so nothing was written and nothing opened. The message names the cap and
+ *   where it is configured (`SESSION_MAX_CONCURRENT`). Transient: the same request succeeds once a
+ *   session is released (the idle sweep), and a retried create with the same `requestId` is a fresh
+ *   attempt, because the refused one left no row behind.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1003,6 +1008,7 @@ export const SessionErrorCode = Schema.Literals([
   "storage",
   "harness",
   "repo_clone_failed",
+  "at_capacity",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 
