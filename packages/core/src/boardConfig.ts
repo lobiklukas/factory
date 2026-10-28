@@ -14,6 +14,8 @@
  *   outside it is `checked: false`: nothing refuses a move over it today, and a reader is told so.
  *   The `human_*` keys are among them — the gate is enforced by the move's actor, which the exit
  *   marks, not by a requirement check.
+ * - **Run caps and WIP limits** (B9, LOB-71) are the row's own, copied as declared: what
+ *   `SessionService.create` refuses a card's start by (`./boardCaps`).
  * - **The role's model** is the deployment's role table (B6, `ROLE_MODELS`), which only the process
  *   that resolved it knows; the caller passes its resolution in (`SessionService.roleModel`).
  *
@@ -50,6 +52,7 @@ const describeColumn = (
   exits: columnTransitions(definition, column.name).map(({ to, gate }) =>
     gate === undefined ? { to } : { to, humanGate: gate },
   ),
+  ...(column.wipLimit === undefined ? {} : { wipLimit: column.wipLimit }),
 });
 
 /** A definition version described, its columns in declaration order. */
@@ -63,6 +66,7 @@ export const describeDefinition = (
     version: definition.version,
     name: definition.name,
     ...(initialColumn === undefined ? {} : { initialColumn }),
+    ...(definition.caps === undefined ? {} : { caps: definition.caps }),
     columns: definition.columns.map((column) =>
       describeColumn(definition, column, modelOf),
     ),

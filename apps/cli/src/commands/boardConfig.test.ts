@@ -106,6 +106,49 @@ describe("definitionLines (LOB-270)", () => {
   });
 });
 
+describe("caps and WIP limits (LOB-71)", () => {
+  /**
+   * Mutation: drop `capsLines` from `definitionLines` — the `caps` line is missing. Mutation: print
+   * a kind the version does not cap — the line carries `repo`.
+   */
+  it("prints a version's caps after its initial column, only the kinds it caps, and a column's WIP limit", () => {
+    const building = Schema.decodeSync(ColumnConfig)({
+      ...Schema.encodeSync(ColumnConfig)(planning),
+      name: "building",
+      wipLimit: 1,
+    });
+    const definition = Schema.decodeSync(DefinitionConfig)({
+      id: "default",
+      version: 5,
+      name: "Default pipeline",
+      initialColumn: "building",
+      caps: { board: 2, task: 1 },
+      columns: [Schema.encodeSync(ColumnConfig)(building)],
+    });
+    const lines = definitionLines(definition);
+    expect(lines.slice(0, 3)).toEqual([
+      "definition  default v5  Default pipeline",
+      "initial     building",
+      "caps        board 2 · task 1 runs in flight",
+    ]);
+    expect(lines.at(-1)).toBe("  wip       at most 1 run in flight");
+  });
+
+  it("prints no caps line and no wip field for a version that declares none", () => {
+    const lines = definitionLines(
+      Schema.decodeSync(DefinitionConfig)({
+        id: "default",
+        version: 4,
+        name: "Default pipeline",
+        initialColumn: "planning",
+        columns: [Schema.encodeSync(ColumnConfig)(planning)],
+      }),
+    );
+    expect(lines.some((line) => line.startsWith("caps"))).toBe(false);
+    expect(lines.some((line) => line.includes("wip"))).toBe(false);
+  });
+});
+
 describe("boardLine and definitionsLines (LOB-270)", () => {
   it("prints a board's id, repo, pinned version and creation time", () => {
     const board = Schema.decodeSync(BoardInstance)({
