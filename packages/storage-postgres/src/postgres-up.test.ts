@@ -57,7 +57,17 @@ import { afterAll, describe, expect, it } from "vitest";
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const LIB = path.join(REPO_ROOT, ".pi/skills/lib/postgres.sh");
 
-/** The skill scripts that own a Postgres precondition. */
+/**
+ * The verify-* skill scripts that own a Postgres precondition: the set the cases below iterate (the
+ * refuse-before-starting case, the one-compose-call drift guard, and the no-bare-`docker` guard).
+ *
+ * `.pi/ralph/loop.sh` is a further caller of `.pi/skills/lib/postgres.sh` (its `ensure_db` sources the
+ * helper and calls `ensure_postgres`) and is deliberately NOT in this list: its `docker_env` probes
+ * `docker info` directly, so the no-bare-`docker` guard would fail on it. Nothing here turns red if
+ * `ensure_db` regrows its own compose call. Ralph is no longer how work is delivered, so the guard is
+ * not widened; when that changes, route `docker_env` through `pg_docker info`, add `loop.sh` here and
+ * drop this note (LOB-122).
+ */
 const CALLERS = [
   ".pi/skills/verify-api/up.sh",
   ".pi/skills/verify-api/sigterm.sh",
