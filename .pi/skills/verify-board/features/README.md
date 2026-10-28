@@ -7,7 +7,10 @@ Status reflects the last verified runs: a PR's review and checks reaching its ca
 `agent/C21`), API on `:9500`, the GitHub fake on `:9501`: `./feedback.sh` exit 0 (**23** PASS) — the
 signed `changes_requested` review blocked the card once, the failing check was one note, `board
 attention` listed a `review` row, and the next run was told the review verbatim, its start lifting the
-block so its settle pushed to the card's PR ([feedback.md](feedback.md)). Before it, the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+block so its settle pushed to the card's PR ([feedback.md](feedback.md)). Before it, the getting-started guide (G1, 2026-10-28, `agent/G1-F11-F18`), API
+on `:9550`, GitHub fake on `:9553`: `./guide.sh` exit 0 (**10/10**), its 14 walk blocks run from the
+guide itself, and `./caps.sh` exit 0 (**25/25**) again with its starts `--idle` ([guide.md](guide.md),
+[caps.md](caps.md)). Before it, the planning run's plan (D10, 2026-10-28, `agent/D10`), API
 on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
 planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
 `./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
@@ -80,6 +83,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | `factory board move` + refusals         | passing | [move.md](move.md)               |
 | `factory board start`                   | passing | [start.md](start.md)             |
 | board caps and WIP limits (LOB-71)      | passing | [caps.md](caps.md)               |
+| the getting-started guide, walked (G1)  | passing | [guide.md](guide.md)             |
 | a card's body and base ref in its runs  | passing | [body.md](body.md)               |
 | `board block\|unblock\|attention\|runs` | passing | [triage.md](triage.md)           |
 | the board read back in the web          | passing | [dashboard.md](dashboard.md)     |

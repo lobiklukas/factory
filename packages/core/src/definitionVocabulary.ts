@@ -36,12 +36,16 @@ export const REQUIREMENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
  * The vocabulary, keys and roles each sorted: every known requirement key with its starting
  * description and whether it is checked or a gate label, and every role `defineBoard` accepts
  * whatever the role table says — `HARNESS_ROLES`, the held definitions' `declared` roles — plus the
- * role table's own (`table`, empty for a deployment with none).
+ * role table's own (`table`, empty for a deployment with none). `rolesOpen` is that emptiness: with no
+ * table `defineBoard` takes any role (`./boardDefine`), so the list is a suggestion and not the whole
+ * of what is accepted. `declared` also holds the deployment's own role policy rows (D10), which the
+ * rules accept beside the table's.
  */
 export const definitionVocabulary = (roles: {
   readonly table: ReadonlySet<string>;
   readonly declared: ReadonlySet<string>;
 }): DefinitionVocabulary => ({
+  rolesOpen: roles.table.size === 0,
   requirements: [...KNOWN_REQUIREMENTS].toSorted().map((key) => ({
     key,
     description: REQUIREMENT_DESCRIPTIONS[key] ?? key,
