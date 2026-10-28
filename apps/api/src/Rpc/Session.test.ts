@@ -447,3 +447,43 @@ describe("proposeDecomposition over RPC (LOB-201)", () => {
     expect(outcome.after.proposedIssues).toBeUndefined();
   }, 120_000);
 });
+
+describe("createTask over RPC (LOB-255)", () => {
+  it("gives a card with no repo its board's, and carries a card naming another repo across the wire as BoardRepoMismatch", async () => {
+    const boardRepo = RepoSlug.make(`acme/rpc-card-${run}`);
+    const other = RepoSlug.make(`acme/rpc-card-other-${run}`);
+    const outcome = await callApi((client) =>
+      Effect.gen(function* () {
+        const board = yield* client.createBoard({
+          repo: boardRepo,
+          definitionId: DefinitionId.make("default"),
+        });
+        const card = yield* client.createTask({
+          boardId: board.id,
+          title: "no repo named",
+          actor: "person:rpc",
+        });
+        const refused = yield* failureOf(
+          client.createTask({
+            boardId: board.id,
+            title: "another repo named",
+            repo: other,
+            actor: "person:rpc",
+          }),
+        );
+        const cards = yield* client.listTasks({ boardId: board.id });
+        return { board, card, refused, cards };
+      }),
+    );
+
+    expect(outcome.card.repo).toBe(boardRepo);
+    expect(outcome.refused).toMatchObject({
+      _tag: "BoardRepoMismatch",
+      boardId: outcome.board.id,
+      boardRepo,
+      repo: other,
+    });
+    // Refused is not written: the board holds the one card.
+    expect(outcome.cards.map((card) => card.id)).toEqual([outcome.card.id]);
+  });
+});

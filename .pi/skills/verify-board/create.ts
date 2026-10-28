@@ -2,6 +2,11 @@
 // The drive's first phase (LOB-84): create a card the way a trigger does — `createTask` over the
 // API's RPC surface — and read it back with `getTask`.
 //
+// The card names NO repository (LOB-255): it inherits the board's, which is what gives every run on
+// it a branch, so the drive taking this card through build, PR and review is the proof that a card
+// made without a repo reaches review. A second create naming another repository is refused as
+// `BoardRepoMismatch`, naming both, and leaves no card behind.
+//
 // No `factory` command creates a card (card creation is a trigger's job, docs/board.md B2), so the
 // create is made from here, over the same RPC client the CLI and the dashboard build. Everything
 // after it — the lanes, the moves and the three refusals — is driven through `factory board` in
@@ -16,6 +21,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
+import { RepoSlug } from "@repo/domain/Session";
 import { BoardInstanceId } from "@repo/domain/Task";
 import { Effect, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -41,18 +47,58 @@ const create = Effect.gen(function* () {
   // Decoded, not cast: a board id that cannot be one is this script's bug, not a server refusal.
   const boardId = yield* Schema.decodeEffect(BoardInstanceId)(BOARD_ID);
   const client = yield* RpcClient.make(RpcApi);
-  // The card names the board's repository, as a trigger's card does (the label → repo mapping):
-  // every run on it is bound to that repo, which is what gives the build run a branch to publish.
+  // No repo on the card: it inherits the board's (LOB-255), and every run on it is bound to that
+  // repo, which is what gives the build run a branch to publish.
   const board = yield* client.getBoard({ boardId });
   const created = yield* client.createTask({
     boardId,
     title: TITLE,
-    repo: board.instance.repo,
     actor: "verify-board",
   });
   const read = yield* client.getTask({ taskId: created.id });
   observed.facts["created"] = created;
   observed.facts["readBack"] = read;
+
+  check(
+    "a card created with no repo inherits the board's repository",
+    created.repo === board.instance.repo,
+    `${created.id} repo=${created.repo ?? "none"}, board ${board.instance.id} over ${board.instance.repo}`,
+  );
+  // Another repository than the board's is refused, naming both, and writes no card.
+  const other = yield* Schema.decodeEffect(RepoSlug)(
+    `${board.instance.repo}-elsewhere`,
+  );
+  const refusedTitle = `${TITLE} elsewhere`;
+  const refused = yield* client
+    .createTask({
+      boardId,
+      title: refusedTitle,
+      repo: other,
+      actor: "verify-board",
+    })
+    .pipe(
+      Effect.match({
+        onFailure: (error) => error,
+        onSuccess: (task) => task,
+      }),
+    );
+  const cards = yield* client.listTasks({ boardId });
+  observed.facts["refused"] = refused;
+  check(
+    "a card naming another repository is refused, naming both",
+    "_tag" in refused &&
+      refused._tag === "BoardRepoMismatch" &&
+      refused.boardRepo === board.instance.repo &&
+      refused.repo === other &&
+      refused.message.includes(board.instance.repo) &&
+      refused.message.includes(other),
+    "_tag" in refused ? `${refused._tag}: ${refused.message}` : "created",
+  );
+  check(
+    "and the refused create wrote no card",
+    !cards.some((card) => card.title === refusedTitle),
+    `${cards.length} cards on ${boardId}`,
+  );
 
   check(
     "createTask opens the card in intake at revision 1",

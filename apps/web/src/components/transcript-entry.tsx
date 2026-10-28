@@ -9,6 +9,7 @@ import {
 import { cn } from "cn";
 import type { SpendDelta } from "@/lib/compaction-view";
 import { spendHeading } from "@/lib/compaction-view";
+import { hasTranscriptRow } from "@/lib/transcript-view";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import {
   Collapsible,
@@ -46,6 +47,12 @@ export const TranscriptRow = ({
   readonly spend?: SpendDelta | undefined;
 }) => {
   const [open, setOpen] = useState(false);
+
+  // The session's name and a text-less system entry are log bookkeeping, not a message
+  // (LOB-273): no row, so nothing reads as the agent having said the prompt. The pane skips
+  // these before it gets here (a null row would still cost a flex gap); this is the same answer
+  // for any other caller.
+  if (!hasTranscriptRow(entry)) return null;
 
   if (entry.kind === "user") {
     return (

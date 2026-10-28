@@ -903,6 +903,190 @@ describe("TaskService — reading definitions (LOB-270)", () => {
 });
 
 /**
+ * A card's repository is its board's (B2, LOB-255): the default when `create` names none, the only
+ * one it may name, and the one every run on the card is bound to — so a card made the way a trigger
+ * or a person makes one gets runs with a branch, rather than scratch runs that can never leave
+ * building.
+ */
+describe("TaskService — a card's repository (LOB-255)", () => {
+  const sessionRoot = mkdtempSync(join(tmpdir(), "factory-task-repo-"));
+
+  /** A board over a fresh repository. */
+  const boardOver = () =>
+    withService((s) =>
+      s.createBoard({
+        repo: newRepo(),
+        definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+      }),
+    );
+
+  /**
+   * How many cards the board holds, and how many events they have: a refused create must leave both
+   * at zero (an event row needs its card, so a stray event would show as a stray card too).
+   */
+  const writtenOn = (boardId: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ cards: number; events: number }>`
+          SELECT
+            (SELECT count(*)::int FROM tasks WHERE board_id = ${boardId}) AS cards,
+            (SELECT count(*)::int FROM task_events e JOIN tasks t ON t.id = e.task_id
+             WHERE t.board_id = ${boardId}) AS events
+        `;
+        return rows[0];
+      }),
+    );
+
+  /** Mutation: store `input.repo ?? null` again — the card has no repo, here and read back. */
+  it("gives a card created with no repo its board's repository, and reads it back", async () => {
+    const board = await boardOver();
+    const task = await withService((s) =>
+      s.create({ boardId: board.id, title: "no repo named", actor: LUKAS }),
+    );
+    expect(task.repo).toBe(board.repo);
+    expect((await withService((s) => s.get(task.id))).repo).toBe(board.repo);
+    const listed = await withService((s) => s.list({ boardId: board.id }));
+    expect(listed.map((card) => card.repo)).toEqual([board.repo]);
+
+    // Naming the board's own repository makes the same card.
+    const named = await withService((s) =>
+      s.create({
+        boardId: board.id,
+        title: "the board's repo named",
+        repo: board.repo,
+        actor: LUKAS,
+      }),
+    );
+    expect(named.repo).toBe(board.repo);
+  });
+
+  /** Mutation: drop the comparison — the card is written over the other repository and resolves. */
+  it("refuses a card naming another repository, naming both, and writes nothing", async () => {
+    const board = await boardOver();
+    const other = newRepo();
+    const err = await refusal((s) =>
+      s.create({
+        boardId: board.id,
+        title: "elsewhere",
+        repo: other,
+        actor: LUKAS,
+      }),
+    );
+    expect(err._tag).toBe("BoardRepoMismatch");
+    if (err._tag !== "BoardRepoMismatch") throw new Error("unreachable");
+    expect(err.boardId).toBe(board.id);
+    expect(err.boardRepo).toBe(board.repo);
+    expect(err.repo).toBe(other);
+    expect(err.message).toBe(
+      `board ${board.id} is over ${board.repo}, so a card on it cannot name ${other}`,
+    );
+    expect(await writtenOn(board.id)).toEqual({ cards: 0, events: 0 });
+  });
+
+  /**
+   * A run started from the card the way both run starters start one — `factory board start` and the
+   * card pane pass the card's repo — one started by a client that names none, and one for a card
+   * made before cards carried a repo: each is bound to the board's repository, on `factory/<id>`, in
+   * a worktree linked into the repository's registered checkout.
+   *
+   * Mutation: drop `cardRepoFor` — the run with no repo named is a scratch session with no branch.
+   * Mutation: read `t.repo` alone — the legacy card's run is a scratch session.
+   */
+  it("binds every run on the card to the board's repository, in a factory/<session-id> worktree", async () => {
+    const board = await boardOver();
+    const checkout = mkdtempSync(join(tmpdir(), "factory-task-repo-checkout-"));
+    const git = (command: string, cwd = checkout) =>
+      execSync(command, { cwd, encoding: "utf8" }).trim();
+    git("git init -q -b main");
+    git("git config user.email repo@localhost");
+    git("git config user.name repo");
+    writeFileSync(join(checkout, "README.md"), "# fixture\n");
+    git("git add -A");
+    git("git commit -q -m base");
+
+    const card = await withService((s) =>
+      s.create({ boardId: board.id, title: "runs", actor: LUKAS }),
+    );
+    const legacy = await withService((s) =>
+      s.create({ boardId: board.id, title: "legacy", actor: LUKAS }),
+    );
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`UPDATE tasks SET repo = NULL WHERE id = ${legacy.id}`;
+      }),
+    );
+    // The card reads back with its board's repository, the one its runs are bound to below.
+    expect((await withService((s) => s.get(legacy.id))).repo).toBe(board.repo);
+    expect(
+      (await withService((s) => s.list({ boardId: board.id }))).find(
+        (task) => task.id === legacy.id,
+      )?.repo,
+    ).toBe(board.repo);
+
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const runs = await sessions
+      .runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          yield* service.registerRepo({
+            repo: board.repo,
+            url: "https://example.invalid/repo.git",
+            localPath: checkout,
+          });
+          const started = [
+            // What `factory board start --task` and the card pane send: the card's own repo.
+            yield* service.create({
+              title: card.title,
+              taskId: card.id,
+              taskColumn: card.column,
+              ...(card.repo === undefined ? {} : { repo: card.repo }),
+            }),
+            // A client that names no repo for the card's run.
+            yield* service.create({ taskId: card.id, taskColumn: "building" }),
+            // A card from before LOB-255, whose row has no repo.
+            yield* service.create({
+              taskId: legacy.id,
+              taskColumn: "building",
+            }),
+          ];
+          return yield* Effect.forEach(started, (summary) =>
+            service.get(summary.id),
+          );
+        }),
+      )
+      .finally(() => sessions.dispose());
+
+    expect(card.repo).toBe(board.repo);
+    expect(runs).toHaveLength(3);
+    for (const run of runs) {
+      const id = run.session.id;
+      expect(run.session.repo).toBe(board.repo);
+      expect(run.workspace.repo).toBe(board.repo);
+      expect(run.workspace.branch).toBe(`factory/${id}`);
+      expect(run.workspace.path).toBe(
+        join(sessionRoot, ...board.repo.split("/"), id),
+      );
+      // The worktree is real: git in it answers the run's own branch, linked into the checkout.
+      expect(git("git rev-parse --abbrev-ref HEAD", run.workspace.path)).toBe(
+        `factory/${id}`,
+      );
+      expect(git("git worktree list --porcelain")).toContain(
+        `branch refs/heads/factory/${id}`,
+      );
+    }
+  }, 60_000);
+});
+
+/**
  * The thread on a card (B7, LOB-73): a run's question, a person's answer, and every refusal on the
  * way — each refusal checked against the event count, because a refused ask that left a comment
  * behind would be a question nobody can tell was never asked.
@@ -1316,6 +1500,12 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       readonly ago: number;
       readonly decided?: boolean;
     }>;
+    /** Sessions no card owns (no `task_runs` row), each seeded with the approvals named above. */
+    readonly scratch?: ReadonlyArray<{
+      readonly sessionId: string;
+      readonly title?: string;
+      readonly repo?: string;
+    }>;
   };
 
   /**
@@ -1346,6 +1536,12 @@ describe("TaskService — what needs a person (LOB-77)", () => {
                   INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
                   VALUES (${id}, ${run.taskId}, ${id}, ${run.column},
                           now() - make_interval(secs => ${run.ago}))
+                `;
+              }
+              for (const scratch of seed.scratch ?? []) {
+                yield* sql`
+                  INSERT INTO sessions (id, title, repo)
+                  VALUES (${scratch.sessionId}, ${scratch.title ?? ""}, ${scratch.repo ?? null})
                 `;
               }
               for (const approval of seed.approvals) {
@@ -1383,10 +1579,10 @@ describe("TaskService — what needs a person (LOB-77)", () => {
   /** `[reason, card title]` per row, in the order the service answered. */
   const rows = (
     items: ReadonlyArray<{
-      readonly task: { readonly title: string };
+      readonly task?: { readonly title: string } | undefined;
       readonly reason: { readonly _tag: string };
     }>,
-  ) => items.map((item) => [item.reason._tag, item.task.title]);
+  ) => items.map((item) => [item.reason._tag, item.task?.title]);
 
   it("lists approvals, then questions, then done runs at a human gate — and nothing else", async () => {
     const boardId = await newBoard();
@@ -1556,7 +1752,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       ["gate", "plan waits"],
       ["gate", "merge waits"],
     ]);
-    const listed = new Set((onBoard ?? []).map((item) => item.task.id));
+    const listed = new Set((onBoard ?? []).map((item) => item.task?.id));
     for (const absent of [resting, busy, noRun, waiting, building]) {
       expect(listed.has(absent.id)).toBe(false);
     }
@@ -1571,7 +1767,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     // The newest question in the thread, and the block's note when no run asked.
     // An idle planning run holding an undecided approval is the approval row only, never a gate.
     expect(
-      (onBoard ?? []).filter((item) => item.task.id === planAsks.id),
+      (onBoard ?? []).filter((item) => item.task?.id === planAsks.id),
     ).toHaveLength(1);
     expect(reasons[2]).toMatchObject({
       _tag: "approval",
@@ -1599,16 +1795,149 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     });
     expect(
       (onBoard ?? []).every(
-        (item) => item.task.boardId === boardId && item.repo.length > 0,
+        (item) =>
+          item.task?.boardId === boardId && (item.repo?.length ?? 0) > 0,
       ),
     ).toBe(true);
 
     // Every board: this board's rows are all there, in the same order.
     expect(
-      rows((everywhere ?? []).filter((item) => item.task.boardId === boardId)),
+      rows((everywhere ?? []).filter((item) => item.task?.boardId === boardId)),
     ).toEqual(rows(onBoard ?? []));
     // A board where nothing needs a person answers an empty list, not an error.
     expect(clean).toEqual([]);
+  });
+
+  it("lists a pending approval of a session no card owns, on the every-board read only (LOB-271)", async () => {
+    const boardId = await newBoard();
+    const card = await cardIn(boardId, "card approval", ["specifying"]);
+    const cardRun = newSession();
+    const titled = newSession();
+    const bare = newSession();
+    const settled = newSession();
+    const [onBoard, everywhere] = await attentionWith(
+      {
+        runs: [
+          {
+            taskId: card.id,
+            column: "specifying",
+            status: "idle",
+            ago: 5,
+            sessionId: cardRun,
+          },
+        ],
+        scratch: [
+          { sessionId: titled, title: "fix the flaky test", repo: "acme/api" },
+          { sessionId: bare },
+          { sessionId: settled, title: "already decided" },
+        ],
+        approvals: [
+          {
+            sessionId: titled,
+            requestId: "push",
+            action: "git push",
+            ago: 100,
+          },
+          {
+            sessionId: cardRun,
+            requestId: "card-push",
+            action: "git push origin card",
+            ago: 70,
+          },
+          { sessionId: bare, requestId: "pr", action: "open a PR", ago: 40 },
+          {
+            sessionId: settled,
+            requestId: "old",
+            action: "git push -f",
+            ago: 90,
+            decided: true,
+          },
+        ],
+      },
+      [boardId, undefined],
+    );
+
+    // This database is shared with other suites, so read only the rows this case seeded.
+    const mine = new Set([cardRun, titled, bare, settled]);
+    const seeded = (everywhere ?? []).filter(
+      (item) =>
+        item.reason._tag === "approval" && mine.has(item.reason.sessionId),
+    );
+    // One list, oldest request first: the card-less sessions interleave with the card's approval,
+    // and the session whose only request was decided is not there.
+    expect(
+      seeded.map((item) =>
+        item.reason._tag === "approval" ? item.reason.sessionId : undefined,
+      ),
+    ).toEqual([titled, cardRun, bare]);
+    expect(seeded.map((item) => item.task?.title)).toEqual([
+      undefined,
+      "card approval",
+      undefined,
+    ]);
+
+    const [scratchTitled, cardBound, scratchBare] = seeded;
+    expect(scratchTitled).toMatchObject({
+      sessionTitle: "fix the flaky test",
+      repo: "acme/api",
+      reason: {
+        _tag: "approval",
+        sessionId: titled,
+        requestId: "push",
+        action: "git push",
+      },
+    });
+    expect(scratchTitled).not.toHaveProperty("task");
+    // No title and no repo: the row says so by omission, not with a made-up value.
+    expect(scratchBare).toMatchObject({ sessionTitle: "" });
+    expect(scratchBare).not.toHaveProperty("repo");
+    // A card's approval is the row it always was: the card, its board's repo, and no session title.
+    expect(cardBound?.task?.id).toBe(card.id);
+    expect(cardBound?.repo?.length).toBeGreaterThan(0);
+    expect(cardBound).not.toHaveProperty("sessionTitle");
+
+    // A board's own view lists the board's cards only: the card's approval, nothing from scratch.
+    expect(rows(onBoard ?? [])).toEqual([["approval", "card approval"]]);
+  });
+
+  it("orders approvals by the request time the database keeps, below the millisecond (LOB-271)", async () => {
+    const boardId = await newBoard();
+    const card = await cardIn(boardId, "micro order", ["specifying"]);
+    const ids = [newSession(), newSession()].sort();
+    const low = `${ids[0]}`;
+    const high = `${ids[1]}`;
+    const scratch = newSession();
+    // The older request belongs to the session id that sorts last, 400 microseconds apart: a re-sort
+    // on the millisecond `requestedAt` and the session id would put the other one first.
+    const [everywhere] = await attentionWith(
+      {
+        runs: [low, high].map((sessionId) => ({
+          taskId: card.id,
+          column: "specifying" as const,
+          status: "idle" as const,
+          ago: 5,
+          sessionId,
+        })),
+        scratch: [{ sessionId: scratch }],
+        approvals: [
+          { sessionId: high, requestId: "a", action: "one", ago: 10.0008 },
+          { sessionId: low, requestId: "a", action: "two", ago: 10.0004 },
+          { sessionId: scratch, requestId: "a", action: "three", ago: 10.0006 },
+        ],
+      },
+      [undefined],
+    );
+    const mine = new Set([low, high, scratch]);
+    expect(
+      (everywhere ?? [])
+        .filter(
+          (item) =>
+            item.reason._tag === "approval" && mine.has(item.reason.sessionId),
+        )
+        .map((item) =>
+          item.reason._tag === "approval" ? item.reason.sessionId : undefined,
+        ),
+    ).toEqual([high, scratch, low]);
   });
 
   it("drops a question once a person answers it, and refuses a board that does not exist", async () => {
@@ -1675,7 +2004,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       }),
     );
     const bare = (await withService((s) => s.attention(boardId))).find(
-      (item) => item.task.id === other.id,
+      (item) => item.task?.id === other.id,
     );
     expect(bare?.reason).toMatchObject({ _tag: "question" });
     expect(bare?.reason).not.toHaveProperty("question");
@@ -2215,7 +2544,7 @@ describe("TaskService — exit requirements", () => {
     );
   }, 120_000);
 
-  it("refuses building → review when the card's run has no branch: bound to no repository, or gone from the index", async () => {
+  it("refuses building → review when the card's run has no branch: no checkout, bound to no repository, or gone from the index", async () => {
     const task = await inBuilding();
     const sessions = ManagedRuntime.make(
       SessionServiceLive({
@@ -2237,6 +2566,25 @@ describe("TaskService — exit requirements", () => {
         }),
       )
       .finally(() => sessions.dispose());
+    // The run names no repo, so it is bound to the card's (LOB-255) — a repository the create
+    // registered with no checkout, so there is nothing to measure its branch in.
+    const card = await withService((s) => s.get(task.id));
+    const unchecked = await refusal(toReview(task));
+    expect(unchecked).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(unchecked.message).toContain(
+      `run ${run}'s branch could not be measured: repository ${card.repo} has no local checkout registered, so no branch of it can be read`,
+    );
+    // A run bound to no repository can no longer be started for a card; one from before LOB-255 is
+    // its index row with none.
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`UPDATE sessions SET repo = NULL, base_ref = NULL WHERE id = ${run}`;
+      }),
+    );
     const unbound = await refusal(toReview(task));
     expect(unbound).toMatchObject({
       _tag: "RequirementUnmet",
