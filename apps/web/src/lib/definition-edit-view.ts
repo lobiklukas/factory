@@ -13,12 +13,7 @@ import type {
   DefinitionVocabulary,
   RequirementOption,
 } from "@repo/domain/Task";
-import {
-  RunCap,
-  columnTransitions,
-  initialColumnOf,
-  materializeDefinition,
-} from "@repo/domain/Task";
+import { RunCap, materializeDefinition } from "@repo/domain/Task";
 import { Result, Schema } from "effect";
 import { DASHBOARD_ACTOR } from "./approvals-view";
 import { NONE } from "./board-settings-view";
