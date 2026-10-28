@@ -47,6 +47,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done                      | `done` takes a reviewer run's pass on the PR's head, not a note      |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                                          | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: specifying refused with no spec; building refused with no run, no diff; PR on settle; review per-head | a refusal names the requirement; evidence is a condition of the move |
+| a card's one branch + PR (C19)   | `requires.sh`: a 2nd building run on the 1st's branch, its PR `already-open`; review run has diff                    | a later run works on the card's change, and the card keeps one PR    |
 | a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows                       | a card made in either surface is the same card in the other          |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                                             | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden                            | an operator sees what a board will do before trusting it             |
@@ -137,7 +138,7 @@ runs the real script against a closed port and an answering one.
 ```sh
 ./drive.sh       # requires the instance from ./up.sh
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
-./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), four runs on one card
+./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), five runs on one card
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./define.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: authoring a definition version (D4)
@@ -200,8 +201,8 @@ in its tmux terminal (`runs` with the PR link, the stale and repeated refusals).
 
 `requires.sh` (LOB-80, LOB-240) walks a card on the newest `default` definition into `building` and
 proves `specifying`'s `spec_doc` (refused with no spec, let through once a run declared one), and `building`'s `run_completed` (refused with no run), `non_empty_diff` and `pr_link` requirements from the terminal — refused with no
-run, refused again naming `pr_link` once a builder run committed a change, and let through once
-`factory pr` opened its PR on a loopback GitHub fake — and then `review`'s `verified` requirement: refused with no evidence, refused again when the
+run, and let through once the builder run's settle opened its PR on a loopback GitHub fake, after a
+second builder run that continued the first's branch and adopted its PR, `already-open` (C19) — and then `review`'s `verified` requirement: refused with no evidence, refused again when the
 card's latest change (`api`) is unverified even though an earlier run verified `web`, and let through
 once `api` passes. Its runs are real sessions bound to the card, verified by the real `verify` tool
 over a fixture repo; `requires.ts` seeds the card and reads each run's `verify` record back. See

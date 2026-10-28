@@ -36,7 +36,12 @@ const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
     },
   }).trim();
 
-const cut = (localPath: string, sessionId: string, baseRef: string) =>
+const cut = (
+  localPath: string,
+  sessionId: string,
+  baseRef: string,
+  branch?: string,
+) =>
   Effect.runPromiseExit(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -48,6 +53,7 @@ const cut = (localPath: string, sessionId: string, baseRef: string) =>
           repo: RepoSlug.make("factory-test/argv"),
           localPath,
           baseRef,
+          ...(branch === undefined ? {} : { branch }),
         },
         { fs, path },
       );
@@ -110,4 +116,63 @@ describe("resolveWorkspace's commands (S-env-setup)", () => {
       install: "bun install",
     });
   });
+});
+
+describe("resolveWorkspace hands a card's branch to its newest run (C19)", () => {
+  /**
+   * Mutation: drop `takeBranchOver` — git refuses to check the branch out a second time, and the
+   * later run's cut fails. Mutation: detach the operator's worktree too — the second case's
+   * checkout is moved off its branch.
+   */
+  it("detaches the earlier session's worktree, files untouched, and checks the branch out in the new one", async () => {
+    const local = join(root, "card-checkout");
+    git(root, "init", "-q", "-b", "main", local);
+    writeFileSync(join(local, "README.md"), "seed\n");
+    git(local, "add", "README.md");
+    git(local, "commit", "-q", "-m", "seed");
+
+    const first = await cut(local, "ses_card_first", "main");
+    if (!Exit.isSuccess(first)) throw new Error("the first run's cut failed");
+    const earlier = first.value.path;
+    writeFileSync(join(earlier, "built.ts"), "export const built = 1;\n");
+    git(earlier, "add", "built.ts");
+    git(earlier, "commit", "-q", "-m", "build");
+    writeFileSync(join(earlier, "scratch.txt"), "uncommitted\n");
+    const built = git(earlier, "rev-parse", "HEAD");
+
+    const second = await cut(
+      local,
+      "ses_card_second",
+      "main",
+      "factory/ses_card_first",
+    );
+    expect(Exit.isSuccess(second)).toBe(true);
+    if (!Exit.isSuccess(second)) return;
+    const later = second.value.path;
+    expect(second.value.branch).toBe("factory/ses_card_first");
+    // The later run is on the card's branch, at the earlier run's commit, with its change.
+    expect(git(later, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+      "factory/ses_card_first",
+    );
+    expect(git(later, "rev-parse", "HEAD")).toBe(built);
+    expect(existsSync(join(later, "built.ts"))).toBe(true);
+    // The earlier run's worktree is where it was, detached, its uncommitted file kept.
+    expect(git(earlier, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+    expect(git(earlier, "rev-parse", "HEAD")).toBe(built);
+    expect(git(earlier, "status", "--porcelain")).toBe("?? scratch.txt");
+  }, 60_000);
+
+  it("never moves a worktree outside the session root off its branch: the cut fails instead", async () => {
+    const local = join(root, "operator-checkout");
+    git(root, "init", "-q", "-b", "main", local);
+    writeFileSync(join(local, "README.md"), "seed\n");
+    git(local, "add", "README.md");
+    git(local, "commit", "-q", "-m", "seed");
+    const mine = join(root, "operator-worktree");
+    git(local, "worktree", "add", "-q", "-b", "feature/mine", mine);
+
+    const refused = await cut(local, "ses_card_mine", "main", "feature/mine");
+    expect(Exit.isFailure(refused)).toBe(true);
+    expect(git(mine, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature/mine");
+  }, 60_000);
 });

@@ -3744,7 +3744,7 @@ describe("TaskService — exit requirements", () => {
       requirement: PR_LINK_REQUIREMENT,
     });
     expect(err.message).toBe(
-      `the move building → review needs "pr_link" (a PR link), which is not met: the card's latest run ${run} recorded no PR (no factory.pr document in its log): open its PR (factory pr ${run}) before moving the card on`,
+      `the move building → review needs "pr_link" (a PR link), which is not met: the card's latest run ${run} recorded no PR (no factory.pr document in its log), and no run of the card recorded one from its branch factory/${run}: open its PR (factory pr ${run}) before moving the card on`,
     );
 
     // The same run's PR, opened through the PR step, is the record the requirement reads.

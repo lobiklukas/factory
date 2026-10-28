@@ -224,6 +224,18 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (C19):_ a card's runs are one change, so they share one branch and one PR. The card's first
+run in a column that asks for the change (`pr_link` or `non_empty_diff`, B4's `building`) cuts
+`factory/<its session-id>`; every later run of the card — a second building run, a run in `review` —
+is bound to that branch by name, and the newest run's worktree takes it over (the earlier one is left
+on a detached HEAD, its files intact). A later run's PR step adopts the PR an earlier run opened from
+the branch — measured, capped and pushed as an open is, but answered `already-open` with no second
+PR — and a branch is torn down only with the last workspace bound to it. The card's PR stands for
+the card only while the branch is where it was last published (`factory.pr` records the commit
+pushed), so a later run's unpublished commits hold the card in `building`; a run of any column that
+continues a branch with the card's PR pushes it on settle; and a start while a run on the branch is
+still busy, or a message to a run whose worktree was handed over, is refused rather than left to
+commit on a detached HEAD.
 
 ### D11 — Autonomy: the branch is the boundary
 
@@ -233,6 +245,9 @@ force-push, ref deletion, tag pushes, changing remotes, writes outside the workt
 `~/.ssh`), and network egress to non-allowlisted hosts.
 Policy is an Effect service and the decision is data, so "what may run unattended" is a config
 surface rather than logic scattered across hooks.
+_Refined (C19):_ the boundary is the branch the session is bound to. A card's later run is bound to
+its first change run's `factory/<session-id>` (D10), so that is the one branch its agent may push
+unattended, and a refusal names it; a session that names no branch is bound to its own.
 _Rejected:_ approve-everything (makes Missions impossible); full autonomy (how you discover
 your token was over-scoped).
 

@@ -30,10 +30,21 @@
  * (`stopReason: "length"`), was interrupted (C8) or was stopped by its budget (LOB-163) has not
  * completed. A card with no run started in the column has completed nothing. A review run is not the card's run (`pr_link`'s rule), so its end says nothing here.
  *
- * **What `non_empty_diff` and `pr_link` mean.** Both read the card's *latest* run — the newest
- * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own
- * branch, so the latest run's branch is the change the card carries now, and an older run's PR is a
- * PR of a change a later run replaced. `non_empty_diff` is met when that branch has at least one
+ * **What `non_empty_diff` and `pr_link` mean.** Both read the card's branch and PR: the branch of
+ * the card's *latest* run — the newest `task_runs` row — for the reason `verified` reads the newest
+ * call. Since C19 a card's later runs continue its first change run's branch (`./cardBranch`), so
+ * the latest run's branch *is* the card's, and the card's PR is the one recorded from it: the latest
+ * run's own `factory.pr`, or an earlier run's whose `head` is that branch — a follow-up run that
+ * opened no PR of its own (it settled parked, or in a column that opens none) still leaves the card
+ * with its PR. An earlier run's PR stands for the card only while the branch is where that PR was
+ * last published: the newest such record's `commit` (the commit its step measured and pushed) has to
+ * be the branch's tip in the registered checkout. A follow-up run that committed and never published
+ * — its cap refused the diff, its push was refused, it was interrupted, or it is still working — has
+ * moved the branch past the PR, and the move is refused until its PR step pushes (`factory pr`). A
+ * record with no `commit` (written before C19) or a tip the checkout cannot resolve is unknown, and
+ * refused the same way. A PR an older run opened from another branch (a card from before C19, or one
+ * whose branch was released and cut afresh) is a PR of a change a later run replaced, and does not
+ * count. `non_empty_diff` is met when that branch has at least one
  * changed file against its base, by the PR step's own measurement (`git diff --numstat
  * base...head`, LOB-196): committed work only, three-dot from the merge base, against the same base
  * the step picks (`measureBaseOf`, C17 — the forge's fetched tip when the run was cut from it), so a
@@ -49,8 +60,8 @@
  * D3/D4:** this check reads git refs from a checkout on the control plane's own disk. When the
  * worktree moves into the sandbox, the measurement has to follow it (or read the recorded PR's own
  * diff), or `non_empty_diff` refuses every move. `pr_link` is met
- * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
- * commits, not the index's `pr_url` column a rebuild derives from it.
+ * when a `factory.pr` document with a link (LOB-177) is the card's PR as above: the record the PR
+ * step commits, not the index's `pr_url` column a rebuild derives from it.
  *
  * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
  * records a `factory.review` target, which the review trigger opens one per head of a PR — and
@@ -188,9 +199,15 @@ export type RunEvidence = {
   /** The column the run was started in; `run_completed` judges the newest run started in the column being left. */
   readonly column?: string;
   readonly calls: readonly TimedVerifyCall[];
+  /** The branch the run is on, when it is bound to a repository. */
+  readonly branch?: string;
   readonly prUrl?: string;
   /** How the run's newest turn ended (`runTurnOf`); read only when the move checks `run_completed`. */
   readonly turn?: RunTurn;
+  /** The branch its recorded PR was opened from (`factory.pr`'s `head`). */
+  readonly prHead?: string;
+  /** The commit its recorded PR was published at (`factory.pr`'s `commit`, C19). */
+  readonly prCommit?: string;
 };
 
 /**
@@ -243,6 +260,11 @@ export type CardEvidence = {
   readonly diff?: BranchDiff;
   readonly reviews?: readonly ReviewRunEvidence[];
   readonly reviewHeads?: readonly ReportedHead[];
+  /**
+   * The commit the latest run's branch is at in the registered checkout (C19), read when `pr_link`
+   * would stand on an earlier run's PR; absent when it was not read or does not resolve.
+   */
+  readonly branchTip?: string;
 };
 
 /**
@@ -416,17 +438,44 @@ export const nonEmptyDiffVerdict = (
       };
 };
 
-/** The `pr_link` requirement over the latest run's recorded PR (module doc). */
+/**
+ * The `pr_link` requirement over the card's PR (module doc): the latest run's recorded PR, or one an
+ * earlier run recorded from the branch the latest run is on (C19).
+ */
 export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
   const latest = evidence.runs.at(-1);
   if (latest === undefined)
     return { met: false, reason: "the card has no runs, so none opened a PR" };
-  return latest.prUrl === undefined
-    ? {
-        met: false,
-        reason: `the card's latest run ${latest.sessionId} recorded no PR (no factory.pr document in its log): open its PR (factory pr ${latest.sessionId}) before moving the card on`,
-      }
-    : { met: true };
+  if (latest.prUrl !== undefined) return { met: true };
+  const onBranch =
+    latest.branch === undefined
+      ? undefined
+      : evidence.runs.findLast(
+          (run) => run.prUrl !== undefined && run.prHead === latest.branch,
+        );
+  if (onBranch === undefined)
+    return {
+      met: false,
+      reason: `the card's latest run ${latest.sessionId} recorded no PR (no factory.pr document in its log)${latest.branch === undefined ? "" : `, and no run of the card recorded one from its branch ${latest.branch}`}: open its PR (factory pr ${latest.sessionId}) before moving the card on`,
+    };
+  // The earlier run's PR is the card's only while the branch is where it was last published: a
+  // follow-up run that committed and never pushed has moved it past the PR (module doc).
+  if (
+    onBranch.prCommit !== undefined &&
+    evidence.branchTip !== undefined &&
+    onBranch.prCommit === evidence.branchTip
+  )
+    return { met: true };
+  return {
+    met: false,
+    reason: `the card's latest run ${latest.sessionId} recorded no PR, and its branch ${latest.branch ?? ""} ${
+      onBranch.prCommit === undefined
+        ? `has no published commit on record for the card's PR ${onBranch.prUrl ?? ""}`
+        : evidence.branchTip === undefined
+          ? "could not be read in the repository's registered checkout"
+          : `is at ${evidence.branchTip.slice(0, 12)}, past ${onBranch.prCommit.slice(0, 12)} where run ${onBranch.sessionId} published the card's PR ${onBranch.prUrl ?? ""}`
+    }: push the run's commits to the PR (factory pr ${latest.sessionId}) before moving the card on`,
+  };
 };
 
 /** The `spec_doc` requirement over the card's spec (module doc). */

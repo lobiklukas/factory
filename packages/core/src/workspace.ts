@@ -16,6 +16,10 @@
 import { Effect, Option, Schema } from "effect";
 // oxlint-disable-next-line node-builtin-import
 import { execFileSync, execSync } from "node:child_process";
+// oxlint-disable-next-line node-builtin-import
+import { readdirSync, readFileSync } from "node:fs";
+// oxlint-disable-next-line node-builtin-import
+import { join } from "node:path";
 import type { FileSystem, Path } from "effect";
 import type {
   RepoCloneFailed,
@@ -165,6 +169,108 @@ const commandsIn = (
   });
 
 /**
+ * Git options every call below passes: no hook and no fsmonitor runs on the control plane's behalf,
+ * whatever a config the agent can write says (as `./git.ts` does for a push).
+ */
+const QUIET_GIT = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+] as const;
+
+/**
+ * Hand `branch` over to the worktree about to be cut for it (C19): when another session's worktree —
+ * one under the session root — has it checked out, that worktree's HEAD is detached at the commit it
+ * is on, so git lets the new one check the branch out. A card's runs share one branch
+ * (`./cardBranch`), git checks a branch out in one worktree at a time, and the newest run is the one
+ * working on it; the earlier run's files, uncommitted edits included, stay exactly as they were.
+ *
+ * A worktree outside the session root — the operator's own checkout, a worktree they made — is never
+ * touched: the cut then fails on git's own refusal, as it did before.
+ *
+ * The HEAD is written through the worktree's administrative directory in the registered checkout
+ * (`<common>/worktrees/<name>`, the one whose `gitdir` names it), never by running git inside the
+ * agent's directory. Best effort: anything that fails here leaves the cut to fail on its own terms.
+ */
+const takeBranchOver = (
+  checkout: string,
+  branch: string,
+  sessionRoot: string,
+): void => {
+  try {
+    const listing = execFileSync(
+      "git",
+      ["-C", checkout, ...QUIET_GIT, "worktree", "list", "--porcelain"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const holders = listing
+      .split(/\n\n+/)
+      .map((block) => {
+        const lines = block.split("\n");
+        const field = (name: string) =>
+          lines
+            .find((line) => line.startsWith(`${name} `))
+            ?.slice(name.length + 1);
+        return {
+          path: field("worktree"),
+          head: field("HEAD"),
+          branch: field("branch"),
+        };
+      })
+      .filter(
+        (holder) =>
+          holder.branch === `refs/heads/${branch}` &&
+          holder.path !== undefined &&
+          holder.head !== undefined &&
+          holder.path.startsWith(`${sessionRoot}/`),
+      );
+    if (holders.length === 0) return;
+    const common = execFileSync(
+      "git",
+      [
+        "-C",
+        checkout,
+        ...QUIET_GIT,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const admin = join(common, "worktrees");
+    for (const name of readdirSync(admin)) {
+      let gitdir: string;
+      try {
+        gitdir = readFileSync(join(admin, name, "gitdir"), "utf8").trim();
+      } catch {
+        continue;
+      }
+      const holder = holders.find(
+        (candidate) => `${candidate.path}/.git` === gitdir,
+      );
+      if (holder?.head === undefined) continue;
+      execFileSync(
+        "git",
+        [
+          `--git-dir=${join(admin, name)}`,
+          ...QUIET_GIT,
+          "update-ref",
+          "--no-deref",
+          "-m",
+          `factory: ${branch} continues in another session's worktree`,
+          "HEAD",
+          holder.head,
+        ],
+        { stdio: "ignore" },
+      );
+    }
+  } catch {
+    // Left to the cut: `worktree add` names what is in the way.
+  }
+};
+
+/**
  * The session's directory, its repo binding, and the commands its repo declares. Never fails: a
  * session always has a workspace, even if the repo says nothing about itself.
  */
@@ -227,6 +333,14 @@ export const resolveWorkspace = (
       }
       // Set whenever there is a repo (above); narrowed here so it can be an argv entry.
       const worktreeBranch = branch ?? `factory/${input.sessionId}`;
+      // As git spells the worktrees it lists (it resolves symlinks), so `takeBranchOver` can tell
+      // a session's worktree from one of the operator's.
+      const sessionRoot =
+        !occupied && checkout !== undefined
+          ? yield* deps.fs
+              .realPath(input.sessionRoot)
+              .pipe(Effect.orElseSucceed(() => input.sessionRoot))
+          : input.sessionRoot;
       if (!occupied && checkout !== undefined) {
         yield* Effect.try({
           try: () => {
@@ -248,7 +362,10 @@ export const resolveWorkspace = (
               // not registered: nothing to clear
             }
             // Reuse the session's branch when it exists — the idle sweep and a restart leave it,
-            // with the run's commits on it (LOB-268) — otherwise create it at the base ref.
+            // with the run's commits on it (LOB-268), and a card's earlier run leaves the card's
+            // (C19), checked out in its worktree until this one takes it over — otherwise create it
+            // at the base ref.
+            takeBranchOver(checkout, worktreeBranch, sessionRoot);
             let created = false;
             try {
               execFileSync(

@@ -1301,6 +1301,13 @@ export type PullRequestRecord = {
   readonly head: string;
   readonly openedAt: string;
   /**
+   * The commit the PR's head was published at when this session recorded it (C19): the commit the
+   * step measured and pushed. A card's later run that records the card's PR records the commit it
+   * pushed, so `pr_link` can tell a branch the PR carries from one that moved past it. Absent on a
+   * PR recorded before it existed, which a reader treats as unknown.
+   */
+  readonly commit?: string;
+  /**
    * What the PR's body states was verified (LOB-79). Absent only on a PR recorded before evidence
    * existed: the step always derives one, `EvidenceNone` included.
    */
@@ -1345,6 +1352,7 @@ export const writePullRequestDoc = (
             doc.base = pullRequest.base;
             doc.head = pullRequest.head;
             doc.openedAt = pullRequest.openedAt;
+            doc.commit = pullRequest.commit ?? "";
             doc.evidence =
               pullRequest.evidence === undefined
                 ? null
@@ -1384,6 +1392,10 @@ export const readPullRequestDoc = (
       base: doc.base,
       head: doc.head,
       openedAt: doc.openedAt,
+      // A document written before `commit` existed has no such field at all.
+      ...(typeof doc.commit === "string" && doc.commit !== ""
+        ? { commit: doc.commit }
+        : {}),
       ...(evidence === undefined ? {} : { evidence }),
     };
   });
@@ -2798,6 +2810,7 @@ export const readRecordedPullRequest = (
       base: doc.base,
       head: doc.head,
       openedAt: doc.openedAt,
+      ...(doc.commit === "" ? {} : { commit: doc.commit }),
       ...(doc.evidence === undefined ? {} : { evidence: doc.evidence }),
     };
   });
