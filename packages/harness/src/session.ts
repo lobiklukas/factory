@@ -626,11 +626,15 @@ const openSessionIn = (
     const policy =
       options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd);
     // A column that holds the `docs` skill makes this a documentation run, which may write
-    // documentation and nothing else (LOB-195). Composed here, where a policy becomes hooks, so a
-    // session cannot be opened with the skill and without the rule.
-    const columnPolicy = skills.some((skill) => skill.name === DOCS_SKILL)
-      ? docsPolicy(policy)
-      : policy;
+    // documentation and nothing else (LOB-195), and so does one whose autonomy declares
+    // `write: "docs"` (C22). Composed here, where a policy becomes hooks, so a session cannot be
+    // opened with the skill or the declaration and without the rule. A declared `none` is the
+    // read-only stage below (`readOnlyStageOf`), which refuses every write before this rule sees one.
+    const columnPolicy =
+      skills.some((skill) => skill.name === DOCS_SKILL) ||
+      options.run?.autonomy?.write === "docs"
+        ? docsPolicy(policy)
+        : policy;
     // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
     // `verify`, and any `bash` that is not a known read command. The stage is the run's
     // column's, resolved from the same profile, so a session cannot be opened in `specifying` and

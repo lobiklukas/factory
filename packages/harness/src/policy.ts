@@ -45,6 +45,12 @@ import type { Context as ChordContext } from "@earendil-works/chord";
 import type { Extension, HookApi } from "@earendil-works/pi-durable";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 import { Context, Effect, Layer } from "effect";
+import type {
+  AutonomyGate,
+  ColumnAutonomy,
+  ColumnWriteScope,
+  ResolvedAutonomy,
+} from "@repo/domain/Task";
 
 /** The name the policy extension is installed under, so a conversation can select it by name. */
 export const POLICY_EXTENSION = "policy";
@@ -547,6 +553,13 @@ const decidePush = (
   rules: AutonomyRules,
   args: readonly string[],
 ): PolicyDecision => {
+  // No ref may be pushed at all — a column whose autonomy declares `push: "none"` (C22): every push
+  // is refused as that, before its flags or refspecs, so the reason is the one the run can act on.
+  if (rules.pushRefPrefixes.length === 0) {
+    return block(
+      "git push is refused: this session may push no ref. Commit the change instead; the factory's PR step pushes the session's branch.",
+    );
+  }
   const flags: string[] = [];
   const positional: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -1399,7 +1412,7 @@ const decideDocsWrite = (
   )
     return ALLOW;
   return block(
-    `${call.name} writing ${path} is refused by the docs rule: this run holds the ${DOCS_SKILL} skill, so it may write documentation only (${DOCS_WRITE_ALLOWLIST.join(", ")}). Write that documentation instead.`,
+    `${call.name} writing ${path} is refused by the docs rule: this is a documentation run (its column holds the ${DOCS_SKILL} skill or declares write: docs), so it may write documentation only (${DOCS_WRITE_ALLOWLIST.join(", ")}). Write that documentation instead.`,
   );
 };
 
@@ -1459,7 +1472,8 @@ export const REVIEWING_STAGE = "reviewing";
 /**
  * The read-only stage a run is in, or `undefined` when its column's role writes (or it has no
  * column at all — a scratch session is not a stage). A review run (`reviewing`) is always the
- * reviewing stage, with its column and role when it has them.
+ * reviewing stage, with its column and role when it has them. A column whose autonomy declares
+ * `write: "none"` (C22) is a read-only stage too, named after the column, whatever its role.
  */
 export const readOnlyStageOf = (
   run:
@@ -1467,6 +1481,7 @@ export const readOnlyStageOf = (
         readonly column?: string | undefined;
         readonly role?: string;
         readonly reviewing?: boolean;
+        readonly autonomy?: ColumnAutonomy;
       }
     | undefined,
 ): ReadOnlyStage | undefined => {
@@ -1476,11 +1491,14 @@ export const readOnlyStageOf = (
       column: run.column ?? "none",
       role: run.role ?? "none",
     };
-  if (run?.column === undefined || run.role === undefined) return undefined;
-  const stage = READ_ONLY_ROLES.get(run.role);
-  return stage === undefined
-    ? undefined
-    : { stage, column: run.column, role: run.role };
+  if (run?.column === undefined) return undefined;
+  const stage =
+    run.role === undefined ? undefined : READ_ONLY_ROLES.get(run.role);
+  if (stage !== undefined && run.role !== undefined)
+    return { stage, column: run.column, role: run.role };
+  return run.autonomy?.write === "none"
+    ? { stage: run.column, column: run.column, role: run.role ?? "none" }
+    : undefined;
 };
 
 /**
@@ -1976,6 +1994,101 @@ export const readOnlyStagePolicy = (
 });
 
 // ---------------------------------------------------------------------------------------------
+// A column's autonomy (C22)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What a column's autonomy is resolved from: the fields of a board column (`@repo/domain/Task`'s
+ * `BoardColumn`) that decide what its runs may do without asking — its role and skills, which
+ * already narrow its writes (LOB-74, LOB-195), and the `autonomy` it declares.
+ */
+export type AutonomyColumn = {
+  readonly role?: string | undefined;
+  readonly skills: readonly string[];
+  readonly autonomy?: ColumnAutonomy | undefined;
+};
+
+/** The write scopes, widest first: a later one allows a subset of what an earlier one does. */
+const WRITE_SCOPES: readonly ColumnWriteScope[] = ["worktree", "docs", "none"];
+
+/**
+ * Where a run in `column` may write (C22): the narrower of what its role and skills already make it
+ * — a read-only role is `none` (LOB-74), a column holding the `docs` skill is `docs` (LOB-195) — and
+ * what its autonomy declares. A declaration never widens: a specifier column that says `worktree`
+ * still writes nothing. `openSession` composes the run's rules from this, and `getDefinition`
+ * describes the column with it, so what a reader is told is what a run meets.
+ */
+export const columnWriteScope = (column: AutonomyColumn): ColumnWriteScope => {
+  const implied: ColumnWriteScope =
+    column.role !== undefined && READ_ONLY_ROLES.has(column.role)
+      ? "none"
+      : column.skills.includes(DOCS_SKILL)
+        ? "docs"
+        : "worktree";
+  const declared = column.autonomy?.write ?? "worktree";
+  return WRITE_SCOPES.indexOf(declared) > WRITE_SCOPES.indexOf(implied)
+    ? declared
+    : implied;
+};
+
+/**
+ * The deployment's configuration narrowed by a column's autonomy (C22): the column's gates added to
+ * the deployment's, and no ref pushable when it declares `push: "none"`. Nothing a column declares
+ * widens D11 — not a host, not a ref prefix, not a lifted gate — because widening is the deployment's
+ * act (D11), and a definition row is not the deployment. No autonomy is `config` itself.
+ */
+export const withColumnAutonomy = (
+  config: AutonomyConfig,
+  autonomy: ColumnAutonomy | undefined,
+): AutonomyConfig => {
+  if (autonomy === undefined) return config;
+  const deployment = config.approvalRequired ?? [];
+  const held = new Set(deployment.map(normalizeGate));
+  const added = (autonomy.approvalRequired ?? []).filter((gate) => {
+    const normalized = normalizeGate(gate);
+    return normalized.length > 0 && !held.has(normalized);
+  });
+  return {
+    ...config,
+    pushRefPrefixes: autonomy.push === "none" ? [] : config.pushRefPrefixes,
+    approvalRequired: [...deployment, ...added],
+  };
+};
+
+/**
+ * A column's effective autonomy, described (C22, `@repo/domain/Task`'s `ResolvedAutonomy`): every
+ * gate a run in it meets, each named as the deployment's or the column's, and its write and push
+ * scope. Built from `withColumnAutonomy` and `columnWriteScope`, the two a run's policy is built
+ * from, so the settings view and the run cannot disagree. A gate is named in the form it is matched
+ * in (`/usr/bin/npm publish` reads `npm publish`), once, the deployment's when both declare it.
+ */
+export const columnAutonomy = (
+  config: AutonomyConfig,
+  column: AutonomyColumn,
+): ResolvedAutonomy => {
+  const deployment = new Set(
+    (config.approvalRequired ?? []).map(normalizeGate),
+  );
+  const effective = withColumnAutonomy(config, column.autonomy);
+  const gates: AutonomyGate[] = [];
+  for (const command of (effective.approvalRequired ?? []).map(
+    normalizeGate,
+  )) {
+    if (command.length === 0 || gates.some((gate) => gate.command === command))
+      continue;
+    gates.push({
+      command,
+      source: deployment.has(command) ? "deployment" : "column",
+    });
+  }
+  return {
+    approvalRequired: gates,
+    write: columnWriteScope(column),
+    push: effective.pushRefPrefixes.length === 0 ? "none" : "branch",
+  };
+};
+
+// ---------------------------------------------------------------------------------------------
 // The seam
 // ---------------------------------------------------------------------------------------------
 
@@ -2011,8 +2124,15 @@ export const autonomyPolicy = (
 export type PolicyShape = {
   /** The configuration this deployment runs under. */
   readonly config: AutonomyConfig;
-  /** The policy for one session's worktree, and the session that owns its branch. */
-  readonly forWorktree: (worktree: string, sessionId?: string) => SessionPolicy;
+  /**
+   * The policy for one session's worktree, and the session that owns its branch, narrowed by the
+   * autonomy its run's column declares (C22, `withColumnAutonomy`) when it is a run of a card.
+   */
+  readonly forWorktree: (
+    worktree: string,
+    sessionId?: string,
+    column?: ColumnAutonomy,
+  ) => SessionPolicy;
 };
 
 export class Policy extends Context.Service<Policy, PolicyShape>()(
@@ -2025,8 +2145,8 @@ export const PolicyLive = (
 ): Layer.Layer<Policy> =>
   Layer.succeed(Policy, {
     config,
-    forWorktree: (worktree, sessionId) =>
-      autonomyPolicy(config, worktree, sessionId),
+    forWorktree: (worktree, sessionId, column) =>
+      autonomyPolicy(withColumnAutonomy(config, column), worktree, sessionId),
   });
 
 /**

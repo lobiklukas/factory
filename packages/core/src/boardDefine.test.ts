@@ -391,6 +391,26 @@ describe("authoredDefinitionFaults (D4)", () => {
     ).toEqual(["columns[4].name"]);
   });
 
+  /** Mutation: drop the blank-gate rule — the column's `"  "` gate passes, and holds nothing (C22). */
+  it("refuses a blank approval gate in a column's autonomy, and accepts a named one", () => {
+    expect(
+      fields(
+        withColumn(1, (column) => ({
+          ...column,
+          autonomy: { approvalRequired: ["git push", "  "], push: "none" },
+        })),
+      ),
+    ).toEqual(["columns[1].autonomy.approvalRequired[1]"]);
+    expect(
+      fields(
+        withColumn(1, (column) => ({
+          ...column,
+          autonomy: { approvalRequired: ["git push"], write: "docs" },
+        })),
+      ),
+    ).toEqual([]);
+  });
+
   /** Every fault at once, so an author fixes the file in one pass rather than one refusal at a time. */
   it("reports every fault, not only the first", () => {
     const faults = authoredDefinitionFaults(

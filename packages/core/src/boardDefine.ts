@@ -37,7 +37,9 @@
  *   deployment's model. `ROLE_MODELS` is a partial override table (any role it does not name runs on
  *   the deployment's model), so a role it does not list is not by itself a fault: the default
  *   pipeline's `specifier` and `planner` are authored under `ROLE_MODELS=reviewer=…`. With no table
- *   every role runs on the deployment's model, and any role is accepted.
+ *   every role runs on the deployment's model, and any role is accepted;
+ * - **no blank approval gate** in a column's `autonomy` (C22): the run's policy drops one, so it would
+ *   be a gate the author believes in and nothing holds.
  *
  * Pure: the skill library, the role table and the known roles are passed in by the caller, who holds
  * them (`apps/api`'s `defineBoard` handler reads `SkillService.list` and `SessionService.roles`;
@@ -189,6 +191,15 @@ export const authoredDefinitionFaults = (
         field: `${at}.role`,
         message: `column "${column.name}" names role "${column.role}", which is not in the deployment's role table (ROLE_MODELS: ${[...library.roles].sort().join(", ")}), not a role the harness knows, and not one any definition declares (${[...knownRoles].sort().join(", ")})`,
       });
+    // A blank gate is dropped where the run's policy is built and shown nowhere: a gate the author
+    // believes holds and none does (C22).
+    (column.autonomy?.approvalRequired ?? []).forEach((gate, position) => {
+      if (gate.trim() === "")
+        faults.push({
+          field: `${at}.autonomy.approvalRequired[${position}]`,
+          message: `column "${column.name}" declares a blank approval gate: name the command a run asks a person before running, as APPROVAL_REQUIRED does ("git push")`,
+        });
+    });
   });
 
   return faults;

@@ -79,6 +79,7 @@ import {
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
 import {
+  type BoardColumn,
   BoardInstanceId as BoardInstanceIdSchema,
   DEFAULT_DEFINITION_ID,
   DefinitionId as DefinitionIdSchema,
@@ -10090,6 +10091,155 @@ describe("a gated call asks through the approvals service", () => {
     expect(outcome.pendingAfter.approvals).toEqual([]);
     expect(outcome.commits).toBe(1);
   });
+});
+
+/**
+ * A column declares its autonomy on the board definition (docs/board.md B6, C22), and a run's
+ * column's gates are merged over the deployment's when the run's column resolves.
+ *
+ * One deployment, no gate of its own; one definition, written through `defineBoard` (D4) and pinned
+ * by `createBoard`, whose `careful` column gates `git push` and whose `building` column declares
+ * nothing. The faux run calls the same `bash` in both — a push the deployment allows (it widens the
+ * prefixes to `refs/heads/sandbox/` so the ref is not the session's own, which the run cannot know),
+ * followed by an echo that says the command ran — so only the column differs between the two runs.
+ * Mutation: have the acquisition call `forWorktree` without the run's autonomy, or have
+ * `runColumnFor` drop it — the careful run's push runs unasked.
+ */
+describe("a column's autonomy reaches its runs' policy (C22)", () => {
+  const autonomyRoot = mkdtempSync(join(tmpdir(), "factory-core-columns-"));
+  const command =
+    "git push origin HEAD:refs/heads/sandbox/c22-probe; echo push-ran";
+  const runtime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createFauxModelAccess({ fauxCommand: command }).access,
+      sessionRoot: autonomyRoot,
+      autonomy: {
+        ...DEFAULT_AUTONOMY,
+        pushRefPrefixes: [
+          ...DEFAULT_AUTONOMY.pushRefPrefixes,
+          "refs/heads/sandbox/",
+        ],
+      },
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+
+  afterAll(async () => {
+    await runtime.dispose();
+  });
+
+  const columns: ReadonlyArray<BoardColumn> = [
+    {
+      name: "todo",
+      kind: "resting",
+      skills: [],
+      requires: [],
+      transitions: [{ to: "building" }, { to: "careful" }, { to: "canceled" }],
+    },
+    {
+      name: "building",
+      kind: "working",
+      role: "builder",
+      skills: [],
+      requires: [],
+      transitions: [{ to: "done" }, { to: "canceled" }],
+    },
+    {
+      name: "careful",
+      kind: "working",
+      role: "builder",
+      skills: [],
+      requires: [],
+      transitions: [{ to: "done" }, { to: "canceled" }],
+      autonomy: { approvalRequired: ["git push"] },
+    },
+    { name: "done", kind: "terminal", skills: [], requires: [], transitions: [] },
+    {
+      name: "canceled",
+      kind: "terminal",
+      skills: [],
+      requires: [],
+      transitions: [],
+    },
+  ];
+
+  it("parks a run in a column that gates `git push` on an approval, and runs the same push in one that does not", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const tasks = yield* TaskService;
+        const sessions = yield* SessionService;
+        const { definition } = yield* tasks.defineBoard(
+          {
+            id: DefinitionIdSchema.make(
+              `autonomy${randomBytes(3).toString("hex")}`,
+            ),
+            name: "Autonomy per column",
+            columns,
+            initialColumn: "todo",
+          },
+          { skills: new Set(), roles: new Set() },
+        );
+        const board = yield* tasks.createBoard({
+          repo: RepoSlugSchema.make(
+            `factory-test/${randomBytes(3).toString("hex")}`,
+          ),
+          definitionId: definition.id,
+        });
+        const run = (column: string) =>
+          Effect.gen(function* () {
+            const cardId = `tsk_${randomBytes(13).toString("hex")}`;
+            yield* sql`
+              INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
+              VALUES (${cardId}, ${board.id}, ${`a card in ${column}`}, ${column}, ${definition.version}, 1)
+            `;
+            const created = yield* sessions.create({
+              taskId: cardId,
+              taskColumn: column,
+            });
+            yield* sessions.send({ sessionId: created.id, content: "push" });
+            yield* waitUntil(
+              sessions
+                .get(created.id)
+                .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+              `the ${column} run to settle`,
+            );
+            const snapshot = yield* sessions.get(created.id);
+            return {
+              status: snapshot.session.status,
+              pending: (yield* sessions.listApprovals(created.id)).approvals,
+              result: snapshot.entries.find(
+                (entry) => entry.kind === "toolResult",
+              ),
+            };
+          });
+        return {
+          stored: definition.columns.find(
+            (column) => column.name === "careful",
+          )?.autonomy,
+          careful: yield* run("careful"),
+          building: yield* run("building"),
+        };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+
+    // The authored version kept the field (a version is never edited in place, B2).
+    expect(outcome.stored).toEqual({ approvalRequired: ["git push"] });
+
+    // The gated column asked, and the push did not run: the run is parked on a person.
+    expect(outcome.careful.pending).toHaveLength(1);
+    expect(outcome.careful.pending[0]).toMatchObject({
+      action: "git push",
+      detail: command,
+    });
+    expect(outcome.careful.status).toBe("idle");
+    expect(outcome.careful.result?.text).toContain("one has been asked for");
+    expect(outcome.careful.result?.text).not.toContain("push-ran");
+
+    // The same command in the other column of the same board ran unasked.
+    expect(outcome.building.pending).toEqual([]);
+    expect(outcome.building.result?.text).toContain("push-ran");
+    expect(outcome.building.result?.text).not.toContain("asked for");
+  }, 120_000);
 });
 
 /**

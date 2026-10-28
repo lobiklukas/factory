@@ -30,6 +30,7 @@ import {
   type PromptSection,
 } from "@earendil-works/pi-durable";
 import { Effect, Schema } from "effect";
+import type { ColumnAutonomy } from "@repo/domain/Task";
 import { modelAccessFor, type ModelAccess } from "./models";
 import {
   readOnlyStageOf,
@@ -83,6 +84,8 @@ export type RunColumn = {
   /** The role the column declares (B4), absent where B4 puts "—". */
   readonly role?: string;
   readonly skills: readonly string[];
+  /** What the column's runs may do without asking (C22), as declared; absent is the deployment's. */
+  readonly autonomy?: ColumnAutonomy;
 };
 
 /** What one run gets from its column: the sections its prompt carries, in the column's order. */
@@ -96,6 +99,12 @@ export type RunProfile = {
    */
   readonly role?: string;
   readonly skills: readonly RunSkill[];
+  /**
+   * The autonomy the run's column declares (C22), as declared: `openSession` narrows the run's write
+   * scope by it (`columnWriteScope`), and the control plane narrows the session's policy by it
+   * (`Policy.forWorktree`). Absent for a session with no card and a column that declares none.
+   */
+  readonly autonomy?: ColumnAutonomy;
   /**
    * Whether the run reviews a pull request (LOB-36): its session was opened with a review target.
    * A review run is the read-only reviewing stage whatever its column, and is the one run offered
@@ -161,6 +170,7 @@ export const loadRun = (
       column: column.name,
       ...(column.role === undefined ? {} : { role: column.role }),
       skills,
+      ...(column.autonomy === undefined ? {} : { autonomy: column.autonomy }),
     };
   });
 

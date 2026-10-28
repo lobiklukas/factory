@@ -148,7 +148,9 @@ import {
   // method below resolves the workspace and the owner first, so the two names mark which layer
   // owns which half.
   startMission as beginMission,
+  type AutonomyColumn,
   type AutonomyConfig,
+  columnAutonomy,
   type ApprovalAnswer,
   type MergeEvent,
   type MergeRecord,
@@ -246,7 +248,11 @@ import type { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
 import { readOutcomes } from "./outcomes";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
-import { BoardColumn, type ResolvedModel } from "@repo/domain/Task";
+import {
+  BoardColumn,
+  type ResolvedAutonomy,
+  type ResolvedModel,
+} from "@repo/domain/Task";
 import { TaskService, TaskServiceLive, type TaskError } from "./TaskService";
 import type {
   CurateSessionInput,
@@ -714,6 +720,13 @@ export type SessionServiceShape = {
    * what a reader is told is what a run gets. Deployment configuration: read here, never written.
    */
   readonly roleModel: (role: string | undefined) => ResolvedModel;
+  /**
+   * What a run in `column` may do without asking (C22; read by `getDefinition`): this layer's
+   * autonomy configuration narrowed by the column's own `autonomy`, by the same `@repo/harness`
+   * functions the run's policy is built with (`withColumnAutonomy`, `columnWriteScope`), so what a
+   * reader is told is what a run meets. Deployment configuration: read here, never written.
+   */
+  readonly columnAutonomy: (column: AutonomyColumn) => ResolvedAutonomy;
   /**
    * The roles this layer's role table names (B6): what an authored definition version's roles are
    * held to when there are any (D4, `./boardDefine`). Empty for a deployment with no `ROLE_MODELS`.
@@ -1564,6 +1577,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 name: declared.name,
                 ...(declared.role === undefined ? {} : { role: declared.role }),
                 skills: declared.skills,
+                ...(declared.autonomy === undefined
+                  ? {}
+                  : { autonomy: declared.autonomy }),
               };
         });
 
@@ -1757,13 +1773,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const column = yield* runColumnFor(sessionId);
           if (column === undefined || column.skills.length === 0) {
             // No skills to read, but the role still travels: it is what makes a column a read-only
-            // stage (LOB-74), and a stage with no skill bound is still that stage.
+            // stage (LOB-74), and a stage with no skill bound is still that stage. So does the
+            // column's autonomy (C22), which narrows the run's policy whatever skills it binds.
             return column === undefined
               ? EMPTY_RUN_PROFILE
               : {
                   column: column.name,
                   ...(column.role === undefined ? {} : { role: column.role }),
                   skills: [],
+                  ...(column.autonomy === undefined
+                    ? {}
+                    : { autonomy: column.autonomy }),
                 };
           }
           const readFailed = (cause: { readonly message: string }) =>
@@ -2610,7 +2630,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               storage,
               cwd: workspace.path,
               resume: released === undefined && acquisition.resume !== false,
-              policy: policy.forWorktree(workspace.path, id),
+              // The deployment's policy, narrowed by what the run's column declares (C22): its
+              // gates added, its push scope applied. The same `run` the prompt came from, so the
+              // column a run is told about is the column whose autonomy it runs under.
+              policy: policy.forWorktree(workspace.path, id, run.autonomy),
               run,
               pages,
               verify: {
@@ -4554,7 +4577,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         workers: readonly MissionWorker[],
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
-          const sessionPolicy = policy.forWorktree(worktree, sessionId);
+          // The session's column narrows its checks as it narrows its agent (C22): a check is held to
+          // the policy the session's own `bash` calls meet, gates and push scope included.
+          const column = yield* runColumnFor(sessionId);
+          const sessionPolicy = policy.forWorktree(
+            worktree,
+            sessionId,
+            column?.autonomy,
+          );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
             if (worker.check.trim() === "")
@@ -7003,6 +7033,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         outcomes: (input) =>
           readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
+        columnAutonomy: (column) => columnAutonomy(policy.config, column),
         roles: new Set((options.roleModels ?? NO_ROLE_MODELS).keys()),
         resumeMissions,
         resumeRuns,

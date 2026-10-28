@@ -16,6 +16,12 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
     // The role → model table is the session layer's (B6): the one `openSession` resolves a run's
     // model from, so a definition is described with the model a run in each column would get.
     const sessions = yield* SessionService;
+    // So is the autonomy policy (C22): a column is described with what its runs may do unasked, the
+    // deployment's gates and scopes narrowed by the column, as the run's policy is built.
+    const deployment = {
+      modelOf: sessions.roleModel,
+      autonomyOf: sessions.columnAutonomy,
+    };
     // An authored version's skills are held to the library a run resolves them from (D7), read
     // afresh for every define, so a skill put a moment ago is one a column may bind.
     const skills = yield* SkillService;
@@ -38,7 +44,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
           .getDefinition(input.definitionId, input.version)
           .pipe(
             Effect.map((definition) =>
-              describeDefinition(definition, sessions.roleModel),
+              describeDefinition(definition, deployment),
             ),
           ),
       // The rules are core's (`./boardDefine`); the library they check against is the skill table
@@ -50,7 +56,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
           ),
           Effect.map(({ outcome, definition }) => ({
             outcome,
-            definition: describeDefinition(definition, sessions.roleModel),
+            definition: describeDefinition(definition, deployment),
           })),
         ),
       // One read: `getBoard`'s join of the instance and its pinned version, so the two cannot disagree.
@@ -58,7 +64,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
         tasks.getBoard(input.boardId).pipe(
           Effect.map((view) => ({
             instance: view.instance,
-            definition: describeDefinition(view.definition, sessions.roleModel),
+            definition: describeDefinition(view.definition, deployment),
           })),
         ),
       // Every board write is the credential's actor's, not the body's (LOB-20): a body that names a
