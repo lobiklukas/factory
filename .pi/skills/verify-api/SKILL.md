@@ -151,7 +151,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ./setup.sh       # api on API_PORT (default :9200) — a worktree's declared install/build before the first turn, setup_failed parks the card (features/setup.md)
 ./repo-context.sh # api on API_PORT (default :9440) — AGENTS.md and the skill index in the recorded prompt and the log (features/repo-context.md)
-./repo-policy.sh # api on API_PORT (default :9441), booted twice — .factory/config's policy at the base gates, denies, rejects widening, is pinned (features/repo-policy.md)
+./repo-policy.sh # api on API_PORT (default :9444), booted twice — .factory/config's policy at the base gates, denies, rejects widening, is pinned (features/repo-policy.md)
 ./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)

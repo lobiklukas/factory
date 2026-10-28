@@ -10,10 +10,12 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { BunServices } from "@effect/platform-bun";
 import { DEFAULT_AUTONOMY } from "@repo/harness";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, FileSystem, Path } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import { decodePolicy, readRepoPolicy } from "./repoPolicy";
+import { workTreePrefix } from "./workspace";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-core-repo-policy-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -114,14 +116,54 @@ describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
     });
   });
 
-  it("reads a subdirectory checkout's config under its prefix", async () => {
-    const checkout = fixtureRepo({
+  /**
+   * Mutation: drop `--full-tree` from the ls-tree — git reads the pathspec relative to the
+   * subdirectory, finds no `fixtures/app/fixtures/app/.factory/config`, and the policy is lost.
+   */
+  it("reads a subdirectory checkout's config under its prefix, as the service calls it", async () => {
+    const root = fixtureRepo({
       "fixtures/app/.factory/config": config({ deny: ["rm -rf"] }),
     });
-    const exit = await read(checkout, "main", "fixtures/app");
+    // The service passes the registered path — the subdirectory — and its prefix in the work tree.
+    const checkout = join(root, "fixtures/app");
+    const prefix = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        return yield* workTreePrefix(checkout, { fs, path });
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+    expect(prefix).toBe("fixtures/app");
+    const exit = await read(checkout, "main", prefix);
     expect(Exit.isSuccess(exit) && exit.value).toMatchObject({
       source: { path: "fixtures/app/.factory/config", found: true },
       policy: { denied: ["rm -rf"] },
+    });
+  });
+
+  /**
+   * Mutation: answer a config git cannot read as `unread` or as no config — the session runs with
+   * the repo's gates dropped. Once the base names a commit, a config listed there that git cannot
+   * read refuses the load.
+   */
+  it("refuses a base whose config git cannot read, rather than reading it as no policy", async () => {
+    const checkout = fixtureRepo({
+      ".factory/config": config({ approvalRequired: ["bun publish"] }),
+    });
+    const blob = execSync("git rev-parse main:.factory/config", {
+      cwd: checkout,
+      encoding: "utf8",
+    }).trim();
+    // The tree still lists the config; its object is gone, as a corrupt or unreadable store's is.
+    rmSync(join(checkout, ".git/objects", blob.slice(0, 2), blob.slice(2)));
+    const exit = await read(checkout);
+    if (Exit.isSuccess(exit)) throw new Error("expected a rejection");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    expect(failure.error).toMatchObject({
+      _tag: "RepoPolicyRejected",
+      kind: "unreadable",
+      reasons: [expect.stringContaining(".factory/config")],
     });
   });
 
@@ -199,6 +241,17 @@ describe(
 );
 
 describe("decodePolicy", () => {
+  it("fails with a tagged RepoConfigUndecodable", async () => {
+    const exit = await Effect.runPromiseExit(decodePolicy("{ nope"));
+    if (Exit.isSuccess(exit)) throw new Error("expected a failure");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    expect(failure.error).toMatchObject({
+      _tag: "RepoConfigUndecodable",
+      kind: "unreadable",
+    });
+  });
+
   it("reads an empty block as no policy, and keeps an empty allowlist as no egress", async () => {
     expect(await Effect.runPromise(decodePolicy(config({})))).toEqual({
       approvalRequired: [],

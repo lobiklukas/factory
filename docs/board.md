@@ -279,8 +279,11 @@ changes nothing for that run; the next session reads the base again. The order i
 repository (`withRepoPolicy`), then column (`withColumnAutonomy`), each tighten-only. A block that
 tries to allow something the deployment denies (a host off its allowlist), has a key the policy does
 not know, or a config that is not JSON, is refused at load (`RepoPolicyRejected`), and the session
-does not open (`policy_rejected`). Per-repo `roles` model overrides and trigger rules in the same
-file are not built.
+does not open (`policy_rejected`) and leaves no worktree behind. A review run is read at its pull
+request's base, not at the head under review. For a repo with no remote, the base is the checkout's
+local branch, whose refs every session worktree shares, so it holds only as long as no run writes
+that ref (`.pi/skills/verify-api/features/repo-policy.md`). Per-repo `roles` model overrides and
+trigger rules in the same file are not built.
 
 ## B7 — Asking a human happens on the task, never in the transcript
 

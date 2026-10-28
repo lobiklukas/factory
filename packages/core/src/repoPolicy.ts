@@ -34,7 +34,7 @@ import { CONFIG_FILE } from "./workspace";
 /** The largest `.factory/config` read; a larger one is refused rather than read in part. */
 export const REPO_CONFIG_READ_BYTES = 64 * 1024;
 
-/** How long one git read may take. A read that times out is no answer, so the base is unread. */
+/** How long one git read may take. A read of a resolved base that times out is refused. */
 const GIT_READ_TIMEOUT_MS = 15_000;
 
 /** One entry of a list the block declares: a command prefix or a host, never blank. */
@@ -55,7 +55,10 @@ export type RepoPolicyRead =
       readonly source: RepoPolicySource;
       readonly policy: RepoPolicy;
     }
-  /** Git could not answer for the base (it names no commit there): nothing to pin, say why. */
+  /**
+   * The base names no commit in the checkout (a branch deleted since, a mirror not fetched yet):
+   * nothing to pin, say why. Once the base names a commit, a failed read of it is a refusal.
+   */
   | { readonly _tag: "unread"; readonly problem: string };
 
 export type ReadRepoPolicyInput = {
@@ -71,8 +74,9 @@ export type ReadRepoPolicyInput = {
 /**
  * The repository's policy at `ref`, checked against the deployment's `config`. A base with no
  * `.factory/config`, or a config with no `policy` block, is a read with no policy. Refused with
- * `RepoPolicyRejected` when the config is too large or not JSON (`unreadable`), when the block is
- * not the policy's shape (`invalid`), and when it widens the deployment (`widens`).
+ * `RepoPolicyRejected` when the config is too large, not JSON or cannot be read at the commit the
+ * base names (`unreadable`), when the block is not the policy's shape (`invalid`), and when it
+ * widens the deployment (`widens`).
  */
 export const readRepoPolicy = (
   input: ReadRepoPolicyInput,
@@ -102,11 +106,15 @@ export const readRepoPolicy = (
         reasons,
         message: `repo ${input.repo}: the policy in ${path} at ${input.ref} (${commit.slice(0, 12)}) cannot be loaded: ${reasons.join("; ")}`,
       });
+    // `--full-tree`: the path is the work tree root's. `checkout` may be a subdirectory of its work
+    // tree (a repo registered at `fixtures/app`), where git would otherwise read the pathspec
+    // relative to it and look for `<prefix>/<prefix>/.factory/config`.
     const listed = yield* gitAnswer(
       input.checkout,
       [
         "--literal-pathspecs",
         "ls-tree",
+        "--full-tree",
         "-l",
         "--end-of-options",
         commit,
@@ -115,11 +123,13 @@ export const readRepoPolicy = (
       ],
       { timeoutMs: GIT_READ_TIMEOUT_MS },
     );
+    // The base names a commit, so a git that cannot list or read it now (a timeout under load, a
+    // corrupt object) is no answer about the policy: refused, never read as "no policy", which
+    // would drop the repository's gates for the run without a word.
     if (listed === undefined)
-      return {
-        _tag: "unread",
-        problem: `git could not list ${path} at ${input.ref}`,
-      } as const;
+      return yield* refuse("unreadable", [
+        `git could not list ${path} at ${commit.slice(0, 12)}`,
+      ]);
     // `<mode> <type> <object> <size>\t<path>`; nothing listed is a base with no config.
     const [mode, type, object, size] =
       listed.split("\t")[0]?.trim().split(/\s+/) ?? [];
@@ -146,10 +156,9 @@ export const readRepoPolicy = (
       },
     );
     if (text === undefined)
-      return {
-        _tag: "unread",
-        problem: `git could not read ${path} at ${input.ref}`,
-      } as const;
+      return yield* refuse("unreadable", [
+        `git could not read ${path} at ${commit.slice(0, 12)}`,
+      ]);
     const policy = yield* decodePolicy(text).pipe(
       Effect.mapError(({ kind, reasons }) => refuse(kind, reasons)),
     );
@@ -163,10 +172,13 @@ export const readRepoPolicy = (
   });
 
 /** Why a config's text is not a policy: the kind of refusal, and each problem in it. */
-type Undecodable = {
-  readonly kind: "unreadable" | "invalid";
-  readonly reasons: readonly string[];
-};
+export class RepoConfigUndecodable extends Schema.TaggedError<RepoConfigUndecodable>()(
+  "RepoConfigUndecodable",
+  {
+    kind: Schema.Literals(["unreadable", "invalid"]),
+    reasons: Schema.Array(Schema.String),
+  },
+) {}
 
 /**
  * A config's text as the policy it declares: no `policy` key is no policy. Pure apart from being an
@@ -174,18 +186,21 @@ type Undecodable = {
  */
 export const decodePolicy = (
   text: string,
-): Effect.Effect<RepoPolicy, Undecodable> =>
+): Effect.Effect<RepoPolicy, RepoConfigUndecodable> =>
   Effect.gen(function* () {
     const parsed = yield* Schema.decodeEffect(
       Schema.fromJsonString(Schema.Unknown),
     )(text).pipe(
-      Effect.mapError((): Undecodable => ({
-        kind: "unreadable",
-        reasons: [".factory/config is not JSON"],
-      })),
+      Effect.mapError(
+        () =>
+          new RepoConfigUndecodable({
+            kind: "unreadable",
+            reasons: [".factory/config is not JSON"],
+          }),
+      ),
     );
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-      return yield* Effect.fail<Undecodable>({
+      return yield* new RepoConfigUndecodable({
         kind: "unreadable",
         reasons: [".factory/config is not a JSON object"],
       });
@@ -194,12 +209,15 @@ export const decodePolicy = (
       parsed.policy,
       { onExcessProperty: "error", errors: "all" },
     ).pipe(
-      Effect.mapError((error): Undecodable => ({
-        kind: "invalid",
-        reasons: [
-          `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings): ${error.message.replace(/\n\s*/g, " ")}`,
-        ],
-      })),
+      Effect.mapError(
+        (error) =>
+          new RepoConfigUndecodable({
+            kind: "invalid",
+            reasons: [
+              `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings): ${error.message.replace(/\n\s*/g, " ")}`,
+            ],
+          }),
+      ),
     );
     return {
       approvalRequired: (block.approvalRequired ?? []).map((entry) =>

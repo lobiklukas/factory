@@ -26,11 +26,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
+  BranchName,
   RepoSlug,
   type SessionId,
   type SessionSnapshot,
 } from "@repo/domain/Session";
-import { createFauxModelAccess, readPolicyRecord } from "@repo/harness";
+import {
+  createFauxModelAccess,
+  DEFAULT_AUTONOMY,
+  readPolicyRecord,
+} from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -276,16 +281,29 @@ describe("a repository's policy from .factory/config at the base", () => {
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
-        const { repo } = yield* register("widening", {
+        const { repo, localPath } = yield* register("widening", {
           ".factory/config": JSON.stringify({
             policy: { allowedHosts: ["github.com", "evil.example"] },
           }),
         });
         const refused = yield* Effect.flip(sessions.create({ repo }));
+        // A retry is refused the same way, and leaves nothing behind either.
+        yield* Effect.flip(sessions.create({ repo }));
         const rows = yield* sql<{ count: number }>`
           SELECT count(*)::int AS count FROM sessions WHERE repo = ${repo}
         `;
-        return { refused, rows: rows[0]?.count };
+        return {
+          refused,
+          rows: rows[0]?.count,
+          worktrees: execSync("git worktree list --porcelain", {
+            cwd: localPath,
+            encoding: "utf8",
+          }),
+          branches: execSync("git branch --format='%(refname:short)'", {
+            cwd: localPath,
+            encoding: "utf8",
+          }).trim(),
+        };
       }),
     );
 
@@ -297,8 +315,148 @@ describe("a repository's policy from .factory/config at the base", () => {
       "allowedHosts names evil.example, which this deployment does not allow",
     );
     expect(outcome.refused.message).toContain(".factory/config at main");
-    // A refused create leaves no session behind.
+    // A refused create leaves no session behind, and — the policy read before the worktree is cut
+    // — no worktree or `factory/<id>` branch in the operator's checkout.
     expect(outcome.rows).toBe(0);
+    expect(outcome.worktrees.match(/^worktree /gm)).toHaveLength(1);
+    expect(outcome.branches).toBe("main");
+  }, 120_000);
+
+  /**
+   * Mutation: read a reviewer's policy at its `baseRef` (the PR's head) — the head's relaxed config
+   * is pinned and the reviewer runs ungated.
+   */
+  it("reads a reviewer's policy at the pull request's base, not at the head under review", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo, localPath } = yield* register("reviewed", {
+          ".factory/config": GATED,
+        });
+        // The PR under review drops the gate in its own `.factory/config`.
+        git(localPath, "git checkout -q -b contributor");
+        write(localPath, { ".factory/config": JSON.stringify({}) });
+        git(localPath, "git commit -q -am relax");
+        const head = execSync("git rev-parse HEAD", {
+          cwd: localPath,
+          encoding: "utf8",
+        }).trim();
+        git(localPath, "git checkout -q main");
+        const created = yield* sessions.create({
+          repo,
+          baseRef: head,
+          branch: BranchName.make(`factory/review-${RUN}-1`),
+          review: {
+            number: 1,
+            url: "https://example.invalid/pull/1",
+            base: "main",
+            head,
+          },
+        });
+        return {
+          record: yield* recorded(created.id),
+          main: execSync("git rev-parse main", {
+            cwd: localPath,
+            encoding: "utf8",
+          }).trim(),
+        };
+      }),
+    );
+
+    expect(outcome.record).toMatchObject({
+      source: { ref: "main", commit: outcome.main, found: true },
+      repo: { approvalRequired: ["bun publish"] },
+      effective: { approvalRequired: ["bun publish"] },
+    });
+  }, 120_000);
+
+  /**
+   * Mutation: drop `--full-tree` from `readRepoPolicy`'s ls-tree — a repo registered at a
+   * subdirectory of its work tree reads as declaring nothing.
+   */
+  it("reads the policy of a repo registered at a subdirectory of its work tree", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const root = join(scratch, "repos", "nested");
+        mkdirSync(root, { recursive: true });
+        git(root, "git init -q -b main");
+        git(root, "git config user.email policy@localhost");
+        git(root, "git config user.name policy");
+        write(root, {
+          "fixtures/app/.factory/config": JSON.stringify({
+            policy: { deny: ["bun publish"] },
+          }),
+          "fixtures/app/README.md": "app\n",
+        });
+        git(root, "git add -A");
+        git(root, "git commit -q -m base");
+        const repo = RepoSlug.make(`repo-policy-${RUN}/nested`);
+        yield* sessions.registerRepo({
+          repo,
+          url: "https://example.invalid/nested.git",
+          defaultBaseRef: "main",
+          localPath: join(root, "fixtures/app"),
+        });
+        const created = yield* sessions.create({ repo });
+        return yield* recorded(created.id);
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      source: { path: "fixtures/app/.factory/config", found: true },
+      repo: { denied: ["bun publish"] },
+      effective: { denied: ["bun publish"] },
+    });
+  }, 120_000);
+
+  /**
+   * Mutation: refuse a pinned policy that names a host the deployment has since dropped — the
+   * session never opens again, its approvals and close included.
+   */
+  it("still opens a session whose pinned hosts the deployment has since dropped, reaching none of them", async () => {
+    const { id } = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* register("narrowed", {
+          ".factory/config": JSON.stringify({
+            policy: { allowedHosts: ["github.com", "api.github.com"] },
+          }),
+        });
+        const created = yield* sessions.create({ repo });
+        yield* sessions.close;
+        return created;
+      }),
+    );
+    // The same deployment, restarted with a narrower allowlist.
+    const narrowed = ManagedRuntime.make(
+      SessionServiceLive({
+        model: faux.access,
+        sessionRoot: join(scratch, "sessions"),
+        autonomy: { ...DEFAULT_AUTONOMY, allowedHosts: ["api.github.com"] },
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      const record = await narrowed.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // The reopen the run's next message makes: refused before, it now opens and runs.
+          const answered = yield* turn(id);
+          expect(bashResults(answered).at(-1)?.text).toContain(MARKER);
+          const read = yield* recorded(id);
+          yield* sessions.close;
+          return read;
+        }),
+      );
+      expect(record).toMatchObject({
+        repo: { allowedHosts: ["github.com", "api.github.com"] },
+        effective: { allowedHosts: ["api.github.com"] },
+      });
+    } finally {
+      await narrowed.dispose();
+    }
   }, 120_000);
 
   /** Mutation: drop `decideDenied` — the denied command runs the shim. */

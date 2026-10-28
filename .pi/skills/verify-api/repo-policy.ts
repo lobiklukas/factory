@@ -14,7 +14,8 @@
 //   bare      a repo with no config: no approval, and the marker is in the run's bash result.
 //   denying   a repo whose config denies `bun publish`: refused outright, no approval asked.
 //   widening  a repo whose config allows `evil.example`, which the deployment does not: the create
-//             is refused `policy_rejected`, naming the host, and leaves no session row.
+//             is refused `policy_rejected`, naming the host, and leaves no session row, worktree or
+//             branch.
 //   Then, as the agent could with its own tools, `.factory/config` is rewritten to `{}` in the gated
 //   session's worktree and committed on its branch.
 // PHASE=verify, on a fresh process (the owner reopens over the same log):
@@ -48,7 +49,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const API_URL = process.env["API_URL"] ?? "http://localhost:9441";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9444";
 const PHASE = process.env["PHASE"] === "verify" ? "verify" : "arm";
 const REPOS = path.resolve(
   process.env["REPO_POLICY_REPOS"] ?? ".verify/run/repo-policy/repos",
@@ -273,9 +274,21 @@ const program = Effect.gen(function* () {
       SELECT count(*)::int AS count FROM sessions WHERE repo = ${widening.repo}
     `;
     const code = "code" in rejected ? rejected.code : rejected._tag;
+    // The policy is read before the worktree is cut: a refused create leaves no worktree and no
+    // `factory/<id>` branch in the operator's checkout.
+    const worktrees = execSync("git worktree list --porcelain", {
+      cwd: widening.localPath,
+      encoding: "utf8",
+    });
+    const branches = execSync("git branch --format='%(refname:short)'", {
+      cwd: widening.localPath,
+      encoding: "utf8",
+    }).trim();
     observed.scenarios["widening"] = {
       error: rejected,
       sessionRows: rows[0]?.count,
+      worktrees,
+      branches,
     };
     assert(
       "widening: a config allowing a host the deployment denies is rejected at load, typed",
@@ -289,6 +302,12 @@ const program = Effect.gen(function* () {
       "widening: the refused create leaves no session behind",
       rows[0]?.count === 0,
       `${rows[0]?.count} rows`,
+    );
+    assert(
+      "widening: the refused create leaves no worktree or branch in the checkout",
+      (worktrees.match(/^worktree /gm) ?? []).length === 1 &&
+        branches === "main",
+      `${worktrees}\nbranches: ${branches}`,
     );
 
     // --- the agent edits .factory/config in its worktree -------------------------------------------
