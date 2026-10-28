@@ -336,6 +336,18 @@ refresh is a first-class operation on a long session.
 _Rejected:_ a shared service-account PAT (one prompt injection becomes the whole org's source);
 forwarding each user's own key (makes CI-delegated and Slack-delegated sessions unreasoning).
 
+_Refined (S-agent-secrets):_ a repository's own secrets — a registry token for `install`, a test key
+for `verify` — are a second kind of credential, and the same rule holds: never in the session's
+shell. They are stored write-only in Postgres, encrypted under the control plane's
+`FACTORY_SECRETS_KEY` (a KMS later), declared per step in `.factory/config` at the session's base,
+injected only into the declared setup and verify commands, and masked in everything those commands
+print before it is committed. The PR step scans every line the branch's commits add for a stored
+value or a credential's shape before it pushes, and refuses `secret-found`.
+_Rejected:_ injecting them into the agent's shell (the shell's output and the model's context are
+the log); reading the declaration from the run's branch (the agent could grant itself any stored
+value); a proxy that keeps the value out of the sandbox entirely (the right end state, but a network
+component this local-first build does not have yet).
+
 ### D15 — Enforcement: policy in hooks, boundary at GitHub
 
 Pi Durable's hooks (`hook(ToolTask, { beforeTool, afterTool })`, plus `beforeRequest` /

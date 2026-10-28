@@ -184,6 +184,12 @@ send whose install ran once, a webhook delivery answered before its install fini
 on this repo running its own `bun install`; and `factory board show` on the parked card), evidence
 `.verify/evidence/latest/api/setup.json` and `setup-board-show.txt`. See [setup.md](setup.md).
 
+The scoped secrets checks (S-agent-secrets) were run from the `agent/S-agent-secrets` worktree on
+2026-10-28 (`API_PORT=9520`, faux, `DATABASE_URL=…/factory_agent_s_agent_secrets` on 5442):
+`./secrets.sh` **15/15** (13 driver checks, `factory board show` on the refused card, and a grep of
+every evidence file and the API's log for the value), evidence `.verify/evidence/latest/api/secrets.json`
+and `secrets-board-show.txt`. See [secrets.md](secrets.md).
+
 The repo instructions and skills checks (S-repo-instructions-and-skills) were run from the
 `agent/S-repo-instructions-and-skills` worktree on 2026-10-28 (`API_PORT=9530`, faux,
 `DATABASE_URL=…/factory_agent_s_repo_instructions_and_skills` on 5442): `./repo-context.sh` **9/9**,
@@ -339,6 +345,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
 | A worktree's setup       | passing | [setup.md](setup.md)                         |
 | Repo instructions        | passing | [repo-context.md](repo-context.md)           |
+| Scoped secrets           | passing | [secrets.md](secrets.md)                     |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |
