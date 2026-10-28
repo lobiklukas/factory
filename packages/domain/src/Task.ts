@@ -657,7 +657,8 @@ export type BoardConfig = typeof BoardConfig.Type;
  *
  * `definitionVersion` is optional and defaults to the definition's **newest** version, read when the
  * board is created and pinned from then on — a board made today gets today's pipeline, and a version
- * a later migration adds reaches the next board, never this one. Naming a version is for a caller
+ * a later migration adds reaches this board only when a person upgrades it (`upgradeBoard`, D5).
+ * Naming a version is for a caller
  * that needs an older pipeline on purpose (a drive pinned to version 1's exits, say). A repository
  * gets one board: a second `createBoard` for it is `BoardExists`, naming the board it already has —
  * more than one board per repository is deferred board customization (docs/board.md, item 8).
@@ -680,6 +681,62 @@ export const CreatedBoard = Schema.Struct({
   warning: Schema.optional(Schema.String),
 });
 export type CreatedBoard = typeof CreatedBoard.Type;
+
+/**
+ * A column mapping for a card migration (D5): each key a column a card sits in under the version it
+ * pins, each value the column of the version it moves to that the card sits in afterwards.
+ */
+export const ColumnMapping = Schema.Record(Schema.String, Schema.String);
+export type ColumnMapping = typeof ColumnMapping.Type;
+
+/**
+ * Move a board to a newer version of its definition (D5): the instance's pin moves to `toVersion`,
+ * so a card made afterwards pins it, and every card already on the board keeps the version it pinned
+ * — its moves and exit requirements do not change under it (B2).
+ *
+ * `expectedVersion` is the version the caller read the board at, as a card's `expectedRevision` is:
+ * a board another upgrade moved first is refused as `StaleBoardVersion`. `toVersion` is newer than the
+ * pin, or equal to it when `migrateCards` is given, which re-pins the cards an earlier upgrade left
+ * behind.
+ *
+ * `migrateCards` is the explicit migration: every card not already on `toVersion` is re-pinned to it,
+ * in the column the mapping names for its own, with a `repinned` event and a new revision each. The
+ * batch is all or nothing — a card with an unfinished run, in a column the mapping does not name, or
+ * mapped to a column of another kind refuses the whole upgrade as `CardMigrationRefused`, naming every
+ * such card, and nothing is written; a mapping onto a column `toVersion` does not declare is
+ * `InvalidTaskInput`.
+ */
+export const UpgradeBoardInput = Schema.Struct({
+  boardId: BoardInstanceId,
+  toVersion: Schema.Int,
+  expectedVersion: Schema.Int,
+  migrateCards: Schema.optional(ColumnMapping),
+  actor: Schema.String,
+});
+export type UpgradeBoardInput = typeof UpgradeBoardInput.Type;
+
+/** One card an upgrade migrated (D5): the version and column it left, the column it is in now. */
+export const RepinnedCard = Schema.Struct({
+  taskId: TaskId,
+  fromVersion: Schema.Int,
+  from: Schema.String,
+  to: Schema.String,
+  revision: Schema.Int,
+});
+export type RepinnedCard = typeof RepinnedCard.Type;
+
+/**
+ * What `upgradeBoard` did (D5): the instance at its new pin, the version it left, the cards it
+ * migrated (none without `migrateCards`), and how many of the board's cards still pin another
+ * version — the cards whose moves are not the new version's.
+ */
+export const UpgradedBoard = Schema.Struct({
+  instance: BoardInstance,
+  fromVersion: Schema.Int,
+  repinned: Schema.Array(RepinnedCard),
+  unmigrated: Schema.Int,
+});
+export type UpgradedBoard = typeof UpgradedBoard.Type;
 
 /**
  * A new version of a definition, authored (D4): what `defineBoard` and `factory board define --file`
@@ -945,7 +1002,10 @@ export const Task = Schema.Struct({
    * Absent when whoever filed the card gave none.
    */
   externalUrl: Schema.optional(Schema.String),
-  /** The definition version this task started under (B2). */
+  /**
+   * The definition version the card is pinned to (B2): the one it started under, until a person
+   * migrates it to a newer one with `upgradeBoard`'s `migrateCards` (D5, a `repinned` event).
+   */
   definitionVersion: Schema.Int,
   revision: Schema.Int,
   priority: TaskPriority,
@@ -984,7 +1044,7 @@ export type Actor = typeof Actor.Type;
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
  * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), the spec a
  * specifying run declared (B4's `specifying` exit, LOB-238), a priority change (B9, "priority
- * changes are recorded as events") and a retitle (C11). A run starting or finishing is a later
+ * changes are recorded as events"), a retitle (C11) and a repin to a newer definition version (D5). A run starting or finishing is a later
  * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
  * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
  * because B1 makes a run a first-class thing a task owns.
@@ -1066,6 +1126,22 @@ export const TaskEvent = Schema.TaggedUnion({
     to: Schema.String,
     actor: Actor,
     revision: Schema.Int,
+  },
+  /**
+   * The card was moved to a newer version of its board's definition (D5): `upgradeBoard`'s
+   * `migrateCards`, one event per card. `from` and `to` are the card's column before and after —
+   * the same name unless the mapping renamed it — and `mapping` the whole column mapping the person
+   * gave, so the history says what the migration was asked to do as well as what it did to this card.
+   */
+  repinned: {
+    taskId: TaskId,
+    actor: Actor,
+    revision: Schema.Int,
+    fromVersion: Schema.Int,
+    toVersion: Schema.Int,
+    from: Schema.String,
+    to: Schema.String,
+    mapping: Schema.Record(Schema.String, Schema.String),
   },
 });
 export type TaskEvent = typeof TaskEvent.Type;
@@ -1193,6 +1269,43 @@ export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   },
 ) {}
 
+/**
+ * An upgrade expected the board at a version it is no longer pinned to (D5): another upgrade moved it
+ * first. `actual` is the version it is pinned to now.
+ */
+export class StaleBoardVersion extends Schema.TaggedError<StaleBoardVersion>()(
+  "StaleBoardVersion",
+  {
+    boardId: Schema.String,
+    expected: Schema.Int,
+    actual: Schema.Int,
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * Why one card cannot be migrated (D5): a run on it has not finished (`unfinished_run`) — its column,
+ * prompt and policy were resolved from the version it pins — its column is not a key of the mapping
+ * (`unmapped_column`), or the mapping sends it to a column of another kind (`kind_changed`): a
+ * migration re-pins a card, it does not move it past a gate.
+ */
+export const CardMigrationProblem = Schema.Struct({
+  taskId: TaskId,
+  column: Schema.String,
+  reason: Schema.Literals(["unfinished_run", "unmapped_column", "kind_changed"]),
+});
+export type CardMigrationProblem = typeof CardMigrationProblem.Type;
+
+/** A card migration refused whole (D5): every card that cannot move, and why; nothing was written. */
+export class CardMigrationRefused extends Schema.TaggedError<CardMigrationRefused>()(
+  "CardMigrationRefused",
+  {
+    boardId: Schema.String,
+    cards: Schema.Array(CardMigrationProblem),
+    message: Schema.String,
+  },
+) {}
+
 export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransition>()(
   "UndeclaredTransition",
   { from: Schema.String, to: Schema.String, message: Schema.String },
@@ -1277,6 +1390,8 @@ export type TaskError =
   | BoardExists
   | BoardRepoMismatch
   | StaleRevision
+  | StaleBoardVersion
+  | CardMigrationRefused
   | UndeclaredTransition
   | HumanGateRequired
   | RequirementUnmet

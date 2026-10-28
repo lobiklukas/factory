@@ -21,6 +21,7 @@ import {
   BoardNotFound,
   BoardRepoMismatch,
   BoardView,
+  CardMigrationRefused,
   CommentTaskInput,
   CreateBoardInput,
   CreatedBoard,
@@ -51,6 +52,7 @@ import {
   MoveTaskInput,
   NotBlocked,
   RequirementUnmet,
+  StaleBoardVersion,
   StaleRevision,
   Task,
   TaskComment,
@@ -62,6 +64,8 @@ import {
   UndeclaredTransition,
   UnblockTaskInput,
   UpdateTaskInput,
+  UpgradeBoardInput,
+  UpgradedBoard,
 } from "@repo/domain/Task";
 import {
   CurateSessionInput,
@@ -407,6 +411,8 @@ const TaskErrorSchema = Schema.Union([
   BoardExists,
   BoardRepoMismatch,
   StaleRevision,
+  StaleBoardVersion,
+  CardMigrationRefused,
   UndeclaredTransition,
   HumanGateRequired,
   RequirementUnmet,
@@ -462,6 +468,15 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("defineBoard", {
     payload: DefineBoardInput,
     success: DefinedBoard,
+    error: TaskErrorSchema,
+  }),
+  // Move a board to a newer version of its definition (D5), at the version the caller read it at:
+  // new cards pin the new version and existing cards keep theirs, unless `migrateCards` maps their
+  // columns — then every card is re-pinned with a `repinned` event, or, when one cannot be (an
+  // unfinished run, an unmapped column), none is and the pin does not move (`CardMigrationRefused`).
+  Rpc.make("upgradeBoard", {
+    payload: UpgradeBoardInput,
+    success: UpgradedBoard,
     error: TaskErrorSchema,
   }),
   // What an authored version may name besides skills (D6): every requirement key the factory knows

@@ -79,6 +79,7 @@ import {
   BoardInstance,
   BoardInstanceId,
   BoardView,
+  CardMigrationProblem,
   type CreateBoardInput,
   type DefinitionMoves,
   definitionProblems,
@@ -105,6 +106,7 @@ import {
   TaskRun,
   TaskSpec,
   transitionOf,
+  type UpgradedBoard,
 } from "@repo/domain/Task";
 import { TaskComment } from "@repo/domain/Task";
 import type {
@@ -207,6 +209,33 @@ export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   },
 ) {}
 
+/**
+ * `upgradeBoard` expected the board at a version it is no longer pinned to (D5); `actual` is the pin
+ * now. Another upgrade moved it first, and the caller's mapping was written against the old pin.
+ */
+export class StaleBoardVersion extends Schema.TaggedError<StaleBoardVersion>()(
+  "StaleBoardVersion",
+  {
+    boardId: Schema.String,
+    expected: Schema.Int,
+    actual: Schema.Int,
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * `upgradeBoard`'s card migration refused whole (D5): every card that cannot be re-pinned, and why
+ * (`CardMigrationProblem`). Nothing was written — not the cards, and not the board's pin either.
+ */
+export class CardMigrationRefused extends Schema.TaggedError<CardMigrationRefused>()(
+  "CardMigrationRefused",
+  {
+    boardId: Schema.String,
+    cards: Schema.Array(CardMigrationProblem),
+    message: Schema.String,
+  },
+) {}
+
 /** The move is not in the declared transitions of its column. Names both columns. */
 export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransition>()(
   "UndeclaredTransition",
@@ -293,6 +322,8 @@ export type TaskError =
   | BoardExists
   | BoardRepoMismatch
   | StaleRevision
+  | StaleBoardVersion
+  | CardMigrationRefused
   | UndeclaredTransition
   | HumanGateRequired
   | RequirementUnmet
@@ -338,6 +369,18 @@ export type FileTaskInput = CreateTaskInput & { readonly externalRef: string };
 
 /** What `file` did: made the card, or found the one already filed for the same item. */
 export type FiledTask = { readonly task: Task; readonly created: boolean };
+
+/**
+ * Move a board's pin to a newer version of its definition (D5), and — with `migrateCards`, a column
+ * mapping — re-pin its cards to it too. See `UpgradeBoardInput` in `@repo/domain/Task`.
+ */
+export type UpgradeBoardInput = {
+  readonly boardId: string;
+  readonly toVersion: number;
+  readonly expectedVersion: number;
+  readonly migrateCards?: Readonly<Record<string, string>>;
+  readonly actor: Actor;
+};
 
 export type MoveTaskInput = {
   readonly taskId: string;
@@ -487,6 +530,16 @@ export type TaskServiceShape = {
    * an editor can offer them. A row whose `columns` is not an array contributes nothing.
    */
   readonly declaredRoles: Effect.Effect<ReadonlySet<string>, TaskError>;
+  /**
+   * Move a board to a newer version of its definition (D5), at the version the caller expected it
+   * pinned to (`StaleBoardVersion` otherwise). New cards pin the new version; existing cards keep
+   * theirs unless `migrateCards` maps their columns, which re-pins every card not already on it — all
+   * of them or, when one has an unfinished run or a column the mapping does not take, none
+   * (`CardMigrationRefused`, naming each), and then the pin does not move either.
+   */
+  readonly upgradeBoard: (
+    input: UpgradeBoardInput,
+  ) => Effect.Effect<UpgradedBoard, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   /**
    * Make a card for an outside item unless the board already has one for it (LOB-254): the door a
@@ -1387,6 +1440,219 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    /**
+     * Move a board's pin to a newer version of its definition, and with `migrateCards` its cards too
+     * (D5) — the one writer that updates a `board_instances` row or a card's pinned version.
+     *
+     * One transaction. The instance row is locked first (`FOR NO KEY UPDATE`), so two upgrades of one
+     * board are serialised and the second meets the first's pin as `StaleBoardVersion`, and a card
+     * being made on the board (`insertCard` reads its board `FOR SHARE`) either commits at the old pin
+     * before this reads the board's cards, or waits and starts at the new one: no card is made at the
+     * old pin after a migration has read the cards it re-pins. The refusals that need no card come
+     * next — a version that is not newer, one the definition does not hold, one that cannot start a
+     * card, a mapping onto a column the version lacks — and then, for a migration, the cards: under the
+     * repository's `task_runs` advisory lock, which every run start on a card takes while it writes its
+     * run (`checkRunCaps`), so no run starts on a card between the check that it has none unfinished
+     * and its re-pin. Every card is judged before any is written, and one that cannot move refuses the
+     * batch, naming every such card; only then is anything written — the pin, each card's row at its
+     * next revision, and one `repinned` event per card at the revision it was read at.
+     *
+     * A run is unfinished from its start until its session first goes idle (`task_runs.finished_at`,
+     * as the caps count it), unless its workspace was released first; a run whose session row is gone
+     * is counted as unfinished, since nothing says it ended. Its column, prompt and policy were resolved
+     * from the version the card pins, so re-pinning under it would change what the run is held to.
+     */
+    const upgradeBoard = (
+      input: UpgradeBoardInput,
+    ): Effect.Effect<UpgradedBoard, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const boards = yield* sql<BoardInstanceRow>`
+              SELECT ${sql.literal(BOARD_INSTANCE_COLUMNS)} FROM board_instances
+              WHERE id = ${input.boardId}
+              FOR NO KEY UPDATE
+            `;
+            const board = boards[0];
+            if (board === undefined) {
+              return yield* new BoardNotFound({
+                boardId: input.boardId,
+                message: `no board ${input.boardId}`,
+              });
+            }
+            const pinned = `${board.definitionId} v${board.definitionVersion}`;
+            if (board.definitionVersion !== input.expectedVersion) {
+              return yield* new StaleBoardVersion({
+                boardId: board.id,
+                expected: input.expectedVersion,
+                actual: board.definitionVersion,
+                message: `board ${board.id} is pinned to ${pinned}, not v${input.expectedVersion}: someone upgraded it first`,
+              });
+            }
+            const mapping = input.migrateCards;
+            if (
+              input.toVersion < board.definitionVersion ||
+              (input.toVersion === board.definitionVersion &&
+                mapping === undefined)
+            ) {
+              return yield* new InvalidTaskInput({
+                field: "toVersion",
+                message: `board ${board.id} is pinned to ${pinned}: an upgrade names a newer version, or v${board.definitionVersion} itself with migrateCards to re-pin the cards an earlier upgrade left behind`,
+              });
+            }
+            const target = yield* getDefinition(
+              board.definitionId,
+              input.toVersion,
+            );
+            const targetName = `${board.definitionId} v${target.version}`;
+            // The version every card made from now on starts under: held to what `insertCard` holds
+            // it to, so an upgrade never leaves a board on which no card can be made (LOB-267).
+            const faults = definitionProblems(target);
+            if (faults.length > 0 || initialColumnOf(target) === undefined) {
+              return yield* new InvalidTaskInput({
+                field: "toVersion",
+                message: `${targetName} cannot start a card: ${faults.join("; ")}`,
+              });
+            }
+            const repinned: Array<UpgradedBoard["repinned"][number]> = [];
+            if (mapping !== undefined) {
+              for (const [from, to] of Object.entries(mapping)) {
+                if (!target.columns.some((column) => column.name === to)) {
+                  return yield* new InvalidTaskInput({
+                    field: `migrateCards.${from}`,
+                    message: `the mapping sends ${from} to "${to}", which ${targetName} does not declare`,
+                  });
+                }
+              }
+              yield* sql`SELECT pg_advisory_xact_lock(hashtext(${`task_runs:${board.repo}`}))`;
+              const cards = yield* sql<{
+                id: string;
+                column: string;
+                blockedColumn: string | null;
+                definitionVersion: number;
+                revision: number;
+                columns: string;
+                unfinished: boolean;
+              }>`
+                SELECT t.id, t."column", t.blocked_column, t.definition_version, t.revision,
+                       bd.columns::text AS columns,
+                       EXISTS (
+                         SELECT 1 FROM task_runs tr
+                         LEFT JOIN sessions s ON s.id = tr.session_id
+                         WHERE tr.task_id = t.id
+                           AND tr.finished_at IS NULL
+                           AND s.workspace_released_at IS NULL
+                       ) AS unfinished
+                FROM tasks t
+                JOIN board_definitions bd
+                  ON bd.id = ${board.definitionId} AND bd.version = t.definition_version
+                WHERE t.board_id = ${board.id} AND t.definition_version <> ${target.version}
+                ORDER BY t.created_at, t.id
+                FOR UPDATE OF t
+              `;
+              const mapped = (column: string): string | undefined =>
+                Object.hasOwn(mapping, column) ? mapping[column] : undefined;
+              const problems: Array<CardMigrationProblem> = [];
+              for (const card of cards) {
+                const taskId = TaskId.make(card.id);
+                const to = mapped(card.column);
+                const declared = (yield* readColumns(
+                  card.columns,
+                  `task ${card.id}'s definition`,
+                )).find((column) => column.name === card.column);
+                const landing = target.columns.find(
+                  (column) => column.name === to,
+                );
+                const problem: CardMigrationProblem | undefined = card.unfinished
+                  ? { taskId, column: card.column, reason: "unfinished_run" }
+                  : to === undefined
+                    ? { taskId, column: card.column, reason: "unmapped_column" }
+                    : card.blockedColumn !== null &&
+                        mapped(card.blockedColumn) === undefined
+                      ? {
+                          taskId,
+                          column: card.blockedColumn,
+                          reason: "unmapped_column",
+                        }
+                      : declared !== undefined &&
+                          landing !== undefined &&
+                          declared.kind !== landing.kind
+                        ? { taskId, column: card.column, reason: "kind_changed" }
+                        : undefined;
+                if (problem !== undefined) problems.push(problem);
+              }
+              if (problems.length > 0) {
+                const why = {
+                  unfinished_run: "has an unfinished run",
+                  unmapped_column: "is in a column the mapping does not name",
+                  kind_changed: `would land in a column of another kind under ${targetName}`,
+                } as const;
+                return yield* new CardMigrationRefused({
+                  boardId: board.id,
+                  cards: problems,
+                  message: `the board's cards cannot all move to ${targetName}, so none did: ${problems
+                    .map(
+                      (problem) =>
+                        `${problem.taskId} (${problem.column}) ${why[problem.reason]}`,
+                    )
+                    .join("; ")}`,
+                });
+              }
+              for (const card of cards) {
+                const to = mapped(card.column) ?? card.column;
+                const blockedColumn =
+                  card.blockedColumn === null
+                    ? null
+                    : (mapped(card.blockedColumn) ?? card.blockedColumn);
+                yield* sql`
+                  UPDATE tasks
+                  SET definition_version = ${target.version}, "column" = ${to},
+                      blocked_column = ${blockedColumn},
+                      revision = revision + 1, updated_at = now()
+                  WHERE id = ${card.id}
+                `;
+                yield* appendEvent({
+                  _tag: "repinned",
+                  taskId: TaskId.make(card.id),
+                  actor: input.actor,
+                  revision: card.revision,
+                  fromVersion: card.definitionVersion,
+                  toVersion: target.version,
+                  from: card.column,
+                  to,
+                  mapping: { ...mapping },
+                });
+                repinned.push({
+                  taskId: TaskId.make(card.id),
+                  fromVersion: card.definitionVersion,
+                  from: card.column,
+                  to,
+                  revision: card.revision + 1,
+                });
+              }
+            }
+            const updated =
+              target.version === board.definitionVersion
+                ? board
+                : (yield* sql<BoardInstanceRow>`
+                    UPDATE board_instances SET definition_version = ${target.version}
+                    WHERE id = ${board.id}
+                    RETURNING ${sql.literal(BOARD_INSTANCE_COLUMNS)}
+                  `)[0];
+            const behind = yield* sql<{ n: number }>`
+              SELECT count(*)::int AS n FROM tasks
+              WHERE board_id = ${board.id} AND definition_version <> ${target.version}
+            `;
+            return {
+              instance: yield* toInstance(updated ?? board),
+              fromVersion: board.definitionVersion,
+              repinned,
+              unmigrated: behind[0]?.n ?? 0,
+            };
+          }),
+        ),
+      );
+
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
       withStorage(
         Effect.gen(function* () {
@@ -1409,7 +1675,9 @@ export const TaskServiceLive = Layer.effect(
     ): Effect.Effect<Task, TaskError | SqlError> =>
       Effect.gen(function* () {
         // The board and the definition version it binds, which is the version the card pins (B2)
-        // and so the one whose initial column it starts in (LOB-267).
+        // and so the one whose initial column it starts in (LOB-267). Read `FOR SHARE` of the
+        // instance, so an upgrade (D5) that holds it waits for this card to commit before it reads
+        // the cards it re-pins, and a create that waits on an upgrade reads the new pin.
         const boards = yield* sql<{
           id: string;
           repo: string;
@@ -1423,6 +1691,7 @@ export const TaskServiceLive = Layer.effect(
               JOIN board_definitions bd
                 ON bd.id = bi.definition_id AND bd.version = bi.definition_version
               WHERE bi.id = ${input.boardId}
+              FOR SHARE OF bi
             `;
         const board = boards[0];
         if (board === undefined) {
@@ -1652,8 +1921,9 @@ export const TaskServiceLive = Layer.effect(
      * The column a card sits in, by name and as the definition version it pinned declares it (B2):
      * `undefined` for a card that is gone, and `declared` absent for a column its definition does
      * not name. `definition` is that version's columns and initial column, which decide the card's
-     * moves (LOB-267). A card's pinned version never changes, so a read before the card is locked
-     * and one under the lock answer the same definition.
+     * moves (LOB-267). A card's pinned version changes only by a migration (D5), which bumps its
+     * revision, so a read before the card is locked and one under the lock at the same revision
+     * answer the same definition.
      */
     const pinnedColumn = (taskId: string) =>
       Effect.gen(function* () {
@@ -2027,7 +2297,7 @@ export const TaskServiceLive = Layer.effect(
             const from = row.column;
             // From the version the card pinned (B2): the moves are its, not the board's newest or
             // the default pipeline's (LOB-267). The judgement read it at the revision this lock
-            // holds, and a pinned version never changes, so it is not read again here.
+            // holds, and a pin moves only with the revision (D5), so it is not read again here.
             const transition =
               exit.definition === undefined
                 ? undefined
@@ -2946,6 +3216,7 @@ export const TaskServiceLive = Layer.effect(
       listDefinitions,
       getDefinition,
       defineBoard,
+      upgradeBoard,
       declaredRoles,
       create,
       file,
