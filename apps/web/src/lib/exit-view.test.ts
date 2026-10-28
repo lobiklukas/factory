@@ -11,7 +11,7 @@ import { currentExit, exitStatusLabel, moveWarning } from "./exit-view";
 const ID = `tsk_${"0".repeat(26)}`;
 
 const task = (column: string): Task =>
-  Schema.decodeUnknownSync(Task)({
+  Schema.decodeSync(Task)({
     id: ID,
     boardId: `brd_${"0".repeat(26)}`,
     title: "a card",
@@ -21,11 +21,10 @@ const task = (column: string): Task =>
     definitionVersion: 1,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    createdBy: "person:lukas",
   });
 
 const exit = (column: string): TaskExit =>
-  Schema.decodeUnknownSync(TaskExit)({
+  Schema.decodeSync(TaskExit)({
     taskId: ID,
     column,
     revision: 3,
