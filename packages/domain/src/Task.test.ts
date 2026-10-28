@@ -19,6 +19,8 @@ import { Effect, Exit, Schema } from "effect";
 import { SessionId } from "./Session";
 import {
   Actor,
+  cardsByVersion,
+  pinnedVersionsNotice,
   BoardColumn,
   BoardDefinition,
   BoardInstance,
@@ -473,6 +475,15 @@ describe("a card, a run and an event", () => {
         to: "urgent",
       },
       { _tag: "retitled", taskId: A_TASK_ID, from: "old", to: "new" },
+      {
+        _tag: "repinned",
+        taskId: A_TASK_ID,
+        fromVersion: 2,
+        toVersion: 3,
+        from: "review",
+        to: "review",
+        mapping: { review: "review" },
+      },
     ] as const;
     for (const variant of variants) {
       expect(
@@ -1034,5 +1045,37 @@ describe("runPrompt (C6)", () => {
 
   it("names no column the definition does not have", () => {
     expect(runPrompt({ title: "T", body: "B" }, undefined)).toBe("T\n\nB");
+  });
+});
+
+describe("cards pinned to more than one version (D5)", () => {
+  /** Mutation: count distinct versions against 1 instead of 2 — a board on one version gets a notice. */
+  it("says nothing when every card pins one version, and names each version and its cards otherwise", () => {
+    expect(pinnedVersionsNotice(3, [])).toBeNull();
+    expect(
+      pinnedVersionsNotice(3, [
+        { definitionVersion: 2 },
+        { definitionVersion: 2 },
+      ]),
+    ).toBeNull();
+    expect(
+      cardsByVersion([
+        { definitionVersion: 3 },
+        { definitionVersion: 2 },
+        { definitionVersion: 3 },
+      ]),
+    ).toEqual([
+      { version: 2, cards: 1 },
+      { version: 3, cards: 2 },
+    ]);
+    expect(
+      pinnedVersionsNotice(3, [
+        { definitionVersion: 3 },
+        { definitionVersion: 2 },
+        { definitionVersion: 3 },
+      ]),
+    ).toBe(
+      "This board's cards pin more than one version: 1 on v2, 2 on v3 (the board's). Each card moves by the version it pins.",
+    );
   });
 });

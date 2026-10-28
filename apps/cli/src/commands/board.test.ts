@@ -24,6 +24,7 @@ import {
   TaskComment,
   TaskRun,
   TaskExit,
+  TaskId,
   TaskSpec,
   TaskPlan,
 } from "@repo/domain/Task";
@@ -43,6 +44,7 @@ import {
   specLines,
   planLines,
   exitLines,
+  laneLines,
   commentCard,
   StartNeedsAnswer,
   StartNotStarted,
@@ -298,6 +300,43 @@ const card = (over: Partial<Task> = {}): Task =>
     updatedAt: "2026-10-27T00:00:00.000Z",
     ...over,
   });
+
+describe("laneLines (D5)", () => {
+  /**
+   * Mutation: list only the cards of a declared lane — a card left on v1's `doing` after the board
+   * moved to v2, which renames it `review`, is in no lane and missing from the listing.
+   */
+  it("lists every lane of the board's version, then the cards in a column it does not declare with their pin", () => {
+    const old = card({
+      id: TaskId.make(`tsk_${"2".repeat(26)}`),
+      title: "left on v1",
+      column: "doing",
+      definitionVersion: 1,
+    });
+    const fresh = card({
+      id: TaskId.make(`tsk_${"3".repeat(26)}`),
+      title: "made on v2",
+      column: "todo",
+      definitionVersion: 2,
+    });
+    const columns = [
+      { name: "todo", kind: "resting" },
+      { name: "review", kind: "working" },
+    ];
+    expect(laneLines(columns, [old, fresh])).toEqual([
+      "todo  resting  1",
+      `  ${fresh.id}  normal  made on v2`,
+      "review  working  0",
+      "elsewhere  1 in a column the board's version does not declare",
+      `  ${old.id}  normal  left on v1  doing  v1`,
+    ]);
+    expect(laneLines(columns, [fresh])).toEqual([
+      "todo  resting  1",
+      `  ${fresh.id}  normal  made on v2`,
+      "review  working  0",
+    ]);
+  });
+});
 
 /**
  * A board holding one card, enforcing what the server enforces on these two writes: the revision

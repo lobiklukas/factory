@@ -69,6 +69,9 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
             definition: describeDefinition(definition, deployment),
           })),
         ),
+      // The repinned events are the credential's actor's (LOB-20), as every other board write's.
+      upgradeBoard: (input) =>
+        attributed(input).pipe(Effect.flatMap(tasks.upgradeBoard)),
       // The editor's pickers (D6): the keys and roles the rules `defineBoard` runs accept, against the
       // same role table and the same held definitions, read afresh for every call.
       getDefinitionVocabulary: () =>

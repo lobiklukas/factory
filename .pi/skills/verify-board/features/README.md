@@ -89,6 +89,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |
 | `factory board define` (D4)             | passing | [define.md](define.md)           |
+| `factory board upgrade` + Upgrade (D5)  | passing | [upgrade.md](upgrade.md)         |
 
 ## Deliberately absent
 
@@ -107,4 +108,4 @@ Evidence: `.verify/evidence/latest/board/`.
   runs.
 - **Definition editing in place.** A definition version is a new row, never an update (B2):
   `factory board define` writes the next version ([define.md](define.md)), and nothing edits or
-  deletes one. Reading one is [definitions.md](definitions.md).
+  deletes one; a board moves to it by an upgrade ([upgrade.md](upgrade.md)). Reading one is [definitions.md](definitions.md).

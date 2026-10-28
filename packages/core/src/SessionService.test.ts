@@ -14833,6 +14833,67 @@ describe("board caps and WIP limits (LOB-71)", () => {
   }, 60_000);
 
   /**
+   * A start that resolved its column from the card's old pin and then waited on the repository lock
+   * held by an upgrade migrating the card (D5): the upgrade is written here as `upgradeBoard` writes
+   * a re-pin, under the same lock, so the start is held until it commits.
+   *
+   * Mutation: drop the re-resolve under the lock in `withRunAdmitted` — the run is written in
+   * `intake`, a column resolved from v1, on a card that pins v2 in `review`.
+   */
+  it("refuses a start whose card was re-pinned while it waited on the lock, and writes no run", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const definitionId = yield* newDefinition([{}, {}]);
+        const board = yield* newBoard(definitionId, 1);
+        const card = yield* newCard(board.id, "re-pinned mid-start");
+        const locked = Deferred.makeUnsafe<void>();
+        const release = Deferred.makeUnsafe<void>();
+        const upgrade = yield* Effect.forkChild(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`SELECT pg_advisory_xact_lock(hashtext(${`task_runs:${board.repo}`}))`;
+              yield* sql`
+                UPDATE tasks SET definition_version = 2, "column" = 'review',
+                                 revision = revision + 1
+                WHERE id = ${card.id}
+              `;
+              yield* Deferred.succeed(locked, undefined);
+              yield* Deferred.await(release);
+            }),
+          ),
+        );
+        yield* Deferred.await(locked);
+        // No taskColumn: the run starts in the card's own column, read from v1 as `intake`.
+        const starting = yield* Effect.forkChild(
+          Effect.exit(sessions.create({ taskId: card.id })),
+        );
+        // Released once the start waits on the lock, past the read of the card's column.
+        for (let waited = 0; waited < 200; waited++) {
+          const waiting = yield* sql<{ n: number }>`
+            SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted
+          `;
+          if ((waiting[0]?.n ?? 0) > 0) break;
+          yield* Effect.sleep("25 millis");
+        }
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(upgrade);
+        const started = yield* Fiber.join(starting);
+        const runs = yield* sql<{ count: number }>`
+          SELECT count(*)::int AS count FROM task_runs WHERE task_id = ${card.id}
+        `;
+        return { started, runs: runs[0]?.count };
+      }),
+    );
+    const refused = refusalOf(outcome.started);
+    expect(refused?.code).toBe("busy");
+    expect(refused?.message).toContain("re-pinned");
+    expect(outcome.runs).toBe(0);
+  }, 60_000);
+
+  /**
    * A review run (LOB-36) is the PR's, not a person's: refusing it would lose the review the card's
    * merge gate needs, so it is admitted past a full cap — and then holds a slot like any run.
    *
