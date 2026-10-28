@@ -17,6 +17,7 @@ export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
 export const REVIEW_DOC_KIND = "factory.review";
+export const APPROVALS_DOC_KIND = "factory.approvals";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -319,5 +320,46 @@ export const ReviewDoc = defineDoc({
     dimensions: null as JsonValue,
     outcome: "",
     outcomeDetail: "",
+  }),
+});
+
+/** One approval entry as the ledger keeps it: the two fields `projectApprovals` reads. */
+type LedgerEntry = { kind: string; data: JsonValue };
+
+/**
+ * A conversation's approval ledger (LOB-243): a copy of every `factory.approval.*` entry it holds,
+ * oldest first, kind and data only, committed in the same commit as the entry it copies.
+ *
+ * It exists so a historical read can report pending approvals without walking the transcript: the
+ * approvals a snapshot reports are folded from the whole log (LOB-147), and before the ledger that
+ * meant every entry of it. `projectApprovals` folds the ledger's entries exactly as it folds the
+ * transcript's, so the two cannot disagree on what a request id came to; the ledger is bounded by
+ * the approvals the session asked for, not by the length of its log.
+ *
+ * `seeded` is the promise that the ledger is complete through entry `through`. The seed says
+ * `false`, and the one helper that opens the ledger for writing (`approvalLedger`) copies every
+ * approval entry the conversation already holds before it sets it — a log written before the
+ * ledger existed is seeded once, the first time it is opened or asked for an approval — so a
+ * reader trusts a ledger only when it says `true` and folds the transcript otherwise.
+ *
+ * `through` is the newest entry id the ledger has accounted for. It is what keeps the ledger honest
+ * against a writer that does not know it — a build from before LOB-243 appending approval entries
+ * to a log this build seeded (a rollback, a mixed-version deploy, worktrees on different commits
+ * sharing one database): the next approval write catches the ledger up from `through`, and a
+ * historical read that finds an approval entry newer than `through` among the entries it already
+ * read folds the transcript instead of the ledger. What neither sees is such an entry older than a
+ * read's window and newer than the ledger's last write; it reads as missing until this build next
+ * writes an approval in that log (design.md R6).
+ */
+export const ApprovalsDoc = defineDoc({
+  kind: APPROVALS_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    seeded: false as boolean,
+    through: 0,
+    entries: [] as LedgerEntry[],
   }),
 });

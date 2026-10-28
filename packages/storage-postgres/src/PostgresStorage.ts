@@ -59,7 +59,8 @@ import {
  * decode, a failed read — is ignored, and the open folds the whole log as it always has (a failed
  * read or a fold that does not decode is logged as a warning). The checkpoint is an optimisation of
  * a derived value: the commit it follows neither waits for its write nor fails with it, and
- * deleting every row costs one full fold per log.
+ * deleting every row costs one full fold per log. `readers`, the batched fold, starts from the same
+ * checkpoints when its caller asks it to (LOB-243).
  */
 
 export type StorageMode = "owner" | "reader";
@@ -115,6 +116,17 @@ type CheckpointRow = {
   readonly seq: string | number | bigint;
   readonly fold: Uint8Array;
 };
+
+/**
+ * The fold a checkpoint row's bytes hold, restored as of commit `seq`: `undefined` for a fold that
+ * does not decode, and a failure for bytes that are not gzip. Either way the caller folds from the
+ * start instead, and says which.
+ */
+const restoreRow = (fold: Uint8Array, seq: number) =>
+  Effect.map(
+    Effect.try(() => decompressFold(fold)),
+    (encoded) => restoreFold(encoded, seq),
+  );
 
 /** One commit row of one of the logs a batched read asked for. */
 type BatchedRow = Row & { readonly logId: string };
@@ -208,16 +220,21 @@ export class PostgresStorage implements Storage {
    * order per log: the page is ordered by `(log_id, seq)` and keyed on that pair, so a page may
    * split a log across two queries without reordering or dropping the half that did not fit.
    *
-   * It never reads a checkpoint, so every log it answers costs a full fold. It has two callers: the
-   * index rebuild (`rebuildIndexes`), the recovery path, where a fold that trusted a derived row
-   * could only rebuild what that row already believed; and the board's run evidence
-   * (`TaskService`), which pays the full fold of each run's log on every read.
+   * `checkpoints` says whether a log may start from its checkpoint (LOB-243). With it, every log
+   * with a valid checkpoint — the same test `open` applies, in one query for the batch — is restored
+   * and folds only its commits after it, so a log costs its tail, as an open does; one whose
+   * checkpoint is missing, stale or does not decode folds from the start. Its callers say which they
+   * are. The board's run evidence (`TaskService`) passes `true`: it reads documents and the runs'
+   * entries off the fold, which a checkpoint holds exactly. The index rebuild (`rebuildIndexes`)
+   * passes `false`: it is the recovery path, and a fold that trusted a derived row could only rebuild
+   * what that row already believed.
    *
    * The stores are detached and hold no connection, so the caller drops the map when it is done.
    */
   static readers(
     sql: SqlClient,
     logIds: readonly string[],
+    options: { readonly checkpoints: boolean },
   ): Promise<ReadonlyMap<string, Storage>> {
     const stores = new Map<string, MemoryStorage>(
       logIds.map((logId) => [logId, new MemoryStorage()]),
@@ -225,28 +242,76 @@ export class PostgresStorage implements Storage {
     if (stores.size === 0) return Promise.resolve(stores);
     const ids = [...stores.keys()];
     const fold = Effect.gen(function* () {
+      // The seq each log's fold already holds: its checkpoint's, or 0 for a fold from the start.
+      const folded = new Map<string, number>();
+      if (options.checkpoints) {
+        const rows = yield* sql<CheckpointRow & { readonly logId: string }>`
+          SELECT k.log_id AS "logId", k.seq, k.fold
+          FROM log_checkpoints k
+          JOIN commits c ON c.log_id = k.log_id AND c.seq = k.seq
+          WHERE k.log_id = ANY(${ids})
+            AND k.shape = ${CHECKPOINT_SHAPE}
+            AND md5(c.writes::text) = k.commit_hash
+        `.pipe(
+          Effect.catchCause((cause) =>
+            Effect.as(
+              Effect.logWarning(
+                `checkpoints of ${ids.length} logs could not be read; folding them whole`,
+                cause,
+              ),
+              [],
+            ),
+          ),
+        );
+        for (const row of rows) {
+          const seq = Number(row.seq);
+          const restored = yield* restoreRow(row.fold, seq).pipe(
+            Effect.catchCause((cause) =>
+              Effect.as(
+                Effect.logWarning(
+                  `checkpoint of log ${row.logId} could not be read; folding the whole log`,
+                  cause,
+                ),
+                null,
+              ),
+            ),
+          );
+          if (restored === null) continue;
+          if (restored === undefined) {
+            yield* Effect.logWarning(
+              `checkpoint of log ${row.logId} at commit ${seq} did not decode; folding the whole log`,
+            );
+            continue;
+          }
+          stores.set(row.logId, restored);
+          folded.set(row.logId, seq);
+        }
+      }
+      const floors = ids.map((logId) => folded.get(logId) ?? 0);
       let after: { readonly logId: string; readonly seq: number } | undefined;
       for (;;) {
         const rows =
           after === undefined
             ? yield* sql<BatchedRow>`
-                SELECT log_id AS "logId", seq, writes::text AS writes
-                FROM commits
-                WHERE log_id = ANY(${ids})
-                ORDER BY log_id, seq
+                SELECT c.log_id AS "logId", c.seq, c.writes::text AS writes
+                FROM commits c
+                JOIN unnest(${ids}::text[], ${floors}::bigint[]) AS f(log_id, folded)
+                  ON f.log_id = c.log_id AND c.seq > f.folded
+                ORDER BY c.log_id, c.seq
                 LIMIT ${READER_PAGE_ROWS}
               `
             : yield* sql<BatchedRow>`
-                SELECT log_id AS "logId", seq, writes::text AS writes
-                FROM commits
-                WHERE log_id = ANY(${ids})
-                  AND (log_id, seq) > (${after.logId}, ${after.seq})
-                ORDER BY log_id, seq
+                SELECT c.log_id AS "logId", c.seq, c.writes::text AS writes
+                FROM commits c
+                JOIN unnest(${ids}::text[], ${floors}::bigint[]) AS f(log_id, folded)
+                  ON f.log_id = c.log_id AND c.seq > f.folded
+                WHERE (c.log_id, c.seq) > (${after.logId}, ${after.seq})
+                ORDER BY c.log_id, c.seq
                 LIMIT ${READER_PAGE_ROWS}
               `;
         for (const row of rows) {
           const store = stores.get(row.logId);
-          // Unreachable: `ANY(ids)` bounds the rows to ids `stores` holds. Left explicit because
+          // Unreachable: the join bounds the rows to ids `stores` holds. Left explicit because
           // the fold below assumes the store exists, and a missing one would be a silent skip.
           if (store === undefined) continue;
           const seq = Number(row.seq);
@@ -377,8 +442,7 @@ export class PostgresStorage implements Storage {
       const row = rows[0];
       if (row === undefined) return;
       const seq = Number(row.seq);
-      const encoded = yield* Effect.try(() => decompressFold(row.fold));
-      const restored = restoreFold(encoded, seq);
+      const restored = yield* restoreRow(row.fold, seq);
       if (restored === undefined) {
         yield* Effect.logWarning(
           `checkpoint of log ${this.logId} at commit ${seq} did not decode; folding the whole log`,

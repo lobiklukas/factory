@@ -37,8 +37,11 @@ import {
   LinearIssueSyncLayer,
   LinearSyncLog,
   ProposalTrackerLive,
-  SessionWriteBackLive,
 } from "./Api/LinearSync";
+import {
+  SessionWriteBacksLive,
+  TriggerAdaptersLog,
+} from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
@@ -554,7 +557,7 @@ const HttpLive = Effect.gen(function* () {
       onSome: (budget) => ({ defaultBudget: budget }),
     }),
   }).pipe(
-    Layer.provide(Layer.mergeAll(SessionWriteBackLive, ProposalTrackerLive)),
+    Layer.provide(Layer.mergeAll(SessionWriteBacksLive, ProposalTrackerLive)),
   );
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
@@ -588,6 +591,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
   ).pipe(

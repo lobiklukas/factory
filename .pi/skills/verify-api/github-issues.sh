@@ -1,100 +1,82 @@
 #!/usr/bin/env bash
-# Drive the GitHub issues/labels adapter end to end (LOB-190): an issue event creates one session
-# and one issue comment, and neither GitHub's `labeled` twin nor a redelivery creates a second one.
+# Drive the GitHub issues adapter over HTTP (LOB-190, served by LOB-259): a signed `issues` delivery
+# carrying the `factory` label, posted at `POST /webhooks/github` of a booted API, opens one session
+# and one issue comment; GitHub's `labeled` twin and a redelivery open none; an `@factory` comment is
+# the same ask; and the same API booted with `GITHUB_WEBHOOK_SECRET` unset answers 503.
 #
 #   ./github-issues.sh
+#   API_PORT=9580 GITHUB_ISSUES_PORT=9584 ./github-issues.sh        # another pair of ports
 #
-# The driver builds the adapter in-process (`github-issues.ts`), so there is no API instance here:
-# the port a run reserved for this surface is the port the loopback GitHub fake listens on. Only
-# GitHub is fake — the seam, the session layer and the run's Postgres are real.
+# Only GitHub is fake: the loopback `github-issues-fake.ts` answers the issue-comment API, and the
+# API's `GITHUB_API_URL` points at it. The API, its signature check, the seam, the session layer and
+# the run's Postgres are real (`adapter-lib.sh` boots them). `TRIGGER_RULES` names a decoy repo for
+# the labels on purpose: the repo a session runs in is the payload's own.
 #
-# The session root is a throwaway git repo whose origin is a local bare repository, so no git call
-# can reach a real remote (LOB-94), and the run's `DATABASE_URL` is the database the driver opens.
+# Env: API_PORT (or GITHUB_ISSUES_API_PORT; 9426), GITHUB_ISSUES_PORT (9413), DATABASE_URL,
+# GITHUB_TRIGGER_REPO, GITHUB_WEBHOOK_SECRET, EVIDENCE_DIR.
 #
-# What the fake cannot prove: that GitHub accepts the comment path, the App token or
-# `X-GitHub-Api-Version` as spelled, or that creating an issue with a label really emits both the
-# `opened` and the `labeled` delivery the idempotency key collapses. The request shape is asserted
-# in `packages/core/src/GitHub.test.ts` from the documented API; the fake is only as right as that
-# reading. See `docs/testing-third-parties.md`.
+# What the fake cannot prove: that GitHub accepts the comment path, the token or `X-GitHub-Api-Version`
+# as spelled, that GitHub signs a delivery the way `refuseGitHubDelivery` reads it, or that creating
+# an issue with a label really emits both the `opened` and the `labeled` delivery the idempotency key
+# collapses. The request shape is asserted in `packages/core/src/GitHub.test.ts` from the documented
+# API; the fake is only as right as that reading. See `docs/testing-third-parties.md`.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${GITHUB_ISSUES_PORT:-${API_PORT:-9413}}"
-FAKE_URL="http://127.0.0.1:$PORT"
-RUN_DIR="$ROOT/.verify/run/github-issues"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-190}"
-LEDGER="$RUN_DIR/github-issues-ledger.json"
-SESSION_ROOT="$RUN_DIR/sessions"
-ORIGIN_DIR="$RUN_DIR/origin.git"
+source "$ROOT/.pi/skills/verify-api/adapter-lib.sh"
+API_PORT="${GITHUB_ISSUES_API_PORT:-${API_PORT:-9426}}"
+FAKE_PORT="${GITHUB_ISSUES_PORT:-9413}"
+API_URL="http://127.0.0.1:$API_PORT"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-259}"
 DRIVER="$ROOT/.pi/skills/verify-api/github-issues.ts"
-FAKE="$ROOT/.pi/skills/verify-api/github-issues-fake.ts"
-REPO="${GITHUB_TRIGGER_REPO:-acme/verify-api-github}"
+SECRET="${GITHUB_WEBHOOK_SECRET:-lob259-github-webhook-secret}"
+RUN_STAMP="$(date +%s)"
+REPO="${GITHUB_TRIGGER_REPO:-acme/verify-api-github}-$RUN_STAMP"
 
-mkdir -p "$RUN_DIR" "$EVIDENCE_DIR" "$SESSION_ROOT"
+mkdir -p "$EVIDENCE_DIR"
+adapter_init github-issues
+LEDGER="$RUN_DIR/github-issues-ledger.json"
 rm -f "$LEDGER"
+trap adapter_cleanup EXIT
+adapter_check_ports "$API_PORT" "$FAKE_PORT"
 
-stop_fake() {
-  [ -f "$RUN_DIR/fake.pid" ] || return 0
-  local pid; pid="$(cat "$RUN_DIR/fake.pid")"
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-  kill -9 "$pid" 2>/dev/null || true
-  rm -f "$RUN_DIR/fake.pid"
+adapter_start_fake github "$LEDGER" "$ROOT/.pi/skills/verify-api/github-issues-fake.ts" \
+  GITHUB_ISSUES_FAKE_PORT="$FAKE_PORT" GITHUB_ISSUES_FAKE_LEDGER="$LEDGER" \
+  GITHUB_ISSUES_FAKE_FAIL_AFTER_WRITE="#9" || exit 1
+
+# Both rules name the decoy: a session that opened in it would be a mapping that read the rule's repo.
+DECOY="$REPO-decoy"
+RULES="$(printf '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Work on {{title}}:\\n{{body}}"},{"label":"deploy","repo":"%s","prompt":"Deploy {{title}}"}]' "$DECOY" "$DECOY")"
+status=0
+
+drive() { # mode
+  MODE="$1" API_URL="$API_URL" GITHUB_ISSUES_FAKE_LEDGER="$LEDGER" GITHUB_TRIGGER_REPO="$REPO" \
+    GITHUB_WEBHOOK_SECRET="$SECRET" GITHUB_RUN_STAMP="$RUN_STAMP" EVIDENCE_DIR="$EVIDENCE_DIR" \
+    DATABASE_URL="$DATABASE_URL" bun "$DRIVER" 2>&1 | tee "$EVIDENCE_DIR/github-issues-$1.log"
+  return "${PIPESTATUS[0]}"
 }
 
-trap 'stop_fake' EXIT
+# --- configured: the route armed, the comment API at the fake -------------------------------------
+adapter_start_api "$API_PORT" \
+  TRIGGER_RULES="$RULES" GITHUB_WEBHOOK_SECRET="$SECRET" \
+  GITHUB_API_URL="http://127.0.0.1:$FAKE_PORT" GITHUB_TOKEN="ghs-drive-token" \
+  GITHUB_SESSION_URL_BASE="http://localhost:3000/sessions" || exit 1
+drive configured || status=1
+cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/github-issues-api.log"
+adapter_stop_api
 
-source "$ROOT/.pi/skills/lib/postgres.sh"
-ensure_postgres || exit 1
-
-# The session root the service opens workspaces under: a real git repo with a local origin.
-if [ ! -d "$SESSION_ROOT/.git" ]; then
-  rm -rf "$SESSION_ROOT" "$ORIGIN_DIR"
-  mkdir -p "$SESSION_ROOT"
-  git init -q -b main "$SESSION_ROOT"
-  git -C "$SESSION_ROOT" config user.email github@localhost
-  git -C "$SESSION_ROOT" config user.name "github-issues-drive"
-  git -C "$SESSION_ROOT" commit -q --allow-empty -m "github issues drive session root"
-  git init -q -b main --bare "$ORIGIN_DIR"
-  git -C "$SESSION_ROOT" remote add origin "$ORIGIN_DIR"
-  git -C "$SESSION_ROOT" push -q origin main
-fi
-
-# --- the loopback GitHub ----------------------------------------------------------------------
-: > "$RUN_DIR/fake.log"
-( exec env \
-    GITHUB_ISSUES_FAKE_PORT="$PORT" \
-    GITHUB_ISSUES_FAKE_LEDGER="$LEDGER" \
-    GITHUB_ISSUES_FAKE_FAIL_AFTER_WRITE="#9" \
-    bun "$FAKE" ) >> "$RUN_DIR/fake.log" 2>&1 &
-echo $! > "$RUN_DIR/fake.pid"
-for _ in $(seq 1 60); do
-  [ -s "$LEDGER" ] && break
-  sleep 0.1
-done
-if [ ! -s "$LEDGER" ]; then
-  echo "the fake GitHub did not start — see $RUN_DIR/fake.log" >&2
-  exit 1
-fi
-
-# --- the drive ---------------------------------------------------------------------------------
-env \
-  GITHUB_ISSUES_FAKE_URL="$FAKE_URL" \
-  GITHUB_ISSUES_FAKE_LEDGER="$LEDGER" \
-  GITHUB_TRIGGER_REPO="$REPO" \
-  SESSION_ROOT="$SESSION_ROOT" \
-  EVIDENCE_DIR="$EVIDENCE_DIR" \
-  DATABASE_URL="${DATABASE_URL:?github-issues.sh needs DATABASE_URL from the run}" \
-  bun "$DRIVER" 2>&1 | tee "$EVIDENCE_DIR/github-issues.log"
-STATUS="${PIPESTATUS[0]}"
+# --- unconfigured: the same API with no secret: every delivery is refused ---------------------------
+adapter_start_api "$API_PORT" TRIGGER_RULES="$RULES" GITHUB_WEBHOOK_SECRET="" || exit 1
+drive unconfigured || status=1
+cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/github-issues-api-unconfigured.log"
 
 cp "$LEDGER" "$EVIDENCE_DIR/github-issues-ledger.json" 2>/dev/null || true
-cp "$RUN_DIR/fake.log" "$EVIDENCE_DIR/github-issues-fake.log" 2>/dev/null || true
+cp "$RUN_DIR/github.log" "$EVIDENCE_DIR/github-issues-fake.log" 2>/dev/null || true
 
 echo
-if [ "$STATUS" -eq 0 ]; then
+if [ "$status" -eq 0 ]; then
   echo "github-issues: all checks passed — evidence in $EVIDENCE_DIR"
 else
-  echo "github-issues: FAILURES — see $EVIDENCE_DIR/github-issues.log" >&2
+  echo "github-issues: FAILURES — see $EVIDENCE_DIR/github-issues-*.log" >&2
 fi
-exit "$STATUS"
+exit "$status"
