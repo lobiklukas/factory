@@ -122,28 +122,44 @@ const credentials = CredentialProvider.of({
     ),
 });
 
-const { handler, dispose } = HttpRouter.toWebHandler(
-  SessionRpcLive.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        TestControlPlaneAuth,
-        Layer.succeed(
-          HttpClient.HttpClient,
-          HttpClient.make(() => Effect.die("no forge in this file")),
+/**
+ * The control plane's router over this file's database, with or without a role table: the same
+ * handlers `index.ts` mounts, so a deployment with no `ROLE_MODELS` (F4) is a router of its own.
+ */
+const routerWith = (roles: typeof roleModels | undefined) =>
+  HttpRouter.toWebHandler(
+    SessionRpcLive.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          TestControlPlaneAuth,
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("no forge in this file")),
+          ),
+          Layer.succeed(CredentialProvider, credentials),
+          FauxServerFacts,
         ),
-        Layer.succeed(CredentialProvider, credentials),
-        FauxServerFacts,
       ),
+      Layer.provideMerge(
+        SessionServiceLive({
+          model,
+          ...(roles === undefined ? {} : { roleModels: roles }),
+          sessionRoot,
+        }),
+      ),
+      Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      Layer.provide(ScratchConfig),
     ),
-    Layer.provideMerge(SessionServiceLive({ model, roleModels, sessionRoot })),
-    Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
-    Layer.provide(ScratchConfig),
-  ),
-  { disableLogger: true },
-);
+    { disableLogger: true },
+  );
+
+const { handler, dispose } = routerWith(roleModels);
+/** The same control plane with no role table: `defineBoard` takes any role name (F4). */
+const open = routerWith(undefined);
 
 afterAll(async () => {
   await dispose();
+  await open.dispose();
   await scratch.dispose();
   await admin.runPromise(
     Effect.gen(function* () {
@@ -155,40 +171,46 @@ afterAll(async () => {
   rmSync(sessionRoot, { recursive: true, force: true });
 });
 
-const ClientProtocol = RpcClient.layerProtocolHttp({
-  url: "http://factory.test/rpc",
-  transformClient: sendingToken(TEST_TOKEN),
-}).pipe(
-  Layer.provide(
-    Layer.succeed(
-      HttpClient.HttpClient,
-      HttpClient.make((request, _url, signal) =>
-        HttpClientRequest.toWeb(request, { signal }).pipe(
-          Effect.flatMap((web) => Effect.promise(() => handler(web))),
-          Effect.map((response) =>
-            HttpClientResponse.fromWeb(request, response),
+const protocolFor = (serve: typeof handler) =>
+  RpcClient.layerProtocolHttp({
+    url: "http://factory.test/rpc",
+    transformClient: sendingToken(TEST_TOKEN),
+  }).pipe(
+    Layer.provide(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request, _url, signal) =>
+          HttpClientRequest.toWeb(request, { signal }).pipe(
+            Effect.flatMap((web) => Effect.promise(() => serve(web))),
+            Effect.map((response) =>
+              HttpClientResponse.fromWeb(request, response),
+            ),
+            Effect.orDie,
           ),
-          Effect.orDie,
         ),
       ),
     ),
-  ),
-  Layer.provide(RpcSerialization.layerNdjson),
-);
-
-const call = <A, E>(
-  body: (
-    client: RpcClient.FromGroup<typeof RpcApi, RpcClientError>,
-  ) => Effect.Effect<A, E>,
-) =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const client = yield* RpcClient.make(RpcApi);
-        return yield* body(client);
-      }),
-    ).pipe(Effect.provide(ClientProtocol)),
+    Layer.provide(RpcSerialization.layerNdjson),
   );
+
+const callOn =
+  (serve: typeof handler) =>
+  <A, E>(
+    body: (
+      client: RpcClient.FromGroup<typeof RpcApi, RpcClientError>,
+    ) => Effect.Effect<A, E>,
+  ) =>
+    Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const client = yield* RpcClient.make(RpcApi);
+          return yield* body(client);
+        }),
+      ).pipe(Effect.provide(protocolFor(serve))),
+    );
+
+const call = callOn(handler);
+const callOpen = callOn(open.handler);
 
 /** The failure a call answered, as the client decoded it. */
 const failureOf = <A, E>(effect: Effect.Effect<A, E>) => Effect.flip(effect);
@@ -909,6 +931,59 @@ describe("the definition vocabulary over RPC (D6)", () => {
       }),
     );
     expect(defined.outcome).toBe("created");
+  });
+
+  /**
+   * Whether a typed role name is on offer (F4) is the role table's emptiness, as `defineBoard`'s
+   * rules read it. Mutation: always say closed — a deployment with no table cannot name a new role in
+   * the browser; always say open — a typed typo the server refuses is offered. The same role is then
+   * sent to both control planes, so the flag is proven to be the rule and not a copy of it.
+   */
+  it("says roles are open exactly when the deployment has no role table, and defineBoard agrees", async () => {
+    const closed = await call((client) => client.getDefinitionVocabulary({}));
+    const opened = await callOpen((client) =>
+      client.getDefinitionVocabulary({}),
+    );
+    expect(closed.rolesOpen).toBe(false);
+    expect(opened.rolesOpen).toBe(true);
+    // Without a table the harness's roles are still listed, and the closed table's `builder` is not.
+    expect(opened.roles).toEqual(
+      expect.arrayContaining(["planner", "reviewer", "specifier"]),
+    );
+    expect(opened.roles).not.toContain("builder");
+
+    const novel = `brand-new-${run}`;
+    const input = (id: string) => ({
+      id: DefinitionId.make(id),
+      name: "Names a role of its own",
+      initialColumn: "todo",
+      columns: [
+        {
+          name: "todo",
+          kind: "working" as const,
+          role: novel,
+          skills: [],
+          requires: [],
+          transitions: [{ to: "done" }],
+        },
+        {
+          name: "done",
+          kind: "terminal" as const,
+          skills: [],
+          requires: [],
+          transitions: [],
+        },
+      ],
+    });
+    const refused = await call((client) =>
+      failureOf(client.defineBoard(input(`closedrole${run}`))),
+    );
+    expect(refused).toMatchObject({ _tag: "InvalidDefinition" });
+    const accepted = await callOpen((client) =>
+      client.defineBoard(input(`openrole${run}`)),
+    );
+    expect(accepted.outcome).toBe("created");
+    expect(accepted.definition.columns[0]?.role).toBe(novel);
   });
 });
 

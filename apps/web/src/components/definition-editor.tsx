@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
-import { Cause, Exit, Option } from "effect";
+import { Cause, Exit, Option, Result } from "effect";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -16,6 +16,8 @@ import type {
   BoardDefinition,
   BoardInstance,
   ColumnKind,
+  ColumnPushScope,
+  ColumnWriteScope,
   DefinedBoard,
   DefinitionFault,
   DefinitionVocabulary,
@@ -24,7 +26,9 @@ import { definitionsAtom } from "@/lib/atoms/board-atom";
 import { defineBoardAtom } from "@/lib/atoms/definition-edit-atom";
 import { NONE, newerVersions } from "@/lib/board-settings-view";
 import {
+  CAP_KINDS,
   addColumn,
+  addGate,
   addRequirement,
   addSkill,
   addTransition,
@@ -33,9 +37,12 @@ import {
   defineRefusal,
   definitionDiff,
   draftOf,
+  gatesOf,
   moveColumn,
+  parseLimit,
   placeFaults,
   removeColumn,
+  removeGate,
   removeRequirement,
   removeSkill,
   removeTransition,
@@ -43,16 +50,22 @@ import {
   requirementOptions,
   roleOptions,
   savedNotice,
+  setCap,
+  setGate,
   setInitialColumn,
   setKind,
   setName,
+  setPushScope,
   setRequirementDescription,
   setRole,
   setTransitionGate,
   setTransitionTarget,
+  setWipLimit,
+  setWriteScope,
   skillOptions,
   supersedeNotice,
   targetOptions,
+  type CapKind,
   type DefineRefusal,
   type DefinitionDraft,
   type DraftColumn,
@@ -67,6 +80,22 @@ const SELECT_CLASS =
   "h-7 w-full min-w-0 rounded-none border border-input bg-transparent px-1.5 text-xs outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 aria-invalid:border-destructive dark:bg-input/30";
 
 const KINDS: ReadonlyArray<ColumnKind> = ["resting", "working", "terminal"];
+
+/** A column's write and push scope, widest first (C22); "default" is no scope: the deployment's. */
+const WRITE_SCOPES: ReadonlyArray<ColumnWriteScope> = [
+  "worktree",
+  "docs",
+  "none",
+];
+const PUSH_SCOPES: ReadonlyArray<ColumnPushScope> = ["branch", "none"];
+const DEFAULT_SCOPE = "";
+
+/** What each cap counts, as `BoardCaps` defines it (B9). */
+const CAP_LABELS: Readonly<Record<CapKind, string>> = {
+  board: "Per board",
+  task: "Per task",
+  repo: "Per repository",
+};
 
 /** A select's value for "no role": the column runs on the deployment's model. */
 const NO_ROLE = "";
@@ -118,8 +147,39 @@ const Section = ({
 );
 
 /**
- * One column of the draft: its name, kind and role, the skills it binds and the requirements it
- * declares — each picked from the server's lists, never typed — and its moves out with their gates.
+ * A number field for a limit: empty is no limit. Whatever else is typed reaches the server as the
+ * number it reads as, so `0` or `1.5` is refused there, next to the field, in the server's words.
+ */
+const LimitInput = ({
+  id,
+  value,
+  invalid,
+  onChange,
+  ...data
+}: {
+  readonly id: string;
+  readonly value: number | undefined;
+  readonly invalid: true | undefined;
+  readonly onChange: (limit: number | undefined) => void;
+} & Record<`data-${string}`, string | boolean>) => (
+  <Input
+    id={id}
+    type="number"
+    step="any"
+    inputMode="numeric"
+    value={value === undefined ? "" : String(value)}
+    placeholder="no limit"
+    onChange={(event) => onChange(parseLimit(event.currentTarget.value))}
+    aria-invalid={invalid}
+    className="h-7 text-xs"
+    {...data}
+  />
+);
+
+/**
+ * One column of the draft: its name, kind and role (typed only when the deployment has no role
+ * table), the skills it binds and the requirements it declares — each picked from the server's lists,
+ * never typed — its moves out with their gates, its WIP limit and its autonomy.
  * Every value is the draft's; every fault the last save was refused for sits next to its field.
  */
 const ColumnEditor = ({
@@ -148,7 +208,8 @@ const ColumnEditor = ({
   const canAddMove = targetOptions(draft, key, moves.length).length > 0;
   const freeSkills = skillOptions(skills, column);
   const freeKeys = requirementOptions(vocabulary.requirements, column);
-  const roles = roleOptions(vocabulary.roles, column);
+  const roles = roleOptions(vocabulary, column);
+  const gates = gatesOf(column);
   return (
     <li
       data-editor-column={column.name}
@@ -245,26 +306,57 @@ const ColumnEditor = ({
           <Label htmlFor={id("role")} className="text-[11px]">
             Role
           </Label>
-          <select
-            id={id("role")}
-            data-column-role-select
-            value={column.role ?? NO_ROLE}
-            onChange={(event) => {
-              const role = event.currentTarget.value;
-              update((previous) =>
-                setRole(previous, key, role === NO_ROLE ? undefined : role),
-              );
-            }}
-            aria-invalid={has(placed, slot("role"))}
-            className={SELECT_CLASS}
-          >
-            <option value={NO_ROLE}>{NONE} none</option>
-            {roles.map((role) => (
-              <option key={role} value={role}>
-                {role}
-              </option>
-            ))}
-          </select>
+          {roles.typed ? (
+            <>
+              <Input
+                id={id("role")}
+                data-column-role-input
+                list={`${id("role")}-suggestions`}
+                value={column.role ?? ""}
+                placeholder="none: the deployment's model"
+                onChange={(event) => {
+                  const role = event.currentTarget.value;
+                  update((previous) =>
+                    setRole(
+                      previous,
+                      key,
+                      role.trim() === "" ? undefined : role,
+                    ),
+                  );
+                }}
+                aria-invalid={has(placed, slot("role"))}
+                autoComplete="off"
+                spellCheck={false}
+                className="h-7 font-mono text-xs"
+              />
+              <datalist id={`${id("role")}-suggestions`}>
+                {roles.names.map((role) => (
+                  <option key={role} value={role} />
+                ))}
+              </datalist>
+            </>
+          ) : (
+            <select
+              id={id("role")}
+              data-column-role-select
+              value={column.role ?? NO_ROLE}
+              onChange={(event) => {
+                const role = event.currentTarget.value;
+                update((previous) =>
+                  setRole(previous, key, role === NO_ROLE ? undefined : role),
+                );
+              }}
+              aria-invalid={has(placed, slot("role"))}
+              className={SELECT_CLASS}
+            >
+              <option value={NO_ROLE}>{NONE} none</option>
+              {roles.names.map((role) => (
+                <option key={role} value={role}>
+                  {role}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
       <Faults placed={placed} slot={slot("kind")} />
@@ -498,6 +590,149 @@ const ColumnEditor = ({
         </p>
         <Faults placed={placed} slot={slot("transitions")} />
       </Section>
+
+      <Section label="Limit" data-column-limit>
+        <Label htmlFor={id("wip")} className="text-[11px]">
+          WIP limit: runs in flight at once on the board
+        </Label>
+        <LimitInput
+          id={id("wip")}
+          data-column-wip-input
+          value={column.wipLimit}
+          invalid={has(placed, slot("wipLimit"))}
+          onChange={(limit) =>
+            update((previous) => setWipLimit(previous, key, limit))
+          }
+        />
+        <Faults placed={placed} slot={slot("wipLimit")} />
+      </Section>
+
+      <Section label="Autonomy" data-column-autonomy>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="flex flex-col gap-1">
+            <Label htmlFor={id("write")} className="text-[11px]">
+              Write scope
+            </Label>
+            <select
+              id={id("write")}
+              data-column-write-select
+              value={column.autonomy?.write ?? DEFAULT_SCOPE}
+              onChange={(event) => {
+                const write = WRITE_SCOPES.find(
+                  (candidate) => candidate === event.currentTarget.value,
+                );
+                update((previous) => setWriteScope(previous, key, write));
+              }}
+              aria-invalid={has(placed, slot("autonomy.write"))}
+              className={SELECT_CLASS}
+            >
+              <option value={DEFAULT_SCOPE}>{NONE} deployment&apos;s</option>
+              {WRITE_SCOPES.map((scope) => (
+                <option key={scope} value={scope}>
+                  {scope}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor={id("push")} className="text-[11px]">
+              Push scope
+            </Label>
+            <select
+              id={id("push")}
+              data-column-push-select
+              value={column.autonomy?.push ?? DEFAULT_SCOPE}
+              onChange={(event) => {
+                const push = PUSH_SCOPES.find(
+                  (candidate) => candidate === event.currentTarget.value,
+                );
+                update((previous) => setPushScope(previous, key, push));
+              }}
+              aria-invalid={has(placed, slot("autonomy.push"))}
+              className={SELECT_CLASS}
+            >
+              <option value={DEFAULT_SCOPE}>{NONE} deployment&apos;s</option>
+              {PUSH_SCOPES.map((scope) => (
+                <option key={scope} value={scope}>
+                  {scope}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <Faults placed={placed} slot={slot("autonomy.write")} />
+        <Faults placed={placed} slot={slot("autonomy.push")} />
+        <span className="text-[11px]">
+          Commands a run asks a person before running
+        </span>
+        {gates.length === 0 ? (
+          <span className="text-[11px] text-muted-foreground">{NONE}</span>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {gates.map((gate, position) => (
+              <li
+                key={position}
+                data-column-gate={gate}
+                className="flex flex-col gap-0.5"
+              >
+                <span className="flex items-center gap-1">
+                  <Input
+                    aria-label={`Approval gate ${position + 1} of ${column.name}`}
+                    data-column-gate-input
+                    value={gate}
+                    placeholder="git push"
+                    onChange={(event) => {
+                      const next = event.currentTarget.value;
+                      update((previous) =>
+                        setGate(previous, key, position, next),
+                      );
+                    }}
+                    aria-invalid={has(
+                      placed,
+                      slot(`autonomy.approvalRequired[${position}]`),
+                    )}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="h-6 font-mono text-[11px]"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    data-remove-gate
+                    aria-label={`Remove approval gate ${position + 1} of ${column.name}`}
+                    onClick={() =>
+                      update((previous) => removeGate(previous, key, position))
+                    }
+                  >
+                    <XIcon />
+                  </Button>
+                </span>
+                <Faults
+                  placed={placed}
+                  slot={slot(`autonomy.approvalRequired[${position}]`)}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          data-add-gate
+          onClick={() => update((previous) => addGate(previous, key))}
+          className="self-start"
+        >
+          <PlusIcon />
+          Add a gate
+        </Button>
+        <p className="text-[10px] text-muted-foreground">
+          A column narrows the deployment&apos;s policy and never widens it: its
+          gates are added to the deployment&apos;s.
+        </p>
+        <Faults placed={placed} slot={slot("autonomy.approvalRequired")} />
+      </Section>
     </li>
   );
 };
@@ -596,6 +831,7 @@ export const DefinitionEditor = ({
           refusal: defineRefusal(
             Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
             Cause.pretty(exit.cause),
+            Result.getOrUndefined(Cause.findDefect(exit.cause)),
           ),
           sent,
           draft: sentDraft,
@@ -685,6 +921,37 @@ export const DefinitionEditor = ({
             <Faults placed={placed} slot="initialColumn" />
           </div>
         </div>
+        <fieldset
+          data-editor-caps
+          className="flex max-w-3xl flex-col gap-1 border-0 p-0"
+        >
+          <legend className="mb-1 text-[11px] font-medium">
+            Run caps: runs in flight at once, empty for no cap
+          </legend>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {CAP_KINDS.map((kind: CapKind) => (
+              <div key={kind} className="flex flex-col gap-1">
+                <Label
+                  htmlFor={`definition-cap-${kind}`}
+                  className="text-[11px]"
+                >
+                  {CAP_LABELS[kind]}
+                </Label>
+                <LimitInput
+                  id={`definition-cap-${kind}`}
+                  data-editor-cap={kind}
+                  value={draft.caps?.[kind]}
+                  invalid={has(placed, `caps.${kind}`)}
+                  onChange={(limit) =>
+                    update((previous) => setCap(previous, kind, limit))
+                  }
+                />
+                <Faults placed={placed} slot={`caps.${kind}`} />
+              </div>
+            ))}
+          </div>
+          <Faults placed={placed} slot="caps" />
+        </fieldset>
       </header>
 
       <div className="flex flex-col gap-4 p-4 xl:flex-row xl:items-start">
