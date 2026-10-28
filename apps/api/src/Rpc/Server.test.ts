@@ -96,6 +96,8 @@ const factsFor = (input: {
       linearStates: { started: "Doing", inReview: "Review", done: "Shipped" },
       reviewer: "token",
       sandbox: "in-process",
+      triggerRules: 0,
+      envFiles: [],
     } satisfies ServerFactsShape;
   }).pipe(Effect.runPromise);
 

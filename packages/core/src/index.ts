@@ -24,6 +24,7 @@ export * from "./Sentry";
 export * from "./SentryWriteBack";
 export * from "./git";
 export * from "./RepoMirror";
+export { checkBaseRef } from "./repos";
 export * from "./RepoRemote";
 export * from "./Linear";
 export * from "./LinearSync";
