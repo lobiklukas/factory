@@ -53,13 +53,17 @@ const processWith = (
     }).pipe(Layer.provideMerge(DatabaseLayer)),
   );
 
-const owner = processWith("owner", { ttlMs: 900 });
+/** The owner the streams follow: the default TTL, so a late heartbeat under load ends nothing. */
+const owner = processWith("owner", {});
+/** An owner whose heartbeat comes every 300ms, for the case that waits for it to notice a loss. */
+const shortLived = processWith("short-lived", { ttlMs: 900 });
 const follower = processWith("follower", { followPollMs: 100 });
 /** A follower whose poll is a minute away: anything it hears sooner, it heard from the bus. */
 const deaf = processWith("deaf", { followPollMs: 60_000 });
 
 afterAll(async () => {
   await owner.dispose();
+  await shortLived.dispose();
   await follower.dispose();
   await deaf.dispose();
 });
@@ -272,9 +276,10 @@ describe("following a session another process owns", () => {
   /**
    * Mutation: the heartbeat ignores a renewal that came back short — the owner stays registered and
    * its `send` succeeds against a log another holder claims.
+   * Mutation: release a lost owner as a closed one — its idle overwrites the usurper's busy.
    */
   it("releases an owner whose lease another process took", async () => {
-    const outcome = await owner.runPromise(
+    const outcome = await shortLived.runPromise(
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
@@ -286,6 +291,12 @@ describe("following a session another process owns", () => {
             fence = fence + 1, expires_at = now() + interval '1 minute'
           WHERE kind = 'session' AND key = ${created.id}
         `;
+        // ...and reports the session busy, as its projection would once its run starts.
+        yield* sql`
+          INSERT INTO session_activity (session_id, status, last_activity_at)
+          VALUES (${created.id}, 'busy', now())
+          ON CONFLICT (session_id) DO UPDATE SET status = 'busy'
+        `;
         // The owner's heartbeat (a third of its 900ms TTL) finds the claim gone and lets go.
         yield* waitUntil(
           Effect.exit(
@@ -296,13 +307,18 @@ describe("following a session another process owns", () => {
           "the owner to be released",
         );
         const followed = yield* sessions.get(created.id);
+        const activity = yield* sql<{ readonly status: string }>`
+          SELECT status FROM session_activity WHERE session_id = ${created.id}
+        `;
         yield* sql`DELETE FROM leases WHERE kind = 'session' AND key = ${created.id}`;
-        return { before, followed };
+        return { before, followed, status: activity[0]?.status };
       }),
     );
     expect(outcome.before.session.mode).toBe("live");
     // Still live — the usurper owns it — and read here from the log.
     expect(outcome.followed.session.mode).toBe("live");
+    // The released owner wrote no idle over the status the usurper reports.
+    expect(outcome.status).toBe("busy");
   }, 60_000);
 
   /**

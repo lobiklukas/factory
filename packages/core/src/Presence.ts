@@ -8,8 +8,9 @@
  * and writer.
  *
  * Every claim names its holder (one process, minted at boot) and its home (`homeOf`: that process's
- * host and absolute session root). `fence` counts the claim's holders: it rises when the claim changes hands, and a
- * holder renews or releases only the claim it took, so one that lost its claim cannot renew it back.
+ * host and absolute session root). `fence` counts the claims taken on the row: it rises on every
+ * acquisition over a row still there, and a holder renews or releases only the claim it took, so one
+ * that lost its claim cannot renew it back, and a release of an earlier claim cannot drop a later one.
  *
  * Time is the database's (`now()`), never a process clock: two processes on two machines agree on
  * whether a lease has lapsed because only one clock decides it.
@@ -50,9 +51,10 @@ export type PresenceShape = {
   /** How long a claim lives without a renewal. */
   readonly ttlMs: number;
   /**
-   * Claim one thing. Answered `Held` when nobody holds it, when this process already does (same
-   * fence), or when the lease there has lapsed (the next fence); otherwise `HeldElsewhere`, naming the
-   * live holder.
+   * Claim one thing. Answered `Held` when nobody holds it, when this process already does, or when
+   * the lease there has lapsed; otherwise `HeldElsewhere`, naming the live holder. A claim taken over
+   * a row still there is always under the next fence — this process's own row included — so a stale
+   * `release` or `renew` of the claim it replaced cannot touch the new one.
    *
    * `takeoverHome` also takes a live claim whose holder shares this process's home: a previous
    * incarnation of this process, which a restart replaces rather than waiting out its TTL (LOB-25,
@@ -165,10 +167,11 @@ export const makePresence = (config: {
               now() + ${ttlMs}::int * interval '1 millisecond'
             )
             ON CONFLICT (kind, key) DO UPDATE SET
-              fence = CASE WHEN leases.holder = EXCLUDED.holder
-                THEN leases.fence ELSE leases.fence + 1 END,
-              acquired_at = CASE WHEN leases.holder = EXCLUDED.holder
-                THEN leases.acquired_at ELSE now() END,
+              -- Every acquisition is a claim of its own, one by the same holder included: a release
+              -- or renewal still in flight for the claim it replaces names the old fence and so
+              -- matches nothing. Keeping a claim alive is what renew does, never an acquisition.
+              fence = leases.fence + 1,
+              acquired_at = now(),
               holder = EXCLUDED.holder,
               home = EXCLUDED.home,
               renewed_at = now(),

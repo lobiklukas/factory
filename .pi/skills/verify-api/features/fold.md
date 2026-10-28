@@ -53,6 +53,20 @@ is anybody's. A live lease whose holder shares this process's home — the same 
 where the session's worktree is — is taken back at once: that is the process this one replaced (a
 SIGKILL, a crash), and its run, mission or parked approval should not wait out a TTL for it.
 
+The home is `hostname():sessionRoot`, so that takeover needs a hostname that survives the restart.
+Where it does not — a recreated container, a Kubernetes Deployment pod — the boot's `resumeRuns` and
+`resumeMissions` are refused `owned_elsewhere` for every session the dead process held, log that
+they could not resume, and do not retry once its leases lapse: those runs wait until a client
+touches the session (or the next boot). A stable home (a StatefulSet's pod name, a fixed hostname)
+keeps boot recovery; a delayed retry of the refused resumes is a follow-up on LOB-18.
+
+Every acquisition is a claim of its own, under the next fence — the same process claiming a session
+again after closing it included — so a release or renewal still in flight for an owner this process
+already let go names the old fence and cannot drop or extend the new owner's claim. A claim is
+renewed from the moment it is taken, while the owner is still opening, not only once it is
+registered. An owner released because its claim was lost writes neither the list's `idle` nor a
+release: the session is the new holder's, and so is its status.
+
 A followed stream is the fold's snapshot with what the log says is happening now — `mode: "live"`,
 `status` and `live` from `pi.live`, `queued` from `pi.inbox`, the session's spend, and the live tasks
 from the log's task records — then one batch of events per read, in a live stream's order: entries
@@ -86,3 +100,5 @@ lease lapses (then the next acquisition takes it under the next fence).
 `packages/core/src/SessionService.follow.test.ts` covers the same in-process, plus the bus carrying a
 commit with the poll a minute away, an owner released when its lease was taken from it, and a dead
 holder's lease lapsing (its followers' streams end; the next claim takes fence 2).
+`packages/harness/src/follow.test.ts` pins the order of one read: an answer committed with the run's
+idle is sent before the idle, however the commit falls between the follower's reads.

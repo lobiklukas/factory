@@ -37,7 +37,7 @@ const lapse = (key: string) =>
 describe("presence leases", () => {
   /**
    * Mutation: drop the `WHERE` on the upsert — the second process takes a live claim.
-   * Mutation: keep the fence on a change of hands — the reclaimed fence is 1, not 2.
+   * Mutation: keep the fence on a change of hands — the reclaimed fence is 2, not 3.
    * Mutation: `leaseOf` without `expires_at > now()` — the lapsed lease still reads as held.
    */
   it("holds a claim against another process until it lapses, then hands it on under the next fence", async () => {
@@ -69,24 +69,75 @@ describe("presence leases", () => {
     );
     expect(outcome.first).not.toBe(outcome.second);
     expect(outcome.taken).toEqual({ _tag: "Held", fence: 1 });
-    // Taking a claim one already holds is a renewal, not a change of hands.
-    expect(outcome.again).toEqual({ _tag: "Held", fence: 1 });
+    // Taking a claim one already holds is a claim of its own, under the next fence.
+    expect(outcome.again).toEqual({ _tag: "Held", fence: 2 });
     expect(outcome.refused._tag).toBe("HeldElsewhere");
     if (outcome.refused._tag === "HeldElsewhere") {
       expect(outcome.refused.lease).toMatchObject({
         holder: outcome.first,
         home: "/first",
-        fence: 1,
+        fence: 2,
       });
     }
     expect(Option.getOrUndefined(outcome.held)?.holder).toBe(outcome.first);
     expect(Option.isNone(outcome.lapsed)).toBe(true);
-    expect(outcome.reclaimed).toEqual({ _tag: "Held", fence: 2 });
+    expect(outcome.reclaimed).toEqual({ _tag: "Held", fence: 3 });
     expect(Option.getOrUndefined(outcome.now)).toMatchObject({
       holder: outcome.second,
       home: "/second",
-      fence: 2,
+      fence: 3,
     });
+  }, 30_000);
+
+  /**
+   * One process closes its owner of a session and, before that release has reached the table, opens
+   * the session again: the release of the first claim must not drop the second.
+   *
+   * Mutation: keep the fence when the same holder claims again — the re-acquisition answers fence 1,
+   * the stale release deletes the row, the session reads as unowned and the renewal of the live
+   * claim comes back empty.
+   */
+  it("keeps a claim taken again by its holder when the release of the earlier one lands after it", async () => {
+    const outcome = await run(
+      Effect.gen(function* () {
+        const key = freshKey();
+        const holder = yield* makePresence({ home: "/same", ttlMs: 60_000 });
+        const other = yield* makePresence({ home: "/other", ttlMs: 60_000 });
+        const earlier = yield* holder.acquire("card", key);
+        const later = yield* holder.acquire("card", key);
+        if (earlier._tag !== "Held" || later._tag !== "Held")
+          return yield* Effect.die(new Error("the claims were refused"));
+        // The earlier owner's release, finishing after the later owner opened.
+        yield* holder.release("card", key, earlier.fence);
+        const survived = yield* other.leaseOf("card", key);
+        const refused = yield* other.acquire("card", key);
+        const staleRenewal = yield* holder.renew("card", [
+          { key, fence: earlier.fence },
+        ]);
+        const renewed = yield* holder.renew("card", [
+          { key, fence: later.fence },
+        ]);
+        yield* holder.releaseAll;
+        return {
+          earlier,
+          later,
+          survived,
+          refused,
+          staleRenewal: [...staleRenewal],
+          renewed: [...renewed],
+          holder: holder.holder,
+          key,
+        };
+      }),
+    );
+    expect(outcome.later.fence).toBeGreaterThan(outcome.earlier.fence);
+    expect(Option.getOrUndefined(outcome.survived)).toMatchObject({
+      holder: outcome.holder,
+      fence: outcome.later.fence,
+    });
+    expect(outcome.refused._tag).toBe("HeldElsewhere");
+    expect(outcome.staleRenewal).toEqual([]);
+    expect(outcome.renewed).toEqual([outcome.key]);
   }, 30_000);
 
   /**

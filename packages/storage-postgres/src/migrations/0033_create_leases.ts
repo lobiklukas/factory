@@ -14,9 +14,11 @@ import { SqlClient } from "effect/sql/SqlClient";
  * - `home` is the holder's host and absolute session root — where its sessions' worktrees are: what a
  *   restarted process shares with the process it replaces, so it can take back what that one held
  *   without waiting out the TTL.
- * - `fence` counts the holders the row has had. It rises by one each time the claim changes hands,
- *   and a holder renews or releases only the claim it took (`holder` and `fence` both match), so a
- *   holder that lost its claim while it was not looking cannot renew it back from the new one.
+ * - `fence` counts the claims taken on the row. It rises by one on every acquisition over a row
+ *   still there (a change of hands, or the same holder claiming again), and a holder renews or
+ *   releases only the claim it took (`holder` and `fence` both match), so a holder that lost its
+ *   claim while it was not looking cannot renew it back from the new one, and a release of an
+ *   earlier claim cannot drop a later one.
  *
  * Not refolded by `rebuildIndexes` and not in the log: a lease is a fact about running processes,
  * which a log cannot know, and dropping every row costs nothing but a TTL's wait for nobody.

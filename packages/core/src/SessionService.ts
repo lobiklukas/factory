@@ -929,6 +929,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       );
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
       /**
+       * The presence claims taken by acquisitions still opening their owner (LOB-18), by fence: the
+       * heartbeat renews these too, so an open that outlasts the TTL (a worktree cut, a long log's
+       * fold, a resumed run) keeps its claim until the owner is in `live` and renewed from there.
+       */
+      const opening = yield* Ref.make(HashMap.empty<SessionId, number>());
+      /**
        * When each owned session's current run started, as its activity projection saw it turn busy
        * (`observeRun`); the run's duration is recorded when it turns idle (`factory.run.duration`).
        * Only the projection writes an entry, and `releaseOwner` drops it with the projection.
@@ -1939,6 +1945,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }
             claimed = claim.fence;
             const fence = claim.fence;
+            yield* Ref.update(opening, HashMap.set(id, fence));
             const workspace = yield* workspaceFor(row, {
               cut: released === undefined,
               released,
@@ -2068,6 +2075,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ? Effect.void
                 : presence.release("session", id, claimed).pipe(Effect.ignore),
             ),
+            // Opened or not, the claim is no longer an opening one: `live` renews it from here.
+            Effect.ensuring(Ref.update(opening, HashMap.remove(id))),
           ),
         );
       };
@@ -4582,6 +4591,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const releaseOwner = (
         sessionId: SessionId,
         owner: LiveOwner,
+        /**
+         * The heartbeat's release of an owner whose claim another process took (LOB-18): the session
+         * is that process's now, so neither its claim nor its list status is this one's to write.
+         */
+        release: { readonly lost?: boolean } = {},
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
           // Interrupting the projection first: a released owner has no status to report.
@@ -4594,6 +4608,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // worktree's files, which stay for the session's next run like the worktree itself.
           yield* owner.releaseEnvironment;
           yield* Effect.promise(() => owner.storage.dispose());
+          // A claim another process took is its session now, busy there perhaps: writing idle over
+          // its status, or releasing a claim that is no longer this one's, is not this owner's to do.
+          if (release.lost === true) return;
+          // Nobody here owns the session any more, so the list's honest status is idle (D8) —
+          // written while the claim is still held, so a process that takes the session next writes
+          // its status after this one, never under it.
+          yield* setActivityStatus(sessionId, "idle");
           // The claim goes last, once nothing here can write the log: a process that takes the
           // session next must not find this one still committing (LOB-18).
           yield* presence
@@ -4605,8 +4626,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
               ),
             );
-          // Nobody owns the session now, so the list's honest status is idle (D8).
-          yield* setActivityStatus(sessionId, "idle");
         });
 
       /**
@@ -4919,23 +4938,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const heartbeat = Effect.gen(function* () {
         const owners = HashMap.toEntries(yield* Ref.get(live));
-        if (owners.length === 0) return;
+        // Claims still being opened are renewed too; one lost meanwhile is found by the first beat
+        // after its owner reaches `live`, as any other owner's is.
+        const claims = new Map<string, number>(
+          HashMap.toEntries(yield* Ref.get(opening)),
+        );
+        for (const [sessionId, owner] of owners)
+          claims.set(sessionId, owner.fence);
+        if (claims.size === 0) return;
         const renewed = yield* presence.renew(
           "session",
-          owners.map(([sessionId, owner]) => ({
-            key: sessionId,
-            fence: owner.fence,
-          })),
+          [...claims].map(([key, fence]) => ({ key, fence })),
         );
         for (const [sessionId, owner] of owners) {
           if (renewed.has(sessionId)) continue;
-          // Only if it is still the owner the renewal was asked for: one released meanwhile dropped
-          // its own claim, and one opened again since holds a new one.
+          // Only if it is still the claim the renewal was asked for: one released meanwhile dropped
+          // its own claim, and one opened again since holds a new one. Compared by the claim — its
+          // fence and the harness it opened — not by the owner value, which every `touch` replaces.
           const removed = yield* Ref.modify(live, (current) =>
             Option.match(HashMap.get(current, sessionId), {
               onNone: () => [false, current] as const,
               onSome: (still) =>
-                still === owner
+                still.fence === owner.fence && still.harness === owner.harness
                   ? ([true, HashMap.remove(current, sessionId)] as const)
                   : ([false, current] as const),
             }),
@@ -4944,7 +4968,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* Effect.logWarning(
             `session ${sessionId}: its presence lease was lost to another process; releasing this owner`,
           );
-          yield* releaseOwner(sessionId, owner);
+          yield* releaseOwner(sessionId, owner, { lost: true });
         }
       }).pipe(
         Effect.catch((error) =>

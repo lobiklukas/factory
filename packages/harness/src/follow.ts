@@ -247,6 +247,11 @@ export const followSessionEvents = (
 
       const step = Effect.gen(function* () {
         const events: SessionEvent[] = [];
+        // The state first, then the entries: a reader-mode storage catches up on every read, so the
+        // entries are read at least as far into the log as the state was, and every entry committed
+        // with or before the state this step sends (an idle among them) goes out ahead of it. An
+        // entry newer than the state is harmless: the next step sends the newer state after it.
+        const next = yield* readFollowedState(storage);
         for (const record of yield* readEntriesAfter(storage, last)) {
           last = Math.max(last, Number(record.id));
           events.push({ _tag: "entry", entry: projectEntry(record) });
@@ -261,7 +266,6 @@ export const followSessionEvents = (
               });
           }
         }
-        const next = yield* readFollowedState(storage);
         if (!sameJson(state.queued, next.queued))
           events.push({ _tag: "queued", queued: next.queued });
         if (!sameJson(state.live, next.live)) {
