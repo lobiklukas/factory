@@ -17,6 +17,13 @@ run did (D7), and `run_id` is the session id. A multi-step run may use `defineTa
 the card is never a Pi Durable `Task`, because Pi Durable tasks are created through a `Session` commit
 and a card must exist before any session does. One cardinality rule: **one card, many runs.**
 
+Built (LOB-260): a card carries a markdown **body**, a **base ref** and an **external ref** (the tracker
+issue it was filed from), set by `createTask` and written into its `created` event as well as its row,
+so `TaskService.replay` folds the card back out of `task_events` alone (`projectTask`). Every run on
+the card is told the body verbatim as its `task_body` prompt section, beside `task_thread` — an empty
+body is no section — and a run that names no base of its own cuts its worktree from the card's base
+ref rather than the repository's default. `factory board show` prints all three.
+
 ## B2 — The board is definitions plus instances, in the factory's own database
 
 A board **definition** declares columns and their policies; a board **instance** is bound to one

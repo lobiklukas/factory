@@ -33,7 +33,10 @@ The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`,
 card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
 `:9510`, **18/18** checks passed (`create-board.json`). `./definitions.sh` (LOB-270, 2026-10-28,
 `agent/LOB-270`), API on `:9550`, **30/30** checks passed (`definitions.json`), the tmux pane among
-them. Evidence: `.verify/evidence/latest/board/`.
+them. `./start-body.sh` (LOB-260, 2026-10-28, `agent/LOB-260`), API on `:9500`, web on `:3500`, the
+GitHub fake on `:9503`: **8/8** checks passed (`start-body.json`), with `body-create.json`'s **3/3** and
+`body-told.json`'s **6/6** folded in,, and `./drive.sh` exit 0 beside it against the same instance.
+Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                                 | Status  | File                             |
 | --------------------------------------- | ------- | -------------------------------- |
@@ -43,6 +46,7 @@ them. Evidence: `.verify/evidence/latest/board/`.
 | `factory board show`                    | passing | [show.md](show.md)               |
 | `factory board move` + refusals         | passing | [move.md](move.md)               |
 | `factory board start`                   | passing | [start.md](start.md)             |
+| a card's body and base ref in its runs  | passing | [body.md](body.md)               |
 | `board block\|unblock\|attention\|runs` | passing | [triage.md](triage.md)           |
 | the board read back in the web          | passing | [dashboard.md](dashboard.md)     |
 | specify, ask, answer (the card)         | passing | [specify.md](specify.md)         |

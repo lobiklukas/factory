@@ -1212,38 +1212,67 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
-       * The repository a card's run works in when the create named none (LOB-255): the card's, and
-       * for a card made before cards carried one, its board's (B2). `undefined` for no card, and for
-       * a card id the tasks table does not hold — the run row's foreign key refuses that one.
+       * Where a card's run works when the create named nothing (LOB-255, LOB-260): the card's
+       * repository — for a card made before cards carried one, its board's (B2) — and the card's base
+       * ref, when it has one. `undefined` for no card, and for a card id the tasks table does not
+       * hold — the run row's foreign key refuses that one.
        */
-      const cardRepoFor = (
+      const cardBindingFor = (
         taskId: string | undefined,
-      ): Effect.Effect<RepoSlug | undefined, SessionError> =>
+      ): Effect.Effect<
+        { readonly repo: RepoSlug; readonly baseRef?: string } | undefined,
+        SessionError
+      > =>
         Effect.gen(function* () {
           if (taskId === undefined) return undefined;
           const rows = yield* paper(
             "read the card's repo",
-            sql<{ repo: string }>`
-              SELECT COALESCE(t.repo, bi.repo) AS repo
+            sql<{ repo: string; baseRef: string | null }>`
+              SELECT COALESCE(t.repo, bi.repo) AS repo, t.base_ref
               FROM tasks t JOIN board_instances bi ON bi.id = t.board_id
               WHERE t.id = ${taskId}
             `,
           );
-          const raw = rows[0]?.repo;
-          return raw === undefined ? undefined : yield* toRepoSlug(raw);
+          const row = rows[0];
+          if (row === undefined) return undefined;
+          return {
+            repo: yield* toRepoSlug(row.repo),
+            ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+          };
         });
 
       /**
+       * The card's body (LOB-260), read when a run's owner opens so its prompt carries what the task
+       * asks for. `''` — a card with none — is `undefined`, and so no `task_body` section.
+       */
+      const cardBodyFor = (
+        taskId: string,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        paper(
+          "read the card's body",
+          sql<{ body: string }>`SELECT body FROM tasks WHERE id = ${taskId}`,
+        ).pipe(
+          Effect.map((rows) => {
+            const body = rows[0]?.body;
+            return body === undefined || body === "" ? undefined : body;
+          }),
+        );
+
+      /**
        * Resolve the repo binding a create asked for, registering the repo on first use. A card's run
-       * that names no repo is bound to the card's (`cardRepoFor`), so it gets a branch and a worktree
-       * whichever client started it; only a run of no card is a scratch session.
+       * that names no repo is bound to the card's (`cardBindingFor`), so it gets a branch and a
+       * worktree whichever client started it; only a run of no card is a scratch session. A card's
+       * run that names no base starts from the card's base ref (LOB-260) when the run is in the
+       * card's repository, and from the repository's default otherwise.
        */
       const resolveBinding = (
         input: CreateSessionInput,
       ): Effect.Effect<Binding, SessionError> =>
         Effect.gen(function* () {
-          const repo = input.repo ?? (yield* cardRepoFor(input.taskId));
+          const card = yield* cardBindingFor(input.taskId);
+          const repo = input.repo ?? card?.repo;
           if (repo === undefined) return {};
+          const cardBase = card?.repo === repo ? card.baseRef : undefined;
           const existing = (yield* paper("read repo", readRepo(repo)))[0];
           const registered =
             existing ??
@@ -1258,7 +1287,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ))[0];
           return {
             repo,
-            baseRef: input.baseRef ?? registered?.defaultBaseRef ?? "main",
+            baseRef:
+              input.baseRef ?? cardBase ?? registered?.defaultBaseRef ?? "main",
             // The branch is part of the binding, not of the create call: every later read of this
             // session's workspace has to answer the branch it is really on (LOB-197).
             ...(input.branch === undefined ? {} : { branch: input.branch }),
@@ -1387,6 +1417,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
         readonly thread?: ThreadReader;
+        /** The card's body (LOB-260); absent for a session with no card, or a card with none. */
+        readonly body?: string;
         /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
         readonly spec?: SpecOptions;
         /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
@@ -1476,6 +1508,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
+            const body =
+              card === undefined ? undefined : yield* cardBodyFor(card);
             const opened = yield* open({
               storage,
               cwd: workspace.path,
@@ -1491,6 +1525,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : {
                     ask: askFor(id, card),
                     thread: threadFor(card),
+                    ...(body === undefined ? {} : { body }),
                     spec: specFor(id, card, run.column),
                   }),
               ...(reviews ? { review: reviewFor() } : {}),
@@ -1543,6 +1578,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             verify,
             ask,
             thread,
+            body,
             spec,
             review,
           }) =>
@@ -1562,6 +1598,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               approvalAsker: askerFor(id),
               ...(ask === undefined ? {} : { ask }),
               ...(thread === undefined ? {} : { thread }),
+              ...(body === undefined ? {} : { body }),
               ...(spec === undefined ? {} : { spec }),
               ...(review === undefined ? {} : { review }),
               // A mission is a durable task, so the kind has to be installed in the registry this

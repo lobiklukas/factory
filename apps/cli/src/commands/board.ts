@@ -254,6 +254,22 @@ export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
       ];
 
 /**
+ * What the card says and where its runs start (LOB-260): its base ref and external ref, `-` when it
+ * has none, then its body — `body      -` for a card with none, or the line count and each line of
+ * the markdown indented, exactly as it was filed, the way a thread comment's body is printed.
+ */
+export const bodyLines = (card: Task): ReadonlyArray<string> => [
+  `base      ${card.baseRef ?? "-"}`,
+  `external  ${card.externalRef ?? "-"}`,
+  ...(card.body === undefined
+    ? ["body      -"]
+    : [
+        `body      ${card.body.split("\n").length} lines`,
+        ...card.body.split("\n").map((line) => `    ${line}`),
+      ]),
+];
+
+/**
  * `factory board show <task>` — one card, as the server has it, its spec (LOB-238), and its thread
  * (B7): the question a parked run asked and the answer a person gave are read here, on the task, not
  * in a transcript.
@@ -294,6 +310,7 @@ const showCommand = Command.make(
         }`,
       );
       yield* Console.log(`title     ${card.title}`);
+      for (const line of bodyLines(card)) yield* Console.log(line);
       for (const line of specLines(spec)) yield* Console.log(line);
       yield* Console.log(`thread    ${thread.length}`);
       for (const comment of thread) {

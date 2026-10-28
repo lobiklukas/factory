@@ -456,6 +456,22 @@ export const Task = Schema.Struct({
    * holds none in its row and reads back with its board's, the one its runs are bound to.
    */
   repo: Schema.optional(RepoSlug),
+  /**
+   * What the card asks for, in markdown, as whoever filed it wrote it (LOB-260): the task's
+   * description, quoted verbatim into every run's prompt as its `task_body` section. Absent for a
+   * card with none, which is every card made before cards carried one.
+   */
+  body: Schema.optional(Schema.String),
+  /**
+   * The ref the card's runs cut their worktree from (LOB-260): a run started on the card with no
+   * base of its own starts here rather than at the repository's default. Absent: the repository's.
+   */
+  baseRef: Schema.optional(Schema.String),
+  /**
+   * Where the card came from outside the factory (LOB-260): the tracker issue it was filed from — a
+   * URL or a key such as `LOB-42`. Opaque here: nothing reads it back out of the card yet.
+   */
+  externalRef: Schema.optional(Schema.String),
   /** The definition version this task started under (B2). */
   definitionVersion: Schema.Int,
   revision: Schema.Int,
@@ -497,6 +513,11 @@ export type Actor = typeof Actor.Type;
  * because B1 makes a run a first-class thing a task owns.
  */
 export const TaskEvent = Schema.TaggedUnion({
+  /**
+   * The card was made. `body`, `baseRef`, `externalRef` and `priority` are what the create carried
+   * (LOB-260), so the card's input is derivable from its history (`projectTask`); each is absent
+   * when the create set none, and on every `created` event written before cards carried them.
+   */
   created: {
     taskId: TaskId,
     boardId: BoardInstanceId,
@@ -504,6 +525,10 @@ export const TaskEvent = Schema.TaggedUnion({
     column: Schema.String,
     actor: Actor,
     revision: Schema.Int,
+    body: Schema.optional(Schema.String),
+    baseRef: Schema.optional(Schema.String),
+    externalRef: Schema.optional(Schema.String),
+    priority: Schema.optional(TaskPriority),
   },
   moved: {
     taskId: TaskId,
@@ -720,14 +745,37 @@ export type TaskError =
   | TaskStorageError;
 
 /**
+ * The longest body a card takes, in characters (LOB-260). The body is quoted verbatim into the
+ * prompt of every request of every run on the card, so its size is a prompt budget (about 8,000
+ * tokens), as a comment's is; a spec longer than this belongs in a file in the repository.
+ */
+export const MAX_TASK_BODY_CHARS = 32_000;
+
+/** The longest base ref and external ref a card takes: a ref or a URL, never a document. */
+export const MAX_TASK_REF_CHARS = 1_024;
+
+/**
  * A new card (B3). `repo` defaults to the board instance's repository, which is the only one a card
  * on that board may name: another is `BoardRepoMismatch` (LOB-255).
+ *
+ * `body` is the card's description in markdown, `baseRef` the ref its runs cut their worktree from,
+ * and `externalRef` the tracker issue it was filed from (LOB-260). Each is optional, and an empty or
+ * all-whitespace one is stored as none: a card with an empty body gets no `task_body` section.
  */
 export const CreateTaskInput = Schema.Struct({
   boardId: BoardInstanceId,
   title: Schema.String,
   repo: Schema.optional(RepoSlug),
   priority: Schema.optional(TaskPriority),
+  body: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_BODY_CHARS))),
+  ),
+  baseRef: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
+  ),
+  externalRef: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
+  ),
   actor: Schema.String,
 });
 export type CreateTaskInput = typeof CreateTaskInput.Type;

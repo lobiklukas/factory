@@ -4,6 +4,7 @@ export * from "./ids";
 export * from "./workspace";
 export * from "./credentials";
 export * from "./TaskService";
+export * from "./taskProjection";
 export * from "./requirements";
 export * from "./boardConfig";
 export * from "./pr";
