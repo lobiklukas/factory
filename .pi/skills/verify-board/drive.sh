@@ -35,8 +35,10 @@
 # evidence section names the verify skill and its exit code. The run moves its card to `review`; a
 # person's merge is refused naming `review_verdict` until a faux reviewer run — opened by the review
 # trigger on a signed `pull_request` for the PR (`review.ts`, LOB-36) — records a pass on the PR's
-# head (LOB-241); then the run's own `review → done` is refused at the merge gate, and the person's
-# merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
+# head (LOB-241); then the run's own `review → done` is refused at the merge gate, the person's is
+# refused naming `human_merge` while the PR is open (C20), and the merge itself — the PR merged on the
+# fake, and GitHub's signed `pull_request` closed delivery (`merge.ts`), sent twice — moves the card to
+# `done` exactly once, recorded by `merge:<PR page>`. The PR is never assumed: with no GitHub path (./up.sh with
 # BOARD_GITHUB=off) the settled run's step fails on the missing credential and says so in its
 # transcript and on its card, the drive prints that reason and exits non-zero, and the phases after it
 # run on with the link empty rather than one the drive made up. The board holds the card too
@@ -841,12 +843,31 @@ check "the run's review → done is refused at the merge gate" \
   "$([ -n "$BUILD_SESSION_ID" ] && [ "$(exit_code merge-run)" != "0" ] && [ -n "$(exit_code merge-run)" ] && grep -qF "$MERGE_MESSAGE" "$EVIDENCE_DIR/move-merge-run.txt" && echo 0 || echo 1)" \
   "actor=${BUILD_SESSION_ID:-none}, exit=$(exit_code merge-run), message verbatim"
 
+# With the reviewer's pass, a person's review → done is held on the merge itself while the PR is
+# open (C20): `human_merge` reads the card's PR's recorded merge, and the move's read of the PR on the
+# fake finds it open.
 fresh
-run_cmd merge "$FACTORY board move --task $TASK_ID --to done --expect-revision ${MERGE_REVISION:-0} --actor person:reviewer --api $API_URL" || true
-capture move-merge.txt
-check "with the reviewer's pass, a person's review → done goes through, at the revision the refusals left" \
-  "$([ "$(exit_code merge)" = "0" ] && [ -n "$MERGE_REVISION" ] && grep -qx "moved $TASK_ID to done (revision $((MERGE_REVISION + 1)))" "$EVIDENCE_DIR/move-merge.txt" && echo 0 || echo 1)" \
-  "exit=$(exit_code merge)"
+run_cmd merge-open "$FACTORY board move --task $TASK_ID --to done --expect-revision ${MERGE_REVISION:-0} --actor person:reviewer --api $API_URL" || true
+capture move-merge-open.txt
+OPEN_MESSAGE="requirement_unmet: the move review → done needs \"human_merge\" (a human merge (B5's merge gate)), which is not met: no merge of the card's PR ${PR_URL:-none} is on record"
+check "with the reviewer's pass and the PR open, a person's review → done is refused naming human_merge and the PR" \
+  "$([ -n "$PR_URL" ] && [ "$(exit_code merge-open)" != "0" ] && [ -n "$(exit_code merge-open)" ] && grep -qF "$OPEN_MESSAGE" "$EVIDENCE_DIR/move-merge-open.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code merge-open), $(grep -m1 -o 'needs "[a-z_]*"' "$EVIDENCE_DIR/move-merge-open.txt" 2>/dev/null)"
+
+# The merge is GitHub's: the PR merged on the fake, and the signed delivery GitHub sends for it, twice.
+if [ -n "$PR_URL" ]; then
+  env MODE=merge API_URL="$API_URL" GITHUB_WEBHOOK_SECRET="$(cat "$RUN_DIR/webhook-secret" 2>/dev/null)" \
+    FORGE_URL="http://127.0.0.1:$(cat "$RUN_DIR/github-port" 2>/dev/null || echo 9403)" \
+    REPO="$BOARD_REPO_SLUG" PR_URL="$PR_URL" TASK_ID="$TASK_ID" EXPECT_REVISION="${MERGE_REVISION:-0}" \
+    LABEL=drive EVIDENCE_DIR="$EVIDENCE_DIR" bun "$SKILL/merge.ts" > "$RUN_DIR/merge-drive.log" 2>&1
+  MERGE_RC=$?
+else
+  echo "drive: no PR to merge" > "$RUN_DIR/merge-drive.log"
+  MERGE_RC=1
+fi
+cat "$RUN_DIR/merge-drive.log"
+check "the PR's merge moves the card to done once across a redelivery, recorded by the merge (merge.ts)" "$MERGE_RC" \
+  "see merge-drive.json"
 
 fresh
 run_cmd done "$FACTORY board show --task $TASK_ID --api $API_URL" || true

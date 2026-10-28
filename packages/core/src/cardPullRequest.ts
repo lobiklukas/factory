@@ -19,9 +19,11 @@
  *   `getTaskExit` — the card pane's checklist and `factory board show` — and before a move into
  *   `done`): a local box with no webhook has no other way to learn of the merge. A merge it finds is
  *   recorded on the PR's sessions (`SessionService.recordMerge`, the record `human_merge` reads) and,
- *   when the read settles, moves the card as the delivery would; a close blocks it. The read is
- *   `PullRequestStates`, which caches each PR's answer for `STATE_TTL` so a pane open on a card does
- *   not ask GitHub on every poll, and answers nothing — changing nothing — when GitHub cannot be read.
+ *   when the read settles, moves the card as the delivery would; a close blocks it. The read before a
+ *   move only records, so the move that follows is the person's own. The read is `PullRequestStates`,
+ *   which keeps each PR's answer for `STATE_TTL` so a pane open on a card does not ask GitHub on every
+ *   poll — a move's read asks afresh, since the person may have merged a moment ago — and answers
+ *   nothing, changing nothing, when GitHub cannot be read.
  *
  * `human_merge` itself is `./requirements`' check: a person's move into `done` needs the card's PR's
  * merge on record, so a move while the PR is open, or closed unmerged, is refused naming it.
@@ -37,11 +39,7 @@ import {
   Redacted,
   Schema,
 } from "effect";
-import {
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { isTerminalColumn } from "@repo/domain/Task";
@@ -75,9 +73,7 @@ export type PullRequestState =
  */
 export const pullRequestOfPage = (
   url: string,
-):
-  | { readonly repo: RepoSlug; readonly number: number }
-  | undefined => {
+): { readonly repo: RepoSlug; readonly number: number } | undefined => {
   if (!URL.canParse(url)) return undefined;
   const match = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\/?$/.exec(
     new URL(url).pathname,
@@ -132,7 +128,9 @@ export const readPullRequestState = (
     const pr = yield* http.execute(request).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap(HttpClientResponse.schemaBodyJson(GitHubPullRequestState)),
-      Effect.mapError(() => fail("GitHub's answer for the PR could not be read")),
+      Effect.mapError(() =>
+        fail("GitHub's answer for the PR could not be read"),
+      ),
     );
     if (pr.merged === true || (pr.merged_at ?? "") !== "") {
       return {
@@ -150,8 +148,15 @@ export const readPullRequestState = (
 
 /** The forge read the card follows its PR with when no webhook told it (module doc). */
 export type PullRequestStatesShape = {
-  /** The PR's state, by its page, or `undefined` when GitHub could not be read (logged). */
-  readonly read: (url: string) => Effect.Effect<PullRequestState | undefined>;
+  /**
+   * The PR's state, by its page, or `undefined` when GitHub could not be read (logged). `fresh`
+   * asks GitHub whatever answer is kept: a person's move into `done` right after a merge must not be
+   * judged on the open PR a pane read a moment before.
+   */
+  readonly read: (
+    url: string,
+    options?: { readonly fresh?: boolean },
+  ) => Effect.Effect<PullRequestState | undefined>;
 };
 
 export class PullRequestStates extends Context.Service<
@@ -178,8 +183,11 @@ export const PullRequestStatesLive = Layer.effect(
       },
     );
     return PullRequestStates.of({
-      read: (url) =>
-        Cache.get(cache, url).pipe(
+      read: (url, options) =>
+        (options?.fresh === true
+          ? Effect.andThen(Cache.invalidate(cache, url), Cache.get(cache, url))
+          : Cache.get(cache, url)
+        ).pipe(
           Effect.catchTag("PrError", (error) =>
             Effect.as(
               Effect.logWarning(
@@ -271,7 +279,11 @@ const settleCard = (
  */
 export const settleCardsOfPullRequest = (
   event: PullRequestLifecycle,
-): Effect.Effect<CardsSettled, never, TaskService | SessionService | SqlClient> =>
+): Effect.Effect<
+  CardsSettled,
+  never,
+  TaskService | SessionService | SqlClient
+> =>
   Effect.gen(function* () {
     if (event._tag === "other") return NOTHING;
     let changed = 0;
@@ -297,7 +309,11 @@ export const settleCardsOfDelivery = (input: {
   readonly secret: string | undefined;
   readonly raw: string;
   readonly signature: string | undefined;
-}): Effect.Effect<CardsSettled, never, TaskService | SessionService | SqlClient> =>
+}): Effect.Effect<
+  CardsSettled,
+  never,
+  TaskService | SessionService | SqlClient
+> =>
   Effect.gen(function* () {
     if (refuseGitHubDelivery(input) !== undefined) return NOTHING;
     const payload = yield* Schema.decodeEffect(JsonBody)(input.raw).pipe(
@@ -323,11 +339,12 @@ export type CardPullRequestRefresh = {
  * Read the card's current PR's state and follow it (module doc): a merge on record or reported by
  * GitHub is recorded on the PR's sessions and, with `settle`, moves the card to `done`; a close
  * reported by GitHub, with `settle`, blocks it. A finished card and a card with no PR read nothing.
- * Never fails: what could not be read is logged and changes nothing.
+ * `fresh` asks GitHub past any kept answer (`PullRequestStatesShape.read`). Never fails: what could
+ * not be read is logged and changes nothing.
  */
 export const refreshCardPullRequest = (
   taskId: string,
-  options: { readonly settle: boolean },
+  options: { readonly settle: boolean; readonly fresh?: boolean },
 ): Effect.Effect<
   CardPullRequestRefresh,
   never,
@@ -369,9 +386,12 @@ export const refreshCardPullRequest = (
     const recorded = ofPr.some((row) => row.prMergedAt !== null);
     const state: PullRequestState | undefined = recorded
       ? { _tag: "merged", mergedAt: "" }
-      : yield* (yield* PullRequestStates).read(url);
+      : yield* (yield* PullRequestStates).read(url, {
+          fresh: options.fresh === true,
+        });
     if (state === undefined) return { pr: url, changed: false };
-    if (state._tag === "open") return { pr: url, state: "open", changed: false };
+    if (state._tag === "open")
+      return { pr: url, state: "open", changed: false };
     if (state._tag === "merged" && !recorded) {
       const sessions = yield* SessionService;
       // GitHub's `merged_at`, or now when it named none: `recordMerge` takes an instant.

@@ -100,7 +100,7 @@ precedent ("an index, not a projection").
 | `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
-transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
+transient | setup_failed | pr_closed`) plus the column it blocked from, so a blocked card stays visible in its own
 lane and there is no "return to where it was" ambiguity. A person parks and frees a card from the card pane or `factory board block` / `unblock`, and fixes its
 title or priority with `updateTask` (`factory board update`; C11), a revision-checked write that records
 a `retitled` / `priorityChanged` event per changed field. `setup_failed` is written by a run, not a
@@ -116,6 +116,20 @@ human gate can only be made by a person — recorded as such. `requires[]` is ch
 refusal names the failing requirement. In the MVP the two human gates are the plan approval
 (`planning → building`) and the merge (`review → done`); Mastra's third gate, acceptance of the task
 itself, is the recorded move that starts the first run.
+
+Built (C20): the merge gate reads the merge. `human_merge` is a checked requirement on a move into
+`done`: a person's move is refused naming it until a run of the card recorded GitHub's merge of the
+card's PR (`factory.merge`, LOB-44) — so a card cannot reach `done` while its PR is open or was closed
+unmerged. The merge itself completes the card: a signed `pull_request` closed delivery
+(`POST /webhooks/github`) moves the card whose current PR it names — the newest PR a run of the card
+recorded — to `done`, from whichever column it is in and without its exit requirements (the work is on
+the base already), recorded by the actor `merge:<PR page>`, and its runs' workspaces are released; an
+unmerged close blocks it `pr_closed`, the note naming the PR. Both happen once however often GitHub
+redelivers (`TaskService.settlePullRequest`, under the card's row lock). A box GitHub cannot deliver to
+learns the same by asking: opening the card (`getTaskExit`, the card pane's checklist and `factory board
+show`) reads the PR's state (`GET …/pulls/{n}`, each answer kept 30 s) and settles the card the way the
+delivery would, and a move into `done` reads it afresh and records a merge it finds, so the person's
+move goes through (`packages/core/src/cardPullRequest.ts`).
 
 ## B6 — Columns bind roles and skills; skills live in the factory
 

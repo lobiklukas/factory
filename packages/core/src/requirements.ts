@@ -641,7 +641,8 @@ export const humanMergeVerdict = (
       reason:
         "the card has no PR on record, so nothing merged: a run of the card opens its PR (factory pr <session>), and its merge in GitHub moves the card to done",
     };
-  if (evidence.runs.some((run) => run.mergedPr === cardPr)) return { met: true };
+  if (evidence.runs.some((run) => run.mergedPr === cardPr))
+    return { met: true };
   return {
     met: false,
     reason: `no merge of the card's PR ${cardPr} is on record: it is open, or was closed without being merged. Merge it in GitHub — its signed pull_request delivery to POST /webhooks/github, or the PR-state read when the card is opened, records the merge and moves the card to done`,

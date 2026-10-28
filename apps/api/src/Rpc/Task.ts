@@ -33,8 +33,9 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
     // webhooks to learns its card's PR merged or closed.
     const states = yield* PullRequestStates;
     const sql = yield* SqlClient;
+    // A move asks GitHub afresh: the person has just merged, and the pane's kept answer is older.
     const refresh = (taskId: string, settle: boolean) =>
-      refreshCardPullRequest(taskId, { settle }).pipe(
+      refreshCardPullRequest(taskId, { settle, fresh: !settle }).pipe(
         Effect.provideService(TaskService, tasks),
         Effect.provideService(SessionService, sessions),
         Effect.provideService(PullRequestStates, states),

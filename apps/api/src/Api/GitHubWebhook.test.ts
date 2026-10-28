@@ -851,9 +851,9 @@ describe("POST /webhooks/github settles the PR's card (C20)", () => {
 
     // An unsigned merge settles nothing.
     const unsigned = await cardWithPr(63);
-    expect((await deliver(merge(63, unsigned.url), () => "sha256=00")).status).toBe(
-      401,
-    );
+    expect(
+      (await deliver(merge(63, unsigned.url), () => "sha256=00")).status,
+    ).toBe(401);
     expect(await cardOf(unsigned.taskId)).toMatchObject({ column: "review" });
   }, 120_000);
 });

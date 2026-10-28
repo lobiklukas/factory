@@ -2599,9 +2599,8 @@ describe("TaskService — exit requirements", () => {
       await sessions.runPromise(
         Effect.gen(function* () {
           const service = yield* SessionService;
-          const id = yield* Schema.decodeUnknownEffect(SessionIdSchema)(
-            sessionId,
-          );
+          const id =
+            yield* Schema.decodeEffect(SessionIdSchema)(sessionId);
           yield* service.recordMerge({
             sessionId: id,
             event: {
@@ -2981,7 +2980,10 @@ describe("TaskService — exit requirements", () => {
       ),
     ).toMatchObject(HELD_AT_MERGE);
     // GitHub's merge recorded on the run (C20) is the last of them, and the person's move goes through.
-    await recordMergeOn(changeRun, "https://github.com/factory-test/requires/pull/7");
+    await recordMergeOn(
+      changeRun,
+      "https://github.com/factory-test/requires/pull/7",
+    );
     const done = await withService((s) =>
       s.move({
         taskId: task.id,
@@ -4407,7 +4409,7 @@ describe("TaskService — a card settled by its PR (C20)", () => {
         s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
       ),
     ]);
-    expect([a.changed, b.changed].sort()).toEqual([false, true]);
+    expect([a.changed, b.changed].filter(Boolean)).toEqual([true]);
     expect(
       (await eventsAfter(task.id, task.revision)).map((event) => event.kind),
     ).toEqual(["moved"]);
@@ -4464,7 +4466,11 @@ describe("TaskService — a card settled by its PR (C20)", () => {
     );
     expect(again.changed).toBe(false);
     expect(await eventsAfter(task.id, task.revision)).toEqual([
-      { kind: "blocked", actor: `pr-closed:${PR.url}`, revision: task.revision },
+      {
+        kind: "blocked",
+        actor: `pr-closed:${PR.url}`,
+        revision: task.revision,
+      },
     ]);
     // A person lifts it as any block, at the revision the close left.
     const unblocked = await withService((s) =>

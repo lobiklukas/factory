@@ -205,7 +205,9 @@ describe("a signed pull_request close settles the card (C20)", () => {
     const { taskId, runs } = await cardWithPrs([url]);
     expect(await deliver(url, true)).toEqual({ done: 1, blocked: 0 });
     expect(await card(taskId)).toMatchObject({ column: "done", revision: 3 });
-    expect((await sessionRow(runs[0] ?? ""))?.workspaceReleasedAt).not.toBeNull();
+    expect(
+      (await sessionRow(runs[0] ?? ""))?.workspaceReleasedAt,
+    ).not.toBeNull();
     expect(await deliver(url, true)).toEqual({ done: 0, blocked: 0 });
     expect(await card(taskId)).toMatchObject({ column: "done", revision: 3 });
     expect(
@@ -312,7 +314,10 @@ describe("the card's PR read when the card is opened (C20)", () => {
       changed: false,
     });
     for (const { taskId } of [openCard, silentCard])
-      expect(await card(taskId)).toMatchObject({ column: "review", revision: 2 });
+      expect(await card(taskId)).toMatchObject({
+        column: "review",
+        revision: 2,
+      });
     const closedCard = await cardWithPrs([closed]);
     expect(await refresh(closedCard.taskId, true)).toMatchObject({
       state: "closed",
@@ -417,7 +422,10 @@ describe("readPullRequestState (C20)", () => {
     expect(await read("https://github.com/o/r/pull/7")).toEqual({
       _tag: "closed",
     });
-    next = { status: 200, body: { state: "open", merged: false, merged_at: null } };
+    next = {
+      status: 200,
+      body: { state: "open", merged: false, merged_at: null },
+    };
     expect(await read("https://github.com/o/r/pull/7")).toEqual({
       _tag: "open",
     });
@@ -439,7 +447,9 @@ describe("readPullRequestState (C20)", () => {
         Effect.gen(function* () {
           const reader = yield* PullRequestStates;
           return [yield* reader.read(url), yield* reader.read(url)];
-        }).pipe(Effect.provide(PullRequestStatesLive.pipe(Layer.provide(forge)))),
+        }).pipe(
+          Effect.provide(PullRequestStatesLive.pipe(Layer.provide(forge))),
+        ),
       );
     next = { status: 200, body: { state: "open" } };
     const sent = requests.length;
@@ -454,5 +464,25 @@ describe("readPullRequestState (C20)", () => {
       undefined,
     ]);
     expect(requests.length).toBe(sent + 3);
+  });
+
+  /** Mutation: ignore `fresh` — a move right after the merge would be judged on the kept "open". */
+  it("asks GitHub again when the read is fresh, past the answer it kept", async () => {
+    next = { status: 200, body: { state: "open" } };
+    const sent = requests.length;
+    const answers = await Effect.runPromise(
+      Effect.gen(function* () {
+        const reader = yield* PullRequestStates;
+        const kept = yield* reader.read("https://github.com/o/r/pull/10");
+        next = { status: 200, body: { state: "closed", merged: true } };
+        const stale = yield* reader.read("https://github.com/o/r/pull/10");
+        const fresh = yield* reader.read("https://github.com/o/r/pull/10", {
+          fresh: true,
+        });
+        return [kept?._tag, stale?._tag, fresh?._tag];
+      }).pipe(Effect.provide(PullRequestStatesLive.pipe(Layer.provide(forge)))),
+    );
+    expect(answers).toEqual(["open", "open", "merged"]);
+    expect(requests.length).toBe(sent + 2);
   });
 });

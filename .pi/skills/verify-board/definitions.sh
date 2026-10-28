@@ -121,11 +121,11 @@ check "building's and review's models are their roles' rows (ROLE_MODELS)" \
 check "a role with no row runs the deployment's model" \
   "$(yes_if grep -Fxq '  model     faux/faux-1 (deployment)' "$RUN_DIR/definitions-show-v3.out")" "faux/faux-1 (deployment)"
 check "the checked requirements are marked checked" \
-  "$(has show-v3 'non_empty_diff (checked)' && has show-v3 'pr_link (checked)' && has show-v3 'verified (checked)' && has show-v3 'review_verdict (checked)' && has show-v3 'spec_doc (checked)' && has show-v3 'run_completed (checked)' && echo 0 || echo 1)" \
-  "non_empty_diff, pr_link, verified, review_verdict, spec_doc, run_completed"
+  "$(has show-v3 'non_empty_diff (checked)' && has show-v3 'pr_link (checked)' && has show-v3 'verified (checked)' && has show-v3 'review_verdict (checked)' && has show-v3 'spec_doc (checked)' && has show-v3 'run_completed (checked)' && has show-v3 'human_merge (checked)' && echo 0 || echo 1)" \
+  "non_empty_diff, pr_link, verified, review_verdict, spec_doc, run_completed, human_merge (C20)"
 check "the declared-only requirements are marked unchecked" \
-  "$(has show-v3 'plan_doc (unchecked)' && has show-v3 'human_move (unchecked)' && has show-v3 'human_merge (unchecked)' && echo 0 || echo 1)" \
-  "plan_doc, human_*"
+  "$(has show-v3 'plan_doc (unchecked)' && has show-v3 'human_move (unchecked)' && echo 0 || echo 1)" \
+  "plan_doc, human_move"
 check "the human gates are marked on their exits" \
   "$(has show-v3 '  exits     building [human gate: plan approval], canceled' && has show-v3 '  exits     done [human gate: merge], canceled' && echo 0 || echo 1)" \
   "plan approval, merge"
