@@ -162,7 +162,9 @@ been told of (no `synchronize` yet): the newest review run is then the previous 
 is judged as the newest — `requirements.ts` names that window. A branch nothing
 can measure (a repository with no registered checkout) and a newer run without a PR after an older
 one with one are refusals pinned in `TaskService.test.ts`, not driven here. The human gates (`human_move`, `human_merge`) are B5's actor check, proven
-in `packages/core`'s `TaskService` cases. A change made _after_ the latest `verify` call is not seen;
+in `packages/core`'s `TaskService` cases; `human_merge` is also checked against the card's PR's merge
+since C20, which step 9 drives with no webhook: the PR merged on the fake, the move's read of its state.
+An unmerged close blocking the card is `cardPullRequest.test.ts`'s and `GitHubWebhook.test.ts`'s. A change made _after_ the latest `verify` call is not seen;
 that is LOB-79's coverage check, on the PR. Ordering calls across interleaved runs by when they were
 recorded, and refusing on a newest call that left no record, are pinned in `requirements.test.ts`,
 not driven here.

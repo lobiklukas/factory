@@ -8,8 +8,9 @@ The rest of milestone B's path on the card `./drive.sh` specified and answered
 ([specify.md](specify.md)): a person approves the plan, a run in `building` makes a change and
 verifies it, the run's PR is opened on the forge with the verification in its body, the card moves to
 `review`, the PR's reviewer run records its verdict (LOB-241: a faux reviewer the review trigger opens
-on the PR's head, not a person's note), the run is refused the merge, and the person's merge takes the
-card to `done` (docs/board.md B4, B5, B8).
+on the PR's head, not a person's note), the run is refused the merge, the person's move is refused
+naming `human_merge` while the PR is open, and the PR's merge in GitHub takes the card to `done` (C20;
+docs/board.md B4, B5, B8).
 
 Since C18 nobody opens the run's PR: `building` requires one (`pr_link`), so the build run takes the
 PR step itself when it settles with its change (`packages/core/src/prOnSettle.ts`), and the drive only
@@ -103,8 +104,15 @@ review → done needs "review_verdict" (a review verdict), which is not met: no 
    `pass` on the head (`outcome: clean`). `board runs` lists it as the card's newest run, in `review`.
 7. **The merge gate.** The run's `review → done` is refused with
    `human_gate_required: the move review → done crosses the merge gate, which only a person can make`
-   and a non-zero exit; the person's move at the same revision goes through, and `board show` says
-   `column    done`.
+   and a non-zero exit. The person's move at the same revision is refused too, since C20, with
+   `requirement_unmet: the move review → done needs "human_merge" (a human merge (B5's merge gate)), which
+is not met: no merge of the card's PR <page> is on record: …` (`move-merge-open.txt`): the move's
+   read of the PR on the fake finds it open.
+8. **The merge** (C20). `merge.ts` merges the PR on the fake (`PUT …/pulls/{n}/merge`, GitHub's merge
+   endpoint, as a person's click) and delivers the signed `pull_request` closed, `merged: true`, that
+   GitHub would send, twice: the first answer carries `cards: {done: 1, blocked: 0}`, the redelivery
+   none, the card is in `done` one revision on, and its history holds exactly one move into `done`, by
+   `merge:<PR page>` (`merge-drive.json`). `board show` says `column    done`.
 
 The PR is never assumed. With no PR path the settled run's step fails, the drive prints
 `drive: the PR path is missing — <the run's own line>` and records it as the failing check's
