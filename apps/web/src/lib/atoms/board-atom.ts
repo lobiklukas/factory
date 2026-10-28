@@ -21,7 +21,7 @@ import { runtime } from "../atom";
 import { definitionOfConfig } from "../board-view";
 import { RpcClient } from "../rpc-client";
 import { startRunSession } from "../run-start-view";
-import { SESSIONS_KEY, sessionListAtom } from "./session-list";
+import { SESSIONS_KEY } from "./session-list";
 
 /** The reactivity key a move invalidates: every board read re-runs once a move lands. */
 export const BOARD_KEY = "board";
@@ -212,19 +212,39 @@ export const taskRunsAtom = Atom.family((taskId: TaskId) =>
     .pipe(Atom.withReactivity([RUNS_KEY]), Atom.withRefresh(BOARD_POLL)),
 );
 
+/** The most runs of one card the rows read state for: the index's page ceiling (`MAX_PAGE_SIZE`). */
+export const CARD_RUN_ROWS_LIMIT = 100;
+
 /**
- * The sessions a card's run rows read their state from (C7): repo, status and PR link, out of the
- * activity index (`listSessions`), which costs one query however many runs the card has.
+ * The sessions a card's run rows read their state from (C7, C7b): repo, status and PR link, out of
+ * the activity index (`listSessions` filtered to the card's runs), which costs one query however many
+ * runs the card has.
  *
  * Polled with the board, because whether a run is idle and has a PR is what offers its row the
  * "Open pull request" control, and a run that settles under another browser's or the CLI's hand
  * should offer it within one interval. It is deliberately not `getSession` per row: that folds the
- * log and counts as activity, and a card with a dozen runs would keep them all warm. A run older
- * than the newest page the index returns has no entry here and its row offers nothing; the run
- * open in the pane has its own control in the session header, which reads the live stream.
+ * log and counts as activity, and a card with a dozen runs would keep them all warm.
+ *
+ * It asks for this card's runs and no others (C7b). It used to read the newest 50 sessions of every
+ * card and every scratch session, so a card's older run, once fifty newer sessions existed anywhere,
+ * lost its row control. Now a run is missing here only past the index's page ceiling
+ * (`CARD_RUN_ROWS_LIMIT` runs of one card).
  */
-export const runSessionsAtom = sessionListAtom.pipe(
-  Atom.withRefresh(BOARD_POLL),
+export const taskRunSessionsAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.listSessions({
+          taskId,
+          limit: CARD_RUN_ROWS_LIMIT,
+        });
+      }),
+    )
+    .pipe(
+      Atom.withReactivity([SESSIONS_KEY, RUNS_KEY]),
+      Atom.withRefresh(BOARD_POLL),
+    ),
 );
 
 /**

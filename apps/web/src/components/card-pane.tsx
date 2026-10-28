@@ -27,7 +27,7 @@ import {
   boardAtom,
   commentTaskAtom,
   moveTaskAtom,
-  runSessionsAtom,
+  taskRunSessionsAtom,
   startRunAtom,
   taskCommentsAtom,
   taskExitAtom,
@@ -815,7 +815,7 @@ const Runs = ({
   readonly runStarter: RunStarter;
 }) => {
   const runs = useAtomValue(taskRunsAtom(task.id));
-  const runSessions = useAtomValue(runSessionsAtom);
+  const runSessions = useAtomValue(taskRunSessionsAtom(task.id));
   const sessionOf = new Map(
     (Option.getOrUndefined(AsyncResult.value(runSessions))?.sessions ?? []).map(
       (entry) => [entry.id, entry] as const,
