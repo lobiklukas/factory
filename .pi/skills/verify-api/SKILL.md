@@ -141,6 +141,7 @@ DATABASE_URL=… ./follow.sh  # two apis on :9438/:9439 (FOLLOW_OWNER_PORT/FOLLO
 ./run-restart.sh      # api on :9430 (RUN_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGKILL mid-run (KILL_SIGNAL=TERM for the graceful path), a fresh process resumes the run at boot (features/lifecycle.md)
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
+./pr-closed.sh   # fake GitHub on :9411 (PR_CLOSED_PORT) — the card's PR closed, its next run opens a new one
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight, a generic `push` refused
 API_VIA_TURBO=1 ./webhook.sh  # the same drive with the API started the way `bun run dev` starts it (turbo, Strict Mode): TRIGGER_SECRET and the other webhook variables must be declared in apps/api/turbo.json or every route is 503 (LOB-257)
 ./jira.sh        # api on :9424, fake Jira on :9412 — POST /webhooks/jira: one session, one comment, the retry, 401s, 503 unconfigured (features/jira.md)
