@@ -17,6 +17,14 @@ import { SqlClient } from "effect/sql/SqlClient";
  * and the projection writing it costs one reopen at the next boot, which finds nothing to resume and
  * clears it. The partial index keeps the boot's query to the handful of rows that are set.
  *
+ * `mission_session_root` is the session root of the process that marked it, resolved to an absolute
+ * path, and the boot resumes only the rows marked under its own root. A session's worktree lives
+ * under the root (`<root>/<id>`), so a process with another root would cut a fresh worktree beside
+ * the one the mission was working in; and the verify skills boot throwaway APIs on the shared
+ * development database with roots of their own, which must not take over the missions of the
+ * instance that marked them. Two processes on one database *and* one root are still one deployment
+ * to this column: it is not an ownership lease (docs/design.md D12, as built for LOB-231).
+ *
  * Not refolded from the log by `rebuildIndexes`, like the workspace columns (0023): the upsert never
  * writes it, so a rebuild over existing rows keeps it, and a row the rebuild inserts reads `false`
  * until its session is next owned.
@@ -26,11 +34,12 @@ export default Effect.gen(function* () {
 
   yield* sql`
     ALTER TABLE sessions
-      ADD COLUMN IF NOT EXISTS mission_in_flight BOOLEAN NOT NULL DEFAULT false
+      ADD COLUMN IF NOT EXISTS mission_in_flight BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS mission_session_root TEXT
   `;
 
   yield* sql`
     CREATE INDEX IF NOT EXISTS sessions_mission_in_flight
-    ON sessions (id) WHERE mission_in_flight
+    ON sessions (mission_session_root, id) WHERE mission_in_flight
   `;
 });

@@ -8595,6 +8595,24 @@ describe("a mission across a restart", () => {
       `;
       return rows[0]?.missionInFlight;
     });
+  /** The session root a mission in flight was marked under — the only boot that resumes it. */
+  const markedRoot = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ readonly missionSessionRoot: string | null }>`
+        SELECT mission_session_root FROM sessions WHERE id = ${sessionId}
+      `;
+      return rows[0]?.missionSessionRoot;
+    });
+  /** What a process that died with a mission in flight under `root` leaves in the row. */
+  const mark = (sessionId: SessionId, root: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`
+        UPDATE sessions SET mission_in_flight = true, mission_session_root = ${root}
+        WHERE id = ${sessionId}
+      `;
+    });
   const runsOf = (worktree: string, name: string) =>
     existsSync(join(worktree, `${name}.runs`))
       ? readFileSync(join(worktree, `${name}.runs`), "utf8")
@@ -8653,15 +8671,18 @@ describe("a mission across a restart", () => {
           const quiet = yield* sessions.create({ title: "no mission here" });
           const mission = yield* holdingMission(hold);
           const marked = yield* inFlight(mission.sessionId);
+          const root = yield* markedRoot(mission.sessionId);
           // What the API's shutdown finalizer runs on SIGTERM.
           yield* sessions.close;
-          return { quiet: quiet.id, ...mission, marked };
+          return { quiet: quiet.id, ...mission, marked, root };
         }),
       )
       .finally(() => before.dispose());
     const worktree = armed.snapshot.workspace.path;
     const workersBefore = workersIn(armed.snapshot.tasks);
     expect(armed.marked).toBe(true);
+    // Marked with the root of the process running it, the one whose boot resumes it.
+    expect(armed.root).toBe(restartRoot);
     expect(workersBefore).toHaveLength(2);
     // Both checks had started once, and the close stopped them: neither had finished.
     expect(runsOf(worktree, "a")).toBe(1);
@@ -8760,19 +8781,101 @@ describe("a mission across a restart", () => {
       const outcome = await runtime.runPromise(
         Effect.gen(function* () {
           const sessions = yield* SessionService;
-          const sql = yield* SqlClient;
           const created = yield* sessions.create({ title: "a stale mark" });
           // A crash between a mission settling and the projection writing it leaves the row set.
           yield* sessions.close;
-          yield* sql`UPDATE sessions SET mission_in_flight = true WHERE id = ${created.id}`;
+          yield* mark(created.id, restartRoot);
           const resumed = yield* sessions.resumeMissions;
           const marked = yield* inFlight(created.id);
+          const root = yield* markedRoot(created.id);
           yield* sessions.close;
-          return { id: created.id, resumed, marked };
+          return { id: created.id, resumed, marked, root };
         }),
       );
       expect(outcome.resumed).not.toContain(outcome.id);
       expect(outcome.marked).toBe(false);
+      expect(outcome.root).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("leaves a mission marked under another session root to the process that marked it", async () => {
+    const runtime = restartRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "another instance's",
+          });
+          yield* sessions.close;
+          // Another API on the same database with a root of its own — a verify skill's throwaway
+          // instance beside the development one — died with this mission in flight.
+          const elsewhere = join(restartRoot, "..", "another-instance-root");
+          yield* mark(created.id, elsewhere);
+          const resumed = yield* sessions.resumeMissions;
+          const snapshot = yield* sessions.get(created.id);
+          const marked = yield* inFlight(created.id);
+          const root = yield* markedRoot(created.id);
+          return { id: created.id, resumed, snapshot, marked, root, elsewhere };
+        }),
+      );
+      // Not reopened, not cleared: it is the other process's to resume at its boot.
+      expect(outcome.resumed).not.toContain(outcome.id);
+      expect(outcome.snapshot.session.mode).toBe("historical");
+      expect(outcome.marked).toBe(true);
+      expect(outcome.root).toBe(outcome.elsewhere);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("drops the mark of a released session, at its release and at the next boot", async () => {
+    const runtime = restartRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sql = yield* SqlClient;
+          const releasing = yield* sessions.create({
+            title: "released by an event",
+          });
+          const stale = yield* sessions.create({
+            title: "released under a mark",
+          });
+          yield* sessions.close;
+          // A terminal event takes the session's runs away, and with them its mission's resume.
+          yield* mark(releasing.id, restartRoot);
+          yield* sessions.releaseWorkspace({
+            sessionId: releasing.id,
+            reason: "discarded",
+          });
+          const afterRelease = yield* inFlight(releasing.id);
+          // A row released before releases cleared the mark: the boot drops it rather than read it
+          // at every boot, and reopens nothing.
+          yield* mark(stale.id, restartRoot);
+          yield* sql`
+            UPDATE sessions
+            SET workspace_released_at = now(), workspace_release_reason = 'discarded'
+            WHERE id = ${stale.id}
+          `;
+          const resumed = yield* sessions.resumeMissions;
+          const staleMarked = yield* inFlight(stale.id);
+          const staleSnapshot = yield* sessions.get(stale.id);
+          return {
+            ids: [releasing.id, stale.id],
+            afterRelease,
+            resumed,
+            staleMarked,
+            staleSnapshot,
+          };
+        }),
+      );
+      expect(outcome.afterRelease).toBe(false);
+      for (const id of outcome.ids) expect(outcome.resumed).not.toContain(id);
+      expect(outcome.staleMarked).toBe(false);
+      expect(outcome.staleSnapshot.session.mode).toBe("historical");
     } finally {
       await runtime.dispose();
     }

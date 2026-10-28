@@ -261,6 +261,18 @@ const DocsScheduleConfig = Config.all({
   repo: Config.option(Config.schema(RepoSlug, "DOCS_SCHEDULE_REPO")),
 });
 
+/**
+ * Whether the boot resumes the missions its database says are in flight (LOB-231). On by default:
+ * a mission a restart interrupted waits on no client, so a deployment that did not resume it would
+ * leave it `pending` in its log. The resume only reopens rows marked under this process's
+ * `SESSION_ROOT`, which already keeps a verify skill's throwaway API off the development instance's
+ * missions; `MISSION_RESUME=false` is for a second process that shares the database *and* the root
+ * and must not take over the first one's logs — there is no ownership lease (docs/design.md D12).
+ */
+const MissionResumeConfig = Config.Boolean("MISSION_RESUME").pipe(
+  Config.withDefault(true),
+);
+
 /** A docs schedule the boot refuses: an interval with no repo to run it over. */
 class InvalidDocsSchedule extends Schema.TaggedError<InvalidDocsSchedule>()(
   "InvalidDocsSchedule",
@@ -444,6 +456,7 @@ const HttpLive = Effect.gen(function* () {
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
+  const missionResume = yield* MissionResumeConfig;
   const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
   if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
     return yield* new InvalidDocsSchedule({
@@ -597,15 +610,22 @@ const HttpLive = Effect.gen(function* () {
   // tick inside `sessions.create` could open an owner while `close` was releasing them.
   // The mission resume (LOB-231) sits there too, for the same reason: a resume that is still
   // reopening owners when the signal lands is interrupted before `close` releases them.
+  const MissionResume = missionResume
+    ? MissionResumeDaemon
+    : Layer.effectDiscard(
+        Effect.logInfo(
+          "missions: resume at boot off (MISSION_RESUME=false); a mission in flight waits for its next caller",
+        ),
+      );
   const SessionDaemons = Option.match(docsSchedule.repo, {
-    onNone: () => MissionResumeDaemon,
+    onNone: () => MissionResume,
     onSome: (repo) =>
       docsEveryMs > 0
         ? Layer.mergeAll(
-            MissionResumeDaemon,
+            MissionResume,
             DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
           )
-        : MissionResumeDaemon,
+        : MissionResume,
   }).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");

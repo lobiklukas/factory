@@ -83,22 +83,28 @@ must not leave it for a caller who never comes:
 - **The boot resumes it, unasked.** Each session's row carries `mission_in_flight` (migration
   `0027`), mirrored from the live task graph by the owner's activity projection and set by
   `startMission` before the task exists. At boot the API (`MissionResumeDaemon`) calls
-  `SessionService.resumeMissions`, which reopens every session the row names whose workspace was not
-  released and calls `Harness.resume()` on it. The mission continues in the phase it died in: the
+  `SessionService.resumeMissions`, which reopens every session the row names under this process's
+  session root whose workspace was not released, asks its task graph whether a mission is still
+  live, and only then calls `Harness.resume()` on it. The mission continues in the phase it died in: the
   workers rerun their own phase in the conversations they already own — an interrupted tool call is
   answered as interrupted, a prompt is not asked twice (its request id finds the submission) — and
   the join, verify and the result follow as they would have. A row that outlived its mission costs
-  one reopen that finds nothing and clears it.
+  one reopen that finds nothing, schedules nothing in that log, and clears it; a released session's
+  mark is cleared by the release itself.
 - **The idle sweep keeps it.** An owner whose harness has a live mission is not released however
   quiet its conversation is (`missionInFlight`); released, the mission would wait for the next boot.
-- **One process per database.** The boot reopens what the database says is in flight, so two API
-  processes over one database would both run a session's mission. That is the deployment the rest of
-  the control plane already assumes (a log has one owner); the restart drive mints a database of its
-  own for that reason.
+- **One process per database and session root.** The row is marked with the absolute `SESSION_ROOT`
+  of the process running the mission (`mission_session_root`), and a boot resumes only the rows
+  marked with its own, so the verify skills' throwaway APIs — the shared development database, roots
+  of their own — leave ./up.sh's missions alone. Two processes on one database _and_ one root would
+  both own a session's log (there is no presence lease yet, docs/design.md D12), so a second one sets
+  `MISSION_RESUME=false`. The restart drive mints a database of its own besides, so the boot's
+  "resumed 1" is exactly its mission.
 
 `mission-restart.sh` proves it over the wire: an API with `FAUX_COMMAND="sleep 8 && echo faux-ok"`
 holds both workers' conversations on a `bash` call while the mission waits in `implement`; SIGTERM;
-with no process running, the row still says a mission is in flight; a fresh API (faux `echo`) that
+with no process running, the row still says a mission is in flight, marked with the script's
+session root; a fresh API (faux `echo`) that
 the driver only reads from is `live` for the session, the mission's task is `waiting` in
 `implement`, its document says `implement` with `entered` `plan,implement`, and it waits on the same
 worker tasks in the same conversations. Each worker's check holds on a file the driver writes, so

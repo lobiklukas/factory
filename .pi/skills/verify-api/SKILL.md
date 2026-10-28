@@ -106,7 +106,7 @@ running, and writes its own evidence:
 ```sh
 ./sigterm.sh     # api on :9400 (SIGTERM_PORT) — a busy session with a commit, SIGTERM, a fresh process resumes it on the same branch
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
-DATABASE_URL=… ./mission-restart.sh  # api on :9410 (MISSION_RESTART_PORT or API_PORT), its own database — SIGTERM mid-implement, a fresh process resumes the mission at boot (features/mission.md)
+./mission-restart.sh  # api on :9418 (MISSION_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGTERM mid-implement, a fresh process resumes the mission at boot (features/mission.md)
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight, a generic `push` refused

@@ -6,17 +6,19 @@
 # the same workers, in the same conversations — rather than being lost or restarted from `plan`.
 #
 # This script owns its own API instance — its own port, session root, log, pid file and database —
-# because the point of the test is to kill it, and because a booting API resumes every mission its
-# database says is in flight: pointed at the database ./up.sh's instance uses, the restart would
-# reopen that instance's sessions under it. So it mints a throwaway database on the server
+# because the point of the test is to kill it. A booting API resumes the missions its database says
+# are in flight under its own session root, so the root alone keeps the restart off ./up.sh's
+# sessions; the database is the script's own as well so that what the boot resumed is exactly the
+# one mission this drive started ("resumed 1"). It mints a throwaway database on the server
 # DATABASE_URL names (`factory_verify_mission_restart_<random>`), and drops it on exit after the API
 # is stopped. It does not touch the instance ./up.sh started, and it leaves nothing running.
 #
-#   DATABASE_URL=… ./mission-restart.sh
-#   DATABASE_URL=… API_PORT=9540 ./mission-restart.sh     # another port
+#   API_PORT=9410 ./mission-restart.sh
+#   DATABASE_URL=… MISSION_RESTART_PORT=9540 ./mission-restart.sh     # another server, another port
 #
-# Env: DATABASE_URL (required — it names the *server*, not the database the drive writes),
-# MISSION_RESTART_PORT or API_PORT (9410 when both are unset), EVIDENCE_DIR.
+# Env: DATABASE_URL (the *server* to mint the drive's database on, not the database it writes;
+# default postgres://factory:factory@localhost:5442/factory, the API's own default),
+# MISSION_RESTART_PORT or API_PORT (9418 when both are unset), EVIDENCE_DIR.
 #
 # Evidence: .verify/evidence/latest/api/mission-restart-arm.json and mission-restart-verify.json
 # (what the session looked like before the signal and after the restart, from the driver),
@@ -24,7 +26,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${MISSION_RESTART_PORT:-${API_PORT:-9410}}"
+PORT="${MISSION_RESTART_PORT:-${API_PORT:-9418}}"
 API_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/mission-restart"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
@@ -36,11 +38,8 @@ LOG="$RUN_DIR/api.log"
 CHECKOUT="$RUN_DIR/checkout"
 HOLD="$RUN_DIR/hold"
 REPO="lobiklukas/factory-mission-restart-$(date +%s)$$"
-if [ -z "${DATABASE_URL:-}" ]; then
-  echo "mission-restart.sh needs DATABASE_URL naming the Postgres server to mint its database on" >&2
-  exit 1
-fi
-SERVER_URL="$DATABASE_URL"
+# The server only: the database the URL names is where the scratch one is created from, not written.
+SERVER_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory}"
 SCRATCH_DB="factory_verify_mission_restart_$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
@@ -193,6 +192,15 @@ MARKED="$(bun -e '
 ' "$SESSION_ID" 2>/dev/null || echo "unreadable")"
 check "the session's row says a mission is in flight while nothing runs" \
   "$([ "$MARKED" = "true" ] && echo 0 || echo 1)" "mission_in_flight=$MARKED"
+# And under which session root: the next boot resumes only the rows marked with its own.
+MARKED_ROOT="$(bun -e '
+  const sql = new Bun.SQL(process.env.DATABASE_URL);
+  const [row] = await sql`SELECT mission_session_root FROM sessions WHERE id = ${process.argv[1]}`;
+  console.log(row?.mission_session_root ?? "null");
+  await sql.close();
+' "$SESSION_ID" 2>/dev/null || echo "unreadable")"
+check "the mark names this process's session root" \
+  "$([ "$MARKED_ROOT" = "$RUN_DIR/sessions" ] && echo 0 || echo 1)" "mission_session_root=$MARKED_ROOT"
 
 # --- verify: a fresh process resumes the mission on its own --------------------------------------
 start_api "echo faux-ok"

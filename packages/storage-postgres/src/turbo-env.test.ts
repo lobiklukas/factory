@@ -289,6 +289,7 @@ describe("the dev tasks' environment", () => {
     "DEVTOOLS_URL",
     "DOCS_SCHEDULE_MS",
     "DOCS_SCHEDULE_REPO",
+    "MISSION_RESUME",
     "GITHUB_REVIEWER_APP_ID",
     "GITHUB_REVIEWER_APP_INSTALLATION_ID",
   ] as const;

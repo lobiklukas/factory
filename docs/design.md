@@ -225,6 +225,17 @@ lease and a heartbeat), then the bus itself — an `AFTER INSERT` trigger on `co
 cap at 8000 bytes and D7 makes the log truth. A subscriber reads the log from the cursor, so the
 notification is a hint and the log stays authoritative.
 
+_As built (LOB-231)._ A booting API now takes owners nobody asked for: `resumeMissions` reopens and
+resumes every session whose row says a mission is in flight (`sessions.mission_in_flight`), because a
+mission waits on no client and would otherwise stay `pending` in its log. Without presence that is a
+**single-process rule**: the row is marked with the absolute `SESSION_ROOT` of the process that ran
+the mission (`mission_session_root`), and a boot resumes only the rows marked under its own root, so
+an instance with another root — every verify skill's throwaway API on the shared development
+database — leaves them alone. Two processes on one database _and_ one root would both resume a
+mission and both own its log until Postgres poisons one of them on `PRIMARY KEY (log_id, seq)`; such a
+second process sets `MISSION_RESUME=false`. The presence lease above replaces both the root scoping
+and the flag when replicas arrive.
+
 ### D13 — Sandbox image: generic base, then templates where they pay
 
 Bun, Node, git, gh, ripgrep, plus Pi Durable and the harness. Repo-specific toolchains install
