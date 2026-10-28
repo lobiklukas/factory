@@ -470,7 +470,11 @@ describe("vocabularyLines (F5)", () => {
  * decodes — with excess properties refused — back to the same definition.
  */
 describe("definitionFileText (F8)", () => {
-  const column = (name: string, kind: string, extra: object = {}) => ({
+  const column = (
+    name: string,
+    kind: "resting" | "working" | "terminal",
+    extra: object = {},
+  ) => ({
     name,
     kind,
     skills: [],
