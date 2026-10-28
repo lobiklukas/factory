@@ -229,5 +229,6 @@ three acceptance cases through the real seam on Postgres (and the reclaim, the G
 lookup failure); `WebhookBoot.test.ts` the boot refusal. Over HTTP: `./linear.sh` checks 22–25 (an
 untrusted labeller's issue opens nothing and the recorded row names them; an issue created before
 the route skipped; a zero-width- and tag-hidden instruction and an HTML comment absent from the
-session's first message; the trusted relabel reclaimed) and `./github-issues.sh` check 13 (a
-reader's labelled issue refused naming the role, a writer's opened, both asked of the fake forge).
+session's first message; the trusted relabel reclaimed) and `./github-issues.sh` checks 13–14 (a
+reader's labelled issue refused naming the role, a writer's opened, both asked of the fake forge;
+a writer adding `bug` to the reader's issue `202` ignored, opening nothing).
