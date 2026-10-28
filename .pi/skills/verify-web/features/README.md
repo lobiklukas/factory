@@ -42,38 +42,42 @@ web `:3560`), its board now made through the form.
 `interrupt.sh` (the Interrupt button, C8) last passed **10/10** on 2026-10-28 from the `agent/C8`
 worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 
+`card-face.sh` (the card face's run status, PR link and cost, C10) last passed **10/10** on 2026-10-28
+from the `agent/C10` worktree, API `:9580` / web `:3580`, `FAUX_SLEEP_MS=5000`.
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
 
-| Feature                    | Status  | File                                                                          |
-| -------------------------- | ------- | ----------------------------------------------------------------------------- |
-| Dashboard shell renders    | passing | [dashboard-shell.md](dashboard-shell.md)                                      |
-| Routing                    | passing | [routing.md](routing.md)                                                      |
-| Approvals inbox            | passing | [routing.md](routing.md)                                                      |
-| Browser reaches the API    | passing | [api-connectivity.md](api-connectivity.md)                                    |
-| Session stream             | passing | [session-stream.md](session-stream.md)                                        |
-| Fork lineage               | passing | [fork-lineage.md](fork-lineage.md)                                            |
-| Transcript                 | passing | [transcript.md](transcript.md)                                                |
-| Live tasks                 | passing | [live-tasks.md](live-tasks.md)                                                |
-| Compaction from the pane   | passing | [compaction.md](compaction.md)                                                |
-| Board lanes                | passing | [board.md](board.md)                                                          |
-| Card pane (write path)     | passing | [card-pane.md](card-pane.md)                                                  |
-| What needs a person        | passing | [attention.md](attention.md)                                                  |
-| The card's thread          | passing | [thread.md](thread.md) (`thread.sh`)                                          |
-| The session's PR link      | passing | [pr-link.md](pr-link.md)                                                      |
-| Open pull request          | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
-| Spend by repo and actor    | passing | [spend.md](spend.md) (`spend.sh`)                                             |
-| Repositories               | passing | [repos.md](repos.md) (`repos.sh`)                                             |
-| New board (boards page)    | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
-| New card (board page)      | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
-| Earlier history            | passing | [history.md](history.md) (`history.sh`)                                       |
-| Model backend and model    | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
-| New session form           | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
-| New session model picker   | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
-| Cost prediction            | passing | [cost.md](cost.md) (`cost.sh`)                                                |
-| Interrupt a busy run       | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
-| The dashboard's credential | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
+| Feature                      | Status  | File                                                                          |
+| ---------------------------- | ------- | ----------------------------------------------------------------------------- |
+| Dashboard shell renders      | passing | [dashboard-shell.md](dashboard-shell.md)                                      |
+| Routing                      | passing | [routing.md](routing.md)                                                      |
+| Approvals inbox              | passing | [routing.md](routing.md)                                                      |
+| Browser reaches the API      | passing | [api-connectivity.md](api-connectivity.md)                                    |
+| Session stream               | passing | [session-stream.md](session-stream.md)                                        |
+| Fork lineage                 | passing | [fork-lineage.md](fork-lineage.md)                                            |
+| Transcript                   | passing | [transcript.md](transcript.md)                                                |
+| Live tasks                   | passing | [live-tasks.md](live-tasks.md)                                                |
+| Compaction from the pane     | passing | [compaction.md](compaction.md)                                                |
+| Board lanes                  | passing | [board.md](board.md)                                                          |
+| Card pane (write path)       | passing | [card-pane.md](card-pane.md)                                                  |
+| What needs a person          | passing | [attention.md](attention.md)                                                  |
+| The card's thread            | passing | [thread.md](thread.md) (`thread.sh`)                                          |
+| The session's PR link        | passing | [pr-link.md](pr-link.md)                                                      |
+| Open pull request            | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
+| Spend by repo and actor      | passing | [spend.md](spend.md) (`spend.sh`)                                             |
+| Repositories                 | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| New board (boards page)      | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
+| New card (board page)        | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
+| Earlier history              | passing | [history.md](history.md) (`history.sh`)                                       |
+| Model backend and model      | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
+| New session form             | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
+| New session model picker     | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
+| Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
+| Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
+| Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |
+| The dashboard's credential   | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
 ## Known gaps
 

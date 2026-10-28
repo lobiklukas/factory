@@ -239,6 +239,21 @@ one `interruptSession`, the header to go idle within 5 s, no `faux-ok` two naps 
 raise a toast in the server's words (`features/interrupt.md`). Evidence goes to
 `.verify/evidence/latest/interrupt/`.
 
+### The card face
+
+```sh
+CARD_FACE_API_PORT=9581 CARD_FACE_WEB_PORT=3581 ./card-face.sh   # its own instance with FAUX_SLEEP_MS; leaves nothing running
+```
+
+A card shows its newest run's state, the PR its runs opened and their summed spend (C10), from the
+board's one `listBoardCards` read. `card-face.sh` starts its own API and dashboard with
+`FAUX_SLEEP_MS` (default `5000`); `card-face.mjs` seeds a board (`seed-card-face.ts`), starts runs over
+the RPC, and requires `busy` within one poll interval of a run starting, the summed spend to equal the
+sum the drive reads off `listTaskRuns` and `listSessions`, a PR link to appear within one poll interval
+of the session recording it, `idle` once the run settles, no per-card read in the page's RPC tags, and
+nine cards to cost no more calls per window than three (`features/card-face.md`). Evidence goes to
+`.verify/evidence/latest/card-face/`.
+
 ### Open pull request
 
 ```sh

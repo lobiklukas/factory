@@ -114,7 +114,8 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
 
   if (last === undefined) return null;
   const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
-  const { instance, definition, tasks, pinned } = last;
+  const { instance, definition, tasks, cards, pinned } = last;
+  const faces = new Map(cards.map((entry) => [entry.task.id, entry]));
   const selected =
     card === undefined ? undefined : tasks.find((task) => task.id === card);
   // The card's own pinned version (B2, LOB-267): the board's for every card made on it.
@@ -205,6 +206,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
         <BoardLanesView
           boardId={boardId}
           board={boardLanes(definition, tasks)}
+          faces={faces}
           selected={card}
         />
       </div>
