@@ -1,6 +1,7 @@
 import { Clock, Effect, Random } from "effect";
 import { SessionId } from "@repo/domain/Session";
 import { BoardInstanceId, TaskId } from "@repo/domain/Task";
+import { TriggerRouteId } from "@repo/domain/Trigger";
 
 /**
  * Session ids: Crockford base32 (no `i`, `l`, `o`, `u`) with ten characters of millisecond
@@ -49,3 +50,8 @@ export const mintTaskId: Effect.Effect<TaskId> = mint("tsk_").pipe(
 export const mintBoardId: Effect.Effect<BoardInstanceId> = mint("brd_").pipe(
   Effect.map((id) => BoardInstanceId.make(id)),
 );
+
+/** Stored trigger route ids (`trr_`, the same shape again; `TriggerRouteId` in `packages/domain/src/Trigger.ts`). */
+export const mintTriggerRouteId: Effect.Effect<TriggerRouteId> = mint(
+  "trr_",
+).pipe(Effect.map((id) => TriggerRouteId.make(id)));

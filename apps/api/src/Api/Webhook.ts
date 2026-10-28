@@ -54,10 +54,11 @@
  * So the secret is configuration, not a default: `503` names the missing variable, and a
  * deployment that wants the route sets it.
  */
-import { Duration, Effect, Layer, Schema } from "effect";
+import { Duration, Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { RateLimiter } from "effect/persistence";
 import {
+  ENV_RULES_ORIGIN,
   linearDeliveryFor,
   SENTRY_REQUEST_ID_HEADER,
   SENTRY_RESOURCE_HEADER,
@@ -74,11 +75,7 @@ import type {
   TriggerEvent,
   TriggerRule,
 } from "@repo/domain/Trigger";
-import {
-  LIFECYCLE_ACTIONS,
-  TRIGGER_ACTION,
-  TriggerRules,
-} from "@repo/domain/Trigger";
+import { LIFECYCLE_ACTIONS, TRIGGER_ACTION } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { TriggerWriteBackLive } from "./LinearSync";
 
@@ -249,15 +246,13 @@ const callerCannotName = (
  * The generic adapter's delivery: the id is the configured header, else the body's own
  * `requestId` — the sender names its delivery, because nothing else can.
  */
-const genericDelivery = (
-  deliveryHeader: string,
-  rules: ReadonlyArray<TriggerRule>,
-) => {
-  const refusedActions = callerCannotName(rules);
+const genericDelivery = (deliveryHeader: string) => {
   return (
     payload: Record<string, unknown>,
     header: HeaderLookup,
+    rules: ReadonlyArray<TriggerRule>,
   ): TriggerDelivery | Refusal => {
+    const refusedActions = callerCannotName(rules);
     const requestId =
       header(deliveryHeader) ??
       stringField(payload, "requestId") ??
@@ -304,6 +299,7 @@ type Adapter = {
   readonly delivery: (
     payload: Record<string, unknown>,
     header: HeaderLookup,
+    rules: ReadonlyArray<TriggerRule>,
   ) => TriggerDelivery | Refusal;
   /** The variable the missing-secret refusal names, so an operator knows what to set. */
   readonly secretVariable: string;
@@ -329,9 +325,26 @@ type Adapter = {
   readonly rateCap?: {
     readonly limit: number;
     readonly windowSeconds: number;
-    readonly counts: (delivery: TriggerDelivery) => boolean;
+    readonly counts: (
+      delivery: TriggerDelivery,
+      rules: ReadonlyArray<TriggerRule>,
+    ) => boolean;
   };
 };
+
+/** A real failure, not a refusal: `500`, so the sender retries rather than stopping on work nobody recorded. */
+const storageFailure = (cause: {
+  readonly message: string;
+  readonly code: string;
+}) =>
+  HttpServerResponse.setStatus(
+    HttpServerResponse.jsonUnsafe({
+      ok: false,
+      error: cause.message,
+      code: cause.code,
+    }),
+    500,
+  );
 
 const handle = (adapter: () => Adapter) =>
   Effect.gen(function* () {
@@ -410,7 +423,19 @@ const handle = (adapter: () => Adapter) =>
 
     const header: HeaderLookup = (name) =>
       req.headers[name.toLowerCase()] as string | undefined;
-    const delivery = config.delivery(body, header);
+    // The rules this delivery is normalized against: the stored routes as they are right now, then
+    // `TRIGGER_RULES` (LOB-266). Read after the refusals that need no rule, so a stranger's unsigned
+    // body costs no query; the seam reads the same set again to map, and the two reads differ only
+    // if an operator edits a route between them.
+    const read = yield* triggers.rules.pipe(
+      Effect.map((rules) => ({ ok: true as const, rules })),
+      Effect.catchTag("TriggerError", (cause) =>
+        Effect.succeed({ ok: false as const, cause }),
+      ),
+    );
+    if (!read.ok) return storageFailure(read.cause);
+    const rules = read.rules;
+    const delivery = config.delivery(body, header, rules);
     if ("refused" in delivery) {
       return badRequest(delivery.refused, delivery.code);
     }
@@ -419,7 +444,10 @@ const handle = (adapter: () => Adapter) =>
     // bounds how fast this process lets the route open work, whoever the sender says it is. A
     // delivery the seam would only skip spends no token, so a firehose of them cannot starve an
     // alert of the budget.
-    if (config.rateCap !== undefined && config.rateCap.counts(delivery)) {
+    if (
+      config.rateCap !== undefined &&
+      config.rateCap.counts(delivery, rules)
+    ) {
       const { limit: perWindow, windowSeconds } = config.rateCap;
       const admitted = yield* limiter
         .consume({
@@ -491,16 +519,7 @@ const handle = (adapter: () => Adapter) =>
         Effect.succeed({ ok: false as const, cause }),
       ),
     );
-    if (!outcome.ok) {
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe({
-          ok: false,
-          error: outcome.cause.message,
-          code: outcome.cause.code,
-        }),
-        500,
-      );
-    }
+    if (!outcome.ok) return storageFailure(outcome.cause);
     const delivered = outcome.delivered;
     if (delivered.replayed && delivered.status === "received") {
       // A replay of a claim with no outcome yet is not an answer a sender may stop on: the first
@@ -538,51 +557,48 @@ const handle = (adapter: () => Adapter) =>
 /**
  * The Linear adapter (`@repo/core/Linear`, LOB-164). It derives its own delivery: the key is the
  * issue for a delivery that can start work, so a retry Linear sends with a fresh header and a fresh
- * `webhookTimestamp` cannot open a second session. `rules` is the value `TriggerServiceLive` maps
- * with, so the key and the mapping cannot disagree about which payloads a rule claims.
+ * `webhookTimestamp` cannot open a second session. `rules` is the seam's own set (`TriggerService.rules`: the stored
+ * routes, then `TRIGGER_RULES`), so the key and the mapping cannot disagree about which payloads a rule claims.
  */
-const linearRoute = (rules: ReadonlyArray<TriggerRule>) => {
-  const deliver = linearDeliveryFor(rules);
-  return HttpRouter.add(
-    "POST",
-    "/webhooks/linear",
-    handle(() => ({
-      route: "/webhooks/linear",
-      deliveryHeader: "linear-delivery",
-      signatureHeader: "linear-signature",
-      secret: process.env["LINEAR_WEBHOOK_SECRET"],
-      secretVariable: "LINEAR_WEBHOOK_SECRET",
-      delivery: (payload, header) =>
-        deliver(payload, { delivery: header("linear-delivery") }) ?? {
-          refused: "the payload does not name a Linear issue",
-          code: "bad-payload",
-        },
-    })),
-  );
-};
+const linearRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/linear",
+  handle(() => ({
+    route: "/webhooks/linear",
+    deliveryHeader: "linear-delivery",
+    signatureHeader: "linear-signature",
+    secret: process.env["LINEAR_WEBHOOK_SECRET"],
+    secretVariable: "LINEAR_WEBHOOK_SECRET",
+    delivery: (payload, header, rules) =>
+      linearDeliveryFor(rules)(payload, {
+        delivery: header("linear-delivery"),
+      }) ?? {
+        refused: "the payload does not name a Linear issue",
+        code: "bad-payload",
+      },
+  })),
+);
 
 /**
- * The generic adapter. `rules` is the value `TriggerServiceLive` maps with, so the actions it
+ * The generic adapter. `rules` is the seam's own set (`TriggerService.rules`), so the actions it
  * refuses are exactly the ones a rule would otherwise admit from a caller-typed `action`.
  */
-const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
-  HttpRouter.add(
-    "POST",
-    "/webhooks/generic",
-    handle(() => ({
-      route: "/webhooks/generic",
-      deliveryHeader:
-        process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
-      signatureHeader:
-        process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
-      secret: process.env["TRIGGER_SECRET"],
-      secretVariable: "TRIGGER_SECRET",
-      delivery: genericDelivery(
-        process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
-        rules,
-      ),
-    })),
-  );
+const genericRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/generic",
+  handle(() => ({
+    route: "/webhooks/generic",
+    deliveryHeader:
+      process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
+    signatureHeader:
+      process.env["TRIGGER_SECRET_HEADER"] ?? DEFAULT_SECRET_HEADER,
+    secret: process.env["TRIGGER_SECRET"],
+    secretVariable: "TRIGGER_SECRET",
+    delivery: genericDelivery(
+      process.env["TRIGGER_DELIVERY_HEADER"] ?? DEFAULT_DELIVERY_HEADER,
+    ),
+  })),
+);
 
 /**
  * The Sentry receiver (`@repo/core/Sentry`, LOB-81): Sentry's own signature header, checked with the
@@ -593,77 +609,52 @@ const genericRoute = (rules: ReadonlyArray<TriggerRule>) =>
  * event. A delivery no rule lets start work (`issue`, `comment`, `installation`, …) spends no token;
  * `rules` is the seam's, so the cap, the key and the filter agree on which those are.
  */
-const sentryRoute = (rules: ReadonlyArray<TriggerRule>) =>
-  HttpRouter.add(
-    "POST",
-    "/webhooks/sentry",
-    handle(() => ({
-      route: "/webhooks/sentry",
-      deliveryHeader: SENTRY_REQUEST_ID_HEADER,
-      signatureHeader: SENTRY_SIGNATURE_HEADER,
-      secret: process.env["SENTRY_CLIENT_SECRET"],
-      secretVariable: "SENTRY_CLIENT_SECRET",
-      verify: (raw, signature, clientSecret) =>
-        verifySentrySignature({ raw, signature, clientSecret }),
-      rateCap: {
-        limit: positiveInteger(
-          process.env["SENTRY_RATE_LIMIT"],
-          DEFAULT_SENTRY_RATE_LIMIT,
-        ),
-        windowSeconds: positiveInteger(
-          process.env["SENTRY_RATE_WINDOW_SECONDS"],
-          DEFAULT_SENTRY_RATE_WINDOW_S,
-        ),
-        counts: (delivery) => sentryStartsWork(delivery.event, rules),
-      },
-      delivery: (payload, header) =>
-        sentryDelivery(
-          payload,
-          {
-            resource: header(SENTRY_RESOURCE_HEADER),
-            requestId: header(SENTRY_REQUEST_ID_HEADER),
-          },
-          rules,
-        ),
-    })),
-  );
-
-/**
- * The mapping rules a deployment ships: `TRIGGER_RULES` is a JSON array of `{label, repo,
- * baseRef?, prompt}`. An invalid value is empty rather than fatal — a malformed mapping means
- * "nothing is mapped yet", which answers every delivery `skipped` and names why, instead of
- * refusing to boot the API over a typo.
- */
-const rulesFromEnv = (): ReadonlyArray<TriggerRule> => {
-  const raw = process.env["TRIGGER_RULES"];
-  if (raw === undefined || raw.trim() === "") return [];
-  try {
-    // oxlint-disable-next-line effecttsgo/prefer-schema-over-json
-    return Schema.decodeUnknownSync(TriggerRules)(JSON.parse(raw) as unknown);
-  } catch {
-    return [];
-  }
-};
-
-/**
- * Every route shares one `TriggerService` instance: the rules and the session port are per-process
- * configuration, and two instances would be two copies of the same config waiting to drift.
- */
-const rules = rulesFromEnv();
-
-/** The rules this process boots with, for the boot log to name the ones whose repo has no checkout (LOB-263). */
-export const bootTriggerRules = rules;
+const sentryRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/sentry",
+  handle(() => ({
+    route: "/webhooks/sentry",
+    deliveryHeader: SENTRY_REQUEST_ID_HEADER,
+    signatureHeader: SENTRY_SIGNATURE_HEADER,
+    secret: process.env["SENTRY_CLIENT_SECRET"],
+    secretVariable: "SENTRY_CLIENT_SECRET",
+    verify: (raw, signature, clientSecret) =>
+      verifySentrySignature({ raw, signature, clientSecret }),
+    rateCap: {
+      limit: positiveInteger(
+        process.env["SENTRY_RATE_LIMIT"],
+        DEFAULT_SENTRY_RATE_LIMIT,
+      ),
+      windowSeconds: positiveInteger(
+        process.env["SENTRY_RATE_WINDOW_SECONDS"],
+        DEFAULT_SENTRY_RATE_WINDOW_S,
+      ),
+      counts: (delivery, rules) => sentryStartsWork(delivery.event, rules),
+    },
+    delivery: (payload, header, rules) =>
+      sentryDelivery(
+        payload,
+        {
+          resource: header(SENTRY_RESOURCE_HEADER),
+          requestId: header(SENTRY_REQUEST_ID_HEADER),
+        },
+        rules,
+      ),
+  })),
+);
 
 /**
  * Every route, still asking for the seam and the rate cap per request. Exported so a test can serve
  * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`, `429`) are answered before the
  * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
- * `webhookRoutesFor` takes the rules, so a case can configure the ones the generic adapter reads.
+ * The rules a route normalizes against are the seam's own (`TriggerService.rules`), so a case that
+ * needs the generic adapter to read some serves a fake seam that answers them.
  */
-export const webhookRoutesFor = (rules: ReadonlyArray<TriggerRule>) =>
-  Layer.mergeAll(linearRoute(rules), genericRoute(rules), sentryRoute(rules));
-
-export const WebhookRoutes = webhookRoutesFor(rules);
+export const WebhookRoutes = Layer.mergeAll(
+  linearRoute,
+  genericRoute,
+  sentryRoute,
+);
 
 /**
  * The routes' rate caps, counted in this process's memory. Provided once beside the seam
@@ -674,20 +665,32 @@ export const WebhookRateLimiterLive = RateLimiter.layer.pipe(
   Layer.provide(RateLimiter.layerStoreMemory),
 );
 
-export const WebhookLive = WebhookRoutes.pipe(
-  HttpRouter.provideRequest(
-    Layer.mergeAll(
-      TriggerServiceLive({ rules }).pipe(
-        Layer.provide(
-          // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
-          // started state when its session opens. Otherwise none.
-          Layer.mergeAll(
-            TriggerSessionsFromSessionService,
-            TriggerWriteBackLive,
+/**
+ * The routes over the production seam. `rules` is `TRIGGER_RULES`, decoded and logged at boot
+ * (`readTriggerRules`); it is the *fallback* — the seam reads the stored routes (`trigger_routes`)
+ * per delivery and consults them first (LOB-266). Every route shares one `TriggerService` instance:
+ * the rules and the session port are per-process configuration, and two instances would be two
+ * copies of the same config waiting to drift.
+ */
+export const webhookLiveFor = (rules: ReadonlyArray<TriggerRule>) =>
+  WebhookRoutes.pipe(
+    HttpRouter.provideRequest(
+      Layer.mergeAll(
+        TriggerServiceLive({
+          rules,
+          storedRoutes: true,
+          rulesOrigin: ENV_RULES_ORIGIN,
+        }).pipe(
+          Layer.provide(
+            // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
+            // started state when its session opens. Otherwise none.
+            Layer.mergeAll(
+              TriggerSessionsFromSessionService,
+              TriggerWriteBackLive,
+            ),
           ),
         ),
+        WebhookRateLimiterLive,
       ),
-      WebhookRateLimiterLive,
     ),
-  ),
-);
+  );
