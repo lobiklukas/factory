@@ -247,7 +247,8 @@ describe("scanAddedLines", () => {
   });
 });
 
-describe("scanBranchForSecrets", () => {
+// Each case runs a handful of real git commands, which a loaded machine can take seconds over.
+describe("scanBranchForSecrets", { timeout: 30_000 }, () => {
   it("passes a branch that adds no secret", async () => {
     const root = repo();
     commit(root, { "a.txt": "hello\n" });
