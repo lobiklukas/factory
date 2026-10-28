@@ -34,7 +34,7 @@ its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-onl
 Built (LOB-267): transitions, human gates and the initial column are definition data. A column
 declares `transitions: [{ to, gate? }]` and a definition its `initialColumn`
 (`board_definitions.initial_column`); `TaskService.move`, `create`, the attention view's gate rows and
-the card pane all read the card's pinned version. Default version 4 (`0024_seed_definition_transitions`)
+the card pane all read the card's pinned version. Default version 4 (`0025_seed_definition_transitions`)
 carries exactly the old code table; versions 1–3, which declare no transitions, still resolve through
 that table (`columnTransitions` in `@repo/domain/Task`) and start a card in their first column.
 

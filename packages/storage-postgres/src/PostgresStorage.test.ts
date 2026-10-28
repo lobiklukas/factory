@@ -1565,7 +1565,7 @@ describe("the board's tables and seed", () => {
       }
 
       const migration = (
-        await import("./migrations/0024_seed_definition_transitions")
+        await import("./migrations/0025_seed_definition_transitions")
       ).default;
       await Effect.runPromise(
         migration.pipe(Effect.provideService(SqlClient, sql)),

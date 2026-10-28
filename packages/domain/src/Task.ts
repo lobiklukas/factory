@@ -112,7 +112,7 @@ export type BoardColumn = typeof BoardColumn.Type;
  *
  * Since LOB-267 a definition declares its moves on its columns (`BoardColumn.transitions`), and this
  * table is only two things: what a definition version that declares none resolves to — default
- * versions 1–3, which cards in flight still pin (B2) — and the seed `0024_seed_definition_transitions`
+ * versions 1–3, which cards in flight still pin (B2) — and the seed `0025_seed_definition_transitions`
  * wrote into default version 4. Nothing reads it for a definition that declares its own.
  */
 export const DECLARED_TRANSITIONS: Readonly<
