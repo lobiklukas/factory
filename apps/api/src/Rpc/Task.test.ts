@@ -266,7 +266,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       {
         key: "review_verdict",
         description: "a review verdict",
-        checked: false,
+        checked: true,
       },
       {
         key: "human_merge",

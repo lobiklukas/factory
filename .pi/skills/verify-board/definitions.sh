@@ -6,8 +6,8 @@
 # The definition the drive shows is the seeded `default` pipeline at version 3, and its whole printed
 # description is compared with `definitions-v3.expected` — every column's kind, role (or —), resolved
 # model, skills, requires marked checked or unchecked, and exits with the human gates marked. The
-# expected models are ./up.sh's: `ROLE_MODELS=builder=faux/builder`, so `building` runs its role's row
-# and every other column the deployment's `faux/faux-1`. Then the refusals: an unknown id and an
+# expected models are ./up.sh's: `ROLE_MODELS=builder=faux/builder,reviewer=faux/reviewer`, so
+# `building` and `review` run their roles' rows and every other column the deployment's `faux/faux-1`. Then the refusals: an unknown id and an
 # unknown version are the server's `definition_not_found`, a malformed id or board is the CLI's
 # `invalid_input`, and an unknown board is `board_not_found` — each non-zero.
 #
@@ -111,16 +111,16 @@ check "it prints every column with its kind, in definition order" \
   "$([ "$OBSERVED_COLUMNS" = "$LANES" ] && echo 0 || echo 1)" "columns=[$OBSERVED_COLUMNS]"
 check "a column with no role prints — for it" \
   "$(yes_if grep -Fxq '  role      —' "$RUN_DIR/definitions-show-v3.out")" "intake, done, canceled"
-check "building's model is its role's row (ROLE_MODELS)" \
-  "$(yes_if grep -Fxq '  model     faux/builder (role)' "$RUN_DIR/definitions-show-v3.out")" "faux/builder (role)"
+check "building's and review's models are their roles' rows (ROLE_MODELS)" \
+  "$(grep -Fxq '  model     faux/builder (role)' "$RUN_DIR/definitions-show-v3.out" && grep -Fxq '  model     faux/reviewer (role)' "$RUN_DIR/definitions-show-v3.out" && echo 0 || echo 1)" "faux/builder (role), faux/reviewer (role)"
 check "a role with no row runs the deployment's model" \
   "$(yes_if grep -Fxq '  model     faux/faux-1 (deployment)' "$RUN_DIR/definitions-show-v3.out")" "faux/faux-1 (deployment)"
 check "the checked requirements are marked checked" \
-  "$(has show-v3 'non_empty_diff (checked)' && has show-v3 'pr_link (checked)' && has show-v3 'verified (checked)' && echo 0 || echo 1)" \
-  "non_empty_diff, pr_link, verified"
+  "$(has show-v3 'non_empty_diff (checked)' && has show-v3 'pr_link (checked)' && has show-v3 'verified (checked)' && has show-v3 'review_verdict (checked)' && echo 0 || echo 1)" \
+  "non_empty_diff, pr_link, verified, review_verdict"
 check "the declared-only requirements are marked unchecked" \
-  "$(has show-v3 'spec_doc (unchecked)' && has show-v3 'plan_doc (unchecked)' && has show-v3 'run_completed (unchecked)' && has show-v3 'review_verdict (unchecked)' && has show-v3 'human_move (unchecked)' && has show-v3 'human_merge (unchecked)' && echo 0 || echo 1)" \
-  "spec_doc, plan_doc, run_completed, review_verdict, human_*"
+  "$(has show-v3 'spec_doc (unchecked)' && has show-v3 'plan_doc (unchecked)' && has show-v3 'run_completed (unchecked)' && has show-v3 'human_move (unchecked)' && has show-v3 'human_merge (unchecked)' && echo 0 || echo 1)" \
+  "spec_doc, plan_doc, run_completed, human_*"
 check "the human gates are marked on their exits" \
   "$(has show-v3 '  exits     building [human gate: plan approval], canceled' && has show-v3 '  exits     done [human gate: merge], canceled' && echo 0 || echo 1)" \
   "plan approval, merge"
@@ -182,8 +182,8 @@ check "its columns are exactly what definition show prints for that version" \
   "$([ "$rc" = "0" ] && diff <(tail -n +3 "$RUN_DIR/definitions-config.out") "$RUN_DIR/definitions-show-pinned.out" > "$EVIDENCE_DIR/definitions-config.diff" && echo 0 || echo 1)" \
   "see definitions-config.diff"
 run config-v1 board config --board "${PINNED_ID:-brd_missing}" --api "$API_URL"
-check "a v1 board's config describes v1: review does not require verified yet" \
-  "$([ "$rc" = "0" ] && has config-v1 "definition  default v1  " && ! has config-v1 'verified (checked)' && has config-v1 'review_verdict (unchecked)' && echo 0 || echo 1)" \
+check "a v1 board's config describes v1: review does not require verified yet, and checks the review verdict" \
+  "$([ "$rc" = "0" ] && has config-v1 "definition  default v1  " && ! has config-v1 'verified (checked)' && has config-v1 'review_verdict (checked)' && echo 0 || echo 1)" \
   "exit=$rc"
 run config-unknown board config --board "brd_$(printf '0%.0s' $(seq 1 26))" --api "$API_URL"
 check "an unknown board is board_not_found, non-zero" \

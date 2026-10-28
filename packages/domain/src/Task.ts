@@ -171,6 +171,13 @@ export const NON_EMPTY_DIFF_REQUIREMENT = "non_empty_diff";
  */
 export const PR_LINK_REQUIREMENT = "pr_link";
 
+/**
+ * The requirement a column declares when leaving it takes the reviewer's verdict: the card's newest
+ * review run (LOB-36) recorded a `pass` on the head it was opened for (LOB-241). The default
+ * pipeline's `review` declares it from version 1.
+ */
+export const REVIEW_VERDICT_REQUIREMENT = "review_verdict";
+
 /** The columns the default pipeline's table lets a card in `from` move to, in pipeline order. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];

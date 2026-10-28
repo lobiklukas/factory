@@ -19,8 +19,16 @@
 #   3. api, unverified a second run changes apps/api, which the fixture has no skill for: the move is
 #                      refused again, naming "verified" and `api` — the passing `web` evidence from
 #                      run 2 is a different surface and does not satisfy it
-#   4. api, passing    a third run changes apps/api and adds a passing verify-api skill: the same move
-#                      goes through
+#   4. api, passing    a third run changes apps/api and adds a passing verify-api skill: `verified`
+#                      is met, and the same move is refused naming "review_verdict": no review ran
+#   5. head A passes   a signed `pull_request` `opened` on the builder's PR (`review.ts`, the route a
+#                      deployment's GitHub delivers to) starts a faux reviewer run on the card at the
+#                      PR's head, which records a pass (LOB-36, LOB-241)
+#   6. head B fails    a push to the PR's branch and its `synchronize`: the new head's reviewer fails
+#                      `correctness`, and the move is refused naming it — A's pass does not survive
+#                      the push
+#   7. head C passes   a second push reverts the regression; its reviewer passes, and the same move
+#                      goes through to `done`
 #
 # Each review run's change is the fixture's `change.sh`, committed on `main` before the run starts, so
 # the worktree the run is cut from carries it and FAUX_COMMAND stays one fixed `bash change.sh`. The
@@ -29,6 +37,15 @@
 # phases below start, as before, with no verification of the card's change. The runs are real
 # sessions bound to the card (`task_runs`), their verification is the real `verify` tool, and its
 # record is read back out of the run's log by `requires.ts`.
+#
+# The reviewer is a run of the card the review trigger opens, not a person's comment: it runs on the
+# deployment's faux model (no `ROLE_MODELS` reviewer row, so the review runs `board start` opens keep
+# `bash change.sh`), its stage offers it no `write`, `edit` or `verify`, and its `review` calls are
+# FAUX_REVIEW: first a `correctness` fail on `apps/web/src/regress.ts`, then a clean pass. The tool
+# refuses a finding on a file the PR does not change, so a head without that file — A, and C after
+# the revert — is reviewed with the clean pass, and head B, which adds it, with the fail. Nothing is
+# posted: the instance has no reviewer identity, so the fail is recorded `withheld` and the pass
+# `clean`, and the gate reads the verdict in the run's log either way.
 #
 # Not ./up.sh's instance: this script starts and stops its own API on REQUIRES_PORT (default 9402)
 # and its own GitHub fake on REQUIRES_GITHUB_PORT (default 9404), with its own session root and
@@ -50,6 +67,11 @@ LEDGER="$RUN_DIR/github-ledger.json"
 # to measure and the PR something to carry. No `verify` call (LOB-240; see the header).
 BUILD_CHANGE="mkdir -p apps/web/src && echo 'export const built = 1;' > apps/web/src/built.ts && git add apps/web/src/built.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m 'build the card' && echo built"
 FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: false } }))')"
+# The reviewer's `review` calls (see the header): a fail that names a file only head B changes, then
+# a clean pass.
+REGRESSION="apps/web/src/regress.ts"
+FAUX_REVIEW='[{"summary":"Adds a regression.","dimensions":{"correctness":{"verdict":"fail","findings":[{"severity":"P0","file":"'"$REGRESSION"'","line":1,"mechanism":"regress is exported as 0 where every caller reads a positive count, so the first division by it throws"}]},"security":{"verdict":"pass","findings":[]},"tests":{"verdict":"pass","findings":[]},"performance":{"verdict":"pass","findings":[]}}},{"summary":"Adds one export.","dimensions":{"correctness":{"verdict":"pass","findings":[]},"security":{"verdict":"pass","findings":[]},"tests":{"verdict":"pass","findings":[]},"performance":{"verdict":"pass","findings":[]}}}]'
+WEBHOOK_SECRET="verify-board-requires-$(date +%s)$$"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/board"
 LOG="$RUN_DIR/api.log"
 FACTORY=(bun run "$ROOT/apps/cli/src/index.ts")
@@ -157,6 +179,8 @@ grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null ||
 : > "$LOG"
 ( cd "$ROOT/apps/api" && exec env \
     -u GITHUB_TOKEN -u GITHUB_APP_ID -u GITHUB_APP_PRIVATE_KEY -u GITHUB_APP_INSTALLATION_ID \
+    -u GITHUB_REVIEWER_TOKEN -u GITHUB_REVIEWER_APP_ID -u GITHUB_REVIEWER_APP_PRIVATE_KEY \
+    -u GITHUB_REVIEWER_APP_INSTALLATION_ID \
     PORT="$PORT" \
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$PORT" \
@@ -167,6 +191,8 @@ grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null ||
     FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \
     GITHUB_API_URL="http://127.0.0.1:$GITHUB_PORT" \
     GITHUB_TOKEN="verify-board-fake-token" \
+    GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+    FAUX_REVIEW="$FAUX_REVIEW" \
     SESSION_ROOT="$RUN_DIR/sessions" \
     SESSION_IDLE_TIMEOUT_MS=600000 \
     bun run src/index.ts ) >> "$LOG" 2>&1 &
@@ -299,8 +325,53 @@ check "and the refusal names the remedy for a surface nothing can verify" \
 # --- 4. api verified: the same move goes through -----------------------------------------------------
 next_change 'mkdir -p apps/api/src .pi/skills/verify-api && echo "export const feature = 2;" > apps/api/src/feature.ts && printf "echo \"verify-api fixture: 3/3 checks passed\"\n" > .pi/skills/verify-api/drive.sh && echo changed api with its skill'
 start_run api-verified "api:VerifyRan:0"
+rc="$(cli requires-unreviewed.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
+check "once the change's surface passed, review → done is held on review_verdict: no review ran" \
+  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: ' "$EVIDENCE_DIR/requires-unreviewed.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-unreviewed.txt" | cut -c1-140)"
+
+# --- 5-7. the reviewer's verdict, per head of the PR (LOB-36, LOB-241) -------------------------------
+REPO_SLUG="$(json repo)"
+PR_BRANCH="factory/${BUILD_SESSION:-none}"
+# The builder's worktree holds the PR's branch; a push to the PR is a commit there.
+PR_WORKTREE="$(git -C "$REPO" worktree list --porcelain | awk -v b="branch refs/heads/$PR_BRANCH" '/^worktree /{w=substr($0,10)} $0==b{print w}')"
+push_pr() { # message, command — commit on the PR's branch, print the new head
+  ( cd "$PR_WORKTREE" && eval "$2" && git add -A && \
+      git -c user.email=builder@localhost -c user.name=builder commit -q -m "$1" ) >/dev/null 2>&1
+  git -C "$REPO" rev-parse "$PR_BRANCH"
+}
+review_head() { # label, action, head, expect — deliver the event, wait for the verdict, check it
+  local base; base="$(git -C "$REPO" rev-parse main)"
+  MODE=review API_URL="$API_URL" GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" REPO="$REPO_SLUG" \
+    PR_URL="$PR_URL" PR_NUMBER="${PR_URL##*/}" ACTION="$2" HEAD="$3" HEAD_REF="$PR_BRANCH" \
+    BASE_SHA="$base" EXPECT="$4" LABEL="requires-$1" \
+    EVIDENCE_DIR="$EVIDENCE_DIR" bun "$ROOT/.pi/skills/verify-board/review.ts" > "$RUN_DIR/review-$1.log" 2>&1
+  local review_rc=$?
+  cat "$RUN_DIR/review-$1.log"
+  check "the PR's $2 at ${3:0:12} gets a reviewer run that records $4 (review.ts)" "$review_rc" \
+    "see review-requires-$1.json"
+}
+
+HEAD_A="$(git -C "$REPO" rev-parse "$PR_BRANCH" 2>/dev/null)"
+check "the PR's branch is checked out in the builder's worktree" \
+  "$([ -n "$PR_WORKTREE" ] && [ -d "$PR_WORKTREE" ] && [ -n "$HEAD_A" ] && echo 0 || echo 1)" \
+  "${PR_WORKTREE:-no worktree} at ${HEAD_A:-no head}"
+review_head a opened "$HEAD_A" pass
+
+HEAD_B="$(push_pr "regress" "echo 'export const regress = 0;' > $REGRESSION")"
+review_head b synchronize "$HEAD_B" fail
+rc="$(cli requires-refused-review.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
+check "after a push, head B's fail refuses review → done, naming the failing dimension" \
+  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move review → done needs "review_verdict"' "$EVIDENCE_DIR/requires-refused-review.txt" && grep -qF "#${PR_URL##*/} at ${HEAD_B:0:12} failed correctness: fix the findings and push" "$EVIDENCE_DIR/requires-refused-review.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+check "and head A's earlier pass does not stand in for it" \
+  "$([ -n "$HEAD_A" ] && ! grep -qF "${HEAD_A:0:12}" "$EVIDENCE_DIR/requires-refused-review.txt" && echo 0 || echo 1)" \
+  "the refusal names ${HEAD_B:0:12}, not ${HEAD_A:0:12}"
+
+HEAD_C="$(push_pr "revert the regression" "git rm -q $REGRESSION")"
+review_head c synchronize "$HEAD_C" pass
 rc="$(cli requires-done.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
-check "once the change's surface passed, the same review → done goes through" \
+check "once the newest head's reviewer passed, the same review → done goes through" \
   "$([ "$rc" = "0" ] && grep -q "moved $TASK_ID to done (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-done.txt" && echo 0 || echo 1)" \
   "exit=$rc"
 
@@ -314,6 +385,7 @@ cp "$LOG" "$EVIDENCE_DIR/requires-api.log"
   printf '  "definitionVersion": "%s",\n' "$VERSION"
   printf '  "runs": {"build": "%s", "web": "%s", "apiUnverified": "%s", "apiVerified": "%s"},\n' "${BUILD_SESSION:-}" "${WEB_SESSION:-}" "${API_SESSION:-}" "${RUN_SESSION:-}"
   printf '  "prUrl": "%s",\n' "${PR_URL:-}"
+  printf '  "heads": {"a": "%s", "b": "%s", "c": "%s"},\n' "${HEAD_A:-}" "${HEAD_B:-}" "${HEAD_C:-}"
   printf '  "checks": {\n'
   write_checks
   printf '  }\n}\n'

@@ -16,9 +16,9 @@ every column with:
   from;
 - its skills;
 - its exit requirements, each **checked** (the board refuses a move over it: `verified`,
-  `non_empty_diff`, `pr_link` — `CHECKED_REQUIREMENTS`) or **unchecked** (declared, enforced by nothing
-  yet: `spec_doc`, `plan_doc`, `run_completed`, `review_verdict`, and the `human_*` keys, whose gate the
-  move's actor check enforces instead);
+  `non_empty_diff`, `pr_link`, `review_verdict` — `CHECKED_REQUIREMENTS`) or **unchecked** (declared,
+  enforced by nothing yet: `spec_doc`, `plan_doc`, `run_completed`, and the `human_*` keys, whose gate
+  the move's actor check enforces instead);
 - its exits, from the column's own `transitions` (LOB-267) — or, for default versions 1–3, which
   declare none, the default pipeline's table — exactly what `TaskService.move` refuses by, with the
   **human gates** marked (`plan approval` on `planning → building`, `merge` on `review → done`).
@@ -47,7 +47,7 @@ unknown board is `BoardNotFound`.
 
 ## How the skill drives it
 
-`definitions.sh`, against `./up.sh`'s API (`ROLE_MODELS=builder=faux/builder`, faux backend), with
+`definitions.sh`, against `./up.sh`'s API (`ROLE_MODELS=builder=faux/builder,reviewer=faux/reviewer`, faux backend), with
 plain subprocesses — stdout, stderr and the exit code are what it asserts — and one run in a private
 tmux server. `board-create.ts` reads the two facts a terminal cannot: the newest `default` version
 and how many boards the database holds. It asserts:
@@ -55,7 +55,8 @@ and how many boards the database holds. It asserts:
 - `board definitions` lists `default` v1 through the database's newest (≥ 3), oldest first, each with
   its name and timestamp;
 - `board definition show default --version 3` prints every column in definition order, with `—` for
-  no role, `faux/builder (role)` for `building`, `faux/faux-1 (deployment)` elsewhere, the checked and
+  no role, `faux/builder (role)` for `building`, `faux/reviewer (role)` for `review`,
+  `faux/faux-1 (deployment)` elsewhere, the checked and
   unchecked requirements, and both human gates on their exits — and its whole output equals
   `definitions-v3.expected`, written by hand, not generated;
 - with no `--version` it shows the newest;

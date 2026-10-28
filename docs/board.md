@@ -152,9 +152,19 @@ reviewed head is `stale` and posts nothing. A head the registered checkout lacks
 GitHub's "Update branch") is fetched first with the worker's read credential, and one that still
 cannot be had is `skipped`, naming the commit. A review run is not one of the card's runs as the
 exit checks read them: it starts while the card is still in `building`, and `pr_link` and
-`non_empty_diff` judge the latest run that makes the change. The `review_verdict` exit requirement
-is still not checked: the verdict is recorded, and gating `review → done` on it is LOB-241. The
-review is not trusted until it is measured on our own PRs (LOB-242).
+`non_empty_diff` judge the latest run that makes the change. The review is not trusted until it is
+measured on our own PRs (LOB-242).
+
+Built (LOB-241): the verdict is the gate. `review_verdict`, which `review` declares in every version
+of the default pipeline, is checked on exit (`packages/core/src/requirements.ts`): `review → done`
+goes through only when the card's **newest** review run — by when its `task_runs` row started, so a
+`synchronize` opens the run that decides — recorded `pass` on the head it was opened for. No review
+run ("no review ran"), a newest run with no verdict yet (naming the head under review), a `fail`
+(naming the failing dimensions) and a pass its post found `stale` are each refused naming the
+requirement, so an older head's approval never survives a push at the gate. What it cannot see is a
+push the trigger has not been told of yet: until its `synchronize` opens the next run, the previous
+head's pass is the newest. The verdict is read from the run's log (`factory.review`, D7), not from
+GitHub, so an unposted or withheld verdict counts the same as a posted one.
 
 ## B7 — Asking a human happens on the task, never in the transcript
 

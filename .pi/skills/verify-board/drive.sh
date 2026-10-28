@@ -27,9 +27,11 @@
 # (LOB-86, docs/board.md B4, B5, B8): a person approves the plan (`planning → building`), a run in
 # `building` makes a change, commits it and verifies it, `factory pr` opens its PR on the loopback
 # GitHub fake, and the drive asserts a non-empty diff, a link the forge answered, and a body whose
-# evidence section names the verify skill and its exit code. The run moves its card to `review`, a
-# person records the verdict on the card, the run's own `review → done` is refused at the merge gate,
-# and the person's merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
+# evidence section names the verify skill and its exit code. The run moves its card to `review`; a
+# person's merge is refused naming `review_verdict` until a faux reviewer run — opened by the review
+# trigger on a signed `pull_request` for the PR (`review.ts`, LOB-36) — records a pass on the PR's
+# head (LOB-241); then the run's own `review → done` is refused at the merge gate, and the person's
+# merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
 # BOARD_GITHUB=off) `factory pr` fails, the drive prints that reason and exits non-zero, and the
 # phases after it run on with the link empty rather than one the drive made up. The board holds the
 # card too (LOB-240): `building` is left only with a committed change and a recorded PR, so the run's
@@ -169,7 +171,7 @@ fi
 rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
   "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
-  "$EVIDENCE_DIR/pr-body.md" \
+  "$EVIDENCE_DIR/pr-body.md" "$EVIDENCE_DIR/review-drive.json" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
   "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png \
   "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
@@ -654,7 +656,7 @@ check "show prints the card unblocked, in building" \
   "exit=$(exit_code unblocked-show)"
 BUILDING_REVISION="${UNBLOCKED_REVISION:-$BUILDING_REVISION}"
 
-# --- review: the run moves its card on, and a person records the verdict --------------------------
+# --- review: the run moves its card on ------------------------------------------------------------
 # `building → review` crosses no gate, so the run that built the change may make it (B5); the drive
 # makes it with that run's id to show the difference from the merge, below. With no PR (BOARD_GITHUB=
 # off) the board refuses it naming `pr_link` (LOB-240): the check fails with that refusal as its
@@ -673,38 +675,50 @@ if [ -z "$PR_URL" ]; then
     "exit=$(exit_code review)"
 fi
 
-# The verdict is read off the evidence the reviewer was shown, not written in advance: approve only
-# when there is a PR, the run's verify record passed (build-built.json) and the forge's PR carries
-# that evidence (build-pr.json). Anything else is a request for changes naming what is missing, and
-# the check below fails on it, so a review with no PR to review is a failed step, not a pass.
-if [ -z "$PR_URL" ]; then
-  VERDICT="verdict: request changes (no PR) — there is no pull request to review"
-elif [ "$BUILT_RC" != "0" ]; then
-  VERDICT="verdict: request changes $PR_URL — the run's verify record did not pass (build-built.json)"
-elif [ "$PR_PROBE_RC" != "0" ]; then
-  VERDICT="verdict: request changes $PR_URL — the PR does not carry the diff and evidence (build-pr.json)"
+# --- the reviewer's verdict: a faux reviewer run on the PR's head, not a person's comment (LOB-241) --
+# `review` declares `review_verdict`, so until a review run of the card records a pass on the PR's
+# head, a person's merge is refused naming it — the evidence (`verified`) is met by now, so the refusal
+# is about the review alone. The review comes the way a deployment gets one: GitHub tells the API
+# about the PR (`POST /webhooks/github`, signed with the instance's GITHUB_WEBHOOK_SECRET, which
+# `review.ts` sends since the loopback fake sends no webhooks), the review trigger opens a reviewer
+# run of the card at the PR's head (LOB-36), and its faux model (./up.sh's `faux/reviewer`) reads the
+# diff and records a clean pass in its log's `factory.review`.
+fresh
+run_cmd merge-unreviewed "$FACTORY board move --task $TASK_ID --to done --expect-revision ${REVIEW_REVISION:-0} --actor person:reviewer --api $API_URL" || true
+capture move-merge-unreviewed.txt
+UNREVIEWED_MESSAGE='requirement_unmet: the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: '
+check "with no review run, a person's review → done is refused naming review_verdict" \
+  "$([ "$(exit_code merge-unreviewed)" != "0" ] && [ -n "$(exit_code merge-unreviewed)" ] && grep -qF "$UNREVIEWED_MESSAGE" "$EVIDENCE_DIR/move-merge-unreviewed.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code merge-unreviewed), $(grep -m1 -o 'needs "[a-z_]*"' "$EVIDENCE_DIR/move-merge-unreviewed.txt" 2>/dev/null)"
+
+PR_HEAD="$(git -C "$BOARD_REPO" rev-parse "factory/${BUILD_SESSION_ID:-none}" 2>/dev/null)"
+PR_BASE="$(git -C "$BOARD_REPO" rev-parse main 2>/dev/null)"
+if [ -n "$PR_URL" ] && [ -n "$PR_HEAD" ]; then
+  env MODE=review API_URL="$API_URL" GITHUB_WEBHOOK_SECRET="$(cat "$RUN_DIR/webhook-secret" 2>/dev/null)" \
+    REPO="$BOARD_REPO_SLUG" PR_URL="$PR_URL" PR_NUMBER="${PR_URL##*/}" ACTION=opened \
+    HEAD="$PR_HEAD" HEAD_REF="factory/$BUILD_SESSION_ID" BASE_SHA="$PR_BASE" EXPECT=pass \
+    LABEL=drive EVIDENCE_DIR="$EVIDENCE_DIR" bun "$SKILL/review.ts" > "$RUN_DIR/review-drive.log" 2>&1
+  REVIEW_RC=$?
 else
-  VERDICT="verdict: approve $PR_URL — verify-web exit 0, evidence in the PR body"
+  echo "drive: no PR to review — the review phase has nothing to deliver" > "$RUN_DIR/review-drive.log"
+  REVIEW_RC=1
 fi
+cat "$RUN_DIR/review-drive.log"
+REVIEWER_SESSION_ID="$(sed -n 's/^reviewer \(ses_[0-9a-z]\{26\}\)$/\1/p' "$RUN_DIR/review-drive.log" | head -1)"
+check "the PR's opened starts a reviewer run that records a pass on its head (review.ts)" "$REVIEW_RC" \
+  "reviewer=${REVIEWER_SESSION_ID:-none} head=${PR_HEAD:-none}, see review-drive.json"
 fresh
-run_cmd verdict "$FACTORY board comment --task $TASK_ID --expect-revision ${REVIEW_REVISION:-0} --body '$VERDICT' --actor person:reviewer --api $API_URL" || true
-capture verdict.txt
-VERDICT_EXIT="$(exit_code verdict)"
-VERDICT_REVISION="$(sed -n "s/^commented on $TASK_ID (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/verdict.txt")"
-fresh
-run_cmd verdict-show "$FACTORY board show --task $TASK_ID --api $API_URL" || true
-capture show-verdict.txt
-# A comment is stamped with the revision it was written against; the card moves one past it.
-check "a person's verdict is recorded on the card's thread" \
-  "$([ "$VERDICT_EXIT" = "0" ] && [ -n "$VERDICT_REVISION" ] && grep -qF "  [note] person:reviewer (revision $REVIEW_REVISION)" "$EVIDENCE_DIR/show-verdict.txt" && grep -qxF "    $VERDICT" "$EVIDENCE_DIR/show-verdict.txt" && echo 0 || echo 1)" \
-  "exit=${VERDICT_EXIT:-none}, revision=${VERDICT_REVISION:-none}"
-check "the verdict, read off the PR and its evidence, approves" \
-  "$(case "$VERDICT" in "verdict: approve "*) echo 0 ;; *) echo 1 ;; esac)" \
-  "$VERDICT"
+run_cmd runs-reviewed "$FACTORY board runs --task $TASK_ID --api $API_URL" || true
+capture runs-reviewed.txt
+check "board runs lists the reviewer as the card's newest run, in review" \
+  "$([ "$(exit_code runs-reviewed)" = "0" ] && [ -n "$REVIEWER_SESSION_ID" ] && grep '^ses_' "$EVIDENCE_DIR/runs-reviewed.txt" | head -1 | grep -qE "^$REVIEWER_SESSION_ID  review  idle  " && echo 0 || echo 1)" \
+  "$(grep '^ses_' "$EVIDENCE_DIR/runs-reviewed.txt" 2>/dev/null | head -1)"
+# The refusals wrote nothing: the merge is made at the revision the move into review left.
+MERGE_REVISION="${REVIEW_REVISION:-}"
 
 # --- merge: the run is refused at the merge gate; the person's move reaches done -------------------
 fresh
-run_cmd merge-run "$FACTORY board move --task $TASK_ID --to done --expect-revision ${VERDICT_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
+run_cmd merge-run "$FACTORY board move --task $TASK_ID --to done --expect-revision ${MERGE_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
 capture move-merge-run.txt
 MERGE_MESSAGE="human_gate_required: the move review → done crosses the merge gate, which only a person can make"
 check "the run's review → done is refused at the merge gate" \
@@ -712,10 +726,10 @@ check "the run's review → done is refused at the merge gate" \
   "actor=${BUILD_SESSION_ID:-none}, exit=$(exit_code merge-run), message verbatim"
 
 fresh
-run_cmd merge "$FACTORY board move --task $TASK_ID --to done --expect-revision ${VERDICT_REVISION:-0} --actor person:reviewer --api $API_URL" || true
+run_cmd merge "$FACTORY board move --task $TASK_ID --to done --expect-revision ${MERGE_REVISION:-0} --actor person:reviewer --api $API_URL" || true
 capture move-merge.txt
-check "a person's review → done goes through, at the revision the refusal left" \
-  "$([ "$(exit_code merge)" = "0" ] && [ -n "$VERDICT_REVISION" ] && grep -qx "moved $TASK_ID to done (revision $((VERDICT_REVISION + 1)))" "$EVIDENCE_DIR/move-merge.txt" && echo 0 || echo 1)" \
+check "with the reviewer's pass, a person's review → done goes through, at the revision the refusals left" \
+  "$([ "$(exit_code merge)" = "0" ] && [ -n "$MERGE_REVISION" ] && grep -qx "moved $TASK_ID to done (revision $((MERGE_REVISION + 1)))" "$EVIDENCE_DIR/move-merge.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code merge)"
 
 fresh
@@ -736,6 +750,8 @@ check "the card is done" \
   printf '  "nextSessionId": "%s",\n' "${NEXT_SESSION_ID:-}"
   printf '  "buildSessionId": "%s",\n' "${BUILD_SESSION_ID:-}"
   printf '  "prUrl": "%s",\n' "${PR_URL:-}"
+  printf '  "reviewerSessionId": "%s",\n' "${REVIEWER_SESSION_ID:-}"
+  printf '  "prHead": "%s",\n' "${PR_HEAD:-}"
   printf '  "checks": {\n'
   write_checks
   printf '  }\n}\n'

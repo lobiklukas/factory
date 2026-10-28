@@ -8,12 +8,13 @@
  * tested) without a database.
  *
  * **Which keys are checked.** Only the keys in `CHECKED_REQUIREMENTS`: `verified`, the one B8
- * promotes from a PR body artifact into a condition of the move, and `building`'s `non_empty_diff`
- * and `pr_link` (LOB-240), whose evidence the PR step already records. The other keys the default
- * pipeline declares are not checked here, and each for a stated reason: `human_move` and
- * `human_merge` are B5's human gates, which `TaskService` already enforces by actor; `spec_doc`,
- * `plan_doc`, `run_completed` and `review_verdict` have no recorded artifact to check yet, and
- * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
+ * promotes from a PR body artifact into a condition of the move, `building`'s `non_empty_diff`
+ * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
+ * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36). The
+ * other keys the default pipeline declares are not checked here, and each for a stated reason:
+ * `human_move` and `human_merge` are B5's human gates, which `TaskService` already enforces by actor;
+ * `spec_doc`, `plan_doc` and `run_completed` have no recorded artifact to check yet, and refusing
+ * every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
  *
@@ -37,6 +38,23 @@
  * diff), or `non_empty_diff` refuses every move. `pr_link` is met
  * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
  * commits, not the index's `pr_url` column a rebuild derives from it.
+ *
+ * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
+ * records a `factory.review` target, which the review trigger opens one per head of the card's PR —
+ * and only the newest of them, by when its `task_runs` row started: a `synchronize` (a push) opens
+ * the next head's run, so the newest review run is the review of the newest head the factory was told
+ * about. It is met when that run recorded a verdict of `pass` on the head it was opened for. It is
+ * not met, and the refusal says which, when no review ran; when the newest review run has recorded
+ * no verdict yet (it is still reviewing, or it died before it called the tool), naming the head under
+ * review; when the verdict is `fail`, naming the failing dimensions; and when a `pass` was found
+ * `stale` as it was posted — the PR had moved to another head, so the pass is about a head the PR is
+ * no longer at, and no newer review run has spoken for the head it moved to. An older pass never
+ * stands in for a newer head's missing or failing verdict: a stale approval does not survive a push
+ * at the gate. **The window it cannot see** is a push the review trigger has not been told of yet —
+ * between GitHub's push and its `synchronize` delivery, or a delivery the trigger skipped (a head it
+ * could not fetch) — when the newest review run is still the previous head's, and its pass is judged
+ * as the newest. A `clean` pass is never posted, so it is never marked `stale` either. Gating on the
+ * PR's live head would close it, at the cost of a forge read on every move.
  *
  * **What `verified` means.** The card's change is the newest `verify` call, over all of the card's
  * runs, that measured a change. "Newest" is by when the call's result was written (the tool
@@ -74,9 +92,11 @@ import type { BoardColumn, ColumnRequirement } from "@repo/domain/Task";
 import {
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
+  REVIEW_VERDICT_REQUIREMENT,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
 import {
+  type RecordedReview,
   REPO_SURFACE,
   surfaceOf,
   surfacesOf,
@@ -90,6 +110,7 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   VERIFIED_REQUIREMENT,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
+  REVIEW_VERDICT_REQUIREMENT,
 ]);
 
 /**
@@ -121,13 +142,21 @@ export type BranchDiff =
       readonly reason: string;
     };
 
+/** One review run of the card (LOB-36) and the review its `factory.review` document records. */
+export type ReviewRunEvidence = {
+  readonly sessionId: string;
+  readonly review: RecordedReview;
+};
+
 /**
  * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
- * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run.
+ * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
+ * and its review runs, oldest first by when each started (absent: it has none).
  */
 export type CardEvidence = {
   readonly runs: readonly RunEvidence[];
   readonly diff?: BranchDiff;
+  readonly reviews?: readonly ReviewRunEvidence[];
 };
 
 /**
@@ -314,6 +343,43 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
     : { met: true };
 };
 
+/** A commit as a reader takes it in a sentence: its first twelve characters. */
+const shortSha = (sha: string): string => sha.slice(0, 12);
+
+/** The `review_verdict` requirement over the card's newest review run (module doc). */
+export const reviewVerdictVerdict = (
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  const newest = evidence.reviews?.at(-1);
+  if (newest === undefined)
+    return {
+      met: false,
+      reason:
+        "no review ran: the card has no review run (the review trigger opens one for each head its PR's pull_request events name)",
+    };
+  const { sessionId, review } = newest;
+  const pr = `${review.target.repo}#${review.target.number}`;
+  const head = review.target.head;
+  if (review.verdict === undefined)
+    return {
+      met: false,
+      reason: `run ${sessionId} is still reviewing ${pr} at ${head}: it has recorded no verdict yet (wait for it to settle, or prompt it again if it ended without one)`,
+    };
+  if (review.verdict === "fail") {
+    const failing = review.failing ?? [];
+    return {
+      met: false,
+      reason: `run ${sessionId}'s review of ${pr} at ${shortSha(head)} failed ${failing.length === 0 ? "a dimension" : failing.join(", ")}${review.outcome === "posted" && review.outcomeDetail !== undefined && review.outcomeDetail !== "" ? ` (its findings: ${review.outcomeDetail})` : ""}: fix the findings and push, and the new head's review decides the move`,
+    };
+  }
+  if (review.outcome === "stale")
+    return {
+      met: false,
+      reason: `run ${sessionId}'s pass on ${pr} at ${shortSha(head)} is stale: the PR moved to ${review.outcomeDetail === undefined || review.outcomeDetail === "" ? "another head" : review.outcomeDetail} before it was posted, and no review run has recorded a verdict on that head`,
+    };
+  return { met: true };
+};
+
 /** One checked requirement's verdict over the card's evidence. */
 export const requirementVerdict = (
   requirement: ColumnRequirement,
@@ -326,6 +392,8 @@ export const requirementVerdict = (
       return nonEmptyDiffVerdict(evidence);
     case PR_LINK_REQUIREMENT:
       return prLinkVerdict(evidence);
+    case REVIEW_VERDICT_REQUIREMENT:
+      return reviewVerdictVerdict(evidence);
     default:
       return { met: false, reason: `"${requirement.key}" has no checker` };
   }

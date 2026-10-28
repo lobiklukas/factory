@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { BoardColumn } from "@repo/domain/Task";
-import type { VerifyRecord, VerifyResult } from "@repo/harness";
+import type { RecordedReview, VerifyRecord, VerifyResult } from "@repo/harness";
 import {
   type BranchDiff,
   CHECKED_REQUIREMENTS,
@@ -15,6 +15,8 @@ import {
   nonEmptyDiffVerdict,
   prLinkVerdict,
   requirementVerdict,
+  type ReviewRunEvidence,
+  reviewVerdictVerdict,
   VERIFIABLE_REMEDY,
   verifiedVerdict,
   type RunEvidence,
@@ -100,9 +102,12 @@ describe("exitRequirements", () => {
       "verified",
       "non_empty_diff",
       "pr_link",
+      "review_verdict",
     ]);
+    // `human_merge` is the merge gate, enforced by actor, not by a check of evidence.
     expect(exitRequirements(review, "done").map((r) => r.key)).toEqual([
       "verified",
+      "review_verdict",
     ]);
     // `run_completed` has no recorded artifact yet, so it is skipped; the two that do are kept in
     // the order building declares them, which is the order a refusal names the first unmet one.
@@ -121,10 +126,10 @@ describe("exitRequirements", () => {
   it("names a key without a checker as unchecked rather than met", () => {
     expect(
       requirementVerdict(
-        { key: "review_verdict", description: "a review verdict" },
+        { key: "plan_doc", description: "a plan doc" },
         { runs: [] },
       ),
-    ).toEqual({ met: false, reason: '"review_verdict" has no checker' });
+    ).toEqual({ met: false, reason: '"plan_doc" has no checker' });
   });
 });
 
@@ -429,5 +434,172 @@ describe("the pr_link requirement", () => {
       met: false,
       reason: "the card has no runs, so none opened a PR",
     });
+  });
+});
+
+describe("the review_verdict requirement (LOB-241)", () => {
+  const HEAD_A = "a".repeat(40);
+  const HEAD_B = "b".repeat(40);
+  const target = (head: string): RecordedReview["target"] => ({
+    repo: "acme/widgets",
+    number: 7,
+    url: "https://github.com/acme/widgets/pull/7",
+    base: "main",
+    head,
+  });
+  /** A review run at `head`: still reviewing, or settled on `verdict` with `outcome`. */
+  const reviewed = (
+    sessionId: string,
+    head: string,
+    settled?: Pick<
+      RecordedReview,
+      "verdict" | "outcome" | "outcomeDetail" | "failing"
+    >,
+  ): ReviewRunEvidence => ({
+    sessionId,
+    review: { target: target(head), ...settled },
+  });
+  const pass = (outcome = "clean") => ({
+    verdict: "pass" as const,
+    outcome,
+    outcomeDetail: "",
+    failing: [],
+  });
+  const unmet = (reviews: ReviewRunEvidence[] | undefined): string => {
+    const verdict = reviewVerdictVerdict(
+      reviews === undefined ? { runs: [] } : { runs: [], reviews },
+    );
+    if (verdict.met) throw new Error("expected the requirement to be unmet");
+    return verdict.reason;
+  };
+
+  it("is unmet when no review ran, whether the evidence names none or holds none", () => {
+    for (const reviews of [undefined, []]) {
+      expect(unmet(reviews)).toMatch(/^no review ran: /);
+    }
+    // A change run's evidence is not a review: a card whose runs verified and opened a PR has still
+    // had no review.
+    expect(
+      reviewVerdictVerdict({
+        runs: [
+          {
+            sessionId: "ses_build",
+            calls: [],
+            prUrl: "https://github.com/acme/widgets/pull/7",
+          },
+        ],
+      }).met,
+    ).toBe(false);
+  });
+
+  it("is unmet while the newest review run has recorded no verdict, naming the head it reviews", () => {
+    expect(unmet([reviewed("ses_r1", HEAD_A)])).toBe(
+      `run ses_r1 is still reviewing acme/widgets#7 at ${HEAD_A}: it has recorded no verdict yet (wait for it to settle, or prompt it again if it ended without one)`,
+    );
+  });
+
+  it("is unmet on a fail, naming every failing dimension and where its findings are", () => {
+    expect(
+      unmet([
+        reviewed("ses_r1", HEAD_A, {
+          verdict: "fail",
+          outcome: "posted",
+          outcomeDetail: "https://github.com/acme/widgets/pull/7#review-1",
+          failing: ["correctness", "tests"],
+        }),
+      ]),
+    ).toBe(
+      "run ses_r1's review of acme/widgets#7 at aaaaaaaaaaaa failed correctness, tests (its findings: https://github.com/acme/widgets/pull/7#review-1): fix the findings and push, and the new head's review decides the move",
+    );
+    // An unposted fail still fails: the verdict is the log's, not the comment's.
+    expect(
+      unmet([
+        reviewed("ses_r1", HEAD_A, {
+          verdict: "fail",
+          outcome: "withheld",
+          outcomeDetail: "no reviewer identity",
+          failing: ["security"],
+        }),
+      ]),
+    ).toContain("failed security: fix the findings");
+  });
+
+  it("is met by a pass on the newest review run's own head, posted or not", () => {
+    for (const outcome of ["clean", "posted", "withheld", "unposted"]) {
+      expect(
+        reviewVerdictVerdict({
+          runs: [],
+          reviews: [reviewed("ses_r1", HEAD_A, pass(outcome))],
+        }),
+      ).toEqual({ met: true });
+    }
+  });
+
+  it("never lets an older head's pass stand in for the newest head's verdict", () => {
+    const approvedA = reviewed("ses_r1", HEAD_A, pass());
+    // A push opened head B's run: until B has a verdict, A's pass does not count.
+    expect(unmet([approvedA, reviewed("ses_r2", HEAD_B)])).toContain(
+      `run ses_r2 is still reviewing acme/widgets#7 at ${HEAD_B}`,
+    );
+    expect(
+      unmet([
+        approvedA,
+        reviewed("ses_r2", HEAD_B, {
+          verdict: "fail",
+          outcome: "clean",
+          outcomeDetail: "",
+          failing: ["performance"],
+        }),
+      ]),
+    ).toContain("at bbbbbbbbbbbb failed performance");
+    expect(
+      reviewVerdictVerdict({
+        runs: [],
+        reviews: [approvedA, reviewed("ses_r2", HEAD_B, pass())],
+      }),
+    ).toEqual({ met: true });
+    // And the newest is the last, not the best: a fail on A followed by a pass on B is met.
+    expect(
+      reviewVerdictVerdict({
+        runs: [],
+        reviews: [
+          reviewed("ses_r1", HEAD_A, {
+            verdict: "fail",
+            outcome: "posted",
+            outcomeDetail: "",
+            failing: ["correctness"],
+          }),
+          reviewed("ses_r2", HEAD_B, pass()),
+        ],
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet on a pass found stale as it was posted, naming the head the PR moved to", () => {
+    expect(
+      unmet([
+        reviewed("ses_r1", HEAD_A, {
+          ...pass("stale"),
+          outcomeDetail: HEAD_B,
+        }),
+      ]),
+    ).toBe(
+      `run ses_r1's pass on acme/widgets#7 at aaaaaaaaaaaa is stale: the PR moved to ${HEAD_B} before it was posted, and no review run has recorded a verdict on that head`,
+    );
+  });
+
+  it("is what requirementVerdict checks for the key", () => {
+    expect(
+      requirementVerdict(
+        { key: "review_verdict", description: "a review verdict" },
+        { runs: [] },
+      ).met,
+    ).toBe(false);
+    expect(
+      requirementVerdict(
+        { key: "review_verdict", description: "a review verdict" },
+        { runs: [], reviews: [reviewed("ses_r1", HEAD_A, pass())] },
+      ),
+    ).toEqual({ met: true });
   });
 });

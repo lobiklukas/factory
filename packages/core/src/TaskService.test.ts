@@ -15,7 +15,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { BranchName, RepoSlug } from "@repo/domain/Session";
+import { BranchName, RepoSlug, type SessionId } from "@repo/domain/Session";
 import {
   declaredTransitions,
   DEFAULT_DEFINITION_ID,
@@ -24,10 +24,11 @@ import {
   LIST_BOARDS_LIMIT,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
+  REVIEW_VERDICT_REQUIREMENT,
   type AttentionItem,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
-import { createFauxModelAccess } from "@repo/harness";
+import { createFauxModelAccess, type FauxSpecAttempt } from "@repo/harness";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { noCheckoutWarning } from "./workspace";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -300,7 +301,9 @@ describe("TaskService", () => {
     );
     expect(mergeGate._tag).toBe("HumanGateRequired");
     expect(mergeGate.message).toContain("merge");
-    const done = await withService((s) =>
+    // A person is past the gate, so the same move is judged on review's requirements instead: with
+    // no review run on the card, `review_verdict` holds it (LOB-241; the exit requirements below).
+    const unreviewed = await refusal((s) =>
       s.move({
         taskId: task.id,
         expectedRevision: review.revision,
@@ -308,9 +311,12 @@ describe("TaskService", () => {
         actor: LUKAS,
       }),
     );
-    expect(done.column).toBe("done");
-    // created + 4 accepted moves (the seat into review writes none); every refusal added nothing.
-    expect(await eventCount(task.id)).toBe(5);
+    expect(unreviewed).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    // created + 3 accepted moves (the seat into review writes none); every refusal added nothing.
+    expect(await eventCount(task.id)).toBe(4);
   });
 
   it("accepts every move the shared table declares out of a column, and refuses every other", async () => {
@@ -2225,6 +2231,174 @@ describe("TaskService — exit requirements", () => {
     }
   };
 
+  /**
+   * A head for a review run to be opened at: a commit on its own branch of `repoRoot` that adds
+   * `path`, so `git diff main...<head>` — what the reviewer measures its findings against — names it.
+   */
+  const headWith = (repoRoot: string, path: string): string => {
+    const git = (command: string) =>
+      execSync(command, { cwd: repoRoot, encoding: "utf8" }).trim();
+    git(`git checkout -q -b pr-${hex(4)}`);
+    mkdirSync(dirname(join(repoRoot, path)), { recursive: true });
+    writeFileSync(join(repoRoot, path), `export const at = "${hex(4)}";\n`);
+    git(`git add -A && git commit -q -m "change ${path}"`);
+    const head = git("git rev-parse HEAD");
+    git("git checkout -q main");
+    return head;
+  };
+
+  const passing = { verdict: "pass", findings: [] };
+  /** The reviewer's clean answer: every dimension passes, no finding, nothing posted. */
+  const CLEAN: FauxSpecAttempt = {
+    summary: "Adds one export.",
+    dimensions: {
+      correctness: passing,
+      security: passing,
+      tests: passing,
+      performance: passing,
+    },
+  };
+  /** The reviewer failing two dimensions, each over a P0/P1 finding on `file`. */
+  const failingOn = (file: string): FauxSpecAttempt => ({
+    summary: "Adds an untested export that is wrong.",
+    dimensions: {
+      correctness: {
+        verdict: "fail",
+        findings: [
+          {
+            severity: "P0",
+            file,
+            line: 1,
+            mechanism: "`at` is a random string where a number is read",
+          },
+        ],
+      },
+      security: passing,
+      tests: {
+        verdict: "fail",
+        findings: [
+          {
+            severity: "P1",
+            file,
+            mechanism:
+              "nothing exercises the new export, so a regression ships",
+          },
+        ],
+      },
+      performance: passing,
+    },
+  });
+
+  /**
+   * A process of the control plane whose faux reviewer runs `git diff` and then answers the review
+   * tool with `review` (or never calls it, when absent).
+   */
+  const reviewerSessions = (review?: FauxSpecAttempt) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({
+          fauxCommand: "git diff --stat main...HEAD",
+          fauxReview: review === undefined ? [] : [review],
+        }).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+
+  /** Prompt a review run and resolve once it has answered: its review tool call is settled. */
+  const settle = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const service = yield* SessionService;
+      yield* service.send({ sessionId, content: "review the pull request" });
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const snapshot = yield* service.get(sessionId);
+        if (
+          snapshot.session.status === "idle" &&
+          snapshot.entries.some(
+            (entry) =>
+              entry.kind === "toolResult" && entry.toolName === "review",
+          ) &&
+          snapshot.entries.some(
+            (entry) => entry.kind === "assistant" && entry.text !== "",
+          )
+        )
+          return;
+        yield* Effect.sleep(50);
+      }
+      return yield* Effect.die(
+        new Error(`review run ${sessionId} did not settle`),
+      );
+    });
+
+  /**
+   * A review run of `taskId` (LOB-36), as the review trigger opens one: a session in the card's
+   * `review` column with PR 7 at `head` as its review target, cut at the head. With `review` it is
+   * prompted and settles on that verdict; without, it is left with no verdict, still to review.
+   */
+  const reviewRun = async (input: {
+    readonly taskId: string;
+    readonly repoRoot: string;
+    readonly head: string;
+    readonly review?: FauxSpecAttempt;
+  }): Promise<SessionId> => {
+    const sessions = reviewerSessions(input.review);
+    const repo = RepoSlug.make(`factory-test/reviewed-${hex(4)}`);
+    try {
+      return await sessions.runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          yield* service.registerRepo({
+            repo,
+            url: "https://example.invalid/reviewed.git",
+            localPath: input.repoRoot,
+          });
+          const created = yield* service.create({
+            repo,
+            baseRef: input.head,
+            taskId: input.taskId,
+            taskColumn: "review",
+            review: {
+              number: 7,
+              url: "https://github.com/factory-test/requires/pull/7",
+              base: "main",
+              head: input.head,
+            },
+          });
+          if (input.review !== undefined) yield* settle(created.id);
+          return created.id;
+        }),
+      );
+    } finally {
+      await sessions.dispose();
+    }
+  };
+
+  /** Prompt a review run opened earlier (in another process) and wait for its verdict. */
+  const settleReview = async (
+    sessionId: SessionId,
+    review: FauxSpecAttempt,
+  ): Promise<void> => {
+    const sessions = reviewerSessions(review);
+    try {
+      await sessions.runPromise(settle(sessionId));
+    } finally {
+      await sessions.dispose();
+    }
+  };
+
+  /** A clean pass on the fixture's `main`: the reviewer's approval, for a case about another gate. */
+  const approve = (taskId: string, repoRoot: string) =>
+    reviewRun({
+      taskId,
+      repoRoot,
+      head: execSync("git rev-parse main", {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }).trim(),
+      review: CLEAN,
+    });
+
   /** A card on a board over `version`, walked by a person from intake into review. */
   const inReview = (version: number) =>
     newBoard(version)
@@ -2380,6 +2554,22 @@ describe("TaskService — exit requirements", () => {
       repoRoot,
       command: change("apps/api/src/feature.ts"),
     });
+    // `verified` is met now, so the move is held on the next requirement review declares: the
+    // reviewer's verdict (LOB-241). The review run is not a run of the change, so it moves nothing
+    // `verified` reads.
+    const unreviewed = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(unreviewed).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    await approve(task.id, repoRoot);
     const done = await withService((s) =>
       s.move({
         taskId: task.id,
@@ -2409,6 +2599,7 @@ describe("TaskService — exit requirements", () => {
       repoRoot,
       command: change("apps/web/src/page.ts"),
     });
+    await approve(control.id, repoRoot);
     const controlDone = await withService((s) =>
       s.move({
         taskId: control.id,
@@ -2445,7 +2636,10 @@ describe("TaskService — exit requirements", () => {
   }, 180_000);
 
   it("keeps a card pinned to version 1 on the exit it started under", async () => {
+    // Version 1's review declares no `verified`: a card with a reviewer's pass and no verification
+    // at all leaves it. It does declare `review_verdict`, which every version is held to (LOB-241).
     const task = await inReview(1);
+    await approve(task.id, fixtureRepo({}));
     const done = await withService((s) =>
       s.move({
         taskId: task.id,
@@ -2455,7 +2649,134 @@ describe("TaskService — exit requirements", () => {
       }),
     );
     expect(done.column).toBe("done");
-  });
+  }, 120_000);
+
+  // --- review_verdict (LOB-241): the newest review run's verdict on its own head -----------------
+
+  /** A person's `review → done` of the card at the revision it was seated in review at. */
+  const merge =
+    (task: { readonly id: string; readonly revision: number }) =>
+    (s: TaskServiceShape) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      });
+
+  it("refuses review → done with no review run, naming review_verdict and that no review ran", async () => {
+    // Every version of the default pipeline declares `review_verdict`; version 1 declares it alone,
+    // so nothing else can be what refuses.
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    // A run of the card's change is not a review: it leaves the card unreviewed.
+    await recordRun({
+      taskId: task.id,
+      repoRoot,
+      command: change("apps/web/src/page.ts"),
+    });
+    const events = await eventCount(task.id);
+    const err = await refusal(merge(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      taskId: task.id,
+      column: "review",
+      to: "done",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    expect(err.message).toBe(
+      'the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: the card has no review run (the review trigger opens one for each head its PR\'s pull_request events name)',
+    );
+    const after = await withService((s) => s.get(task.id));
+    expect(after).toMatchObject({ column: "review", revision: task.revision });
+    expect(await eventCount(task.id)).toBe(events);
+  }, 120_000);
+
+  it("refuses while the newest review run has recorded no verdict, naming the head under review", async () => {
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    const head = headWith(repoRoot, "src/sum.ts");
+    const reviewer = await reviewRun({ taskId: task.id, repoRoot, head });
+    const err = await refusal(merge(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${reviewer} is still reviewing factory-test/`,
+    );
+    expect(err.message).toContain(
+      `#7 at ${head}: it has recorded no verdict yet`,
+    );
+    // Once the same run settles on a pass, the same move goes through.
+    await settleReview(reviewer, CLEAN);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
+  }, 120_000);
+
+  it("refuses on a fail verdict after an earlier head's pass, naming the failing dimensions, and never gates a move into canceled", async () => {
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    // An earlier head passed; the push after it is the head that fails, and the fail is what counts.
+    await reviewRun({
+      taskId: task.id,
+      repoRoot,
+      head: headWith(repoRoot, "src/first.ts"),
+      review: CLEAN,
+    });
+    const head = headWith(repoRoot, "src/sum.ts");
+    const reviewer = await reviewRun({
+      taskId: task.id,
+      repoRoot,
+      head,
+      review: failingOn("src/sum.ts"),
+    });
+    const err = await refusal(merge(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    // No reviewer identity in this process, so the fail is recorded and withheld, not posted.
+    expect(err.message).toContain(`run ${reviewer}'s review of factory-test/`);
+    expect(err.message).toContain(
+      `#7 at ${head.slice(0, 12)} failed correctness, tests: fix the findings and push`,
+    );
+    const canceled = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "canceled",
+        actor: LUKAS,
+      }),
+    );
+    expect(canceled.column).toBe("canceled");
+  }, 120_000);
+
+  it("holds a pass on head A once a push opens head B's review, until B passes", async () => {
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    const headA = headWith(repoRoot, "src/a.ts");
+    await reviewRun({ taskId: task.id, repoRoot, head: headA, review: CLEAN });
+    // The `synchronize` of a push: the next head's run, newer than A's, with no verdict yet.
+    const headB = headWith(repoRoot, "src/b.ts");
+    const reviewerB = await reviewRun({
+      taskId: task.id,
+      repoRoot,
+      head: headB,
+    });
+    const stale = await refusal(merge(task));
+    expect(stale).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    expect(stale.message).toContain(`run ${reviewerB} is still reviewing`);
+    expect(stale.message).toContain(`at ${headB}`);
+    expect(stale.message).not.toContain(headA.slice(0, 12));
+    // B passes: the newest head's verdict is a pass, and the move goes through.
+    await settleReview(reviewerB, CLEAN);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
+  }, 180_000);
 
   /** A card on a board over `version`, walked by a person from intake into building. */
   const inBuilding = (version = 1) =>

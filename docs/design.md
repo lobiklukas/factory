@@ -278,7 +278,9 @@ happens in GitHub. A `pull_request` on a PR a card's run opened starts a reviewe
 conversation, on the reviewer role's (cheaper) model, in a read-only stage — that posts one
 `COMMENT` review per head under its own GitHub identity, never the author's, and never approves:
 the human merge gate is the decision (B5). There is still no review UI. It is not trusted until it
-is measured on our own PRs (LOB-242), and gating a move on its verdict is LOB-241.
+is measured on our own PRs (LOB-242). Since LOB-241 its verdict is also a condition of
+`review → done` (B5's `review_verdict`): the person still merges, but not over a newest head the
+reviewer failed or has not finished.
 _Rejected:_ PR-level review automation in CI (a different product surface, and it belongs after we
 trust our output).
 

@@ -126,7 +126,9 @@ import {
 } from "./ask";
 import { commitSpec, specExtension, type SpecOptions } from "./specify";
 import {
+  REVIEW_DIMENSIONS,
   reviewExtension,
+  type ReviewDimension,
   type ReviewOptions,
   type ReviewTarget,
 } from "./review";
@@ -1143,6 +1145,12 @@ export type RecordedReview = {
   readonly outcome?: string;
   /** The comment's link when `posted`, the head the PR moved to when `stale`. */
   readonly outcomeDetail?: string;
+  /**
+   * The dimensions the verdict failed, in the comment's order; present with the verdict, and empty
+   * on a `pass` (a review fails exactly when one of its dimensions does). What a board's
+   * `review_verdict` refusal names (LOB-241).
+   */
+  readonly failing?: readonly ReviewDimension[];
 };
 
 /**
@@ -1160,6 +1168,22 @@ export const readRecordedReview = (
     const number = value?.["number"];
     if (text("head") === "" || typeof number !== "number") return undefined;
     const verdict = text("verdict");
+    // Plain JSON, as `commitVerdict` stores it: each dimension `{ verdict, findings }`.
+    const dimensions = value?.["dimensions"];
+    const failed = (dimension: ReviewDimension): boolean => {
+      const entry =
+        typeof dimensions === "object" &&
+        dimensions !== null &&
+        !Array.isArray(dimensions)
+          ? dimensions[dimension]
+          : undefined;
+      return (
+        typeof entry === "object" &&
+        entry !== null &&
+        !Array.isArray(entry) &&
+        entry["verdict"] === "fail"
+      );
+    };
     return {
       target: {
         repo: text("repo"),
@@ -1173,6 +1197,7 @@ export const readRecordedReview = (
             verdict,
             outcome: text("outcome"),
             outcomeDetail: text("outcomeDetail"),
+            failing: REVIEW_DIMENSIONS.filter(failed),
           }
         : {}),
     };

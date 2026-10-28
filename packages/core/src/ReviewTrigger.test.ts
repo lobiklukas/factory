@@ -391,6 +391,7 @@ describe("the review a pull_request event starts", () => {
       verdict: "fail",
       outcome: "posted",
       outcomeDetail: `${URL}#review-1`,
+      failing: ["correctness"],
     });
     const mine = forge.posts.filter((post) => post.target.url === URL);
     expect(mine).toHaveLength(1);
