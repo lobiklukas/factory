@@ -435,6 +435,46 @@ describe("the pr_link requirement", () => {
       reason: "the card has no runs, so none opened a PR",
     });
   });
+
+  // C19: a card's later runs continue its first change run's branch, so a follow-up run that opened
+  // no PR of its own still leaves the card with the PR an earlier run opened from that branch.
+  it("is met when the latest run opened none, but an earlier run's PR is from the branch it continues (C19)", () => {
+    expect(
+      prLinkVerdict({
+        runs: [
+          {
+            sessionId: "ses_a",
+            calls: [],
+            branch: "factory/ses_a",
+            prUrl: link,
+            prHead: "factory/ses_a",
+          },
+          { sessionId: "ses_b", calls: [], branch: "factory/ses_a" },
+        ],
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet when the earlier run's PR is from another branch than the latest run's (C19)", () => {
+    expect(
+      prLinkVerdict({
+        runs: [
+          {
+            sessionId: "ses_a",
+            calls: [],
+            branch: "factory/ses_a",
+            prUrl: link,
+            prHead: "factory/ses_a",
+          },
+          { sessionId: "ses_b", calls: [], branch: "factory/ses_b" },
+        ],
+      }),
+    ).toEqual({
+      met: false,
+      reason:
+        "the card's latest run ses_b recorded no PR (no factory.pr document in its log), and no run of the card recorded one from its branch factory/ses_b: open its PR (factory pr ses_b) before moving the card on",
+    });
+  });
 });
 
 describe("the review_verdict requirement (LOB-241)", () => {

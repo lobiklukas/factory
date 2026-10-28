@@ -19,10 +19,14 @@
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
  *
- * **What `non_empty_diff` and `pr_link` mean.** Both read the card's *latest* run — the newest
- * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own
- * branch, so the latest run's branch is the change the card carries now, and an older run's PR is a
- * PR of a change a later run replaced. `non_empty_diff` is met when that branch has at least one
+ * **What `non_empty_diff` and `pr_link` mean.** Both read the card's branch and PR: the branch of
+ * the card's *latest* run — the newest `task_runs` row — for the reason `verified` reads the newest
+ * call. Since C19 a card's later runs continue its first change run's branch (`./cardBranch`), so
+ * the latest run's branch *is* the card's, and the card's PR is the one recorded from it: the latest
+ * run's own `factory.pr`, or an earlier run's whose `head` is that branch — a follow-up run that
+ * opened no PR of its own (it settled parked, or in a column that opens none) still leaves the card
+ * with its PR. A PR an older run opened from another branch (a card from before C19, or one whose
+ * branch was released and cut afresh) is a PR of a change a later run replaced, and does not count. `non_empty_diff` is met when that branch has at least one
  * changed file against its base, by the PR step's own measurement (`git diff --numstat
  * base...head`, LOB-196): committed work only, three-dot from the merge base, against the same base
  * the step picks (`measureBaseOf`, C17 — the forge's fetched tip when the run was cut from it), so a
@@ -38,8 +42,8 @@
  * D3/D4:** this check reads git refs from a checkout on the control plane's own disk. When the
  * worktree moves into the sandbox, the measurement has to follow it (or read the recorded PR's own
  * diff), or `non_empty_diff` refuses every move. `pr_link` is met
- * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
- * commits, not the index's `pr_url` column a rebuild derives from it.
+ * when a `factory.pr` document with a link (LOB-177) is the card's PR as above: the record the PR
+ * step commits, not the index's `pr_url` column a rebuild derives from it.
  *
  * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
  * records a `factory.review` target, which the review trigger opens one per head of a PR — and
@@ -167,7 +171,11 @@ export const KNOWN_REQUIREMENTS: ReadonlySet<string> = new Set([
 export type RunEvidence = {
   readonly sessionId: string;
   readonly calls: readonly TimedVerifyCall[];
+  /** The branch the run is on, when it is bound to a repository. */
+  readonly branch?: string;
   readonly prUrl?: string;
+  /** The branch its recorded PR was opened from (`factory.pr`'s `head`). */
+  readonly prHead?: string;
 };
 
 /**
@@ -388,15 +396,25 @@ export const nonEmptyDiffVerdict = (
       };
 };
 
-/** The `pr_link` requirement over the latest run's recorded PR (module doc). */
+/**
+ * The `pr_link` requirement over the card's PR (module doc): the latest run's recorded PR, or one an
+ * earlier run recorded from the branch the latest run is on (C19).
+ */
 export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
   const latest = evidence.runs.at(-1);
   if (latest === undefined)
     return { met: false, reason: "the card has no runs, so none opened a PR" };
-  return latest.prUrl === undefined
+  if (latest.prUrl !== undefined) return { met: true };
+  const onBranch =
+    latest.branch === undefined
+      ? undefined
+      : evidence.runs.findLast(
+          (run) => run.prUrl !== undefined && run.prHead === latest.branch,
+        );
+  return onBranch === undefined
     ? {
         met: false,
-        reason: `the card's latest run ${latest.sessionId} recorded no PR (no factory.pr document in its log): open its PR (factory pr ${latest.sessionId}) before moving the card on`,
+        reason: `the card's latest run ${latest.sessionId} recorded no PR (no factory.pr document in its log)${latest.branch === undefined ? "" : `, and no run of the card recorded one from its branch ${latest.branch}`}: open its PR (factory pr ${latest.sessionId}) before moving the card on`,
       }
     : { met: true };
 };

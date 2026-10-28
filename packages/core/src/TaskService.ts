@@ -35,8 +35,9 @@
  * under the card's pinned definition version, after the transition and the gate, and a requirement
  * that is not met refuses the move with `RequirementUnmet`, naming it. Which keys are checked, and
  * against what, is `./requirements`; `verified` reads the `verify` records in the logs of the card's
- * runs, `pr_link` the latest run's `factory.pr` document, and `non_empty_diff` the latest run's
- * branch, measured against its base by the PR step's own `git diff --numstat` from the run's
+ * runs, `pr_link` the card's PR — the latest run's `factory.pr` document, or an earlier run's
+ * recorded from the branch the latest run continues (C19) — and `non_empty_diff` the latest run's
+ * branch, which since C19 is the card's, measured against its base by the PR step's own `git diff --numstat` from the run's
  * registered checkout (a session's worktree is a linked worktree of it, so the two share every ref).
  * A review run (LOB-36: a log with a `factory.review` target) is not among them: it judges a run's
  * change and makes none, and it starts while the card is still in `building` — the PR's `opened` is
@@ -1758,11 +1759,18 @@ export const TaskServiceLive = Layer.effect(
           (_, index) => recordedReviews[index] === undefined,
         );
         const recorded = yield* Effect.forEach(
-          changing.map((run) => run.sessionId),
-          (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
+          changing,
+          (run): Effect.Effect<RunEvidence, TaskStorageError> => {
+            const sessionId = run.sessionId;
+            // The branch the run is on (C19: a card's later runs share its first change run's), so
+            // `pr_link` can tell the card's PR from a PR of a branch the card no longer carries.
+            const branch =
+              run.repo === null
+                ? {}
+                : { branch: run.branch ?? `factory/${sessionId}` };
             const storage = logs.get(sessionId);
             if (storage === undefined)
-              return Effect.succeed({ sessionId, calls: [] });
+              return Effect.succeed({ sessionId, calls: [], ...branch });
             return Effect.gen(function* () {
               const calls = yield* readVerifyCalls(storage).pipe(
                 Effect.mapError(
@@ -1783,7 +1791,8 @@ export const TaskServiceLive = Layer.effect(
               return {
                 sessionId,
                 calls,
-                ...(pr === undefined ? {} : { prUrl: pr.url }),
+                ...branch,
+                ...(pr === undefined ? {} : { prUrl: pr.url, prHead: pr.head }),
               };
             });
           },
