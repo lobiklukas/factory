@@ -34,6 +34,12 @@ import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  DEFAULT_LINEAR_STATES,
+  LinearIssueSyncLive,
+  LinearTriggerWriteBack,
+} from "./LinearSync";
+import { makeLinear, PROGRESS, TODO } from "./linearFake";
+import {
   SENTRY_LABEL,
   sentryDelivery,
   sentryEvent,
@@ -414,7 +420,8 @@ describe("SentryWriteBack", () => {
       const api = makeSentryApi({ get: "unreachable" });
       const { exit, lines } = await write(api, { event: alertEvent() });
       expect(exit._tag).toBe("Success");
-      expectOneLine(lines, "could not be reached");
+      expectOneLine(lines, "gave no answer");
+      expectOneLine(lines, "TransportError");
       expect(api.requests).toHaveLength(1);
     });
 
@@ -422,7 +429,8 @@ describe("SentryWriteBack", () => {
       const api = makeSentryApi({ post: "unreachable" });
       const { exit, lines } = await write(api, { event: alertEvent() });
       expect(exit._tag).toBe("Success");
-      expectOneLine(lines, "could not be reached");
+      expectOneLine(lines, "gave no answer");
+      expectOneLine(lines, "whether it landed is unknown");
     });
 
     it("an answer that is not a list of notes posts nothing: a read nobody understood is not 'no note'", async () => {
@@ -516,6 +524,39 @@ describe("the composite write-back, with Sentry beside Linear", () => {
     await send(alertEvent({ source: "linear", key: "LOB-1" }));
     expect(linear).toEqual(["started LOB-1"]);
     expect(api.requests).toEqual([]);
+  });
+
+  it("moves a Linear issue to started through the real Linear write-back with Sentry configured", async () => {
+    const sentry = makeSentryApi();
+    const fake = makeLinear();
+    const layer = TriggerWriteBackBySource({
+      linear: LinearTriggerWriteBack.pipe(
+        Layer.provide(
+          LinearIssueSyncLive({
+            apiUrl: "http://linear.test/graphql",
+            apiKey: Redacted.make("lin_api_test"),
+            states: DEFAULT_LINEAR_STATES,
+          }),
+        ),
+        Layer.provide(fake.layer),
+      ),
+      sentry: SentryWriteBack(config()).pipe(Layer.provide(sentry.client)),
+    });
+    const send = (event: TriggerEvent) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const port = yield* TriggerWriteBack;
+          yield* port.write({ event, sessionId });
+        }).pipe(Effect.provide(layer)),
+      );
+    expect(fake.issue.state).toEqual(TODO);
+    await send(alertEvent({ source: "linear", key: "ENG-42" }));
+    expect(fake.issue.state).toEqual(PROGRESS);
+    expect(sentry.requests).toEqual([]);
+    // And the Sentry alert beside it notes its issue and leaves Linear's issue where it was.
+    await send(alertEvent());
+    expect(sentry.notesOf("issue-9")).toHaveLength(1);
+    expect(fake.issue.state).toEqual(PROGRESS);
   });
 
   it("notes a Sentry alert and does not touch Linear for it", async () => {
@@ -673,6 +714,7 @@ afterAll(() =>
       yield* sql`DELETE FROM trigger_fingerprints WHERE starts_with(fingerprint, ${`sentry:${runId}`})`;
       yield* sql`DELETE FROM webhook_deliveries WHERE starts_with(request_id, ${`sentry:event:${runId}`})`;
       yield* sql`DELETE FROM sessions WHERE starts_with(id, ${SESSION_PREFIX})`;
+      yield* sql`DELETE FROM repos WHERE slug = ${repo}`;
     }).pipe(Effect.provide(DatabaseLive)),
   ),
 );

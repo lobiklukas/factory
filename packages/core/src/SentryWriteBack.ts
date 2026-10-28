@@ -35,6 +35,7 @@ import { Duration, Effect, Layer, Redacted, Schema } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
+  HttpClientError,
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/http";
@@ -47,9 +48,12 @@ export const SENTRY_DEFAULT_API_URL = "https://sentry.io";
 
 /**
  * How long the whole link-back — the read and the post — may take before the delivery goes on
- * without it. The route answers after this runs and Sentry's own delivery budget is one second
- * (`docs/testing-third-parties.md`), so it is short: a note that misses it is not retried, and a
- * redelivery is what the read-before-post check makes safe.
+ * without it. The route answers after this runs, and Sentry's own delivery budget is one second
+ * (`docs/testing-third-parties.md`), so a slow Sentry API outlives it: that is deliberate. The
+ * delivery is still processed, and the sender that gave up and re-sent is answered by the dedupe,
+ * so a late answer costs nothing but a repeat. The budget only keeps a silent API from holding the
+ * route open indefinitely; a note that misses it is not retried, and a redelivery is what the
+ * read-before-post check makes safe.
  */
 export const SENTRY_LINK_BACK_BUDGET: Duration.Input = "4 seconds";
 
@@ -142,6 +146,9 @@ export const SentryWriteBack = (
       };
       const fail = (message: string): TriggerError =>
         new TriggerError({ code: "write-back", message });
+      /** Why a request produced no answer: the client error's reason, so a log line can tell a refused connection from a reset one. */
+      const why = (error: HttpClientError.HttpClientError): string =>
+        `${error.reason._tag}${error.message ? `: ${error.message}` : ""}`;
       const notesUrl = (issueId: string): string =>
         `${config.baseUrl}/api/0/issues/${encodeURIComponent(issueId)}/comments/`;
 
@@ -156,9 +163,9 @@ export const SentryWriteBack = (
               HttpClientRequest.get(notesUrl(input.issueId), { headers }),
             )
             .pipe(
-              Effect.mapError(() =>
+              Effect.mapError((error) =>
                 fail(
-                  `Sentry could not be reached to read issue ${input.issueId}'s notes`,
+                  `Sentry gave no answer reading issue ${input.issueId}'s notes (${why(error)}); nothing was posted`,
                 ),
               ),
             );
@@ -204,9 +211,9 @@ export const SentryWriteBack = (
             Effect.provideService(FetchHttpClient.RequestInit, {
               keepalive: false,
             }),
-            Effect.mapError(() =>
+            Effect.mapError((error) =>
               fail(
-                `Sentry could not be reached to note issue ${input.issueId}`,
+                `Sentry gave no answer to the note on issue ${input.issueId} (${why(error)}); whether it landed is unknown, and a redelivery's read-before-post check settles it`,
               ),
             ),
           );

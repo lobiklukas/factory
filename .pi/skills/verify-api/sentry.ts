@@ -359,7 +359,7 @@ const program = Effect.gen(function* () {
       assert(
         "one log line names the issue, the session and the cause of the dropped call",
         lostLines.length === 1 &&
-          lostLines[0]?.includes("could not be reached") === true,
+          lostLines[0]?.includes("gave no answer") === true,
         `lines=${JSON.stringify(lostLines)}`,
       );
 
@@ -989,6 +989,11 @@ const program = Effect.gen(function* () {
       }),
     ),
   )(linkback);
+  assert(
+    "the linkback phase left its state, so the lost-acknowledgement replay is asserted",
+    lostCase !== null,
+    `${LINKBACK_STATE} is missing or unreadable`,
+  );
   if (lostCase !== null) {
     const beforeLostReplay = yield* Effect.promise(() =>
       ledgerFor(LOSE_ACK_ISSUE),
