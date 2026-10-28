@@ -176,9 +176,9 @@ export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
  * (`HUMAN_GATE_REQUIREMENTS`), whose gate is the transition's `gate`, not the key. A reader is told
  * they are unchecked (`describeDefinition`). `plan_doc` was here until D10 recorded its artifact.
  */
-export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
-  ...HUMAN_GATE_REQUIREMENTS,
-]);
+export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set(
+  HUMAN_GATE_REQUIREMENTS,
+);
 
 /**
  * Every key the factory knows (D4): the checked ones and the declared-but-unchecked ones. An authored
