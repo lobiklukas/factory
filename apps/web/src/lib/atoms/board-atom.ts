@@ -205,6 +205,28 @@ export const taskSpecAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
+ * What a card needs to leave its column (D9): `getTaskExit`, each of the column's requirements met,
+ * unmet with the reason a move would be refused with, or not checked.
+ *
+ * Polled with the board, because what a requirement reads — a run's log, a spec a run declared —
+ * changes under the CLI's and the runs' hands, and the checklist should follow within one interval;
+ * and re-read at once when a move or a run start from this page lands (`BOARD_KEY`, `RUNS_KEY`).
+ */
+export const taskExitAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getTaskExit({ taskId });
+      }),
+    )
+    .pipe(
+      Atom.withReactivity([BOARD_KEY, RUNS_KEY]),
+      Atom.withRefresh(BOARD_POLL),
+    ),
+);
+
+/**
  * Starts a run against a card and sends it its first message (C6): `createSession` with the card
  * named, exactly as `factory board start` does (LOB-61), so a run is one Pi Durable session (B1) and
  * its row lands in `task_runs`; then `sendMessage` with the prompt the person sent from the field

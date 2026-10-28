@@ -92,7 +92,10 @@ import {
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
   NON_EMPTY_DIFF_REQUIREMENT,
+  RUN_COMPLETED_REQUIREMENT,
+  SPEC_DOC_REQUIREMENT,
   Task,
+  TaskExit,
   TaskEvent,
   TaskId,
   TaskRun,
@@ -109,6 +112,7 @@ import type {
 import { SessionId } from "@repo/domain/Session";
 import {
   readRecordedPullRequest,
+  readRunTurn,
   readRecordedReview,
   readVerifyCalls,
 } from "@repo/harness";
@@ -126,8 +130,10 @@ import { measureBaseOf } from "./RepoRemote";
 import { noCheckoutWarning } from "./workspace";
 import {
   type BranchDiff,
+  CHECKED_REQUIREMENTS,
   type CardEvidence,
   exitRequirements,
+  exitView,
   requirementVerdict,
   type RunEvidence,
 } from "./requirements";
@@ -505,6 +511,12 @@ export type TaskServiceShape = {
   readonly spec: (
     taskId: string,
   ) => Effect.Effect<TaskSpec | undefined, TaskError>;
+  /**
+   * What the card needs to leave its column, judged now (D9): the column's whole `requires[]`
+   * under the card's pinned definition, each key met, unmet with the reason `move` would refuse
+   * with, or not checked. An unknown card is `TaskNotFound`.
+   */
+  readonly exit: (taskId: string) => Effect.Effect<TaskExit, TaskError>;
   /**
    * The card as its `task_events` say it is (LOB-260, `./taskProjection`): the history folded,
    * oldest first. An unknown card is `TaskNotFound`; a history that does not start with `created`,
@@ -1705,11 +1717,12 @@ export const TaskServiceLive = Layer.effect(
     /**
      * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
      * truth for what it did). One batched read folds every run's log; none is opened as an owner.
-     * The latest run's branch is measured only when `measureDiff` says the move checks it. The review
+     * What a run's turn, the card's spec and the latest run's branch cost to read is paid only when
+     * `keys` names the requirement that reads it (`run_completed`, `spec_doc`, `non_empty_diff`). The review
      * runs are split out, in the same order, beside the head each of the card's PRs was last
      * reported at (`review_heads`), which says which of them `review_verdict` judges (LOB-241).
      */
-    const cardEvidence = (taskId: string, measureDiff: boolean) =>
+    const cardEvidence = (taskId: string, keys: ReadonlySet<string>) =>
       Effect.gen(function* () {
         const runs = yield* sql<RunRow>`
           SELECT tr.session_id, s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
@@ -1780,10 +1793,21 @@ export const TaskServiceLive = Layer.effect(
                     }),
                 ),
               );
+              const turn = keys.has(RUN_COMPLETED_REQUIREMENT)
+                ? yield* readRunTurn(storage).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new TaskStorageError({
+                          message: `task ${taskId}: run ${sessionId}'s turn does not read: ${cause.message}`,
+                        }),
+                    ),
+                  )
+                : undefined;
               return {
                 sessionId,
                 calls,
                 ...(pr === undefined ? {} : { prUrl: pr.url }),
+                ...(turn === undefined ? {} : { turn }),
               };
             });
           },
@@ -1802,15 +1826,30 @@ export const TaskServiceLive = Layer.effect(
           head: row.head,
         }));
         const latest = changing.at(-1);
-        const evidence: CardEvidence =
-          measureDiff && latest !== undefined
-            ? {
-                runs: recorded,
-                reviews,
-                reviewHeads,
-                diff: yield* branchDiff(latest),
-              }
-            : { runs: recorded, reviews, reviewHeads };
+        // The card's newest spec: the newest `specified` event, which `spec` reads whole; here only
+        // that one exists is needed.
+        const specified = keys.has(SPEC_DOC_REQUIREMENT)
+          ? (yield* sql<{ actor: string; column: string }>`
+              SELECT payload->>'actor' AS actor, payload->>'column' AS "column"
+              FROM task_events
+              WHERE task_id = ${taskId} AND kind = 'specified'
+              ORDER BY id DESC
+              LIMIT 1
+            `)[0]
+          : undefined;
+        const evidence: CardEvidence = {
+          runs: recorded,
+          reviews,
+          reviewHeads,
+          ...(specified === undefined
+            ? {}
+            : {
+                spec: { sessionId: specified.actor, column: specified.column },
+              }),
+          ...(keys.has(NON_EMPTY_DIFF_REQUIREMENT) && latest !== undefined
+            ? { diff: yield* branchDiff(latest) }
+            : {}),
+        };
         return evidence;
       });
 
@@ -1842,9 +1881,7 @@ export const TaskServiceLive = Layer.effect(
           return { unmet: undefined, definition };
         const evidence = yield* cardEvidence(
           input.taskId,
-          requirements.some(
-            (requirement) => requirement.key === NON_EMPTY_DIFF_REQUIREMENT,
-          ),
+          new Set(requirements.map((requirement) => requirement.key)),
         );
         for (const requirement of requirements) {
           const verdict = requirementVerdict(requirement, evidence);
@@ -1863,6 +1900,34 @@ export const TaskServiceLive = Layer.effect(
         }
         return { unmet: undefined, definition };
       });
+
+    const exit = (taskId: string): Effect.Effect<TaskExit, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const pinned = yield* pinnedColumn(taskId);
+          if (pinned === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          const column = pinned.declared;
+          const base = {
+            taskId: TaskId.make(taskId),
+            column: pinned.name,
+            revision: pinned.revision,
+          };
+          // A column the pinned definition does not declare has no requirements to meet.
+          if (column === undefined) return { ...base, requirements: [] };
+          const keys = new Set(
+            column.requires
+              .map((requirement) => requirement.key)
+              .filter((key) => CHECKED_REQUIREMENTS.has(key)),
+          );
+          const evidence = yield* cardEvidence(taskId, keys);
+          return { ...base, requirements: exitView(column, evidence) };
+        }),
+      );
 
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
       withStorage(
@@ -2751,6 +2816,7 @@ export const TaskServiceLive = Layer.effect(
       comments,
       declareSpec,
       spec,
+      exit,
       replay,
       listCards,
       listRuns,

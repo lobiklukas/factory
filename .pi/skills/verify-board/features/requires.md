@@ -1,11 +1,14 @@
-# `requires[]` on exit: the `building` gate, the `verified` gate and the reviewer's verdict
+# `requires[]` on exit: the `spec_doc` and `run_completed` gates, the `building` gate, the `verified` gate and the reviewer's verdict
 
 **Status: passing.**
 
 ## What it is
 
 A column's exit requirements, checked when a card leaves it (docs/board.md B5, B8; LOB-80, part 3 of
-LOB-16). The default pipeline's `building` declares `non_empty_diff` and `pr_link` from version 1, and
+LOB-16). Since D9 `specifying`'s `spec_doc` and `building`'s `run_completed` are checked as well:
+`specifying → planning` needs a `specified` event on the card, and `building → review` needs the card's
+latest run to have completed a turn (not failed, interrupted, budget-stopped, still working or absent),
+checked before the other two `building` keys. `requires.sh` proves each with one refusal and one pass. The default pipeline's `building` declares `non_empty_diff` and `pr_link` from version 1, and
 both are checked since LOB-240: `building → review` goes through only when the card's latest run's
 branch has a committed change against its base — measured by the PR step's own `diffSize`
 (`git diff --numstat base...head`, LOB-196) in the run's registered checkout — and that run's log
@@ -36,8 +39,8 @@ document out of its review runs', and measures the latest run's branch, before i
 
 ```sh
 factory board move --task tsk_… --to review --expect-revision 4
-# error: requirement_unmet: the move building → review needs "non_empty_diff" (a non-empty diff),
-#   which is not met: the card has no runs, so no branch carries its change             (exit 1)
+# error: requirement_unmet: the move building → review needs "run_completed" (a run that completed),
+#   which is not met: the card has no runs, so none completed a turn                    (exit 1)
 
 factory board start --task tsk_… --prompt "build this card"   # the builder commits on its branch
 factory board move --task tsk_… --to review --expect-revision 4 --actor ses_…
@@ -133,8 +136,11 @@ reviewer session and the review its log records; a replay's answer only),
 
 ## What it does not prove
 
-The other keys of the default pipeline (`spec_doc`, `plan_doc`, `run_completed`)
-are not checked: nothing records their evidence yet, and `requirements.ts` says so. A review run that
+The other key of the default pipeline (`plan_doc`)
+is not checked: nothing records its evidence yet, and `requirements.ts` says so. A faulted, interrupted
+or unfinished latest run refusing `run_completed` is `TaskService.test.ts`'s ("refuses building → review
+after a faulted run…") and `runEnding.test.ts`'s, not driven here: the faux backend cannot fail a model
+request, so `requires.sh`'s `run_completed` refusal is the no-run one. A review run that
 has recorded no verdict yet is refused naming its head in `TaskService.test.ts`, not here: the faux
 reviewer settles before a second command could race it. Nor is a push the review trigger has not
 been told of (no `synchronize` yet): the newest review run is then the previous head's, and its pass

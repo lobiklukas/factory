@@ -88,6 +88,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |
+| Exit checklist               | passing | [exit-checklist.md](exit-checklist.md) (`exit-checklist.sh`)                  |
 | The dashboard's credential   | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
 ## Known gaps

@@ -95,6 +95,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       listTaskComments: (input) => tasks.comments(input.taskId),
       getTaskSpec: (input) =>
         tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
+      getTaskExit: (input) => tasks.exit(input.taskId),
       listTaskRuns: (input) => tasks.listRuns(input.taskId),
       listAttention: (input) => tasks.attention(input.boardId),
     });

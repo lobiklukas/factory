@@ -66,7 +66,8 @@ and a version-1 `factory.spec` value reading as no spec).
 ## What it does not prove
 
 - **The stage using it.** That is verify-board's `features/specify.md`. The `specifying` column's
-  exit requirement (`spec_doc`) is still not checked against the document.
+  exit requirement (`spec_doc`) is met by the card holding a `specified` event, not checked against
+  the document's content (D9; verify-board's `requires.sh`).
 - **A spec over the wire from the session.** `getSession` does not carry the spec; the board reads
   the card's copy with `getTaskSpec`, which verify-board drives.
 - **A fork's spec.** A fork copies entries, not documents, so a forked session starts with no spec.

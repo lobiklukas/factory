@@ -35,6 +35,7 @@ import {
   GetBoardInput,
   GetDefinitionInput,
   GetTaskInput,
+  GetTaskExitInput,
   GetTaskSpecInput,
   HumanGateRequired,
   InvalidDefinition,
@@ -53,6 +54,7 @@ import {
   TaskComment,
   TaskNotFound,
   TaskRun,
+  TaskExit,
   TaskSpec,
   TaskStorageError,
   UndeclaredTransition,
@@ -509,6 +511,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getTaskSpec", {
     payload: GetTaskSpecInput,
     success: Schema.NullOr(TaskSpec),
+    error: TaskErrorSchema,
+  }),
+  // What the card needs to leave its column (D9): each exit requirement met, unmet with the reason
+  // the move's refusal would give, or not checked. Judged by `moveTask`'s own verdicts.
+  Rpc.make("getTaskExit", {
+    payload: GetTaskExitInput,
+    success: TaskExit,
     error: TaskErrorSchema,
   }),
   // A card's runs, newest first (LOB-76): how the card pane keeps a run started from it in reach.

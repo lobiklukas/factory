@@ -286,6 +286,7 @@ try {
     "listSessions",
     "listTasks",
     "getTaskSpec",
+    "getTaskExit",
     "listTaskComments",
   ];
   const w1From = Date.now();

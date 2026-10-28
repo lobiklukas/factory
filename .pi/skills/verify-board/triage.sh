@@ -92,9 +92,11 @@ check "board block --reason needs_input parks the card with no revision named" \
 # The gate card: in planning with an idle run started there (--idle: the run opens and waits; a
 # bare `board start` sends the card's prompt since C6, which would leave the run busy).
 run gated-move1 board move --task "${GATED:-tsk_missing}" --to specifying --expect-revision 1 --api "$API_URL"
-run gated-move2 board move --task "${GATED:-tsk_missing}" --to planning --expect-revision 2 --api "$API_URL"
+# `specifying`'s exit needs the card's spec (D9); `lib/seed-spec.ts` declares one, a revision on.
+TASK_ID="${GATED:-tsk_missing}" bun "$SKILL/../lib/seed-spec.ts" > "$RUN_DIR/triage-gated-spec.json" 2>&1
+run gated-move2 board move --task "${GATED:-tsk_missing}" --to planning --expect-revision 3 --api "$API_URL"
 check "the gate card is moved on to planning" \
-  "$([ "$rc" = "0" ] && has gated-move2 "to planning (revision 3)" && echo 0 || echo 1)" "exit=$rc"
+  "$([ "$rc" = "0" ] && has gated-move2 "to planning (revision 4)" && echo 0 || echo 1)" "exit=$rc"
 run gated-start board start --task "${GATED:-tsk_missing}" --idle --api "$API_URL"
 GATE_SESSION="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/triage-gated-start.txt" | head -1)"
 check "a run is started in planning and left idle" \
@@ -143,9 +145,9 @@ check "board runs on a card with no run says so" \
 # The shared board pins the newest default version, which caps runs in flight (2 per board, 1 per
 # task). The gate run never gets a prompt, so it is in flight until its card is finished; left there,
 # two triage runs would fill the board and refuse every later drive's start on it.
-run gated-cancel board move --task "${GATED:-tsk_missing}" --to canceled --expect-revision 3 --api "$API_URL"
+run gated-cancel board move --task "${GATED:-tsk_missing}" --to canceled --expect-revision 4 --api "$API_URL"
 check "the gate card is canceled, freeing its run's slot on the shared board" \
-  "$([ "$rc" = "0" ] && has gated-cancel "to canceled (revision 4)" && echo 0 || echo 1)" "exit=$rc"
+  "$([ "$rc" = "0" ] && has gated-cancel "to canceled (revision 5)" && echo 0 || echo 1)" "exit=$rc"
 
 {
   printf '{\n  "apiUrl": "%s",\n  "askedTask": "%s",\n  "gatedTask": "%s",\n  "gateSession": "%s",\n  "checks": {\n' \

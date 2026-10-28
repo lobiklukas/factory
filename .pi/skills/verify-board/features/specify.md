@@ -132,8 +132,11 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
   ("records the run's own column when a person moved the card on …"); the drive does not move a card
   under a live run.
 - **`spec_doc` as an exit requirement.** `specifying` declares `spec_doc` in `requires[]`, and it is
-  still not checked (`packages/core/src/requirements.ts`): the move to `planning` goes through with
-  or without a spec.
+  checked since D9 (`packages/core/src/requirements.ts`): the move to `planning` is refused with no
+  `specified` event on the card. This drive's run declares one before the move, so it passes; the
+  refusal and the pass are [requires.md](requires.md)'s, and the checklist in the pane is
+  [verify-web's exit-checklist.md](../../verify-web/features/exit-checklist.md). A spec's content
+  (open gaps) is not what the key checks.
 - **The stage's refusals, or that the session applied it.** The drive shows the run's column
   resolving to the stage and a read getting through, which a session opened without the stage would
   also do. That `openSession` composes the stage and it refuses writes is `packages/core`'s

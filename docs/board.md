@@ -173,8 +173,8 @@ then posts the same spec on the card as a `specified` task event, idempotent by
 declared, and the event is the card's copy, written in the same call, so the board reads it without
 folding every run's log. The event records the run's own column, the one its role came from, so a
 specifier resumed after a person moved the card on still declares its spec from `specifying`. A spec
-is not an ask: a gap still parks the card through `ask`, and the `spec_doc` exit requirement is
-still not checked.
+is not an ask: a gap still parks the card through `ask`; the `spec_doc` exit requirement is met by
+the event's existence (D9, below).
 
 Built (LOB-36): the reviewer. A **review run** — a session opened for one pull request's head, which
 its log records as `factory.review`'s target — is the read-only `reviewing` stage whatever its
@@ -259,6 +259,17 @@ and that run's log must record a PR (`factory.pr`, LOB-177) — so a card cannot
 change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
+
+Built (D9): `spec_doc` and `run_completed` are checked too. `spec_doc` (`specifying`) is met when the
+card holds a `specified` event — a specifying run's `spec` tool wrote one (LOB-238) — whatever its gaps,
+which stay the ask's to raise. `run_completed` (`building`, first among its keys) reads the card's
+_latest_ run, as `pr_link` does, and is met when that run's newest turn ended on its own
+(`runTurnOf`): a run still working or parked, one ending on a failed or aborted model answer, one
+interrupted (C8) or one its budget stopped has not completed, and a card with no run has completed
+nothing. `plan_doc` and the `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
+which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
+own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
+clickable, because the server's answer is the decision.
 
 Built (C18): a run whose column requires `pr_link` opens its PR itself. When this process sees the run
 settle (its session goes idle), the control plane runs the same PR step `factory pr` and the

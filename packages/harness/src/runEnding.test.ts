@@ -12,6 +12,7 @@ import {
   INTERRUPTED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
   runEndingOf,
+  runTurnOf,
 } from "./projection";
 
 let nextId = 1;
@@ -97,5 +98,74 @@ describe("runEndingOf", () => {
 
   it("is finished for a log with no run to have stopped", () => {
     expect(ending()).toBe("finished");
+  });
+});
+
+/** The same window as `ending`, read as `run_completed` reads it (D9). */
+const turn = (...oldestFirst: EntryRecord[]) =>
+  runTurnOf([...oldestFirst].reverse());
+
+describe("runTurnOf", () => {
+  it("is completed for a run whose newest answer stopped on its own", () => {
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "toolUse"),
+        entry("pi.tool-result"),
+        entry("pi.assistant", "stop"),
+      ),
+    ).toBe("completed");
+  });
+
+  /** Mutation: count a tool-use answer as a completed turn — a run that died mid-loop passes. */
+  it("is unfinished while the run has no answer, or its newest answer still wants a tool", () => {
+    expect(turn(entry("pi.user"))).toBe("unfinished");
+    expect(turn(entry("pi.user"), entry("pi.assistant", "toolUse"))).toBe(
+      "unfinished",
+    );
+    expect(turn()).toBe("unfinished");
+  });
+
+  it("is failed for an error or an abort, interrupted or budget for the markers, and the markers win", () => {
+    expect(turn(entry("pi.user"), entry("pi.assistant", "error"))).toBe(
+      "failed",
+    );
+    expect(turn(entry("pi.user"), entry("pi.assistant", "aborted"))).toBe(
+      "failed",
+    );
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "stop"),
+        entry(INTERRUPTED_ENTRY_KIND),
+      ),
+    ).toBe("interrupted");
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "toolUse"),
+        entry(BUDGET_STOPPED_ENTRY_KIND),
+      ),
+    ).toBe("budget");
+  });
+
+  it("reads only the newest run, so an earlier failure does not carry into a run that completed", () => {
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "error"),
+        entry("pi.user"),
+        entry("pi.assistant", "stop"),
+        entry(NO_CHANGE_ENTRY_KIND),
+      ),
+    ).toBe("completed");
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "stop"),
+        entry("pi.user"),
+        entry("pi.assistant", "error"),
+      ),
+    ).toBe("failed");
   });
 });
