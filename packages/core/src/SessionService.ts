@@ -181,6 +181,8 @@ import {
   writeActor,
   writeBudget,
   writeCurationUsage,
+  readProposedIssues,
+  recordCreatedIssue,
   writeProposedIssues,
   writeRepoBinding,
   writeReviewTarget,
@@ -203,10 +205,13 @@ import type {
   RecordPageInput,
 } from "@repo/domain/Page";
 import { PageStrings } from "@repo/domain/Page";
-import type {
-  ProposalsRefused,
-  ProposeDecompositionInput,
-  ProposeDecompositionResult,
+import {
+  ApproveProposalsError,
+  type ApproveProposalsInput,
+  type ApproveProposalsResult,
+  type ProposalsRefused,
+  type ProposeDecompositionInput,
+  type ProposeDecompositionResult,
 } from "@repo/domain/Decomposition";
 import { isSafeBranchName } from "./git";
 import { mintSessionId } from "./ids";
@@ -217,6 +222,7 @@ import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
 } from "./SessionWriteBack";
+import { ProposalTracker, proposalIssueBody } from "./ProposalTracker";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { inspectCheckout, workTreeRoot } from "./repos";
 import { removeWorkspace, resolveWorkspace } from "./workspace";
@@ -412,6 +418,25 @@ export type SessionServiceShape = {
   ) => Effect.Effect<
     ProposeDecompositionResult,
     SessionError | ProposalsRefused
+  >;
+  /**
+   * Create the approved proposals as tracker issues (LOB-202, part 2 of LOB-43).
+   *
+   * `approved` are indices into the session's `factory.proposedIssues`. Each approved proposal not
+   * yet created becomes one child of the issue the session was delegated from, and its id is written
+   * back to the document as soon as the tracker answers — before the next request — so a failure
+   * halfway leaves a document a retry can finish rather than repeat. Then each `blockedBy` edge
+   * whose two ends both exist becomes a relation; an edge to a proposal nobody has approved yet
+   * waits for it. Unapproved proposals get nothing. It writes no card and no `task_links` row.
+   *
+   * With no tracker configured, or for a session no tracker issue opened, it refuses as
+   * `ApproveProposalsError` before any request is made and leaves the document unchanged.
+   */
+  readonly approveProposals: (
+    input: ApproveProposalsInput,
+  ) => Effect.Effect<
+    ApproveProposalsResult,
+    SessionError | ApproveProposalsError
   >;
   /**
    * Open the session's PR, or return the one its log already records (LOB-177).
@@ -744,6 +769,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const context = yield* Effect.context<never>();
       /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
       const writeBack = yield* SessionWriteBack;
+      /** Where approved proposals become issues; refuses unless a deployment wires a tracker (LOB-202). */
+      const tracker = yield* ProposalTracker;
       const writeBackBudget = Duration.fromInputUnsafe(
         options.writeBackBudget ?? SESSION_WRITE_BACK_BUDGET,
       );
@@ -758,6 +785,38 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * the log's single owner is what excludes, which is why no lock is stored anywhere.
        */
       const prGate = yield* Semaphore.make(1);
+      /**
+       * Serializes the approvals of one session, for the reason `prGate` serializes PR opens: two
+       * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
+       * session, because a slow or unreachable tracker must hold up only the session that asked, and
+       * an entry lives only while someone holds or awaits it. The tracker's own marker is what
+       * excludes a second process.
+       */
+      const proposalLocks = new Map<
+        SessionId,
+        { readonly semaphore: Semaphore.Semaphore; users: number }
+      >();
+      const withProposalGate = <A, E>(
+        sessionId: SessionId,
+        effect: Effect.Effect<A, E>,
+      ): Effect.Effect<A, E> =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const entry = proposalLocks.get(sessionId) ?? {
+              semaphore: Semaphore.makeUnsafe(1),
+              users: 0,
+            };
+            entry.users += 1;
+            proposalLocks.set(sessionId, entry);
+            return entry;
+          }),
+          (entry) => entry.semaphore.withPermits(1)(effect),
+          (entry) =>
+            Effect.sync(() => {
+              entry.users -= 1;
+              if (entry.users === 0) proposalLocks.delete(sessionId);
+            }),
+        );
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -3421,6 +3480,101 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * One approval of proposals (LOB-202, part 2 of LOB-43).
+       *
+       * Everything that can be refused without the tracker is refused first, from the document and
+       * the indices; the tracker is then opened, which refuses a process with no tracker and a
+       * session with no delegating issue before any request is made. Creations run in index order,
+       * one request at a time, and a created proposal is recorded in the document before the next is
+       * sent: a failure stops there with `tracker_failed` naming what was created, and the retry
+       * skips those. The edges are the last pass and run over every created proposal, not only the
+       * ones this call created, which is how approving a blocker later creates the edge that was
+       * waiting for it.
+       */
+      const approveProposals = (
+        input: ApproveProposalsInput,
+      ): Effect.Effect<
+        ApproveProposalsResult,
+        SessionError | ApproveProposalsError
+      > =>
+        withProposalGate(
+          input.sessionId,
+          Effect.gen(function* () {
+            const refuse = (
+              reason: ApproveProposalsError["reason"],
+              message: string,
+              created: readonly number[] = [],
+            ) => new ApproveProposalsError({ reason, message, created });
+            const row = yield* requireSession(input.sessionId);
+            const owner = yield* acquireOwner(input.sessionId, row);
+            const stored = yield* readProposedIssues(owner.harness, owner.root);
+            if (stored === undefined) {
+              return yield* refuse(
+                "no_proposals",
+                `session ${input.sessionId} has no proposed issues to approve`,
+              );
+            }
+            const unknown = input.approved.filter(
+              (index) => index < 0 || index >= stored.proposals.length,
+            );
+            if (unknown.length > 0) {
+              return yield* refuse(
+                "unknown_proposal",
+                `${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not proposals of session ${input.sessionId}, which has ${stored.proposals.length}`,
+              );
+            }
+            const target = yield* tracker.open(input.sessionId);
+            const proposals = [...stored.proposals];
+            const created: number[] = [];
+            const retag = (error: ApproveProposalsError) =>
+              refuse(error.reason, error.message, [...created]);
+            for (const index of [...new Set(input.approved)].sort(
+              (left, right) => left - right,
+            )) {
+              const proposal = proposals[index];
+              if (proposal === undefined || proposal.created !== undefined) {
+                continue;
+              }
+              const issue = yield* target
+                .create({
+                  title: proposal.title,
+                  body: proposalIssueBody(proposal),
+                })
+                .pipe(Effect.mapError(retag));
+              const recorded = yield* recordCreatedIssue(
+                owner.root,
+                index,
+                proposal.title,
+                issue,
+              );
+              if (!recorded) {
+                return yield* refuse(
+                  "proposals_changed",
+                  `the proposals of session ${input.sessionId} changed while proposal ${index} was being created as ${issue.identifier}; approve again`,
+                  created,
+                );
+              }
+              proposals[index] = { ...proposal, created: issue };
+              created.push(index);
+            }
+            let related = 0;
+            for (const proposal of proposals) {
+              if (proposal.created === undefined) continue;
+              for (const blockerIndex of proposal.blockedBy) {
+                const blocker = proposals[blockerIndex]?.created;
+                if (blocker === undefined) continue;
+                const made = yield* target
+                  .relate({ blocker, blocked: proposal.created })
+                  .pipe(Effect.mapError(retag));
+                if (made) related += 1;
+              }
+            }
+            yield* touchActivity(input.sessionId);
+            return { proposals, created, related };
+          }),
+        );
+
+      /**
        * One page of the session list, newest activity first.
        *
        * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
@@ -4055,6 +4209,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         listPages,
         curate,
         proposeDecomposition,
+        approveProposals,
         openPullRequest: openPr,
         releaseWorkspace,
         roleModel,

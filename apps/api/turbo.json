@@ -26,6 +26,7 @@
         "APPROVAL_REQUIRED",
         "FAUX_ASK",
         "FAUX_SPEC",
+        "FAUX_DECOMPOSITION",
         "FAUX_REVIEW",
         "FAUX_COST",
         "SESSION_BUDGET",
