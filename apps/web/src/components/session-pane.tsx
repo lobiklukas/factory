@@ -34,6 +34,7 @@ import {
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { prLink } from "@/lib/pr-link";
+import { sessionModel } from "@/lib/server-info-view";
 import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { CompactButton } from "@/components/compact-button";
@@ -333,6 +334,16 @@ export const SessionPane = ({
             {sessionId}
           </span>
           <PrAnchor prUrl={view?.summary.prUrl} />
+          {/* The model this session is pinned to (LOB-272): faux/faux-1 is a scripted answer. */}
+          {sessionModel(view?.summary.model) === null ? null : (
+            <span
+              data-session-model
+              title="The model this session runs on"
+              className="shrink-0 font-mono text-[10px] text-muted-foreground"
+            >
+              {view?.summary.model}
+            </span>
+          )}
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:flex-nowrap">
           {attaching ? (
