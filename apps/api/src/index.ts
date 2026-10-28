@@ -39,6 +39,11 @@ import {
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import {
+  describeFauxBackend,
+  describeLoadedEnvFiles,
+  loadedEnvFiles,
+} from "./EnvFiles";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
 
@@ -407,6 +412,18 @@ const HttpLive = Effect.gen(function* () {
     Option.isSome(model.apiKey) ? "anthropic" : "faux",
   );
   yield* Effect.logInfo(
+    describeLoadedEnvFiles(
+      yield* loadedEnvFiles({
+        execArgv: process.execArgv,
+        cwd: process.cwd(),
+        // Bun picks its autoloaded files from NODE_ENV, so the boot line reads the same variable.
+        nodeEnv: Option.getOrUndefined(
+          yield* Config.option(Config.String("NODE_ENV")),
+        ),
+      }).pipe(Effect.provide(BunServices.layer)),
+    ),
+  );
+  yield* Effect.logInfo(
     `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
   );
   yield* Effect.logInfo(
@@ -417,9 +434,7 @@ const HttpLive = Effect.gen(function* () {
     }),
   );
   if (backend === "faux") {
-    yield* Effect.logWarning(
-      "no ANTHROPIC_API_KEY: sessions run against the faux provider and produce scripted answers",
-    );
+    yield* Effect.logWarning(describeFauxBackend(Option.isSome(model.backend)));
   }
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).
