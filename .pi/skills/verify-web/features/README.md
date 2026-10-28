@@ -27,6 +27,10 @@ from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571
 `.pi/skills/verify-board`'s `drive.sh` opened its build run's PR in the browser there
 ([pr-open.md](pr-open.md)).
 
+`board-create.sh` (the New board form, C5) passed **20/20** on 2026-10-28 from the `agent/C5` worktree,
+API `:9561` / web `:3561`, on an empty throwaway database; `drive.mjs` passed 120/120 there (API `:9560` /
+web `:3560`), its board now made through the form.
+
 `model.sh` (the New session model picker, LOB-274) last passed **11/11** on 2026-10-28 from the
 `agent/LOB-274` worktree, API `:9505` / web `:3505`.
 
@@ -53,6 +57,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Open pull request          | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor    | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories               | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| New board (boards page)    | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
 | New card (board page)      | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
 | Earlier history            | passing | [history.md](history.md) (`history.sh`)                                       |
 | Model backend and model    | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |

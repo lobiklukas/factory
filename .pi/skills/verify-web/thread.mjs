@@ -9,7 +9,7 @@
 //             person — the specifier's column, where a run asks rather than builds
 //   empty     the card pane's Thread section says the card has no comment, and its composer is a
 //             note's (**Comment**), since nothing is blocked
-//   parked    **Start run** in the pane, then a message typed into the run's composer: the faux run
+//   parked    **Start run** then **Send** in the pane (the first message is the card's default prompt): the faux run
 //             reads, then asks, and ends parked. The pane — without a reload — shows the card blocked
 //             `needs_input`, the question in its thread verbatim with kind, actor (the run's session
 //             id) and time, and the composer turned into **Answer**
@@ -250,9 +250,14 @@ const lastRead = (tag) => pageReads.findLast((read) => read.tag === tag);
 const shot = (name) =>
   page.screenshot({ path: path.join(EVIDENCE_DIR, `${name}.png`) });
 
-/** **Start run** in the pane, then one message typed into the run's own composer. */
-const startAndMessage = async (message, previous) => {
+/**
+ * **Start run** in the pane, then **Send**: the first message is the card's default prompt (C6), so
+ * the run's first turn is the one that asks — nothing is typed into the run's composer.
+ */
+const startRun = async (previous) => {
   await page.locator("aside[data-card-pane] [data-start-run]").click();
+  // Start run opens the prompt field (C6); Send opens the run and sends its text.
+  await page.locator("aside[data-card-pane] [data-start-send]").click();
   const started = await waitFor(
     (before) => {
       const run = new URLSearchParams(window.location.search).get("run");
@@ -262,10 +267,6 @@ const startAndMessage = async (message, previous) => {
     20_000,
   );
   const run = new URL(page.url()).searchParams.get("run");
-  const composer = page.getByPlaceholder("Send a message to this session");
-  await composer.waitFor({ timeout: 20_000 });
-  await composer.fill(message);
-  await composer.press("Enter");
   return { started, run };
 };
 
@@ -321,7 +322,7 @@ assert(
 await page.evaluate(() => {
   window.__threadNoReload = "parked";
 });
-const first = await startAndMessage("Specify this card.", null);
+const first = await startRun(null);
 const parkedShown = await waitFor(
   (card) =>
     document
@@ -689,7 +690,7 @@ assert(
 );
 
 // --- told -----------------------------------------------------------------------------------------
-const second = await startAndMessage("Specify this card, again.", first.run);
+const second = await startRun(first.run);
 const told = spawnSync(
   "bun",
   [path.join(ROOT, ".pi/skills/verify-board/ask.ts")],
