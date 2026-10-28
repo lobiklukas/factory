@@ -48,6 +48,11 @@ mode, in one Turborepo terminal UI. To run the API alone, headless, as scripts a
 bun run --cwd apps/api dev
 ```
 
+If those ports are taken, set `PORT` and `VITE_PORT` (shell or `.env`), tell the API which origin the
+dashboard is served from (`ALLOWED_ORIGINS=http://localhost:3550`, or the browser's calls are blocked
+by CORS), point the dashboard at the API (`VITE_SERVER_URL=http://localhost:9550`) and the CLI too
+(`FACTORY_API_URL=http://localhost:9550`).
+
 Both read the repository-root `.env` themselves (see [Which `.env` is read](#which-env-is-read)).
 With no `.env` there is no model credential, and the API falls back to a scripted **faux** model: the
 rehearsal below needs nothing more. Ports, the database and the model are all environment variables,

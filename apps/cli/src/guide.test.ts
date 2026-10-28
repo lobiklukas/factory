@@ -13,7 +13,8 @@
  * operator to set is one the repository documents (and a typo is caught here, not by a webhook that
  * stays unarmed).
  */
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -147,6 +148,7 @@ const parseHelp = (text: string): Help => {
   };
 };
 
+const execFileAsync = promisify(execFile);
 const helpCache = new Map<string, Promise<Help>>();
 
 /** `factory <path> --help`, parsed. The CLI's own parser is the oracle, so a rename cannot slip by. */
@@ -154,17 +156,10 @@ const helpFor = (path: ReadonlyArray<string>): Promise<Help> => {
   const key = path.join(" ");
   const cached = helpCache.get(key);
   if (cached !== undefined) return cached;
-  const result = new Promise<Help>((resolve, reject) => {
-    const child = spawn("bun", [CLI, ...path, "--help"], {
-      cwd: ROOT,
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-    });
-    let out = "";
-    child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (out += chunk.toString()));
-    child.on("error", reject);
-    child.on("close", () => resolve(parseHelp(out)));
-  });
+  const result = execFileAsync("bun", [CLI, ...path, "--help"], {
+    cwd: ROOT,
+    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+  }).then(({ stdout, stderr }) => parseHelp(`${stdout}\n${stderr}`));
   helpCache.set(key, result);
   return result;
 };
