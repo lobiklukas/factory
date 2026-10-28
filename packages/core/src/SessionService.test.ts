@@ -8642,6 +8642,7 @@ describe("admission control", () => {
     extra: {
       readonly idleTimeoutMs?: number;
       readonly sweepIntervalMs?: number;
+      readonly sessionRoot?: string;
     } = {},
   ) =>
     ManagedRuntime.make(
@@ -8875,6 +8876,91 @@ describe("admission control", () => {
       const codes = exits.map((exit) => refusalOf(exit)?.code ?? "ok");
       expect(codes.filter((code) => code === "ok")).toHaveLength(2);
       expect(codes.filter((code) => code === "at_capacity")).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("hands the slot back when a fork fails after it was admitted", async () => {
+    const runtime = cappedRuntime(1);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const parent = yield* sessions.create({ title: "fork parent" });
+          // Every owner released, so the one slot is free for the fork to reserve.
+          yield* sessions.close;
+          // Admitted, then refused inside its owner's open: `at` names no entry of the parent.
+          const fork = yield* Effect.exit(
+            sessions.fork({ sessionId: parent.id, at: "999999" }),
+          );
+          // The reservation went back with the failure, so the one slot takes a plain create.
+          const after = yield* Effect.exit(
+            sessions.create({ title: "after the failed fork" }),
+          );
+          yield* sessions.close;
+          return { fork, after };
+        }),
+      );
+      expect(refusalOf(outcome.fork)?.code).toBe("invalid_input");
+      expect(refusalOf(outcome.after)).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("resumes a boot's marked run and mission at capacity, and counts their owners", async () => {
+    // A root of its own: the boot resumes read every row marked under the process's root.
+    const root = mkdtempSync(join(tmpdir(), "factory-core-admission-boot-"));
+    const runtime = cappedRuntime(1, { sessionRoot: root });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          const run = yield* sessions.create({ title: "marked run" });
+          yield* sessions.close;
+          const mission = yield* sessions.create({ title: "marked mission" });
+          yield* sessions.close;
+          // The one slot taken by a client, then the marks a dead process would have left.
+          yield* sessions.create({ title: "the one slot" });
+          yield* sql`
+            UPDATE sessions SET run_session_root = ${root} WHERE id = ${run.id}
+          `;
+          yield* sql`
+            UPDATE sessions SET mission_in_flight = true, mission_session_root = ${root}
+            WHERE id = ${mission.id}
+          `;
+          yield* sessions.resumeRuns;
+          yield* sessions.resumeMissions;
+          // Neither had anything left to continue, so each mark went: the boot reopened both rather
+          // than being refused at capacity and leaving them for the next boot.
+          const marks = yield* sql<{
+            id: string;
+            runSessionRoot: string | null;
+            missionInFlight: boolean;
+          }>`
+            SELECT id, run_session_root AS "runSessionRoot", mission_in_flight AS "missionInFlight"
+            FROM sessions WHERE id IN (${run.id}, ${mission.id})
+          `;
+          const runMode = (yield* sessions.get(run.id)).session.mode;
+          const missionMode = (yield* sessions.get(mission.id)).session.mode;
+          // The owners the boot opened count: the server is over its cap, so a create is refused.
+          const create = yield* Effect.exit(
+            sessions.create({ title: "past the resumed" }),
+          );
+          yield* sessions.close;
+          return { marks, runMode, missionMode, create };
+        }),
+      );
+      expect(outcome.marks).toHaveLength(2);
+      for (const mark of outcome.marks) {
+        expect(mark.runSessionRoot).toBeNull();
+        expect(mark.missionInFlight).toBe(false);
+      }
+      expect(outcome.runMode).toBe("live");
+      expect(outcome.missionMode).toBe("live");
+      expect(refusalOf(outcome.create)?.code).toBe("at_capacity");
     } finally {
       await runtime.dispose();
     }

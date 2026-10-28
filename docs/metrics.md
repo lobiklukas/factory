@@ -52,5 +52,7 @@ accepts the body, what a backend does with the names — is the OTLP row of
 
 Admission control's refusal (LOB-70) is `factory.refusals{reason="at_capacity"}`; with
 `factory.session.active` beside it, an operator sees both how close the process runs to
-`SESSION_MAX_CONCURRENT` and how often it said no. The board's queue depth (LOB-71) joins this set
-when it lands.
+`SESSION_MAX_CONCURRENT` and how often it said no. Only a request's refusal counts: a reopen the
+server makes on its own behalf (a replay's comparison commit) is refused at capacity without being
+counted, and a boot's resume of a run or mission is never refused. The board's queue depth (LOB-71)
+joins this set when it lands.

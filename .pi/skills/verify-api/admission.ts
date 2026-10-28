@@ -12,16 +12,19 @@
 //   webhook    a signed generic delivery that would open a session is answered 503 at-capacity with
 //              Retry-After, never a 500
 //   release    nothing touches the sessions, so the idle sweep releases their owners; the refused
-//              create, retried with the same requestId, then succeeds (its refusal left no row to
-//              dedupe on), and every retry before that was the same typed refusal
+//              create, retried with the same requestId, then succeeds live (its refusal left no row to
+//              dedupe on), at least one retry before that was refused and every one was the same
+//              typed refusal, and the sessions that filled the cap are historical (the sweep freed it)
 //   redeliver  the same generic delivery, sent again, is processed and opens its session
+//
+// CAP is at least 2: the retried create takes one slot, and the redelivery needs another.
 //
 // Env: API_URL, EVIDENCE_DIR, CAP, IDLE_TIMEOUT_MS, TRIGGER_SECRET, ADMISSION_REPO, ADMISSION_CHECKOUT.
 import { createHmac, randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc } from "@repo/domain/Rpc";
-import { RepoSlug, type SessionSummary } from "@repo/domain/Session";
+import { RepoSlug, SessionId, type SessionSummary } from "@repo/domain/Session";
 import { Effect, Exit } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor } from "./harness.ts";
@@ -54,6 +57,7 @@ const observed: {
   webhook: Array<{ status: number; retryAfter: string | null; body: unknown }>;
   retries: Array<string>;
   afterRelease?: string | undefined;
+  filledModes?: Array<string> | undefined;
   checks: Record<string, CheckRecord>;
 } = {
   apiUrl: API_URL,
@@ -180,14 +184,34 @@ const program = Effect.gen(function* () {
   }
   observed.afterRelease = created?.id;
   assert(
-    "after the idle sweep releases the owners, the refused create succeeds",
-    created !== undefined && !observed.admitted.includes(created.id),
-    `session=${created?.id ?? "none"} after ${observed.retries.length} refused retries`,
+    "after the idle sweep releases the owners, the refused create succeeds with an open owner",
+    created !== undefined &&
+      !observed.admitted.includes(created.id) &&
+      created.mode === "live",
+    `session=${created?.id ?? "none"} mode=${created?.mode ?? "none"} after ${observed.retries.length} refused retries`,
   );
+  // At least one retry was refused: a refusal that had left a row would be deduped on its request id
+  // at once, without a slot, and every check below would pass on a create that never waited.
   assert(
-    "every retry before the release was the same typed refusal",
-    observed.retries.every((code) => code === "at_capacity"),
+    "the create was refused until the release, every retry the same typed refusal",
+    observed.retries.length > 0 &&
+      observed.retries.every((code) => code === "at_capacity"),
     `retries=${observed.retries.join(",") || "(none)"}`,
+  );
+  // The slot came from the sweep: every session that filled the cap has no owner now. Read only once
+  // the create is in, so the reads (use) cannot have kept an owner open.
+  const filledModes = yield* Effect.forEach(observed.admitted, (sessionId) =>
+    Effect.map(
+      client.getSession({ sessionId: SessionId.make(sessionId) }),
+      (snapshot) => snapshot.session.mode,
+    ),
+  );
+  observed.filledModes = filledModes;
+  assert(
+    "the idle sweep released every session that filled the cap",
+    filledModes.length === CAP &&
+      filledModes.every((mode) => mode === "historical"),
+    `modes=${filledModes.join(",")}`,
   );
   const again = yield* client.createSession({
     title: "the same request again",

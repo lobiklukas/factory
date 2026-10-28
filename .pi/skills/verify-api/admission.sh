@@ -11,7 +11,7 @@
 #   DATABASE_URL=postgres://…/factory_<slug> ./admission.sh
 #   ADMISSION_PORT=9500 ADMISSION_CAP=3 ./admission.sh
 #
-# Env: ADMISSION_PORT (9432 when unset), ADMISSION_CAP (2), ADMISSION_IDLE_MS (3000), DATABASE_URL
+# Env: ADMISSION_PORT (9432 when unset), ADMISSION_CAP (2; at least 2), ADMISSION_IDLE_MS (3000), DATABASE_URL
 # (the API's database; the shell's own when unset, as every skill), EVIDENCE_DIR.
 # Evidence: .verify/evidence/latest/api/admission.json (every check the driver made, the refusal and
 # the webhook answers), admission-process.json (this script's checks) and admission-api.log.
@@ -28,6 +28,16 @@ LOG="$RUN_DIR/api.log"
 SECRET="verify-admission-secret"
 REPO="acme/verify-admission"
 CHECKOUT="$RUN_DIR/checkout"
+
+# The retried create takes one slot once the sweep frees them, and the redelivery needs another, so
+# a cap of 1 would refuse the drive's own last check.
+case "$CAP" in
+  ''|*[!0-9]*) echo "ADMISSION_CAP must be a whole number, at least 2 (got '$CAP')" >&2; exit 1 ;;
+esac
+if [ "$CAP" -lt 2 ]; then
+  echo "ADMISSION_CAP must be at least 2 (got $CAP): the retried create and the redelivery each take a slot" >&2
+  exit 1
+fi
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 
