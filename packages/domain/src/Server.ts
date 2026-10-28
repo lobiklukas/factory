@@ -97,11 +97,18 @@ export const ServerInfo = Schema.Struct({
    * to get a real model. Empty on anthropic. A client shows these rather than inventing its own.
    */
   warnings: Schema.Array(Schema.String),
-  /** The model a session with no role row talks to, `provider/modelId` (`faux/faux-1` under faux). */
+  /**
+   * The model a session that names none and has no role row talks to, `provider/modelId`:
+   * `DEFAULT_MODEL` when the deployment sets it (LOB-274), else the backend's own (`faux/faux-1`
+   * under faux).
+   */
   defaultModel: Schema.String,
   /** The `ROLE_MODELS` rows, resolved against the catalog at boot, by role. */
   roleModels: Schema.Array(RoleModelRow),
-  /** Every model the catalog serves, `provider/modelId`, sorted: what a replay may name. */
+  /**
+   * Every model the catalog serves, `provider/modelId`, sorted: what a replay or `createSession`'s
+   * `model` (and so the dashboard's and the CLI's model choosers) may name (LOB-274).
+   */
   models: Schema.Array(Schema.String),
   /** The command prefixes that wait for a person's approval (`APPROVAL_REQUIRED`, D15). */
   approvalRequired: Schema.Array(Schema.String),

@@ -680,6 +680,35 @@ export const modelAccessFor = (
   };
 };
 
+/** `DEFAULT_MODEL` names a model this process cannot serve, or is not `provider/modelId`. */
+export class InvalidDefaultModel extends Schema.TaggedError<InvalidDefaultModel>()(
+  "InvalidDefaultModel",
+  { message: Schema.String },
+) {}
+
+/**
+ * The deployment's default model (LOB-274, `DEFAULT_MODEL`): `backend` resolved onto `key` with the
+ * lookup a replay and a role row do (`modelAccessFor`), so a deployment changes the model every
+ * session with no role row and no model of its own runs without a code change. Blank: the backend's
+ * own model (`DEFAULT_ANTHROPIC_MODEL`, or the faux `FAUX_MODEL_ID`). A key the catalog does not
+ * hold — another backend's model, a typo, no `/` — fails the boot rather than every session.
+ */
+export const resolveDefaultModel = (
+  backend: ModelAccess,
+  key: string,
+): Effect.Effect<ModelAccess, InvalidDefaultModel> => {
+  const trimmed = key.trim();
+  if (trimmed.length === 0) return Effect.succeed(backend);
+  const access = modelAccessFor(backend, trimmed);
+  return access === undefined
+    ? Effect.fail(
+        new InvalidDefaultModel({
+          message: `DEFAULT_MODEL names model ${trimmed}, which this process does not serve on the ${backend.backend} backend (provider/modelId, one of getServerInfo's models)`,
+        }),
+      )
+    : Effect.succeed(access);
+};
+
 /** A faux access and the provider that served it, so a caller can ask what it was asked. */
 export type FauxModelAccess = {
   readonly access: ModelAccess;

@@ -24,6 +24,7 @@ import {
   parseFauxModelScripts,
   parseRoleModels,
   resolveRoleModels,
+  resolveDefaultModel,
   REVIEW_ROLES,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
@@ -259,7 +260,7 @@ const ModelConfig = Config.all({
  *
  * `ROLE_MODELS` is a comma-separated list of `role=provider/modelId` —
  * `specifier=anthropic/claude-haiku-4-5,reviewer=anthropic/claude-opus-4-5` — and a role with no
- * row, like a session with no card, runs the backend's own model. It is resolved against the
+ * row, like a session with no card, runs the deployment's default model. It is resolved against the
  * backend's catalog at boot (`resolveRoleModels`), so a malformed row or a model the process cannot
  * serve fails the boot rather than a run. Under the faux backend every `faux/<id>` it names is
  * published beside the default, which is how two roles run two models with no key — and only those,
@@ -269,10 +270,23 @@ const RoleModelsConfig = Config.String("ROLE_MODELS").pipe(
   Config.withDefault(""),
 );
 
-/** The faux model ids a role table names, which the faux backend has to publish to serve them. */
-const fauxRoleModels = (declared: ReadonlyMap<string, string>): string[] =>
-  [...declared.values()]
-    .filter((key) => key.startsWith("faux/"))
+/**
+ * The deployment's default model (LOB-274): `provider/modelId`, what a session with no model of its
+ * own and no `ROLE_MODELS` row runs, instead of the backend's own (`claude-sonnet-5-5` on anthropic,
+ * `faux-1` under faux). The precedence is a session's model > its column's role row > this > the
+ * backend's. Resolved against the catalog at boot (`resolveDefaultModel`), so a model the process
+ * cannot serve fails the boot; under faux a `faux/<id>` is published, as a role row's is. Blank: the
+ * backend's own.
+ */
+const DefaultModelConfig = Config.String("DEFAULT_MODEL").pipe(
+  Config.withDefault(""),
+);
+
+/** The faux model ids `keys` name, which the faux backend has to publish to serve them. */
+const fauxModelIds = (keys: Iterable<string>): string[] =>
+  [...keys]
+    .map((key) => key.trim())
+    .filter((key) => key.startsWith("faux/") && key.length > "faux/".length)
     .map((key) => key.slice("faux/".length));
 
 /**
@@ -510,6 +524,7 @@ const HttpLive = Effect.gen(function* () {
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
+  const declaredDefault = (yield* DefaultModelConfig).trim();
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
   const missionResume = yield* MissionResumeConfig;
@@ -569,9 +584,14 @@ const HttpLive = Effect.gen(function* () {
   );
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).
-  // The default first, so a run with no role row still talks to it (LOB-207).
+  // The backend's own first, so it stays in the catalog when `DEFAULT_MODEL` names another one; a
+  // `faux/<id>` that `DEFAULT_MODEL` or a role row names is published beside it (LOB-274).
   const fauxModels = [
-    ...new Set([FAUX_MODEL_ID, ...fauxRoleModels(declaredRoles)]),
+    ...new Set([
+      FAUX_MODEL_ID,
+      ...fauxModelIds([declaredDefault]),
+      ...fauxModelIds(declaredRoles.values()),
+    ]),
   ];
   const fauxModelScripts = yield* parseFauxModelScripts(
     model.fauxModelScripts,
@@ -582,7 +602,7 @@ const HttpLive = Effect.gen(function* () {
       `faux model scripts: ${[...fauxModelScripts.keys()].join(", ")} (FAUX_MODEL_SCRIPTS)`,
     );
   }
-  const modelAccess = createModelAccess(backend, {
+  const backendAccess = createModelAccess(backend, {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
@@ -595,6 +615,17 @@ const HttpLive = Effect.gen(function* () {
     fauxModels,
     fauxModelScripts,
   });
+  // The deployment's default (LOB-274): `DEFAULT_MODEL` resolved against the backend's catalog, or
+  // the backend's own model when it is blank. One outside the catalog fails the boot here.
+  const modelAccess = yield* resolveDefaultModel(
+    backendAccess,
+    declaredDefault,
+  );
+  yield* Effect.logInfo(
+    declaredDefault === ""
+      ? `default model: ${modelKey(modelAccess)} (the ${backend} backend's own; DEFAULT_MODEL unset)`
+      : `default model: ${modelKey(modelAccess)} (DEFAULT_MODEL)`,
+  );
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
   yield* Effect.logInfo(
     `role models: ${[...roleModels]

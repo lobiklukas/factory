@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
@@ -7,6 +8,12 @@ import { toast } from "sonner";
 import { cn } from "cn";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { startSessionAtom } from "@/lib/atoms/session-atom";
+import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
+import {
+  modelChoices,
+  modelInput,
+  SERVER_DEFAULT,
+} from "@/lib/model-picker-view";
 import { sessionModel } from "@/lib/server-info-view";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -37,6 +44,13 @@ export const SessionSidebar = () => {
   const { sessionId } = useParams({ strict: false });
   const navigate = useNavigate();
   const start = useAtomSet(startSessionAtom, { mode: "promise" });
+  // The model the next session is created on (LOB-274): the server's catalog, or its default. A
+  // server that has not answered (or could not) leaves only the default, which still starts one.
+  const info = useAtomValue(serverInfoAtom);
+  const choices = modelChoices(
+    AsyncResult.isSuccess(info) ? info.value : undefined,
+  );
+  const [model, setModel] = useState(SERVER_DEFAULT);
   return (
     <aside
       className={cn(
@@ -44,7 +58,26 @@ export const SessionSidebar = () => {
         sessionId === undefined ? "flex min-w-0 flex-1" : "hidden",
       )}
     >
-      <div className="border-b border-border p-3">
+      <div className="flex flex-col gap-2 border-b border-border p-3">
+        <label
+          htmlFor="new-session-model"
+          className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
+        >
+          Model
+        </label>
+        <select
+          id="new-session-model"
+          name="model"
+          value={model}
+          onChange={(event) => setModel(event.currentTarget.value)}
+          className="h-8 w-full truncate rounded-none border border-input bg-transparent px-2 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 dark:bg-input/30"
+        >
+          {choices.map((choice) => (
+            <option key={choice.value} value={choice.value}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
         <Button
           className="w-full justify-start"
           variant="outline"
@@ -54,7 +87,7 @@ export const SessionSidebar = () => {
             // to move. A refusal says so out loud instead of leaving the user on
             // the list with an error they cannot see: there is no session id to
             // navigate to, and silence is indistinguishable from a dead button.
-            void start({ content: PROMPT }).then(
+            void start({ content: PROMPT, ...modelInput(model) }).then(
               (session) =>
                 navigate({
                   to: "/sessions/$sessionId",

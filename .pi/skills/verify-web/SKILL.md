@@ -167,6 +167,19 @@ and stops both. It requires no banner after the page's own `getServerInfo` read 
 message is sent, so no request leaves the machine), and `factory status` / `factory ls` against it
 (`features/backend-badge.md`). Evidence goes to `.verify/evidence/latest/backend/`.
 
+### The New session model picker
+
+```sh
+MODEL_API_PORT=9451 MODEL_WEB_PORT=3451 ./model.sh   # its own instance with DEFAULT_MODEL and a role model; leaves nothing running
+```
+
+The models a server serves are deployment settings, so `model.sh` starts its own API and dashboard
+with `DEFAULT_MODEL=faux/faux-cheap` and `ROLE_MODELS=specifier=faux/faux-spec`. `model.mjs` requires
+the sidebar's **Model** picker to offer the server's default and then exactly `getServerInfo.models`,
+a session started on `faux/faux-spec` to name it and to have sent every request to it (its
+`usage.models`, read over the API), and one started on the server's default to run `faux/faux-cheap`
+(`features/model-picker.md`). Evidence goes to `.verify/evidence/latest/model/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -227,6 +240,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`) |
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)    |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)   |
+| `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`) |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it         |
 
 ## Feature map

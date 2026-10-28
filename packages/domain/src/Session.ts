@@ -762,6 +762,15 @@ export const CreateSessionInput = Schema.Struct({
    * reviews nothing, and a reviewer run that was not given one is refused its `review` tool's call.
    */
   review: Schema.optional(ReviewTargetInput),
+  /**
+   * The model the session runs on, `provider/modelId` (LOB-274): one of `getServerInfo.models`. It
+   * is pinned into the session's root when the session first opens, ahead of its column's role model
+   * (`ROLE_MODELS`) and the deployment's default (`DEFAULT_MODEL`, else the backend's own), so a card
+   * run created on a model runs that model whatever its column's role says. A model the server does
+   * not serve is refused as `invalid_input` before anything is written. Absent: the role's model,
+   * else the deployment's.
+   */
+  model: Schema.optional(Schema.String),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 

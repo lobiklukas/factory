@@ -310,6 +310,63 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
       expect(wire).not.toContain(secret);
     }
   }, 30_000);
+
+  it("answers the DEFAULT_MODEL a deployment set as its defaultModel, on either backend (LOB-274)", async () => {
+    const faux = await boot(
+      { MODEL_BACKEND: "faux", DEFAULT_MODEL: "faux/faux-cheap" },
+      getServerInfo,
+    );
+    expect(faux.code, faux.output).toBeNull();
+    if (faux.asked === undefined) throw new Error("the boot never answered");
+    expect(faux.asked.info.defaultModel).toBe("faux/faux-cheap");
+    // Published beside the backend's own, which stays servable to a session that names it.
+    expect(faux.asked.info.models).toEqual(["faux/faux-1", "faux/faux-cheap"]);
+    expect(faux.output).toContain(
+      "default model: faux/faux-cheap (DEFAULT_MODEL)",
+    );
+
+    const anthropic = await boot(
+      { ANTHROPIC_API_KEY: KEY, DEFAULT_MODEL: "anthropic/claude-haiku-4-5" },
+      getServerInfo,
+    );
+    expect(anthropic.code, anthropic.output).toBeNull();
+    if (anthropic.asked === undefined)
+      throw new Error("the boot never answered");
+    expect(anthropic.asked.info.defaultModel).toBe(
+      "anthropic/claude-haiku-4-5",
+    );
+    expect(anthropic.asked.wire).not.toContain(KEY);
+
+    // Unset, the backend's own model, and the boot says where it came from.
+    const unset = await boot({ MODEL_BACKEND: "faux" }, getServerInfo);
+    expect(unset.asked?.info.defaultModel).toBe("faux/faux-1");
+    expect(unset.output).toContain(
+      "default model: faux/faux-1 (the faux backend's own; DEFAULT_MODEL unset)",
+    );
+  }, 60_000);
+
+  it("refuses to boot on a DEFAULT_MODEL outside the catalog, naming it", async () => {
+    for (const [env, key] of [
+      [
+        { ANTHROPIC_API_KEY: KEY, DEFAULT_MODEL: "anthropic/claude-nope-9" },
+        "anthropic/claude-nope-9",
+      ],
+      // Another backend's model: a faux process cannot serve it.
+      [
+        { MODEL_BACKEND: "faux", DEFAULT_MODEL: "anthropic/claude-haiku-4-5" },
+        "anthropic/claude-haiku-4-5",
+      ],
+      [{ MODEL_BACKEND: "faux", DEFAULT_MODEL: "haiku" }, "haiku"],
+    ] as const) {
+      const { code, output } = await boot(env);
+      expect(code, output).not.toBeNull();
+      expect(code, output).not.toBe(0);
+      expect(output).toContain("InvalidDefaultModel");
+      expect(output).toContain(`DEFAULT_MODEL names model ${key}`);
+      expect(output).not.toContain(LISTENING);
+      expect(output).not.toContain(KEY);
+    }
+  }, 90_000);
 });
 
 /**

@@ -17,30 +17,31 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 
 ## What it proves
 
-| Feature                                                   | Check in the driver                                                          | Why it matters                                               |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `factory run` (D9)                                        | creates, streams, and prints the answer, exit 0                              | the whole write path in one command                          |
-| The run's session is named                                | `session ses_…` on stdout, and `workspace <path>`                            | the server's own answer, not a client guess                  |
-| The tool call is real                                     | a `[tool:bash]` line carrying the faux tool's output                         | the transcript can only exist if the tool ran                |
-| `factory ls` (LOB-6)                                      | the new session is a row, with its title, exit 0                             | the list is a server read, not a local registry              |
-| The model, in `run` and `ls` (LOB-272)                    | `model faux/faux-1` and `warning: faux backend` in `run`; a MODEL column     | a scripted answer is not mistaken for a real one             |
-| `factory status` (LOB-272)                                | `backend faux`, `selected-by MODEL_BACKEND`, the boot's `reason`, exit 0     | the operator can ask which model backend is running and why  |
-| The PR column (LOB-65)                                    | a seeded PR's URL in its row; `-` for the run's row                          | the operator sees the link without a browser                 |
-| `factory watch`, live (D8)                                | `mode: live`, then the same answer                                           | a session this process owns streams                          |
-| `factory watch`, historical                               | `mode: historical` after the idle sweep, same answer                         | the fold path, and the label that tells them apart           |
-| Typed errors                                              | unknown id → `error: not_found`, non-zero exit                               | a script can branch on `code`, not on prose                  |
-| `factory withdraw` (LOB-166)                              | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript      | withdrawing is a write, not a hidden row                     |
-| `--when-busy steer` (LOB-167)                             | `./steer.sh`: the steer joins the running run, which answers it once         | a steer is not a follow-up with a different label            |
-| `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`          | a script can refuse to queue behind a running run            |
-| `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`          | an operator binds a checkout without writing code            |
-| `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed        | the answer reaches the run, not only the row                 |
-| `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release     | the only way an operator ends a session's work               |
-| `factory replay` (LOB-200)                                | `./replay.sh`: a replay on another model prints both models and the deltas   | an operator compares two models on the same task, in a shell |
-| `factory repo add --url`, `repo sync`, `doctor` (LOB-265) | `./clone.sh`: a URL-only repo cloned, a worktree of it, a typed failure      | a repo with no checkout on this machine still gets worktrees |
-| `factory history` (LOB-243)                               | not here: verify-api `./history.sh`, against a session grown past the window | a terminal reads the whole of a long session, page by page   |
-| `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake     | the link is the forge's answer, never assumed                |
-| `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                           | the card and its runs are the server's, never a local guess  |
-| `factory board add` (LOB-261)                             | not here: verify-board `./drive.sh`'s add phase (features/add.md)            | the card is the server's row, read back, never a local guess |
+| Feature                                                   | Check in the driver                                                           | Why it matters                                               |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `factory run` (D9)                                        | creates, streams, and prints the answer, exit 0                               | the whole write path in one command                          |
+| The run's session is named                                | `session ses_…` on stdout, and `workspace <path>`                             | the server's own answer, not a client guess                  |
+| The tool call is real                                     | a `[tool:bash]` line carrying the faux tool's output                          | the transcript can only exist if the tool ran                |
+| `factory ls` (LOB-6)                                      | the new session is a row, with its title, exit 0                              | the list is a server read, not a local registry              |
+| The model, in `run` and `ls` (LOB-272)                    | `model faux/faux-1` and `warning: faux backend` in `run`; a MODEL column      | a scripted answer is not mistaken for a real one             |
+| `factory status` (LOB-272)                                | `backend faux`, `selected-by MODEL_BACKEND`, the boot's `reason`, exit 0      | the operator can ask which model backend is running and why  |
+| The PR column (LOB-65)                                    | a seeded PR's URL in its row; `-` for the run's row                           | the operator sees the link without a browser                 |
+| `factory watch`, live (D8)                                | `mode: live`, then the same answer                                            | a session this process owns streams                          |
+| `factory watch`, historical                               | `mode: historical` after the idle sweep, same answer                          | the fold path, and the label that tells them apart           |
+| Typed errors                                              | unknown id → `error: not_found`, non-zero exit                                | a script can branch on `code`, not on prose                  |
+| `factory withdraw` (LOB-166)                              | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript       | withdrawing is a write, not a hidden row                     |
+| `--when-busy steer` (LOB-167)                             | `./steer.sh`: the steer joins the running run, which answers it once          | a steer is not a follow-up with a different label            |
+| `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`           | a script can refuse to queue behind a running run            |
+| `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`           | an operator binds a checkout without writing code            |
+| `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed         | the answer reaches the run, not only the row                 |
+| `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release      | the only way an operator ends a session's work               |
+| `factory replay` (LOB-200)                                | `./replay.sh`: a replay on another model prints both models and the deltas    | an operator compares two models on the same task, in a shell |
+| `factory repo add --url`, `repo sync`, `doctor` (LOB-265) | `./clone.sh`: a URL-only repo cloned, a worktree of it, a typed failure       | a repo with no checkout on this machine still gets worktrees |
+| `factory run --model`, `DEFAULT_MODEL` (LOB-274)          | `./model.sh`: the `model` line, the requests' model, refusals, a refused boot | an operator picks a model per task, a deployment its default |
+| `factory history` (LOB-243)                               | not here: verify-api `./history.sh`, against a session grown past the window  | a terminal reads the whole of a long session, page by page   |
+| `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake      | the link is the forge's answer, never assumed                |
+| `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                            | the card and its runs are the server's, never a local guess  |
+| `factory board add` (LOB-261)                             | not here: verify-board `./drive.sh`'s add phase (features/add.md)             | the card is the server's row, read back, never a local guess |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -57,7 +58,13 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./replay.sh      # self-contained: its own API on :9360 (REPLAY_PORT), a checkout, and a second faux model
 ./clone.sh       # self-contained: its own API on :9350 (CLONE_PORT) and a loopback git forge on :9351
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
+./model.sh       # self-contained: its own API on :9370 (MODEL_PORT) and a refused boot on :9371
 ```
+
+`model.sh` is separate because the models a server serves are deployment settings: it boots its own
+API with `DEFAULT_MODEL=faux/faux-cheap` and `ROLE_MODELS=specifier=faux/faux-spec`, under
+`.verify/run/cli-model/`, and a second one with a `DEFAULT_MODEL` outside the catalog, which must
+refuse to boot. See `features/model.md`.
 
 `repo.sh` needs no deployment setting, so it drives the instance `up.sh` started with a tmux server
 of its own under `.verify/run/cli-repo/`. Its "not a git work tree" fixture is a temp directory, not
