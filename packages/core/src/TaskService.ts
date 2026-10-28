@@ -1241,9 +1241,11 @@ export const TaskServiceLive = Layer.effect(
      */
     // A row whose `columns` is not an array (0007 leaves it unconstrained) contributes nothing
     // rather than failing the read.
-    const declaredRoles: Effect.Effect<ReadonlySet<string>, TaskError> =
-      withStorage(
-        sql<{ readonly role: string }>`
+    const declaredRoles: Effect.Effect<
+      ReadonlySet<string>,
+      TaskError
+    > = withStorage(
+      sql<{ readonly role: string }>`
           SELECT DISTINCT c ->> 'role' AS role
           FROM board_definitions d
           CROSS JOIN LATERAL jsonb_array_elements(
@@ -1251,7 +1253,7 @@ export const TaskServiceLive = Layer.effect(
           ) AS c
           WHERE jsonb_typeof(c) = 'object' AND c ->> 'role' IS NOT NULL
         `,
-      ).pipe(Effect.map((rows) => new Set(rows.map((row) => row.role))));
+    ).pipe(Effect.map((rows) => new Set(rows.map((row) => row.role))));
 
     const defineBoard = (
       input: DefineBoardInput,

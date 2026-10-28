@@ -74,9 +74,7 @@ describe("the definition vocabulary (D6)", () => {
     expect(
       vocabulary.requirements.find((option) => option.key === "verified")
         ?.description,
-    ).toBe(
-      "a passing verification of every surface the card's change touched",
-    );
+    ).toBe("a passing verification of every surface the card's change touched");
   });
 
   /** Mutation: offer the role table alone — `specifier` and the declared `planner` go missing. */
@@ -88,9 +86,7 @@ describe("the definition vocabulary (D6)", () => {
       expect.arrayContaining(["builder", "planner", "specifier", "reviewer"]),
     );
     for (const role of vocabulary.roles) {
-      expect(authoredDefinitionFaults(authored([], role), library)).toEqual(
-        [],
-      );
+      expect(authoredDefinitionFaults(authored([], role), library)).toEqual([]);
     }
     expect(
       authoredDefinitionFaults(authored([], "buidler"), library).map(
