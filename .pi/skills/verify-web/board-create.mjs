@@ -288,10 +288,23 @@ try {
   );
 
   // --- exists ----------------------------------------------------------------------------------
-  await page.goto(`${WEB_URL}/boards?new=board`, {
-    waitUntil: "domcontentloaded",
-  });
+  // Opened from the list's header action, the one a person with boards sees (the empty state's
+  // action is gone once a board exists): the list now holds the board just made.
+  await page.goto(`${WEB_URL}/boards`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("[data-new-board='header']", { timeout: 20_000 });
+  assert(
+    "with a board made, the header's New board action is the one shown, and the empty state's is not",
+    (await page.locator("[data-new-board='empty']").count()) === 0 &&
+      (await page.locator("[data-new-board='header']").count()) === 1,
+    `${await page.locator("[data-new-board]").count()} [data-new-board] link(s)`,
+  );
+  await page.locator("[data-new-board='header']").click();
   await page.waitForSelector("[data-board-form]", { timeout: 20_000 });
+  assert(
+    "the header's action opens the form and the URL says so",
+    new URL(page.url()).searchParams.get("new") === "board",
+    page.url(),
+  );
   await page.locator("#new-board-repo").fill(TYPED);
   const beforeDup = created();
   await submit();

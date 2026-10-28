@@ -19,6 +19,7 @@ import {
   initialBoardForm,
   NEWEST_VERSION,
   OTHER_REPO,
+  reconcileRepoPick,
   versionChoices,
   type BoardForm,
 } from "./board-create-view";
@@ -189,5 +190,23 @@ describe("boardRefusal", () => {
     expect(boardRefusal({ _tag: "X", message: "" }, "cause").message).toBe(
       "cause",
     );
+  });
+});
+
+describe("reconcileRepoPick", () => {
+  /** Mutation: keep a pick the registry list no longer holds, so a typed slug is ignored for it. */
+  it("falls back to the typed slug when the picked repository left the list", () => {
+    const reconciled = reconcileRepoPick(
+      form({ repoPick: "a/b", repoText: "c/d" }),
+      [],
+    );
+    expect(reconciled.repoPick).toBe(OTHER_REPO);
+    expect(chosenRepo(reconciled)).toBe("c/d");
+  });
+
+  it("keeps a pick the list still holds", () => {
+    const held = form({ repoPick: "a/b", repoText: "c/d" });
+    expect(reconcileRepoPick(held, ["a/b", "x/y"])).toBe(held);
+    expect(chosenRepo(reconcileRepoPick(held, ["a/b"]))).toBe("a/b");
   });
 });

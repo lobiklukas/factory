@@ -1870,8 +1870,9 @@ if ((await sessionLink.count()) > 0) {
 // Feature: the board's lanes (LOB-75). See features/board.md.
 //
 // Lanes come from the definition, cards from the server, and the browser holds nothing between
-// them. Each run seeds its **own** board and one card in `intake` through the real `TaskService`
-// (`.pi/skills/verify-board/seed.ts`), so the drive can be rerun against the same `./up.sh`
+// them. Each run makes its **own** board through the New board form (below) and seeds one card in
+// `intake` onto it through the real `TaskService` (`.pi/skills/verify-board/seed.ts`, given the
+// form's board as `SEED_BOARD_ID`), so the drive can be rerun against the same `./up.sh`
 // instance: the move below changes only this run's card. The oracle for the lane order is
 // `getBoard` asked from this process, so a definition that reorders its columns changes the
 // expectation rather than breaking the check. The lanes themselves never change a card: every move

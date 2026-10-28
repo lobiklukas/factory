@@ -13,6 +13,7 @@ import {
   createBoardInput,
   initialBoardForm,
   OTHER_REPO,
+  reconcileRepoPick,
   versionChoices,
   type BoardField,
   type BoardForm,
@@ -54,31 +55,57 @@ export const NewBoardDialog = ({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (board: CreatedBoard) => void;
-}) => (
-  <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>
-    <DialogContent data-new-board-dialog className="sm:max-w-lg">
-      <DialogHeader>
-        <DialogTitle>New board</DialogTitle>
-        <DialogDescription>
-          A board binds one repository to a version of a board definition. The
-          version is pinned when the board is made; a repository has one board.
-        </DialogDescription>
-      </DialogHeader>
-      {/* Mounted only while the dialog is open, so each opening reads the lists afresh. */}
-      <NewBoardLoader onCreated={onCreated} />
-    </DialogContent>
-  </Dialog>
-);
+}) => {
+  // Held here, not in the form, so the dialog can refuse to close under a request in flight: a
+  // close (Cancel, the X, Escape, a click outside) would unmount the form while `.then` still
+  // navigates to the board it made, taking away a person who had just walked away.
+  const [pending, setPending] = useState(false);
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && pending) return;
+        onOpenChange(next);
+      }}
+    >
+      <DialogContent
+        data-new-board-dialog
+        showCloseButton={!pending}
+        className="sm:max-w-lg"
+      >
+        <DialogHeader>
+          <DialogTitle>New board</DialogTitle>
+          <DialogDescription>
+            A board binds one repository to a version of a board definition. The
+            version is pinned when the board is made; a repository has one
+            board.
+          </DialogDescription>
+        </DialogHeader>
+        {/* Mounted only while the dialog is open, so each opening reads the lists afresh. */}
+        <NewBoardLoader
+          pending={pending}
+          setPending={setPending}
+          onCreated={onCreated}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 /**
  * Waits for the definitions (and the registry, when it answers) before showing the form, so the
  * form opens already on the default definition. A registry that fails to read is not fatal: a slug
- * can be typed, and `createBoard` registers a repository it has not seen. A definition list that
+ * can be typed, because `createBoard` accepts a repository the registry has not seen (it does not
+ * register it; the board page warns when that repository has no checkout). A definition list that
  * fails is: there is nothing to pick, and the server's words say why.
  */
 const NewBoardLoader = ({
+  pending,
+  setPending,
   onCreated,
 }: {
+  readonly pending: boolean;
+  readonly setPending: (pending: boolean) => void;
   readonly onCreated: (board: CreatedBoard) => void;
 }) => {
   const definitions = useAtomValue(definitionsAtom);
@@ -113,6 +140,8 @@ const NewBoardLoader = ({
     <NewBoardForm
       definitions={loaded}
       registered={registered}
+      pending={pending}
+      setPending={setPending}
       onCreated={onCreated}
     />
   );
@@ -127,19 +156,25 @@ const NewBoardLoader = ({
 const NewBoardForm = ({
   definitions,
   registered,
+  pending,
+  setPending,
   onCreated,
 }: {
   readonly definitions: ReadonlyArray<DefinitionSummary>;
   readonly registered: ReadonlyArray<string>;
+  readonly pending: boolean;
+  readonly setPending: (pending: boolean) => void;
   readonly onCreated: (board: CreatedBoard) => void;
 }) => {
   const create = useAtomSet(createBoardAtom, { mode: "promiseExit" });
-  const [form, setForm] = useState<BoardForm>(() =>
+  const [held, setForm] = useState<BoardForm>(() =>
     initialBoardForm(definitions, registered),
   );
+  // The registry re-reads every few seconds and may fail or lose a row; what is shown and what is
+  // sent is the form as the current list can honour it, never a pick the list no longer holds.
+  const form = reconcileRepoPick(held, registered);
   const [problem, setProblem] = useState<BoardProblem | null>(null);
   const [refusal, setRefusal] = useState<BoardRefusal | null>(null);
-  const [pending, setPending] = useState(false);
 
   const edit = (patch: Partial<BoardForm>) => {
     setForm((previous) => ({ ...previous, ...patch }));
@@ -223,7 +258,12 @@ const NewBoardForm = ({
             name="repoText"
             aria-label={registered.length === 0 ? undefined : "Repository slug"}
             value={form.repoText}
-            onChange={(event) => edit({ repoText: event.currentTarget.value })}
+            onChange={(event) =>
+              edit({
+                repoText: event.currentTarget.value,
+                repoPick: OTHER_REPO,
+              })
+            }
             placeholder="owner/name"
             autoComplete="off"
             spellCheck={false}
@@ -312,7 +352,9 @@ const NewBoardForm = ({
         </div>
       )}
       <DialogFooter>
-        <DialogClose render={<Button type="button" variant="outline" />}>
+        <DialogClose
+          render={<Button type="button" variant="outline" disabled={pending} />}
+        >
           Cancel
         </DialogClose>
         <Button

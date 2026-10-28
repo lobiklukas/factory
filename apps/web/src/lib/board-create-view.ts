@@ -59,6 +59,19 @@ export const initialBoardForm = (
   version: NEWEST_VERSION,
 });
 
+/**
+ * The form as the registry's current list can honour it: a picked slug the list no longer holds
+ * (the registry re-reads on a timer, and a read can fail) falls back to "another repository", so
+ * the field the page shows is the field that is sent.
+ */
+export const reconcileRepoPick = (
+  form: BoardForm,
+  registered: ReadonlyArray<string>,
+): BoardForm =>
+  form.repoPick === OTHER_REPO || registered.includes(form.repoPick)
+    ? form
+    : { ...form, repoPick: OTHER_REPO };
+
 /** The slug the form means: the registered repository picked, or the one typed beside "Another". */
 export const chosenRepo = (form: BoardForm): string =>
   form.repoPick === OTHER_REPO ? form.repoText : form.repoPick;

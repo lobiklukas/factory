@@ -24,11 +24,11 @@ export const Route = createFileRoute("/boards/")({
 });
 
 /** A link, not a button: the form is a URL (`?new=board`), so it opens in a new tab too. */
-const NewBoardLink = () => (
+const NewBoardLink = ({ where }: { readonly where: "empty" | "header" }) => (
   <Link
     to="/boards"
     search={{ new: NEW_BOARD }}
-    data-new-board
+    data-new-board={where}
     className={buttonVariants({ size: "sm" })}
   >
     <PlusIcon strokeWidth={1.75} />
@@ -79,12 +79,12 @@ function BoardsRoute() {
         title="No boards yet"
         detail="A board binds one repository to a definition version. None exists on this control plane yet; make one here, or with factory board create --repo owner/name."
         visible={boards.length === 0}
-        action={<NewBoardLink />}
+        action={<NewBoardLink where="empty" />}
       >
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
           <div className="mb-4 flex max-w-xl items-center justify-between gap-3">
             <h1 className="text-sm font-medium">Boards</h1>
-            <NewBoardLink />
+            <NewBoardLink where="header" />
           </div>
           {boards.length >= LIST_BOARDS_LIMIT && (
             <p className="mb-3 max-w-xl text-xs text-muted-foreground">
