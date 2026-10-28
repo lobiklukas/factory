@@ -24,6 +24,7 @@ export const testTokens = (
     tokenTableOf({
       token: Option.none(),
       actor: DEFAULT_SHARED_ACTOR,
+      authOff: false,
       tokens: Option.some(
         Redacted.make(
           entries.map(([actor, token]) => `${actor}=${token}`).join(","),

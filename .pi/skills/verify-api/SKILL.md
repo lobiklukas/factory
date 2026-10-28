@@ -70,7 +70,9 @@ Every check is required: the driver exits non-zero when one fails.
 boots requires it on every RPC; every driver's client (`harness.ts`'s `protocolFor`, and its
 `authHeaders()` for a raw `fetch`) and the CLI send the same variable, and the checks that read an
 approval's actor expect the token's (`recordedActor`: `FACTORY_API_ACTOR`, `operator` by default).
-Unset, the API runs with auth off and every driver behaves as before.
+Unset, the API runs with auth off and every driver behaves as before; every script binds
+`HOST=127.0.0.1`, the only kind of address an open control plane boots on without
+`FACTORY_API_AUTH=off`.
 
 ## Launch
 

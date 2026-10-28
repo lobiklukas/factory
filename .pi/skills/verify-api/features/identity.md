@@ -59,5 +59,9 @@ built without it is answered `Unauthenticated` and shows nothing.
 
 **What it does not prove.** The other verify-web drives and verify-board's run-actor gate check run
 against an API with auth off, because they declare actors (`dashboard`, a run's session id) that only
-an open control plane keeps. Per-column move permissions and audit views
+an open control plane keeps: each of their scripts unsets `FACTORY_API_TOKEN`, `FACTORY_API_TOKENS`,
+`VITE_FACTORY_API_TOKEN` and `FACTORY_API_AUTH` first, so a token exported for everything else does not
+turn auth on under them. An open control plane binds loopback (`HOST` defaults to `127.0.0.1`); one
+with no token on a `HOST` beyond loopback refuses the boot (`ApiAuthRequired`) unless
+`FACTORY_API_AUTH=off` says so, which `apps/api/src/boot.test.ts` proves on the real boot. Per-column move permissions and audit views
 (docs/board.md wave-2 item 7) are not built.

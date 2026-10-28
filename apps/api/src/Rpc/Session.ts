@@ -4,7 +4,6 @@ import {
   TaskServiceLive,
   TriggerRoutesLive,
 } from "@repo/core";
-import { Caller } from "@repo/domain/Auth";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
 import { HttpClient } from "effect/http";
@@ -45,19 +44,9 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       // A fork or a replay over the wire is the caller's new session, so its spend is the caller's;
       // with auth off it keeps its source's actor, as an in-process one does (LOB-162).
       forkSession: (input) =>
-        Effect.gen(function* () {
-          const { actor } = yield* Caller;
-          return yield* sessions.fork(
-            actor === undefined ? input : { ...input, actor },
-          );
-        }),
+        attributed(input).pipe(Effect.flatMap(sessions.fork)),
       replaySession: (input) =>
-        Effect.gen(function* () {
-          const { actor } = yield* Caller;
-          return yield* sessions.replay(
-            actor === undefined ? input : { ...input, actor },
-          );
-        }),
+        attributed(input).pipe(Effect.flatMap(sessions.replay)),
       resetSession: (input) => sessions.reset(input),
       compactSession: (input) => sessions.compact(input),
       // A mission is a session's (LOB-230): the call answers its id, and the phase it reached is read

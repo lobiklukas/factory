@@ -74,7 +74,8 @@
         "SLACK_TEXT",
         "SLACK_SESSION_URL_BASE",
         "NODE_ENV",
-        "FACTORY_API_ACTOR"
+        "FACTORY_API_ACTOR",
+        "FACTORY_API_AUTH"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       // The ANTHROPIC_* names are every variable pi-ai's Anthropic provider authenticates from, which

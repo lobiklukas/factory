@@ -380,8 +380,32 @@ describe("control-plane auth on a booted API (LOB-20)", () => {
     expect(code, output).not.toBeNull();
     expect(code, output).not.toBe(0);
     expect(output).toContain("InvalidApiTokens");
-    expect(output).toContain("trigger:linear");
+    expect(output).toContain("FACTORY_API_TOKENS entry 1");
+    expect(output).toContain("trigger's actor");
     expect(output).not.toContain(TOKEN);
     expect(output).not.toContain(LISTENING);
   }, 30_000);
+
+  it("refuses to serve an open control plane beyond loopback, unless FACTORY_API_AUTH=off says so", async () => {
+    const refused = await boot({ MODEL_BACKEND: "faux", HOST: "0.0.0.0" });
+    const intended = await boot(
+      { MODEL_BACKEND: "faux", HOST: "0.0.0.0", FACTORY_API_AUTH: "off" },
+      askWith(undefined),
+    );
+    const secured = await boot(
+      { MODEL_BACKEND: "faux", HOST: "0.0.0.0", FACTORY_API_TOKEN: TOKEN },
+      askWith(`Bearer ${TOKEN}`),
+    );
+
+    expect(refused.code, refused.output).not.toBeNull();
+    expect(refused.code, refused.output).not.toBe(0);
+    expect(refused.output).toContain("ApiAuthRequired");
+    expect(refused.output).toContain("HOST=0.0.0.0");
+    expect(refused.output).not.toContain(LISTENING);
+    expect(intended.code, intended.output).toBeNull();
+    expect(intended.output).toContain("control-plane auth: OFF");
+    expect(intended.asked).toContain('"backend":"faux"');
+    expect(secured.code, secured.output).toBeNull();
+    expect(secured.asked).toContain('"backend":"faux"');
+  }, 60_000);
 });

@@ -60,8 +60,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import { WebhookRateLimiterLive, WebhookRoutes } from "../Api/Webhook";
 import { FauxServerFacts } from "../ServerInfo.test-fake";
 import {
+  bindRefusal,
   controlPlaneAuthLayer,
   DEFAULT_SHARED_ACTOR,
+  isLoopbackHost,
   describeApiAuth,
   MIN_TOKEN_CHARS,
   tokenTableOf,
@@ -247,7 +249,11 @@ const actorOf = (sessionId: SessionId) =>
   );
 
 describe("tokenTableOf: what a deployment may configure (LOB-20)", () => {
-  const none = { token: Option.none(), tokens: Option.none() } as const;
+  const none = {
+    token: Option.none(),
+    tokens: Option.none(),
+    authOff: false,
+  } as const;
   const table = (config: {
     readonly token?: string;
     readonly actor?: string;
@@ -261,6 +267,7 @@ describe("tokenTableOf: what a deployment may configure (LOB-20)", () => {
             Redacted.make,
           ),
           actor: config.actor ?? DEFAULT_SHARED_ACTOR,
+          authOff: false,
           tokens: Option.map(
             Option.fromUndefinedOr(config.tokens),
             Redacted.make,
@@ -321,18 +328,63 @@ describe("tokenTableOf: what a deployment may configure (LOB-20)", () => {
       refusal({ token: AMY_TOKEN, actor: "ses_0123456789abcdefghjkmnpqrs" }),
       refusal({ tokens: `trigger:linear=${AMY_TOKEN}` }),
       refusal({ token: AMY_TOKEN, actor: " padded " }),
+      // Written the wrong way round: the "actor" is the secret, and must not be echoed either.
+      refusal({ tokens: `bob=${BOB_TOKEN},${AMY_TOKEN}=amy` }),
     ];
+    expect(cases[0]).toContain("FACTORY_API_TOKEN (as FACTORY_API_ACTOR)");
     expect(cases[0]).toContain(`at least ${MIN_TOKEN_CHARS}`);
+    expect(cases[1]).toContain("FACTORY_API_TOKENS entry 1");
     expect(cases[1]).toContain("no whitespace");
     expect(cases[2]).toContain("entry 2 is not actor=token");
-    expect(cases[3]).toContain('both "amy" and "bob"');
+    expect(cases[3]).toContain(
+      "FACTORY_API_TOKENS entry 2 repeats the token of FACTORY_API_TOKENS entry 1",
+    );
     expect(cases[4]).toContain("run's actor");
+    expect(cases[5]).toContain("FACTORY_API_TOKENS entry 1");
     expect(cases[5]).toContain("trigger's actor");
     expect(cases[6]).toContain("not a valid actor");
+    expect(cases[7]).toContain("FACTORY_API_TOKENS entry 2");
+    expect(cases[7]).toContain(`at least ${MIN_TOKEN_CHARS}`);
     for (const message of cases) {
       expect(message).not.toContain(AMY_TOKEN);
       expect(message).not.toContain(BOB_TOKEN);
+      expect(message).not.toContain("amy-token");
     }
+  });
+});
+
+describe("bindRefusal: an open control plane stays on loopback (LOB-20)", () => {
+  const table = testTokens([["amy", AMY_TOKEN]]);
+
+  it("lets an open control plane listen on loopback, and beyond it only with FACTORY_API_AUTH=off", () => {
+    for (const host of [
+      "127.0.0.1",
+      "127.0.0.2",
+      "localhost",
+      "::1",
+      "[::1]",
+    ]) {
+      expect(isLoopbackHost(host), host).toBe(true);
+      expect(bindRefusal(undefined, host, false), host).toBeUndefined();
+    }
+    for (const host of ["0.0.0.0", "::", "10.0.0.5", "factory.internal"]) {
+      expect(isLoopbackHost(host), host).toBe(false);
+      expect(bindRefusal(undefined, host, false), host).toMatchObject({
+        _tag: "ApiAuthRequired",
+      });
+      expect(bindRefusal(undefined, host, true), host).toBeUndefined();
+    }
+    expect(bindRefusal(undefined, "0.0.0.0", false)?.message).toContain(
+      "FACTORY_API_TOKEN",
+    );
+  });
+
+  it("lets a token table listen anywhere, and refuses FACTORY_API_AUTH=off beside it", () => {
+    expect(bindRefusal(table, "0.0.0.0", false)).toBeUndefined();
+    expect(bindRefusal(table, "127.0.0.1", false)).toBeUndefined();
+    expect(bindRefusal(table, "0.0.0.0", true)?.message).toContain(
+      "contradicts",
+    );
   });
 });
 
@@ -349,6 +401,30 @@ describe("a call without a credential the control plane knows (LOB-20)", () => {
     const server = await asStranger((client) =>
       failureOf(client.getServerInfo({})),
     );
+    // The two groups whose handlers a missing middleware would not break the build of either:
+    // TriggerRoutesRpc never reads `Caller`, and a route decides which repo a delivery starts on.
+    const route = await asNobody((client) =>
+      failureOf(
+        client.addTriggerRoute({
+          label: `auth-${run}`,
+          repo: RepoSlug.make(`acme/auth-${run}`),
+          prompt: "nobody's",
+        }),
+      ),
+    );
+    const routes = await asStranger((client) =>
+      failureOf(client.listTriggerRoutes({})),
+    );
+    const approval = await asNobody((client) =>
+      failureOf(
+        client.decideApproval({
+          sessionId: "ses_0123456789abcdefghjkmnpqrs" as SessionId,
+          requestId: "req-1",
+          decision: "approved",
+          actor: MALLORY,
+        }),
+      ),
+    );
 
     expect(missing).toBeInstanceOf(Unauthenticated);
     expect(missing).toMatchObject({
@@ -363,6 +439,15 @@ describe("a call without a credential the control plane knows (LOB-20)", () => {
     expect(server).toMatchObject({
       _tag: "Unauthenticated",
       reason: "invalid",
+    });
+    expect(route).toMatchObject({ _tag: "Unauthenticated", reason: "missing" });
+    expect(routes).toMatchObject({
+      _tag: "Unauthenticated",
+      reason: "invalid",
+    });
+    expect(approval).toMatchObject({
+      _tag: "Unauthenticated",
+      reason: "missing",
     });
     expect(JSON.stringify(invalid)).not.toContain(WRONG_TOKEN);
   }, 60_000);

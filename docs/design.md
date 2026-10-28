@@ -482,7 +482,9 @@ a trigger's credential is its route's signing secret, checked before the in-proc
 mints `trigger:<source>`, so neither namespace can be claimed over RPC. The webhook routes are not
 behind the middleware and keep their own signatures (LOB-81). A deployment with no token runs with
 auth **off** — every call is served and a declared actor is recorded, as before — and its boot says so
-in a warning; this is the seam where GitHub OAuth or SSO fills `Caller` later (D1 rules out SSO/SCIM
+in a warning. An open control plane is a loopback one: `HOST` defaults to `127.0.0.1`, and no token on
+a `HOST` beyond loopback refuses the boot (`ApiAuthRequired`) unless `FACTORY_API_AUTH=off` declares
+it on purpose. This is the seam where GitHub OAuth or SSO fills `Caller` later (D1 rules out SSO/SCIM
 for now, not identity).
 
 **R5 — `Sandbox` CRD is `v1beta1`.** We inherit a SIG Apps controller and its API may shift.
