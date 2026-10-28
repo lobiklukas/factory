@@ -751,6 +751,57 @@ describe("TaskService", () => {
     ).toMatchObject({ _tag: "TaskNotFound" });
   });
 
+  /**
+   * F10: `create` and `file` hold a title to `update`'s rule, so no card is made with a title it
+   * could never be edited back to. Mutation: drop `cardTitle` from `insertCard` — the blank and the
+   * 301-character cards are made; store `input.title` rather than the trimmed one — the padded title
+   * reads back padded.
+   */
+  it("refuses a card created or filed with a blank or over-long title, writing nothing, and takes one at the cap trimmed", async () => {
+    const boardId = await newBoard();
+    const create = (title: string) =>
+      withService((s) => s.create({ boardId, title, actor: LUKAS }));
+    const file = (title: string, externalRef: string) =>
+      withService((s) =>
+        s.file({ boardId, title, externalRef, actor: "trigger:linear" }),
+      );
+    for (const title of ["", "   ", "x".repeat(301)]) {
+      expect(
+        await refusal((s) => s.create({ boardId, title, actor: LUKAS })),
+      ).toMatchObject({ _tag: "InvalidTaskInput", field: "title" });
+      expect(
+        await refusal((s) =>
+          s.file({
+            boardId,
+            title,
+            externalRef: "linear:iss-f10",
+            actor: "trigger:linear",
+          }),
+        ),
+      ).toMatchObject({ _tag: "InvalidTaskInput", field: "title" });
+    }
+    expect(
+      (
+        await refusal((s) =>
+          s.create({ boardId, title: "y".repeat(301), actor: LUKAS }),
+        )
+      ).message,
+    ).toBe("a card's title takes at most 300 characters; this one has 301");
+    // Nothing was written: no card, so the refused filing left the item free to file.
+    expect(await withService((s) => s.list({ boardId }))).toEqual([]);
+
+    const exact = "x".repeat(300);
+    const created = await create(`  ${exact}  `);
+    expect(created.title).toBe(exact);
+    const filed = await file(` ${exact} `, "linear:iss-f10");
+    expect(filed.created).toBe(true);
+    expect(filed.task.title).toBe(exact);
+    // The event says what the row says, so the history rebuilds the trimmed title.
+    expect((await withService((s) => s.replay(filed.task.id))).title).toBe(
+      exact,
+    );
+  });
+
   /** C11's lane acceptance: a `dependency` block, then lifted, then an urgent flag, all on the one card. */
   it("blocks on a dependency and lifts it, then marks the card urgent, each at the revision before", async () => {
     const boardId = await newBoard();

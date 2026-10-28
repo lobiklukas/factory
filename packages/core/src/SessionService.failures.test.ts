@@ -14,7 +14,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "@repo/domain/Session";
-import { createFauxModelAccess, type FauxModelAccess } from "@repo/harness";
+import {
+  createFauxModelAccess,
+  FAUX_FAIL_MESSAGE,
+  type FauxModelAccess,
+} from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -143,6 +147,35 @@ describe("failed runs in run_failures", () => {
       expect(failed?.text).toBe("");
       expect(rows).toEqual([
         { entryId: failed?.id, reason: "model_error", detail: PROVIDER_ERROR },
+      ]);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("ends a run whose faux request FAUX_FAIL fails idle, on an error entry, indexed as model_error (F6)", async () => {
+    // `model_error:1`: the run's first step (its `bash` call) runs, and the request after it fails —
+    // the shape of a run that did some work and then lost its model, which a drive can now make.
+    const faux = createFauxModelAccess({ fauxFail: { afterAnswers: 1 } });
+    const runtime = runtimeOver(faux);
+    try {
+      const { snapshot, rows, calls } = await runtime.runPromise(runOnce(faux));
+      // Two requests, the second not retried: Pi Durable's retry pattern does not match the message.
+      expect(calls).toBe(2);
+      expect(snapshot.session.status).toBe("idle");
+      expect(
+        snapshot.entries.some((entry) => entry.kind === "toolResult"),
+      ).toBe(true);
+      const failed = snapshot.entries.find(
+        (entry) => entry.kind === "assistant" && entry.isError === true,
+      );
+      expect(failed?.error).toBe(FAUX_FAIL_MESSAGE);
+      expect(rows).toEqual([
+        {
+          entryId: failed?.id,
+          reason: "model_error",
+          detail: FAUX_FAIL_MESSAGE,
+        },
       ]);
     } finally {
       await runtime.dispose();

@@ -88,6 +88,12 @@ with a passing `verify-web` skill, seeds a card on the newest `default` definiti
    `"pr_link"` and the run, and `board show` still prints `building` at the same revision.
    `factory pr <run>` opens the PR on the fake (the printed link is in its ledger), and the run's
    same move goes through.
+   **A faulted run (F6).** A run of the card in `building` created on `faux/faulted` — a model whose
+   `FAUX_MODEL_SCRIPTS` row says `"fail": "model_error"` — ends idle on its model's error
+   (`requires.ts MODE=faulted`). Its settle notes on the card's thread that no PR was opened (a
+   revision on); `board show`'s checklist names it under `run_completed`, and `board move --to
+review` is refused with that reason verbatim (`the card's latest run <run> faulted: …`), the card
+   still in `building`. The second building run below completes after it, and its move goes through.
    **A second building run (C19).** `board start` on the same card opens a second builder run. Its
    worktree is on the first run's branch (`factory/<first run>`), not a fresh one from `main`; it
    commits `built-2.ts` on top of the first run's commit (`git log main..factory/<first run>` lists
@@ -157,10 +163,9 @@ commits), `requires-settled2.txt`, `requires-pr2.txt`, `requires-review-diff.txt
 ## What it does not prove
 
 `plan_doc` (checked since D10) is driven here only as the refusal and the in-process plan
-(`lib/seed-plan.ts`); a real planner run declaring one is `drive.sh`'s ([plan.md](plan.md)). A faulted, interrupted
-or unfinished latest run refusing `run_completed` is `TaskService.test.ts`'s ("refuses building → review
-after a faulted run…") and `runEnding.test.ts`'s, not driven here: the faux backend cannot fail a model
-request, so `requires.sh`'s `run_completed` refusal is the no-run one. A review run that
+(`lib/seed-plan.ts`); a real planner run declaring one is `drive.sh`'s ([plan.md](plan.md)). An interrupted
+or unfinished latest run refusing `run_completed` is `TaskService.test.ts`'s and `runEnding.test.ts`'s,
+not driven here; the faulted one is (0a, F6). A review run that
 has recorded no verdict yet is refused naming its head in `TaskService.test.ts`, not here: the faux
 reviewer settles before a second command could race it. Nor is a push the review trigger has not
 been told of (no `synchronize` yet): the newest review run is then the previous head's, and its pass

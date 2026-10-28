@@ -79,7 +79,12 @@ import {
   type RepoSlug,
   type SessionId,
 } from "@repo/domain/Session";
-import { isWebLink, MAX_TASK_BODY_CHARS, type TaskId } from "@repo/domain/Task";
+import {
+  isWebLink,
+  MAX_TASK_BODY_CHARS,
+  MAX_TASK_TITLE_CHARS,
+  type TaskId,
+} from "@repo/domain/Task";
 import {
   type DeliverySource,
   externalRefOf,
@@ -253,6 +258,53 @@ export const cardBodyOf = (
     body: `${body.slice(0, MAX_TASK_BODY_CHARS - marker.length)}${marker}`,
     cut: body.length,
   };
+};
+
+/** What `cardTitleOf` ends a title it cut with. */
+const TITLE_CUT_MARKER = "…";
+
+/**
+ * The card title and body a delivery's title and description become (F10): a card's title is held to
+ * `MAX_TASK_TITLE_CHARS` and refused blank (`TaskService.cardTitle`), and an outside item's is not,
+ * so a delivery is fitted here rather than turned into a refusal. A title over the cap is cut to its
+ * head and a marker, at most the cap (a head that ends in whitespace, or in half a surrogate pair,
+ * loses it, so the cut title can be a character or two short), and the whole title opens the body, so nothing the source
+ * said is lost; a blank one is `fallback` (the item's source and key), which says which item the card
+ * is about. The body is then `cardBodyOf`'s. `titleCut` is the original title's length, when it was
+ * cut.
+ */
+export const cardTitleOf = (
+  title: string,
+  body: string,
+  fallback: string,
+): {
+  readonly title: string;
+  readonly body: string;
+  readonly titleCut?: number;
+  readonly bodyCut?: number;
+} => {
+  const trimmed = title.trim();
+  const fitted = (named: string, text: string, titleCut?: number) => {
+    const cut = cardBodyOf(text);
+    return {
+      title: named,
+      body: cut.body,
+      ...(titleCut === undefined ? {} : { titleCut }),
+      ...(cut.cut === undefined ? {} : { bodyCut: cut.cut }),
+    };
+  };
+  if (trimmed === "")
+    return fitted(fallback.slice(0, MAX_TASK_TITLE_CHARS).trim(), body);
+  if (trimmed.length <= MAX_TASK_TITLE_CHARS) return fitted(trimmed, body);
+  let head = trimmed.slice(0, MAX_TASK_TITLE_CHARS - TITLE_CUT_MARKER.length);
+  // A cut between the two halves of a surrogate pair would leave half a character on the card.
+  const last = head.charCodeAt(head.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  return fitted(
+    `${head.trimEnd()}${TITLE_CUT_MARKER}`,
+    body.trim() === "" ? `Title: ${trimmed}` : `Title: ${trimmed}\n\n${body}`,
+    trimmed.length,
+  );
 };
 
 /**
@@ -870,14 +922,18 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // A fingerprinted event is one occurrence of an item (a Sentry issue's event, LOB-82): its
           // card is the item's, so every occurrence lands on one card rather than one per event.
           const externalRef = fingerprintOf(event) ?? externalRefOf(event);
-          const body = cardBodyOf(event.body);
+          const text = cardTitleOf(
+            event.title,
+            event.body,
+            `${event.source} ${externalRef}`,
+          );
           const filed = yield* cards
             .file({
               source: event.source,
               boardId: board.id,
               repo: mapping.repo,
-              title: event.title,
-              body: body.body,
+              title: text.title,
+              body: text.body,
               baseRef: mapping.baseRef,
               externalRef,
               // A link the card pane renders, so only a web link; an adapter that passed anything
@@ -903,9 +959,13 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           const reason = `${routedBy}: ${
             card.created ? "filed card" : "already on the board as card"
           } ${card.id} (${externalRef}) on board ${board.id}${
-            body.cut === undefined
+            text.titleCut === undefined
               ? ""
-              : `; its body was cut to ${MAX_TASK_BODY_CHARS} of ${body.cut} characters`
+              : `; its title was cut to ${text.title.length} of ${text.titleCut} characters, and the whole title opens its body`
+          }${
+            text.bodyCut === undefined
+              ? ""
+              : `; its body was cut to ${MAX_TASK_BODY_CHARS} of ${text.bodyCut} characters`
           }${note === undefined ? "" : `; ${note}`}`;
           yield* processed(requestId, reason, { taskId: card.id });
           return {

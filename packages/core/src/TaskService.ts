@@ -874,6 +874,33 @@ const present = (value: string | undefined): string | undefined =>
   value === undefined || value.trim() === "" ? undefined : value;
 
 /**
+ * A card's title as it is stored (C11, F10): trimmed, since a title is a label and stray whitespace
+ * is never the one meant, and refused when that leaves nothing or more than `MAX_TASK_TITLE_CHARS`.
+ * One rule for every door — `create`, `file` and `update` — so no card is made with a title it could
+ * never be edited back to.
+ */
+export const cardTitle = (
+  title: string,
+): Effect.Effect<string, InvalidTaskInput> => {
+  const trimmed = title.trim();
+  if (trimmed === "")
+    return Effect.fail(
+      new InvalidTaskInput({
+        field: "title",
+        message: "a card's title cannot be blank",
+      }),
+    );
+  if (trimmed.length > MAX_TASK_TITLE_CHARS)
+    return Effect.fail(
+      new InvalidTaskInput({
+        field: "title",
+        message: `a card's title takes at most ${MAX_TASK_TITLE_CHARS} characters; this one has ${trimmed.length}`,
+      }),
+    );
+  return Effect.succeed(trimmed);
+};
+
+/**
  * A create's body, base ref and external ref as the card stores them (LOB-260), or the first field
  * it cannot take. The body is kept verbatim; the refs are trimmed, since a ref or a key never means
  * its surrounding whitespace. The caps are the domain schema's, so an in-process caller is held to
@@ -1864,6 +1891,9 @@ export const TaskServiceLive = Layer.effect(
       input: CreateTaskInput,
     ): Effect.Effect<Task, TaskError | SqlError> =>
       Effect.gen(function* () {
+        // The title is held to `update`'s rule before anything is read (F10): a card made with a
+        // blank or over-long title could never be edited back to the one it was made with.
+        const title = yield* cardTitle(input.title);
         // The instance is locked `FOR SHARE` first, so an upgrade (D5) that holds it waits for this
         // card to commit before it reads the cards it re-pins, and a create that waits on an upgrade
         // goes on at the new pin. A statement of its own, not a lock on the join below: a row lock
@@ -1934,7 +1964,7 @@ export const TaskServiceLive = Layer.effect(
                 created_at, updated_at
               )
               VALUES (
-                ${id}, ${board.id}, ${input.title}, ${column}, ${repo},
+                ${id}, ${board.id}, ${title}, ${column}, ${repo},
                 ${board.definitionVersion}, 1, ${priority}, ${body ?? ""},
                 ${baseRef ?? null}, ${externalRef ?? null}, ${externalUrl ?? null},
                 now(), now()
@@ -1947,7 +1977,7 @@ export const TaskServiceLive = Layer.effect(
           _tag: "created",
           taskId: id,
           boardId: BoardInstanceId.make(board.id),
-          title: input.title,
+          title,
           column,
           actor: input.actor,
           revision: 1,
@@ -2641,19 +2671,10 @@ export const TaskServiceLive = Layer.effect(
                 message: "an update names a title, a priority or both",
               });
             }
-            const title = input.title?.trim();
-            if (title !== undefined && title === "") {
-              return yield* new InvalidTaskInput({
-                field: "title",
-                message: "a card's title cannot be blank",
-              });
-            }
-            if (title !== undefined && title.length > MAX_TASK_TITLE_CHARS) {
-              return yield* new InvalidTaskInput({
-                field: "title",
-                message: `a card's title takes at most ${MAX_TASK_TITLE_CHARS} characters; this one has ${title.length}`,
-              });
-            }
+            const title =
+              input.title === undefined
+                ? undefined
+                : yield* cardTitle(input.title);
             const row = yield* lockExpected(
               input.taskId,
               input.expectedRevision,

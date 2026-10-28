@@ -13,6 +13,10 @@
 //   MODE=answered SESSION_ID=… LABEL=… the run answered and is idle, and its log holds no `verify`
 //                                      record — the builder run (LOB-240), whose change is committed
 //                                      on its branch and whose PR is what `building` waits for.
+//   MODE=faulted TASK_ID=… MODEL=…     a run of the card in `building` created on MODEL — the faux
+//            LABEL=…                   model whose script fails every request (`FAUX_MODEL_SCRIPTS`'s
+//                                      `fail`, F6) — and sent a message: it goes idle on an error
+//                                      entry carrying `FAUX_FAIL_MESSAGE`. Prints `{"sessionId"}`.
 //
 // Everything a person reads — the refusal, its words, its exit code, the move that goes through —
 // is read by `requires.sh` through `factory board`.
@@ -29,7 +33,7 @@ import { TaskService, TaskServiceLive } from "@repo/core";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
-import { readVerifyRecords } from "@repo/harness";
+import { FAUX_FAIL_MESSAGE, readVerifyRecords } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { makeChecker, protocolFor } from "../verify-api/harness.ts";
 import type { CheckRecord } from "../verify-api/harness.ts";
@@ -40,6 +44,8 @@ const REPO_ROOT = process.env["REPO_ROOT"] ?? "";
 const SESSION = (process.env["SESSION_ID"] ?? "") as SessionId;
 const LABEL = process.env["LABEL"] ?? "run";
 const EXPECT = process.env["EXPECT"] ?? "";
+const TASK_ID = process.env["TASK_ID"] ?? "";
+const MODEL = process.env["MODEL"] ?? "";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/board";
 
@@ -174,6 +180,47 @@ const settled = Effect.gen(function* () {
   );
 });
 
+/**
+ * A run of the card whose model request fails (F6): created on the failing faux model, as a client
+ * names a model (LOB-274), in `building`, and sent the message `board start` would send. Its newest
+ * turn ends on the failed answer, which is what `run_completed` reads as faulted.
+ */
+const faulted = Effect.gen(function* () {
+  const client = yield* RpcClient.make(RpcApi);
+  const run = yield* client.createSession({
+    taskId: TASK_ID,
+    taskColumn: "building",
+    model: MODEL,
+  });
+  observed.sessionId = run.id;
+  yield* client.sendMessage({ sessionId: run.id, content: "build this card" });
+  const started = Date.now();
+  let snapshot = yield* client.getSession({ sessionId: run.id });
+  const errored = () =>
+    snapshot.entries.find(
+      (entry) => entry.kind === "assistant" && entry.isError === true,
+    );
+  while (
+    (snapshot.live.busy || errored() === undefined) &&
+    Date.now() - started < 60_000
+  ) {
+    yield* Effect.sleep(100);
+    snapshot = yield* client.getSession({ sessionId: run.id });
+  }
+  const failure = errored();
+  observed.facts["session"] = snapshot.session;
+  observed.facts["error"] = failure?.error;
+  check(
+    `the ${LABEL} run on ${MODEL} is idle on its model's error`,
+    !snapshot.live.busy &&
+      snapshot.session.status === "idle" &&
+      snapshot.session.model === MODEL &&
+      failure?.error === FAUX_FAIL_MESSAGE,
+    `busy=${snapshot.live.busy} status=${snapshot.session.status} model=${snapshot.session.model} error=${JSON.stringify(failure?.error)}`,
+  );
+  console.log(JSON.stringify({ sessionId: run.id }));
+});
+
 const failed = () => Object.values(observed.checks).some((c) => !c.passed);
 
 const runScoped = <E>(
@@ -194,8 +241,10 @@ if (MODE === "seed") {
   await runScoped(seed);
   if (failed()) process.exit(1);
   process.exit(0);
-} else if (MODE === "settled" || MODE === "answered") {
-  await runScoped(MODE === "settled" ? settled : answered);
+} else if (MODE === "settled" || MODE === "answered" || MODE === "faulted") {
+  await runScoped(
+    MODE === "settled" ? settled : MODE === "faulted" ? faulted : answered,
+  );
   await mkdir(EVIDENCE_DIR, { recursive: true });
   await writeFile(
     path.join(EVIDENCE_DIR, `requires-${LABEL}.json`),
@@ -203,6 +252,8 @@ if (MODE === "seed") {
   );
   process.exit(failed() ? 1 : 0);
 } else {
-  console.error("requires.ts: MODE must be one of seed, settled, answered");
+  console.error(
+    "requires.ts: MODE must be one of seed, settled, answered, faulted",
+  );
   process.exit(2);
 }

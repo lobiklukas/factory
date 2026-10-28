@@ -45,13 +45,16 @@ path.
 messages and nothing else. Three boots of one API over that database:
 
 1. both sinks: a card's run parks it on a question (the `ask` service call), another's run asks an
-   approval (`requestApproval`), a third's run is stopped by its one-cent cap. Each is exactly one
-   Slack message and one ntfy message, linked to its card, saying what it is about; three in all on
-   each sink; ntfy carries the token, Slack no credential;
+   approval (`requestApproval`), a third's run is stopped by its one-cent cap, and a fourth's run is
+   created on `faux/faulted` — a faux model whose `FAUX_MODEL_SCRIPTS` row says
+   `"fail": "model_error"` (F6) — so its model request fails and the run ends `model_error`. Each is
+   exactly one Slack message and one ntfy message, linked to its card, saying what it is about (the
+   model failure's body is `FAUX_FAIL_MESSAGE`); four in all on each sink; ntfy carries the token,
+   Slack no credential;
 2. restarted with the same configuration: a new question arrives once on each sink (the notifier is
-   polling), and the first three are still one message each;
-3. restarted with `NOTIFY_TYPES=question,failed` and a fresh topic: the two questions and the failure
-   reach it once each; the approval, still pending, does not.
+   polling), and the first four are still one message each;
+3. restarted with `NOTIFY_TYPES=question,failed` and a fresh topic: the two questions and the two
+   failures reach it once each; the approval, still pending, does not.
 
 The script also checks the boot lines, that the API's log names no webhook path, topic or token
 across the three boots, and that the API called no route the fake does not serve.
@@ -63,7 +66,7 @@ sent nor recorded, a failed send recorded and retried once, `maxAttempts`, the f
 retry of a decided approval dropped, a kind turned off not sent from the backlog, a 429 spending no
 attempt, a hanging sink cut off without delaying the other);
 `packages/core/src/SessionService.failures.test.ts` (a budget stop and a non-retryable model error
-each one `run_failures` row; an answered run none, and a run interrupted inside a retry's backoff
+each one `run_failures` row, and so does a request `FAUX_FAIL` fails; an answered run none, and a run interrupted inside a retry's backoff
 none); `apps/cli/src/transcript.test.ts` (a failed request is never the CLI's answer); `apps/api/src/Notifications.test.ts` (the
 configuration and the boot line, no secret in it).
 

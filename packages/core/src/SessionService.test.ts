@@ -10862,6 +10862,157 @@ describe("a mission on a session", () => {
     expect(outcome.snapshot.tasks).toEqual([]);
   }, 120_000);
 
+  it("refuses a check that writes in a read-only column, names the worker and the column, and runs the same check in a writing one (F1)", async () => {
+    // A read-only stage — a column whose autonomy says `write: "none"`, or a read-only role's
+    // column such as the specifier's — holds its agent to reads through the stage's policy and the
+    // role's tools, neither of which a check meets. The service holds the check to the same stage:
+    // a check it cannot prove is a read is refused naming the column, and one that only reads is
+    // admitted. Mutation: drop the stage from `refuseUnpolicedChecks` — the `reading` and
+    // `specifying` checks are admitted and write the worktree; refuse every check in a read-only
+    // column — the read check is refused; key the stage off the role alone — `reading` is admitted.
+    const columns: ReadonlyArray<BoardColumn> = [
+      {
+        name: "todo",
+        kind: "resting",
+        skills: [],
+        requires: [],
+        transitions: [
+          { to: "reading" },
+          { to: "specifying" },
+          { to: "building" },
+          { to: "canceled" },
+        ],
+      },
+      {
+        name: "reading",
+        kind: "working",
+        role: "builder",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+        autonomy: { write: "none" },
+      },
+      {
+        name: "specifying",
+        kind: "working",
+        role: "specifier",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+      },
+      {
+        name: "building",
+        kind: "working",
+        role: "builder",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+      },
+      {
+        name: "done",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+      {
+        name: "canceled",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+    ];
+    const writes = "touch check-wrote-here";
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const tasks = yield* TaskService;
+        const sessions = yield* SessionService;
+        const { definition } = yield* tasks.defineBoard(
+          {
+            id: DefinitionIdSchema.make(
+              `readonlychecks${randomBytes(3).toString("hex")}`,
+            ),
+            name: "Read-only checks",
+            columns,
+            initialColumn: "todo",
+          },
+          { skills: new Set(), roles: new Set() },
+        );
+        const board = yield* tasks.createBoard({
+          repo: RepoSlugSchema.make(
+            `factory-test/${randomBytes(3).toString("hex")}`,
+          ),
+          definitionId: definition.id,
+        });
+        /** A session on a new card in `column`, as a run of that column. */
+        const sessionIn = (column: string) =>
+          Effect.gen(function* () {
+            const cardId = `tsk_${randomBytes(13).toString("hex")}`;
+            yield* sql`
+              INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
+              VALUES (${cardId}, ${board.id}, ${`a card in ${column}`}, ${column}, ${definition.version}, 1)
+            `;
+            const created = yield* sessions.create({
+              taskId: cardId,
+              taskColumn: column,
+            });
+            return created.id;
+          });
+        const start = (sessionId: SessionId, check: string) =>
+          Effect.result(
+            sessions.startMission({
+              sessionId,
+              feature: "a mission with a check",
+              workers: [{ id: "writer", prompt: "write a file", check }],
+            }),
+          );
+        const refusedIn = (column: string) =>
+          Effect.gen(function* () {
+            const sessionId = yield* sessionIn(column);
+            const refused = yield* start(sessionId, writes);
+            const snapshot = yield* sessions.get(sessionId);
+            return { refused, snapshot };
+          });
+        const reading = yield* refusedIn("reading");
+        const specifying = yield* refusedIn("specifying");
+        // A check that only reads is a check a read-only stage can run.
+        const reads = yield* start(yield* sessionIn("reading"), "ls");
+        // The same writing check in a column that writes runs, and writes its worktree.
+        const buildingId = yield* sessionIn("building");
+        const building = yield* start(buildingId, writes);
+        const workspace = (yield* sessions.get(buildingId)).workspace.path;
+        yield* waitUntil(
+          Effect.sync(() => existsSync(join(workspace, "check-wrote-here"))),
+          "the building column's check to write its file",
+        );
+        return { reading, specifying, reads, building };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+
+    const messageOf = (result: typeof outcome.reads) =>
+      result._tag === "Failure" ? result.failure : undefined;
+    for (const [column, stage] of [
+      ["reading", "reading"],
+      ["specifying", "specifying"],
+    ] as const) {
+      const { refused, snapshot } = outcome[column];
+      expect(messageOf(refused)?.code).toBe("invalid_input");
+      expect(messageOf(refused)?.message).toBe(
+        `the mission worker "writer"'s check is refused: column "${column}" is the read-only ${stage} stage, where a check may only read (running touch is not a read)`,
+      );
+      // Nothing ran: no mission, no task, and no file in the worktree the stage keeps unchanged.
+      expect(snapshot.mission).toBeUndefined();
+      expect(snapshot.tasks).toEqual([]);
+      expect(
+        existsSync(join(snapshot.workspace.path, "check-wrote-here")),
+      ).toBe(false);
+    }
+    expect(outcome.reads._tag).toBe("Success");
+    expect(outcome.building._tag).toBe("Success");
+  }, 120_000);
+
   it("refuses a mission with no feature, and answers no id for it", async () => {
     const outcome = await program(
       Effect.gen(function* () {
