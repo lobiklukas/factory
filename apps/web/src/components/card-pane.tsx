@@ -34,7 +34,6 @@ import {
 } from "@/lib/atoms/board-atom";
 import {
   awaitingMove,
-  blockedLabel,
   externalLink,
   landedOn,
   moveRefusal,
@@ -61,10 +60,10 @@ import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { specLists } from "@/lib/spec-view";
 import { startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
+import { BlockControl, CardHeading } from "@/components/card-state";
 import { PrControl } from "@/components/open-pull-request";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -76,7 +75,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
  * hold their sends. Otherwise a move clicked just after an answer (or a comment just after a move)
  * sends the old revision and is refused as stale for the person's own write.
  */
-type CardWrites = {
+export type CardWrites = {
   /** A write from this pane is in flight. */
   readonly busy: boolean;
   /** A write landed at a revision the board read does not show yet. */
@@ -911,7 +910,6 @@ export const CardPane = ({
   readonly definition: BoardDefinition;
   readonly run: SessionId | undefined;
 }) => {
-  const blocked = blockedLabel(task);
   const external = externalLink(task);
   const writes = useCardWrites(task);
   const runs = useAtomValue(taskRunsAtom(task.id));
@@ -931,22 +929,12 @@ export const CardPane = ({
     >
       <header className="flex shrink-0 items-start gap-3 border-b border-border px-4 py-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <h2 className="text-sm font-medium break-words">{task.title}</h2>
-          <span className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted-foreground">
-            <span>{task.column}</span>
-            <span>r{task.revision}</span>
-            <span className="truncate">{task.id}</span>
-            {task.priority === "urgent" ? (
-              <Badge variant="outline" className="text-[10px] uppercase">
-                urgent
-              </Badge>
-            ) : null}
-            {blocked === null ? null : (
-              <Badge variant="destructive" className="text-[10px]">
-                {blocked}
-              </Badge>
-            )}
-          </span>
+          <CardHeading
+            key={`heading:${task.id}`}
+            boardId={boardId}
+            task={task}
+            writes={writes}
+          />
           {/* Where the card came from (LOB-254): the tracker issue, linked when the card has a link. */}
           {external === null ? null : external.href === undefined ? (
             <span
@@ -994,6 +982,12 @@ export const CardPane = ({
         )}
       >
         <BlockNote task={task} />
+        <BlockControl
+          key={`block:${task.id}`}
+          boardId={boardId}
+          task={task}
+          writes={writes}
+        />
         <Moves
           key={task.id}
           boardId={boardId}

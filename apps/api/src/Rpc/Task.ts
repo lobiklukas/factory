@@ -99,6 +99,10 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
         attributed(input).pipe(
           Effect.flatMap((owned) => tasks.unblock(owned as any)),
         ),
+      updateTask: (input) =>
+        attributed(input).pipe(
+          Effect.flatMap((owned) => tasks.update(owned as any)),
+        ),
       commentTask: (input) =>
         attributed(input).pipe(Effect.flatMap(tasks.comment)),
       listTaskComments: (input) => tasks.comments(input.taskId),

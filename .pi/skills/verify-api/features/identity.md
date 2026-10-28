@@ -11,7 +11,7 @@ or `trigger:<source>` (a signed delivery's) fails the boot.
 
 Every write that records an actor records the credential's: `createSession` (and so `board start`),
 `forkSession` and `replaySession` (the caller's actor now, not the source's), `decideApproval`, and the
-board's `createTask` / `moveTask` / `blockTask` / `unblockTask` / `commentTask`. A body `actor` is
+board's `createTask` / `moveTask` / `blockTask` / `unblockTask` / `updateTask` / `commentTask`. A body `actor` is
 ignored, so no client can write as someone else or as a run. `sessions.actor`, `factory.actor` and
 `listSpend` are unchanged; they just hold the authenticated name. The webhook routes are not behind
 the middleware: a delivery is authenticated by its route's signature, and its session's actor is the

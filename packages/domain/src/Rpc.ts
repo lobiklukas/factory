@@ -59,6 +59,7 @@ import {
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
+  UpdateTaskInput,
 } from "@repo/domain/Task";
 import {
   CurateSessionInput,
@@ -504,6 +505,12 @@ export class TasksRpc extends RpcGroup.make(
   }),
   Rpc.make("unblockTask", {
     payload: UnblockTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
+  // A card's title and priority, revision-checked (C11): one revision, one event per changed field.
+  Rpc.make("updateTask", {
+    payload: UpdateTaskInput,
     success: Task,
     error: TaskErrorSchema,
   }),
