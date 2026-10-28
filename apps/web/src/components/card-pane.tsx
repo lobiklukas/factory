@@ -408,7 +408,7 @@ const useStartRun = (boardId: BoardInstanceId, task: Task) => {
   const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
-  const begin = (prompt: string, onOpened: () => void, budget?: StartBudget) => {
+  const begin = (prompt: string, onOpened: () => void, budget?: number) => {
     setStarting(true);
     void start({ task, prompt, budget })
       .then((exit) => {
@@ -839,10 +839,14 @@ const Runs = ({
 
   const send = () => {
     if (draft === null || !sendable || starting) return;
-    begin(draft, () => {
-      setOpen(null);
-      setBudgetText("");
-    }, budget.ok ? budget.budget : undefined);
+    begin(
+      draft,
+      () => {
+        setOpen(null);
+        setBudgetText("");
+      },
+      budget.ok ? budget.budget : undefined,
+    );
   };
 
   return (
