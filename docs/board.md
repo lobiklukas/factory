@@ -288,7 +288,11 @@ customization, decomposition, and board metrics.
 6. **Sync map** — per-column declarative mapping, Jira and GitHub, conflict rules. Trigger: the second
    tracker.
 7. **Identity** — real authentication, per-column move permissions, audit views (LOB-20). Trigger: the
-   second operator, or the first agent that should not be able to move a card.
+   second operator, or the first agent that should not be able to move a card. Built: the
+   authentication (LOB-20) — every RPC needs a bearer token when the deployment configures one, and a
+   board write records the token's actor, never the body's, so no client can move a card as a run or
+   as someone else (docs/design.md, R4's _As built (LOB-20)_). Still not built: per-column move
+   permissions and audit views.
 8. **Board customization** — edit columns in the UI, more than one board per repository. Trigger: after
    the default has been used for real work.
 9. **Decomposition** (LOB-43) into child cards. Trigger: after dependency links and once the specifier

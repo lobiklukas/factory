@@ -11,7 +11,10 @@
         "VITE_SERVER_URL",
         "VITE_ENABLE_DEVTOOLS",
         "VITE_DEVTOOLS_URL"
-      ]
+      ],
+      // The dashboard's control-plane credential (LOB-20): it must reach the dev server, but a
+      // secret's value must not enter the task hash or the cache key.
+      "passThroughEnv": ["VITE_FACTORY_API_TOKEN"]
     }
   }
 }

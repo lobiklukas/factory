@@ -20,8 +20,8 @@ import { existsSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
-import { FetchHttpClient } from "effect/http";
-import { RpcClient, RpcSerialization } from "effect/rpc";
+import { protocolFor } from "../verify-api/harness.ts";
+import { RpcClient } from "effect/rpc";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9600";
 const CASE = process.env["CASE"] ?? "push-main";
@@ -86,12 +86,8 @@ const assert = (name: string, condition: unknown, detail: string): boolean => {
   return Boolean(condition);
 };
 
-const ProtocolLive = RpcClient.layerProtocolHttp({
-  url: `${API_URL}/rpc`,
-}).pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(RpcSerialization.layerNdjson),
-);
+// The verify-api client, credential included (LOB-20): `FACTORY_API_TOKEN` when it is exported.
+const ProtocolLive = protocolFor(API_URL);
 
 /** Poll until `check` yields anything but `false`, so the driver never depends on a fixed delay. */
 const waitUntil = <A, E, R>(

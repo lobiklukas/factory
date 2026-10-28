@@ -39,12 +39,15 @@ export const RepoSlug = Schema.String.pipe(
 export type RepoSlug = typeof RepoSlug.Type;
 
 /**
- * Who a session's spend is attributed to (LOB-162, part 2 of LOB-17): `cli`, `dashboard`, a
- * trigger's `trigger:<source>`, or whatever name a caller passes.
+ * Who a session's spend is attributed to (LOB-162, part 2 of LOB-17): the actor the call's
+ * credential authenticated as (LOB-20, `@repo/domain/Auth`), or a trigger's `trigger:<source>` for a
+ * session a signed delivery opened.
  *
- * This is a string the caller declares, as an approval decision's and a board move's actor already
- * are. LOB-20's credential changes where the value comes from; it does not change this shape, the
- * `sessions.actor` column, or the `factory.actor` document that records it. The checks keep a name
+ * The value comes from the credential, not the body: a create, a fork and a replay over the RPC
+ * surface record the server's `Caller`, and a body `actor` naming someone else changes nothing. Only
+ * a control plane running with auth off keeps a declared one (`cli`, `dashboard`, …). The credential
+ * changed where the value comes from, not this shape, the `sessions.actor` column, or the
+ * `factory.actor` document that records it. The checks keep a name
  * readable in the spend pane: nothing blank, no surrounding whitespace and no control character
  * anywhere — an embedded newline or NUL renders as nothing, so two spellings of one actor would look
  * like one name in two rows — and at most 200 characters.
@@ -754,8 +757,10 @@ export const CreateSessionInput = Schema.Struct({
    */
   budget: Schema.optional(SessionBudgetCap),
   /**
-   * Who the session's spend is attributed to (LOB-162). Absent: nobody, which the spend pane shows
-   * as unattributed. A fork and a replay take their source's actor rather than naming one.
+   * Who the session's spend is attributed to (LOB-162), as the caller declares it. Over the RPC
+   * surface the server records its authenticated `Caller` instead (LOB-20), so this only counts on a
+   * control plane running with auth off, or for an in-process caller such as a trigger. Absent there:
+   * nobody, which the spend pane shows as unattributed.
    */
   actor: Schema.optional(SessionActor),
   /**

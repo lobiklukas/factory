@@ -60,10 +60,17 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Approving proposals (LOB-202)           | `approve-proposals.sh`: `approveProposals` creates only the approved proposals in a loopback Linear, under the delegating issue and in its team, with the edges whose ends exist, and nothing twice                                                                                                                         | approved proposals become tracker issues, once                                     |
 | The model backend (LOB-258)             | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
 | What the server runs (LOB-269)          | `server-info.sh`: `getServerInfo` answers faux by `MODEL_BACKEND`, `faux/faux-1`, the `ROLE_MODELS` rows, gate, budget and armed routes; no dummy credential in the raw body or the log; a session names `faux/faux-1` on create, get and list                                                                              | a client can ask which backend and model it is on                                  |
+| Control-plane identity (LOB-20)         | `identity.sh`: no credential or a wrong one is `Unauthenticated` for `listSessions` and the `watchSession` stream; amy's create, decide, card create and move, and the CLI's move record `amy` over a body's `mallory`; `listSpend` by those; a signed delivery needs no credential                                         | the actor is the one the control plane authenticated                               |
 | Jira, Slack and GitHub issues (LOB-259) | `jira.sh`, `slack.sh`, `github-issues.sh`: signed deliveries at `/webhooks/jira`, `/webhooks/slack` and the issue events of `/webhooks/github` open one session and one comment; an unset secret answers 503                                                                                                                | three more sources arrive over HTTP, each armed by its own secret                  |
 |                                         |                                                                                                                                                                                                                                                                                                                             |                                                                                    |     |     |     | 579ff10 |
 
 Every check is required: the driver exits non-zero when one fails.
+
+**With auth on (LOB-20).** Export `FACTORY_API_TOKEN` (16+ characters) before a script and the API it
+boots requires it on every RPC; every driver's client (`harness.ts`'s `protocolFor`, and its
+`authHeaders()` for a raw `fetch`) and the CLI send the same variable, and the checks that read an
+approval's actor expect the token's (`recordedActor`: `FACTORY_API_ACTOR`, `operator` by default).
+Unset, the API runs with auth off and every driver behaves as before.
 
 ## Launch
 
@@ -131,6 +138,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
 DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getServerInfo and each session's model; no credential's value in the answer (features/server-info.md)
+DATABASE_URL=… ./identity.sh     # api on :9200 (API_PORT), via up.sh with a token table — unauthenticated calls refused, every write records the credential's actor (features/identity.md)
 ./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
 ```
 

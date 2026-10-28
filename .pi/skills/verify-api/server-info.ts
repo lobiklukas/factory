@@ -18,7 +18,7 @@ import { RpcApi } from "@repo/domain/Rpc";
 import type { ServerInfo } from "@repo/domain/Server";
 import { Effect } from "effect";
 import { RpcClient } from "effect/rpc";
-import { makeChecker, protocolFor } from "./harness.ts";
+import { authHeaders, makeChecker, protocolFor } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9200";
@@ -141,7 +141,7 @@ await Effect.runPromise(
 // The bytes a client receives, not only what a decoder kept: one raw NDJSON request.
 const response = await fetch(`${API_URL}/rpc`, {
   method: "POST",
-  headers: { "content-type": "application/ndjson" },
+  headers: { "content-type": "application/ndjson", ...authHeaders() },
   body: `${JSON.stringify({ _tag: "Request", id: "1", tag: "getServerInfo", payload: {}, headers: [] })}\n`,
 });
 const wire = await response.text();

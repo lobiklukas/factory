@@ -811,9 +811,30 @@ describe("the API's environment reads (LOB-257)", () => {
       "ANTHROPIC_API_KEY",
       "ANTHROPIC_OAUTH_TOKEN",
       "ANTHROPIC_AUTH_TOKEN",
+      "FACTORY_API_TOKEN",
+      "FACTORY_API_TOKENS",
     ]) {
       expect(passThrough).toContain(name);
       expect(declared(dryRun, DEV_TASK)).not.toContain(name);
+    }
+  }, 90_000);
+
+  it("passes the control-plane credential through to the CLI and the dashboard without declaring it (LOB-20)", () => {
+    // Stripped, `bun run dev` would send no credential to an API that requires one, and every call
+    // would answer `unauthenticated` with the token sitting in the shell.
+    for (const [workspace, task, name] of [
+      ["@repo/cli", CLI_DEV_TASK, "FACTORY_API_TOKEN"],
+      ["@repo/web", WEB_DEV_TASK, "VITE_FACTORY_API_TOKEN"],
+    ] as const) {
+      const dryRun = resolveScript(
+        "dev",
+        workspace,
+        databaseUrl("factory_probe"),
+      );
+      expect(
+        taskOf(dryRun, task).resolvedTaskDefinition.passThroughEnv,
+      ).toContain(name);
+      expect(declared(dryRun, task)).not.toContain(name);
     }
   }, 90_000);
 });

@@ -4,8 +4,10 @@
  * session's log by `packages/core` and `packages/harness`.
  *
  * A request is identified by a caller-supplied `requestId`, so a retried request is the same
- * request. A decision names an `actor` the caller supplies: the control plane does not yet know
- * who is at the other end (LOB-20 owns identity).
+ * request. A decision's `actor` is the one the call's credential authenticated as (LOB-20,
+ * `@repo/domain/Auth`): the `actor` in `DecideApprovalInput` is what the caller says, and the server
+ * replaces it with its `Caller` before anything is recorded. Only a control plane running with auth
+ * off keeps the declared one.
  */
 import { Schema } from "effect";
 import { SessionId, Timestamp } from "@repo/domain/Ids";
@@ -25,7 +27,10 @@ export type ApprovalRequest = typeof ApprovalRequest.Type;
 export const ApprovalVerdict = Schema.Literals(["approved", "denied"]);
 export type ApprovalVerdict = typeof ApprovalVerdict.Type;
 
-/** The settled answer to one request. `actor` is whatever the caller said it was. */
+/**
+ * The settled answer to one request. `actor` is who the control plane authenticated as having made
+ * it (LOB-20); with auth off, whatever the caller said it was.
+ */
 export const ApprovalDecision = Schema.Struct({
   sessionId: SessionId,
   requestId: Schema.String,
@@ -47,6 +52,11 @@ export const DecideApprovalInput = Schema.Struct({
   sessionId: SessionId,
   requestId: Schema.String,
   decision: ApprovalVerdict,
+  /**
+   * Who decided, as the caller declares it. The server records its authenticated `Caller` instead
+   * (LOB-20), so a name here that is not the credential's changes nothing; only a control plane
+   * running with auth off records it.
+   */
   actor: Schema.String,
   /**
    * Hand the session the decision as a follow-up message once it is recorded (LOB-53), so a run

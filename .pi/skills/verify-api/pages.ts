@@ -34,6 +34,7 @@ import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
 import type { RpcClientError } from "effect/rpc/RpcClientError";
+import type { Unauthenticated } from "@repo/domain/Auth";
 import { SqlClient } from "effect/sql/SqlClient";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
@@ -111,7 +112,7 @@ const pageEntries = (sessionId: SessionId) =>
 
 /** A refusal as the client decoded it: a `SessionError` with its code, or what arrived instead. */
 const refusalOf = (
-  error: SessionError | RpcClientError,
+  error: SessionError | Unauthenticated | RpcClientError,
 ): { readonly _tag: string; readonly code?: string } =>
   error._tag === "SessionError"
     ? { _tag: error._tag, code: error.code }

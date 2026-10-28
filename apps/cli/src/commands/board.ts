@@ -69,16 +69,26 @@ const apiFlag = Flag.String("api").pipe(
   Flag.optional,
 );
 
+/**
+ * Who the caller says makes a board write. A declaration: a control plane that authenticates the
+ * call (`FACTORY_API_TOKEN`, LOB-20) records the token's actor whatever this says, so the flag only
+ * counts against one running with auth off.
+ */
 const actorFlag = Flag.String("actor").pipe(
   Flag.withDescription(
-    "Who makes the move; a session id is a run, anything else is a person",
+    "Who makes the move; a session id is a run, anything else is a person. Ignored by a control plane that authenticates (FACTORY_API_TOKEN), which records the token's actor",
   ),
   Flag.withDefault("cli"),
 );
 
-/** Who a run started from the terminal is attributed to (LOB-162): `cli`, as a move's actor is. */
+/**
+ * Who a run started from the terminal is attributed to (LOB-162): `cli`, as a move's actor is — and,
+ * like it, overridden by the token's actor on a control plane that authenticates (LOB-20).
+ */
 const runActorFlag = Flag.String("actor").pipe(
-  Flag.withDescription("Who the run's spend is attributed to"),
+  Flag.withDescription(
+    "Who the run's spend is attributed to; ignored by a control plane that authenticates (FACTORY_API_TOKEN)",
+  ),
   Flag.withSchema(SessionActor),
   Flag.withDefault("cli"),
 );

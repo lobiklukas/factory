@@ -311,3 +311,77 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
     }
   }, 30_000);
 });
+
+/**
+ * Control-plane identity on the real boot (LOB-20): `index.ts` reads the token table from its
+ * environment, says which mode it runs in, refuses a table it cannot trust, and serves `/rpc` behind
+ * the middleware — read here as raw NDJSON, so the refusal is the typed `Unauthenticated` a client
+ * decodes, not a transport error. No database is reachable, and `getServerInfo` needs none.
+ */
+describe("control-plane auth on a booted API (LOB-20)", () => {
+  const TOKEN = "boot-shared-token-lob20-0123456789";
+
+  /** One `getServerInfo` request over raw NDJSON, with `authorization` when given; the body. */
+  const askWith = (authorization: string | undefined) => (url: string) =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const response = yield* client.execute(
+        HttpClientRequest.post(`${url}/rpc`).pipe(
+          HttpClientRequest.bodyText(
+            `${JSON.stringify({ _tag: "Request", id: "1", tag: "getServerInfo", payload: {}, headers: [] })}\n`,
+            "application/ndjson",
+          ),
+          authorization === undefined
+            ? (request) => request
+            : HttpClientRequest.setHeader("authorization", authorization),
+        ),
+      );
+      return yield* response.text;
+    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.runPromise);
+
+  it("refuses an RPC with no credential as Unauthenticated, serves the token, and never logs it", async () => {
+    const missing = await boot(
+      { MODEL_BACKEND: "faux", FACTORY_API_TOKEN: TOKEN },
+      askWith(undefined),
+    );
+    const served = await boot(
+      { MODEL_BACKEND: "faux", FACTORY_API_TOKEN: TOKEN },
+      askWith(`Bearer ${TOKEN}`),
+    );
+
+    expect(missing.code, missing.output).toBeNull();
+    expect(missing.output).toContain(
+      "control-plane auth: bearer token on every RPC, 1 credential(s) for operator",
+    );
+    expect(missing.asked).toContain('"_tag":"Unauthenticated"');
+    expect(missing.asked).toContain('"reason":"missing"');
+    expect(served.asked).toContain('"backend":"faux"');
+    expect(served.asked).not.toContain("Unauthenticated");
+    for (const output of [missing.output, served.output]) {
+      expect(output).not.toContain(TOKEN);
+    }
+  }, 30_000);
+
+  it("warns that auth is off when no token is configured, and serves an unauthenticated call", async () => {
+    const { code, output, asked } = await boot(
+      { MODEL_BACKEND: "faux" },
+      askWith(undefined),
+    );
+    expect(code, output).toBeNull();
+    expect(output).toContain("control-plane auth: OFF");
+    expect(asked).toContain('"backend":"faux"');
+  }, 30_000);
+
+  it("exits non-zero on a token table it cannot trust, naming the actor and never the token", async () => {
+    const { code, output } = await boot({
+      MODEL_BACKEND: "faux",
+      FACTORY_API_TOKENS: `trigger:linear=${TOKEN}`,
+    });
+    expect(code, output).not.toBeNull();
+    expect(code, output).not.toBe(0);
+    expect(output).toContain("InvalidApiTokens");
+    expect(output).toContain("trigger:linear");
+    expect(output).not.toContain(TOKEN);
+    expect(output).not.toContain(LISTENING);
+  }, 30_000);
+});

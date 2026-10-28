@@ -12,7 +12,8 @@ import { followSession, formatDollars } from "../transcript";
  *
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
- * `factory approve` decides as `cli`). The workspace line is the server's own answer for where the work will
+ * `factory approve` decides as `cli`) — a declaration only an open control plane keeps: one that
+ * authenticates records the actor of the `FACTORY_API_TOKEN` the call carried (LOB-20). The workspace line is the server's own answer for where the work will
  * live, so the run proves the read path as well as the write.
  */
 export const runCommand = Command.make(
@@ -38,7 +39,9 @@ export const runCommand = Command.make(
       Flag.optional,
     ),
     actor: Flag.String("actor").pipe(
-      Flag.withDescription("Who the session's spend is attributed to"),
+      Flag.withDescription(
+        "Who the session's spend is attributed to; ignored by a control plane that authenticates (FACTORY_API_TOKEN), which records the token's actor",
+      ),
       Flag.withSchema(SessionActor),
       Flag.withDefault("cli"),
     ),

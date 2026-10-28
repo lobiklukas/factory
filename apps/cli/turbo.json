@@ -12,7 +12,10 @@
         "DEVTOOLS_URL",
         "MOTEL_URL",
         "OTEL_SERVICE_NAME"
-      ]
+      ],
+      // The control-plane credential every call sends (src/rpc.ts, LOB-20): a secret, so it reaches
+      // the process without entering the task hash or the cache key.
+      "passThroughEnv": ["FACTORY_API_TOKEN"]
     }
   }
 }
