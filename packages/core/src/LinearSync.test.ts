@@ -13,8 +13,8 @@
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { BunServices } from "@effect/platform-bun";
-import { Effect, Exit, Layer, ManagedRuntime, Redacted, Schema } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { Effect, Exit, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import { HttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
@@ -41,7 +41,18 @@ import {
   syncPullRequestLifecycle,
   verifyGitHubSignature,
 } from "./LinearSync";
+import {
+  CANCELED,
+  DONE,
+  makeLinear,
+  PROGRESS,
+  REVIEW,
+  state,
+  TEAM,
+  TODO,
+} from "./linearFake";
 import { PrError } from "./pr";
+import { proposalIssueBody, proposalMarker } from "./ProposalTracker";
 import {
   pullRequestReport,
   SessionWriteBack,
@@ -57,19 +68,6 @@ import {
 } from "./TriggerService";
 
 const sessionId = "ses_01j8z000000000000000000000" as SessionId;
-
-const state = (
-  id: string,
-  name: string,
-  type: string,
-): LinearWorkflowState => ({ id, name, type });
-
-const TODO = state("st-todo", "Todo", "unstarted");
-const PROGRESS = state("st-progress", "In Progress", "started");
-const REVIEW = state("st-review", "In Review", "started");
-const DONE = state("st-done", "Done", "completed");
-const CANCELED = state("st-canceled", "Canceled", "canceled");
-const TEAM = [TODO, PROGRESS, REVIEW, DONE, CANCELED];
 
 const config: LinearConfig = {
   apiUrl: "http://linear.test/graphql",
@@ -339,179 +337,6 @@ describe("githubPullRequestLifecycle", () => {
     ).toEqual({ _tag: "merged", pr, apiUrl: api });
   });
 });
-
-/** A request the fake saw: the operation, its variables, and the key it carried. */
-type Seen = {
-  readonly operation: string;
-  readonly variables: Record<string, unknown>;
-  readonly authorization: string | undefined;
-};
-
-type FakeOptions = {
-  /** The issue's identifier; per case on Postgres, because a session's request id is unique. */
-  readonly identifier?: string;
-  readonly start?: LinearWorkflowState;
-  readonly states?: readonly LinearWorkflowState[];
-  readonly comments?: readonly string[];
-  /** Apply this mutation, then answer 500 the first time: the lost acknowledgement. */
-  readonly loseAckOnce?: string;
-  /** Answer this operation with GraphQL `errors` on HTTP 200. */
-  readonly refuse?: string;
-  /** Answer this mutation with `success: false`. */
-  readonly unsuccessful?: string;
-  /** Answer this operation the way Linear rate-limits: HTTP 400, `RATELIMITED`, this many times. */
-  readonly rateLimit?: { readonly operation: string; readonly times: number };
-  /** Never answer this operation, this many times (`Infinity`: never at all). */
-  readonly hang?: { readonly operation: string; readonly times: number };
-};
-
-const Json = Schema.fromJsonString(Schema.Unknown);
-const RequestBody = Schema.Struct({
-  query: Schema.String,
-  variables: Schema.Record(Schema.String, Schema.Unknown),
-});
-
-const asRecord = (value: unknown): Record<string, unknown> =>
-  typeof value === "object" && value !== null
-    ? (value as Record<string, unknown>)
-    : {};
-
-/** One Linear issue, stateful, answering the sync's four operations as Linear's schema spells them. */
-const makeLinear = (options: FakeOptions = {}) => {
-  const states = options.states ?? TEAM;
-  const issue = {
-    id:
-      options.identifier === undefined
-        ? "iss-uuid-1"
-        : `iss-${options.identifier}`,
-    identifier: options.identifier ?? "ENG-42",
-    state: options.start ?? TODO,
-    comments: [...(options.comments ?? [])],
-    attachments: [] as Array<{ url: string; title: string }>,
-  };
-  const seen: Seen[] = [];
-  const lost = new Set<string>();
-  let limitsLeft = options.rateLimit?.times ?? 0;
-  let hangsLeft = options.hang?.times ?? 0;
-
-  const operationOf = (query: string): string =>
-    query.includes("commentCreate")
-      ? "commentCreate"
-      : query.includes("issueUpdate")
-        ? "issueUpdate"
-        : query.includes("attachmentCreate")
-          ? "attachmentCreate"
-          : "issue";
-
-  const answer = (operation: string, variables: Record<string, unknown>) => {
-    const input = asRecord(variables["input"]);
-    switch (operation) {
-      case "issue":
-        return {
-          issue:
-            variables["id"] === issue.id || variables["id"] === issue.identifier
-              ? {
-                  id: issue.id,
-                  identifier: issue.identifier,
-                  state: issue.state,
-                  team: { states: { nodes: states } },
-                  comments: {
-                    nodes: issue.comments.map((body) => ({ body })),
-                  },
-                  attachments: {
-                    nodes: issue.attachments.map(({ url }) => ({ url })),
-                  },
-                }
-              : null,
-        };
-      case "commentCreate":
-        issue.comments.push(String(input["body"]));
-        return { commentCreate: { success: true } };
-      case "issueUpdate": {
-        const next = states.find((s) => s.id === input["stateId"]);
-        if (next !== undefined) issue.state = next;
-        return { issueUpdate: { success: next !== undefined } };
-      }
-      default:
-        issue.attachments.push({
-          url: String(input["url"]),
-          title: String(input["title"]),
-        });
-        return { attachmentCreate: { success: true } };
-    }
-  };
-
-  const client = HttpClient.make((request) =>
-    Effect.gen(function* () {
-      const raw =
-        request.body._tag === "Uint8Array"
-          ? new TextDecoder().decode(request.body.body)
-          : "{}";
-      const body = yield* Schema.decodeEffect(
-        Schema.fromJsonString(RequestBody),
-      )(raw);
-      const operation = operationOf(body.query);
-      seen.push({
-        operation,
-        variables: body.variables,
-        authorization: request.headers["authorization"],
-      });
-      const reply = (status: number, payload: unknown) =>
-        Schema.encodeEffect(Json)(payload).pipe(
-          Effect.map((text) =>
-            HttpClientResponse.fromWeb(
-              request,
-              new Response(text, {
-                status,
-                headers: { "content-type": "application/json" },
-              }),
-            ),
-          ),
-        );
-      if (options.hang?.operation === operation && hangsLeft > 0) {
-        hangsLeft -= 1;
-        return yield* Effect.never;
-      }
-      if (options.rateLimit?.operation === operation && limitsLeft > 0) {
-        limitsLeft -= 1;
-        return yield* reply(400, {
-          data: null,
-          errors: [
-            {
-              message: "Rate limit exceeded",
-              extensions: { code: "RATELIMITED" },
-            },
-          ],
-        });
-      }
-      if (options.refuse === operation) {
-        return yield* reply(200, {
-          data: null,
-          errors: [{ message: "Entity not found" }],
-        });
-      }
-      if (options.unsuccessful === operation) {
-        return yield* reply(200, {
-          data: { [operation]: { success: false } },
-        });
-      }
-      const data = answer(operation, body.variables);
-      if (options.loseAckOnce === operation && !lost.has(operation)) {
-        lost.add(operation);
-        return yield* reply(500, { error: "upstream timeout" });
-      }
-      return yield* reply(200, { data });
-    }).pipe(Effect.orDie),
-  );
-  const layer = Layer.succeed(HttpClient.HttpClient, client);
-  const writes = (operation?: string) =>
-    seen.filter((s) =>
-      operation === undefined
-        ? s.operation !== "issue"
-        : s.operation === operation,
-    );
-  return { issue, seen, writes, client, layer };
-};
 
 const withSync = <A, E>(
   fake: ReturnType<typeof makeLinear>,
@@ -815,6 +640,187 @@ describe("LinearIssueSyncLive", () => {
       sync.started({ issueId: "ENG-999", sessionId }),
     );
     expect(JSON.stringify(exit)).toContain("Linear has no issue ENG-999");
+  });
+});
+
+describe("child issues under a delegating issue (LOB-202)", () => {
+  const child = {
+    issueId: "ENG-42",
+    marker: proposalMarker(sessionId, "Schema"),
+    title: "Schema",
+    description: `the body\n\n\`${proposalMarker(sessionId, "Schema")}\``,
+  };
+
+  it("creates a child in the parent's team, addressed by the parent's id rather than its identifier", async () => {
+    const fake = makeLinear();
+    const exit = await withSync(fake, (sync) => sync.createChild(child));
+    expect(exit).toEqual(
+      Exit.succeed({ id: "iss-child-1", identifier: "ENG-101" }),
+    );
+    expect(fake.writes()).toEqual([
+      {
+        operation: "issueCreate",
+        variables: {
+          input: {
+            teamId: fake.teamId,
+            parentId: "iss-uuid-1",
+            title: "Schema",
+            description: child.description,
+          },
+        },
+        authorization: "lin_api_test",
+      },
+    ]);
+  });
+
+  it("answers the child whose description carries the marker instead of creating another", async () => {
+    const fake = makeLinear();
+    const first = await withSync(fake, (sync) => sync.createChild(child));
+    const again = await withSync(fake, (sync) => sync.createChild(child));
+    expect(again).toEqual(first);
+    expect(fake.writes("issueCreate")).toHaveLength(1);
+    // Another proposal of the same session is another marker, so it is created.
+    const other = await withSync(fake, (sync) =>
+      sync.createChild({
+        ...child,
+        title: "Service",
+        marker: proposalMarker(sessionId, "Service"),
+        description: "the other body",
+      }),
+    );
+    expect(Exit.isSuccess(other)).toBe(true);
+    expect(fake.children).toHaveLength(2);
+  });
+
+  it("retries a rate-limited create and creates once", async () => {
+    const fake = makeLinear({
+      rateLimit: { operation: "issueCreate", times: 1 },
+    });
+    const exit = await withSync(fake, (sync) => sync.createChild(child));
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(fake.children).toHaveLength(1);
+  });
+
+  it("fails a refused or unsuccessful create as a non-transient LinearSyncError, once", async () => {
+    for (const options of [
+      { refuse: "issueCreate" },
+      { unsuccessful: "issueCreate" },
+    ]) {
+      const fake = makeLinear(options);
+      const exit = await withSync(fake, (sync) => sync.createChild(child));
+      expect(Exit.isFailure(exit)).toBe(true);
+      const error = Option.getOrThrow(Exit.findErrorOption(exit));
+      expect(error).toMatchObject({
+        _tag: "LinearSyncError",
+        operation: "issueCreate",
+        transient: false,
+      });
+      // A refusal is not retried: one request, no child.
+      expect(fake.writes("issueCreate")).toHaveLength(1);
+      expect(fake.children).toHaveLength(0);
+    }
+  });
+
+  it("fails an issue Linear shows this key as a LinearSyncError and writes nothing", async () => {
+    const fake = makeLinear();
+    const exit = await withSync(fake, (sync) =>
+      sync.createChild({ ...child, issueId: "ENG-404" }),
+    );
+    expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
+      operation: "issueChildren",
+    });
+    expect(fake.writes()).toEqual([]);
+  });
+
+  /** Two children the fake made, so the ids a relation names are issues it knows. */
+  const twoChildren = async (fake: ReturnType<typeof makeLinear>) => {
+    for (const title of ["Schema", "Service"]) {
+      await withSync(fake, (sync) =>
+        sync.createChild({
+          ...child,
+          title,
+          marker: proposalMarker(sessionId, title),
+          description: title,
+        }),
+      );
+    }
+    const [blocker, blocked] = fake.children;
+    if (blocker === undefined || blocked === undefined) {
+      throw new Error("the fake made no children");
+    }
+    return { blocker, blocked };
+  };
+
+  it("relates a blocker to the issue it blocks once, and finds the edge on every later ask", async () => {
+    const fake = makeLinear();
+    const { blocker, blocked } = await twoChildren(fake);
+    const creates = fake.writes().length;
+    const first = await withSync(fake, (sync) =>
+      sync.blocks({ blocker, blocked }),
+    );
+    const second = await withSync(fake, (sync) =>
+      sync.blocks({ blocker, blocked }),
+    );
+    expect(first).toEqual(Exit.succeed({ created: true }));
+    expect(second).toEqual(Exit.succeed({ created: false }));
+    expect(fake.writes().slice(creates)).toEqual([
+      {
+        operation: "issueRelationCreate",
+        variables: {
+          input: {
+            issueId: blocker.id,
+            relatedIssueId: blocked.id,
+            type: "blocks",
+          },
+        },
+        authorization: "lin_api_test",
+      },
+    ]);
+    // The reverse is another edge, not the one already there.
+    const reverse = await withSync(fake, (sync) =>
+      sync.blocks({ blocker: blocked, blocked: blocker }),
+    );
+    expect(reverse).toEqual(Exit.succeed({ created: true }));
+  });
+
+  it("does not take a lost acknowledgement for a missing edge", async () => {
+    const fake = makeLinear({ loseAckOnce: "issueRelationCreate" });
+    const { blocker, blocked } = await twoChildren(fake);
+    const exit = await withSync(fake, (sync) =>
+      sync.blocks({ blocker, blocked }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(fake.relations).toHaveLength(1);
+  });
+});
+
+describe("the proposal marker and body (LOB-202)", () => {
+  it("names a proposal by its session and its title, not by its position", () => {
+    const marker = proposalMarker(sessionId, "Add the schema");
+    expect(marker).toMatch(/^factory:ses_[0-9a-z]{26}:proposal:[0-9a-f]{12}$/);
+    // The validator's own notion of the same title.
+    expect(proposalMarker(sessionId, "  add   THE schema ")).toBe(marker);
+    expect(proposalMarker(sessionId, "Add the service")).not.toBe(marker);
+    expect(
+      proposalMarker(
+        "ses_01j8z000000000000000000001" as SessionId,
+        "Add the schema",
+      ),
+    ).not.toBe(marker);
+  });
+
+  it("writes the goal, the change and the acceptance lines as a checklist", () => {
+    expect(
+      proposalIssueBody({
+        title: "T",
+        goal: "the goal",
+        change: "the change",
+        acceptance: ["one", "two"],
+        blockedBy: [],
+      }),
+    ).toBe(
+      "the goal\n\n**Change**\n\nthe change\n\n**Acceptance**\n\n- [ ] one\n- [ ] two",
+    );
   });
 });
 
