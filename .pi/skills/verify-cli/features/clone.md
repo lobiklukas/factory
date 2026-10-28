@@ -35,7 +35,7 @@ answers `401` without the drive's own token (`../lib/git-remote.ts`), its own AP
 3. The forge's main moves; a second `run` is cut at the new tip and the first worktree stays where it
    was: each session fetches.
 4. `repo show` reads `state       ready` and the cache; `factory doctor <slug>` prints
-   `ok    <slug>  cloned into <cache>` and exits 0.
+   `ok repo <slug>: cloned into <cache>` and exits 0.
 5. `repo add <ghost> --url <forge>/<ghost>.git` for a repo the forge does not serve — non-zero,
    `error: repo_clone_failed:` naming the ghost, nothing left in the cache. `repo show` still has the row,
    `state       not cloned yet`, `remedy      factory repo sync <ghost>`; `factory doctor <ghost>` prints

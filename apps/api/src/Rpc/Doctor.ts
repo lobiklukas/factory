@@ -163,7 +163,7 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
               ? oneLine(reply.errorMessage ?? "the provider answered an error")
               : text.trim() === ""
                 ? "answered"
-                : `answered ${JSON.stringify(oneLine(text).slice(0, 40))}`,
+                : `answered "${oneLine(text).slice(0, 40)}"`,
             costUsd: reply.usage.cost.total,
             inputTokens: Math.round(reply.usage.input),
             outputTokens: Math.round(reply.usage.output),
