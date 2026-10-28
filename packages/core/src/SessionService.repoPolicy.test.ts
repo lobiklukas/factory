@@ -63,10 +63,12 @@ const runtime = ManagedRuntime.make(
   }).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer))),
 );
 
+// Disposing the runtime closes every owner and its log: seconds under the gate's load, not 10 s's
+// default hook.
 afterAll(async () => {
   await runtime.dispose();
   rmSync(scratch, { recursive: true, force: true });
-});
+}, 60_000);
 
 const waitUntil = <E, R>(
   check: Effect.Effect<boolean, E, R>,
@@ -662,7 +664,7 @@ describe("a reviewer's policy at a base fetched from the forge", () => {
       Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
     ),
   );
-  afterAll(() => withRemote.dispose());
+  afterAll(() => withRemote.dispose(), 60_000);
 
   /** Mutation: skip `reviewBaseStartFor` — `release` names no commit and the reviewer is ungated. */
   it("fetches a pull request's base the checkout does not hold, and reads the policy there", async () => {
