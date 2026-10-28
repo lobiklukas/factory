@@ -11,6 +11,8 @@
 import { Effect, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -22,7 +24,7 @@ import { applyPlan, planRulesets, verifyRulesets } from "./reconcile";
 const ADMIN = "admin-token-for-tests";
 const WORKER = "worker-token-for-tests";
 const POLICY = rulesetPolicy();
-const MAIN = "factory: main is PR-only";
+const MAIN = "factory: the default branch is PR-only";
 const SESSIONS = "factory: factory/** is append-only";
 
 let root: string;
@@ -315,7 +317,7 @@ describe("failures", () => {
       operation: "list",
       repo,
       status: 401,
-      message: "GitHub answered HTTP 401",
+      message: "GitHub answered HTTP 401: Bad credentials",
     });
   });
 
@@ -323,7 +325,81 @@ describe("failures", () => {
     const client = await clientFor(WORKER);
     const plan = await run(planRulesets(client, repo, POLICY));
     const error = await run(Effect.flip(applyPlan(client, plan, POLICY)));
-    expect(error).toMatchObject({ operation: "create", status: 403 });
+    expect(error).toMatchObject({
+      operation: "create",
+      status: 403,
+      message:
+        "GitHub answered HTTP 403: Resource not accessible by integration",
+    });
     expect(forge.rulesets(repo)).toEqual([]);
+  });
+
+  it("carries GitHub's reason for a refusal, and survives a body that has none", async () => {
+    // GitHub's own shapes: a 422 with an `errors` list, a 403 a plan answers, and a body that is
+    // not JSON at all (a proxy's error page), which must still leave the status.
+    const answers: Record<string, { status: number; body: string }> = {
+      "/repos/acme/invalid/rulesets": {
+        status: 422,
+        body: JSON.stringify({
+          message: "Validation Failed",
+          errors: [
+            { resource: "Ruleset", field: "rules", code: "invalid" },
+            "Invalid rule 'pull_request': required_approving_review_count must be at most 10",
+          ],
+        }),
+      },
+      "/repos/acme/private/rulesets": {
+        status: 403,
+        body: JSON.stringify({
+          message:
+            "Upgrade to GitHub Pro or make this repository public to enable this feature.",
+        }),
+      },
+      "/repos/acme/proxied/rulesets": {
+        status: 502,
+        body: "<html>Bad Gateway</html>",
+      },
+    };
+    const server = createServer((req, res) => {
+      const answer = answers[(req.url ?? "").split("?")[0] ?? ""];
+      res.writeHead(answer?.status ?? 404, {
+        "content-type": "application/json",
+      });
+      res.end(answer?.body ?? "{}");
+    });
+    await once(server.listen(0, "127.0.0.1"), "listening");
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("the refusing server did not bind a TCP port");
+      const client = await run(
+        makeRulesetsClient({
+          apiUrl: `http://127.0.0.1:${address.port}`,
+          token: Redacted.make(ADMIN),
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
+      );
+      const [declared] = POLICY;
+      if (declared === undefined) throw new Error("no declared ruleset");
+      expect(
+        await run(Effect.flip(client.create("acme/invalid", declared))),
+      ).toMatchObject({
+        status: 422,
+        message:
+          "GitHub answered HTTP 422: Validation Failed; rules invalid; Invalid rule 'pull_request': required_approving_review_count must be at most 10",
+      });
+      expect(await run(Effect.flip(client.list("acme/private")))).toMatchObject(
+        {
+          status: 403,
+          message:
+            "GitHub answered HTTP 403: Upgrade to GitHub Pro or make this repository public to enable this feature.",
+        },
+      );
+      expect(await run(Effect.flip(client.list("acme/proxied")))).toMatchObject(
+        { status: 502, message: "GitHub answered HTTP 502" },
+      );
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
   });
 });

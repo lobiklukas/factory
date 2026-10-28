@@ -6,7 +6,7 @@
  * - `apply` makes the plan's writes, then reads every ruleset back; exits non-zero unless the
  *   read-back is clean.
  * - `verify` is the read-back alone: exits non-zero when a declared ruleset is missing, differs, or
- *   names a bypass actor. This is the check a scheduled job runs against the real repo.
+ *   names a bypass actor. `.github/workflows/rulesets.yml` runs it daily against this repository.
  * - `probe` pushes to `factory/ruleset-probe` as the factory's own credential and exits non-zero
  *   unless the forge refuses the force-push and the deletion (`rulesets/probe.ts`).
  *
@@ -57,12 +57,8 @@ const RulesetsTokenConfig = Config.all({
 const repoFlag = Flag.String("repo").pipe(
   Flag.withDescription("The repository (owner/name)"),
 );
-const branchFlag = Flag.String("branch").pipe(
-  Flag.withDescription("The branch PRs merge into"),
-  Flag.withDefault("main"),
-);
 const approvalsFlag = Flag.Int("approvals").pipe(
-  Flag.withDescription("Approvals a PR into the branch requires"),
+  Flag.withDescription("Approvals a PR into the default branch requires"),
   Flag.withDefault(1),
 );
 const jsonFlag = Flag.Boolean("json").pipe(
@@ -154,19 +150,15 @@ const planCommand = Command.make(
   "plan",
   {
     repo: repoFlag,
-    branch: branchFlag,
     approvals: approvalsFlag,
     json: jsonFlag,
   },
-  Effect.fnUntraced(function* ({ repo, branch, approvals, json }) {
+  Effect.fnUntraced(function* ({ repo, approvals, json }) {
     yield* reported(
       Effect.gen(function* () {
         const slug = yield* slugOf(repo);
         const client = yield* operatorClient;
-        const policy = rulesetPolicy({
-          defaultBranch: branch,
-          requiredApprovals: approvals,
-        });
+        const policy = rulesetPolicy({ requiredApprovals: approvals });
         const plan = yield* planRulesets(client, slug, policy);
         yield* print(json, plan, plan.changes.flatMap(describeChange));
       }),
@@ -178,19 +170,15 @@ const applyCommand = Command.make(
   "apply",
   {
     repo: repoFlag,
-    branch: branchFlag,
     approvals: approvalsFlag,
     json: jsonFlag,
   },
-  Effect.fnUntraced(function* ({ repo, branch, approvals, json }) {
+  Effect.fnUntraced(function* ({ repo, approvals, json }) {
     yield* reported(
       Effect.gen(function* () {
         const slug = yield* slugOf(repo);
         const client = yield* operatorClient;
-        const policy = rulesetPolicy({
-          defaultBranch: branch,
-          requiredApprovals: approvals,
-        });
+        const policy = rulesetPolicy({ requiredApprovals: approvals });
         const plan = yield* planRulesets(client, slug, policy);
         const applied = yield* applyPlan(client, plan, policy);
         const verification = yield* verifyRulesets(client, slug, policy);
@@ -220,11 +208,10 @@ const verifyCommand = Command.make(
   "verify",
   {
     repo: repoFlag,
-    branch: branchFlag,
     approvals: approvalsFlag,
     json: jsonFlag,
   },
-  Effect.fnUntraced(function* ({ repo, branch, approvals, json }) {
+  Effect.fnUntraced(function* ({ repo, approvals, json }) {
     yield* reported(
       Effect.gen(function* () {
         const slug = yield* slugOf(repo);
@@ -232,10 +219,7 @@ const verifyCommand = Command.make(
         const verification = yield* verifyRulesets(
           client,
           slug,
-          rulesetPolicy({
-            defaultBranch: branch,
-            requiredApprovals: approvals,
-          }),
+          rulesetPolicy({ requiredApprovals: approvals }),
         );
         yield* print(json, verification, [
           ...verification.findings,

@@ -1,0 +1,38 @@
+# The read-back of D15's GitHub rulesets against this repository (LOB-30, R3): a ruleset deleted or
+# weakened in GitHub's settings page fails this job, the same day, without anyone running a command.
+# It needs an operator token with the repository's Administration permission, which the factory's
+# own credentials must never hold, in the RULESETS_ADMIN_TOKEN secret (GitHub reserves the GITHUB_
+# prefix for secret names; the job hands it to the command as GITHUB_RULESETS_TOKEN). Until the
+# owner adds that secret the job is inert: it says so in a notice and passes. It is not part of `gate` and
+# never pushes; the live force-push probe (`bun run rulesets probe`) stays an operator's run.
+name: rulesets
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rulesets
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_RULESETS_TOKEN: ${{ secrets.RULESETS_ADMIN_TOKEN }}
+    steps:
+      - name: inert without the operator token
+        if: env.GITHUB_RULESETS_TOKEN == ''
+        run: echo "::notice::the RULESETS_ADMIN_TOKEN secret is not set; the rulesets read-back did not run"
+      - if: env.GITHUB_RULESETS_TOKEN != ''
+        uses: actions/checkout@v4
+      - if: env.GITHUB_RULESETS_TOKEN != ''
+        uses: ./.github/actions/setup
+      - name: read the live rulesets back
+        if: env.GITHUB_RULESETS_TOKEN != ''
+        run: bun run rulesets verify --repo "${{ github.repository }}"

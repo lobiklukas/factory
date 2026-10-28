@@ -16,14 +16,19 @@
 //      force-push lands; apply restores it, and verify and the probe pass again
 //   6. the factory's App added as a bypass actor fails verify and the probe; apply restores it
 //   7. an operator token equal to the factory's GITHUB_TOKEN is refused before any request
-//   8. every request stayed on loopback
+//   8. no request left loopback: every child runs with HTTP(S)_PROXY at an egress canary (a loopback
+//      listener that records and drops whatever reaches it) and NO_PROXY=127.0.0.1, so a call to
+//      any non-loopback host lands in the canary instead of the network; the canary saw nothing, and
+//      a control call at a non-loopback API root shows it catches one
 //
 // The forge is `infra/src/testing/githubFake.ts`, started in this process on FORGE_PORT (default
-// 9521); the CLI runs as a child process with GITHUB_API_URL pointed at it and only the variables
-// it needs, so no real credential and no GITHUB_APP_* of the caller's can reach it.
+// 9521); the CLI runs as a child process (`bun --no-env-file`, so no `.env` in the checkout is
+// loaded into it) with GITHUB_API_URL pointed at it and only the variables it needs, so no real
+// credential and no GITHUB_APP_* of the caller's can reach it.
 //
-// Env: FORGE_PORT, EVIDENCE_DIR.
+// Env: FORGE_PORT, CANARY_PORT (default 9522), EVIDENCE_DIR.
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { startGitHubFake } from "@repo/infra/testing";
@@ -34,6 +39,7 @@ const EVIDENCE_DIR = path.resolve(
   process.env["EVIDENCE_DIR"] ?? ".verify/rulesets",
 );
 const FORGE_PORT = Number(process.env["FORGE_PORT"] ?? "9521");
+const CANARY_PORT = Number(process.env["CANARY_PORT"] ?? "9522");
 const ADMIN = "verify-rulesets-admin-token";
 const WORKER = "verify-rulesets-worker-token";
 const REPO = "acme/rulesets-drive";
@@ -49,6 +55,34 @@ const forge = await startGitHubFake({
   ledger: path.join(EVIDENCE_DIR, "forge-ledger.json"),
 });
 forge.createRepo(REPO);
+
+/**
+ * The egress canary: every child's HTTP(S)_PROXY. A request to a non-loopback host — fetch's or
+ * git's — opens a connection here instead of reaching the network; the canary records its first
+ * line (`CONNECT host:443 …` or `GET http://host/… …`) and drops it, so the request fails too.
+ */
+const egress: Array<string> = [];
+const canary = createTcpServer((socket) => {
+  socket.once("data", (chunk) => {
+    egress.push(chunk.toString("latin1").split("\r\n")[0] ?? "");
+    socket.destroy();
+  });
+  socket.on("error", () => undefined);
+});
+await new Promise<void>((resolve, reject) => {
+  canary.once("error", reject);
+  canary.listen(CANARY_PORT, "127.0.0.1", resolve);
+});
+const CANARY = `http://127.0.0.1:${CANARY_PORT}`;
+/** Fetch (Bun) and git (curl) both read these; either case, so neither falls through. */
+const PROXIED = {
+  HTTP_PROXY: CANARY,
+  HTTPS_PROXY: CANARY,
+  http_proxy: CANARY,
+  https_proxy: CANARY,
+  NO_PROXY: "127.0.0.1,localhost",
+  no_proxy: "127.0.0.1,localhost",
+};
 
 type Check = {
   readonly name: string;
@@ -80,19 +114,25 @@ const rulesets = async (
   args: ReadonlyArray<string>,
   env: Record<string, string> = {},
 ): Promise<Ran> => {
-  const child = Bun.spawn(["bun", "infra/src/rulesets.ts", ...args], {
-    cwd: ROOT,
-    env: {
-      PATH: process.env["PATH"] ?? "",
-      HOME: process.env["HOME"] ?? "",
-      GITHUB_API_URL: forge.url,
-      GITHUB_RULESETS_TOKEN: ADMIN,
-      GITHUB_TOKEN: WORKER,
-      ...env,
+  // `--no-env-file`: Bun loads the cwd's `.env` into a child even when `env` is given, so without it a
+  // checkout's `.env` (GITHUB_APP_*, MOTEL_URL, …) would reach the command under test.
+  const child = Bun.spawn(
+    ["bun", "--no-env-file", "infra/src/rulesets.ts", ...args],
+    {
+      cwd: ROOT,
+      env: {
+        ...PROXIED,
+        PATH: process.env["PATH"] ?? "",
+        HOME: process.env["HOME"] ?? "",
+        GITHUB_API_URL: forge.url,
+        GITHUB_RULESETS_TOKEN: ADMIN,
+        GITHUB_TOKEN: WORKER,
+        ...env,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
     },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  );
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -110,6 +150,7 @@ const git = async (args: ReadonlyArray<string>, cwd: string): Promise<Ran> => {
   const child = Bun.spawn(["git", ...args], {
     cwd,
     env: {
+      ...PROXIED,
       PATH: process.env["PATH"] ?? "",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
@@ -329,21 +370,37 @@ try {
     unsafe.stderr,
   );
 
-  // 8. loopback only
+  // 8. loopback only: the canary saw nothing, and it would have
+  const escaped = [...egress];
   check(
-    "every request went to the loopback forge",
-    forge.url.startsWith("http://127.0.0.1:") && forge.requests.length > 0,
-    forge.url,
+    "no request left loopback: the egress canary saw nothing from any child",
+    escaped.length === 0 && forge.requests.length > 0,
+    escaped.join("\n"),
+  );
+  const control = await rulesets(["verify", ...repoArgs], {
+    GITHUB_API_URL: "https://egress-canary.invalid",
+  });
+  check(
+    "the canary catches a non-loopback request (control): it is recorded, and the call fails",
+    control.code === 1 &&
+      control.stderr.includes("could not be reached") &&
+      egress.some((line) => line.includes("egress-canary.invalid")),
+    `${egress.join("\n")}\n${control.stderr}`,
   );
 } finally {
   await forge.close();
+  await new Promise<void>((resolve) => canary.close(() => resolve()));
   rmSync(scratch, { recursive: true, force: true });
 }
 
 const passed = checks.every((each) => each.ok);
 writeFileSync(
   path.join(EVIDENCE_DIR, "drive.json"),
-  JSON.stringify({ passed, forge: forge.url, checks, transcript }, null, 2),
+  JSON.stringify(
+    { passed, forge: forge.url, canary: CANARY, egress, checks, transcript },
+    null,
+    2,
+  ),
 );
 console.log(
   `\n${checks.filter((each) => each.ok).length}/${checks.length} checks passed`,

@@ -297,8 +297,8 @@ Residual risk: the app can still create new branches, and ruleset configuration 
 security surface, so it must be code. Alchemy's GitHub provider covers repositories,
 Actions secrets/variables, and webhooks, but not rulesets — that is a custom provider or
 Terraform's `github_repository_ruleset`.
-_As built (LOB-30)._ The rulesets are declared in `infra/src/rulesets/policy.ts` (`main` PR-only
-with one approval from someone other than the last pusher, plus `deletion` and `non_fast_forward`;
+_As built (LOB-30)._ The rulesets are declared in `infra/src/rulesets/policy.ts` (the default
+branch, as `~DEFAULT_BRANCH`, PR-only with one approval from someone other than the last pusher, plus `deletion` and `non_fast_forward`;
 `factory/**` with `deletion` and `non_fast_forward`; `bypass_actors` empty) and reconciled by a
 custom provider in plain Effect over the REST API (`bun run rulesets plan|apply|verify`), not by
 Alchemy yet: Alchemy v2 is a prerelease that needs a newer `effect` than the repo pins, so
@@ -306,6 +306,7 @@ Alchemy yet: Alchemy v2 is a prerelease that needs a newer `effect` than the rep
 and fails on a missing one, any drift, or any bypass actor; `probe` pushes a force-push and a
 deletion at `factory/ruleset-probe` as the factory's own credential and fails unless the forge
 refuses both with `GH013`. The operator token (`GITHUB_RULESETS_TOKEN`) must not be the factory's.
+`.github/workflows/rulesets.yml` runs `verify` daily once the `RULESETS_ADMIN_TOKEN` secret exists.
 
 ### D16 — Review happens in GitHub
 

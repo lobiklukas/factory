@@ -32,11 +32,11 @@ describe("the declared rulesets", () => {
   it("are exactly D15's two, active, with nobody able to bypass them", () => {
     expect(rulesetPolicy()).toEqual([
       {
-        name: "factory: main is PR-only",
+        name: "factory: the default branch is PR-only",
         target: "branch",
         enforcement: "active",
         bypass_actors: [],
-        conditions: { ref_name: { include: ["refs/heads/main"], exclude: [] } },
+        conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
         rules: [
           { type: "deletion" },
           { type: "non_fast_forward" },
@@ -65,13 +65,8 @@ describe("the declared rulesets", () => {
     ]);
   });
 
-  it("follow the branch and approval count they are given, and keep the owned prefix", () => {
-    const [main] = rulesetPolicy({
-      defaultBranch: "trunk",
-      requiredApprovals: 2,
-    });
-    expect(main?.name).toBe("factory: trunk is PR-only");
-    expect(main?.conditions.ref_name.include).toEqual(["refs/heads/trunk"]);
+  it("follow the approval count they are given, and keep the owned prefix", () => {
+    const [main] = rulesetPolicy({ requiredApprovals: 2 });
     expect(
       main?.rules.find((rule) => rule.type === "pull_request")?.parameters?.[
         "required_approving_review_count"
@@ -79,6 +74,34 @@ describe("the declared rulesets", () => {
     ).toBe(2);
     for (const ruleset of rulesetPolicy())
       expect(ruleset.name.startsWith(RULESET_PREFIX)).toBe(true);
+  });
+
+  it("name nothing after an input, so no option can rename (and so prune) a declared ruleset", () => {
+    const names = rulesetPolicy().map((ruleset) => ruleset.name);
+    expect(rulesetPolicy({ requiredApprovals: 0 }).map((r) => r.name)).toEqual(
+      names,
+    );
+    expect(rulesetPolicy({ requiredApprovals: 3 }).map((r) => r.name)).toEqual(
+      names,
+    );
+  });
+
+  it("bind whatever the repository's default branch is called", () => {
+    const trunk = { defaultBranch: "trunk", pusher: APP };
+    expect(
+      evaluateRefUpdate(
+        rulesetPolicy(),
+        { ref: "refs/heads/trunk", kind: "fast-forward" },
+        trunk,
+      ).map((violation) => violation.rule),
+    ).toEqual(["pull_request"]);
+    expect(
+      evaluateRefUpdate(
+        rulesetPolicy(),
+        { ref: "refs/heads/main", kind: "fast-forward" },
+        trunk,
+      ),
+    ).toEqual([]);
   });
 });
 

@@ -8,7 +8,10 @@
  * is silently absent (R3). So the rulesets are declared here, reviewed like any other change, and
  * reconciled and read back by `reconcile.ts`:
  *
- * - **The default branch is PR-only, with no bypass.** A `pull_request` rule (so no push lands on it
+ * - **The default branch is PR-only, with no bypass.** Matched as `~DEFAULT_BRANCH`, not by name, so
+ *   the ruleset follows the repository's default branch and its name never depends on an input: a
+ *   mistyped branch cannot rename it, which would make apply delete the real protection as an
+ *   undeclared prefixed ruleset and pass its own read-back. A `pull_request` rule (so no push lands on it
  *   directly, the factory App's included), plus `deletion` and `non_fast_forward`. The PR rule asks
  *   for one approval and for the last push to be approved by someone other than its pusher: the
  *   factory's own identity cannot approve the PR it opened, and the reviewer agent only ever posts a
@@ -53,9 +56,10 @@ export const RULESET_PREFIX = "factory: ";
 /** The branch namespace a session pushes to (`SESSION_BRANCH_PREFIX` in `@repo/core`). */
 export const SESSION_BRANCH_PATTERN = "refs/heads/factory/**";
 
+/** The pattern GitHub resolves to the repository's default branch, whatever it is called. */
+export const DEFAULT_BRANCH_PATTERN = "~DEFAULT_BRANCH";
+
 export type PolicyOptions = {
-  /** The branch PRs merge into. Defaults to `main`. */
-  readonly defaultBranch?: string;
   /** Approvals the PR rule requires before a merge. Defaults to 1; 0 lets an author merge alone. */
   readonly requiredApprovals?: number;
 };
@@ -64,15 +68,14 @@ export type PolicyOptions = {
 export const rulesetPolicy = (
   options: PolicyOptions = {},
 ): ReadonlyArray<DeclaredRuleset> => {
-  const branch = options.defaultBranch ?? "main";
   return [
     {
-      name: `${RULESET_PREFIX}${branch} is PR-only`,
+      name: `${RULESET_PREFIX}the default branch is PR-only`,
       target: "branch",
       enforcement: "active",
       bypass_actors: [],
       conditions: {
-        ref_name: { include: [`refs/heads/${branch}`], exclude: [] },
+        ref_name: { include: [DEFAULT_BRANCH_PATTERN], exclude: [] },
       },
       rules: [
         { type: "deletion" },

@@ -112,6 +112,55 @@ export type RulesetsClientOptions = {
 
 const PAGE_SIZE = 100;
 
+/** GitHub's error body: `message`, and for a `422` an `errors` list of strings or objects. */
+const RefusalBody = Schema.Struct({
+  message: Schema.optional(Schema.String),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Union([
+        Schema.String,
+        Schema.Struct({
+          message: Schema.optional(Schema.String),
+          code: Schema.optional(Schema.String),
+          field: Schema.optional(Schema.String),
+        }),
+      ]),
+    ),
+  ),
+});
+
+/** The most an error line can carry of what GitHub said, so a huge body cannot flood it. */
+const REASON_LIMIT = 500;
+
+/**
+ * Why GitHub refused, read best-effort from the body: its `message` and any `errors`, e.g.
+ * "Upgrade to GitHub Pro or make this repository public to enable this feature." or "Resource not
+ * accessible by personal access token". `undefined` when the body says nothing readable.
+ */
+const refusalReason = (
+  response: HttpClientResponse.HttpClientResponse,
+): Effect.Effect<string | undefined> =>
+  HttpClientResponse.schemaBodyJson(RefusalBody)(response).pipe(
+    Effect.map((body) => {
+      const details = (body.errors ?? []).flatMap((each) =>
+        typeof each === "string"
+          ? [each]
+          : each.message !== undefined
+            ? [each.message]
+            : each.code !== undefined
+              ? [
+                  `${each.field === undefined ? "" : `${each.field} `}${each.code}`,
+                ]
+              : [],
+      );
+      const reason = [body.message, ...details]
+        .filter((part): part is string => part !== undefined && part !== "")
+        .join("; ");
+      return reason === "" ? undefined : reason.slice(0, REASON_LIMIT);
+    }),
+    Effect.orElseSucceed(() => undefined),
+  );
+
 type Operation = RulesetsApiError["operation"];
 
 /** The rulesets client over the ambient `HttpClient`. */
@@ -166,12 +215,16 @@ export const makeRulesetsClient = (
                   ),
                 ),
               )
-            : Effect.fail(
-                failed(
-                  operation,
-                  repo,
-                  `GitHub answered HTTP ${response.status}`,
-                  response.status,
+            : refusalReason(response).pipe(
+                Effect.flatMap((reason) =>
+                  Effect.fail(
+                    failed(
+                      operation,
+                      repo,
+                      `GitHub answered HTTP ${response.status}${reason === undefined ? "" : `: ${reason}`}`,
+                      response.status,
+                    ),
+                  ),
                 ),
               ),
         ),
