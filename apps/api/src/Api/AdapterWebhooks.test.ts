@@ -54,6 +54,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
         Layer.succeed(
           TriggerService,
           TriggerService.of({
+            rules: Effect.succeed([]),
             deliver: (delivery) =>
               Effect.sync(() => {
                 delivered.push(delivery);

@@ -51,8 +51,9 @@ import {
   handleGitHubIssueWebhook,
   handlePullRequestReviewWebhook,
   releaseMergedDelivery,
+  TriggerService,
 } from "@repo/core";
-import { rules, TriggerSeamLive } from "./Webhook";
+import { TriggerSeamLive } from "./Webhook";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
 const GITHUB_DELIVERY_HEADER = "x-github-delivery";
@@ -125,12 +126,31 @@ const GitHubWebhookRoute = HttpRouter.add(
     const signature = req.headers[GITHUB_SIGNATURE_HEADER];
     const event = req.headers[GITHUB_EVENT_HEADER];
     if (event === "issues" || event === "issue_comment") {
+      // The rules the intake maps with are the seam's own (stored routes, then `TRIGGER_RULES`), so
+      // the intake and the seam cannot disagree about which deliveries a rule claims (LOB-266).
+      const triggers = yield* TriggerService;
+      const read = yield* triggers.rules.pipe(
+        Effect.map((rules) => ({ ok: true as const, rules })),
+        Effect.catchTag("TriggerError", (cause) =>
+          Effect.succeed({ ok: false as const, cause }),
+        ),
+      );
+      if (!read.ok) {
+        return HttpServerResponse.setStatus(
+          HttpServerResponse.jsonUnsafe({
+            ok: false,
+            error: read.cause.message,
+            code: read.cause.code,
+          }),
+          500,
+        );
+      }
       const answered = yield* handleGitHubIssueWebhook({
         secret,
         raw,
         signature,
         event,
-        rules,
+        rules: read.rules,
         mention: mention(),
       });
       return HttpServerResponse.setStatus(

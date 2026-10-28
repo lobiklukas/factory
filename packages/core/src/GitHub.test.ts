@@ -608,6 +608,7 @@ describe("handleGitHubIssueWebhook", () => {
     const seam = Layer.succeed(
       TriggerService,
       TriggerService.of({
+        rules: Effect.succeed([]),
         deliver: (delivery) =>
           Effect.suspend(() => {
             delivered.push(delivery);

@@ -5,6 +5,7 @@ import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
   CoinsIcon,
+  GitBranchIcon,
   KanbanSquareIcon,
   TerminalIcon,
 } from "lucide-react";
@@ -37,6 +38,8 @@ const SECTIONS = [
   { to: "/sessions", label: "Sessions", icon: TerminalIcon },
   // What the sessions cost, per repo and per actor (LOB-162): R4's attribution, across every run.
   { to: "/spend", label: "Spend", icon: CoinsIcon },
+  // The repositories sessions are cut worktrees from, and the form that registers one (LOB-262).
+  { to: "/repos", label: "Repositories", icon: GitBranchIcon },
 ] as const;
 
 /**
