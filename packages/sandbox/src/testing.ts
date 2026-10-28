@@ -328,15 +328,19 @@ export const createSandboxRuntimeConformance = <E>(
       (runtime) =>
         Effect.gen(function* () {
           const sandbox = yield* scopedSandbox(runtime);
+          // The command writes its marker only once the case lets it, not after a fixed nap: a nap
+          // a loaded machine outlasted between `started` and the interrupt let a command the
+          // interrupt did kill write `survived` first.
           const running = yield* Effect.forkChild(
             runtime.exec(
               sandbox,
-              "printf s > started; sleep 1; printf s > survived",
+              "printf s > started; until [ -e release ]; do sleep 0.02; done; printf s > survived",
             ),
           );
           yield* until(runtime, sandbox, "started");
           yield* Fiber.interrupt(running);
-          // Longer than the command would have needed to write the marker had it survived.
+          yield* runtime.writeFile(sandbox, "release", "");
+          // Far longer than a surviving command needs to see `release` and write the marker.
           yield* Effect.sleep("1500 millis");
           assert.strictEqual(
             yield* outcome(runtime.readFile(sandbox, "survived")),
