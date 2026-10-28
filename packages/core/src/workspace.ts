@@ -77,6 +77,15 @@ export type WorkspaceInput = {
   readonly cut?: boolean | undefined;
 };
 
+/**
+ * Why a repo-bound session or board that has no local checkout cannot produce a diff, and the
+ * command that fixes it (LOB-263). One text for every surface that names it — the session's
+ * workspace, a board's creation and read, the boot log of a trigger rule — so the operator reads the
+ * same sentence wherever they meet it. `factory repo add` is the CLI's own spelling of `registerRepo`.
+ */
+export const noCheckoutWarning = (repo: string): string =>
+  `repo ${repo} has no local checkout registered, so a run on it gets an empty directory instead of a worktree and can produce no diff: register one with \`factory repo add ${repo} --path <dir>\``;
+
 /** Read the declared commands from one directory, tolerating a missing or undecodable file. */
 const commandsIn = (
   directory: string,
@@ -208,6 +217,9 @@ export const resolveWorkspace = (
       ...(input.repo === undefined ? {} : { branch }),
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
+      ...(input.repo !== undefined && input.localPath === undefined
+        ? { warning: noCheckoutWarning(input.repo) }
+        : {}),
     };
   });
 

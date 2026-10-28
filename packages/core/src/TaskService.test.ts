@@ -29,6 +29,7 @@ import {
 } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { noCheckoutWarning } from "./workspace";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import {
   TaskService,
@@ -625,14 +626,17 @@ describe("TaskService — creating a board (LOB-208)", () => {
       }),
     );
     const view = await withService((s) => s.getBoard(board.id));
-    expect(view.instance).toEqual(board);
+    // The instance is the board's own columns; `warning` (LOB-263) is the repository's, so it is
+    // answered beside the instance, not inside it, and a fresh repo with no checkout has one.
+    const { warning: _warning, ...instance } = board;
+    expect(view.instance).toEqual(instance);
     expect(view.definition.version).toBe(2);
     expect(view.definition.columns.map((column) => column.name)).toContain(
       "specifying",
     );
 
     const listed = await withService((s) => s.listBoards);
-    expect(listed.find((row) => row.id === board.id)).toEqual(board);
+    expect(listed.find((row) => row.id === board.id)).toEqual(instance);
 
     const card = await withService((s) =>
       s.create({ boardId: board.id, title: "on a made board", actor: LUKAS }),
@@ -640,6 +644,67 @@ describe("TaskService — creating a board (LOB-208)", () => {
     expect(card.boardId).toBe(board.id);
     expect(card.definitionVersion).toBe(2);
     expect(card.column).toBe("intake");
+  });
+
+  /**
+   * LOB-263, the rule pinned for boards: a board over a repository with no `local_path` is still
+   * made — a repository is registered on first use, so refusing would fail every board for a slug
+   * nobody registered yet — but the answer carries a `warning` naming the repo and the command that
+   * fixes it, and `getBoard` carries it until the repo has a path.
+   * Mutation: drop the warning from `createBoard`, or from `getBoard` — the matching expectation fails.
+   * Mutation: warn only for a slug with no `repos` row — the row with a NULL path below has none.
+   * Mutation: warn whatever the path says — the checked-out repo below has one.
+   */
+  it("makes a board over a repo with no local checkout and says so, until the repo has a path", async () => {
+    const definitionId = DefinitionId.make(DEFAULT_DEFINITION_ID);
+    const setRepo = (slug: string, localPath: string | null) =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`
+            INSERT INTO repos (slug, url, default_base_ref, local_path)
+            VALUES (${slug}, '', 'main', ${localPath})
+            ON CONFLICT (slug) DO UPDATE SET local_path = EXCLUDED.local_path
+          `;
+        }),
+      );
+
+    // Never registered: no row at all.
+    const unregistered = newRepo();
+    const bare = await withService((s) =>
+      s.createBoard({ repo: unregistered, definitionId }),
+    );
+    expect(bare.warning).toBe(noCheckoutWarning(unregistered));
+    expect(bare.warning).toContain(
+      `factory repo add ${unregistered} --path <dir>`,
+    );
+    expect(await boardsOver(unregistered)).toBe(1);
+
+    // Auto-registered by a session that named it: a row whose path is NULL.
+    const pathless = newRepo();
+    await setRepo(pathless, null);
+    const made = await withService((s) =>
+      s.createBoard({ repo: pathless, definitionId }),
+    );
+    expect(made.warning).toBe(noCheckoutWarning(pathless));
+    expect((await withService((s) => s.getBoard(made.id))).warning).toBe(
+      noCheckoutWarning(pathless),
+    );
+
+    // The fix clears it: the next read of the same board says nothing.
+    await setRepo(pathless, "/srv/checkouts/pathless");
+    expect(
+      (await withService((s) => s.getBoard(made.id))).warning,
+    ).toBeUndefined();
+
+    // A repo registered with a path makes its board with no warning at all.
+    const ready = newRepo();
+    await setRepo(ready, "/srv/checkouts/ready");
+    const clean = await withService((s) =>
+      s.createBoard({ repo: ready, definitionId }),
+    );
+    expect(clean.warning).toBeUndefined();
+    expect("warning" in clean).toBe(false);
   });
 
   /**

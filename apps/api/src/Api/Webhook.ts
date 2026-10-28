@@ -651,6 +651,9 @@ const rulesFromEnv = (): ReadonlyArray<TriggerRule> => {
  */
 const rules = rulesFromEnv();
 
+/** The rules this process boots with, for the boot log to name the ones whose repo has no checkout (LOB-263). */
+export const bootTriggerRules = rules;
+
 /**
  * Every route, still asking for the seam and the rate cap per request. Exported so a test can serve
  * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`, `429`) are answered before the
