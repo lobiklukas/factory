@@ -1,4 +1,4 @@
-# `requires[]` on exit: the `building` gate and the `verified` gate
+# `requires[]` on exit: the `building` gate, the `verified` gate and the reviewer's verdict
 
 **Status: passing.**
 
@@ -16,9 +16,21 @@ records a PR (`factory.pr`, LOB-177). Its `review` declares `verified` from defi
 "denied". A move into `canceled` is never gated, and a card pinned to version 1 or 2 keeps the exit it
 started under (B2) — `review` without `verified`, `building` with the two keys every version declares.
 
+`review` also declares `review_verdict` from version 1, checked since LOB-241: `review → done` goes
+through only when the review run — a run whose log records a `factory.review` target, which the
+review trigger opens on the card for each head of its PR (LOB-36) — of the card's PR at the head that
+PR was last reported at recorded `pass`. Every review delivery records its head in `review_heads`
+before its run opens, a replay included, so a force-push back to an earlier head is judged on that
+head's review, not on the newest run. No review run, only another PR's, a reported head with no run
+yet, a run that has recorded no verdict yet (naming the head under review), a `fail` (naming the
+failing dimensions), and a pass the post found `stale` are each refused naming `review_verdict`; an
+older head's pass never stands in for the reported head's. Review runs come only from signed
+`POST /webhooks/github` deliveries, so a deployment GitHub cannot reach has none and no card of it
+reaches `done`.
+
 The rules are `packages/core/src/requirements.ts`; `TaskService.move` reads the `verify` records and
-the `factory.pr` document out of the logs of the card's runs (`task_runs`), and measures the latest
-run's branch, before it locks the card.
+the `factory.pr` document out of the logs of the card's runs (`task_runs`), the `factory.review`
+document out of its review runs', and measures the latest run's branch, before it locks the card.
 
 ## How a user reaches it
 
@@ -44,6 +56,14 @@ factory board move --task tsk_… --to done --expect-revision 5
 
 factory board start --task tsk_… --prompt "make the change and verify it"   # the run calls verify
 factory board move --task tsk_… --to done --expect-revision 5
+# error: requirement_unmet: the move review → done needs "review_verdict" (a review verdict), which
+#   is not met: no review ran: the card has no review run (…)                          (exit 1)
+
+# GitHub's pull_request (opened, then synchronize per push) → a reviewer run per head
+factory board move --task tsk_… --to done --expect-revision 5
+# error: requirement_unmet: … "review_verdict" …: run ses_…'s review of …#1 at 3f2a…
+#   failed correctness: fix the findings and push, and the new head's review decides the move
+factory board move --task tsk_… --to done --expect-revision 5     # after the fixed head's pass
 # moved tsk_… to done (revision 6)
 ```
 
@@ -52,7 +72,9 @@ factory board move --task tsk_… --to done --expect-revision 5
 `./requires.sh` (standalone; its own API on `REQUIRES_PORT`, default 9402, with `MODEL_BACKEND=faux`,
 `FAUX_VERIFY=true` and `FAUX_COMMAND="bash change.sh"`, and the builder role on its own faux model,
 `ROLE_MODELS=builder=faux/builder`, whose `FAUX_MODEL_SCRIPTS` row commits one file and calls no
-`verify`; the loopback GitHub fake on `REQUIRES_GITHUB_PORT`, default 9404). It builds a fixture repo
+`verify`; the loopback GitHub fake on `REQUIRES_GITHUB_PORT`, default 9404; a fresh
+`GITHUB_WEBHOOK_SECRET`, and `FAUX_REVIEW`, the reviewer's two `review` calls — a `correctness` fail
+on `apps/web/src/regress.ts`, then a clean pass). It builds a fixture repo
 with a passing `verify-web` skill, seeds a card on the newest `default` definition
 (`requires.ts MODE=seed`), walks it into `building` with `factory board move`, and then:
 
@@ -73,15 +95,36 @@ with a passing `verify-web` skill, seeds a card on the newest `default` definiti
    the first run is a different surface and does not count — and the remedy (declare
    `commands.verify`, or add a `verify-<surface>` driver).
 4. **Api, passing.** A third run changes `apps/api/…` and adds a passing `verify-api` skill
-   (`api:VerifyRan:0`); the same move goes through, exit 0.
+   (`api:VerifyRan:0`): `verified` is met, and the same move is refused naming `"review_verdict"` —
+   no review ran (LOB-241).
+5. **Head A passes.** `review.ts MODE=review` signs a `pull_request` `opened` for the builder's PR (its
+   page from `factory pr`, the head of `factory/<builder>`, `main`'s commit as the base) and delivers
+   it on `POST /webhooks/github`. The answer names a reviewer session; it is cut at the head, settles
+   with a non-error `review` result, and its log's `factory.review` records `pass` on that head. The
+   first `FAUX_REVIEW` call names a file head A does not change, so the tool refuses it and the
+   reviewer's retry is the clean pass — the same rule that makes head B fail.
+6. **Head B fails.** A commit on the PR's branch in the builder's worktree (a push) adds
+   `apps/web/src/regress.ts`, and its `synchronize` opens the next head's reviewer, which records
+   `fail` (`correctness`). The move is refused naming `review_verdict`, head B and `correctness`, and
+   names nothing of head A: A's pass does not survive the push.
+7. **Head C passes.** A second push removes the file; its reviewer records `pass`.
+8. **Back to B, then to C.** A signed `synchronize` back at head B (a force-push undoing the revert)
+   is answered `replayed`: B's run already exists, so no run is opened and C's pass stays the newest
+   review run. The move is still refused on B's `correctness` fail, because the delivery recorded B
+   as the PR's head (`review_heads`). A `synchronize` back at C is replayed too, and the same move
+   goes through, exit 0.
 
 Each review run's change is committed on the fixture's `main` before `board start`, so the worktree
 the run is cut from carries it and the faux command never changes.
 
 ## Evidence
 
-`.verify/evidence/latest/board/` (last run: `.verify/evidence/lob-240/requires/board/`, 24/24, LOB-240,
-2026-10-27): `requires-observed.json` (every check), `requires-building-none.txt`,
+`.verify/evidence/latest/board/` (last run: `.verify/evidence/lob-241/board/`, 56/56, LOB-241,
+2026-10-28; before it `.verify/evidence/lob-240/requires/board/`, 24/24): `requires-observed.json`
+(every check, and the three heads), `requires-unreviewed.txt`, `requires-refused-review.txt`,
+`requires-refused-back.txt`, `review-requires-{a,b,c,b-again,c-again}.json` (each delivery, its
+reviewer session and the review its log records; a replay's answer only),
+`requires-building-none.txt`,
 `requires-building-no-pr.txt`, `requires-show-building.txt`, `requires-build-diff.txt`,
 `requires-pr.txt`, `requires-move-review.txt`, `requires-refused-none.txt`,
 `requires-refused-surface.txt`, `requires-done.txt`, `requires-move-*.txt`, `requires-start-*.txt`,
@@ -90,8 +133,12 @@ the run is cut from carries it and the faux command never changes.
 
 ## What it does not prove
 
-The other keys of the default pipeline (`spec_doc`, `plan_doc`, `run_completed`, `review_verdict`)
-are not checked: nothing records their evidence yet, and `requirements.ts` says so. A branch nothing
+The other keys of the default pipeline (`spec_doc`, `plan_doc`, `run_completed`)
+are not checked: nothing records their evidence yet, and `requirements.ts` says so. A review run that
+has recorded no verdict yet is refused naming its head in `TaskService.test.ts`, not here: the faux
+reviewer settles before a second command could race it. Nor is a push the review trigger has not
+been told of (no `synchronize` yet): the newest review run is then the previous head's, and its pass
+is judged as the newest — `requirements.ts` names that window. A branch nothing
 can measure (a repository with no registered checkout) and a newer run without a PR after an older
 one with one are refusals pinned in `TaskService.test.ts`, not driven here. The human gates (`human_move`, `human_merge`) are B5's actor check, proven
 in `packages/core`'s `TaskService` cases. A change made _after_ the latest `verify` call is not seen;

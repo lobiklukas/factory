@@ -29,10 +29,10 @@ building  working
   exits     review, canceled
 review  working
   role      reviewer
-  model     faux/faux-1 (deployment)
+  model     faux/reviewer (role)
   skills    review
   requires  verified (checked): a passing verification of every surface the card's change touched
-            review_verdict (unchecked): a review verdict
+            review_verdict (checked): a review verdict
             human_merge (unchecked): a human merge (B5's merge gate)
   exits     done [human gate: merge], canceled
 done  terminal

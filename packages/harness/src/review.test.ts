@@ -229,6 +229,8 @@ describe("the review tool", { timeout: 60_000 }, () => {
       verdict: "fail",
       outcome: "posted",
       outcomeDetail: `${ran.target.url}#pullrequestreview-1`,
+      // The dimensions the verdict failed, which a board's review_verdict refusal names (LOB-241).
+      failing: ["correctness"],
     });
     const results = reviewResults(ran.entries);
     expect(results).toHaveLength(1);
@@ -251,6 +253,7 @@ describe("the review tool", { timeout: 60_000 }, () => {
       verdict: "pass",
       outcome: "clean",
       outcomeDetail: "",
+      failing: [],
     });
     expect(reviewResults(ran.entries)[0]?.text).toContain(
       "a clean pull request gets no comment",

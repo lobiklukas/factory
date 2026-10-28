@@ -588,10 +588,13 @@ const HttpLive = Effect.gen(function* () {
   const webhookSecret = yield* Config.String("GITHUB_WEBHOOK_SECRET").pipe(
     Config.withDefault(""),
   );
-  if (
-    webhookSecret !== "" &&
-    ![...REVIEW_ROLES].some((role) => roleModels.has(role))
-  ) {
+  // A card leaves `review` for `done` only on a review run's pass (LOB-241's `review_verdict`), and
+  // review runs are opened only by signed deliveries to this route: without it, no card can.
+  if (webhookSecret === "") {
+    yield* Effect.logWarning(
+      "review runs: off (GITHUB_WEBHOOK_SECRET unset, so POST /webhooks/github answers 503): no pull request is reviewed, and a board's review → done, which needs a review run's pass (review_verdict), is refused for every card",
+    );
+  } else if (![...REVIEW_ROLES].some((role) => roleModels.has(role))) {
     yield* Effect.logWarning(
       `review runs: ROLE_MODELS has no row for ${[...REVIEW_ROLES].join(" or ")}, so every pull request review runs on the deployment's model (${modelKey(modelAccess)}); set ROLE_MODELS=reviewer=<provider>/<model> to review on a cheaper one`,
     );

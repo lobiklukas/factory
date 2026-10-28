@@ -21,6 +21,9 @@
  * longer at, and if the earlier reviewer is still working its post finds the PR moved and posts
  * nothing (`githubReviewPoster`'s `stale`). The run is told the PR, the base and the head, and its
  * worktree is cut at the head, so `git diff <base>...HEAD` there is exactly the change under review.
+ * Because a replay opens no run, the run rows cannot say which head the PR is at after a push back
+ * to a head it had before; every delivery on a card's PR records its head in `review_heads` first
+ * (`recordReviewHead`), and that is the head the board's `review_verdict` judges the review of.
  *
  * **The head has to be here.** The worktree is cut from the repo's registered checkout, and a head
  * nobody committed on this machine — a person's push to the PR branch, GitHub's "Update branch" merge
@@ -107,6 +110,11 @@ export type PullRequestUpdate = {
   /** Whether the head branch is in the PR's own repository (not a fork), so it can be fetched there. */
   readonly headInRepo?: boolean;
   readonly draft: boolean;
+  /**
+   * When the PR last changed (`updated_at`), when the payload names a valid time: what orders two
+   * deliveries' heads in `review_heads` (LOB-241), so a redelivered past event does not move it back.
+   */
+  readonly updatedAt?: string;
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
@@ -155,6 +163,7 @@ export const pullRequestUpdate = (
   const apiUrl = text(pr, "url");
   const baseSha = text(asRecord(pr?.["base"]), "sha");
   const headRef = text(asRecord(pr?.["head"]), "ref");
+  const updatedAt = text(pr, "updated_at");
   const headRepo = text(
     asRecord(asRecord(pr?.["head"])?.["repo"]),
     "full_name",
@@ -174,6 +183,9 @@ export const pullRequestUpdate = (
       ? {}
       : { headInRepo: headRepo.toLowerCase() === repo.value }),
     draft: pr?.["draft"] === true,
+    ...(updatedAt === undefined || Number.isNaN(Date.parse(updatedAt))
+      ? {}
+      : { updatedAt }),
   };
 };
 
@@ -298,6 +310,41 @@ export const reviewCardOf = (
         reason: `task ${run.taskId}'s board declares no column whose role reviews (${[...REVIEW_ROLES].join(", ")})`,
       };
     return { _tag: "card", card: { taskId: run.taskId, column: column.name } };
+  });
+
+/**
+ * Record `update.head` as the head the card's PR was last reported at (`review_heads`, LOB-241): the
+ * head `review_verdict` judges the review of. Written for every review delivery on a card's PR —
+ * before its run is opened, and for a replay or a skip too — because a replay opens no run, so the
+ * run rows alone cannot say that a push took the PR back to a head it had before. A delivery older
+ * than the row (by `pull_request.updated_at`) leaves it.
+ */
+export const recordReviewHead = (
+  update: PullRequestUpdate,
+  card: ReviewCard,
+): Effect.Effect<void, TriggerError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    yield* sql`
+      INSERT INTO review_heads (pr_url, api_url, task_id, head, reported_at)
+      VALUES (
+        ${update.url}, ${update.apiUrl ?? null}, ${card.taskId}, ${update.head},
+        COALESCE(${update.updatedAt ?? null}::timestamptz, now())
+      )
+      ON CONFLICT (pr_url) DO UPDATE
+        SET api_url = EXCLUDED.api_url, task_id = EXCLUDED.task_id,
+            head = EXCLUDED.head, reported_at = EXCLUDED.reported_at
+        WHERE EXCLUDED.reported_at >= review_heads.reported_at
+    `.pipe(
+      Effect.asVoid,
+      Effect.mapError(
+        (cause) =>
+          new TriggerError({
+            code: "storage",
+            message: `record ${update.repo}#${update.number}'s head ${update.head.slice(0, 12)}: ${cause.message}`,
+          }),
+      ),
+    );
   });
 
 /**
@@ -530,12 +577,15 @@ export const reviewPullRequest = (
         status: "ignored",
         reason: `action "${update.action}" starts no review`,
       };
+    const lookup = yield* reviewCardOf(update);
+    // The head is the PR's now, whatever this delivery goes on to do: a draft's push, a head that
+    // cannot be fetched and a replay all leave the gate judging this head (`recordReviewHead`).
+    if (lookup._tag === "card") yield* recordReviewHead(update, lookup.card);
     if (update.draft)
       return {
         status: "skipped",
         reason: `${update.repo}#${update.number} is a draft; it is reviewed when it is ready`,
       };
-    const lookup = yield* reviewCardOf(update);
     if (lookup._tag === "none")
       return { status: "skipped", reason: lookup.reason };
     const checkout = yield* prepareReviewCheckout(update, fetch);

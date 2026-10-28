@@ -40,7 +40,8 @@
  * A review run (LOB-36: a log with a `factory.review` target) is not among them: it judges a run's
  * change and makes none, and it starts while the card is still in `building` — the PR's `opened` is
  * what starts it — so counting it would make it the "latest run" whose PR and branch `building`'s exit
- * reads, and the card could never leave. The diff runs in a child process without blocking the event loop (`branchDiffSize`), so a large one
+ * reads, and the card could never leave. What it records is `review_verdict`'s evidence instead
+ * (LOB-241): the newest review run's verdict on its own head. The diff runs in a child process without blocking the event loop (`branchDiffSize`), so a large one
  * holds up this move only. The logs are read, and the branch measured, *before* the card is locked,
  * not inside the transaction: a log fold and a `git diff` are unbounded work, and holding the row
  * lock (and a pool connection) across them would let a long log or a large diff stall every other
@@ -1379,7 +1380,9 @@ export const TaskServiceLive = Layer.effect(
     /**
      * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
      * truth for what it did). One batched read folds every run's log; none is opened as an owner.
-     * The latest run's branch is measured only when `measureDiff` says the move checks it.
+     * The latest run's branch is measured only when `measureDiff` says the move checks it. The review
+     * runs are split out, in the same order, beside the head each of the card's PRs was last
+     * reported at (`review_heads`), which says which of them `review_verdict` judges (LOB-241).
      */
     const cardEvidence = (taskId: string, measureDiff: boolean) =>
       Effect.gen(function* () {
@@ -1406,13 +1409,12 @@ export const TaskServiceLive = Layer.effect(
             }),
         });
         // A review run is not a run of the card's change (module doc), so it is neither evidence nor
-        // the latest run.
-        const reviewing = yield* Effect.forEach(runs, (run) => {
+        // the latest run; what it recorded is `review_verdict`'s evidence.
+        const recordedReviews = yield* Effect.forEach(runs, (run) => {
           const storage = logs.get(run.sessionId);
           return storage === undefined
-            ? Effect.succeed(false)
+            ? Effect.undefined
             : readRecordedReview(storage).pipe(
-                Effect.map((review) => review !== undefined),
                 Effect.mapError(
                   (cause) =>
                     new TaskStorageError({
@@ -1421,7 +1423,15 @@ export const TaskServiceLive = Layer.effect(
                 ),
               );
         });
-        const changing = runs.filter((_, index) => reviewing[index] !== true);
+        const reviews = runs.flatMap((run, index) => {
+          const review = recordedReviews[index];
+          return review === undefined
+            ? []
+            : [{ sessionId: run.sessionId, review }];
+        });
+        const changing = runs.filter(
+          (_, index) => recordedReviews[index] === undefined,
+        );
         const recorded = yield* Effect.forEach(
           changing.map((run) => run.sessionId),
           (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
@@ -1453,11 +1463,29 @@ export const TaskServiceLive = Layer.effect(
             });
           },
         );
+        // The head each of the card's PRs was last reported at, which picks the review that counts
+        // (`review_heads`, LOB-241).
+        const reviewHeads = (yield* sql<{
+          readonly prUrl: string;
+          readonly apiUrl: string | null;
+          readonly head: string;
+        }>`
+          SELECT pr_url, api_url, head FROM review_heads WHERE task_id = ${taskId}
+        `).map((row) => ({
+          url: row.prUrl,
+          ...(row.apiUrl === null ? {} : { apiUrl: row.apiUrl }),
+          head: row.head,
+        }));
         const latest = changing.at(-1);
         const evidence: CardEvidence =
           measureDiff && latest !== undefined
-            ? { runs: recorded, diff: yield* branchDiff(latest) }
-            : { runs: recorded };
+            ? {
+                runs: recorded,
+                reviews,
+                reviewHeads,
+                diff: yield* branchDiff(latest),
+              }
+            : { runs: recorded, reviews, reviewHeads };
         return evidence;
       });
 

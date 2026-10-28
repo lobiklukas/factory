@@ -7,7 +7,8 @@
 The rest of milestone B's path on the card `./drive.sh` specified and answered
 ([specify.md](specify.md)): a person approves the plan, a run in `building` makes a change and
 verifies it, the run's PR is opened on the forge with the verification in its body, the card moves to
-`review`, a person records the verdict, the run is refused the merge, and the person's merge takes the
+`review`, the PR's reviewer run records its verdict (LOB-241: a faux reviewer the review trigger opens
+on the PR's head, not a person's note), the run is refused the merge, and the person's merge takes the
 card to `done` (docs/board.md B4, B5, B8).
 
 Three things are new beside the drive:
@@ -30,6 +31,10 @@ Three things are new beside the drive:
   carrying a passing `.pi/skills/verify-web/drive.sh`), and the drive's card names no repository —
   it inherits the board's (LOB-255) — so every run on it is a git worktree of the fixture. The board is pinned to the default pipeline's
   **newest** version, so `review → done` is also gated on `verified` (LOB-80).
+- **A reviewer for `./up.sh`'s instance** (LOB-241). `ROLE_MODELS`' `reviewer=faux/reviewer` row,
+  whose `FAUX_MODEL_SCRIPTS` row reads the diff, and `FAUX_REVIEW`, a clean pass; `GITHUB_WEBHOOK_SECRET`
+  is a fresh value per instance (`.verify/run/webhook-secret`), which `review.ts` signs the PR's
+  `pull_request` delivery with, since the fake forge sends no webhooks.
 
 ## How a user reaches it
 
@@ -40,9 +45,11 @@ factory board move --task tsk_… --to review --expect-revision 8 --actor ses_�
 factory pr ses_…                                                                     # pr https://github.com/…/pull/N
 factory ls                                                                           # the run's row carries the link
 factory board move --task tsk_… --to review --expect-revision 8 --actor ses_…        # the run moves its card on
-factory board comment --task tsk_… --expect-revision 9 --body 'verdict: approve …' --actor person:reviewer
-factory board move --task tsk_… --to done --expect-revision 10 --actor ses_…         # refused: the merge gate
-factory board move --task tsk_… --to done --expect-revision 10 --actor person:reviewer
+factory board move --task tsk_… --to done --expect-revision 9 --actor person:reviewer  # refused: needs "review_verdict"
+# GitHub's pull_request (opened) → the review trigger opens a reviewer run on the card at the PR's head
+factory board runs --task tsk_…                                                      # the reviewer, newest, in review
+factory board move --task tsk_… --to done --expect-revision 9 --actor ses_…          # refused: the merge gate
+factory board move --task tsk_… --to done --expect-revision 9 --actor person:reviewer
 ```
 
 ## How the skill drives it
@@ -73,11 +80,14 @@ card's latest run ses_… recorded no PR` and a non-zero exit. It names `pr_link
    lists the path under `## Changed files`, names `faux/builder` as the model, and its
    `## Verification` section says ``### `verify-web`: exit 0`` and `- Exit code: 0`; `getSession`
    reads the same link back. `factory ls` shows it in the run's row.
-6. **Review.** The run's own `building → review` (no gate on it; with the PR recorded the
-   requirements are met), then a person's verdict as a note on
-   the card, read back by `board show` under `[note] person:reviewer`. The verdict is read off the
-   evidence: `approve <link>` only when there is a PR and both `build.ts` probes passed, otherwise
-   `request changes` naming what is missing — and a check that the verdict approves fails on it.
+6. **Review** (LOB-241). The run's own `building → review` (no gate on it; with the PR recorded the
+   requirements are met). A person's `review → done` is then refused with `requirement_unmet: the move
+review → done needs "review_verdict" (a review verdict), which is not met: no review ran: …` —
+   `verified` is met by the build run's record, so the review is the only thing missing. `review.ts`
+   delivers a signed `pull_request` `opened` for the PR (its page, the build branch's head, `main`'s
+   commit as the base) on `POST /webhooks/github`; the answer names the reviewer session, which is cut
+   at that head and settles with a non-error `review` result, and its log's `factory.review` records
+   `pass` on the head (`outcome: clean`). `board runs` lists it as the card's newest run, in `review`.
 7. **The merge gate.** The run's `review → done` is refused with
    `human_gate_required: the move review → done crosses the merge gate, which only a person can make`
    and a non-zero exit; the person's move at the same revision goes through, and `board show` says
@@ -97,7 +107,10 @@ stays in `building` (a check that passes only when there is no link says so).
 received it), `build-diff.txt`, and the panes `move-building.txt` (`show-building.txt` since LOB-87, where the browser approves the plan), `start-build.txt`,
 `move-review-no-pr.txt` (the `pr_link` refusal before the PR), `pr.txt`, `ls-pr.txt`,
 `move-review.txt`, `verdict.txt`, `show-verdict.txt`, `move-merge-run.txt`, `move-merge.txt`,
-`show-done.txt`. Before it, `.verify/evidence/lob-86/pass/board/` (43/43, without the gate).
+`show-done.txt`. Since LOB-241 the verdict is the reviewer run's (`.verify/evidence/lob-241/board/`,
+**120/120**, 2026-10-28, `agent/LOB-241`): `move-merge-unreviewed.txt` (the `review_verdict`
+refusal), `review-drive.json` (the delivery, the reviewer session and its recorded review) and
+`runs-reviewed.txt` replace `verdict.txt` and `show-verdict.txt`. Before it, `.verify/evidence/lob-86/pass/board/` (43/43, without the gate).
 
 **Non-vacuity: the PR path missing.** `./up.sh` with `BOARD_GITHUB=off` starts no fake and hands
 the API no credential (and a closed loopback port as its forge). The same drive exits 1
@@ -121,4 +134,6 @@ itself exits non-zero on a refusal is the `BOARD_GITHUB=off` drive's. `packages/
 ## What it does not prove
 
 - That GitHub accepts the request as the fake does (`packages/core/src/pr.test.ts` asserts the shape).
-- A reviewer _run_: the verdict is a person's note. No recorded artifact backs `review_verdict` yet.
+- A reviewer that finds anything: the drive's faux reviewer (`./up.sh`'s `faux/reviewer`) always
+  passes cleanly, so its verdict is recorded `clean` and nothing is posted. A failing verdict, and a
+  push that opens the next head's review, are `requires.sh`'s (phases 5–7) and `TaskService.test.ts`'s.

@@ -8,12 +8,13 @@
  * tested) without a database.
  *
  * **Which keys are checked.** Only the keys in `CHECKED_REQUIREMENTS`: `verified`, the one B8
- * promotes from a PR body artifact into a condition of the move, and `building`'s `non_empty_diff`
- * and `pr_link` (LOB-240), whose evidence the PR step already records. The other keys the default
- * pipeline declares are not checked here, and each for a stated reason: `human_move` and
- * `human_merge` are B5's human gates, which `TaskService` already enforces by actor; `spec_doc`,
- * `plan_doc`, `run_completed` and `review_verdict` have no recorded artifact to check yet, and
- * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
+ * promotes from a PR body artifact into a condition of the move, `building`'s `non_empty_diff`
+ * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
+ * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36). The
+ * other keys the default pipeline declares are not checked here, and each for a stated reason:
+ * `human_move` and `human_merge` are B5's human gates, which `TaskService` already enforces by actor;
+ * `spec_doc`, `plan_doc` and `run_completed` have no recorded artifact to check yet, and refusing
+ * every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
  *
@@ -37,6 +38,33 @@
  * diff), or `non_empty_diff` refuses every move. `pr_link` is met
  * when that run's log holds a `factory.pr` document with a link (LOB-177): the record the PR step
  * commits, not the index's `pr_url` column a rebuild derives from it.
+ *
+ * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
+ * records a `factory.review` target, which the review trigger opens one per head of a PR — and
+ * judges exactly one: the review of the card's PR at the head that PR was last reported at.
+ *
+ * - *The card's PR* is the newest PR a run of the card's change recorded (`factory.pr`), so a fix-up
+ *   run that opens a new PR is not passed on the old PR's review; a card none of whose runs recorded
+ *   one (a version with no `pr_link`) is judged on its newest review's PR.
+ * - *The head it was last reported at* is `review_heads`' row for that PR, which every review
+ *   delivery writes before its run is opened — a replay included, since a replay opens no run. It is
+ *   not "the newest review run": a push back to a head the PR had before (a force-push undoing one)
+ *   replays that head's old run and leaves another head's run the newest, and the row is what says
+ *   the PR is at the old head again. With no row (a PR from before the table, or a review run opened
+ *   outside the trigger) the newest review run of the PR is judged.
+ *
+ * It is met when that run recorded a verdict of `pass` on its head. It is not met, and the refusal
+ * says which, when no review ran (and where review runs come from: a deployment GitHub cannot deliver
+ * `pull_request` webhooks to has none, so its cards cannot leave `review` for `done`); when the
+ * card's PR has no review while another PR's does; when no review run has a target for the reported
+ * head yet (its run is still being opened, or its delivery was skipped because the head could not be
+ * fetched); when that run has recorded no verdict yet (it is still reviewing, or it died before it
+ * called the tool), naming the head under review; when the verdict is `fail`, naming the failing
+ * dimensions; and when a `pass` was found `stale` as it was posted. Another head's pass never stands
+ * in for the reported head's missing or failing verdict: a stale approval does not survive a push at
+ * the gate. **The window it cannot see** is a push the trigger has not been told of yet — between
+ * GitHub's push and its `synchronize` delivery — when the reported head is still the previous one.
+ * Gating on the PR's live head would close it, at the cost of a forge read on every move.
  *
  * **What `verified` means.** The card's change is the newest `verify` call, over all of the card's
  * runs, that measured a change. "Newest" is by when the call's result was written (the tool
@@ -74,9 +102,11 @@ import type { BoardColumn, ColumnRequirement } from "@repo/domain/Task";
 import {
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
+  REVIEW_VERDICT_REQUIREMENT,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
 import {
+  type RecordedReview,
   REPO_SURFACE,
   surfaceOf,
   surfacesOf,
@@ -90,6 +120,7 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   VERIFIED_REQUIREMENT,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
+  REVIEW_VERDICT_REQUIREMENT,
 ]);
 
 /**
@@ -121,13 +152,33 @@ export type BranchDiff =
       readonly reason: string;
     };
 
+/** One review run of the card (LOB-36) and the review its `factory.review` document records. */
+export type ReviewRunEvidence = {
+  readonly sessionId: string;
+  readonly review: RecordedReview;
+};
+
+/**
+ * The head one of the card's PRs was last reported at by a `pull_request` delivery (`review_heads`,
+ * LOB-241): its page, its API resource when the delivery named one, and the head.
+ */
+export type ReportedHead = {
+  readonly url: string;
+  readonly apiUrl?: string;
+  readonly head: string;
+};
+
 /**
  * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
- * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run.
+ * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
+ * its review runs, oldest first by when each started (absent: it has none), and the head each of
+ * its PRs was last reported at (absent: none was).
  */
 export type CardEvidence = {
   readonly runs: readonly RunEvidence[];
   readonly diff?: BranchDiff;
+  readonly reviews?: readonly ReviewRunEvidence[];
+  readonly reviewHeads?: readonly ReportedHead[];
 };
 
 /**
@@ -314,6 +365,78 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
     : { met: true };
 };
 
+/** A commit as a reader takes it in a sentence: its first twelve characters. */
+const shortSha = (sha: string): string => sha.slice(0, 12);
+
+/**
+ * Where a review run comes from, for a refusal that finds none: a deployment that GitHub cannot
+ * reach has no way to open one (module doc).
+ */
+const REVIEW_RUNS_COME_FROM =
+  "the review trigger opens one for each head its PR's pull_request events name, and those reach the factory only as signed deliveries to POST /webhooks/github, which needs GITHUB_WEBHOOK_SECRET set and GitHub able to reach it";
+
+/** The `review_verdict` requirement over the review of the card's PR at its reported head (module doc). */
+export const reviewVerdictVerdict = (
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  const reviews = evidence.reviews ?? [];
+  const newestReview = reviews.at(-1);
+  // The card's PR: the newest one a run of its change opened; the newest review's when none did.
+  const cardPr =
+    evidence.runs.findLast((run) => run.prUrl !== undefined)?.prUrl ??
+    newestReview?.review.target.url;
+  if (cardPr === undefined || newestReview === undefined)
+    return {
+      met: false,
+      reason: `no review ran: the card has no review run${cardPr === undefined ? "" : ` of ${cardPr}`} (${REVIEW_RUNS_COME_FROM})`,
+    };
+  const reported = evidence.reviewHeads?.find(
+    (head) => head.url === cardPr || head.apiUrl === cardPr,
+  );
+  const ofPr = reviews.filter(
+    (run) =>
+      run.review.target.url === cardPr ||
+      (reported !== undefined && run.review.target.url === reported.url),
+  );
+  if (ofPr.length === 0)
+    return {
+      met: false,
+      reason: `no review ran on the card's PR ${cardPr}: its newest review run ${newestReview.sessionId} reviewed ${newestReview.review.target.url}, another PR, whose verdict says nothing about this one (${REVIEW_RUNS_COME_FROM})`,
+    };
+  // The review of the head the PR was last reported at; with no report (a PR from before
+  // `review_heads`, or a run opened outside the trigger), the newest review of the PR.
+  const newest =
+    reported === undefined
+      ? ofPr.at(-1)
+      : ofPr.findLast((run) => run.review.target.head === reported.head);
+  if (newest === undefined)
+    return {
+      met: false,
+      reason: `${cardPr} was last reported at ${shortSha(reported?.head ?? "")}, and no review run has recorded a target for that head (its run is still being opened, or its delivery was skipped — a head the checkout could not fetch); a review of another head does not stand in for it`,
+    };
+  const { sessionId, review } = newest;
+  const pr = `${review.target.repo}#${review.target.number}`;
+  const head = review.target.head;
+  if (review.verdict === undefined)
+    return {
+      met: false,
+      reason: `run ${sessionId} is still reviewing ${pr} at ${head}: it has recorded no verdict yet (wait for it to settle, or prompt it again if it ended without one)`,
+    };
+  if (review.verdict === "fail") {
+    const failing = review.failing ?? [];
+    return {
+      met: false,
+      reason: `run ${sessionId}'s review of ${pr} at ${shortSha(head)} failed ${failing.length === 0 ? "a dimension" : failing.join(", ")}${review.outcome === "posted" && review.outcomeDetail !== undefined && review.outcomeDetail !== "" ? ` (its findings: ${review.outcomeDetail})` : ""}: fix the findings and push, and the new head's review decides the move`,
+    };
+  }
+  if (review.outcome === "stale")
+    return {
+      met: false,
+      reason: `run ${sessionId}'s pass on ${pr} at ${shortSha(head)} is stale: the PR moved to ${review.outcomeDetail === undefined || review.outcomeDetail === "" ? "another head" : review.outcomeDetail} before it was posted, and no review run has recorded a verdict on that head`,
+    };
+  return { met: true };
+};
+
 /** One checked requirement's verdict over the card's evidence. */
 export const requirementVerdict = (
   requirement: ColumnRequirement,
@@ -326,6 +449,8 @@ export const requirementVerdict = (
       return nonEmptyDiffVerdict(evidence);
     case PR_LINK_REQUIREMENT:
       return prLinkVerdict(evidence);
+    case REVIEW_VERDICT_REQUIREMENT:
+      return reviewVerdictVerdict(evidence);
     default:
       return { met: false, reason: `"${requirement.key}" has no checker` };
   }
