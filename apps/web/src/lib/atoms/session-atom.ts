@@ -127,6 +127,8 @@ export const startSessionAtom = runtime.fn(
     readonly title?: string | undefined;
     /** The model the picker chose (LOB-274); absent, the server's default. */
     readonly model?: string | undefined;
+    /** The spend cap (LOB-163): the predicted high when the form asked for it (LOB-38). */
+    readonly budget?: number | undefined;
   }) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
@@ -138,6 +140,7 @@ export const startSessionAtom = runtime.fn(
         actor: DASHBOARD_ACTOR,
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.budget === undefined ? {} : { budget: input.budget }),
       });
       yield* rpc.client.sendMessage({
         sessionId: session.id,

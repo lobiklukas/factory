@@ -109,6 +109,20 @@ one from `factory run`, one from the dashboard's **New session**, and one run ea
 repo × actor table to be `listSpend`'s answer and its pairs to be the list's costs added up
 (`features/spend.md`). Evidence goes to `.verify/evidence/latest/spend/`.
 
+### Cost prediction
+
+```sh
+DATABASE_URL=… COST_API_PORT=9452 COST_WEB_PORT=3452 ./cost.sh   # its own priced instance and database; leaves nothing running
+```
+
+The New session form's predicted range and its **Cap at predicted high**, and `/spend`'s backtest
+strip (LOB-38). A prediction needs priced history, and its first state — no estimate — needs none, so
+`cost.sh` starts its own API (`FAUX_COST=0.01`) and dashboard on a throwaway database it mints on
+`DATABASE_URL`'s server and drops on exit. `cost.mjs` reads the empty form, runs three sessions over the
+RPC, then requires the form's range and the capped session's budget to be `predictCost`'s, and the
+strip's numbers to be `backtestCost`'s (`features/cost.md`). Evidence goes to
+`.verify/evidence/latest/cost/`.
+
 ### Earlier history of a long session
 
 ```sh

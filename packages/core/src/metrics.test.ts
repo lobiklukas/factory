@@ -56,9 +56,20 @@ const priced = ManagedRuntime.make(
   }).pipe(Layer.provideMerge(DatabaseLayer)),
 );
 
+/** A process that owns one session at most (LOB-70), so a second is refused at capacity. */
+const cappedRoot = mkdtempSync(join(tmpdir(), "factory-metrics-capped-"));
+const capped = ManagedRuntime.make(
+  SessionServiceLive({
+    model: createFauxModelAccess().access,
+    sessionRoot: cappedRoot,
+    maxConcurrentSessions: 1,
+  }).pipe(Layer.provideMerge(DatabaseLayer)),
+);
+
 afterAll(async () => {
   await sleeping.dispose();
   await priced.dispose();
+  await capped.dispose();
 });
 
 const creates = (origin: SessionOrigin) =>
@@ -277,6 +288,33 @@ describe("factory.refusals", () => {
     );
     expect(outcome.refused).toBe(true);
     expect(outcome.delta).toBe(1);
+  }, 60_000);
+
+  /** Mutation: drop the count in `refuseOverCapacity` — `at_capacity` stays 0. */
+  it("counts a create and a send refused at capacity as at_capacity, once each", async () => {
+    const outcome = await capped.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const before = yield* refusals("at_capacity");
+        const dormant = yield* sessions.create({ title: "soon dormant" });
+        yield* sessions.close;
+        yield* sessions.create({ title: "the one slot" });
+        const created = yield* Effect.exit(
+          sessions.create({ title: "one too many" }),
+        );
+        const sent = yield* Effect.exit(
+          sessions.send({ sessionId: dormant.id, content: "wake" }),
+        );
+        const delta = (yield* refusals("at_capacity")) - before;
+        yield* sessions.close;
+        return {
+          refused: Exit.isFailure(created) && Exit.isFailure(sent),
+          delta,
+        };
+      }),
+    );
+    expect(outcome.refused).toBe(true);
+    expect(outcome.delta).toBe(2);
   }, 60_000);
 
   /** Mutation: drop the count beside the budget stop's log line — `budget` stays 0. */

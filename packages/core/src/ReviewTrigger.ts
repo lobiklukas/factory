@@ -57,6 +57,7 @@ import {
 import { REVIEW_ROLES } from "@repo/harness";
 import type { CredentialProvider } from "./credentials";
 import { fetchBranch } from "./git";
+import { triggerErrorOfSession, triggerFailureAnswer } from "./admission";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
 import {
@@ -391,7 +392,8 @@ export const ReviewSessionsFromSessionService = (
             })
             .pipe(
               Effect.map((summary) => ({ id: summary.id })),
-              Effect.mapError(failed),
+              // `at_capacity` stays `at-capacity` (LOB-70), which the route answers `503`.
+              Effect.mapError(triggerErrorOfSession),
             );
         },
         send: (input) =>
@@ -401,7 +403,7 @@ export const ReviewSessionsFromSessionService = (
               content: input.content,
               requestId: input.requestId,
             })
-            .pipe(Effect.asVoid, Effect.mapError(failed)),
+            .pipe(Effect.asVoid, Effect.mapError(triggerErrorOfSession)),
       });
     }),
   );
@@ -646,15 +648,11 @@ export const handlePullRequestReviewWebhook = (input: {
         status: 200,
         body: { ok: true, ...outcome },
       })),
+      // `500` for a failure, or `503` with `Retry-After` at capacity (LOB-70).
       Effect.catchTag("TriggerError", (cause) =>
         Effect.logError(
           `review: ${update.repo}#${update.number} at ${update.head} failed: ${cause.message}`,
-        ).pipe(
-          Effect.as<GitHubWebhookAnswer>({
-            status: 500,
-            body: { ok: false, error: cause.message, code: cause.code },
-          }),
-        ),
+        ).pipe(Effect.as(triggerFailureAnswer(cause))),
       ),
     );
   });
