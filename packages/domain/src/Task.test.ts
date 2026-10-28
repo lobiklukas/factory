@@ -43,7 +43,6 @@ import {
   declaredTransitions,
   HUMAN_GATES,
   humanGate,
-  isDeclaredTransition,
   Task,
   transitionOf,
   TaskComment,
@@ -682,8 +681,8 @@ describe("the declared transitions and human gates (B4, B5)", () => {
     expect(declaredTransitions("planning")).toEqual(["building", "canceled"]);
     expect(declaredTransitions("building")).toEqual(["review", "canceled"]);
     expect(declaredTransitions("review")).toEqual(["done", "canceled"]);
-    expect(isDeclaredTransition("intake", "done")).toBe(false);
-    expect(isDeclaredTransition("intake", "building")).toBe(false);
+    expect(declaredTransitions("intake")).not.toContain("done");
+    expect(declaredTransitions("intake")).not.toContain("building");
   });
 
   it("declares nothing out of a terminal column or one it does not know", () => {
@@ -700,7 +699,7 @@ describe("the declared transitions and human gates (B4, B5)", () => {
     expect(humanGate("building", "review")).toBeUndefined();
     for (const key of Object.keys(HUMAN_GATES)) {
       const [from = "", to = ""] = key.split("→");
-      expect(isDeclaredTransition(from, to)).toBe(true);
+      expect(declaredTransitions(from)).toContain(to);
     }
     expect(Object.keys(HUMAN_GATES)).toHaveLength(2);
   });
@@ -812,6 +811,8 @@ describe("a definition's own transitions, gates and initial column (LOB-267)", (
     );
     expect(initialColumnOf({ columns: B4_NAMES.map(aColumn) })).toBe("intake");
     expect(initialColumnOf({ columns: [aColumn("backlog")] })).toBe("backlog");
+    // No columns, no lane to start in: never a default name the definition lacks.
+    expect(initialColumnOf({ columns: [] })).toBeUndefined();
   });
 
   it("finds nothing wrong with the synthetic definition or the default pipeline's table", () => {

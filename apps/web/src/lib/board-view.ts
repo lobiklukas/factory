@@ -111,7 +111,9 @@ export const definitionOfConfig = (
   id: config.id,
   version: config.version,
   name: config.name,
-  initialColumn: config.initialColumn,
+  ...(config.initialColumn === undefined
+    ? {}
+    : { initialColumn: config.initialColumn }),
   columns: config.columns.map((column) => ({
     name: column.name,
     kind: column.kind,

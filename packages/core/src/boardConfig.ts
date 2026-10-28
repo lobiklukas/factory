@@ -56,12 +56,15 @@ const describeColumn = (
 export const describeDefinition = (
   definition: BoardDefinition,
   modelOf: RoleModelOf,
-): DefinitionConfig => ({
-  id: definition.id,
-  version: definition.version,
-  name: definition.name,
-  initialColumn: initialColumnOf(definition),
-  columns: definition.columns.map((column) =>
-    describeColumn(definition, column, modelOf),
-  ),
-});
+): DefinitionConfig => {
+  const initialColumn = initialColumnOf(definition);
+  return {
+    id: definition.id,
+    version: definition.version,
+    name: definition.name,
+    ...(initialColumn === undefined ? {} : { initialColumn }),
+    columns: definition.columns.map((column) =>
+      describeColumn(definition, column, modelOf),
+    ),
+  };
+};

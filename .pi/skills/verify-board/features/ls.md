@@ -37,5 +37,5 @@ canceled` — the seeded definition's order;
 ## What it does not prove
 
 Nothing about a board _definition_ the seed did not ship: `getBoard` returns whatever the instance
-binds, and the drive reads the newest version (v3), the one `./up.sh` seeds. Moving a card between boards, or a definition edited in place,
+binds, and the drive reads the newest version (v4 since LOB-267), the one `./up.sh` seeds. Moving a card between boards, or a definition edited in place,
 is not reachable through the CLI at all — a definition version is a new row (B2).

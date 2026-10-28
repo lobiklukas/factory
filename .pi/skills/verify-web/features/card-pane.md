@@ -58,9 +58,10 @@ Open the dashboard, click **Boards**, click a board, click a card.
 The block runs after the lane checks, on the card the drive seeded in `intake`. It requires:
 
 1. the card's link to open `aside[data-card-pane=<id>]` with `?card=<id>` in the URL;
-2. the offered moves to equal `declaredTransitions("intake")` (read through bun from the domain
-   package), and a direct `moveTask` to `done` from the drive to be refused `UndeclaredTransition`
-   with the card unchanged;
+2. the offered moves to equal the `exits` of `intake` in the card's own pinned definition version
+   as the server describes it (`getTask` for the version, then `getBoardConfig`, or `getDefinition`
+   for a version other than the board's; LOB-267), and a direct `moveTask` to `done` from the drive
+   to be refused `UndeclaredTransition` with the card unchanged;
 3. no gated move and a disabled run start in `intake`, its `title` naming the resting column;
 4. with the page's `getBoard`/`listTasks` held at the network (`page.route`), a block and an unblock
    through the API (r1 → r3, same column), then a click on `specifying`: the pane shows

@@ -74,6 +74,7 @@ import {
   BoardView,
   type CreateBoardInput,
   type DefinitionMoves,
+  definitionProblems,
   DefinitionSummary,
   gatedColumns,
   gatedExit,
@@ -488,6 +489,11 @@ type RunRow = {
  */
 type ExitJudgement = {
   readonly unmet: RequirementUnmet | undefined;
+  /**
+   * The card's pinned definition version as the judgement read it, which decides its moves; absent
+   * when the read found no card, which the transaction then refuses as `TaskNotFound`.
+   */
+  readonly definition?: DefinitionMoves;
 };
 
 const iso = (value: Date | string): string =>
@@ -995,10 +1001,21 @@ export const TaskServiceLive = Layer.effect(
                 message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
               });
             }
-            const column = initialColumnOf({
+            const definition: DefinitionMoves = {
               columns: yield* readColumns(board.columns, `board ${board.id}`),
               ...initialColumnField(board.initialColumn),
-            });
+            };
+            // A definition that cannot be used as written (an initial column it lacks, no columns
+            // at all, a move to a lane it lacks) makes no card: one would start in a lane the board
+            // does not render, with no moves out (LOB-267). Only migrations write definitions today,
+            // and 0024 holds its seed to the same check; an authored version will be too.
+            const problems = definitionProblems(definition);
+            const column = initialColumnOf(definition);
+            if (problems.length > 0 || column === undefined) {
+              return yield* new TaskStorageError({
+                message: `board ${board.id}'s definition version ${board.definitionVersion} cannot start a card: ${problems.join("; ")}`,
+              });
+            }
             const id = yield* mintTaskId;
             const priority = input.priority ?? "normal";
             const rows = yield* sql<TaskRow>`
@@ -1240,6 +1257,7 @@ export const TaskServiceLive = Layer.effect(
       Effect.gen(function* () {
         const pinned = yield* pinnedColumn(input.taskId);
         if (pinned === undefined) return { unmet: undefined };
+        const definition = pinned.definition;
         if (pinned.revision !== input.expectedRevision) {
           return yield* new StaleRevision({
             taskId: input.taskId,
@@ -1251,7 +1269,7 @@ export const TaskServiceLive = Layer.effect(
         const column = pinned.declared;
         const requirements = exitRequirements(column, input.to);
         if (column === undefined || requirements.length === 0)
-          return { unmet: undefined };
+          return { unmet: undefined, definition };
         const evidence = yield* cardEvidence(
           input.taskId,
           requirements.some(
@@ -1262,6 +1280,7 @@ export const TaskServiceLive = Layer.effect(
           const verdict = requirementVerdict(requirement, evidence);
           if (!verdict.met) {
             return {
+              definition,
               unmet: new RequirementUnmet({
                 taskId: input.taskId,
                 column: column.name,
@@ -1272,7 +1291,7 @@ export const TaskServiceLive = Layer.effect(
             };
           }
         }
-        return { unmet: undefined };
+        return { unmet: undefined, definition };
       });
 
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
@@ -1295,13 +1314,13 @@ export const TaskServiceLive = Layer.effect(
               input.expectedRevision,
             );
             const from = row.column;
-            // Under the lock, from the version the card pinned (B2): the moves are its, not the
-            // board's newest or the default pipeline's (LOB-267).
-            const pinned = yield* pinnedColumn(input.taskId);
+            // From the version the card pinned (B2): the moves are its, not the board's newest or
+            // the default pipeline's (LOB-267). The judgement read it at the revision this lock
+            // holds, and a pinned version never changes, so it is not read again here.
             const transition =
-              pinned === undefined
+              exit.definition === undefined
                 ? undefined
-                : transitionOf(pinned.definition, from, input.to);
+                : transitionOf(exit.definition, from, input.to);
             if (transition === undefined) {
               return yield* new UndeclaredTransition({
                 from,

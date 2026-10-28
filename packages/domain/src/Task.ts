@@ -147,7 +147,7 @@ export const HUMAN_GATES: Readonly<Record<string, string>> = {
   "review→done": "merge",
 };
 
-/** The column a definition with no `initialColumn` starts a card in, when it declares no columns at all. */
+/** The default pipeline's initial column (B4): where default version 4's seed starts a card (0024). */
 export const DEFAULT_INITIAL_COLUMN = "intake";
 
 /**
@@ -174,9 +174,6 @@ export const PR_LINK_REQUIREMENT = "pr_link";
 /** The columns the default pipeline's table lets a card in `from` move to, in pipeline order. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];
-
-export const isDeclaredTransition = (from: string, to: string): boolean =>
-  declaredTransitions(from).includes(to);
 
 /** The human gate the default pipeline's move `from → to` crosses, or `undefined` when a run may make it too. */
 export const humanGate = (from: string, to: string): string | undefined =>
@@ -234,12 +231,13 @@ export const transitionOf = (
 /**
  * The column a new card on `definition` starts in (B4, LOB-267): its `initialColumn`, or — for a
  * version written before the field existed — its first column, which is `intake` in default versions
- * 1–3.
+ * 1–3. `undefined` for a definition that declares no columns: there is no lane to start a card in,
+ * and naming one it lacks would start a card no lane shows (`definitionProblems` says why).
  */
-export const initialColumnOf = (definition: DefinitionMoves): string =>
-  definition.initialColumn ??
-  definition.columns[0]?.name ??
-  DEFAULT_INITIAL_COLUMN;
+export const initialColumnOf = (
+  definition: DefinitionMoves,
+): string | undefined =>
+  definition.initialColumn ?? definition.columns[0]?.name;
 
 /**
  * Why `definition` cannot be used as written, one sentence per fault, or `[]` when it can (LOB-267):
@@ -455,8 +453,11 @@ export const DefinitionConfig = Schema.Struct({
   id: DefinitionId,
   version: Schema.Int,
   name: Schema.String,
-  /** The column a new card starts in, resolved as `createTask` resolves it (`initialColumnOf`, LOB-267). */
-  initialColumn: Schema.String,
+  /**
+   * The column a new card starts in, resolved as `createTask` resolves it (`initialColumnOf`, LOB-267).
+   * Absent only for a version that declares no columns, on which `createTask` refuses to make a card.
+   */
+  initialColumn: Schema.optional(Schema.String),
   columns: Schema.Array(ColumnConfig),
 });
 export type DefinitionConfig = typeof DefinitionConfig.Type;

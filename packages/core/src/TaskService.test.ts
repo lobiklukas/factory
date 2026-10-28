@@ -2856,6 +2856,24 @@ describe("TaskService — a definition's own transitions, gates and initial colu
   });
 
   /**
+   * A definition row whose initial column it does not declare makes no card (LOB-267 review): the
+   * card would sit in a lane the board does not render, with no moves out. Mutation: drop the check
+   * in `create` — the card is made in `backlog`.
+   */
+  it("refuses to start a card on a definition whose initial column is not one of its columns", async () => {
+    const boardId = await syntheticBoard("backlog");
+    const err = await refusal((s) =>
+      s.create({ boardId, title: "nowhere", actor: LUKAS }),
+    );
+    expect(err).toMatchObject({ _tag: "TaskStorageError" });
+    expect(err.message).toContain(
+      'the initial column "backlog" is not a column of the definition',
+    );
+    const cards = await withService((s) => s.list({ boardId }));
+    expect(cards).toEqual([]);
+  });
+
+  /**
    * The acceptance case. Mutation: check the default pipeline's table — `todo → doing` is refused as
    * undeclared. Mutation: check the gate from the table — the run's `doing → done` goes through.
    */

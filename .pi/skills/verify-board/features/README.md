@@ -31,9 +31,9 @@ The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`,
 **24/24** with its building phase (API on `:9511`, GitHub fake on `:9512`), and `./drive.sh` **49/49**
 (API on `:9510`, web on `:3510`, GitHub fake on `:9513`) and, under `BOARD_GITHUB=off`, exit 1 with the
 card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
-`:9510`, **18/18** checks passed (`create-board.json`). `./definitions.sh` (LOB-270, 2026-10-28,
-`agent/LOB-270`), API on `:9550`, **30/30** checks passed (`definitions.json`), the tmux pane among
-them. Evidence: `.verify/evidence/latest/board/`.
+`:9510`, **18/18** checks passed (`create-board.json`). `./definitions.sh` (LOB-267, 2026-10-28,
+`agent/LOB-267`), API on `:9512`, **31/31** checks passed (`definitions.json`), the tmux pane among
+them, with default v4 (LOB-267's seeded transitions) as the newest version. Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                                 | Status  | File                             |
 | --------------------------------------- | ------- | -------------------------------- |

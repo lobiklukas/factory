@@ -58,7 +58,7 @@ That the run exists: the service treats any well-formed `ses_…` id as a run ac
 does not invent one, not because the refusal depends on it.
 
 Nor does it prove `requires[]` refusals: the drive's card is on the default pipeline's newest
-version (v3, `./up.sh` seeds it with `SEED_DEFINITION_VERSION=newest`), whose `review` requires
+version (v4 since LOB-267, `./up.sh` seeds it with `SEED_DEFINITION_VERSION=newest`), whose `review` requires
 `verified`, but none of this phase's moves leaves a column that declares a checked requirement. The
 refusal is `./requires.sh`'s, in [requires.md](requires.md); the drive's build phase
 ([build.md](build.md)) satisfies `verified` and crosses it.

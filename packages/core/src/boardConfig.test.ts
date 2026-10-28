@@ -174,5 +174,11 @@ describe("describeDefinition over a definition's own transitions (LOB-267)", () 
     expect(describeDefinition(definition, deploymentModel).initialColumn).toBe(
       "planning",
     );
+    // No columns: no initial column, rather than a default name it lacks.
+    const { initialColumn: _declaredInitial, ...undeclared } = declared;
+    expect(
+      "initialColumn" in
+        describeDefinition({ ...undeclared, columns: [] }, deploymentModel),
+    ).toBe(false);
   });
 });

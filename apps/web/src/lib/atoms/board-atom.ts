@@ -8,7 +8,7 @@ import type {
 } from "@repo/domain/Task";
 import type { DecideApprovalInput } from "@repo/domain/Approval";
 import type { SessionId } from "@repo/domain/Session";
-import { Duration, Effect } from "effect";
+import { Duration, Effect, Option } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { definitionOfConfig } from "../board-view";
@@ -63,7 +63,9 @@ export const boardsAtom = runtime.atom(
  *
  * A card's moves are its pinned definition version's (B2, LOB-267). Every card made on a board pins
  * the board's version, so this is normally the two calls and nothing else; a card that pinned another
- * version has that version read too (`getDefinition`), once per version, into `pinned`.
+ * version has that version read too (`getDefinition`), once per version, into `pinned`. A version
+ * read that fails is left out of `pinned` and does not fail the board: that card's pane offers no
+ * move until a later poll reads it.
  *
  * Re-read every `BOARD_POLL` while the board is open, and at once when a move from this page lands
  * (`BOARD_KEY`), so the lanes follow the server rather than this page's last answer (LOB-76).
@@ -84,6 +86,9 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
               .filter((version) => version !== view.definition.version),
           ),
         ];
+        // A version that fails to read is left out rather than failing the board: its cards still
+        // show in their lanes, and the pane says their definition was not read and offers no move,
+        // rather than another version's (`definitionFor`). The next poll reads it again.
         const read = yield* Effect.forEach(
           others,
           (version) =>
@@ -96,10 +101,13 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
                 Effect.map(
                   (config) => [version, definitionOfConfig(config)] as const,
                 ),
+                Effect.option,
               ),
           { concurrency: 4 },
         );
-        const pinned: ReadonlyMap<number, BoardDefinition> = new Map(read);
+        const pinned: ReadonlyMap<number, BoardDefinition> = new Map(
+          read.flatMap((entry) => (Option.isSome(entry) ? [entry.value] : [])),
+        );
         return { ...view, tasks, pinned };
       }),
     )

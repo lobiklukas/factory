@@ -2096,24 +2096,32 @@ const factory = (args) => {
 };
 
 /**
- * The transitions the shared table declares out of `column` (`@repo/domain/Task`), which is what
- * `TaskService` refuses against. Read through bun because the table is TypeScript; the server half
- * of the claim — a move the table does not list is refused — is asserted against the API below.
+ * The transitions the card's own pinned definition version declares out of `column`, as the server
+ * describes it (LOB-267): `getTask` names the board and the version the card pinned, and that
+ * version's `exits` (via `getBoardConfig` when it is the board's, `getDefinition` otherwise) are what
+ * `TaskService` refuses against. The server half of the claim — a move the definition does not list
+ * is refused — is asserted against the API below. `null` when any read fails.
  */
-const declaredOutOf = (column) => {
-  const run = spawnSync(
-    "bun",
-    [
-      "-e",
-      `import { declaredTransitions } from "@repo/domain/Task"; console.log(JSON.stringify(declaredTransitions(${JSON.stringify(column)})));`,
-    ],
-    { cwd: ROOT, encoding: "utf8", timeout: 60_000 },
-  );
-  try {
-    return JSON.parse((run.stdout ?? "").trim());
-  } catch {
-    return null;
-  }
+const declaredOutOf = async (taskId, column) => {
+  const task = (await rpcFromDrive("getTask", { taskId })).value;
+  if (task === null) return null;
+  const config = (
+    await rpcFromDrive("getBoardConfig", { boardId: task.boardId })
+  ).value;
+  if (config === null) return null;
+  const definition =
+    config.definition?.version === task.definitionVersion
+      ? config.definition
+      : (
+          await rpcFromDrive("getDefinition", {
+            definitionId: config.instance?.definitionId,
+            version: task.definitionVersion,
+          })
+        ).value;
+  const exits = definition?.columns?.find(
+    (candidate) => candidate.name === column,
+  )?.exits;
+  return Array.isArray(exits) ? exits.map((exit) => exit.to) : null;
 };
 
 /** The open card pane as the page renders it: which card, its column and revision, its moves. */
@@ -2198,7 +2206,7 @@ assert(
 // Declared transitions only: the intake card is offered exactly what the column declares, and
 // never `done`. The API is asked the same question from here — a direct move to `done` — and must
 // refuse it as undeclared, without changing the card.
-const declaredIntake = declaredOutOf("intake");
+const declaredIntake = await declaredOutOf(cardId, "intake");
 const inIntake = await readPane(page);
 paneObserved.intake = inIntake;
 paneObserved.declaredIntake = declaredIntake;
@@ -2382,7 +2390,7 @@ assert(
   `refusal after the CLI move ${JSON.stringify(followedPane?.refusal ?? null)}`,
 );
 // The pane re-offers from the new column, still exactly what that column declares.
-const declaredSpecifying = declaredOutOf("specifying");
+const declaredSpecifying = await declaredOutOf(cardId, "specifying");
 assert(
   "the pane re-offers the new column's declared transitions",
   Array.isArray(declaredSpecifying) &&

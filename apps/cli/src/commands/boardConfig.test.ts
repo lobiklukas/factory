@@ -91,6 +91,19 @@ describe("definitionLines (LOB-270)", () => {
       "done  terminal",
     ]);
   });
+
+  it("prints — for a definition with no initial column (one that declares no columns)", () => {
+    const definition = Schema.decodeSync(DefinitionConfig)({
+      id: "empty",
+      version: 1,
+      name: "Empty",
+      columns: [],
+    });
+    expect(definitionLines(definition)).toEqual([
+      "definition  empty v1  Empty",
+      "initial     —",
+    ]);
+  });
 });
 
 describe("boardLine and definitionsLines (LOB-270)", () => {

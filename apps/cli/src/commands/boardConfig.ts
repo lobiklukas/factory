@@ -123,7 +123,7 @@ export const definitionLines = (
   definition: DefinitionConfig,
 ): ReadonlyArray<string> => [
   `definition  ${definition.id} v${definition.version}  ${definition.name}`,
-  `initial     ${definition.initialColumn}`,
+  `initial     ${definition.initialColumn ?? NONE}`,
   ...definition.columns.flatMap(columnLines),
 ];
 
