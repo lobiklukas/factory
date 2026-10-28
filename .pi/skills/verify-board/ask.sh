@@ -10,7 +10,7 @@
 #              `needs_input` from `specifying`, and `factory board show` prints the question.
 #   SIGTERM    the API exits.
 #   process 2  `factory board show` still prints the block and the question; `factory board comment`
-#              answers it and lifts the block; `factory board start` opens the next run, and its
+#              answers it and lifts the block, and with --start (C24) opens the next run; its
 #              recorded prompt (the committed `pi.system` entry) quotes the answer verbatim.
 #
 # Every command a person types is run through the real CLI binary and its output and exit code read
@@ -201,21 +201,33 @@ check "after the restart the question is still on the task" \
   "$(grep -qxF "    $QUESTION" "$EVIDENCE_DIR/ask-show-restarted.txt" && echo 0 || echo 1)" \
   "question verbatim"
 
-rc="$(cli ask-comment.txt board comment --task "$TASK_ID" --expect-revision "${REVISION:-0}" --body "$ANSWER" --actor person:verify-board)"
-check "board comment answers the question and lifts the block" \
+rc="$(cli ask-comment.txt board comment --task "$TASK_ID" --expect-revision "${REVISION:-0}" --body "$ANSWER" --actor person:verify-board --start)"
+check "board comment --start answers the question and lifts the block" \
   "$([ "$rc" = "0" ] && grep -q "^answered: $TASK_ID is no longer blocked (needs_input from specifying)$" "$EVIDENCE_DIR/ask-comment.txt" && echo 0 || echo 1)" \
   "exit=$rc"
+
+# C24: the same command opens the next run, after the answer, and sends it the card's default prompt.
+SESSION_2="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/ask-comment.txt" | head -1)"
+check "... and starts the next run on the card, sent the card's default prompt" \
+  "$([ -n "$SESSION_2" ] && [ "$SESSION_2" != "$SESSION_1" ] && grep -q "^task    $TASK_ID in specifying$" "$EVIDENCE_DIR/ask-comment.txt" && grep -q "^sent    .* (the card's default prompt)$" "$EVIDENCE_DIR/ask-comment.txt" && echo 0 || echo 1)" \
+  "session=${SESSION_2:-none}"
 
 rc="$(cli ask-show-answered.txt board show --task "$TASK_ID")"
 check "board show prints the answer under the question, unblocked" \
   "$([ "$rc" = "0" ] && grep -q '^blocked   -$' "$EVIDENCE_DIR/ask-show-answered.txt" && grep -q '^thread    2$' "$EVIDENCE_DIR/ask-show-answered.txt" && grep -qF '  [answer] person:verify-board' "$EVIDENCE_DIR/ask-show-answered.txt" && echo 0 || echo 1)" \
   "exit=$rc"
 
-rc="$(cli ask-start-next.txt board start --task "$TASK_ID" --prompt "go on")"
-SESSION_2="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/ask-start-next.txt" | head -1)"
-check "board start opens the next run" \
-  "$([ "$rc" = "0" ] && [ -n "$SESSION_2" ] && [ "$SESSION_2" != "$SESSION_1" ] && echo 0 || echo 1)" \
-  "exit=$rc session=${SESSION_2:-none}"
+# The control for --start: with no question waiting there is no answer to start a run for, so the
+# command is refused before it writes — no comment (the thread stays at 2) and no run.
+REVISION_2="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/ask-show-answered.txt")"
+rc="$(cli ask-start-refused.txt board comment --task "$TASK_ID" --expect-revision "${REVISION_2:-0}" --body "a note" --start)"
+check "--start on a card with no question waiting is refused, writing nothing" \
+  "$([ "$rc" != "0" ] && grep -q '^error: start_needs_answer: ' "$EVIDENCE_DIR/ask-start-refused.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+rc="$(cli ask-show-refused.txt board show --task "$TASK_ID")"
+check "the refused --start left the thread and the revision as they were" \
+  "$([ "$rc" = "0" ] && grep -q '^thread    2$' "$EVIDENCE_DIR/ask-show-refused.txt" && grep -q "^revision  ${REVISION_2:-0}$" "$EVIDENCE_DIR/ask-show-refused.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
 
 MODE=told API_URL="$API_URL" SESSION_ID="$SESSION_2" TASK_ID="$TASK_ID" QUESTION="$QUESTION" \
   ANSWER="$ANSWER" EVIDENCE_DIR="$EVIDENCE_DIR" bun "$PROBE" > "$RUN_DIR/probe-told.log" 2>&1

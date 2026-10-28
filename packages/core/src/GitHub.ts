@@ -46,7 +46,9 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import {
   resolveMapping,
+  ruleClaims,
   TRIGGER_ACTION,
+  type TriggerAuthor,
   TriggerError,
   type TriggerDelivery,
   type TriggerEvent,
@@ -57,6 +59,7 @@ import { triggerFailureAnswer } from "./admission";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { githubApiUrl } from "./pr";
 import { TriggerService, TriggerWriteBack } from "./TriggerService";
+import { githubRoleOf, TriggerAuthorPermissions } from "./triggerTrust";
 
 /** GitHub's two actions that start work; every other `action` is the seam's to refuse. */
 const GITHUB_STARTING_ACTIONS: ReadonlyArray<string> = ["opened", "labeled"];
@@ -100,6 +103,26 @@ const repoSlug = (fullName: string): RepoSlug | undefined => {
 };
 
 /**
+ * A GitHub user object (`sender`, a comment's `user`) as a delivery's author (S-trigger-trust-gating):
+ * its numeric `id` as the stable id and its `login` as the handle an allowlist names and the
+ * permission check asks about. `undefined` for an object with neither.
+ */
+export const githubAuthorOf = (value: unknown): TriggerAuthor | undefined => {
+  const user = asRecord(value);
+  const login = stringField(user, "login");
+  const numeric = user?.["id"];
+  const id =
+    typeof numeric === "number" && Number.isFinite(numeric)
+      ? String(numeric)
+      : login;
+  if (id === undefined || id === "") return undefined;
+  return {
+    id,
+    ...(login === undefined || login === "" ? {} : { login }),
+  };
+};
+
+/**
  * A GitHub issues webhook payload, normalized.
  *
  * `undefined` is "this is not an issue event this adapter acts on": a payload with no `issue`, with
@@ -123,6 +146,9 @@ export const githubEvent = (payload: unknown): TriggerEvent | undefined => {
   if (repo === undefined) return undefined;
   const action = stringField(body, "action");
   if (action === undefined) return undefined;
+  // Who opened or labelled it is the delivery's `sender`; when the issue was created is the issue's.
+  const author = githubAuthorOf(body["sender"]);
+  const createdAt = stringField(issue, "created_at");
   return {
     source: "github",
     key: `${repo}#${number}`,
@@ -134,6 +160,8 @@ export const githubEvent = (payload: unknown): TriggerEvent | undefined => {
     body: stringField(issue, "body") ?? "",
     labels: labelNames(issue["labels"]),
     repo,
+    ...(author === undefined ? {} : { author }),
+    ...(createdAt === undefined ? {} : { createdAt }),
   };
 };
 
@@ -232,6 +260,19 @@ const mentionPattern = (mention: string): RegExp =>
     "i",
   );
 
+/**
+ * The label a `labeled` delivery reports as just added (`payload.label.name`, or a bare string in a
+ * hand-written payload), as opposed to every label the issue now carries.
+ */
+const labelAdded = (
+  body: Record<string, unknown> | undefined,
+): string | undefined => {
+  const label = body?.["label"];
+  return typeof label === "string"
+    ? label
+    : stringField(asRecord(label), "name");
+};
+
 /** What the route does with one `issues` or `issue_comment` payload. */
 export type GitHubIssueIntake =
   /** Start work: hand the seam this delivery. */
@@ -247,7 +288,8 @@ export type GitHubIssueIntake =
  * chatter record no delivery:
  *
  * - **a `factory` label**: an issue `opened` or `labeled` — `githubDelivery`'s two starting actions;
- *   the rule's label picks the repo's work, as it does for every adapter;
+ *   the rule's label picks the repo's work, as it does for every adapter. A `labeled` delivery asks
+ *   only when the label it added (`payload.label`) is one a rule claims;
  * - **an `@factory` mention**: a comment *created* on an issue whose text mentions `mention`. The
  *   mention is the same ask as the label, so the event carries the handle (`factory`) as one more
  *   label, and a rule on `factory` claims it. Its key is the issue's, as the label's is, so asking
@@ -261,7 +303,9 @@ export type GitHubIssueIntake =
  * asks (the factory's own is posted as one, and a loop is the cost of getting that wrong). A comment
  * is trusted only from an owner, member or collaborator (`author_association`), as a label needs
  * triage permission: the comment's text becomes the session's prompt, and on a public repository
- * anyone may comment. The full trust gate (S:trigger-trust-gating) is planned; this is its interim.
+ * anyone may comment. That is a coarse first cut: a rule's trust gate (S-trigger-trust-gating,
+ * `./triggerTrust`) is the real one, and checks the comment's author — by allowlist, or by their
+ * GitHub role on the repository through the API — before the seam starts anything.
  */
 export const githubIssueIntake = (input: {
   readonly event: "issues" | "issue_comment";
@@ -287,11 +331,29 @@ export const githubIssueIntake = (input: {
       );
     }
     const delivery = githubDeliveryFor(input.rules)(input.payload);
-    return delivery === undefined
-      ? refused(
-          "the payload is not an issue event: it names no issue, repository or action, or it is a pull request",
-        )
-      : { _tag: "delivery", delivery };
+    if (delivery === undefined) {
+      return refused(
+        "the payload is not an issue event: it names no issue, repository or action, or it is a pull request",
+      );
+    }
+    // A `labeled` delivery's sender applied `payload.label`, not every label the issue carries: only
+    // a label a rule claims is their ask. Otherwise a writer adding `bug` to an issue a stranger
+    // labelled `factory` would reclaim the stranger's untrusted-author skip under the issue's key and
+    // be judged as if they had asked (S-trigger-trust-gating), as Linear's `addedAClaimedLabel` keeps
+    // an added `P1` from counting.
+    const added = labelAdded(body);
+    if (
+      action === "labeled" &&
+      added !== undefined &&
+      !input.rules.some((rule) =>
+        ruleClaims(rule, { ...delivery.event, labels: [added] }),
+      )
+    ) {
+      return ignored(
+        `the label added, "${added}", is not one a rule claims; adding it to an issue asks for nothing, whatever labels the issue already carries`,
+      );
+    }
+    return { _tag: "delivery", delivery };
   }
 
   const issue = asRecord(body?.["issue"]);
@@ -336,8 +398,11 @@ export const githubIssueIntake = (input: {
   }
   const label = handle.replace(/^@/, "");
   const who = stringField(commenter, "login") ?? "a user";
+  // The comment's author is the one asking, whoever GitHub says sent the delivery.
+  const author = githubAuthorOf(commenter) ?? base.author;
   const event: TriggerEvent = {
     ...base,
+    ...(author === undefined ? {} : { author }),
     labels: [...new Set([...base.labels, label])],
     body: [base.body, `Comment from ${who}:\n${text}`]
       .filter((part) => part !== "")
@@ -582,6 +647,96 @@ export const GitHubWriteBack = (
               );
             }
           }),
+      });
+    }),
+  );
+
+/** The collaborator-permission answer: the two fields the role is read from (`githubRoleOf`). */
+const GitHubPermissionAnswer = Schema.Struct({
+  permission: Schema.optional(Schema.Unknown),
+  role_name: Schema.optional(Schema.Unknown),
+});
+
+/**
+ * The trust gate's GitHub port (S-trigger-trust-gating): a user's role on a repository, from
+ * `GET /repos/{owner}/{repo}/collaborators/{username}/permission` with the credential seam's token
+ * for that repo, the PR client's own.
+ *
+ * GitHub answers `200` with the legacy `permission` (`admin`, `write`, `read`, `none`) and the
+ * `role_name` (`maintain` and `triage` included), which `githubRoleOf` reads. A `404` — GitHub
+ * knows no such user, or the token cannot see the repo — is `none`, a refusal the reason names; any
+ * other answer, or none, is `author-check`, which fails the delivery (`500`) and gives its claim
+ * back: an outage must neither admit a stranger nor record a trusted author's issue as refused for
+ * good. GitHub does not redeliver a failed webhook by itself, so the issue starts when an admin
+ * redelivers it or the label is removed and added again, each judged afresh.
+ */
+export const GitHubAuthorPermissions = (
+  config: Pick<GitHubConfig, "apiUrl"> = {},
+): Layer.Layer<
+  TriggerAuthorPermissions,
+  never,
+  HttpClient.HttpClient | CredentialProvider
+> =>
+  Layer.effect(
+    TriggerAuthorPermissions,
+    Effect.gen(function* () {
+      const http = yield* HttpClient.HttpClient;
+      const credentials = yield* CredentialProvider;
+      const apiUrl = config.apiUrl ?? githubApiUrl();
+      const fail = (message: string): TriggerError =>
+        new TriggerError({ code: "author-check", message });
+
+      return TriggerAuthorPermissions.of({
+        githubRole: Effect.fn("GitHubAuthorPermissions.githubRole")(
+          function* (input) {
+            const [owner, name] = input.repo.split("/");
+            const token = yield* credentials
+              .tokenFor(input.repo)
+              .pipe(
+                Effect.mapError(() =>
+                  fail(
+                    `no credential for ${input.repo} to check ${input.login}'s permission with`,
+                  ),
+                ),
+              );
+            const response = yield* http
+              .execute(
+                HttpClientRequest.get(
+                  `${apiUrl}/repos/${owner}/${name}/collaborators/${encodeURIComponent(input.login)}/permission`,
+                  {
+                    headers: {
+                      authorization: `Bearer ${Redacted.value(token)}`,
+                      accept: "application/vnd.github+json",
+                      "x-github-api-version": "2022-11-28",
+                    },
+                  },
+                ),
+              )
+              .pipe(
+                Effect.mapError(() =>
+                  fail(
+                    `GitHub could not be reached to check ${input.login}'s permission on ${input.repo}`,
+                  ),
+                ),
+              );
+            if (response.status === 404) return "none" as const;
+            if (response.status < 200 || response.status > 299) {
+              return yield* fail(
+                `GitHub answered HTTP ${response.status} checking ${input.login}'s permission on ${input.repo}`,
+              );
+            }
+            const answer = yield* HttpClientResponse.schemaBodyJson(
+              GitHubPermissionAnswer,
+            )(response).pipe(
+              Effect.mapError(() =>
+                fail(
+                  `GitHub's permission answer for ${input.login} on ${input.repo} could not be read`,
+                ),
+              ),
+            );
+            return githubRoleOf(answer);
+          },
+        ),
       });
     }),
   );

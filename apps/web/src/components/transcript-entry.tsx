@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { TranscriptEntry } from "@repo/domain/Session";
 import {
   ChevronRightIcon,
@@ -38,8 +38,14 @@ import { Message, MessageContent } from "@/components/ui/message";
 export const TranscriptRow = ({
   entry,
   spend,
+  action,
 }: {
   readonly entry: TranscriptEntry;
+  /**
+   * What sits under a budget stop (C23): the pane's "Raise cap", offered on the newest stop. The row
+   * reads no atoms, so the pane builds the control and hands it in; any other row ignores it.
+   */
+  readonly action?: ReactNode;
   /**
    * What the compaction this pane asked for spent, when this row is the summary it wrote
    * (LOB-223). The pane computes it and passes it in: the row reads no atoms, so it stays a
@@ -122,12 +128,15 @@ export const TranscriptRow = ({
   // marker row with the line it recorded, so it never reads as a reply.
   if (entry.kind === "budget") {
     return (
-      <Marker variant="border" className="text-destructive" role="status">
-        <MarkerIcon>
-          <CircleStopIcon strokeWidth={1.75} />
-        </MarkerIcon>
-        <MarkerContent>{entry.text}</MarkerContent>
-      </Marker>
+      <div className="flex flex-col gap-1.5">
+        <Marker variant="border" className="text-destructive" role="status">
+          <MarkerIcon>
+            <CircleStopIcon strokeWidth={1.75} />
+          </MarkerIcon>
+          <MarkerContent>{entry.text}</MarkerContent>
+        </Marker>
+        {action ?? null}
+      </div>
     );
   }
 

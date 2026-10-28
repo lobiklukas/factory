@@ -130,6 +130,16 @@ check "factory run says the run was stopped, not answered" \
   "$(grep -q '^answer: (no answer)$' "$RUN_DIR/cli.txt" && grep -q '^stopped: budget reached (\$0.0100 of \$0.0100)$' "$RUN_DIR/cli.txt" && echo 0 || echo 1)" \
   "answer + stopped lines"
 
+# --- the operator's terminal: factory budget (C23) ---------------------------------------------
+( cd "$ROOT/apps/cli" && bun run src/index.ts budget "$CAPPED" --cap 0.5 --api "$API_URL" ) \
+  > "$RUN_DIR/cli-budget.txt" 2>&1
+CLI_BUDGET_RC=$?
+cp "$RUN_DIR/cli-budget.txt" "$EVIDENCE_DIR/budget-cli-set.txt"
+cat "$RUN_DIR/cli-budget.txt"
+check "factory budget exits cleanly" "$([ "$CLI_BUDGET_RC" = "0" ] && echo 0 || echo 1)" "exit=$CLI_BUDGET_RC"
+check "factory budget prints the cap now in force and the spend" \
+  "$(grep -q "^capped $CAPPED: \$0.5000 cap, \$0.0200 spent$" "$RUN_DIR/cli-budget.txt" && echo 0 || echo 1)" "capped line"
+
 cp "$LOG" "$EVIDENCE_DIR/budget-api.log"
 {
   printf '{\n'
