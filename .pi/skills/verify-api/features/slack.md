@@ -27,42 +27,67 @@ refused. `verifySlackSignature` answers a **typed** verdict — `missing-signatu
 from "wrong secret" from "captured and replayed later", which is the fix each one needs. The window is
 checked _before_ the HMAC on purpose: a replayed delivery is one whose signature is right.
 
-**How the skill drives it.** `./slack.sh` boots `./slack-fake.ts` on the run's `API_PORT` and runs
-`bun slack.ts`, which builds the **real** seam, the real `SessionService` and the real write-back client
-over the run's Postgres — only the Slack Web API is a loopback fake, and the signature every delivery
-carries is computed the way Slack computes it and then checked by the adapter's own verifier.
-Eighteen checks:
+**How a user reaches it.** `POST /webhooks/slack` (LOB-259): the Events API's Request URL. Setting
+`SLACK_SIGNING_SECRET` arms it, and its `url_verification` handshake is answered at once (signed, so a
+stranger gets no challenge back), before any bot token or channel exists. `SLACK_CHANNELS` is the
+allow-list (and `SLACK_TEXT` the optional phrase), read per request; `SLACK_BOT_TOKEN` (with the other
+two, `slackConfigFromEnv`) turns on the replies. With no secret every delivery is `503`. A delivery is
+a `message` or an `app_mention` in a watched channel: an `@factory` mention is the same ask as a
+message there, goes through the same filter, and Slack's `message` twin of it is the same delivery
+(one message address). A signed payload with no event (`app_rate_limited`) is answered `200` and
+ignored, because Slack retries and eventually disables a URL that answers anything else.
 
-1. a signed message in a watched channel starts a session and names it;
-2. the session is in the rule's repo — the channel mapped it — and
+**How the skill drives it.** `./slack.sh` boots `./slack-fake.ts` and `./github-fake.ts`, boots the
+**real API** pointed at them (`adapter-lib.sh`), and runs `bun slack.ts`, which posts deliveries it
+signs the way Slack does (`slackSignature`) at the API over HTTP and reads sessions back through the
+RPC client. Only Slack and GitHub are loopback fakes; the route, the signature check, the seam, the
+session layer and Postgres are real. Nineteen checks, then the API is booted again with the signing
+secret unset:
+
+1. Slack's `url_verification` handshake is answered with its challenge, and refused when unsigned;
+2. a signed message in a watched channel is processed and names a session in the rule's repo — the
+   channel mapped it;
 3. its title is the message's first line and its first message the rendered rule;
-4. the write-back replied exactly once, in the message's thread;
-5. the reply names the session and links to it;
-6. Slack's own two calls: the thread is read (`conversations.replies`) before one `chat.postMessage`,
+4. the write-back replied exactly once, in the message's thread, naming and linking the session;
+5. Slack's own two calls: the thread is read (`conversations.replies`) before one `chat.postMessage`,
    as the bot token;
-7. the same message again — a new `event_id`, a fresh signature — is a replay: one session, one reply;
-8. a delivery timestamped outside the five-minute window is refused as `outside-window`, and
-9. it starts nothing;
-10. a delivery exactly at the edge of the window is still accepted;
-11. a body changed after signing is `bad-signature`, and no signature at all `missing-signature`;
-12. a message in a channel the filter does not watch is skipped, naming the filter;
-13. a message without the filter's phrase is skipped, naming the filter;
-14. a bot's own message in a watched channel starts nothing (the loop guard);
-15. a message already in a thread is answered in that thread;
-16. a delivery whose reply landed but whose acknowledgement was lost fails;
-17. the retry reads the thread and posts no second reply; and
-18. it is processed, reusing the session the failed attempt opened.
+6. the same message again — a new `event_id`, a fresh signature — is a replay: one session, one reply;
+7. a delivery timestamped outside the five-minute window is `401 outside-window` and records nothing;
+8. one inside the window is accepted;
+9. a body changed after signing is `bad-signature`, and no signature at all `missing-signature`, and
+   neither records a delivery;
+10. a message in a channel the filter does not watch is skipped, naming the filter;
+11. a bot's own message in a watched channel starts nothing (the loop guard);
+12. a message already in a thread is answered in that thread;
+13. an `@mention` opens one session, and its `message` twin is a replay (Slack sends both events for
+    a mention in a watched channel, and when they arrive together the second finds the first's claim
+    with no outcome yet and is answered `503 in-progress`; Slack retries it and the retry is the
+    replay, so a mention may leave one failed delivery in Slack's log. Known, not hidden: a `200`
+    there would end the retries of a first delivery that died);
+14. a signed payload that carries no event is answered `200` and ignored;
+15. a delivery whose reply landed but whose acknowledgement was lost is `500 write-back`;
+16. its retry is processed, reads the thread, posts no second reply and reuses the session;
+17. opening the session's PR over RPC (the fake GitHub answers) posts its link in the thread that
+    started the session, once, and a repeat of the step (`already-open`) posts nothing more;
+18. that PR is the fake GitHub's one PR for the session's repo;
+19. (`unconfigured`) with the signing secret unset a delivery and the handshake are `503`, naming
+    `SLACK_SIGNING_SECRET`, and record and open nothing.
 
-**What proves it works.** `.verify/evidence/lob-191/` (`slack.log`, `slack-observed.json`,
-`slack-ledger.json`) — 18/18 on Postgres 5442 with faux. `packages/core/src/Slack.test.ts` (30 cases)
-proves what the drive does not: the payload reading (a threaded message, a bot message, an edit, a
-non-message event, the `url_verification` handshake), the filter's reasons, the derived delivery id
-(one message is one delivery however often Slack retries it), the signature verdicts one at a time,
-the all-or-none config gate, and the two requests' shape including Slack's trap of answering
-`200 {ok: false}` for a logical refusal.
+**What proves it works.** `.verify/evidence/lob-259/` (`slack-configured.log`, `slack-unconfigured.log`,
+`slack-*-observed.json`, `slack-ledger.json`, `slack-github-ledger.json`, the API logs) — 19/19 and 2/2
+on Postgres 5442 with faux. `packages/core/src/Slack.test.ts` proves what the drive does not: the
+payload reading (a threaded message, a bot message, an edit, a mention, a non-message event, the
+handshake), the filter's reasons and its env form, the derived delivery id (one message is one
+delivery however often Slack retries it), the signature verdicts one at a time, the all-or-none
+config gate, the two requests' shape including Slack's trap of answering `200 {ok: false}` for a
+logical refusal, and `SlackSessionWriteBack` against the real `sessions` table (the PR link in the
+thread, once; nothing for a session no Slack message opened; a Slack that refuses does not fail the
+step). `apps/api/src/Api/AdapterWebhooks.test.ts` serves the route in-process: the `503`s, the
+handshake, `outside-window`, the filter read from the environment per request.
 
-**Non-vacuity.** Two hand mutations, both recorded beside the evidence
-(`.verify/evidence/lob-191/mutation-*.log`):
+**Non-vacuity.** Two hand mutations, recorded beside the evidence of the in-process drive that
+preceded the HTTP one (`.verify/evidence/lob-191/mutation-*.log`; the HTTP drive has the same checks
+under other numbers):
 
 - remove the filter's channel check (`if (!filter.channels.includes(channel)) …`) → the unwatched
   message is **processed** and starts a session, `16/18`: check 12 fails on `status=processed`, and
@@ -79,12 +104,13 @@ input, another separator, base64) fails there rather than agreeing with itself. 
 the scheme is pinned to Slack's word; the drive's deliveries are signed with `slackSignature` and
 verified by the adapter, which proves the plumbing, not the spelling.
 
-**Nothing is wired into `apps/api` yet.** As with Jira and GitHub, there is no `POST /webhooks/slack`
-route: `Webhook.ts` (the Linear and generic adapters) is unmodified, and `slackConfigFromEnv` is what a
-deployment — or the coming route — uses to decide whether the adapter exists at all. `slack.sh` stands
-in for the route: it signs, verifies, normalizes and delivers, which is exactly the order the route
-would use. A route would also have to answer Slack's `url_verification` challenge before any delivery
-arrives; `slackEvent` returns `undefined` for it rather than pretending it is a message.
+**The PR link.** `SlackSessionWriteBack` is the session layer's write-back for Slack, beside Linear's
+(`SessionWriteBacksAll`): when the PR step opens a pull request for a session a Slack message started
+— found by the session's own request id, `trigger:slack:<channel>:<root>:<message>` — the PR's link is
+posted in that message's thread, once per link. A step that opens none, or a session no Slack message
+started, posts nothing. When a delivery opens a _card_ instead of a bare session (LOB-254, not landed
+when this was written), the link belongs on the card's review step, and this is the seam to move it
+to.
 
 **The limits the fake cannot close.** That Slack accepts these `chat.postMessage` parameters, that the
 Events API really re-sends a failed delivery with the same `event.ts` (the key this relies on, and
@@ -92,10 +118,8 @@ whether its `event_id` is re-stamped — the key does not depend on the answer),
 `conversations.replies` pages as read (Slack's default 100-message page, so a longer thread's earlier
 reply could be missed and answered twice). Recorded in `docs/testing-third-parties.md`.
 
-**Three things an operator should know.** (1) The stale-delivery refusal is proven at the verifier —
-`verifySlackSignature` returns `outside-window` and the drive makes no delivery from it — so "refused
-before anything starts" is a claim about the check, not about a route; there is no route to place it in
-yet. (2) A **human** reply inside a thread the bot answered also passes the filter and starts its own
+**Three things an operator should know.** (1) The stale-delivery refusal is the route's: the drive posts
+a correctly signed body 305 seconds old and gets `401 outside-window` with no delivery row. (2) A **human** reply inside a thread the bot answered also passes the filter and starts its own
 session; that is by design (a person asking a follow-up in the thread is a new message), and the loop
 guard only covers the bot's own posts, which arrive with `bot_id`. (3) A message is deduped by its
 `ts`, so deleting and re-posting a message is a new delegation, while re-sending the same one is not.

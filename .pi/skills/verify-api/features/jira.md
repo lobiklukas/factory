@@ -14,34 +14,47 @@ mapping rule, exactly as a Linear label does. The write-back posts
 `POST {baseUrl}/rest/api/3/issue/{key}/comment` with Basic `email:api-token` auth and an ADF
 document naming the session.
 
-**How the skill drives it.** `./jira.sh` boots `./jira-fake.ts` on the run's `API_PORT` and runs
-`bun jira.ts`, which builds the **real** seam, the real `SessionService` and the real write-back
-client over the run's Postgres — only Jira is a loopback fake. Seventeen checks:
+**How a user reaches it.** `POST /webhooks/jira` (LOB-259), armed by `JIRA_WEBHOOK_SECRET`: register
+an admin webhook in Jira with that secret and Jira signs `X-Hub-Signature: sha256=<hex HMAC of the
+body>`, which `verifyJiraSignature` checks (a missing header, a digest of another body and a digest
+without the `sha256=` prefix are each `401`, and record nothing). With no secret the route is `503`.
+The comment back on the issue needs `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` (all three,
+`jiraConfigFromEnv`) and optionally `JIRA_SESSION_URL_BASE`; without them the route still opens
+sessions and writes nothing back.
 
-1. a `jira:issue_created` delivery starts a session and names it;
-2. the session's title is the issue's summary, and its first message is the rendered rule;
-3. the write-back posted exactly one comment, on `FAC-1`, naming the session;
-4. the comment body is an ADF document, and the call read the issue first, then posted once, to
-   Jira's own path, with Basic auth;
-5. the same payload again is a replay, and
-6. it creates no second session and no second comment;
+**How the skill drives it.** `./jira.sh` boots `./jira-fake.ts`, boots the **real API** pointed at it
+(`adapter-lib.sh`), and runs `bun jira.ts`, which signs deliveries the way Jira does and posts them at
+the API over HTTP, reading sessions back through the RPC client. Only Jira is a loopback fake: the
+route, the signature check, the seam, the session layer and Postgres are real. Sixteen checks, then
+the API is booted again with the secret unset:
+
+1. a signed `jira:issue_created` delivery is processed (200) and names a session;
+2. the session's title is the issue's summary, in the rule's repo, and
+3. its first message is the rendered rule;
+4. the write-back posted exactly one comment, on `FAC-1`, as an ADF document naming and linking the
+   session;
+5. the call read the issue first, then posted once, to Jira's own path, with Basic auth;
+6. the same body again is `replayed`, with no second session and no second comment;
 7. a `jira:issue_updated` delivery is skipped, with Jira's own event name in the reason;
 8. a label no rule maps is skipped, naming the labels that arrived;
 9. neither skip created a session or a comment;
-10. a payload with no `issue` does not normalize to a delivery at all;
-11. a delivery whose comment landed but whose acknowledgement was lost fails as `write-back`;
-12. the retry reads the issue's comments before it posts;
-13. the retry posts no second comment — the issue still carries exactly one;
-14. the retry is processed and reuses the session the failed attempt opened;
-15. and the retry sends the prompt once: the settled session holds exactly one user message
-    (LOB-218).
+10. a missing, a wrong and an unprefixed signature are each `401` with their reasons, and
+11. a refused delivery records nothing and opens nothing;
+12. a signed body with no issue is `400 bad-payload`;
+13. a delivery whose comment landed but whose acknowledgement was lost is `500 write-back`;
+14. its retry is processed and reuses the session;
+15. the retry reads the issue's comments and posts no second one; and
+16. sends the prompt once: the settled session holds exactly one user message (LOB-218);
+17. (`unconfigured`) with the secret unset the route is `503 not-configured`, naming
+    `JIRA_WEBHOOK_SECRET`, and records and opens nothing.
 
-**What proves it works.** `.verify/evidence/lob-189/` (`jira.log`, `jira-observed.json`,
-`jira-ledger.json`): 17/17 on Postgres 5442 and faux model (`.verify/evidence/lob-218/` for the
-run that added the prompt check). `packages/core/src/Jira.test.ts` (13 cases) proves what the
-drive does not: the payload reading (ADF flattening, a payload with no fields, an update keeping its
-own name), the derived delivery id (same body → same id, re-stamped body → new id), the
-all-three-or-none config gate, the request shape, and a `403` becoming a `write-back` error.
+**What proves it works.** `.verify/evidence/lob-259/` (`jira-configured.log`, `jira-unconfigured.log`,
+`jira-*-observed.json`, `jira-ledger.json`, the API logs): 16/16 and 2/2 on Postgres 5442 and faux
+model. `packages/core/src/Jira.test.ts` proves what the drive does not: the payload reading (ADF
+flattening, a payload with no fields, an update keeping its own name), the derived delivery id (same
+body → same id, re-stamped body → new id), the all-three-or-none config gate, the signature verdicts,
+the request shape, and a `403` becoming a `write-back` error. `apps/api/src/Api/AdapterWebhooks.test.ts`
+serves the route in-process over a recording seam: the `503`, the `401`s, the `400`s, the replay.
 
 **Non-vacuity.** With the write-back's read-before-post removed (`if (already && false) return;`),
 the lost-acknowledgement case fails: the retry posts a second comment and the drive reports
@@ -58,11 +71,10 @@ does not, and the seam's dedupe is a row keyed by that id. So the adapter derive
 `jira:{action}:{issue key}:{timestamp}` — a replayed **body** is one delivery, and a redelivery that
 re-stamps the payload is not. Closing that needs a route that takes a delivery header.
 
-**Nothing is wired into `apps/api` yet.** The issue's third criterion is that the adapter touches no
-file the other adapters own and that the gate stays green with no Jira adapter enabled, so there is
-no `POST /webhooks/jira` route: `Webhook.ts` (the Linear and generic adapters) is unmodified, and
-`jiraConfigFromEnv` is what a deployment (or the coming route) uses to decide whether the adapter
-exists at all — all three of `baseUrl`, `email`, `apiToken` or none.
+**One write-back per source.** The seam has one `TriggerWriteBack`, and the routes share it, so the
+clients sit behind `TriggerWriteBackBySource` (`apps/api/src/Api/TriggerAdapters.ts`): an event is
+answered by the client of the system it came from and by no other, so a GitHub issue can never get a
+Jira comment. The generic and Sentry sources write nothing.
 
 **The read-then-post window.** The comment is looked for in Jira's default page of an issue's
 comments (50). A session's comment on an issue with a longer thread than that could be missed and

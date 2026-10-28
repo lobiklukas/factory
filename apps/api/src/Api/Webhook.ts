@@ -54,18 +54,25 @@
  * So the secret is configuration, not a default: `503` names the missing variable, and a
  * deployment that wants the route sets it.
  */
-import { Duration, Effect, Layer } from "effect";
+import { Clock, Duration, Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { RateLimiter } from "effect/persistence";
 import {
   ENV_RULES_ORIGIN,
+  JIRA_SIGNATURE_HEADER,
+  jiraDelivery,
   linearDeliveryFor,
   SENTRY_REQUEST_ID_HEADER,
   SENTRY_RESOURCE_HEADER,
   SENTRY_SIGNATURE_HEADER,
   sentryDelivery,
   sentryStartsWork,
+  slackDelivery,
+  slackFilterFromEnv,
+  slackUrlVerification,
+  verifyJiraSignature,
   verifySentrySignature,
+  verifySlackSignature,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -77,7 +84,8 @@ import type {
 } from "@repo/domain/Trigger";
 import { LIFECYCLE_ACTIONS, TRIGGER_ACTION } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { TriggerWriteBackLive } from "./LinearSync";
+import { readTriggerRules } from "./WebhookBoot";
+import { slackEnv, TriggerWriteBacksLive } from "./TriggerAdapters";
 
 /** The default cap on a trigger delivery, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 65_536;
@@ -315,7 +323,16 @@ type Adapter = {
     raw: string,
     signature: string | undefined,
     secret: string,
+    /** What a scheme that signs more than the body needs: the other headers, and the time. */
+    request: { readonly header: HeaderLookup; readonly nowSeconds: number },
   ) => SignatureVerdict;
+  /**
+   * A signed payload that is a handshake, not a delivery: the JSON body to answer `200` with, or
+   * `undefined` for a payload that is one. Nothing is recorded, and the seam is not asked.
+   */
+  readonly handshake?: (
+    payload: Record<string, unknown>,
+  ) => Record<string, unknown> | undefined;
   /**
    * The route's rate cap: at most `limit` signed deliveries that `counts` admits per
    * `windowSeconds` in this process. Absent is uncapped, which is what the Linear and generic
@@ -397,10 +414,14 @@ const handle = (adapter: () => Adapter) =>
     // Header names are case-insensitive, and the incoming map is lowercase; a configured
     // `X-Trigger-Signature` must not turn every signed delivery into a 401.
     const signatureHeader = config.signatureHeader.toLowerCase();
+    const header: HeaderLookup = (name) =>
+      req.headers[name.toLowerCase()] as string | undefined;
+    const nowSeconds = Math.floor((yield* Clock.currentTimeMillis) / 1000);
     const verdict = (config.verify ?? verifySignature)(
       raw,
       req.headers[signatureHeader] as string | undefined,
       secret,
+      { header, nowSeconds },
     );
     if (!verdict.ok) {
       yield* logRefusal(verdict.refusal);
@@ -421,8 +442,10 @@ const handle = (adapter: () => Adapter) =>
       return badRequest("the body is not a JSON object", "bad-json");
     }
 
-    const header: HeaderLookup = (name) =>
-      req.headers[name.toLowerCase()] as string | undefined;
+    const handshake = config.handshake?.(body);
+    if (handshake !== undefined)
+      return HttpServerResponse.jsonUnsafe(handshake);
+
     // The rules this delivery is normalized against: the stored routes as they are right now, then
     // `TRIGGER_RULES` (LOB-266). Read after the refusals that need no rule, so a stranger's unsigned
     // body costs no query; the seam reads the same set again to map, and the two reads differ only
@@ -644,6 +667,82 @@ const sentryRoute = HttpRouter.add(
 );
 
 /**
+ * The Jira Cloud adapter (`@repo/core/Jira`, LOB-189, served by LOB-259): an admin webhook
+ * registered with a secret signs `sha256=<hex>` into `X-Hub-Signature`, checked with
+ * `JIRA_WEBHOOK_SECRET`. The delivery's key is the one Jira's payload gives it
+ * (`jira:<event>:<issue>:<timestamp>`), so a replayed body is one delivery. Only the comment back on
+ * the issue needs `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` (`./TriggerAdapters`); without
+ * them the route still opens sessions and writes nothing back.
+ */
+const jiraRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/jira",
+  handle(() => ({
+    route: "/webhooks/jira",
+    deliveryHeader: "x-atlassian-webhook-identifier",
+    signatureHeader: JIRA_SIGNATURE_HEADER,
+    secret: process.env["JIRA_WEBHOOK_SECRET"],
+    secretVariable: "JIRA_WEBHOOK_SECRET",
+    verify: (raw, signature, secret) =>
+      verifyJiraSignature({ raw, signature, secret }),
+    delivery: (payload) =>
+      jiraDelivery(payload) ?? {
+        refused: "the payload does not name a Jira issue",
+        code: "bad-payload",
+      },
+  })),
+);
+
+/**
+ * The Slack Events adapter (`@repo/core/Slack`, LOB-191, served by LOB-259): Slack's own timestamped
+ * signature, checked with `SLACK_SIGNING_SECRET`, whose `url_verification` handshake is answered and
+ * whose payloads that carry no event (`app_rate_limited`) are answered `200` and ignored, because
+ * Slack retries and eventually disables a subscription whose URL answers anything else. The filter
+ * is the environment's, read per request: the channels to watch (`SLACK_CHANNELS`) and an optional
+ * phrase (`SLACK_TEXT`); a message outside them is recorded `skipped` with the reason. The reply in
+ * the thread needs `SLACK_BOT_TOKEN` too (`./TriggerAdapters`).
+ */
+const slackRoute = HttpRouter.add(
+  "POST",
+  "/webhooks/slack",
+  handle(() => ({
+    route: "/webhooks/slack",
+    deliveryHeader: "x-slack-request-timestamp",
+    signatureHeader: "x-slack-signature",
+    secret: process.env["SLACK_SIGNING_SECRET"],
+    secretVariable: "SLACK_SIGNING_SECRET",
+    verify: (raw, signature, signingSecret, request) =>
+      verifySlackSignature({
+        raw,
+        signature,
+        timestamp: request.header("x-slack-request-timestamp"),
+        signingSecret,
+        nowSeconds: request.nowSeconds,
+      }),
+    handshake: (payload) => {
+      const verification = slackUrlVerification(payload);
+      if (verification !== undefined) return verification;
+      const type = payload["type"];
+      return type === "event_callback"
+        ? undefined
+        : {
+            ok: true,
+            ignored: `a "${typeof type === "string" ? type : ""}" payload carries no event`,
+          };
+    },
+    delivery: (payload) => {
+      const filter = slackFilterFromEnv(slackEnv());
+      return (
+        slackDelivery(payload, filter) ?? {
+          refused: "the payload carries no Slack event",
+          code: "bad-payload",
+        }
+      );
+    },
+  })),
+);
+
+/**
  * Every route, still asking for the seam and the rate cap per request. Exported so a test can serve
  * them with a fake `TriggerService` — the route-level refusals (`503`, `413`, `401`, `400`, `429`) are answered before the
  * seam is called, and a case that proves one must not need Postgres and a session layer to do it.
@@ -654,6 +753,8 @@ export const WebhookRoutes = Layer.mergeAll(
   linearRoute,
   genericRoute,
   sentryRoute,
+  jiraRoute,
+  slackRoute,
 );
 
 /**
@@ -672,25 +773,35 @@ export const WebhookRateLimiterLive = RateLimiter.layer.pipe(
  * the rules and the session port are per-process configuration, and two instances would be two
  * copies of the same config waiting to drift.
  */
+const seamFor = (rules: ReadonlyArray<TriggerRule>) =>
+  TriggerServiceLive({
+    rules,
+    storedRoutes: true,
+    rulesOrigin: ENV_RULES_ORIGIN,
+  }).pipe(
+    // Each source's write-back when its credentials are configured (`./TriggerAdapters`): Linear's
+    // started move (LOB-15), Jira's and GitHub's comments, Slack's reply. Only the source a delivery
+    // came from is written back to.
+    Layer.provide(
+      Layer.mergeAll(TriggerSessionsFromSessionService, TriggerWriteBacksLive),
+    ),
+  );
+
 export const webhookLiveFor = (rules: ReadonlyArray<TriggerRule>) =>
   WebhookRoutes.pipe(
     HttpRouter.provideRequest(
-      Layer.mergeAll(
-        TriggerServiceLive({
-          rules,
-          storedRoutes: true,
-          rulesOrigin: ENV_RULES_ORIGIN,
-        }).pipe(
-          Layer.provide(
-            // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
-            // started state when its session opens. Otherwise none.
-            Layer.mergeAll(
-              TriggerSessionsFromSessionService,
-              TriggerWriteBackLive,
-            ),
-          ),
-        ),
-        WebhookRateLimiterLive,
-      ),
+      Layer.mergeAll(seamFor(rules), WebhookRateLimiterLive),
     ),
   );
+
+/**
+ * The seam for a request that is not one of `WebhookRoutes` (the GitHub issue route, whose
+ * `POST /webhooks/github` is built in `./GitHubWebhook`). It reads `TRIGGER_RULES` from the
+ * environment the same way boot does, so both see one set of fallback rules.
+ */
+export const TriggerSeamLive = Layer.unwrap(
+  readTriggerRules(process.env).pipe(
+    Effect.orElseSucceed((): ReadonlyArray<TriggerRule> => []),
+    Effect.map(seamFor),
+  ),
+);
