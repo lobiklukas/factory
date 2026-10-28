@@ -9,6 +9,13 @@ import { cn } from "cn";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { startSessionAtom } from "@/lib/atoms/session-atom";
 import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
+import { costPredictionAtom } from "@/lib/atoms/cost-atom";
+import {
+  capBlocked,
+  predictedBudget,
+  predictionKey,
+  predictionText,
+} from "@/lib/cost-view";
 import {
   modelChoices,
   modelInput,
@@ -51,6 +58,19 @@ export const SessionSidebar = () => {
     AsyncResult.isSuccess(info) ? info.value : undefined,
   );
   const [model, setModel] = useState(SERVER_DEFAULT);
+  // What the session would cost, before it exists (LOB-38): a range from the completed sessions most
+  // like it, on the model picked. Capping at its high is a choice only a range can offer.
+  const prediction = useAtomValue(
+    costPredictionAtom(predictionKey(PROMPT, model)),
+  );
+  const predicted = AsyncResult.isSuccess(prediction)
+    ? prediction.value
+    : undefined;
+  const canCap = predicted?.range !== undefined;
+  const [capped, setCapped] = useState(false);
+  // Asked to cap with no range to cap at (a new model's prediction still loading, or too little
+  // history): Start waits rather than create the uncapped session nobody asked for.
+  const blocked = capBlocked(predicted, capped);
   return (
     <aside
       className={cn(
@@ -69,7 +89,11 @@ export const SessionSidebar = () => {
           id="new-session-model"
           name="model"
           value={model}
-          onChange={(event) => setModel(event.currentTarget.value)}
+          onChange={(event) => {
+            // A cap was asked of the old model's range: the new model's is another number.
+            setModel(event.currentTarget.value);
+            setCapped(false);
+          }}
           className="h-8 w-full truncate rounded-none border border-input bg-transparent px-2 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 dark:bg-input/30"
         >
           {choices.map((choice) => (
@@ -78,16 +102,58 @@ export const SessionSidebar = () => {
             </option>
           ))}
         </select>
+        <p
+          data-cost-prediction={predicted?.basis}
+          data-cost-low={predicted?.range?.low}
+          data-cost-high={predicted?.range?.high}
+          className="font-mono text-[10px] leading-relaxed text-muted-foreground"
+        >
+          {predicted !== undefined
+            ? predictionText(predicted)
+            : AsyncResult.isFailure(prediction)
+              ? "No estimate: the prediction did not load"
+              : "Predicting the cost…"}
+        </p>
+        <label
+          htmlFor="new-session-cap"
+          className="flex items-center gap-2 text-[11px] text-muted-foreground"
+        >
+          <input
+            id="new-session-cap"
+            name="cap"
+            type="checkbox"
+            checked={capped}
+            // Once ticked it can always be unticked, even if the range it was ticked for is gone.
+            disabled={!canCap && !capped}
+            onChange={(event) => setCapped(event.currentTarget.checked)}
+            className="size-3"
+          />
+          Cap at predicted high
+        </label>
+        {blocked ? (
+          <p
+            role="status"
+            data-cost-cap-blocked=""
+            className="text-[10px] leading-relaxed text-muted-foreground"
+          >
+            No predicted high to cap at yet: untick the cap to start uncapped.
+          </p>
+        ) : null}
         <Button
           className="w-full justify-start"
           variant="outline"
+          disabled={blocked}
           onClick={() => {
             // Navigating on the created id rather than waiting for the list to
             // re-read: the pane attaches on the route, so the route is what has
             // to move. A refusal says so out loud instead of leaving the user on
             // the list with an error they cannot see: there is no session id to
             // navigate to, and silence is indistinguishable from a dead button.
-            void start({ content: PROMPT, ...modelInput(model) }).then(
+            void start({
+              content: PROMPT,
+              ...modelInput(model),
+              ...predictedBudget(predicted, capped),
+            }).then(
               (session) =>
                 navigate({
                   to: "/sessions/$sessionId",

@@ -36,6 +36,7 @@ import {
   Ref,
   Schedule,
   Schema,
+  type Scope,
   Semaphore,
   Stream,
 } from "effect";
@@ -104,6 +105,12 @@ import type {
   StartMissionResult,
 } from "@repo/domain/Mission";
 import type { OpenPullRequestPayload } from "@repo/domain/PullRequest";
+import type {
+  BacktestCostInput,
+  CostBacktest,
+  CostPrediction,
+  PredictCostInput,
+} from "@repo/domain/Cost";
 import type {
   AskOptions,
   Conversation,
@@ -220,6 +227,7 @@ import {
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
+import { atCapacity, SESSION_MAX_CONCURRENT } from "./admission";
 import {
   countRefusal,
   countSessionCreate,
@@ -229,6 +237,12 @@ import {
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
+import {
+  backtestCost,
+  predictCost,
+  type CostHistoryRow,
+} from "./costPrediction";
+import { TITLE_MAX, titleFrom } from "./sessionTitle";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -242,9 +256,6 @@ import {
   sessionDirectory,
   type WorkspaceInput,
 } from "./workspace";
-
-/** Longest title we derive from a first message, in characters. */
-const TITLE_MAX = 80;
 
 /** Longest message a session accepts, in characters. Beyond this the call is refused, not truncated. */
 export const MAX_MESSAGE_CHARS = 100_000;
@@ -357,6 +368,22 @@ export type SessionServiceShape = {
    * from the same index, in one grouped read — never a fold (R6).
    */
   readonly spend: Effect.Effect<SpendReport, SessionError>;
+  /**
+   * What a run of `input.prompt` would cost (LOB-38): a range from the completed sessions most like
+   * it, read from the index in one query — never a fold (R6). `model` absent is the deployment's
+   * model; a model this process does not serve is `invalid_input`, as `create` refuses it.
+   */
+  readonly predictCost: (
+    input: PredictCostInput,
+  ) => Effect.Effect<CostPrediction, SessionError>;
+  /**
+   * How wrong `predictCost` has been (LOB-38): every completed session — `input.repo`'s only, when
+   * named — predicted from the whole history that had finished before it was created, and scored
+   * against what it cost. The scored rows come back only when `input.rows` asks.
+   */
+  readonly backtestCost: (
+    input: BacktestCostInput,
+  ) => Effect.Effect<CostBacktest, SessionError>;
   /**
    * Register or update a repo a session can bind to (docs/features.md §3 A1). A `localPath` that is
    * not absolute or not inside a git work tree is `invalid_input` naming it, and nothing is written
@@ -618,6 +645,19 @@ export type SessionServiceOptions = {
   readonly idleTimeoutMs?: number;
   readonly sweepIntervalMs?: number;
   /**
+   * Admission control (LOB-70): how many sessions this process may own at once. An owner is an open
+   * harness, the log's single-writer lock, a worktree and a projection fiber, so this is the budget
+   * of what runs here. Past it, a request that would open one more owner is refused `at_capacity`:
+   * a `create`, `fork` or `replay` before it writes any row, and a `send` (or any other call) to a
+   * session nobody owns before it opens one. A call to a session whose owner is open needs no new
+   * slot and is served; a slot frees when an owner is released (the idle sweep, a workspace
+   * release, `close`). A boot's `resumeRuns` and `resumeMissions` are never refused — that work was
+   * admitted before the process died — but the owners they open count, so a boot that resumes N
+   * sessions is at capacity until one is released. Absent: no cap, as before — a deployment opts in
+   * (`SESSION_MAX_CONCURRENT`).
+   */
+  readonly maxConcurrentSessions?: number;
+  /**
    * What a session may do unattended (D11, `@repo/harness`'s `Policy`). Absent: D11's defaults, so
    * an unpoliced session is not reachable by omitting an argument.
    */
@@ -676,6 +716,12 @@ const cloneFailure = (error: RepoCloneFailed): SessionError =>
     message: `${error.message} (${error.reason})`,
   });
 
+/**
+ * A slot a new session reserved under admission control (LOB-70): `true` until it is handed in —
+ * by its owner's open, or by its release when no owner was opened.
+ */
+type SlotReservation = Ref.Ref<boolean>;
+
 type SessionRow = {
   readonly id: string;
   readonly title: string;
@@ -730,6 +776,24 @@ type ListRow = {
   readonly lastActivityExact: string;
   readonly costTotal: number;
 };
+
+/** One completed session as the cost history reads it (LOB-38). */
+type CostHistoryIndexRow = {
+  readonly id: string;
+  readonly title: string;
+  readonly repo: string | null;
+  readonly model: string | null;
+  readonly costTotal: number;
+  readonly createdAtMs: number;
+  readonly finishedAtMs: number;
+};
+
+/**
+ * Most completed sessions a prediction or a backtest reads, newest first (LOB-38). A range uses at
+ * most `COMPARABLE_WINDOW` of them per tier, so older history only matters to a tier this many
+ * sessions never fill.
+ */
+const COST_HISTORY_LIMIT = 2000;
 
 /** One (repo, actor) group of the spend read (LOB-162). */
 type SpendGroupRow = {
@@ -800,12 +864,6 @@ type LiveOwner = {
    */
   readonly resumed: readonly string[];
   readonly lastUsedAt: number;
-};
-
-const titleFrom = (content: string): string => {
-  const line =
-    content.split("\n").find((candidate) => candidate.trim().length > 0) ?? "";
-  return line.trim().slice(0, TITLE_MAX);
 };
 
 /**
@@ -896,6 +954,87 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const runStarts = new Map<SessionId, number>();
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
+      /**
+       * Admission control (LOB-70). A slot is an open owner (`live`): the cap counts them, plus the
+       * slots a `create`, `fork` or `replay` has reserved between its check — made before it writes
+       * its row — and its owner's open. The check, a reservation and an owner's insert are all made
+       * under `gate`, so two callers cannot both take the last slot, and a reservation turns into
+       * its owner in the same step that inserts it, so a slot is never counted twice.
+       */
+      const capacity = options.maxConcurrentSessions;
+      const reserved = yield* Ref.make(0);
+      /**
+       * Refuse one more owner when the slots are all taken. Under `gate` to be the truth. `counted`:
+       * whether the refusal is a request's, and so a `factory.refusals{reason="at_capacity"}` — a
+       * reopen the server makes on its own behalf (a replay's comparison commit) is refused the same
+       * way but is no request the factory declined.
+       */
+      const refuseOverCapacity = (
+        counted: boolean,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (capacity === undefined) return;
+          const taken =
+            HashMap.size(yield* Ref.get(live)) + (yield* Ref.get(reserved));
+          if (taken < capacity) return;
+          if (counted) yield* countRefusal("at_capacity");
+          return yield* atCapacity({
+            limit: capacity,
+            source: SESSION_MAX_CONCURRENT,
+          });
+        });
+      /**
+       * Whether an acquisition must find a free slot: not one its new session already reserved, and
+       * not a boot's resume of work admitted before the process died (`admission: "resume"`).
+       */
+      const needsSlot = (acquisition: {
+        readonly slot?: SlotReservation | undefined;
+        readonly admission?: "resume" | "background";
+      }) =>
+        acquisition.admission === "resume"
+          ? Effect.succeed(false)
+          : Effect.map(holdsSlot(acquisition.slot), (held) => !held);
+      /** Whether a reservation still holds its slot (not yet handed in). */
+      const holdsSlot = (slot: SlotReservation | undefined) =>
+        slot === undefined ? Effect.succeed(false) : Ref.get(slot);
+      /**
+       * Hand a reservation in: it stops counting, once. Its owner's open does it as it inserts the
+       * owner; the reservation's release does it when no owner was inserted (a refusal, a failure).
+       */
+      const consumeSlot = (slot: SlotReservation | undefined) =>
+        slot === undefined
+          ? Effect.void
+          : Effect.gen(function* () {
+              if (yield* Ref.getAndSet(slot, false))
+                yield* Ref.update(reserved, (count) => count - 1);
+            });
+      /**
+       * A slot held from before a new session's row is written until its owner is open, in the
+       * caller's scope: refused `at_capacity` when none is free, so a refused create, fork or replay
+       * writes nothing. With no cap configured, a reservation that holds nothing and counts nothing.
+       */
+      const admitted: Effect.Effect<
+        SlotReservation,
+        SessionError,
+        Scope.Scope
+      > =
+        capacity === undefined
+          ? Ref.make(false)
+          : Effect.acquireRelease(
+              gate.withPermits(1)(
+                Effect.gen(function* () {
+                  yield* refuseOverCapacity(true);
+                  yield* Ref.update(reserved, (count) => count + 1);
+                  return yield* Ref.make(true);
+                }),
+              ),
+              // A slot its owner took over is never held again, so only one that is still held
+              // waits for the gate: a create does not queue behind another session's open to end.
+              (slot) =>
+                Effect.flatMap(Ref.get(slot), (held) =>
+                  held ? gate.withPermits(1)(consumeSlot(slot)) : Effect.void,
+                ),
+            );
       /**
        * Serializes PR opens. Two overlapping calls for one session would each read an empty
        * `factory.pr` and each open a PR, so the read-then-create-then-commit sequence has to be
@@ -1840,6 +1979,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * `create` passes it to the open that creates the root, which pins it ahead of the role's.
          */
         readonly model?: ModelAccess;
+        /**
+         * The slot a new session reserved before its row was written (`admitted`, LOB-70): its open
+         * is admitted on it, and inserting the owner hands it in. Absent: the open takes a free
+         * slot or is refused `at_capacity`.
+         */
+        readonly slot?: SlotReservation | undefined;
+        /**
+         * How admission control (LOB-70) treats an open that is no client's request. `"resume"`: a
+         * boot's resume of a run or mission a dead process left in flight — work the cap admitted
+         * before the crash, so it is never refused (a refusal would strand it until the next boot)
+         * and its owner counts against the cap like any other. `"background"`: a reopen the server
+         * makes on its own (a replay's comparison commit), refused at capacity like a request but not
+         * counted as one in `factory.refusals`. Absent: a request's open.
+         */
+        readonly admission?: "resume" | "background";
       };
 
       /** The part of an acquisition that is serialized: everything but the network (below). */
@@ -1860,6 +2014,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               yield* Ref.update(live, HashMap.set(id, touched));
               return touched;
             }
+            // One more owner (LOB-70): admitted on the slot its new session reserved, or on a free
+            // one, counted under this gate with the insert below so the count cannot be overtaken.
+            if (yield* needsSlot(acquisition))
+              yield* refuseOverCapacity(acquisition.admission !== "background");
 
             // Read again under the gate rather than trusted from `row`: a release that committed
             // after the caller read the row must not be undone by cutting the worktree back
@@ -1981,6 +2139,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               resumed: opened.resumed,
               lastUsedAt: now,
             };
+            // The reservation becomes this owner in the same step, so the slot is counted once.
+            yield* consumeSlot(acquisition.slot);
             yield* Ref.update(live, HashMap.set(id, owner));
             // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
             yield* shiftSessionsActive(1);
@@ -2018,8 +2178,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<LiveOwner, SessionError> =>
         Effect.gen(function* () {
           // The network part of opening a URL-only repo's session, outside the gate (see
-          // `mirrorStartFor`); an owner that is already open needs none of it.
-          const mirrorStart = HashMap.has(yield* Ref.get(live), id)
+          // `mirrorStartFor`); an owner that is already open needs none of it. A server at capacity
+          // refuses before the fetch rather than after it; the gate still decides (LOB-70).
+          const alreadyOpen = HashMap.has(yield* Ref.get(live), id);
+          if (!alreadyOpen && (yield* needsSlot(acquisition)))
+            yield* refuseOverCapacity(acquisition.admission !== "background");
+          const mirrorStart = alreadyOpen
             ? undefined
             : yield* mirrorStartFor(row);
           return yield* acquireUnderGate(
@@ -2218,6 +2382,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the lookup a replay does — before anything is written: a model this process cannot serve
           // is refused here, not registered as a repo, an index row and a log that never run.
           const model = yield* sessionModelFor(input.model);
+          // A slot before anything is written (LOB-70): a create refused at capacity registers no
+          // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
+          // the owner below is open, which takes it over; given back on any other exit.
+          const slot = yield* admitted;
           const binding = yield* resolveBinding(input);
           const id = yield* mintSessionId;
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
@@ -2267,6 +2435,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(id, row, {
             reviewing: input.review !== undefined,
             ...(model === undefined ? {} : { model }),
+            slot,
           });
           if (input.review !== undefined && binding.repo !== undefined) {
             // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
@@ -2314,7 +2483,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* touchActivity(id);
           yield* countSessionCreate("create");
           return yield* describe(id, row);
-        });
+        }).pipe(Effect.scoped);
 
       const get = (
         sessionId: SessionId,
@@ -2663,6 +2832,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               : { repo: yield* toRepoSlug(parent.repo) }),
             ...(parent.baseRef === null ? {} : { baseRef: parent.baseRef }),
           };
+          // A slot before the row is written, as `create` takes one (LOB-70).
+          const slot = yield* admitted;
           // The index row is written first, as `create` writes it, so the fork exists for a retried
           // read the moment its log does; a failure between the two leaves a row whose log is empty,
           // and `rebuildIndexes` removes a row with no log rather than trusting it.
@@ -2746,11 +2917,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   ).pipe(Effect.ignore),
                 ),
               ),
+            { slot },
           );
           yield* touchActivity(id);
           yield* countSessionCreate("fork");
           return yield* describe(id, row);
-        });
+        }).pipe(Effect.scoped);
 
       /**
        * Replay a session against another model (LOB-198).
@@ -2781,6 +2953,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ? {}
               : { baseRef: origin.binding.baseRef }),
           };
+          // A slot before the row is written, after the refusals that need none (LOB-70).
+          const slot = yield* admitted;
           const id = yield* mintSessionId;
           const inserted = yield* paper(
             "create session",
@@ -2832,6 +3006,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   ? {}
                   : { defaultBudget: options.defaultBudget }),
               }),
+            { slot },
           ).pipe(
             Effect.tapError(() =>
               paper(
@@ -2846,7 +3021,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* touchActivity(id);
           yield* countSessionCreate("replay");
           return yield* describe(id, row);
-        });
+        }).pipe(Effect.scoped);
 
       /**
        * Bring one replay's comparison up to date with its logs (LOB-199): what is owed is read off
@@ -2939,6 +3114,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(
             sessionId,
             yield* requireSession(sessionId),
+            { admission: "background" },
           );
           yield* writeReplayComparison(owner.root, comparison);
         }).pipe(
@@ -4265,6 +4441,76 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         },
       );
 
+      /**
+       * The completed sessions a cost prediction reads (LOB-38), newest first: idle, with no run and
+       * no mission in flight, and priced — a session that spent nothing says nothing about price, and
+       * one still running has not finished spending. The cost is the list's own `cost_total`, so a
+       * prediction and the spend pane never disagree about what a session cost.
+       */
+      const costHistory: Effect.Effect<
+        readonly CostHistoryRow[],
+        SessionError
+      > = Effect.gen(function* () {
+        const rows = yield* paper(
+          "read cost history",
+          sql<CostHistoryIndexRow>`
+              SELECT
+                s.id,
+                s.title,
+                s.repo,
+                s.model,
+                a.cost_total::double precision AS cost_total,
+                (extract(epoch FROM s.created_at) * 1000)::double precision AS created_at_ms,
+                (extract(epoch FROM COALESCE(a.last_activity_at, s.created_at)) * 1000)::double precision AS finished_at_ms
+              FROM session_activity a
+              JOIN sessions s ON s.id = a.session_id
+              WHERE a.status = 'idle'
+                AND a.cost_total > 0
+                AND s.run_session_root IS NULL
+                AND NOT s.mission_in_flight
+              ORDER BY s.created_at DESC, s.id DESC
+              LIMIT ${COST_HISTORY_LIMIT}
+            `,
+        );
+        const history: CostHistoryRow[] = [];
+        for (const row of rows) {
+          history.push({
+            id: yield* toSessionId(row.id),
+            title: row.title,
+            repo: row.repo === null ? undefined : yield* toRepoSlug(row.repo),
+            model: row.model ?? undefined,
+            costTotal: row.costTotal,
+            createdAt: row.createdAtMs,
+            finishedAt: row.finishedAtMs,
+          });
+        }
+        return history;
+      });
+
+      const predictSessionCost = (
+        input: PredictCostInput,
+      ): Effect.Effect<CostPrediction, SessionError> =>
+        Effect.gen(function* () {
+          // The model a create with this input would run on: the one it names, refused when this
+          // process does not serve it, else the deployment's.
+          const model = (yield* sessionModelFor(input.model)) ?? options.model;
+          const history = yield* costHistory;
+          return predictCost(history, {
+            prompt: input.prompt,
+            repo: input.repo,
+            model: modelKey(model),
+          });
+        });
+
+      const backtestSessionCost = (
+        input: BacktestCostInput,
+      ): Effect.Effect<CostBacktest, SessionError> =>
+        // The whole history, always: a repo's sessions are predicted from every repo's, as
+        // `predictCost` predicts them, and only the scoring is that repo's.
+        Effect.map(costHistory, (history) =>
+          backtestCost(history, { repo: input.repo, rows: input.rows }),
+        );
+
       const parseCursor = (
         raw: string,
       ): Effect.Effect<
@@ -4622,8 +4868,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 const row = yield* requireSession(sessionId);
                 // `starts`: a release that committed after the query read the row is refused under
                 // the owners' gate, as a `startMission` would be.
+                // `resume`: work admitted before the process died is not refused at capacity (LOB-70).
                 const owner = yield* acquireOwner(sessionId, row, {
                   starts: true,
+                  admission: "resume",
                 });
                 // The reopened graph already lists a mission the stop left pending. The row outlived
                 // its mission (a crash between the two writes): nothing to resume, so nothing else in
@@ -4682,8 +4930,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 // The acquisition is the whole of the resume: the open continues what the log left
                 // unsettled (`openSession`'s `resume`). `starts` refuses a release that committed
                 // after the query read the row, as `send` would.
+                // `resume`: work admitted before the process died is not refused at capacity (LOB-70).
                 const owner = yield* acquireOwner(sessionId, row, {
                   starts: true,
+                  admission: "resume",
                 });
                 if (owner.resumed.length > 0) return sessionId;
                 // The row outlived its run (a death between the run settling and the projection
@@ -4786,6 +5036,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         startMission,
         list,
         spend,
+        predictCost: predictSessionCost,
+        backtestCost: backtestSessionCost,
         registerRepo,
         listRepos,
         getRepo,
