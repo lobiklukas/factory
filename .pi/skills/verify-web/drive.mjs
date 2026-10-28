@@ -94,16 +94,28 @@ const assert = (name, condition, detail) => {
   return Boolean(condition);
 };
 
-// Feature: the root redirects to the sessions section. See features/routing.md.
+// Feature: the root opens on boards (C9): the only board's lanes, or the list with none or several.
+// See features/routing.md and features/first-run.md. The checks here do not assume how many boards
+// the instance's database holds; `first-run.sh` proves the 0, 1 and several cases on its own database.
 await page.goto(WEB_URL, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
+await page.waitForFunction(() => window.location.pathname !== "/", null, {
+  timeout: 15_000,
+});
 const redirected = new URL(page.url()).pathname;
 observed.redirected = redirected;
+const boardsAtRoot = await rpcFromDrive("listBoards", {});
+const expectedRoot =
+  boardsAtRoot.value?.length === 1
+    ? `/boards/${boardsAtRoot.value[0].id}`
+    : "/boards";
 assert(
-  "root redirects to sessions",
-  redirected === "/sessions",
-  `after goto ${WEB_URL} the path is ${JSON.stringify(redirected)}`,
+  "root opens the only board, or the boards list",
+  boardsAtRoot.exit === "Success" && redirected === expectedRoot,
+  `after goto ${WEB_URL} the path is ${JSON.stringify(redirected)}; ${boardsAtRoot.value?.length ?? "?"} board(s) so ${JSON.stringify(expectedRoot)}`,
 );
+await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
 
 // The sidebar is the server's list (LOB-75 deleted the browser-local registry): once it has
 // loaded, its rows are `listSessions`' first page in the server's order, or its empty state when the
@@ -1999,6 +2011,8 @@ const BOARD_READS = new Set([
   "getServerInfo",
   // The New session form's cost estimate (LOB-38) is a read: it spends nothing and opens nothing.
   "predictCost",
+  // The getting-started checklist (C9) reads the registry beside the boards, cards and runs.
+  "listRepos",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
