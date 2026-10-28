@@ -535,6 +535,192 @@ describe("TaskService", () => {
     }
   });
 
+  /**
+   * C11: a person fixes a card's title and priority. One call is one revision however many fields it
+   * changes, with one event per changed field at the revision the call expected, and the history
+   * rebuilds the card (`replay`).
+   *
+   * Mutation: bump the revision once per field — the card lands at 3, not 2.
+   * Mutation: skip the `retitled` event — the replayed title is the old one.
+   * Mutation: write the title untrimmed — the card reads back with the padding.
+   */
+  it("updates a card's title and priority in one revision, one event per changed field", async () => {
+    const boardId = await newBoard();
+    // Older than `task`, so it reads first in the FIFO until `task` is urgent.
+    const first = await withService((s) =>
+      s.create({ boardId, title: "first", actor: LUKAS }),
+    );
+    const task = await withService((s) =>
+      s.create({ boardId, title: "typo in titel", actor: LUKAS }),
+    );
+    const updated = await withService((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: 1,
+        title: "  typo in title  ",
+        priority: "urgent",
+        actor: LUKAS,
+      }),
+    );
+    expect(updated.title).toBe("typo in title");
+    expect(updated.priority).toBe("urgent");
+    expect(updated.revision).toBe(2);
+    expect(await withService((s) => s.get(task.id))).toEqual(updated);
+    expect(await eventCount(task.id)).toBe(3);
+    const events = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql<{
+          kind: string;
+          revision: number;
+          actor: string;
+          payload: Record<string, unknown>;
+        }>`SELECT kind, revision, actor, payload FROM task_events WHERE task_id = ${task.id} ORDER BY id`;
+      }),
+    );
+    expect(events.slice(1).map((e) => [e.kind, e.revision, e.actor])).toEqual([
+      ["retitled", 1, LUKAS],
+      ["priorityChanged", 1, LUKAS],
+    ]);
+    expect(events[1]?.payload).toMatchObject({
+      from: "typo in titel",
+      to: "typo in title",
+    });
+    expect(events[2]?.payload).toMatchObject({ from: "normal", to: "urgent" });
+    expect(await withService((s) => s.replay(task.id))).toMatchObject({
+      title: "typo in title",
+      priority: "urgent",
+      revision: 2,
+    });
+    // Urgent reads first in its column (B9), and back to normal drops it behind the FIFO.
+    expect(
+      (await withService((s) => s.list({ boardId }))).map((t) => t.id),
+    ).toEqual([task.id, first.id]);
+    const demoted = await withService((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: 2,
+        priority: "normal",
+        actor: LUKAS,
+      }),
+    );
+    expect(demoted.title).toBe("typo in title");
+    expect(
+      (await withService((s) => s.list({ boardId }))).map((t) => t.id),
+    ).toEqual([first.id, task.id]);
+  });
+
+  /**
+   * Mutation: drop the `lockExpected` — the stale update lands. Mutation: skip the unchanged check —
+   * a no-op edit bumps the revision and writes an event.
+   */
+  it("refuses a stale update naming the revision it found, treats an unchanged value as no edit, and refuses a blank, over-long or empty one", async () => {
+    const boardId = await newBoard();
+    const task = await withService((s) =>
+      s.create({ boardId, title: "keep", actor: LUKAS }),
+    );
+    await withService((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: 1,
+        priority: "urgent",
+        actor: LUKAS,
+      }),
+    );
+    const stale = await refusal((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: 1,
+        title: "late",
+        actor: LUKAS,
+      }),
+    );
+    expect(stale).toMatchObject({
+      _tag: "StaleRevision",
+      expected: 1,
+      actual: 2,
+    });
+    expect((await withService((s) => s.get(task.id))).title).toBe("keep");
+
+    const events = await eventCount(task.id);
+    const same = await withService((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: 2,
+        title: " keep ",
+        priority: "urgent",
+        actor: LUKAS,
+      }),
+    );
+    expect(same.revision).toBe(2);
+    expect(await eventCount(task.id)).toBe(events);
+
+    for (const [field, input] of [
+      ["title", { title: "   " }],
+      ["title", { title: "x".repeat(301) }],
+      ["update", {}],
+    ] as const) {
+      const refused = await refusal((s) =>
+        s.update({
+          taskId: task.id,
+          expectedRevision: 2,
+          ...input,
+          actor: LUKAS,
+        }),
+      );
+      expect(refused).toMatchObject({ _tag: "InvalidTaskInput", field });
+    }
+    expect(await eventCount(task.id)).toBe(events);
+    expect(
+      await refusal((s) =>
+        s.update({
+          taskId: "tsk_missing",
+          expectedRevision: 1,
+          title: "x",
+          actor: LUKAS,
+        }),
+      ),
+    ).toMatchObject({ _tag: "TaskNotFound" });
+  });
+
+  /** C11's lane acceptance: a `dependency` block, then lifted, then an urgent flag, all on the one card. */
+  it("blocks on a dependency and lifts it, then marks the card urgent, each at the revision before", async () => {
+    const boardId = await newBoard();
+    const task = await withService((s) =>
+      s.create({ boardId, title: "park me", actor: LUKAS }),
+    );
+    const blocked = await withService((s) =>
+      s.block({
+        taskId: task.id,
+        expectedRevision: 1,
+        reason: "dependency",
+        note: "waiting on the schema PR",
+        actor: LUKAS,
+      }),
+    );
+    // An edit does not lift the block, and the block's reason and note survive it.
+    const urgent = await withService((s) =>
+      s.update({
+        taskId: task.id,
+        expectedRevision: blocked.revision,
+        priority: "urgent",
+        actor: LUKAS,
+      }),
+    );
+    expect(urgent.blocked).toEqual(blocked.blocked);
+    expect(urgent.priority).toBe("urgent");
+    const lifted = await withService((s) =>
+      s.unblock({
+        taskId: task.id,
+        expectedRevision: urgent.revision,
+        actor: LUKAS,
+      }),
+    );
+    expect(lifted.blocked).toBeUndefined();
+    expect(lifted.priority).toBe("urgent");
+    expect(lifted.revision).toBe(4);
+  });
+
   it("reads a board as its instance plus the definition version it binds", async () => {
     const boardId = await newBoard();
     const board = await withService((s) => s.getBoard(boardId));

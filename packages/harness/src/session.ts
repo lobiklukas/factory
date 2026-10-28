@@ -42,7 +42,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
-import { Effect, Queue, Schema, Stream } from "effect";
+import { Effect, Option, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
   QueuedMessage,
@@ -113,6 +113,8 @@ import {
   ReviewDoc,
   ReplayDoc,
   PLAN_REVISIONS_DOC_KIND,
+  REPO_PROMPT_DOC_KIND,
+  RepoPromptDoc,
   SKILLS_DOC_KIND,
   SkillPinsDoc,
   PlanRevisionsDoc,
@@ -122,6 +124,14 @@ import {
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
+import {
+  assembleRepoPrompt,
+  repoInstructionsExtension,
+  type RepoContext,
+  type RepoPromptRecord,
+  repoPromptRecord,
+  repoSkillsExtension,
+} from "./repoContext";
 import {
   BudgetDoc,
   budgetExtension,
@@ -399,6 +409,16 @@ export type OpenSessionOptions = {
    */
   readonly pages?: readonly CitedPage[];
   /**
+   * What the session's repository tells every run (S-repo-instructions-and-skills, `./repoContext`):
+   * its `AGENTS.md` and the skills it ships, read by the control plane at the session's base ref.
+   * The open assembles them into the `repo_instructions` section and the `repo_skills` index under
+   * their caps, defers to the column's skills where a name overlaps, and commits what that came to
+   * (`RepoPromptDoc`). Absent — a scratch session, a released workspace, a directory that is not a
+   * checkout — installs nothing, so such a session runs as it did before, and clears a record an
+   * earlier open left rather than letting it name sections this prompt does not carry.
+   */
+  readonly repo?: RepoContext;
+  /**
    * What the `verify` tool runs (LOB-78, `./verify`): the repo's declared `verify` command and the
    * base its changes are measured against, from the workspace the control plane resolved. Absent:
    * no declared command and no base, so the tool falls back on the worktree's verify skills and
@@ -572,6 +592,13 @@ const openSessionIn = (
     // The skill versions the log already pins (D7), read before the root opens like the model is:
     // the open adds a pin only for a skill it has not recorded, and writes nothing when there is none.
     const recordedPins = yield* readSkillPins(options.storage);
+    // Whether an earlier open recorded what the repository told it, for an open that reads none
+    // (S-repo-instructions-and-skills): that record is cleared below rather than left standing for
+    // sections this prompt no longer carries. A session that never had one writes nothing.
+    const recordedRepo =
+      options.repo === undefined
+        ? yield* readRepoPrompt(options.storage)
+        : undefined;
     const chosen = options.sessionModel ?? role.model;
     const model =
       pinned === undefined
@@ -580,7 +607,24 @@ const openSessionIn = (
     // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
     // the whole code extension — tools and sections — renders after the run's own instructions.
     const skills = options.run?.skills ?? [];
+    // What the repository says (S-repo-instructions-and-skills), assembled once like the pages, so
+    // the record below is the value the sections render. Its standing instructions go first, ahead
+    // of the column's skills, so the factory's text for this stage reads as the more specific word;
+    // its skill index right after them, which it defers to where a name is the column's.
+    const repoPrompt =
+      options.repo === undefined
+        ? undefined
+        : assembleRepoPrompt(
+            options.repo,
+            skills.map((skill) => skill.name),
+          );
+    if (repoPrompt?.instructions !== undefined) {
+      registry.install(repoInstructionsExtension(repoPrompt));
+    }
     if (skills.length > 0) registry.install(skillsExtension(skills));
+    if (repoPrompt?.skills.text !== undefined) {
+      registry.install(repoSkillsExtension(repoPrompt));
+    }
     // The knowledge the session carries, one section beside the skills, installed before the tools
     // for the same reason they are. It is assembled and measured here, once, so what the run was
     // told and what it cost are the same value — the record written below is that value, not a
@@ -721,6 +765,11 @@ const openSessionIn = (
           dropped: pagesPrompt.dropped,
         },
         mergeSkillPins(recordedPins, skills),
+        repoPrompt !== undefined
+          ? repoPromptRecord(repoPrompt)
+          : recordedRepo !== undefined
+            ? null
+            : undefined,
       );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
@@ -816,6 +865,12 @@ export const writePagePrompt = (
   record: PagePromptRecord,
   /** The run's skill pins (D7), when this open changes them; absent leaves the document alone. */
   skillPins?: readonly SkillPin[],
+  /**
+   * What the repository's sections came to (S-repo-instructions-and-skills), for an open that read
+   * a repository; `null` resets the document to its seed, for an open that read none after one that
+   * did, so the record never names sections the prompt no longer carries; absent leaves it alone.
+   */
+  repoPrompt?: RepoPromptRecord | null,
 ): Effect.Effect<void, SessionError> =>
   attempt("write page prompt", () =>
     conversation.commit(
@@ -840,6 +895,42 @@ export const writePagePrompt = (
                     version: pin.version,
                   }));
                 }),
+            repoPrompt === undefined
+              ? Promise.resolve()
+              : repoPrompt === null
+                ? tx.doc(RepoPromptDoc, conversation.id).then((doc) => {
+                    // The seed's values: `skills.cap` 0 is what `readRepoPrompt` reads as none.
+                    doc.ref = "";
+                    doc.commit = "";
+                    doc.instructions = null;
+                    doc.skills = {
+                      tokens: 0,
+                      cap: 0,
+                      listed: [],
+                      dropped: [],
+                      shadowed: [],
+                    };
+                  })
+                : tx.doc(RepoPromptDoc, conversation.id).then((doc) => {
+                    doc.ref = repoPrompt.ref;
+                    doc.commit = repoPrompt.commit;
+                    doc.instructions =
+                      repoPrompt.instructions === null
+                        ? null
+                        : { ...repoPrompt.instructions };
+                    doc.skills = {
+                      tokens: repoPrompt.skills.tokens,
+                      cap: repoPrompt.skills.cap,
+                      listed: repoPrompt.skills.listed.map(
+                        ({ name, path }) => ({
+                          name,
+                          path,
+                        }),
+                      ),
+                      dropped: [...repoPrompt.skills.dropped],
+                      shadowed: [...repoPrompt.skills.shadowed],
+                    };
+                  }),
           ]).then(() => undefined),
         ),
       BACKGROUND_CONTEXT,
@@ -898,6 +989,47 @@ export const readSkillPins = (
     }
     return pins;
   });
+
+/**
+ * What the session's repository told its last open (S-repo-instructions-and-skills), read without
+ * owning the log: `undefined` for a log no open on a repository has written — a scratch session, or
+ * one older than the record. A value that is not the record's shape is `undefined` too, rather than
+ * a record trusted half-read.
+ */
+export const readRepoPrompt = (
+  storage: Storage,
+): Effect.Effect<RepoPromptRecord | undefined, SessionError> =>
+  Effect.map(readDocument(storage, REPO_PROMPT_DOC_KIND), (value) => {
+    if (value === undefined) return undefined;
+    const decoded = Schema.decodeUnknownOption(RepoPromptRecordSchema)(value);
+    return Option.isNone(decoded) || decoded.value.skills.cap === 0
+      ? undefined
+      : decoded.value;
+  });
+
+/** The record's shape, as a reader of the log checks it (`readRepoPrompt`). */
+const RepoPromptRecordSchema = Schema.Struct({
+  ref: Schema.String,
+  commit: Schema.String,
+  instructions: Schema.NullOr(
+    Schema.Struct({
+      path: Schema.String,
+      bytes: Schema.Finite,
+      tokens: Schema.Finite,
+      cap: Schema.Finite,
+      truncated: Schema.Boolean,
+    }),
+  ),
+  skills: Schema.Struct({
+    tokens: Schema.Finite,
+    cap: Schema.Finite,
+    listed: Schema.Array(
+      Schema.Struct({ name: Schema.String, path: Schema.String }),
+    ),
+    dropped: Schema.Array(Schema.String),
+    shadowed: Schema.Array(Schema.String),
+  }),
+});
 
 /**
  * What this session's last open was told, or `undefined` when it has never been opened.
@@ -2496,6 +2628,8 @@ export type ForkSessionOptions = {
    * prompt section could enumerate).
    */
   readonly pages?: readonly CitedPage[];
+  /** What the fork's repository tells it, as `OpenSessionOptions.repo`. */
+  readonly repo?: RepoContext;
   /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
   /**
@@ -2540,6 +2674,7 @@ export const forkSession = (
         : { approvalAsker: options.approvalAsker }),
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.pages === undefined ? {} : { pages: options.pages }),
+      ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
     });
     const lineage = yield* attempt(

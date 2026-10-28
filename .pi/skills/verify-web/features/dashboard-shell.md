@@ -9,7 +9,7 @@ route is its pane at that width, with a back link (`Show sessions`) at the start
 
 ## Sub-features
 
-- The rail renders with `aria-label="Sections"` and one entry per section (Boards, Needs a person, Sessions, Spend, Repositories), each
+- The rail renders with `aria-label="Sections"` and one entry per section (Boards, Needs a person, Sessions, Spend, Repositories, Skills), each
   with a tooltip carrying the label the icon replaces; Boards leads (LOB-75), see
   [board.md](board.md). Sandboxes and approvals left the rail for panes of a card's run (LOB-76,
   [card-pane.md](card-pane.md))
