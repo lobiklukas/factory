@@ -180,7 +180,9 @@ import {
   projectBudgetDoc,
   projectEntry,
   runEndingOf,
+  runTurnOf,
   type RunEnding,
+  type RunTurn,
   projectMergeDoc,
   projectPrDoc,
   projectPages,
@@ -2811,6 +2813,34 @@ export const readRecordedPullRequest = (
       ...(doc.commit === "" ? {} : { commit: doc.commit }),
       ...(doc.evidence === undefined ? {} : { evidence: doc.evidence }),
     };
+  });
+
+/**
+ * How the newest run of a log nobody owns stands (D9, `runTurnOf`): read newest first and only as
+ * far back as that run's newest user input, so a card's `run_completed` check costs a page of each
+ * run's tail, not its transcript.
+ */
+export const readRunTurn = (
+  storage: Storage,
+): Effect.Effect<RunTurn, SessionError> =>
+  Effect.gen(function* () {
+    const read: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* attempt("scan the run's entries", () =>
+        storage.scanEntries(
+          { conversationId: ROOT_CONVERSATION_ID },
+          RUN_ENDING_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      );
+      read.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+      if (page.items.some((entry) => entry.kind === "pi.user")) break;
+    }
+    return runTurnOf(read);
   });
 
 /**

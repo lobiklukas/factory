@@ -10,7 +10,7 @@ specifying  working
   role      specifier
   model     faux/faux-1 (deployment)
   skills    specify
-  requires  spec_doc (unchecked): a spec doc, gaps declared (explicitly [] when there are none)
+  requires  spec_doc (checked): a spec doc, gaps declared (explicitly [] when there are none)
   exits     planning, canceled
 planning  working
   role      planner
@@ -23,7 +23,7 @@ building  working
   role      builder
   model     faux/builder (role)
   skills    implement
-  requires  run_completed (unchecked): a run that completed
+  requires  run_completed (checked): a run that completed
             non_empty_diff (checked): a non-empty diff
             pr_link (checked): a PR link
   exits     review, canceled

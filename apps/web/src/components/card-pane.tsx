@@ -21,6 +21,7 @@ import type {
   BoardInstanceId,
   Task,
   TaskBlocked,
+  TaskExit,
 } from "@repo/domain/Task";
 import {
   boardAtom,
@@ -29,6 +30,7 @@ import {
   runSessionsAtom,
   startRunAtom,
   taskCommentsAtom,
+  taskExitAtom,
   taskRunsAtom,
   taskSpecAtom,
 } from "@/lib/atoms/board-atom";
@@ -57,6 +59,7 @@ import {
   type CommentRefusal,
 } from "@/lib/thread-view";
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
+import { currentExit, exitStatusLabel, moveWarning } from "@/lib/exit-view";
 import { specLists } from "@/lib/spec-view";
 import { startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
@@ -116,6 +119,11 @@ const useCardWrites = (task: Task): CardWrites => {
  * a card that is gone. And after a move lands the buttons stay disabled until the board read shows
  * the revision the server answered, so a second click cannot send the old revision and be refused as
  * stale for the person's own move. The hold is the pane's (`CardWrites`), shared with the Thread.
+ *
+ * Beside the moves is what the column needs before a card leaves it (D9, `ExitChecklist`), and a
+ * move the server would refuse over an unmet requirement says why before it is clicked. It is not
+ * disabled: the checklist is a read that can be a poll behind, so the server's answer to the click
+ * stays the decision, and a click on a warned move shows its own refusal.
  */
 const Moves = ({
   boardId,
@@ -134,12 +142,26 @@ const Moves = ({
   const [refusal, setRefusal] = useState<MoveRefusal | null>(null);
   const moves = offeredMoves(task, definition);
   const shown = refusalIsCurrent(refusal, task) ? refusal : null;
+  const exitRead = useAtomValue(taskExitAtom(task.id));
+  const exit = currentExit(
+    Option.getOrUndefined(AsyncResult.value(exitRead)),
+    task,
+  );
 
   return (
     <section aria-label="Moves" className="flex flex-col gap-2">
       <h2 className="text-[11px] font-medium text-muted-foreground uppercase">
         Move
       </h2>
+      <ExitChecklist
+        task={task}
+        exit={exit}
+        failure={
+          AsyncResult.isFailure(exitRead) && exit === null
+            ? Cause.pretty(exitRead.cause)
+            : undefined
+        }
+      />
       {moves.length === 0 ? (
         <p className="text-xs text-muted-foreground" data-no-moves>
           {task.column} declares no moves: the card is finished.
@@ -149,73 +171,97 @@ const Moves = ({
           aria-label={`Moves out of ${task.column}`}
           className="flex flex-col gap-1.5"
         >
-          {moves.map((offered) => (
-            <li key={offered.to}>
-              <Button
-                type="button"
-                variant={offered.gate === undefined ? "outline" : "default"}
-                size="sm"
-                data-move-to={offered.to}
-                data-human-gate={offered.gate}
-                aria-label={
-                  offered.gate === undefined
-                    ? `Move to ${offered.to}`
-                    : `Move to ${offered.to}: the ${offered.gate} gate, a person's move`
-                }
-                disabled={pending !== null || writes.busy || writes.settling}
-                aria-busy={pending === offered.to}
-                className="w-full justify-start"
-                onClick={() => {
-                  const sent = task.revision;
-                  setPending(offered.to);
-                  writes.begin();
-                  setRefusal(null);
-                  void move({
-                    taskId: task.id,
-                    expectedRevision: sent,
-                    to: offered.to,
-                    actor: DASHBOARD_ACTOR,
-                  })
-                    .then((exit) => {
-                      if (Exit.isSuccess(exit)) {
-                        writes.landed(exit.value.revision);
-                        return;
-                      }
-                      setRefusal(
-                        moveRefusal(
-                          Option.getOrUndefined(
-                            Cause.findErrorOption(exit.cause),
-                          ),
-                          Cause.pretty(exit.cause),
-                          sent,
-                        ),
-                      );
-                      // The view the click was made from is stale or wrong: read the server's
-                      // truth again, so the next attempt expects the revision it actually holds.
-                      refreshBoard();
+          {moves.map((offered) => {
+            const warning = moveWarning(exit, offered.to);
+            const noteId = `move-unmet-${offered.to}`;
+            return (
+              <li key={offered.to}>
+                <Button
+                  type="button"
+                  variant={offered.gate === undefined ? "outline" : "default"}
+                  size="sm"
+                  data-move-to={offered.to}
+                  data-human-gate={offered.gate}
+                  aria-label={
+                    offered.gate === undefined
+                      ? `Move to ${offered.to}`
+                      : `Move to ${offered.to}: the ${offered.gate} gate, a person's move`
+                  }
+                  disabled={pending !== null || writes.busy || writes.settling}
+                  aria-busy={pending === offered.to}
+                  data-move-unmet={
+                    warning === null
+                      ? undefined
+                      : warning.map(({ key }) => key).join(" ")
+                  }
+                  aria-describedby={warning === null ? undefined : noteId}
+                  className="w-full justify-start"
+                  onClick={() => {
+                    const sent = task.revision;
+                    setPending(offered.to);
+                    writes.begin();
+                    setRefusal(null);
+                    void move({
+                      taskId: task.id,
+                      expectedRevision: sent,
+                      to: offered.to,
+                      actor: DASHBOARD_ACTOR,
                     })
-                    .finally(() => {
-                      setPending(null);
-                      writes.end();
-                    });
-                }}
-              >
-                {pending === offered.to ? (
-                  <Spinner className="size-3.5" />
-                ) : offered.gate === undefined ? (
-                  <ArrowRightIcon className="size-3.5" strokeWidth={1.75} />
-                ) : (
-                  <UserCheckIcon className="size-3.5" strokeWidth={1.75} />
+                      .then((exit) => {
+                        if (Exit.isSuccess(exit)) {
+                          writes.landed(exit.value.revision);
+                          return;
+                        }
+                        setRefusal(
+                          moveRefusal(
+                            Option.getOrUndefined(
+                              Cause.findErrorOption(exit.cause),
+                            ),
+                            Cause.pretty(exit.cause),
+                            sent,
+                          ),
+                        );
+                        // The view the click was made from is stale or wrong: read the server's
+                        // truth again, so the next attempt expects the revision it actually holds.
+                        refreshBoard();
+                      })
+                      .finally(() => {
+                        setPending(null);
+                        writes.end();
+                      });
+                  }}
+                >
+                  {pending === offered.to ? (
+                    <Spinner className="size-3.5" />
+                  ) : offered.gate === undefined ? (
+                    <ArrowRightIcon className="size-3.5" strokeWidth={1.75} />
+                  ) : (
+                    <UserCheckIcon className="size-3.5" strokeWidth={1.75} />
+                  )}
+                  <span className="font-mono text-[11px]">{offered.to}</span>
+                  {offered.gate === undefined ? null : (
+                    <span className="ml-auto font-mono text-[10px] tracking-wide uppercase opacity-80">
+                      person · {offered.gate}
+                    </span>
+                  )}
+                </Button>
+                {warning === null ? null : (
+                  <ul
+                    id={noteId}
+                    data-move-unmet-note={offered.to}
+                    className="mt-1 flex flex-col gap-0.5 border-l-2 border-destructive pl-2 text-[11px] text-muted-foreground"
+                  >
+                    {warning.map(({ key, reason }) => (
+                      <li key={key} data-move-unmet-key={key}>
+                        <span className="font-mono text-foreground">{key}</span>{" "}
+                        is not met: {reason}
+                      </li>
+                    ))}
+                  </ul>
                 )}
-                <span className="font-mono text-[11px]">{offered.to}</span>
-                {offered.gate === undefined ? null : (
-                  <span className="ml-auto font-mono text-[10px] tracking-wide uppercase opacity-80">
-                    person · {offered.gate}
-                  </span>
-                )}
-              </Button>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
       {shown === null ? null : (
@@ -229,6 +275,83 @@ const Moves = ({
         </Alert>
       )}
     </section>
+  );
+};
+
+/**
+ * What the card needs to leave its column (D9): "Leaves <column> when" and each of the column's
+ * requirements marked met, unmet — with the reason a refusal would give — or not checked, for a key
+ * the factory declares but holds no move to. The read is the server's (`getTaskExit`), judged by the
+ * verdicts `moveTask` refuses on, so what is listed unmet here is what a click on a move would be
+ * refused with. It is hidden, not shown stale, while the last read is of another column.
+ */
+const ExitChecklist = ({
+  task,
+  exit,
+  failure,
+}: {
+  readonly task: Task;
+  readonly exit: TaskExit | null;
+  readonly failure: string | undefined;
+}) => {
+  if (exit === null)
+    return failure === undefined ? null : (
+      <p className="text-xs text-destructive" data-exit-failed>
+        The exit checklist did not load: {failure}
+      </p>
+    );
+  if (exit.requirements.length === 0)
+    return (
+      <p className="text-xs text-muted-foreground" data-exit-none>
+        {task.column} declares nothing a card must have to leave it.
+      </p>
+    );
+  return (
+    <div
+      className="flex flex-col gap-1"
+      data-exit-checklist={task.column}
+      data-exit-revision={exit.revision}
+    >
+      <h3 className="text-xs font-medium">Leaves {task.column} when</h3>
+      <ul
+        aria-label={`Leaves ${task.column} when`}
+        className="flex flex-col gap-1"
+      >
+        {exit.requirements.map((requirement) => (
+          <li
+            key={requirement.key}
+            data-exit-key={requirement.key}
+            data-exit-status={requirement.status}
+            className="flex flex-col gap-0.5 text-[11px]"
+          >
+            <span className="flex items-baseline gap-2">
+              <span
+                className={cn(
+                  "w-16 shrink-0 font-mono text-[10px] uppercase",
+                  requirement.status === "met" && "text-foreground",
+                  requirement.status === "unmet" && "text-destructive",
+                  requirement.status === "unchecked" && "text-muted-foreground",
+                )}
+              >
+                {exitStatusLabel(requirement.status)}
+              </span>
+              <span className="font-mono">{requirement.key}</span>
+              <span className="text-muted-foreground">
+                {requirement.description}
+              </span>
+            </span>
+            {requirement.reason === undefined ? null : (
+              <span
+                className="pl-[4.5rem] text-muted-foreground break-words"
+                data-exit-reason
+              >
+                {requirement.reason}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 };
 

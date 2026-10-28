@@ -96,7 +96,10 @@ import {
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
   NON_EMPTY_DIFF_REQUIREMENT,
+  RUN_COMPLETED_REQUIREMENT,
+  SPEC_DOC_REQUIREMENT,
   Task,
+  TaskExit,
   TaskEvent,
   TaskId,
   TaskRun,
@@ -113,6 +116,7 @@ import type {
 import { SessionId } from "@repo/domain/Session";
 import {
   readRecordedPullRequest,
+  readRunTurn,
   readRecordedReview,
   readVerifyCalls,
 } from "@repo/harness";
@@ -131,8 +135,10 @@ import { resolveCommit } from "./repos";
 import { noCheckoutWarning } from "./workspace";
 import {
   type BranchDiff,
+  CHECKED_REQUIREMENTS,
   type CardEvidence,
   exitRequirements,
+  exitView,
   requirementVerdict,
   type RunEvidence,
 } from "./requirements";
@@ -533,6 +539,12 @@ export type TaskServiceShape = {
     taskId: string,
   ) => Effect.Effect<TaskSpec | undefined, TaskError>;
   /**
+   * What the card needs to leave its column, judged now (D9): the column's whole `requires[]`
+   * under the card's pinned definition, each key met, unmet with the reason `move` would refuse
+   * with, or not checked. An unknown card is `TaskNotFound`.
+   */
+  readonly exit: (taskId: string) => Effect.Effect<TaskExit, TaskError>;
+  /**
    * The card as its `task_events` say it is (LOB-260, `./taskProjection`): the history folded,
    * oldest first. An unknown card is `TaskNotFound`; a history that does not start with `created`,
    * or holds an event that does not decode, is `TaskStorageError`.
@@ -641,6 +653,8 @@ const TASK_COLUMNS_T = taskColumns("t");
  */
 type RunRow = {
   readonly sessionId: string;
+  /** The column the run was started in (`task_runs.column`). */
+  readonly column: string;
   readonly indexed: string | null;
   readonly repo: string | null;
   readonly baseRef: string | null;
@@ -1738,14 +1752,19 @@ export const TaskServiceLive = Layer.effect(
     /**
      * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
      * truth for what it did). One batched read folds every run's log; none is opened as an owner.
-     * The latest run's branch is measured only when `measureDiff` says the move checks it. The review
+     * What a run's turn, the card's spec and the latest run's branch cost to read is paid only when
+     * `keys` names the requirement that reads it (`run_completed`, `spec_doc`, `non_empty_diff`). The review
      * runs are split out, in the same order, beside the head each of the card's PRs was last
      * reported at (`review_heads`), which says which of them `review_verdict` judges (LOB-241).
      */
-    const cardEvidence = (taskId: string, measureDiff: boolean) =>
+    const cardEvidence = (
+      taskId: string,
+      keys: ReadonlySet<string>,
+      column: string,
+    ) =>
       Effect.gen(function* () {
         const runs = yield* sql<RunRow>`
-          SELECT tr.session_id, s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
+          SELECT tr.session_id, tr."column", s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
           FROM task_runs tr
           LEFT JOIN sessions s ON s.id = tr.session_id
           LEFT JOIN repos r ON r.slug = s.repo
@@ -1790,10 +1809,16 @@ export const TaskServiceLive = Layer.effect(
         const changing = runs.filter(
           (_, index) => recordedReviews[index] === undefined,
         );
+        // `run_completed` judges the newest run started in the column being left, so only that run's
+        // turn is read: a run an earlier column started says nothing about this one.
+        const completing = changing
+          .filter((run) => run.column === column)
+          .at(-1)?.sessionId;
         const recorded = yield* Effect.forEach(
           changing,
           (run): Effect.Effect<RunEvidence, TaskStorageError> => {
             const sessionId = run.sessionId;
+            const startedIn = run.column;
             // The branch the run is on (C19: a card's later runs share its first change run's), so
             // `pr_link` can tell the card's PR from a PR of a branch the card no longer carries.
             const branch =
@@ -1802,7 +1827,12 @@ export const TaskServiceLive = Layer.effect(
                 : { branch: run.branch ?? `factory/${sessionId}` };
             const storage = logs.get(sessionId);
             if (storage === undefined)
-              return Effect.succeed({ sessionId, calls: [], ...branch });
+              return Effect.succeed({
+                sessionId,
+                column: startedIn,
+                calls: [],
+                ...branch,
+              });
             return Effect.gen(function* () {
               const calls = yield* readVerifyCalls(storage).pipe(
                 Effect.mapError(
@@ -1820,10 +1850,21 @@ export const TaskServiceLive = Layer.effect(
                     }),
                 ),
               );
+              const turn =
+                keys.has(RUN_COMPLETED_REQUIREMENT) && sessionId === completing
+                  ? yield* readRunTurn(storage).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new TaskStorageError({
+                            message: `task ${taskId}: run ${sessionId}'s turn does not read: ${cause.message}`,
+                          }),
+                      ),
+                    )
+                  : undefined;
               return {
                 sessionId,
+                column: startedIn,
                 calls,
-                ...branch,
                 ...(pr === undefined
                   ? {}
                   : {
@@ -1833,6 +1874,8 @@ export const TaskServiceLive = Layer.effect(
                         ? {}
                         : { prCommit: pr.commit }),
                     }),
+                ...branch,
+                ...(turn === undefined ? {} : { turn }),
               };
             });
           },
@@ -1851,6 +1894,14 @@ export const TaskServiceLive = Layer.effect(
           head: row.head,
         }));
         const latest = changing.at(-1);
+        // Whether the card has a spec: any `specified` event.
+        const specified = keys.has(SPEC_DOC_REQUIREMENT)
+          ? (yield* sql<{ id: number }>`
+              SELECT id FROM task_events
+              WHERE task_id = ${taskId} AND kind = 'specified'
+              LIMIT 1
+            `)[0]
+          : undefined;
         // Where the latest run's branch is, for `pr_link` standing on an earlier run's PR (C19):
         // read from the registered checkout, as `non_empty_diff` reads it.
         const branchTip =
@@ -1863,16 +1914,17 @@ export const TaskServiceLive = Layer.effect(
                 `refs/heads/${latest.branch ?? `factory/${latest.sessionId}`}`,
               );
         const tip = branchTip === undefined ? {} : { branchTip };
-        const evidence: CardEvidence =
-          measureDiff && latest !== undefined
-            ? {
-                runs: recorded,
-                reviews,
-                reviewHeads,
-                diff: yield* branchDiff(latest),
-                ...tip,
-              }
-            : { runs: recorded, reviews, reviewHeads, ...tip };
+        const evidence: CardEvidence = {
+          column,
+          runs: recorded,
+          reviews,
+          reviewHeads,
+          ...(specified === undefined ? {} : { specified: true }),
+          ...(keys.has(NON_EMPTY_DIFF_REQUIREMENT) && latest !== undefined
+            ? { diff: yield* branchDiff(latest) }
+            : {}),
+          ...tip,
+        };
         return evidence;
       });
 
@@ -1904,9 +1956,8 @@ export const TaskServiceLive = Layer.effect(
           return { unmet: undefined, definition };
         const evidence = yield* cardEvidence(
           input.taskId,
-          requirements.some(
-            (requirement) => requirement.key === NON_EMPTY_DIFF_REQUIREMENT,
-          ),
+          new Set(requirements.map((requirement) => requirement.key)),
+          column.name,
         );
         for (const requirement of requirements) {
           const verdict = requirementVerdict(requirement, evidence);
@@ -1925,6 +1976,34 @@ export const TaskServiceLive = Layer.effect(
         }
         return { unmet: undefined, definition };
       });
+
+    const exit = (taskId: string): Effect.Effect<TaskExit, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const pinned = yield* pinnedColumn(taskId);
+          if (pinned === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          const column = pinned.declared;
+          const base = {
+            taskId: TaskId.make(taskId),
+            column: pinned.name,
+            revision: pinned.revision,
+          };
+          // A column the pinned definition does not declare has no requirements to meet.
+          if (column === undefined) return { ...base, requirements: [] };
+          const keys = new Set(
+            column.requires
+              .map((requirement) => requirement.key)
+              .filter((key) => CHECKED_REQUIREMENTS.has(key)),
+          );
+          const evidence = yield* cardEvidence(taskId, keys, pinned.name);
+          return { ...base, requirements: exitView(column, evidence) };
+        }),
+      );
 
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
       withStorage(
@@ -2882,6 +2961,7 @@ export const TaskServiceLive = Layer.effect(
       comments,
       declareSpec,
       spec,
+      exit,
       replay,
       listCards,
       listRuns,

@@ -25,6 +25,8 @@ import {
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
+  RUN_COMPLETED_REQUIREMENT,
+  SPEC_DOC_REQUIREMENT,
   type AttentionItem,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
@@ -133,6 +135,20 @@ const seatInReview = (taskId: string) =>
 const RUN = "ses_0123456789abcdefghjkmnpqrs";
 const LUKAS = "person:lukas";
 
+/**
+ * The card's spec as a specifying run's `spec` tool posts it (D9): what `specifying`'s exit needs.
+ * Returns the card a revision on, so a walk goes on with its revision.
+ */
+const specified = (s: TaskServiceShape, task: { readonly id: string }) =>
+  s.declareSpec({
+    taskId: task.id,
+    actor: RUN,
+    goal: "walk the card on",
+    acceptance: ["it reaches planning"],
+    gaps: [],
+    openQuestions: [],
+  });
+
 describe("TaskService", () => {
   it("creates a card in intake at revision 1 with one created event", async () => {
     const boardId = await newBoard();
@@ -237,12 +253,13 @@ describe("TaskService", () => {
     // intake → specifying → planning, all by a person.
     const planning = await withService((s) =>
       Effect.gen(function* () {
-        const a = yield* s.move({
+        yield* s.move({
           taskId: task.id,
           expectedRevision: 1,
           to: "specifying",
           actor: LUKAS,
         });
+        const a = yield* specified(s, task);
         return yield* s.move({
           taskId: task.id,
           expectedRevision: a.revision,
@@ -266,7 +283,7 @@ describe("TaskService", () => {
     const stillPlanning = await withService((s) => s.get(task.id));
     expect(stillPlanning.column).toBe("planning");
     expect(stillPlanning.revision).toBe(planning.revision);
-    expect(await eventCount(task.id)).toBe(3);
+    expect(await eventCount(task.id)).toBe(4);
 
     const building = await withService((s) =>
       s.move({
@@ -278,7 +295,7 @@ describe("TaskService", () => {
     );
     // No gate stands on building → review, so a run's move there is judged on the column's
     // requirements, not refused as a gate (the gate is checked first): with no run on the card,
-    // `non_empty_diff` is the one it names.
+    // `run_completed` is the first it names (D9).
     const ungated = await refusal((s) =>
       s.move({
         taskId: task.id,
@@ -289,7 +306,7 @@ describe("TaskService", () => {
     );
     expect(ungated).toMatchObject({
       _tag: "RequirementUnmet",
-      requirement: "non_empty_diff",
+      requirement: "run_completed",
     });
     const review = await seatInReview(task.id);
     const mergeGate = await refusal((s) =>
@@ -316,8 +333,9 @@ describe("TaskService", () => {
       _tag: "RequirementUnmet",
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
-    // created + 3 accepted moves (the seat into review writes none); every refusal added nothing.
-    expect(await eventCount(task.id)).toBe(4);
+    // created + 3 accepted moves + the spec (the seat into review writes none); every refusal added
+    // nothing.
+    expect(await eventCount(task.id)).toBe(5);
   });
 
   it("accepts every move the shared table declares out of a column, and refuses every other", async () => {
@@ -1758,10 +1776,12 @@ describe("TaskService — the card's spec (LOB-238)", () => {
 
   it("records the declaring run's column, not the column the card was moved on to", async () => {
     const task = await inSpecifying();
+    // The move out needs a spec, so an earlier run declares one; the one under test comes after.
+    const earlier = await withService((s) => specified(s, task));
     const planned = await withService((s) =>
       s.move({
         taskId: task.id,
-        expectedRevision: task.revision,
+        expectedRevision: earlier.revision,
         to: "planning",
         actor: LUKAS,
       }),
@@ -1809,6 +1829,11 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       s.create({ boardId, title, actor: LUKAS }),
     );
     for (const to of path) {
+      // `specifying`'s exit needs a spec (D9), which these cases are not about.
+      if (to === "planning") {
+        const specifying = task;
+        task = await withService((s) => specified(s, specifying));
+      }
       const at = task;
       // `building`'s exit needs a branch and a PR (LOB-240), which these cases are not about.
       task =
@@ -2431,6 +2456,25 @@ describe("TaskService — exit requirements", () => {
     ),
   );
 
+  /** Prompt a run and resolve once its model answered: a completed turn (`run_completed`, D9). */
+  const answer = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const service = yield* SessionService;
+      yield* service.send({ sessionId, content: "answer" });
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const snapshot = yield* service.get(sessionId);
+        if (
+          snapshot.session.status === "idle" &&
+          snapshot.entries.some(
+            (entry) => entry.kind === "assistant" && entry.text !== "",
+          )
+        )
+          return;
+        yield* Effect.sleep(50);
+      }
+      return yield* Effect.die(new Error(`run ${sessionId} did not answer`));
+    });
+
   /**
    * One run of `taskId`, started from `column` (`review` unless named): the faux model runs
    * `command` in the run's worktree, calls `verify`, and answers. With `openPr` the run's PR is then
@@ -2705,6 +2749,7 @@ describe("TaskService — exit requirements", () => {
               actor: LUKAS,
             });
             for (const to of ["specifying", "planning", "building"]) {
+              if (to === "planning") task = yield* specified(s, task);
               task = yield* s.move({
                 taskId: task.id,
                 expectedRevision: task.revision,
@@ -3161,6 +3206,7 @@ describe("TaskService — exit requirements", () => {
             actor: LUKAS,
           });
           for (const to of ["specifying", "planning", "building"]) {
+            if (to === "planning") task = yield* specified(s, task);
             task = yield* s.move({
               taskId: task.id,
               expectedRevision: task.revision,
@@ -3184,7 +3230,7 @@ describe("TaskService — exit requirements", () => {
         actor: RUN,
       });
 
-  it("refuses building → review with no run, naming non_empty_diff first, and writes nothing", async () => {
+  it("refuses building → review with no run, naming run_completed first, and writes nothing", async () => {
     // Every version of the default pipeline declares building's requirements, so a card on any of
     // them is held: the definition did not change, the service started checking what it declares.
     for (const version of [1, 3]) {
@@ -3196,10 +3242,10 @@ describe("TaskService — exit requirements", () => {
         taskId: task.id,
         column: "building",
         to: "review",
-        requirement: NON_EMPTY_DIFF_REQUIREMENT,
+        requirement: RUN_COMPLETED_REQUIREMENT,
       });
       expect(err.message).toBe(
-        'the move building → review needs "non_empty_diff" (a non-empty diff), which is not met: the card has no runs, so no branch carries its change',
+        'the move building → review needs "run_completed" (a run that completed), which is not met: the card has no runs, so none completed a turn',
       );
       const after = await withService((s) => s.get(task.id));
       expect(after.column).toBe("building");
@@ -3217,6 +3263,240 @@ describe("TaskService — exit requirements", () => {
       expect(canceled.column).toBe("canceled");
     }
   });
+
+  /**
+   * A run of `taskId` in `column` whose model request failed for good: a non-retryable provider
+   * error, which ends the run on an `error` answer (the faux scripts it as the failures suite does).
+   */
+  const faultedRun = async (taskId: string, column = "building") => {
+    const faux = createFauxModelAccess();
+    faux.faux.setResponses([
+      {
+        role: "assistant",
+        content: [],
+        api: "faux",
+        provider: "faux",
+        model: "faux-1",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "error",
+        errorMessage: "invalid_api_key: the provider refused the credential",
+        timestamp: 0,
+      },
+    ]);
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({ model: faux.access, sessionRoot }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      return await sessions.runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const created = yield* service.create({
+            taskId,
+            taskColumn: column,
+          });
+          yield* service.send({ sessionId: created.id, content: "go" });
+          for (let attempt = 0; attempt < 400; attempt += 1) {
+            const snapshot = yield* service.get(created.id);
+            if (
+              snapshot.session.status === "idle" &&
+              snapshot.entries.some(
+                (entry) => entry.kind === "assistant" && entry.isError === true,
+              )
+            )
+              return created.id;
+            yield* Effect.sleep(50);
+          }
+          return yield* Effect.die(new Error("the faulted run did not end"));
+        }),
+      );
+    } finally {
+      await sessions.dispose();
+    }
+  };
+
+  it("refuses building → review after a faulted run, naming run_completed, and lets canceled through (D9)", async () => {
+    const task = await inBuilding();
+    const run = await faultedRun(task.id);
+    const events = await eventCount(task.id);
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      column: "building",
+      to: "review",
+      requirement: RUN_COMPLETED_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `the card's latest run ${run} faulted: its last model answer is an error or an abort`,
+    );
+    expect(await eventCount(task.id)).toBe(events);
+    const canceled = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "canceled",
+        actor: LUKAS,
+      }),
+    );
+    expect(canceled.column).toBe("canceled");
+  }, 60_000);
+
+  /** Mutation: judge the newest run whatever column started it — a planner's completed run meets building's gate. */
+  it("judges run_completed on the run started in the column being left, not an earlier column's (D9)", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    // The only run is a completed one the card's earlier column started.
+    await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "planning",
+      command: change("src/planned.ts"),
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: RUN_COMPLETED_REQUIREMENT,
+    });
+    expect(err.message).toContain("no run of the card was started in building");
+    const exit = await withService((s) => s.exit(task.id));
+    expect(
+      exit.requirements.find((r) => r.key === RUN_COMPLETED_REQUIREMENT)
+        ?.status,
+    ).toBe("unmet");
+  }, 60_000);
+
+  it("refuses building → review for a run that has not answered, and judges only the latest run (D9)", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    // An earlier run completed; the newest run was opened and never prompted, so it has no turn.
+    await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: change("src/earlier.ts"),
+    });
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    const idle = await sessions
+      .runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const created = yield* service.create({
+            taskId: task.id,
+            taskColumn: "building",
+          });
+          return created.id;
+        }),
+      )
+      .finally(() => sessions.dispose());
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: RUN_COMPLETED_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `the card's latest run ${idle} has not completed its turn`,
+    );
+  }, 60_000);
+
+  it("shows a column's exit checklist: the verdicts the move refuses on, unchecked keys marked, met after the evidence (D9)", async () => {
+    const boardId = await newBoard();
+    const created = await withService((s) =>
+      s.create({ boardId, title: "checklist", actor: LUKAS }),
+    );
+    const intake = await withService((s) => s.exit(created.id));
+    expect(intake).toMatchObject({
+      taskId: created.id,
+      column: "intake",
+      revision: created.revision,
+    });
+    const specifying = await withService((s) =>
+      s.move({
+        taskId: created.id,
+        expectedRevision: created.revision,
+        to: "specifying",
+        actor: LUKAS,
+      }),
+    );
+    const before = await withService((s) => s.exit(created.id));
+    expect(before.column).toBe("specifying");
+    expect(before.requirements.map(({ key, status }) => [key, status])).toEqual(
+      [[SPEC_DOC_REQUIREMENT, "unmet"]],
+    );
+    // The checklist's reason is the move's refusal's, word for word: one verdict, two readers.
+    const refused = await refusal((s) =>
+      s.move({
+        taskId: created.id,
+        expectedRevision: specifying.revision,
+        to: "planning",
+        actor: LUKAS,
+      }),
+    );
+    expect(refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: SPEC_DOC_REQUIREMENT,
+    });
+    expect(refused.message).toContain(before.requirements[0]?.reason ?? "?");
+    const posted = await withService((s) => specified(s, created));
+    const after = await withService((s) => s.exit(created.id));
+    expect(after.revision).toBe(posted.revision);
+    expect(after.requirements.map(({ key, status }) => [key, status])).toEqual([
+      [SPEC_DOC_REQUIREMENT, "met"],
+    ]);
+    const planning = await withService((s) =>
+      s.move({
+        taskId: created.id,
+        expectedRevision: posted.revision,
+        to: "planning",
+        actor: LUKAS,
+      }),
+    );
+    // `plan_doc` and the human-gate label have no checker, so they are listed, not judged.
+    const unchecked = await withService((s) => s.exit(created.id));
+    expect(unchecked.revision).toBe(planning.revision);
+    expect(
+      unchecked.requirements.map(({ key, status }) => [key, status]),
+    ).toEqual([
+      ["plan_doc", "unchecked"],
+      ["human_move", "unchecked"],
+    ]);
+    expect(unchecked.requirements.every((r) => r.reason === undefined)).toBe(
+      true,
+    );
+    const missing = await refusal((s) => s.exit(`tsk_${hex(13)}`));
+    expect(missing._tag).toBe("TaskNotFound");
+  }, 60_000);
+
+  it("lists building's checklist from the evidence: run_completed unmet after a faulted run, the rest judged too (D9)", async () => {
+    const task = await inBuilding();
+    const none = await withService((s) => s.exit(task.id));
+    expect(none.requirements.map(({ key, status }) => [key, status])).toEqual([
+      [RUN_COMPLETED_REQUIREMENT, "unmet"],
+      [NON_EMPTY_DIFF_REQUIREMENT, "unmet"],
+      [PR_LINK_REQUIREMENT, "unmet"],
+    ]);
+    await faultedRun(task.id);
+    const faulted = await withService((s) => s.exit(task.id));
+    expect(faulted.requirements[0]).toMatchObject({
+      key: RUN_COMPLETED_REQUIREMENT,
+      status: "unmet",
+    });
+    expect(faulted.requirements[0]?.reason).toContain("faulted");
+  }, 60_000);
 
   it("refuses building → review when the latest run's branch carries no committed change", async () => {
     const task = await inBuilding();
@@ -3314,6 +3594,7 @@ describe("TaskService — exit requirements", () => {
             taskId: task.id,
             taskColumn: "building",
           });
+          yield* answer(created.id);
           return created.id;
         }),
       )
@@ -3371,6 +3652,7 @@ describe("TaskService — exit requirements", () => {
             taskId: task.id,
             taskColumn: "building",
           });
+          yield* answer(created.id);
           return created.id;
         }),
       )
@@ -3822,6 +4104,10 @@ describe("TaskService — a definition's own transitions, gates and initial colu
     expect(task.column).toBe("intake");
     expect(task.definitionVersion).toBe(4);
     for (const to of ["specifying", "planning"]) {
+      if (to === "planning") {
+        const specifying = task;
+        task = await withService((s) => specified(s, specifying));
+      }
       const at = task;
       task = await withService((s) =>
         s.move({

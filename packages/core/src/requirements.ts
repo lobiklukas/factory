@@ -10,14 +10,25 @@
  * **Which keys are checked.** Only the keys in `CHECKED_REQUIREMENTS`: `verified`, the one B8
  * promotes from a PR body artifact into a condition of the move, `building`'s `non_empty_diff`
  * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
- * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36). The
- * other keys the default pipeline declares are not checked here, and each for a stated reason:
- * `human_move` and `human_merge` label B5's human gates, which `TaskService` enforces by actor on a
- * move whose transition names a `gate` (the key itself is read by nothing);
- * `spec_doc`, `plan_doc` and `run_completed` have no recorded artifact to check yet, and refusing
- * every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
+ * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36),
+ * `spec_doc` (D9), whose evidence is a `specified` event on the card (LOB-238), and `run_completed`
+ * (D9), whose evidence is how the card's latest run's log ends. The other keys the default pipeline
+ * declares are not checked here, and each for a stated reason: `human_move` and `human_merge` label
+ * B5's human gates, which `TaskService` enforces by actor on a move whose transition names a `gate`
+ * (the key itself is read by nothing); `plan_doc` has no recorded artifact to check yet, and
+ * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
+ *
+ * **What `spec_doc` and `run_completed` mean (D9).** `spec_doc` is met when a specifying run declared
+ * the card's spec: the card holds a `specified` event (`getTaskSpec`'s record), whichever run posted
+ * it and whichever column the card was in. A spec with open gaps still meets it — a gap parks the card
+ * through `ask`, it is not this key's to refuse. `run_completed` reads the newest run *started in the
+ * column being left* (an earlier column's run, a planner's say, is not the builder's), and is met
+ * when its newest turn ended on its own (`runTurnOf`): a run that is still working, died
+ * mid-tool-call, ended on a failed or aborted model answer or one cut off at the output limit
+ * (`stopReason: "length"`), was interrupted (C8) or was stopped by its budget (LOB-163) has not
+ * completed. A card with no run started in the column has completed nothing. A review run is not the card's run (`pr_link`'s rule), so its end says nothing here.
  *
  * **What `non_empty_diff` and `pr_link` mean.** Both read the card's branch and PR: the branch of
  * the card's *latest* run — the newest `task_runs` row — for the reason `verified` reads the newest
@@ -111,16 +122,24 @@
  * `canceled`. That is deliberate — "nothing could check this" is not a pass — and the refusal names
  * the remedy (`VERIFIABLE_REMEDY`) whenever a missing verification is the reason.
  */
-import type { BoardColumn, ColumnRequirement } from "@repo/domain/Task";
+import type {
+  BoardColumn,
+  ColumnRequirement,
+  ExitRequirementView,
+} from "@repo/domain/Task";
 import {
+  ABANDON_COLUMN,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
+  RUN_COMPLETED_REQUIREMENT,
+  SPEC_DOC_REQUIREMENT,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
 import {
   type RecordedReview,
   REPO_SURFACE,
+  type RunTurn,
   surfaceOf,
   surfacesOf,
   type TimedVerifyCall,
@@ -134,6 +153,8 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
+  SPEC_DOC_REQUIREMENT,
+  RUN_COMPLETED_REQUIREMENT,
 ]);
 
 /**
@@ -149,14 +170,12 @@ export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
 
 /**
  * The keys a definition may declare that nothing checks yet (module doc): the default pipeline's
- * `spec_doc`, `plan_doc` and `run_completed`, whose artifacts are not recorded, and the human-gate
- * labels (`HUMAN_GATE_REQUIREMENTS`), whose gate is the transition's `gate`, not the key. A reader is
- * told they are unchecked (`describeDefinition`).
+ * `plan_doc`, whose artifact is not recorded, and the human-gate labels (`HUMAN_GATE_REQUIREMENTS`),
+ * whose gate is the transition's `gate`, not the key. A reader is told they are unchecked
+ * (`describeDefinition`).
  */
 export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
-  "spec_doc",
   "plan_doc",
-  "run_completed",
   ...HUMAN_GATE_REQUIREMENTS,
 ]);
 
@@ -177,10 +196,14 @@ export const KNOWN_REQUIREMENTS: ReadonlySet<string> = new Set([
  */
 export type RunEvidence = {
   readonly sessionId: string;
+  /** The column the run was started in; `run_completed` judges the newest run started in the column being left. */
+  readonly column?: string;
   readonly calls: readonly TimedVerifyCall[];
   /** The branch the run is on, when it is bound to a repository. */
   readonly branch?: string;
   readonly prUrl?: string;
+  /** How the run's newest turn ended (`runTurnOf`); read only when the move checks `run_completed`. */
+  readonly turn?: RunTurn;
   /** The branch its recorded PR was opened from (`factory.pr`'s `head`). */
   readonly prHead?: string;
   /** The commit its recorded PR was published at (`factory.pr`'s `commit`, C19). */
@@ -225,10 +248,15 @@ export type ReportedHead = {
  * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
  * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
  * its review runs, oldest first by when each started (absent: it has none), and the head each of
- * its PRs was last reported at (absent: none was).
+ * its PRs was last reported at (absent: none was). `specified` is whether the card has a spec, read only when
+ * the move checks `spec_doc` (absent: it has none, or the move did not read).
  */
 export type CardEvidence = {
+  /** The column being left; absent: `run_completed` judges the newest run whatever column started it. */
+  readonly column?: string;
   readonly runs: readonly RunEvidence[];
+  /** The card has a `specified` event; read only when the move checks `spec_doc` (D9). */
+  readonly specified?: boolean;
   readonly diff?: BranchDiff;
   readonly reviews?: readonly ReviewRunEvidence[];
   readonly reviewHeads?: readonly ReportedHead[];
@@ -260,7 +288,7 @@ export const exitRequirements = (
   column: BoardColumn | undefined,
   to: string,
 ): ReadonlyArray<ColumnRequirement> =>
-  column === undefined || to === "canceled"
+  column === undefined || to === ABANDON_COLUMN
     ? []
     : column.requires.filter((requirement) =>
         CHECKED_REQUIREMENTS.has(requirement.key),
@@ -450,6 +478,59 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
   };
 };
 
+/** The `spec_doc` requirement over the card's spec (module doc). */
+export const specDocVerdict = (evidence: CardEvidence): RequirementVerdict =>
+  evidence.specified !== true
+    ? {
+        met: false,
+        reason:
+          "the card has no spec: no run has declared one with its spec tool (start a run from the card in specifying and let it post the spec)",
+      }
+    : { met: true };
+
+/** What a run that has not completed says, by how its turn stands. */
+const UNCOMPLETED: Record<
+  Exclude<RunTurn, "completed">,
+  (sessionId: string) => string
+> = {
+  unfinished: (id) =>
+    `the card's latest run ${id} has not completed its turn: it is still working, parked on a question or an approval, or it ended mid-tool-call (wait for it, answer it, or start another run)`,
+  truncated: (id) =>
+    `the card's latest run ${id} did not complete: its last model answer was cut off at the output limit (send it on to continue, or start another run)`,
+  interrupted: (id) =>
+    `the card's latest run ${id} was interrupted before it completed (start another run, or send it on)`,
+  budget: (id) =>
+    `the card's latest run ${id} was stopped by its budget before it completed (raise the cap and send it on, or start another run)`,
+  failed: (id) =>
+    `the card's latest run ${id} faulted: its last model answer is an error or an abort (send it on to retry, or start another run)`,
+};
+
+/** The `run_completed` requirement over the latest run's turn (module doc). */
+export const runCompletedVerdict = (
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  const column = evidence.column;
+  const latest = (
+    column === undefined
+      ? evidence.runs
+      : evidence.runs.filter((run) => run.column === column)
+  ).at(-1);
+  if (latest === undefined)
+    return {
+      met: false,
+      reason:
+        column === undefined || evidence.runs.length === 0
+          ? "the card has no runs, so none completed a turn"
+          : `no run of the card was started in ${column}, so none completed a turn there (start one from the card)`,
+    };
+  const id = latest.sessionId;
+  const turn = latest.turn;
+  if (turn === undefined)
+    return { met: false, reason: `run ${id}'s turn was not read` };
+  if (turn === "completed") return { met: true };
+  return { met: false, reason: UNCOMPLETED[turn](id) };
+};
+
 /** A commit as a reader takes it in a sentence: its first twelve characters. */
 const shortSha = (sha: string): string => sha.slice(0, 12);
 
@@ -536,7 +617,30 @@ export const requirementVerdict = (
       return prLinkVerdict(evidence);
     case REVIEW_VERDICT_REQUIREMENT:
       return reviewVerdictVerdict(evidence);
+    case SPEC_DOC_REQUIREMENT:
+      return specDocVerdict(evidence);
+    case RUN_COMPLETED_REQUIREMENT:
+      return runCompletedVerdict(evidence);
     default:
       return { met: false, reason: `"${requirement.key}" has no checker` };
   }
 };
+
+/**
+ * A column's whole `requires[]` as the card's pane lists it (D9), in declaration order: each checked
+ * key judged by `requirementVerdict` — the verdict a refusal of the move carries — and each key
+ * nothing checks (`plan_doc`, the human-gate labels) marked `unchecked`, never `met`.
+ */
+export const exitView = (
+  column: BoardColumn,
+  evidence: CardEvidence,
+): ReadonlyArray<ExitRequirementView> =>
+  column.requires.map((requirement): ExitRequirementView => {
+    const { key, description } = requirement;
+    if (!CHECKED_REQUIREMENTS.has(key))
+      return { key, description, status: "unchecked" };
+    const verdict = requirementVerdict(requirement, evidence);
+    return verdict.met
+      ? { key, description, status: "met" }
+      : { key, description, status: "unmet", reason: verdict.reason };
+  });

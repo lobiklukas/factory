@@ -12478,6 +12478,16 @@ describe("the specifying run's spec", () => {
         actor: PERSON,
       });
       for (const to of columns) {
+        // `specifying`'s exit needs a spec (D9), which this case is not about: an earlier run's.
+        if (to === "planning")
+          card = yield* tasks.declareSpec({
+            taskId: card.id,
+            actor: `ses_${"0".repeat(26)}`,
+            goal: "walk the card on",
+            acceptance: ["it reaches planning"],
+            gaps: [],
+            openQuestions: [],
+          });
         card = yield* tasks.move({
           taskId: card.id,
           expectedRevision: card.revision,
@@ -12578,10 +12588,19 @@ describe("the specifying run's spec", () => {
             taskId: card.id,
             taskColumn: card.column,
           });
-          // The run is pinned to `specifying`; the card is not.
+          // The run is pinned to `specifying`; the card is not. Leaving it needs a spec (D9), so an
+          // earlier one is declared; the run's own comes after and is the one read back.
+          const earlier = yield* tasks.declareSpec({
+            taskId: card.id,
+            actor: `ses_${"0".repeat(26)}`,
+            goal: "an earlier spec",
+            acceptance: ["it reaches planning"],
+            gaps: [],
+            openQuestions: [],
+          });
           const moved = yield* tasks.move({
             taskId: card.id,
-            expectedRevision: card.revision,
+            expectedRevision: earlier.revision,
             to: "planning",
             actor: PERSON,
           });
@@ -12616,6 +12635,8 @@ describe("the specifying run's spec", () => {
           const sessions = yield* SessionService;
           const tasks = yield* TaskService;
           const card = yield* cardIn("specifying", "planning");
+          // The spec `cardIn` declared to leave specifying: the planning run must leave it as it is.
+          const seeded = yield* tasks.spec(card.id);
           const run = yield* sessions.create({
             title: card.title,
             taskId: card.id,
@@ -12636,6 +12657,7 @@ describe("the specifying run's spec", () => {
           );
           return {
             snapshot: yield* sessions.get(run.id),
+            seeded,
             spec: yield* tasks.spec(card.id),
             stored: yield* storedSpec(run.id),
           };
@@ -12647,7 +12669,8 @@ describe("the specifying run's spec", () => {
     expect(
       outcome.snapshot.entries.some((entry) => entry.toolName === "spec"),
     ).toBe(false);
-    expect(outcome.spec).toBeUndefined();
+    expect(outcome.seeded).toBeDefined();
+    expect(outcome.spec).toEqual(outcome.seeded);
     expect(outcome.stored).toBeUndefined();
   }, 120_000);
 });

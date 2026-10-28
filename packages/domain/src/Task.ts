@@ -221,6 +221,20 @@ export const PR_LINK_REQUIREMENT = "pr_link";
  */
 export const REVIEW_VERDICT_REQUIREMENT = "review_verdict";
 
+/**
+ * The requirement a column declares when leaving it takes a spec: the card holds a `specified`
+ * event, which a specifying run's `spec` tool writes (LOB-238, D9). The default pipeline's
+ * `specifying` declares it from version 1.
+ */
+export const SPEC_DOC_REQUIREMENT = "spec_doc";
+
+/**
+ * The requirement a column declares when leaving it takes a run that finished: the card's latest
+ * run's newest turn ended on its own, not failed, interrupted, budget-stopped or still working (D9).
+ * The default pipeline's `building` declares it from version 1.
+ */
+export const RUN_COMPLETED_REQUIREMENT = "run_completed";
+
 /** The columns the default pipeline's table lets a card in `from` move to, in pipeline order. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];
@@ -756,6 +770,62 @@ export const TaskSpec = Schema.Struct({
   createdAt: Timestamp,
 });
 export type TaskSpec = typeof TaskSpec.Type;
+
+/**
+ * The column a move abandons a card into: it checks no exit requirement, because a card nobody will
+ * finish cannot be asked to prove the work it is abandoning (`exitRequirements`).
+ */
+export const ABANDON_COLUMN = "canceled";
+
+/**
+ * Where one of a column's exit requirements stands for a card (D9): `met` or `unmet` for a key the
+ * factory checks (`./requirements` in core), with `reason` saying what is missing when it is not,
+ * and `unchecked` for a key it declares but nothing checks yet.
+ */
+export const ExitRequirementStatus = Schema.Literals([
+  "met",
+  "unmet",
+  "unchecked",
+]);
+export type ExitRequirementStatus = typeof ExitRequirementStatus.Type;
+
+export const ExitRequirementView = Schema.Struct({
+  key: Schema.String,
+  description: Schema.String,
+  status: ExitRequirementStatus,
+  /** What the move's refusal would say; present exactly when `status` is `unmet`. */
+  reason: Schema.optional(Schema.String),
+});
+export type ExitRequirementView = typeof ExitRequirementView.Type;
+
+/**
+ * What a card needs to leave its column, judged now (D9): each of the column's `requires[]` under
+ * the card's pinned definition version, in declaration order, by the same verdicts `moveTask`
+ * refuses on, so the pane's checklist and the server's refusal cannot disagree. A move into
+ * `ABANDON_COLUMN` checks none of them.
+ */
+export const TaskExit = Schema.Struct({
+  taskId: TaskId,
+  column: Schema.String,
+  revision: Schema.Int,
+  requirements: Schema.Array(ExitRequirementView),
+});
+export type TaskExit = typeof TaskExit.Type;
+
+export const GetTaskExitInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskExitInput = typeof GetTaskExitInput.Type;
+
+/**
+ * The requirements a move to `to` would be refused on, from a card's exit view: the unmet ones, none
+ * for a move into `ABANDON_COLUMN`. What a move control says before it is clicked.
+ */
+export const unmetFor = (
+  exit: TaskExit,
+  to: string,
+): ReadonlyArray<ExitRequirementView> =>
+  to === ABANDON_COLUMN
+    ? []
+    : exit.requirements.filter((requirement) => requirement.status === "unmet");
 
 /** The spec a card holds, or `null` when no run on it has declared one (LOB-238). */
 export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });

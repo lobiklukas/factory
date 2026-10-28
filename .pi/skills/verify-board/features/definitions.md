@@ -16,8 +16,8 @@ every column with:
   from;
 - its skills;
 - its exit requirements, each **checked** (the board refuses a move over it: `verified`,
-  `non_empty_diff`, `pr_link`, `review_verdict` — `CHECKED_REQUIREMENTS`) or **unchecked** (declared,
-  enforced by nothing yet: `spec_doc`, `plan_doc`, `run_completed`, and the `human_*` keys, whose gate
+  `non_empty_diff`, `pr_link`, `review_verdict`, `spec_doc`, `run_completed` — `CHECKED_REQUIREMENTS`)
+  or **unchecked** (declared, enforced by nothing yet: `plan_doc`, and the `human_*` keys, whose gate
   the move's actor check enforces instead);
 - its exits, from the column's own `transitions` (LOB-267) — or, for default versions 1–3, which
   declare none, the default pipeline's table — exactly what `TaskService.move` refuses by, with the

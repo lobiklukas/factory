@@ -2004,6 +2004,8 @@ const BOARD_READS = new Set([
   // The card pane's spec document (LOB-238): a read the pane makes on opening a card, so the
   // write check below would otherwise count it as a write nobody clicked.
   "getTaskSpec",
+  // The card pane's exit checklist (D9): a read it makes on opening a card and on every poll.
+  "getTaskExit",
   "getSession",
   "watchSession",
   "listApprovals",
@@ -2516,10 +2518,31 @@ await freshPage.screenshot({
 });
 await freshContext.close();
 
-// And the reverse: a move made in the browser is what `factory board show` prints.
-await page.waitForSelector(`aside[data-card-pane='${cardId}']`, {
-  timeout: 10_000,
-});
+// And the reverse: a move made in the browser is what `factory board show` prints. Leaving
+// `specifying` needs the card's spec (D9); this block is about the move, so the spec a specifying
+// run's `spec` tool would post is declared in-process (`lib/seed-spec.ts`), one revision on, and the
+// pane is let catch up to it before the click. The checklist and the refusal are
+// `exit-checklist.sh`'s.
+const specSeed = spawnSync(
+  "bun",
+  ["run", path.join(ROOT, ".pi/skills/lib/seed-spec.ts")],
+  {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, TASK_ID: cardId },
+  },
+);
+paneObserved.specSeed = {
+  status: specSeed.status,
+  stdout: (specSeed.stdout ?? "").trim().slice(0, 200),
+  stderr: (specSeed.stderr ?? "").trim().slice(0, 200),
+};
+await page
+  .waitForSelector(
+    `aside[data-card-pane='${cardId}'][data-card-pane-revision='5']`,
+    { timeout: 15_000 },
+  )
+  .catch(() => undefined);
 let browserMoved = false;
 try {
   await page.locator("aside[data-card-pane] [data-move-to='planning']").click();
@@ -2534,7 +2557,7 @@ assert(
   browserMoved &&
     cliShow.status === 0 &&
     /^column\s+planning$/m.test(cliShow.stdout) &&
-    /^revision\s+5$/m.test(cliShow.stdout),
+    /^revision\s+6$/m.test(cliShow.stdout),
   `browser moved: ${browserMoved}; show exit ${String(cliShow.status)}: ${JSON.stringify(cliShow.stdout.split("\n").slice(0, 4))}`,
 );
 
