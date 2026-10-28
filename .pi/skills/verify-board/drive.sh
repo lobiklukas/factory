@@ -138,9 +138,16 @@ t() { tmux -u -S "$SOCK" "$@"; }
 pane() { t capture-pane -p -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]]*$//'; }
 capture() { pane > "$EVIDENCE_DIR/$1"; }
 
+# Clear the pane and its history. The history is cleared only once the screen is: under a loaded
+# machine the shell can take longer than a fixed pause to run `clear`, and history cleared before it
+# does keeps the last command's output on screen, where the next capture reads it as this command's.
 fresh() {
   t send-keys -t "$TERM_SESSION" "clear" Enter
   sleep 0.3
+  for _ in $(seq 1 100); do
+    t capture-pane -p -t "$TERM_SESSION" | grep -q '__done_' || break
+    sleep 0.1
+  done
   t clear-history -t "$TERM_SESSION" 2>/dev/null || true
 }
 
@@ -592,6 +599,21 @@ if ! grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt"; then
   capture move-building.txt
   BUILDING_REVISION="$(sed -n "s/^moved $TASK_ID to building (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-building.txt")"
 fi
+
+# --- both ways, a new card: the browser's New card is the terminal's card, and back (LOB-275) -------
+# The same equivalence for a card being made rather than moved: card-create.sh's page makes a card
+# from the board header's form (an empty title refused inline, a bad base ref refused by the server
+# in a toast), `board ls` and `board show` list it, the terminal makes its twin with the same inputs
+# (`factory board add`), the still-open page shows that one without a reload, and the server holds
+# the two with the same title, body, repo, priority and base ref. Its own checks are in
+# card-create.json; this folds its exit code in.
+API_URL="$API_URL" WEB_URL="$WEB_URL" EVIDENCE_DIR="${EVIDENCE_DIR%/board}" \
+  "$SKILL/card-create.sh" > "$RUN_DIR/card-create.log" 2>&1
+CARD_CREATE_RC=$?
+cat "$RUN_DIR/card-create.log"
+check "a card made in the browser is the terminal's card, and back (card-create.sh)" \
+  "$([ "$CARD_CREATE_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$CARD_CREATE_RC, see card-create.json"
 
 fresh
 run_cmd build "$FACTORY board start --task $TASK_ID --prompt 'build this card' --api $API_URL" || true

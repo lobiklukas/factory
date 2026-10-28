@@ -46,13 +46,14 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done | `done` takes a reviewer run's pass on the PR's head, not a note      |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                     | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then per-head review  | a refusal names the requirement; evidence is a condition of the move |
+| a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows  | a card made in either surface is the same card in the other          |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                        | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden       | an operator sees what a board will do before trusting it             |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh` and
-`equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
-specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s and `build.ts`'s (its build phase)
-exit codes into its own.
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`,
+`card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
+`card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
 
 ## Launch
 
@@ -138,6 +139,7 @@ runs the real script against a closed port and an answering one.
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./start-body.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database: a card's body and base ref in its run
+./card-create.sh # requires the instance from ./up.sh (API and web): the New card form ⇄ `board ls|show|add`; drive.sh runs it too
 ./equivalence.sh   # standalone, no instance up: verify-cli, verify-web, then up/drive/down here
 ```
 
@@ -204,7 +206,10 @@ page must follow without a reload → the
 refusals wrote nothing) → **web** (`web.mjs` in headless Chrome: the card's lane, the pane's revision,
 `building` offered and marked `plan approval`) → **build** (LOB-86; see `features/build.md`): a
 person's `planning → building` clicked in the open page, which `board show` must print (the end of
-both ways; see `features/equivalence.md`), `board start` in `building`, the run's `verify` record (`build.ts`), a
+both ways for a move; see `features/equivalence.md`) → **both ways, a new card** (LOB-275,
+`card-create.sh`): a card made with the board page's New card is what `board ls` and `board show` list,
+its twin made at the terminal with the same inputs reaches the still-open page, and the server holds
+the two alike → `board start` in `building`, the run's `verify` record (`build.ts`), a
 non-empty `git diff main...factory/<run>`, `factory pr <run>` and its link checked against the fake's
 ledger and body (`build.ts`), `factory ls` showing it → **review**: the run's own `building → review`,
 a person's `review → done` refused naming `review_verdict` (no review ran), then a signed
@@ -244,6 +249,10 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `both-ways.json`, `both-ways-cli.png`, `both-ways-browser.png` — the both-ways phase's checks,
   what the open page rendered at each step, its own `moveTask` request, and the page after the
   terminal's move and after its own
+- `card-create.json`, `card-create-web.json`, `card-create-*.png`, `card-create-*.txt` — the new-card
+  leg's terminal checks (both card ids), the page's checks with what it
+  sent and the oracle's reads, its screenshots, and what `ls`, `show` and `add` printed;
+  `card-create.sh` deletes its own before it starts
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
 - `observed.json` — every check with its detail, the board id, the card id and both session ids.
