@@ -26,7 +26,9 @@ export type RefusalReason =
   /** A model request stopped by the session's budget (LOB-163). */
   | "budget"
   /** A request that would open one more session than `SESSION_MAX_CONCURRENT` allows (LOB-70). */
-  | "at_capacity";
+  | "at_capacity"
+  /** A first message refused because its worktree's declared setup failed (S-env-setup). */
+  | "setup_failed";
 
 /** How a session came to exist (`factory.session.creates`' `origin`). */
 export type SessionOrigin = "create" | "fork" | "replay";

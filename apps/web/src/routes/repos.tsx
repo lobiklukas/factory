@@ -14,6 +14,7 @@ import { reposAtom, registerRepoAtom } from "@/lib/atoms/repos-atom";
 import {
   EMPTY_REPO_FORM,
   notRunnableCount,
+  readinessView,
   registerInput,
   registerRefusal,
   runnability,
@@ -314,6 +315,7 @@ const AddRepository = () => {
  */
 const RepoRow = ({ repo }: { readonly repo: RepoSummary }) => {
   const state = runnability(repo);
+  const readiness = readinessView(repo);
   return (
     <li
       data-repo-row={repo.repo}
@@ -362,6 +364,27 @@ const RepoRow = ({ repo }: { readonly repo: RepoSummary }) => {
         <dd className="min-w-0 font-mono break-all">{urlLabel(repo.url)}</dd>
         <dt className="text-muted-foreground">.factory/config</dt>
         <dd>{repo.hasFactoryConfig ? "declares commands" : "none"}</dd>
+        <dt className="text-muted-foreground">Agent readiness</dt>
+        <dd data-repo-readiness={readiness?.score ?? "none"}>
+          {readiness === null ? (
+            "not scored: no checkout to read"
+          ) : (
+            <>
+              <span className="font-mono">{readiness.score}</span>
+              {readiness.ready ? (
+                " checks pass"
+              ) : (
+                <ul className="mt-0.5 list-disc pl-4 text-muted-foreground">
+                  {readiness.missing.map((reason) => (
+                    <li key={reason} data-repo-readiness-missing>
+                      {reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </dd>
       </dl>
       {state.runnable ? null : (
         <p

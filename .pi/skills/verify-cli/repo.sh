@@ -76,6 +76,9 @@ if git -C "$PLAIN" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 git init -q -b main "$CHECKOUT"
 printf '{"test": "true"}\n' > "$CHECKOUT/.factory/config"
+# One of the four readiness checks passes (LOB-29, S-env-setup): an AGENTS.md, and no package.json,
+# verify skill or skill directory — so the score the registry answers is 1/4, and names the rest.
+printf '# agents\n' > "$CHECKOUT/AGENTS.md"
 # A plain directory inside the checkout: accepted, and the answer names the checkout it is inside.
 NESTED="$CHECKOUT/packages/nested"
 mkdir -p "$NESTED"
@@ -136,6 +139,9 @@ check "repo add prints the repo, path and base ref" \
 check "repo add names the work tree sessions are cut from" \
   "$(has repo-add.txt "work-tree   $CHECKOUT_ROOT" && echo 0 || echo 1)" \
   "work-tree=$CHECKOUT_ROOT"
+check "repo add scores the checkout's readiness, naming the checks that failed" \
+  "$(grep -qE '^readiness   1/4 \(.*no package.json.*\)$' "$EVIDENCE_DIR/repo-add.txt" && echo 0 || echo 1)" \
+  "$(grep '^readiness' "$EVIDENCE_DIR/repo-add.txt" | cut -c1-100)"
 check "repo add says .factory/config was found" \
   "$(has repo-add.txt "config      .factory/config found" && has repo-add.txt "state       ready" && echo 0 || echo 1)" \
   "config found, ready"
@@ -196,14 +202,14 @@ AUTO_ROW="$(awk -v slug="$AUTO" '$1 == slug { print; exit }' "$EVIDENCE_DIR/repo
 # The terminal expands the tabs between columns, so the pane is read as whitespace-split fields.
 check "repo ls exits 0 with its header" \
   "$([ "$(exit_code ls)" = "0" ] &&
-    grep -qE '^repo[[:space:]]+path[[:space:]]+base-ref[[:space:]]+registered-at[[:space:]]+config[[:space:]]+url[[:space:]]+state$' \
+    grep -qE '^repo[[:space:]]+path[[:space:]]+base-ref[[:space:]]+registered-at[[:space:]]+config[[:space:]]+readiness[[:space:]]+url[[:space:]]+state$' \
       "$EVIDENCE_DIR/repo-ls.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code ls)"
-check "repo ls lists the registered repo with its path, base ref and registered-at" \
-  "$(echo "$REG_ROW" | awk -v p="$CHECKOUT" '$2 == p && $3 == "trunk" && $4 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/ && $5 == "yes" { ok = 1 } END { exit !ok }' && echo 0 || echo 1)" \
+check "repo ls lists the registered repo with its path, base ref, registered-at and readiness" \
+  "$(echo "$REG_ROW" | awk -v p="$CHECKOUT" '$2 == p && $3 == "trunk" && $4 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/ && $5 == "yes" && $6 == "1/4" { ok = 1 } END { exit !ok }' && echo 0 || echo 1)" \
   "row=$(echo "$REG_ROW" | cut -c1-120)"
-check "repo ls lists the auto-registered repo with none and the remedy" \
-  "$(echo "$AUTO_ROW" | awk '$2 == "none" && $3 == "main" && $6 == "none" { ok = 1 } END { exit !ok }' &&
+check "repo ls lists the auto-registered repo with none (readiness included) and the remedy" \
+  "$(echo "$AUTO_ROW" | awk '$2 == "none" && $3 == "main" && $6 == "none" && $7 == "none" { ok = 1 } END { exit !ok }' &&
     echo "$AUTO_ROW" | grep -qF "no clone URL / no local checkout (factory repo add $AUTO --path <dir>)" && echo 0 || echo 1)" \
   "row=$(echo "$AUTO_ROW" | cut -c1-120)"
 # Piped rather than in the pane: what a script reads, where the separator is the tab itself.
@@ -211,7 +217,7 @@ $FACTORY repo ls --api "$API_URL" > "$EVIDENCE_DIR/repo-ls-piped.txt" 2>&1
 PIPED_PATH="$(awk -F'\t' -v slug="$SLUG" '$1 == slug { print $2; exit }' "$EVIDENCE_DIR/repo-ls-piped.txt")"
 PIPED_HEADER="$(head -1 "$EVIDENCE_DIR/repo-ls-piped.txt")"
 check "piped, repo ls separates its columns with tabs" \
-  "$([ "$PIPED_HEADER" = "$(printf 'repo\tpath\tbase-ref\tregistered-at\tconfig\turl\tstate')" ] &&
+  "$([ "$PIPED_HEADER" = "$(printf 'repo\tpath\tbase-ref\tregistered-at\tconfig\treadiness\turl\tstate')" ] &&
     [ "$PIPED_PATH" = "$CHECKOUT" ] && echo 0 || echo 1)" \
   "path=$PIPED_PATH"
 check "repo ls does not list the refused registration" \

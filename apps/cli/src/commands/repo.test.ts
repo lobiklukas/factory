@@ -144,6 +144,41 @@ describe("a URL-only repo", () => {
   });
 });
 
+describe("readiness", () => {
+  const scored = (extra: Partial<typeof RepoSummary.Encoded> = {}) =>
+    summary({
+      readiness: {
+        score: 3,
+        max: 4,
+        checks: [
+          { name: "agents-md", passed: false, reason: "missing AGENTS.md" },
+          { name: "package-scripts", passed: true, reason: "has scripts" },
+          { name: "verify-skills", passed: true, reason: "a verify skill" },
+          { name: "skill-dir", passed: true, reason: "a SKILL.md" },
+        ],
+      },
+      ...extra,
+    });
+
+  it("is a column of repo ls: the score, under its own header", () => {
+    expect(column(repoRow(scored()), "readiness")).toBe("3/4");
+    expect(fields(repoRow(scored()))).toHaveLength(
+      fields(REPO_LS_HEADER).length,
+    );
+  });
+
+  it("is none, not 0/4, for a repo the server did not score", () => {
+    expect(column(repoRow(autoRegistered()), "readiness")).toBe(NONE);
+    expect(repoLines(autoRegistered())).toContain(`readiness   ${NONE}`);
+  });
+
+  it("names every failed check's reason in add and show", () => {
+    expect(repoLines(scored())).toContain(
+      "readiness   3/4 (missing AGENTS.md)",
+    );
+  });
+});
+
 describe("repoRow", () => {
   it("puts each value under its header, the path second", () => {
     const row = repoRow(summary());

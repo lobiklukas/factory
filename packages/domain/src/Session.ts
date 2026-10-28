@@ -89,6 +89,28 @@ export const RepoCommands = Schema.Struct({
 export type RepoCommands = typeof RepoCommands.Type;
 
 /**
+ * One check of a checkout's agent-readiness (LOB-29, `@repo/harness`'s `scoreRepoReadiness`): its
+ * name (`agents-md`, `package-scripts`, `verify-skills`, `skill-dir`), whether it passed, and why.
+ */
+export const RepoReadinessCheck = Schema.Struct({
+  name: Schema.String,
+  passed: Schema.Boolean,
+  reason: Schema.String,
+});
+export type RepoReadinessCheck = typeof RepoReadinessCheck.Type;
+
+/**
+ * How ready a checkout is for an agent to work in (LOB-29): how many of the checks passed (`score`)
+ * out of how many there are (`max`), and each check with its reason.
+ */
+export const RepoReadiness = Schema.Struct({
+  score: Schema.Int,
+  max: Schema.Int,
+  checks: Schema.Array(RepoReadinessCheck),
+});
+export type RepoReadiness = typeof RepoReadiness.Type;
+
+/**
  * One row of the repo registry: where a repo is cloned from and which ref sessions start at, with
  * what its local checkout says about itself (LOB-253).
  *
@@ -124,6 +146,13 @@ export const RepoSummary = Schema.Struct({
    * repo that has a `localPath`, has no `url`, or has not been cloned yet.
    */
   mirrorPath: Schema.optional(Schema.String),
+  /**
+   * The checkout's agent-readiness score (LOB-29, S-env-setup), scored from `localPath` when the row
+   * is answered — so a registration answers it, and every read re-scores it, like the facts above:
+   * an AGENTS.md added since registration counts on the next read. Absent for a repo whose
+   * `localPath` is not a git work tree (or that has none): a bare mirror has no files to score.
+   */
+  readiness: Schema.optional(RepoReadiness),
 });
 export type RepoSummary = typeof RepoSummary.Type;
 
@@ -1033,6 +1062,17 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   one of its board definition's run caps (B9, LOB-71): the message names the cap, the board, task,
  *   repository or column it counts, and the definition version it is configured in, and `cap` says
  *   which it was.
+ * - `setup_failed` — the session's worktree setup failed before the agent's first turn
+ *   (S-env-setup): the repo's declared `install` or `build` exited non-zero or could not run, so the
+ *   message was not submitted and no model was called. The message names the step, the command, its
+ *   exit code and its output's last lines; the whole tail is the log's `factory.setup` document, and
+ *   a session that is a card's run blocked the card `setup_failed` and ended. The next send to a
+ *   session that is no card's run runs the setup again; one to a card's run whose setup failed is
+ *   refused the same way without running it, because that run has ended: fix the repo, unblock the
+ *   card and start a new run.
+ * - `setup_running` — the session's worktree setup is still running after the send waited the time
+ *   it waits for one (S-env-setup), so nothing was submitted. Transient: the setup goes on without
+ *   the request, and the same send again waits for that setup rather than starting another.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1043,6 +1083,8 @@ export const SessionErrorCode = Schema.Literals([
   "repo_clone_failed",
   "owned_elsewhere",
   "at_capacity",
+  "setup_failed",
+  "setup_running",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

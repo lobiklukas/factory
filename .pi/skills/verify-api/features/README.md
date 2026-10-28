@@ -177,6 +177,13 @@ The per-worker cost checks (LOB-194) were run from the `agent/LOB-194` worktree 
 `./mission-cost.sh` **10/10** (7 driver checks across the run and the reopen, 3 shell checks),
 evidence `.verify/evidence/lob-194/api/`. See [mission.md](mission.md).
 
+The worktree setup checks (S-env-setup) were run from the `agent/S-env-setup` worktree on
+2026-10-28 (`API_PORT=9520`, faux, `DATABASE_URL=…/factory_agent_s_env_setup` on 5442):
+`./setup.sh` **16/16** (15 driver checks, among them a card run's retry refused, an abandoned
+send whose install ran once, a webhook delivery answered before its install finished, and a session
+on this repo running its own `bun install`; and `factory board show` on the parked card), evidence
+`.verify/evidence/latest/api/setup.json` and `setup-board-show.txt`. See [setup.md](setup.md).
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
@@ -325,6 +332,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | A docs run               | passing | [docs-run.md](docs-run.md)                   |
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)           |
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
+| A worktree's setup       | passing | [setup.md](setup.md)                         |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |

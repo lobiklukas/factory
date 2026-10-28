@@ -238,6 +238,38 @@ const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
   needs_input: "needs input",
   capability: "missing a capability",
   transient: "a transient failure",
+  setup_failed: "its worktree setup failing",
+};
+
+/**
+ * What a blocked card is waiting on, in the words its block was given: for a run parked
+ * `setup_failed` (S-env-setup) that is the step that failed, its exit code and its output's last
+ * lines, which is what a person needs to fix the repo or the machine. A `needs_input` block's note
+ * is the question, which the thread below already shows, so it is not repeated.
+ */
+const BlockNote = ({ task }: { readonly task: Task }) => {
+  const blocked = task.blocked;
+  if (
+    blocked === undefined ||
+    blocked.note === undefined ||
+    blocked.note.trim() === "" ||
+    blocked.reason === "needs_input"
+  )
+    return null;
+  return (
+    <section
+      aria-label="Why the card is blocked"
+      data-card-block-note={blocked.reason}
+      className="flex flex-col gap-1.5 border-l-2 border-destructive pl-2"
+    >
+      <h3 className="text-xs font-medium">
+        Blocked: {BLOCK_FROM[blocked.reason]}
+      </h3>
+      <pre className="max-h-48 overflow-auto font-mono text-[11px] leading-snug break-words whitespace-pre-wrap">
+        {blocked.note}
+      </pre>
+    </section>
+  );
 };
 
 /**
@@ -961,6 +993,7 @@ export const CardPane = ({
             : "max-h-[45%] shrink-0",
         )}
       >
+        <BlockNote task={task} />
         <Moves
           key={task.id}
           boardId={boardId}
