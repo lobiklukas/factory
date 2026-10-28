@@ -901,6 +901,13 @@ const initialColumnField = (
   initialColumn === null ? {} : { initialColumn };
 
 /**
+ * `board_definitions.author` (F7) as `BoardDefinition` carries it: absent, not `null`, for a seeded
+ * version and for one written without an attributed caller.
+ */
+const authorField = (author: string | null): { readonly author?: string } =>
+  author === null ? {} : { author };
+
+/**
  * `board_definitions.caps` (0038, LOB-71) as `BoardDefinition` carries it: absent, not `null`, for a
  * version written before the column existed, which caps nothing. Read as the driver parses JSONB and
  * decoded with the rest of the definition, so a malformed value is the definition's decode failure.
@@ -1149,6 +1156,7 @@ export const TaskServiceLive = Layer.effect(
             columns: string;
             initialColumn: string | null;
             caps: unknown;
+            author: string | null;
           }>`
             SELECT bi.repo,
                    bi.definition_id AS "definitionId",
@@ -1157,7 +1165,8 @@ export const TaskServiceLive = Layer.effect(
                    bd.name,
                    bd.columns::text AS columns,
                    bd.initial_column,
-                   bd.caps
+                   bd.caps,
+                   bd.author
             FROM board_instances bi
             JOIN board_definitions bd
               ON bd.id = bi.definition_id AND bd.version = bi.definition_version
@@ -1188,6 +1197,7 @@ export const TaskServiceLive = Layer.effect(
               columns,
               ...initialColumnField(row.initialColumn),
               ...capsField(row.caps),
+              ...authorField(row.author),
             },
           }).pipe(
             Effect.mapError(
@@ -1313,20 +1323,27 @@ export const TaskServiceLive = Layer.effect(
           version: number;
           name: string;
           createdAt: Date | string;
+          author: string | null;
         }>`
-          SELECT id, version, name, created_at AS "createdAt"
+          SELECT id, version, name, created_at AS "createdAt", author
           FROM board_definitions
           ORDER BY id COLLATE "C", version
         `;
         const grouped: Array<{
           id: string;
-          versions: Array<{ version: number; name: string; createdAt: string }>;
+          versions: Array<{
+            version: number;
+            name: string;
+            createdAt: string;
+            author?: string;
+          }>;
         }> = [];
         for (const row of rows) {
           const version = {
             version: row.version,
             name: row.name,
             createdAt: iso(row.createdAt),
+            ...authorField(row.author),
           };
           const last = grouped.at(-1);
           if (last !== undefined && last.id === row.id) {
@@ -1368,18 +1385,19 @@ export const TaskServiceLive = Layer.effect(
             columns: string;
             initialColumn: string | null;
             caps: unknown;
+            author: string | null;
           };
           const rows =
             version === undefined
               ? yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns, initial_column, caps
+                  SELECT version, name, columns::text AS columns, initial_column, caps, author
                   FROM board_definitions
                   WHERE id = ${definitionId}
                   ORDER BY version DESC
                   LIMIT 1
                 `
               : yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns, initial_column, caps
+                  SELECT version, name, columns::text AS columns, initial_column, caps, author
                   FROM board_definitions
                   WHERE id = ${definitionId} AND version = ${version}
                 `;
@@ -1405,6 +1423,7 @@ export const TaskServiceLive = Layer.effect(
             columns,
             ...initialColumnField(row.initialColumn),
             ...capsField(row.caps),
+            ...authorField(row.author),
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -1452,7 +1471,7 @@ export const TaskServiceLive = Layer.effect(
       TaskError
     > =>
       Effect.gen(function* () {
-        const { dryRun, ...authored } = input;
+        const { dryRun, actor, ...authored } = input;
         // The roles the definitions the factory holds already declare are accepted as known (the
         // default pipeline's `planner` and `builder` among them): `ROLE_MODELS` is a partial override
         // table, so re-authoring a version under one that names only `reviewer` must not be refused
@@ -1513,10 +1532,10 @@ export const TaskServiceLive = Layer.effect(
                 };
               }
               yield* sql`
-                INSERT INTO board_definitions (id, version, name, columns, initial_column, caps)
+                INSERT INTO board_definitions (id, version, name, columns, initial_column, caps, author)
                 VALUES (
                   ${input.id}, ${version}, ${authored.name}, ${encodedColumns}::jsonb,
-                  ${authored.initialColumn ?? null}, ${encodedCaps}::jsonb
+                  ${authored.initialColumn ?? null}, ${encodedCaps}::jsonb, ${actor ?? null}
                 )
               `;
               // Read back through the one decoder every reader uses, so the answer is the row as

@@ -225,6 +225,54 @@ table > "$RUN_DIR/define-rows-end.txt"
 check "the CLI's refusals wrote nothing" \
   "$(diff -q "$RUN_DIR/define-rows-v2.txt" "$RUN_DIR/define-rows-end.txt" >/dev/null && echo 0 || echo 1)" "rows unchanged since v2"
 
+# --- definition show --json: a file define accepts, and a round trip (F8) --------------------------
+# $ID's newest is v2 (the refusals above wrote nothing). Its file read back, defined with --dry-run,
+# is unchanged; one field edited and defined is a v3 differing in that field only.
+json_keys() { bun -e 'const t = await Bun.file(process.argv[1]).text(); console.log(Object.keys(JSON.parse(t)).sort().join(" "))' "$1"; }
+run show-json board definition show "$ID" --version 2 --json --api "$API_URL"
+cp "$RUN_DIR/define-show-json.out" "$FILES/shown-v2.json"
+check "definition show --json exits 0 and prints one JSON document on stdout, nothing on stderr" \
+  "$([ "$rc" = "0" ] && [ ! -s "$RUN_DIR/define-show-json.err" ] && json_keys "$FILES/shown-v2.json" >/dev/null 2>&1 && echo 0 || echo 1)" "exit=$rc"
+check "it names exactly the keys a definition file does — no version, no author, no actor" \
+  "$([ "$(json_keys "$FILES/shown-v2.json")" = "caps columns id initialColumn name" ] && echo 0 || echo 1)" \
+  "keys=[$(json_keys "$FILES/shown-v2.json")]"
+run roundtrip board define --file "$FILES/shown-v2.json" --dry-run --api "$API_URL"
+check "define --file <shown> --dry-run answers unchanged, v2: the file is the version" \
+  "$([ "$rc" = "0" ] && has roundtrip "unchanged   $ID v2 already holds this definition; nothing written" && echo 0 || echo 1)" "exit=$rc"
+sed -e 's/"name": "Driven pipeline, renamed"/"name": "Driven pipeline, edited from a shown file"/' "$FILES/shown-v2.json" > "$FILES/shown-v3.json"
+run roundtrip-edit board define --file "$FILES/shown-v3.json" --api "$API_URL"
+check "the file with one field edited is written as v3" \
+  "$([ "$rc" = "0" ] && has roundtrip-edit "defined     $ID v3" && has roundtrip-edit "definition  $ID v3  Driven pipeline, edited from a shown file" && echo 0 || echo 1)" "exit=$rc"
+run show-json-v3 board definition show "$ID" --version 3 --json --api "$API_URL"
+FILE_DIFF="$(diff "$FILES/shown-v2.json" "$RUN_DIR/define-show-json-v3.out" || true)"
+DIFFERING="$(printf '%s\n' "$FILE_DIFF" | grep -c '^<' || true)"
+check "v3 read back differs from v2 in that one field only (the name)" \
+  "$([ "$DIFFERING" = "1" ] && [[ "$FILE_DIFF" == *'< '*'"name": "Driven pipeline, renamed"'* ]] && echo 0 || echo 1)" \
+  "differing lines in v2=$DIFFERING"
+run show-json-legacy board definition show default --version 1 --json --api "$API_URL"
+cp "$RUN_DIR/define-show-json-legacy.out" "$FILES/legacy.json"
+check "a legacy version (default v1) spells out its initial column and every column's moves" \
+  "$(bun -e 'const d = JSON.parse(await Bun.file(process.argv[1]).text()); const ok = d.initialColumn === "intake" && d.columns.every((c) => Array.isArray(c.transitions)) && d.columns[0].transitions.length > 0; process.exit(ok ? 0 : 1)' "$FILES/legacy.json" && echo 0 || echo 1)" \
+  "initialColumn intake, transitions on every column"
+BEFORE_LEGACY="$(table)"
+run legacy-dry board define --file "$FILES/legacy.json" --dry-run --api "$API_URL"
+check "and that file decodes on the way in and is accepted as a definition: valid, a dry run writes nothing" \
+  "$([ "$rc" = "0" ] && has legacy-dry "valid       default would be written as v" && [ "$(table)" = "$BEFORE_LEGACY" ] && echo 0 || echo 1)" "exit=$rc; $(head -1 "$RUN_DIR/define-legacy-dry.out")"
+check "after the round trip $ID holds v1, v2 and v3" \
+  "$([ "$(versions "$ID")" = "1 2 3" ] && echo 0 || echo 1)" "versions=[$(versions "$ID")]"
+
+# --- author (F7): this suite runs with auth off, so the CLI's own actor is the author ---------------
+# A credential's actor overrides it, which verify-api's identity.sh proves (auth on); here the
+# unauthenticated case: `board define` names itself `cli`, as a card move does, in the table and in
+# the listing.
+check "with auth off a version written by board define is authored by cli, v1 to v3" \
+  "$([ "$(MODE=authors ID="$ID" probe)" = "1=cli 2=cli 3=cli" ] && echo 0 || echo 1)" \
+  "authors=[$(MODE=authors ID="$ID" probe)]"
+run list-after board definitions --api "$API_URL"
+check "board definitions prints 'by cli' on each of $ID's three versions" \
+  "$([ "$rc" = "0" ] && [ "$(grep -cE "^$ID  v[123]  .* by cli$" "$RUN_DIR/define-list-after.out")" = "3" ] && echo 0 || echo 1)" \
+  "$(grep -E "^$ID  " "$RUN_DIR/define-list-after.out" | awk '{print $2 ":" $NF}' | tr '\n' ' ')"
+
 # --- evidence --------------------------------------------------------------------------------------
 cp "$FILES/v1.json" "$EVIDENCE_DIR/define-v1.json"
 {

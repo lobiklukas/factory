@@ -141,8 +141,23 @@ describe("draftOf and defineInputOf", () => {
       initialColumn: "todo",
       caps: { board: 2 },
       columns: PINNED.columns,
+      actor: "dashboard",
     });
     expect("version" in input).toBe(false);
+  });
+
+  /**
+   * F7: the version the editor writes is the dashboard's, as a dashboard card write is, and the
+   * pinned version's own author is not carried over as the new version's.
+   * Mutation: drop the actor, or spread the pinned `author` into the payload.
+   */
+  it("names the dashboard as the author and never the pinned version's", () => {
+    const input = defineInputOf(
+      { ...PINNED, author: "someone" },
+      draftOf(PINNED),
+    );
+    expect(input.actor).toBe("dashboard");
+    expect("author" in input).toBe(false);
   });
 
   /**

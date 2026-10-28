@@ -10,6 +10,9 @@
 //             `session_approvals.actor` and `task_events.actor`; `factory board move --actor mallory`
 //             through the CLI (FACTORY_API_TOKEN = amy's) records `amy` too; the shared token records
 //             its own actor; `listSpend` groups by the authenticated actors and holds no `mallory`
+//   author    `defineBoard` as amy with a body actor naming `mallory` records `amy` as the version's
+//             author (`getDefinition`, `board_definitions.author`); an unchanged answer and a dry run write
+//             no row; the shared token's version carries its own actor; a seeded version has none (F7)
 //   webhook   a signed generic delivery sent with no credential still starts a session, attributed
 //             `trigger:generic`; the same body unsigned is still `401`
 //
@@ -270,6 +273,113 @@ try {
     "actors: listSpend groups the repo's sessions by the authenticated actors, never mallory",
     pairs.join(",") === [`amy:1`, `${SHARED_ACTOR}:1`].sort().join(","),
     pairs.join(","),
+  );
+
+  // ── author (F7) ────────────────────────────────────────────────────────────────────────────
+  // A definition version records the credential's actor, as a skill version does: amy's `defineBoard`
+  // with a body actor naming mallory is amy's, the shared token's is its own, a seeded version has
+  // none, and an unchanged answer or a dry run writes no row (so no author).
+  const defId = DefinitionId.make(`idnt${Date.now().toString(36)}`);
+  const authored = {
+    id: defId,
+    name: "identity: authored",
+    initialColumn: "todo",
+    columns: [
+      {
+        name: "todo",
+        kind: "resting" as const,
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }],
+      },
+      {
+        name: "done",
+        kind: "terminal" as const,
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+    ],
+  };
+  const defined = await as(AMY_TOKEN, (client) =>
+    Effect.gen(function* () {
+      const created = yield* client.defineBoard({
+        ...authored,
+        actor: MALLORY,
+      });
+      const again = yield* client.defineBoard({ ...authored, actor: MALLORY });
+      const dry = yield* client.defineBoard({
+        ...authored,
+        name: "identity: dry",
+        actor: MALLORY,
+        dryRun: true,
+      });
+      return { created, again, dry };
+    }),
+  );
+  const byOperator = await as(SHARED_TOKEN, (client) =>
+    client.defineBoard({ ...authored, name: "identity: by the operator" }),
+  );
+  const read = await as(AMY_TOKEN, (client) =>
+    Effect.gen(function* () {
+      return {
+        v1: yield* client.getDefinition({ definitionId: defId, version: 1 }),
+        v2: yield* client.getDefinition({ definitionId: defId, version: 2 }),
+        seeded: yield* client.getDefinition({
+          definitionId: DefinitionId.make("default"),
+          version: 1,
+        }),
+        listed: yield* client.listDefinitions({}),
+      };
+    }),
+  );
+  const authorRows = (await db`
+    SELECT version, author FROM board_definitions WHERE id = ${defId} ORDER BY version
+  `) as Array<{ version: number; author: string | null }>;
+  observed.recorded = {
+    ...observed.recorded,
+    definitionAuthors: authorRows,
+    definitionOutcomes: [
+      defined.created.outcome,
+      defined.again.outcome,
+      defined.dry.outcome,
+      byOperator.outcome,
+    ],
+  };
+  assert(
+    "author: defineBoard records amy on the version, not the body's mallory (getDefinition and the row)",
+    defined.created.outcome === "created" &&
+      defined.created.definition.author === "amy" &&
+      read.v1.author === "amy" &&
+      authorRows[0]?.author === "amy",
+    `answer=${String(defined.created.definition.author)} read=${String(read.v1.author)} row=${String(authorRows[0]?.author)}`,
+  );
+  assert(
+    "author: an unchanged answer and a dry run write no row, so no author",
+    defined.again.outcome === "unchanged" &&
+      defined.dry.outcome === "validated" &&
+      defined.dry.definition.author === undefined &&
+      authorRows.length === 2,
+    `rows=${JSON.stringify(authorRows)}`,
+  );
+  assert(
+    "author: the shared token's version carries its own actor, and listDefinitions names both",
+    byOperator.definition.version === 2 &&
+      read.v2.author === SHARED_ACTOR &&
+      JSON.stringify(
+        read.listed
+          .find((definition) => definition.id === defId)
+          ?.versions.map((version) => version.author),
+      ) === JSON.stringify(["amy", SHARED_ACTOR]),
+    `v2=${String(read.v2.author)}`,
+  );
+  assert(
+    "author: a seeded version has none (absent, not empty)",
+    !("author" in read.seeded) &&
+      read.listed
+        .find((definition) => definition.id === "default")
+        ?.versions.every((version) => version.author === undefined) === true,
+    `seeded=${JSON.stringify(read.seeded.author)}`,
   );
 
   // ── webhook ────────────────────────────────────────────────────────────────────────────────

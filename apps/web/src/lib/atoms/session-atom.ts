@@ -13,7 +13,7 @@ import type {
   TranscriptEntry,
   WithdrawMessageInput,
 } from "@repo/domain/Session";
-import { Cause, Effect, Exit, Option, Stream } from "effect";
+import { Cause, Duration, Effect, Exit, Option, Stream } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { hasTranscriptRow } from "../transcript-view";
@@ -235,6 +235,21 @@ export const forkSessionAtom = runtime.fn(
 );
 
 /**
+ * Replays a session onto the model this server runs by default (E9, LOB-198's RPC): the same task
+ * again in a new session, which the pane navigates to. The way forward for a session pinned to a
+ * model this server no longer serves, whose composer is disabled. The source's log is only read.
+ * `SESSIONS_KEY` puts the replay in the sidebar's list once it exists.
+ */
+export const replaySessionAtom = runtime.fn(
+  (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.replaySession({ sessionId });
+    }),
+  { reactivityKeys: [SESSIONS_KEY] },
+);
+
+/**
  * Asks the server to compact a session now (LOB-185's RPC, LOB-222's action).
  *
  * A compaction is a task in the log, not a request that answers with a summary: the call admits it
@@ -322,6 +337,40 @@ export const readSessionHistoryAtom = runtime.fn(
 );
 
 /**
+ * The session's `lastActivityAt` as it was right after the last press of "Open pull request" settled
+ * (C7b), or `undefined` before a press and while one is in flight. A refusal is the verdict on the
+ * branch at that moment; this is the server's own mark of that moment, which the pane compares with
+ * `sessionActivityAtom` to tell that the session has moved on. Kept alive with the refusal it dates.
+ */
+export const openPullRequestMarkAtom = Atom.family((_sessionId: SessionId) =>
+  Atom.make<string | undefined>(undefined).pipe(Atom.keepAlive),
+);
+
+/** How often a remembered refusal looks at the server to see whether the session moved on. */
+export const PR_REFUSAL_WATCH_POLL = Duration.seconds(2);
+
+/**
+ * The session's `lastActivityAt` now, from its one activity-index row (`listSessions` with
+ * `sessionId`: one indexed row, no fold of the log, and so no activity of its own). Subscribed only
+ * while a refusal is on screen (`PrRefusalWatch`), so a page full of idle runs polls nothing. `null`
+ * for a session the index has no row for.
+ */
+export const sessionActivityAtom = Atom.family((sessionId: SessionId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        const page = yield* rpc.client.listSessions({ sessionId, limit: 1 });
+        return page.sessions[0]?.lastActivityAt ?? null;
+      }),
+    )
+    .pipe(
+      Atom.withReactivity([SESSIONS_KEY]),
+      Atom.withRefresh(PR_REFUSAL_WATCH_POLL),
+    ),
+);
+
+/**
  * Opens a session's pull request (LOB-213's RPC, C7's control): one atom per session, so the session
  * pane's header and the card pane's run row read and write the same answer.
  *
@@ -337,10 +386,30 @@ export const readSessionHistoryAtom = runtime.fn(
 export const openPullRequestAtom = Atom.family((sessionId: SessionId) =>
   runtime
     .fn(
-      (title: string) =>
+      (title: string, get) =>
         Effect.gen(function* () {
           const rpc = yield* RpcClient;
-          return yield* rpc.client.openPullRequest({ sessionId, title });
+          get.set(openPullRequestMarkAtom(sessionId), undefined);
+          // Whatever the call came to, the mark is read after it settled, so the call's own writes
+          // (the step touches the session's activity) are in it and are not mistaken for a run
+          // that happened since. A mark that cannot be read leaves the refusal standing.
+          const mark = rpc.client.listSessions({ sessionId, limit: 1 }).pipe(
+            Effect.tap((page) =>
+              Effect.sync(() =>
+                get.set(
+                  openPullRequestMarkAtom(sessionId),
+                  page.sessions[0]?.lastActivityAt,
+                ),
+              ),
+            ),
+            // One more read on a failed one: a dropped read is the only way a refusal would never
+            // learn the session moved on.
+            Effect.retry({ times: 1 }),
+            Effect.ignore,
+          );
+          return yield* rpc.client
+            .openPullRequest({ sessionId, title })
+            .pipe(Effect.ensuring(mark));
         }),
       { reactivityKeys: [SESSIONS_KEY] },
     )

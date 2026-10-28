@@ -77,8 +77,8 @@ export type DefinitionLibrary = {
   readonly knownRoles?: ReadonlySet<string>;
 };
 
-/** The fields of `DefineBoardInput` the rules read: everything but the dry-run flag. */
-export type AuthoredDefinition = Omit<DefineBoardInput, "dryRun">;
+/** The fields of `DefineBoardInput` the rules read: everything but the dry-run flag and the actor. */
+export type AuthoredDefinition = Omit<DefineBoardInput, "dryRun" | "actor">;
 
 /** Every fault of `definition`, or `[]` when it may be written as a new version. */
 export const authoredDefinitionFaults = (

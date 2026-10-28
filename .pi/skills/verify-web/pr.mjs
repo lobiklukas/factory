@@ -26,6 +26,18 @@
 //             the control; pressing the row's shows the link in the row *and* the header without a
 //             reload; a card's run on `empty` shows the same reason in both, disabled in both
 //
+//   repeat    a session whose PR the forge refuses `422` naming a PR already open (C7b): the button is
+//             blocked, never "Retry pull request", the reason carries the forge's words, and the PR
+//             it names is linked; one press, one create request. A session the forge answers `502`
+//             is still offered "Retry pull request", and a second press asks the forge again
+//   moved     a refusal is dropped once the server reports the session has moved on, with no pane
+//             watching a run: an `empty` session refused, left alone past two polls (it stays), then
+//             written to over RPC (`setSessionBudget`, which touches its activity and runs nothing);
+//             the button comes back on the header and on the card row, without a reload
+//   old       a card's run with more than 50 newer sessions after it: `listSessions` (newest page)
+//             does not hold it, `listSessions` for the card does, and its row offers the control and
+//             opens the PR
+//
 // Without a forge (`off`), the same press on a session on `change` is refused with the missing
 // credential's message, verbatim, in the header and on the card's row; nothing reaches a forge.
 import { spawnSync } from "node:child_process";
@@ -259,7 +271,7 @@ const cardRun = async (boardRepoKind, kind) => {
 let exitCode = 0;
 try {
   for (const kind of MODE === "fake"
-    ? ["change", "empty", "big"]
+    ? ["change", "empty", "big", "dup", "flaky"]
     : ["change"]) {
     await checkout(kind);
   }
@@ -521,6 +533,193 @@ try {
         (await noReload()) &&
         createsFor(refused.session.id) === 0,
       `row=${JSON.stringify(rowReason)} header=${JSON.stringify(paneReason)}`,
+    );
+
+    // --- repeat: a forge refusal that will repeat is not offered as a retry (C7b) -----------------------
+    const dup = await runSession("dup");
+    await openSession(dup.id);
+    await openButton(header, "available").waitFor({ timeout: 15_000 });
+    const dupCallsBefore = pageOpenCalls;
+    await openButton(header, "available").click();
+    await openButton(header, "blocked").waitFor({ timeout: 15_000 });
+    const dupReason = (await headerReason())?.trim();
+    const dupLabel = (
+      await openButton(header, "blocked").textContent()
+    )?.trim();
+    const dupLink = await hrefOf("[data-existing-pr]");
+    const dupCreates = createsFor(dup.id);
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-header-repeat.png"),
+      fullPage: true,
+    });
+    await openButton(header, "blocked").click({ force: true });
+    await sleep(500);
+    observed.repeat = { session: dup.id, dupReason, dupLabel, dupLink };
+    assert(
+      "a 422 naming an existing PR is determinate: the button is blocked, not offered as a retry",
+      dupLabel === "Open pull request" &&
+        (await openButton(header, "blocked").getAttribute("aria-disabled")) ===
+          "true" &&
+        (await openButton(header, "available").count()) === 0,
+      `label=${JSON.stringify(dupLabel)}`,
+    );
+    assert(
+      "it shows the forge's reason, and links the PR the forge names",
+      dupReason?.includes("GitHub answered HTTP 422") &&
+        dupReason.includes("A pull request already exists") &&
+        dupLink === "https://github.com/verify-pr/dup/pull/99",
+      `reason=${JSON.stringify(dupReason)} link=${dupLink}`,
+    );
+    assert(
+      "one press made one create request, and a press on the blocked button sends nothing more",
+      dupCreates === 1 &&
+        createsFor(dup.id) === 1 &&
+        pageOpenCalls === dupCallsBefore + 1,
+      `creates=${createsFor(dup.id)} page calls ${dupCallsBefore} -> ${pageOpenCalls}`,
+    );
+
+    const flaky = await runSession("flaky");
+    await openSession(flaky.id);
+    await openButton(header, "available").waitFor({ timeout: 15_000 });
+    await openButton(header, "available").click();
+    await page
+      .locator("header [data-open-pr='available']", {
+        hasText: "Retry pull request",
+      })
+      .waitFor({ timeout: 15_000 });
+    const flakyReason = (await headerReason())?.trim();
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-header-retry.png"),
+      fullPage: true,
+    });
+    const flakyFirst = createsFor(flaky.id);
+    await openButton(header, "available").click();
+    await page.waitForFunction(
+      () => document.querySelectorAll("[data-open-pr='available']").length > 0,
+    );
+    await sleep(800);
+    observed.flaky = { session: flaky.id, flakyReason };
+    assert(
+      "a 502 passes: the button stays pressable as Retry pull request, with what the forge said",
+      flakyReason === "GitHub answered HTTP 502" &&
+        (await openButton(header, "blocked").count()) === 0,
+      `reason=${JSON.stringify(flakyReason)}`,
+    );
+    assert(
+      "and the retry reaches the forge again",
+      flakyFirst === 1 && createsFor(flaky.id) === 2,
+      `creates ${flakyFirst} -> ${createsFor(flaky.id)}`,
+    );
+
+    // --- moved: a refusal is dropped by the server's own state, with no pane watching a run (C7b) ------------
+    const idleRefused = await cardRun("empty", "empty");
+    const movedRow = `li[data-run='${idleRefused.session.id}']`;
+    await openCard(
+      idleRefused.board.id,
+      idleRefused.task.id,
+      idleRefused.session.id,
+    );
+    await openButton(movedRow, "available").waitFor({ timeout: 20_000 });
+    await openButton(`[data-run-pane] ${header}`, "available").waitFor({
+      timeout: 20_000,
+    });
+    await openButton(movedRow, "available").click();
+    await openButton(movedRow, "blocked").waitFor({ timeout: 15_000 });
+    await openButton(`[data-run-pane] ${header}`, "blocked").waitFor({
+      timeout: 15_000,
+    });
+    // Past several polls with nothing written to the session: the refusal is its own press's, and the
+    // press's own writes to the session's activity are not "the session moved on".
+    await sleep(8_000);
+    const stillBlocked =
+      (await openButton(movedRow, "blocked").count()) === 1 &&
+      (await openButton(`[data-run-pane] ${header}`, "blocked").count()) === 1;
+    const statusBefore = (
+      await rpc("getSession", { sessionId: idleRefused.session.id })
+    ).session.status;
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-moved-held.png"),
+      fullPage: true,
+    });
+    // A write from outside the page that runs nothing: no run starts, so this pane never sees the
+    // session go busy, and only what the server reports can say that it moved on.
+    await rpc("setSessionBudget", {
+      sessionId: idleRefused.session.id,
+      budget: 50,
+    });
+    await openButton(movedRow, "available").waitFor({ timeout: 20_000 });
+    await openButton(`[data-run-pane] ${header}`, "available").waitFor({
+      timeout: 20_000,
+    });
+    const statusAfter = (
+      await rpc("getSession", { sessionId: idleRefused.session.id })
+    ).session.status;
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-moved-dropped.png"),
+      fullPage: true,
+    });
+    observed.moved = {
+      session: idleRefused.session.id,
+      statusBefore,
+      statusAfter,
+    };
+    assert(
+      "a refusal stands through several polls while nothing has written to the session",
+      stillBlocked,
+      "row and header still [data-open-pr='blocked'] after 8s",
+    );
+    assert(
+      "a write the page never saw run (no busy status, no reload) drops it on the row and the header",
+      statusBefore === "idle" &&
+        statusAfter === "idle" &&
+        (await openButton(movedRow, "blocked").count()) === 0 &&
+        (await reasonOf(movedRow).catch(() => null)) === null &&
+        (await noReload()),
+      `status ${statusBefore} -> ${statusAfter}`,
+    );
+
+    // --- old: a card's run beyond the newest 50 sessions keeps its row control (C7b) ------------------------
+    const old = await cardRun("change", "change");
+    for (let batch = 0; batch < 6; batch += 1) {
+      await Promise.all(
+        Array.from({ length: 9 }, (_, n) =>
+          rpc("createSession", { title: `verify-pr filler ${batch}-${n}` }),
+        ),
+      );
+    }
+    const newest = (await rpc("listSessions", { limit: 50 })).sessions;
+    const forCard = (await rpc("listSessions", { taskId: old.task.id }))
+      .sessions;
+    const oldRow = `li[data-run='${old.session.id}']`;
+    await openCard(old.board.id, old.task.id, old.session.id);
+    await openButton(oldRow, "available").waitFor({ timeout: 20_000 });
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-old-offered.png"),
+      fullPage: true,
+    });
+    await openButton(oldRow, "available").click();
+    const oldHref = await hrefOf(`${oldRow} [data-pr-link]`);
+    observed.old = {
+      session: old.session.id,
+      newestHolds: newest.some((entry) => entry.id === old.session.id),
+      forCard: forCard.map((entry) => entry.id),
+      oldHref,
+    };
+    assert(
+      "the run is older than the newest 50 sessions: the newest page does not hold it, the card's own list does",
+      newest.length === 50 &&
+        !newest.some((entry) => entry.id === old.session.id) &&
+        forCard.length === 1 &&
+        forCard[0].id === old.session.id &&
+        forCard[0].status === "idle",
+      `newest=${newest.length} forCard=${forCard.length}`,
+    );
+    assert(
+      "its row still offers the control, and pressing it opens the PR on the row",
+      oldHref !== null &&
+        oldHref === pullFor(old.session.id)?.url &&
+        createsFor(old.session.id) === 1,
+      `href=${oldHref}`,
     );
   } else {
     // --- no credential: the refusal is the server's, and nothing reaches a forge --------------------
