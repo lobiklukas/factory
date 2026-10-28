@@ -42,7 +42,8 @@ adapter_check_ports "$API_PORT" "$FAKE_PORT"
 
 adapter_start_fake github "$LEDGER" "$ROOT/.pi/skills/verify-api/github-issues-fake.ts" \
   GITHUB_ISSUES_FAKE_PORT="$FAKE_PORT" GITHUB_ISSUES_FAKE_LEDGER="$LEDGER" \
-  GITHUB_ISSUES_FAKE_FAIL_AFTER_WRITE="#9" || exit 1
+  GITHUB_ISSUES_FAKE_FAIL_AFTER_WRITE="#9" \
+  GITHUB_ISSUES_FAKE_ROLES="verify-writer=write,verify-reader=read" || exit 1
 
 # Both rules name the decoy: a session that opened in it would be a mapping that read the rule's repo.
 DECOY="$REPO-decoy"

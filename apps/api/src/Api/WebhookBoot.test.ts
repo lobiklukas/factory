@@ -96,6 +96,39 @@ describe("TRIGGER_RULES at boot", () => {
     );
   });
 
+  it("refuses an env rule whose trust gate takes items created after it was enabled, which only a stored route has", async () => {
+    const { exit, lines } = await boot({
+      TRIGGER_RULES:
+        '[{"label":"a","repo":"acme/widgets","prompt":"x"},{"label":"b","repo":"acme/widgets","prompt":"x","trust":{"createdAfter":"enabled"}}]',
+    });
+    expect(exit._tag).toBe("Failure");
+    expect(lines.find((line) => line.level === "Error")?.text).toContain(
+      'TRIGGER_RULES[1] sets trust.createdAfter to "enabled"',
+    );
+  });
+
+  it("takes an env rule's trust gate with an instant, and refuses one that is not an instant", async () => {
+    const valid = await Effect.runPromise(
+      readTriggerRules({
+        TRIGGER_RULES:
+          '[{"label":"a","repo":"acme/widgets","prompt":"x","trust":{"authors":["user-1"],"githubPermission":"write","createdAfter":"2026-10-28T00:00:00Z"}}]',
+      }),
+    );
+    expect(valid[0]?.trust).toEqual({
+      authors: ["user-1"],
+      githubPermission: "write",
+      createdAfter: "2026-10-28T00:00:00Z",
+    });
+    const { exit, lines } = await boot({
+      TRIGGER_RULES:
+        '[{"label":"a","repo":"acme/widgets","prompt":"x","trust":{"createdAfter":"last tuesday","githubPermission":"push"}}]',
+    });
+    expect(exit._tag).toBe("Failure");
+    const error = lines.find((line) => line.level === "Error")?.text;
+    expect(error).toContain("ISO-8601 instant");
+    expect(error).toContain("githubPermission");
+  });
+
   it("lists the rules of a valid value, each with the repo it maps to", async () => {
     const { exit, lines } = await boot({
       ...ALL_ARMED,

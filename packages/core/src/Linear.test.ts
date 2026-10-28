@@ -84,6 +84,9 @@ const issuePayload = (over: {
       labelIds: labels.map((label) => label.id),
       labels,
       teamId: "team-1",
+      // The issue's own creation, earlier than the delivery's top-level `createdAt` (the action's).
+      createdAt: "2026-10-01T08:00:00.000Z",
+      creatorId: "user-creator",
     },
     url: "https://linear.app/acme/issue/ENG-42/the-widget-wobbles",
     ...(over.updatedFrom === undefined
@@ -109,7 +112,37 @@ describe("linearEvent", () => {
       labels: ["factory", "Bug"],
       // The webhook's `url` is its subject's: the issue's own link, which a card links (LOB-254).
       url: "https://linear.app/acme/issue/ENG-42/the-widget-wobbles",
+      // Who did it is the webhook's `actor`, and when the issue was made is the issue's own
+      // `createdAt`, not the delivery's (S-trigger-trust-gating).
+      author: { id: "user-1", name: "Ada" },
+      createdAt: "2026-10-01T08:00:00.000Z",
     });
+  });
+
+  it("names the actor's e-mail as the login an allowlist may name, and falls back to the creator only on a create", () => {
+    const payload = issuePayload({});
+    expect(
+      linearEvent(
+        {
+          ...payload,
+          actor: { id: "user-2", name: "Bo", email: "bo@acme.dev" },
+        },
+        rules,
+      )?.author,
+    ).toEqual({ id: "user-2", login: "bo@acme.dev", name: "Bo" });
+    // A relay's body with no actor: on a create, the creator is the one who did it.
+    const { actor: _actor, ...anonymous } = payload;
+    expect(linearEvent(anonymous, rules)?.author).toEqual({
+      id: "user-creator",
+    });
+    // On an update the creator is not the person who labelled it, so nobody is named.
+    const update = issuePayload({
+      action: "update",
+      labels: [BUG, FACTORY],
+      updatedFrom: { labelIds: [BUG.id] },
+    });
+    const { actor: _updater, ...anonymousUpdate } = update;
+    expect(linearEvent(anonymousUpdate, rules)).not.toHaveProperty("author");
   });
 
   it("prefers the issue's own `data.url`, and carries no link that is not a web link (LOB-254)", () => {

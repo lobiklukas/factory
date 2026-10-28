@@ -48,6 +48,7 @@
  */
 import { isWebLink } from "@repo/domain/Task";
 import {
+  type TriggerAuthor,
   externalRefOf,
   resolveMapping,
   ruleClaims,
@@ -144,6 +145,35 @@ const entityId = (entity: Record<string, unknown>): string | undefined =>
  */
 const teamKey = (entity: Record<string, unknown>): string | undefined =>
   stringField(entity, "team") ?? stringField(asRecord(entity["team"]), "key");
+
+/**
+ * Who did what the delivery reports (S-trigger-trust-gating): Linear's top-level `actor` — the person
+ * who created the issue, or who added the label to it — by its user id, with its e-mail as the login
+ * an allowlist may name instead. A relay's body with no `actor` falls back to the issue's
+ * `creatorId` on a create, where the creator is the one who did it; on an update the creator is not
+ * the person who labelled it, so the event names nobody and a rule that lists authors refuses it.
+ */
+const linearAuthor = (
+  body: Record<string, unknown>,
+  entity: Record<string, unknown>,
+  action: string,
+): TriggerAuthor | undefined => {
+  const actor = asRecord(body["actor"]);
+  const id = stringField(actor, "id");
+  if (id !== undefined && id !== "") {
+    const email = stringField(actor, "email");
+    const name = stringField(actor, "name");
+    return {
+      id,
+      ...(email === undefined || email === "" ? {} : { login: email }),
+      ...(name === undefined || name === "" ? {} : { name }),
+    };
+  }
+  const creator = stringField(entity, "creatorId");
+  return action === TRIGGER_ACTION && creator !== undefined && creator !== ""
+    ? { id: creator }
+    : undefined;
+};
 
 /**
  * Whether an `update` added a label a rule claims. `updatedFrom` carries only the properties that
@@ -273,6 +303,9 @@ export const linearEvent = (
   // The issue's own link (Linear's `data.url`, or the webhook's top-level `url` for its subject), so a
   // card filed from it can link back (LOB-254). Only a web link: anything else is no link.
   const url = stringField(entity, "url") ?? stringField(body, "url");
+  const author = linearAuthor(body, entity, action);
+  // The issue's own creation, not the delivery's: an old issue labelled today is still old.
+  const createdAt = stringField(entity, "createdAt");
   return {
     source: "linear",
     key: id,
@@ -284,6 +317,8 @@ export const linearEvent = (
     labels: labelNames(entity["labels"]),
     ...(team === undefined ? {} : { team }),
     ...(url === undefined || !isWebLink(url) ? {} : { url }),
+    ...(author === undefined ? {} : { author }),
+    ...(createdAt === undefined ? {} : { createdAt }),
   };
 };
 

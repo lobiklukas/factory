@@ -237,6 +237,44 @@ describe("trigger routes over RPC", () => {
     ).toEqual([]);
   }, 60_000);
 
+  it("carries a route's trust gate over the wire and back (S-trigger-trust-gating), and refuses one that is not an instant", async () => {
+    await call((client) => client.registerRepo({ repo }));
+    const trust = {
+      authors: ["user-ada", "octocat"],
+      githubPermission: "write" as const,
+      createdAfter: "enabled" as const,
+    };
+    const gated = await call((client) =>
+      client.addTriggerRoute({
+        label: `${label}-gated`,
+        repo,
+        prompt: "{{title}}",
+        trust,
+      }),
+    );
+    try {
+      expect(gated.trust).toEqual(trust);
+      const listed = (
+        await call((client) => client.listTriggerRoutes({}))
+      ).routes.find((route) => route.id === gated.id);
+      expect(listed?.trust).toEqual(trust);
+    } finally {
+      await call((client) => client.removeTriggerRoute({ id: gated.id }));
+    }
+    await expect(
+      call((client) =>
+        failureOf(
+          client.addTriggerRoute({
+            label: `${label}-bad-gate`,
+            repo,
+            prompt: "x",
+            trust: { createdAfter: "yesterday" },
+          } as never),
+        ),
+      ),
+    ).rejects.toThrow(/validation failed/);
+  }, 60_000);
+
   it("refuses a route that names neither a label nor a team before it is sent", async () => {
     // The payload schema checks it, on the client that encodes the call and the server that decodes
     // it, so it surfaces as a thrown validation failure and never as the registry's typed `storage`

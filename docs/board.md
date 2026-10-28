@@ -456,8 +456,10 @@ customization, decomposition, and board metrics.
 
 1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, claiming under the caps/WIP
    limits (enforced on every start since LOB-71), TTL reclaim, priority
-   bands, trusted-actor and created-after-enable rules. Trigger: the first run you want started without
-   you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
+   bands, trusted-actor and created-after-enable rules (built for trigger intake, S-trigger-trust-gating:
+   a rule's `trust` gate — an author allowlist, a GitHub role, created after the rule was enabled — so
+   the dispatcher reuses it rather than inventing its own). Trigger: the first run you want started
+   without you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
 2. **Questions as durable objects** — dedup by question id, aging, resume after death, wake policy.
    Trigger: the first question asked while you are not watching. Linear's `elicitation` supplies the
    outward half, so this is smaller than it looks.
