@@ -889,7 +889,7 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     yield* emit(line);
   }
   if (input.idle) {
-    return;
+    return session.id;
   }
   const content =
     input.prompt ?? runPrompt(card, yield* runColumn(client, card, taskColumn));
@@ -902,6 +902,7 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
       ? `sent    ${card.title} (the card's default prompt)`
       : `sent    ${input.prompt}`,
   );
+  return session.id;
 });
 
 const startCommand = Command.make(

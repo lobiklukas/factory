@@ -11,9 +11,11 @@ import { budgetCommand } from "./commands/budget";
 import { costCommand } from "./commands/cost";
 import { discardCommand } from "./commands/discard";
 import { doctorCommand } from "./commands/doctor";
+import { handoffCommand } from "./commands/handoff";
 import { historyCommand } from "./commands/history";
 import { interruptCommand } from "./commands/interrupt";
 import { lsCommand } from "./commands/ls";
+import { mcpCommand } from "./commands/mcp";
 import { outcomesCommand } from "./commands/outcomes";
 import { prCommand } from "./commands/pr";
 import { repoCommand } from "./commands/repo";
@@ -67,6 +69,8 @@ const root = Command.make("factory").pipe(
     approvalsCommand,
     approveCommand,
     denyCommand,
+    handoffCommand,
+    mcpCommand,
   ]),
 );
 
