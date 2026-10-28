@@ -70,6 +70,9 @@ import {
   TriggerRouteNotFound,
 } from "@repo/domain/Trigger";
 import {
+  ApproveProposalsError,
+  ApproveProposalsInput,
+  ApproveProposalsResult,
   ProposalsRefused,
   ProposeDecompositionInput,
   ProposeDecompositionResult,
@@ -220,6 +223,15 @@ export class SessionRpc extends RpcGroup.make(
     payload: ProposeDecompositionInput,
     success: ProposeDecompositionResult,
     error: Schema.Union([SessionError, ProposalsRefused]),
+  }),
+  // Approving a subset of those proposals (LOB-202): each approved one becomes a child of the issue
+  // the session was delegated from, and its id is recorded in the document. A process with no
+  // tracker, or a session with no delegating issue, is refused as `ApproveProposalsError` with
+  // nothing sent; a tracker failure is the same error naming what was already created.
+  Rpc.make("approveProposals", {
+    payload: ApproveProposalsInput,
+    success: ApproveProposalsResult,
+    error: Schema.Union([SessionError, ApproveProposalsError]),
   }),
   // A registration that names a URL and no checkout clones the repo into the factory's cache (LOB-265):
   // a clone that fails is `RepoCloneFailed`, naming the repo and the reason, with the row still

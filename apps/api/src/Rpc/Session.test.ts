@@ -487,6 +487,39 @@ describe("proposeDecomposition over RPC (LOB-201)", () => {
   }, 120_000);
 });
 
+describe("approveProposals over RPC (LOB-202)", () => {
+  it("carries a refusal and an unknown session across the wire with their own tags", async () => {
+    const outcome = await callApi((client) =>
+      Effect.gen(function* () {
+        const scratch = yield* client.createSession({
+          title: "never decomposed",
+        });
+        // `ApproveProposalsError` is a tagged error of its own in the RPC's error union: a client
+        // that never decomposed is told so by tag and reason, not by a generic failure.
+        const noProposals = yield* failureOf(
+          client.approveProposals({ sessionId: scratch.id, approved: [0] }),
+        );
+        const missing = yield* failureOf(
+          client.approveProposals({
+            sessionId: "ses_01j8z0000000000000000000zz" as SessionId,
+            approved: [0],
+          }),
+        );
+        return { noProposals, missing };
+      }),
+    );
+    expect(outcome.noProposals).toMatchObject({
+      _tag: "ApproveProposalsError",
+      reason: "no_proposals",
+      created: [],
+    });
+    expect(outcome.missing).toMatchObject({
+      _tag: "SessionError",
+      code: "not_found",
+    });
+  }, 60_000);
+});
+
 /**
  * The terminal events this app wires (LOB-268): an operator's `discardSession`, and a `moveTask` that
  * lands a card in `canceled`. Both tear the session's worktree and branch down; the move does it

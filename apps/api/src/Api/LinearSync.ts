@@ -26,6 +26,7 @@ import type { SqlClient } from "effect/sql/SqlClient";
 import {
   type LinearIssueSync,
   LinearIssueSyncLive,
+  LinearProposalTracker,
   LinearSessionWriteBack,
   LinearTriggerWriteBack,
   linearConfigFromEnv,
@@ -67,6 +68,17 @@ export const SessionWriteBackLive: Layer.Layer<
   never,
   LinearIssueSync | SqlClient
 > = linearConfig === undefined ? Layer.empty : LinearSessionWriteBack;
+
+/**
+ * Where an approved proposal becomes a Linear issue (LOB-202). Without a key nothing is provided and
+ * the port's default refuses `no_tracker` with nothing sent, so `approveProposals` on a process with
+ * no tracker is an answer rather than a silent success.
+ */
+export const ProposalTrackerLive: Layer.Layer<
+  never,
+  never,
+  LinearIssueSync | SqlClient
+> = linearConfig === undefined ? Layer.empty : LinearProposalTracker;
 
 /** Say at boot whether the loop closes in Linear, and through which states. */
 export const LinearSyncLog = Layer.effectDiscard(

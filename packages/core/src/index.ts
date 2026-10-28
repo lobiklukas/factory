@@ -24,5 +24,6 @@ export * from "./git";
 export * from "./RepoMirror";
 export * from "./Linear";
 export * from "./LinearSync";
+export * from "./ProposalTracker";
 export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";

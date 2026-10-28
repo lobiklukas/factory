@@ -53,6 +53,13 @@
  * and hands it to every consumer. Across processes the read and the write are not atomic — the
  * window is two reports landing in the same instant, which `docs/testing-third-parties.md` records.
  *
+ * **Child issues** (LOB-202) are the one place this module creates issues rather than mirroring
+ * state: `createChild` makes an issue under the issue a session was delegated from, in that issue's
+ * team, and `blocks` relates two such issues. Both read before they write, as everything here does —
+ * a child is looked up by a marker line in its description (`factory:<session>:proposal:<digest>`)
+ * and a relation by the blocker's own relations — so a lost acknowledgement (the issue exists, the
+ * answer never arrived) is found by the retry instead of being created twice.
+ *
  * **Every request is bounded** (`requestTimeout`), because both callers wait on it: the PR step
  * reports before it answers, and the trigger seam moves the issue before it answers Linear's
  * webhook. A Linear that never answers is a transient failure after a few seconds, not a stall.
@@ -76,9 +83,11 @@ import {
 } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
-import type { SessionId } from "@repo/domain/Session";
+import { SessionError, type SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
+import { ApproveProposalsError } from "@repo/domain/Decomposition";
 import { linearIssueOfDelivery } from "./Linear";
+import { ProposalTracker, proposalMarker } from "./ProposalTracker";
 import { pullRequestReport, SessionWriteBack } from "./SessionWriteBack";
 import { deliveryIdOfSession, TriggerWriteBack } from "./TriggerService";
 
@@ -251,6 +260,80 @@ export const LINEAR_ATTACHMENT_CREATE = `mutation FactoryAttachment($input: Atta
   attachmentCreate(input: $input) { success }
 }`;
 
+/**
+ * The parent of the issues a session proposed (LOB-202): its id and its team's, which `issueCreate`
+ * needs and the shared read above does not carry, and its children, which is where a retry looks for
+ * an issue a lost acknowledgement already created. One page of 250, Linear's maximum.
+ */
+export const LINEAR_PARENT_QUERY = `query FactoryParent($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    team { id }
+    children(first: 250) { nodes { id identifier description } }
+  }
+}`;
+
+export const LINEAR_ISSUE_CREATE = `mutation FactoryIssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { id identifier } }
+}`;
+
+/** An issue's own relations: where `blocks` looks for the edge before it creates it. */
+export const LINEAR_RELATIONS_QUERY = `query FactoryRelations($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    relations(first: 250) { nodes { type relatedIssue { id } } }
+  }
+}`;
+
+export const LINEAR_RELATION_CREATE = `mutation FactoryRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) { success }
+}`;
+
+const ParentData = Schema.Struct({
+  issue: Schema.NullOr(
+    Schema.Struct({
+      id: Schema.String,
+      identifier: Schema.String,
+      team: Schema.Struct({ id: Schema.String }),
+      children: Schema.Struct({
+        nodes: Schema.Array(
+          Schema.Struct({
+            id: Schema.String,
+            identifier: Schema.String,
+            description: Schema.optional(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      }),
+    }),
+  ),
+});
+
+const RelationsData = Schema.Struct({
+  issue: Schema.NullOr(
+    Schema.Struct({
+      relations: Schema.Struct({
+        nodes: Schema.Array(
+          Schema.Struct({
+            type: Schema.String,
+            relatedIssue: Schema.Struct({ id: Schema.String }),
+          }),
+        ),
+      }),
+    }),
+  ),
+});
+
+const IssueCreateResult = Schema.Struct({
+  success: Schema.Boolean,
+  issue: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({ id: Schema.String, identifier: Schema.String }),
+    ),
+  ),
+});
+
 /** What `nextLinearState` decided. */
 export type LinearStateDecision =
   | { readonly _tag: "move"; readonly state: LinearWorkflowState }
@@ -409,6 +492,12 @@ export const linearFailureComment = (
 
 type PullRequestLink = { readonly number: number; readonly url: string };
 
+/** An issue Linear made, by the id its API addresses and the identifier a person reads. */
+export type LinearIssueRef = {
+  readonly id: string;
+  readonly identifier: string;
+};
+
 export type LinearIssueSyncShape = {
   /** The session started: move the issue to the started state. */
   readonly started: (input: {
@@ -435,6 +524,25 @@ export type LinearIssueSyncShape = {
     readonly sessionId: SessionId;
     readonly pr: PullRequestLink;
   }) => Effect.Effect<void, LinearSyncError>;
+  /**
+   * Create an issue as a child of `issueId`, in its team (LOB-202) — or answer the child whose
+   * description already carries `marker`, which is what a request whose acknowledgement was lost
+   * left behind. `description` is the whole text, marker included.
+   */
+  readonly createChild: (input: {
+    readonly issueId: string;
+    readonly marker: string;
+    readonly title: string;
+    readonly description: string;
+  }) => Effect.Effect<LinearIssueRef, LinearSyncError>;
+  /**
+   * Make `blocker` block `blocked` (LOB-202). `created: false` is an edge Linear already had, and
+   * nothing was sent.
+   */
+  readonly blocks: (input: {
+    readonly blocker: LinearIssueRef;
+    readonly blocked: LinearIssueRef;
+  }) => Effect.Effect<{ readonly created: boolean }, LinearSyncError>;
 };
 
 export class LinearIssueSync extends Context.Service<
@@ -616,6 +724,31 @@ export const LinearIssueSyncLive = (
           return decoded.issue;
         });
 
+      /** A mutation's own field of the answer's `data`, undecoded. */
+      const mutationField = (
+        operation: string,
+        issueId: string,
+        query: string,
+        variables: Record<string, unknown>,
+      ): Effect.Effect<unknown, LinearSyncError> =>
+        Effect.gen(function* () {
+          const data = yield* graphql(operation, issueId, query, variables);
+          const fields = yield* Schema.decodeUnknownEffect(MutationData)(
+            data,
+          ).pipe(
+            Effect.mapError(
+              () =>
+                new LinearSyncError({
+                  issueId,
+                  operation,
+                  message: `Linear's answer to ${operation} could not be read`,
+                  transient: false,
+                }),
+            ),
+          );
+          return fields[operation];
+        });
+
       const mutate = (
         operation: string,
         issueId: string,
@@ -623,7 +756,12 @@ export const LinearIssueSyncLive = (
         variables: Record<string, unknown>,
       ): Effect.Effect<void, LinearSyncError> =>
         Effect.gen(function* () {
-          const data = yield* graphql(operation, issueId, query, variables);
+          const field = yield* mutationField(
+            operation,
+            issueId,
+            query,
+            variables,
+          );
           const fail = (message: string) =>
             new LinearSyncError({
               issueId,
@@ -631,12 +769,9 @@ export const LinearIssueSyncLive = (
               message,
               transient: false,
             });
-          const decoded = yield* Schema.decodeUnknownEffect(MutationData)(
-            data,
+          const decoded = yield* Schema.decodeUnknownEffect(MutationResult)(
+            field,
           ).pipe(
-            Effect.flatMap((fields) =>
-              Schema.decodeUnknownEffect(MutationResult)(fields[operation]),
-            ),
             Effect.mapError(() =>
               fail(`Linear's answer to ${operation} could not be read`),
             ),
@@ -647,6 +782,30 @@ export const LinearIssueSyncLive = (
             );
           }
         });
+
+      /** A read whose answer is decoded by `schema`; an issue Linear does not show is a refusal. */
+      const read = <A>(
+        operation: string,
+        issueId: string,
+        query: string,
+        schema: Schema.Decoder<A>,
+        variables: Record<string, unknown>,
+      ): Effect.Effect<A, LinearSyncError> =>
+        graphql(operation, issueId, query, variables).pipe(
+          Effect.flatMap((data) =>
+            Schema.decodeUnknownEffect(schema)(data).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new LinearSyncError({
+                    issueId,
+                    operation,
+                    message: `Linear's answer to ${operation} could not be read: ${cause.message}`,
+                    transient: false,
+                  }),
+              ),
+            ),
+          ),
+        );
 
       /** Read once, then write only what the read says is missing, in a fixed order. */
       const apply = (
@@ -726,7 +885,132 @@ export const LinearIssueSyncLive = (
           }),
         );
 
+      const noIssue = (operation: string, issueId: string) =>
+        new LinearSyncError({
+          issueId,
+          operation,
+          message: `Linear has no issue ${issueId} this key can read`,
+          transient: false,
+        });
+
+      /**
+       * Read the parent, adopt the child that already carries the marker or create it. Under the
+       * parent's lock so two approvals of one session cannot both read "no child yet".
+       */
+      const createChild: LinearIssueSyncShape["createChild"] = (input) =>
+        withIssueLock(
+          input.issueId,
+          Effect.gen(function* () {
+            const { issue: parent } = yield* read(
+              "issueChildren",
+              input.issueId,
+              LINEAR_PARENT_QUERY,
+              ParentData,
+              { id: input.issueId },
+            );
+            if (parent === null) {
+              return yield* noIssue("issueChildren", input.issueId);
+            }
+            const existing = parent.children.nodes.find((child) =>
+              (child.description ?? "").includes(input.marker),
+            );
+            if (existing !== undefined) {
+              yield* Effect.logInfo(
+                `linear: ${parent.identifier} already has ${existing.identifier} for ${input.marker}`,
+              );
+              return { id: existing.id, identifier: existing.identifier };
+            }
+            const field = yield* mutationField(
+              "issueCreate",
+              input.issueId,
+              LINEAR_ISSUE_CREATE,
+              {
+                input: {
+                  teamId: parent.team.id,
+                  parentId: parent.id,
+                  title: input.title,
+                  description: input.description,
+                },
+              },
+            );
+            const fail = (message: string) =>
+              new LinearSyncError({
+                issueId: input.issueId,
+                operation: "issueCreate",
+                message,
+                transient: false,
+              });
+            const created = yield* Schema.decodeUnknownEffect(
+              IssueCreateResult,
+            )(field).pipe(
+              Effect.mapError(() =>
+                fail("Linear's answer to issueCreate could not be read"),
+              ),
+            );
+            if (!created.success || !created.issue) {
+              return yield* fail(
+                created.success
+                  ? "Linear answered issueCreate without the issue it made"
+                  : "Linear answered success: false to issueCreate",
+              );
+            }
+            yield* Effect.logInfo(
+              `linear: ${parent.identifier} → created ${created.issue.identifier} (issueCreate)`,
+            );
+            return created.issue;
+          }),
+        ).pipe(
+          Effect.retry({
+            ...RETRY,
+            while: (error: LinearSyncError) => error.transient,
+          }),
+        );
+
+      /** Read the blocker's relations, create the edge only when it is missing. */
+      const blocks: LinearIssueSyncShape["blocks"] = (input) =>
+        withIssueLock(
+          input.blocker.id,
+          Effect.gen(function* () {
+            const { issue } = yield* read(
+              "issueRelations",
+              input.blocker.identifier,
+              LINEAR_RELATIONS_QUERY,
+              RelationsData,
+              { id: input.blocker.id },
+            );
+            if (issue === null) {
+              return yield* noIssue("issueRelations", input.blocker.identifier);
+            }
+            const exists = issue.relations.nodes.some(
+              (relation) =>
+                relation.type === "blocks" &&
+                relation.relatedIssue.id === input.blocked.id,
+            );
+            if (exists) return { created: false };
+            yield* mutate(
+              "issueRelationCreate",
+              input.blocker.identifier,
+              LINEAR_RELATION_CREATE,
+              {
+                input: {
+                  issueId: input.blocker.id,
+                  relatedIssueId: input.blocked.id,
+                  type: "blocks",
+                },
+              },
+            );
+            return { created: true };
+          }),
+        ).pipe(
+          Effect.retry({
+            ...RETRY,
+            while: (error: LinearSyncError) => error.transient,
+          }),
+        );
+
       return LinearIssueSync.of({
+        createChild,
+        blocks,
         started: (input) =>
           apply("started", input.issueId, { phase: "started" }),
         pullRequestOpened: (input) =>
@@ -819,6 +1103,26 @@ export const NoLinearIssueSync = Layer.succeed(
     pullRequestOpened: () => Effect.void,
     failed: () => Effect.void,
     merged: () => Effect.void,
+    // Unreachable through `ProposalTracker`'s default: a process with no key refuses before it asks. If a
+    // caller reaches here anyway, nothing was created and it must not look as though something was.
+    createChild: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issueId,
+          operation: "issueCreate",
+          message: "no Linear key is configured; nothing was created",
+          transient: false,
+        }),
+      ),
+    blocks: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.blocker.identifier,
+          operation: "issueRelationCreate",
+          message: "no Linear key is configured; nothing was related",
+          transient: false,
+        }),
+      ),
   }),
 );
 
@@ -837,16 +1141,20 @@ const storageError =
  * opened. The session's own request id is the record — `trigger:linear:<issue>:mapped`, written by
  * the seam when the issue's delivery opened it — so the binding needs no table of its own.
  */
-const issueOfSession = (
-  sql: SqlClient,
-  sessionId: SessionId,
-): Effect.Effect<string | undefined, LinearSyncError> =>
+const readIssueOfSession = (sql: SqlClient, sessionId: SessionId) =>
   sql<{ readonly requestId: string | null }>`
     SELECT request_id FROM sessions WHERE id = ${sessionId}
   `.pipe(
     Effect.map((rows) =>
       linearIssueOfDelivery(deliveryIdOfSession(rows[0]?.requestId)),
     ),
+  );
+
+const issueOfSession = (
+  sql: SqlClient,
+  sessionId: SessionId,
+): Effect.Effect<string | undefined, LinearSyncError> =>
+  readIssueOfSession(sql, sessionId).pipe(
     Effect.mapError(storageError(sessionId, "read the session's issue")),
   );
 
@@ -896,6 +1204,68 @@ export const LinearSessionWriteBack = Layer.effect(
             ),
           ),
         ),
+    };
+  }),
+);
+
+/**
+ * The proposal tracker of a deployment with a Linear key (LOB-202): proposals become children of the
+ * issue the session was delegated from. The delegating issue is `issueOfSession`'s — a session no
+ * Linear delivery opened has none, and is refused `no_delegating_issue` before a request is made.
+ * Every Linear failure is `tracker_failed` with Linear's own message; the sync has already retried
+ * what is transient.
+ */
+export const LinearProposalTracker = Layer.effect(
+  ProposalTracker,
+  Effect.gen(function* () {
+    const sync = yield* LinearIssueSync;
+    const sql = yield* SqlClient;
+    const failed = (error: LinearSyncError) =>
+      new ApproveProposalsError({
+        reason: "tracker_failed",
+        message: `Linear ${error.operation} on ${error.issueId} failed: ${error.message}`,
+        created: [],
+      });
+    return {
+      open: (sessionId) =>
+        Effect.gen(function* () {
+          const issueId = yield* readIssueOfSession(sql, sessionId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionError({
+                  code: "storage",
+                  message: `read session ${sessionId}'s delegating issue: ${cause.message}`,
+                }),
+            ),
+          );
+          if (issueId === undefined) {
+            return yield* new ApproveProposalsError({
+              reason: "no_delegating_issue",
+              message: `session ${sessionId} was not delegated from a Linear issue, so there is no parent or team to create under; nothing was sent`,
+              created: [],
+            });
+          }
+          return {
+            create: (input) =>
+              sync
+                .createChild({
+                  issueId,
+                  marker: proposalMarker(sessionId, input.title),
+                  title: input.title,
+                  description: [
+                    input.body,
+                    "",
+                    code(proposalMarker(sessionId, input.title)),
+                  ].join("\n"),
+                })
+                .pipe(Effect.mapError(failed)),
+            relate: (input) =>
+              sync.blocks(input).pipe(
+                Effect.map((result) => result.created),
+                Effect.mapError(failed),
+              ),
+          };
+        }),
     };
   }),
 );
