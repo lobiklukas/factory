@@ -3,6 +3,7 @@ import { Command, Flag } from "effect/cli";
 import {
   RepoSlug,
   SessionActor,
+  SessionBudgetCap,
   SessionError,
   SessionId,
 } from "@repo/domain/Session";
@@ -33,6 +34,7 @@ import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { NO_PR } from "./ls";
 import { BoardClient } from "../rpc";
+import { formatDollars } from "../transcript";
 import { boardConfigCommands } from "./boardConfig";
 
 /**
@@ -736,6 +738,7 @@ export interface StartClient<B, S> {
     readonly taskColumn: string;
     readonly actor: string;
     readonly repo?: RepoSlug;
+    readonly budget?: number;
   }) => Effect.Effect<{ readonly id: SessionId }, S>;
   readonly getSession: (input: {
     readonly sessionId: SessionId;
@@ -796,6 +799,8 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     readonly prompt: string | undefined;
     readonly idle: boolean;
     readonly actor: string;
+    /** The run's spend ceiling in US dollars (C23); absent: the server's default cap, if any. */
+    readonly budget?: number | undefined;
   },
   emit: (line: string) => Effect.Effect<void>,
 ) {
@@ -807,9 +812,13 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     taskColumn,
     actor: input.actor,
     ...(card.repo === undefined ? {} : { repo: card.repo }),
+    ...(input.budget === undefined ? {} : { budget: input.budget }),
   });
   yield* emit(`session ${session.id}`);
   yield* emit(`task    ${card.id} in ${taskColumn}`);
+  if (input.budget !== undefined) {
+    yield* emit(`budget  ${formatDollars(input.budget)}`);
+  }
   // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
   // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
   // Advisory: the run has started, so a failed read skips the warning and never fails the command.
@@ -860,10 +869,25 @@ const startCommand = Command.make(
       ),
       Flag.withDefault(false),
     ),
+    budget: Flag.Finite("budget").pipe(
+      Flag.withDescription(
+        "Spend ceiling for the run, in US dollars: it stops before a model request once the session's spend reaches it (raise it with `factory budget`)",
+      ),
+      Flag.withSchema(SessionBudgetCap),
+      Flag.optional,
+    ),
     actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, idle, actor, api }) {
+  Effect.fnUntraced(function* ({
+    task,
+    column,
+    prompt,
+    idle,
+    budget,
+    actor,
+    api,
+  }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -888,6 +912,7 @@ const startCommand = Command.make(
           column: Option.getOrUndefined(column),
           prompt: Option.getOrUndefined(prompt),
           idle,
+          budget: Option.getOrUndefined(budget),
           actor,
         },
         Console.log,
@@ -903,6 +928,10 @@ const startCommand = Command.make(
       command: "factory board start --task tsk_…",
       description:
         "A session bound to the card, in the card's own column, sent the card's default prompt",
+    },
+    {
+      command: "factory board start --task tsk_… --budget 2.50",
+      description: "The same run, capped at $2.50 of spend",
     },
     {
       command: "factory board start --task tsk_… --idle",

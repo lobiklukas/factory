@@ -68,43 +68,44 @@ Status reflects the last verified run: **2026-10-27**, from the `agent/LOB-65` w
 `./drive.sh` in tmux — **20/20** required checks passed, including the PR column (LOB-65). A
 mutation run (the row always printing `-`) failed "ls shows the recorded PR URL" with `pr=-`.
 
-| Feature                                           | Status  | File                                                                  |
-| ------------------------------------------------- | ------- | --------------------------------------------------------------------- |
-| `factory run`                                     | passing | [run.md](run.md)                                                      |
-| `factory run --model`, `DEFAULT_MODEL`            | passing | [model.md](model.md) (`model.sh`)                                     |
-| `factory cost`, `factory run --cap-at-prediction` | passing | verify-api's [cost.md](../../verify-api/features/cost.md) (`cost.sh`) |
-| `factory ls`                                      | passing | [ls.md](ls.md)                                                        |
-| `factory status`, the model in `run` and `ls`     | passing | [status.md](status.md)                                                |
-| `factory watch`                                   | passing | [watch.md](watch.md)                                                  |
-| Typed errors                                      | passing | [errors.md](errors.md)                                                |
-| `factory send` / `factory withdraw`               | passing | [withdraw.md](withdraw.md)                                            |
-| `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                  |
-| `factory interrupt`                               | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                         |
-| `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                              |
-| `factory discard`                                 | passing | [discard.md](discard.md)                                              |
-| `factory replay`                                  | passing | [replay.md](replay.md)                                                |
-| `factory fork` / `reset` / `compact` / `spend`    | passing | [session.md](session.md)                                              |
-| `factory repo add --url`, `repo sync`, `doctor`   | passing | [clone.md](clone.md)                                                  |
-| `factory doctor` (preflight)                      | passing | [doctor.md](doctor.md) (`preflight.sh`)                               |
-| `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)         |
-| Feature                                           | Status  | File                                                                  |
-| -----------------------------------------------   | ------- | ---------------------------------------------------------------       |
-| `factory run`                                     | passing | [run.md](run.md)                                                      |
-| `factory run --model`, `DEFAULT_MODEL`            | passing | [model.md](model.md) (`model.sh`)                                     |
-| `factory cost`, `factory run --cap-at-prediction` | passing | verify-api's [cost.md](../../verify-api/features/cost.md) (`cost.sh`) |
-| `factory ls`                                      | passing | [ls.md](ls.md)                                                        |
-| `factory watch`                                   | passing | [watch.md](watch.md)                                                  |
-| Typed errors                                      | passing | [errors.md](errors.md)                                                |
-| `factory send` / `factory withdraw`               | passing | [withdraw.md](withdraw.md)                                            |
-| `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                  |
-| `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                              |
-| `factory repo add` / `ls` / `show`                | passing | [repo.md](repo.md)                                                    |
-| `factory skill ls` / `show` / `put`               | passing | [skill.md](skill.md) (`skill.sh`)                                     |
-| `factory triggers ls` / `deliveries`              | passing | [triggers.md](triggers.md) (`triggers.sh`)                            |
-| `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)         |
-| `factory board block\|unblock\|attention\|runs`   | passing | [verify-board triage.md](../../verify-board/features/triage.md)       |
-| `factory board add`                               | passing | [verify-board add.md](../../verify-board/features/add.md)             |
-| `factory outcomes`                                | passing | [verify-api outcomes.md](../../verify-api/features/outcomes.md)       |
+| Feature                                           | Status  | File                                                                      |
+| ------------------------------------------------- | ------- | ------------------------------------------------------------------------- |
+| `factory run`                                     | passing | [run.md](run.md)                                                          |
+| `factory run --model`, `DEFAULT_MODEL`            | passing | [model.md](model.md) (`model.sh`)                                         |
+| `factory cost`, `factory run --cap-at-prediction` | passing | verify-api's [cost.md](../../verify-api/features/cost.md) (`cost.sh`)     |
+| `factory ls`                                      | passing | [ls.md](ls.md)                                                            |
+| `factory status`, the model in `run` and `ls`     | passing | [status.md](status.md)                                                    |
+| `factory watch`                                   | passing | [watch.md](watch.md)                                                      |
+| Typed errors                                      | passing | [errors.md](errors.md)                                                    |
+| `factory send` / `factory withdraw`               | passing | [withdraw.md](withdraw.md)                                                |
+| `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                      |
+| `factory budget`                                  | passing | [budget.md](budget.md) (`verify-api/budget.sh`, `verify-board/budget.sh`) |
+| `factory interrupt`                               | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                             |
+| `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                                  |
+| `factory discard`                                 | passing | [discard.md](discard.md)                                                  |
+| `factory replay`                                  | passing | [replay.md](replay.md)                                                    |
+| `factory fork` / `reset` / `compact` / `spend`    | passing | [session.md](session.md)                                                  |
+| `factory repo add --url`, `repo sync`, `doctor`   | passing | [clone.md](clone.md)                                                      |
+| `factory doctor` (preflight)                      | passing | [doctor.md](doctor.md) (`preflight.sh`)                                   |
+| `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)             |
+| Feature                                           | Status  | File                                                                      |
+| -----------------------------------------------   | ------- | ---------------------------------------------------------------           |
+| `factory run`                                     | passing | [run.md](run.md)                                                          |
+| `factory run --model`, `DEFAULT_MODEL`            | passing | [model.md](model.md) (`model.sh`)                                         |
+| `factory cost`, `factory run --cap-at-prediction` | passing | verify-api's [cost.md](../../verify-api/features/cost.md) (`cost.sh`)     |
+| `factory ls`                                      | passing | [ls.md](ls.md)                                                            |
+| `factory watch`                                   | passing | [watch.md](watch.md)                                                      |
+| Typed errors                                      | passing | [errors.md](errors.md)                                                    |
+| `factory send` / `factory withdraw`               | passing | [withdraw.md](withdraw.md)                                                |
+| `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                      |
+| `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                                  |
+| `factory repo add` / `ls` / `show`                | passing | [repo.md](repo.md)                                                        |
+| `factory skill ls` / `show` / `put`               | passing | [skill.md](skill.md) (`skill.sh`)                                         |
+| `factory triggers ls` / `deliveries`              | passing | [triggers.md](triggers.md) (`triggers.sh`)                                |
+| `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)             |
+| `factory board block\|unblock\|attention\|runs`   | passing | [verify-board triage.md](../../verify-board/features/triage.md)           |
+| `factory board add`                               | passing | [verify-board add.md](../../verify-board/features/add.md)                 |
+| `factory outcomes`                                | passing | [verify-api outcomes.md](../../verify-api/features/outcomes.md)           |
 
 ## Deliberately absent
 

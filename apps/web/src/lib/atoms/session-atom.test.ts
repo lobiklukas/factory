@@ -6,6 +6,7 @@
  * *absent* from the next list. A fold that merged would keep the finished task on screen forever.
  */
 import type {
+  SessionBudget,
   SessionEvent,
   SessionSummary,
   SessionTask,
@@ -119,6 +120,51 @@ describe("foldSessionEvent and the no-checkout warning (LOB-263)", () => {
     expect("workspaceWarning" in foldSessionEvent(warned, snapshotOf())).toBe(
       false,
     );
+  });
+});
+
+describe("foldSessionEvent and a stop the snapshot shows as raised (C23)", () => {
+  const stopEntry = {
+    id: "e1",
+    kind: "budget" as const,
+    text: "x",
+    toolCalls: [],
+  };
+  const snapshotWith = (
+    budget: SessionBudget | undefined,
+    entries = [stopEntry],
+  ): SessionEvent => ({
+    _tag: "snapshot",
+    session: summary,
+    workspace: { path: "/tmp/session", commands: {}, commandsSource: "none" },
+    entries,
+    live: { busy: false, tools: [] },
+    usage: { models: [], tools: [] },
+    queued: [],
+    tasks: [],
+    approvals: [],
+    budget,
+  });
+
+  /** Mutation: always offering on a newest stop — a reload offers Raise cap on a cap raised elsewhere. */
+  it("marks the newest stop settled when the budget reports no stop", () => {
+    expect(
+      foldSessionEvent(view, snapshotWith({ cap: 2, spent: 1 })).settledStop,
+    ).toBe("e1");
+  });
+
+  it("marks nothing settled while the budget still reports the stop, or without a budget", () => {
+    const stopped = {
+      cap: 1,
+      spent: 1,
+      stopped: { at: "2026-10-28T00:00:00.000Z", spent: 1, cap: 1 },
+    };
+    expect("settledStop" in foldSessionEvent(view, snapshotWith(stopped))).toBe(
+      false,
+    );
+    expect(
+      "settledStop" in foldSessionEvent(view, snapshotWith(undefined)),
+    ).toBe(false);
   });
 });
 
