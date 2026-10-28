@@ -161,6 +161,11 @@ const withRuntime = async <A>(
      */
     readonly failWriteBackTimes?: number;
     /**
+     * Fail every `send` as the session layer does when the session's worktree setup failed
+     * (S-env-setup), counting each attempt: the prompt is never sent.
+     */
+    readonly failSetup?: { attempts: number };
+    /**
      * Park the winning delivery in `send`, i.e. after its claim and before its outcome, until
      * `release` fires: the window in which a second delivery of the same id is a replay of work
      * that is still running.
@@ -220,6 +225,14 @@ const withRuntime = async <A>(
       ),
     send: (input) =>
       Effect.gen(function* () {
+        const setup = options.failSetup;
+        if (setup !== undefined) {
+          setup.attempts += 1;
+          return yield* new TriggerError({
+            code: "setup-failed",
+            message: `session ${input.sessionId}: setup failed: install \`bun install\` exited 1 in /w\nerror: registry unreachable`,
+          });
+        }
         const hold = options.holdInFlight;
         if (hold !== undefined) {
           yield* Deferred.succeed(hold.arrived, undefined);
@@ -709,6 +722,32 @@ describe("the trigger seam", () => {
         expect(created).toHaveLength(1);
       },
       { registerRepo: [repo], dieCreateTimes: 1 },
+    );
+  }, 60_000);
+
+  it("records a session whose setup failed as the delivery's outcome, so a retry does not set it up again", async () => {
+    // S-env-setup: the send fails because the session's worktree setup did. That is the delivery's
+    // result, not a failure to retry: the claim is kept and the sender's retry is a replay.
+    const requestId = `${runId}-setup-failed`;
+    const failSetup = { attempts: 0 };
+    await withRuntime(
+      async ({ run, trigger, created }) => {
+        const first = await run(trigger.deliver(deliver(requestId)));
+        expect(first.status).toBe("processed");
+        expect(first.sessionId).toBe(created[0]?.id);
+        expect(first.reason).toContain("worktree setup failed");
+        expect(first.reason).toContain("exited 1");
+        // The reason is one line: the output's tail is the session's log, not the delivery's.
+        expect(first.reason).not.toContain("registry unreachable");
+        expect(created[0]?.messages).toEqual([]);
+
+        const retried = await run(trigger.deliver(deliver(requestId)));
+        expect(retried.replayed).toBe(true);
+        expect(retried.reason).toBe(first.reason);
+        expect(failSetup.attempts).toBe(1);
+        expect(created).toHaveLength(1);
+      },
+      { registerRepo: [repo], failSetup },
     );
   }, 60_000);
 

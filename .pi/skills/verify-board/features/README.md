@@ -3,7 +3,16 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: board caps and WIP limits (LOB-71, 2026-10-28, `agent/LOB-71`),
+Status reflects the last verified runs: the PR opened when the build run settles (C18, 2026-10-28,
+`agent/C18`), API on `:9500`, web on `:3500`, the GitHub fake on `:9503`: `./drive.sh` exit 0
+(**150** PASS) with no `factory pr` and nothing pressed — `build.ts MODE=settled` read the link, the
+card pane showed it with no control (`pr-browser.mjs` `PR_MODE=recorded`) — and exit 1 under
+`BOARD_GITHUB=off` with the run's `CredentialError` line in its transcript and on its card and the
+card held in `building` by `pr_link`; `./requires.sh` exit 0 (**57** PASS, `:9501`), its builder's PR
+opened on settle and `factory pr` answering it `already-open` ([build.md](build.md)), re-run on the
+committed tree after main's D4 and S-notifications merged. Before it, authoring a definition version (D4, 2026-10-28, `agent/D4`),
+API on `:9510`, web on `:3510`, the GitHub fake on `:9513`: `./define.sh` exit 0, **29/29**, twice
+against one instance ([define.md](define.md)), with `./definitions.sh` green beside it. Before it, board caps and WIP limits (LOB-71, 2026-10-28, `agent/LOB-71`),
 API on `:9530`, web on `:3530`, the GitHub fake on `:9533`, the shared board on default v5 (capped
 2/1/2): `./caps.sh` exit 0, **25/25**, twice against one instance ([caps.md](caps.md)), and beside it
 `./drive.sh` exit 0 (147 checks), `./triage.sh` (its gate card canceled at the end), `./start-body.sh`,
@@ -73,6 +82,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
 | a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |
+| `factory board define` (D4)             | passing | [define.md](define.md)           |
 
 ## Deliberately absent
 
@@ -89,6 +99,6 @@ Evidence: `.verify/evidence/latest/board/`.
   ([equivalence.md](equivalence.md)); the pane's declared moves, its stale refusal, a fresh context
   and a run start are `.pi/skills/verify-web`'s (`features/card-pane.md`), which `./equivalence.sh`
   runs.
-- **Definition editing.** A definition version is a new row, never an update (B2); nothing in the CLI
-  writes `board_definitions`, and the seed ships the default pipeline. Reading one is
-  [definitions.md](definitions.md).
+- **Definition editing in place.** A definition version is a new row, never an update (B2):
+  `factory board define` writes the next version ([define.md](define.md)), and nothing edits or
+  deletes one. Reading one is [definitions.md](definitions.md).

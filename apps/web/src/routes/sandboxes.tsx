@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { BoxesIcon } from "lucide-react";
 import { EmptyPane } from "@/components/empty-pane";
+import { EmptyLink } from "@/components/empty-link";
 
 export const Route = createFileRoute("/sandboxes")({
   component: SandboxesRoute,
@@ -21,6 +22,7 @@ function SandboxesRoute() {
       icon={<BoxesIcon strokeWidth={1.75} />}
       title="No sandboxes yet"
       detail="Sandbox lifecycle is M4. Until it lands a session's environment is the control plane itself, so there is nothing separate to list."
+      action={<EmptyLink to="/boards">Open the boards</EmptyLink>}
       visible
     />
   );

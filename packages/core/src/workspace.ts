@@ -107,6 +107,34 @@ export type WorkspaceInput = {
 export const noCheckoutWarning = (repo: string): string =>
   `repo ${repo} has no local checkout registered, so a run on it gets an empty directory instead of a worktree and can produce no diff: register one with \`factory repo add ${repo} --path <dir>\``;
 
+/**
+ * Where `checkout` sits inside its git work tree, as `git rev-parse --show-prefix` prints it with no
+ * trailing slash: `""` for the work tree's root — any directory holding its own `.git`, which is
+ * answered without running git — or for a path git cannot answer for.
+ */
+const workTreePrefix = (
+  checkout: string,
+  deps: WorkspaceDeps,
+): Effect.Effect<string> =>
+  Effect.gen(function* () {
+    const atRoot = yield* deps.fs
+      .exists(deps.path.join(checkout, ".git"))
+      .pipe(Effect.orElseSucceed(() => true));
+    if (atRoot) return "";
+    return yield* Effect.try({
+      try: () =>
+        execFileSync("git", ["rev-parse", "--show-prefix"], {
+          cwd: checkout,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+          .trim()
+          .replace(/\/+$/, ""),
+      // oxlint-disable-next-line global-error-in-effect-catch
+      catch: () => new Error(`not a work tree: ${checkout}`),
+    }).pipe(Effect.orElseSucceed(() => ""));
+  });
+
 /** Read the declared commands from one directory, tolerating a missing or undecodable file. */
 const commandsIn = (
   directory: string,
@@ -264,7 +292,17 @@ export const resolveWorkspace = (
         });
       }
     }
-    const fromSession = yield* commandsIn(directory, deps);
+    // A checkout registered at a subdirectory of its work tree (a verify skill's fixture inside the
+    // factory's own monorepo) is that subdirectory's repo: its config in the session's worktree is
+    // at the same place, not at the work tree's root, which is the enclosing repo's (S-env-setup).
+    const prefix =
+      input.localPath === undefined
+        ? ""
+        : yield* workTreePrefix(input.localPath, deps);
+    const fromSession = yield* commandsIn(
+      prefix === "" ? directory : deps.path.join(directory, prefix),
+      deps,
+    );
     const fromRepo =
       Option.isSome(fromSession) || input.localPath === undefined
         ? Option.none<RepoCommands>()

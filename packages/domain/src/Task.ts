@@ -21,7 +21,12 @@ import { Schema } from "effect";
 // with a *native* dynamic import, and in that context an extensionless relative specifier
 // inside this package is left for Node's ESM loader, which does not add `.ts`. Every other
 // consumer in the repo (`packages/core`, `packages/harness`) already imports the subpath.
-import { RepoSlug, SessionId, Timestamp } from "@repo/domain/Session";
+import {
+  RepoSlug,
+  SessionId,
+  SessionStatus,
+  Timestamp,
+} from "@repo/domain/Session";
 
 /**
  * Task ids use `SessionId`'s alphabet and shape (`tsk_`, ten of millisecond timestamp then sixteen
@@ -165,7 +170,9 @@ export const DECLARED_TRANSITIONS: Readonly<
  * The default definition's terminal columns (B4): a card in one is finished, and its runs' worktrees
  * and branches are torn down when it gets there (LOB-268). Hard-coded by name: `BoardColumn.kind`
  * says it per definition, and moves read the card's definition since LOB-267, but the workspace
- * release still decides "finished" from the column's name alone, which is the default pipeline's.
+ * release still decides "finished" from the column's name alone, which is the default pipeline's, and
+ * so does the caps' count of runs in flight. An authored version (D4) is therefore held to it: its
+ * terminal columns carry these names, and a column so named is terminal (`authoredDefinitionFaults`).
  */
 export const TERMINAL_COLUMNS: ReadonlyArray<string> = ["done", "canceled"];
 
@@ -283,54 +290,85 @@ export const initialColumnOf = (
   definition.initialColumn ?? definition.columns[0]?.name;
 
 /**
- * Why `definition` cannot be used as written, one sentence per fault, or `[]` when it can (LOB-267):
+ * One reason a definition cannot be used as written (LOB-267, D4): the field at fault, as a path into
+ * the definition (`columns[2].transitions[0].to`, `initialColumn`), and the sentence that says why.
+ * The path is what an author edits; the sentence names the column, so it reads without the file.
+ */
+export const DefinitionFault = Schema.Struct({
+  field: Schema.String,
+  message: Schema.String,
+});
+export type DefinitionFault = typeof DefinitionFault.Type;
+
+/**
+ * Why `definition` cannot be used as written, one fault per problem, or `[]` when it can (LOB-267):
  * a column named twice, an initial column it does not declare, a move to a column it does not
  * declare, to the column itself, or to one target twice, and a gate with no name. Every move a card
  * makes is checked against the definition, so these are the faults that would leave a card with a
- * move no lane shows or a lane it can never leave. Default version 4's seed is held to it; so will
- * an authored version be.
+ * move no lane shows or a lane it can never leave. Default version 4's seed is held to it, and an
+ * authored version (`defineBoard`, D4) to it and to the authoring rules `@repo/core` adds.
  */
-export const definitionProblems = (
+export const definitionFaults = (
   definition: DefinitionMoves,
-): ReadonlyArray<string> => {
-  const problems: Array<string> = [];
+): ReadonlyArray<DefinitionFault> => {
+  const faults: Array<DefinitionFault> = [];
   const names = new Set<string>();
-  for (const column of definition.columns) {
+  definition.columns.forEach((column, index) => {
     if (names.has(column.name))
-      problems.push(`column "${column.name}" is declared more than once`);
+      faults.push({
+        field: `columns[${index}].name`,
+        message: `column "${column.name}" is declared more than once`,
+      });
     names.add(column.name);
-  }
+  });
   if (definition.columns.length === 0)
-    problems.push("the definition declares no columns");
+    faults.push({
+      field: "columns",
+      message: "the definition declares no columns",
+    });
   if (
     definition.initialColumn !== undefined &&
     !names.has(definition.initialColumn)
   )
-    problems.push(
-      `the initial column "${definition.initialColumn}" is not a column of the definition`,
-    );
-  for (const column of definition.columns) {
+    faults.push({
+      field: "initialColumn",
+      message: `the initial column "${definition.initialColumn}" is not a column of the definition`,
+    });
+  definition.columns.forEach((column, index) => {
     const targets = new Set<string>();
-    for (const transition of column.transitions ?? []) {
+    (column.transitions ?? []).forEach((transition, move) => {
+      const at = `columns[${index}].transitions[${move}]`;
       if (!names.has(transition.to))
-        problems.push(
-          `column "${column.name}" declares a move to "${transition.to}", which is not a column of the definition`,
-        );
+        faults.push({
+          field: `${at}.to`,
+          message: `column "${column.name}" declares a move to "${transition.to}", which is not a column of the definition`,
+        });
       if (transition.to === column.name)
-        problems.push(`column "${column.name}" declares a move to itself`);
+        faults.push({
+          field: `${at}.to`,
+          message: `column "${column.name}" declares a move to itself`,
+        });
       if (targets.has(transition.to))
-        problems.push(
-          `column "${column.name}" declares its move to "${transition.to}" more than once`,
-        );
+        faults.push({
+          field: `${at}.to`,
+          message: `column "${column.name}" declares its move to "${transition.to}" more than once`,
+        });
       targets.add(transition.to);
       if (transition.gate !== undefined && transition.gate.trim() === "")
-        problems.push(
-          `column "${column.name}"'s move to "${transition.to}" names a gate with no name`,
-        );
-    }
-  }
-  return problems;
+        faults.push({
+          field: `${at}.gate`,
+          message: `column "${column.name}"'s move to "${transition.to}" names a gate with no name`,
+        });
+    });
+  });
+  return faults;
 };
+
+/** `definitionFaults`' sentences alone: what a migration's seed and `createTask` refuse with. */
+export const definitionProblems = (
+  definition: DefinitionMoves,
+): ReadonlyArray<string> =>
+  definitionFaults(definition).map((fault) => fault.message);
 
 /**
  * A versioned board definition: the column set a board instance binds to (B2).
@@ -431,8 +469,8 @@ export type DefinitionSummary = typeof DefinitionSummary.Type;
 
 /**
  * Which definitions exist (LOB-270), ordered by id: what `factory board create --definition` and
- * `--definition-version` can name. Definitions are written by migrations only, so the list is small
- * and is answered whole.
+ * `--definition-version` can name. Definitions are written by migrations and by `defineBoard` (D4), a
+ * person at a time, so the list is small and is answered whole.
  */
 export const ListDefinitionsInput = Schema.Struct({});
 export type ListDefinitionsInput = typeof ListDefinitionsInput.Type;
@@ -556,6 +594,46 @@ export const CreatedBoard = Schema.Struct({
 });
 export type CreatedBoard = typeof CreatedBoard.Type;
 
+/**
+ * A new version of a definition, authored (D4): what `defineBoard` and `factory board define --file`
+ * take. The shape is `BoardDefinition`'s less the version, which the server assigns (newest + 1, or 1
+ * for an id it does not hold) — an author never names one, so no two authors can write the same
+ * version, and no row is ever edited in place (B2).
+ *
+ * `initialColumn` is optional here only so its absence is refused by the service as an
+ * `InvalidDefinition` naming the field, beside every other fault of the file, rather than as a schema
+ * error: an authored version always names where a new card starts. `caps` absent is no caps.
+ * `dryRun` validates the version, against everything a write would be checked against, and writes
+ * nothing.
+ */
+export const DefineBoardInput = Schema.Struct({
+  id: DefinitionId,
+  name: Schema.String,
+  columns: Schema.Array(BoardColumn),
+  initialColumn: Schema.optional(Schema.String),
+  caps: Schema.optional(BoardCaps),
+  dryRun: Schema.optional(Schema.Boolean),
+});
+export type DefineBoardInput = typeof DefineBoardInput.Type;
+
+/**
+ * What a `defineBoard` did (D4):
+ *
+ * - `created` — the version was written, as `definition.version`;
+ * - `unchanged` — the definition's newest version already holds exactly this content, so nothing was
+ *   written and `definition` is that version (a retried define is not a second version);
+ * - `validated` — a dry run of a new version: it would be written as `definition.version`, and was
+ *   not.
+ *
+ * `definition` is described as `getDefinition` describes a version, so the answer says what a board
+ * pinned to it will do.
+ */
+export const DefinedBoard = Schema.Struct({
+  outcome: Schema.Literals(["created", "unchanged", "validated"]),
+  definition: DefinitionConfig,
+});
+export type DefinedBoard = typeof DefinedBoard.Type;
+
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);
 export type TaskPriority = typeof TaskPriority.Type;
@@ -566,12 +644,15 @@ export type TaskPriority = typeof TaskPriority.Type;
  * `blocked` is a **card state, not a column**: a blocked card stays visible in its own lane, so
  * there is no "return to where it was" ambiguity and no `ready` column pretending to be a queue.
  * B7 adds that a block carries the question a run ended with, recorded as a comment on the task.
+ * `setup_failed` is a run parked before its first turn because its worktree's declared `install` or
+ * `build` failed (S-env-setup): the note names the step, its exit code and its output's last lines.
  */
 export const BlockReason = Schema.Literals([
   "dependency",
   "needs_input",
   "capability",
   "transient",
+  "setup_failed",
 ]);
 export type BlockReason = typeof BlockReason.Type;
 
@@ -841,6 +922,37 @@ export type TaskRun = typeof TaskRun.Type;
 export const ListTaskRunsInput = Schema.Struct({ taskId: TaskId });
 export type ListTaskRunsInput = typeof ListTaskRunsInput.Type;
 
+/**
+ * The newest run of a card, as a card face shows it (C10): which session it is and whether it is
+ * working. `status` is the session index's (`session_activity`), so it is what `listSessions` says
+ * about the same session — a run whose index row is missing reads `idle`, never `busy`.
+ */
+export const BoardCardRun = Schema.Struct({
+  sessionId: SessionId,
+  status: SessionStatus,
+  startedAt: Timestamp,
+});
+export type BoardCardRun = typeof BoardCardRun.Type;
+
+/**
+ * One card with what its runs say, as `listBoardCards` returns it (C10): the card, how many runs it
+ * has had, what they cost and where the newest stands, so a lane answers "what is live, what has a
+ * PR, what did it cost" without a read per card.
+ *
+ * - `run` is the newest run by `started_at` and is absent for a card no run was started against.
+ * - `prUrl` is the newest run's PR that has one, not necessarily the newest run's: a later run that
+ *   only reads the card does not take the link away from the run that opened it.
+ * - `costTotal` sums every run's `session_activity.cost_total`, in the dollars `pi.usage` reports.
+ */
+export const BoardCard = Schema.Struct({
+  task: Task,
+  runCount: Schema.Int,
+  costTotal: Schema.Finite,
+  run: Schema.optional(BoardCardRun),
+  prUrl: Schema.optional(Schema.String),
+});
+export type BoardCard = typeof BoardCard.Type;
+
 export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   "TaskNotFound",
   { taskId: Schema.String, message: Schema.String },
@@ -961,6 +1073,21 @@ export class InvalidTaskInput extends Schema.TaggedError<InvalidTaskInput>()(
   { field: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * An authored definition version that cannot be used as written (D4): `field` is the first fault's
+ * path into the definition, and `problems` every fault, in the order the file declares them. Nothing
+ * is written.
+ */
+export class InvalidDefinition extends Schema.TaggedError<InvalidDefinition>()(
+  "InvalidDefinition",
+  {
+    definitionId: Schema.String,
+    field: Schema.String,
+    problems: Schema.Array(DefinitionFault),
+    message: Schema.String,
+  },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -975,6 +1102,7 @@ export type TaskError =
   | NotBlocked
   | EmptyComment
   | InvalidTaskInput
+  | InvalidDefinition
   | TaskStorageError;
 
 /**

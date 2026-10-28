@@ -44,7 +44,12 @@ import {
   Redacted,
   Schema,
 } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpRouter,
+  HttpServer,
+} from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
@@ -65,6 +70,7 @@ import {
   TriggerAdaptersLog,
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
+import { NotifierDaemon } from "./Notifications";
 import { SessionRpcLive } from "./Rpc/Session";
 import {
   ApiAuthConfig,
@@ -763,27 +769,45 @@ const HttpLive = Effect.gen(function* () {
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
-  const SessionDeps = SessionServiceLive({
-    reviewPoster,
-    repoMirror,
-    repoRemote,
-    model: modelAccess,
-    roleModels,
-    sessionRoot: model.sessionRoot,
-    sandbox,
-    idleTimeoutMs: model.idleTimeoutMs,
-    ...Option.match(maxConcurrent, {
-      onNone: () => ({}),
-      onSome: (limit) => ({ maxConcurrentSessions: limit }),
-    }),
-    prCap,
-    autonomy,
-    ...Option.match(defaultBudget, {
-      onNone: () => ({}),
-      onSome: (budget) => ({ defaultBudget: budget }),
-    }),
-  }).pipe(
-    Layer.provide(Layer.mergeAll(SessionWriteBacksLive, ProposalTrackerLive)),
+  //
+  // The PR step a settled run takes with no operator call (C18) reaches the forge through the pair
+  // the RPC member is handed — the credential provider and a client on `GITHUB_API_URL` — read
+  // inside the layer graph from `PullRequestStepDeps`, the same layer the routes are given: one
+  // build of it, so one provider (and one App-token cache) answers a settle, a call and the boot log.
+  const SessionDeps = Layer.unwrap(
+    Effect.map(
+      Effect.context<CredentialProvider | HttpClient.HttpClient>(),
+      (pullRequestOnSettle) =>
+        SessionServiceLive({
+          pullRequestOnSettle,
+          reviewPoster,
+          repoMirror,
+          repoRemote,
+          model: modelAccess,
+          roleModels,
+          sessionRoot: model.sessionRoot,
+          sandbox,
+          idleTimeoutMs: model.idleTimeoutMs,
+          ...Option.match(maxConcurrent, {
+            onNone: () => ({}),
+            onSome: (limit) => ({ maxConcurrentSessions: limit }),
+          }),
+          prCap,
+          autonomy,
+          ...Option.match(defaultBudget, {
+            onNone: () => ({}),
+            onSome: (budget) => ({ defaultBudget: budget }),
+          }),
+        }),
+    ),
+  ).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        SessionWriteBacksLive,
+        ProposalTrackerLive,
+        PullRequestStepDeps,
+      ),
+    ),
   );
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
@@ -834,6 +858,8 @@ const HttpLive = Effect.gen(function* () {
     LinearSyncLog,
     TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
+    // Tells a person when a run needs them (S-notifications); off, it logs one line and forks nothing.
+    NotifierDaemon(allowedOrigins[0] ?? "http://localhost:3000"),
     PullRequestStepDeps,
     ServerFactsLive,
     controlPlaneAuthLayer(apiTokens),
@@ -868,6 +894,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
+  );
+  yield* Effect.logInfo(
+    "  - a settled run opens its PR with no operator call when a trigger opened its session or its card's column requires a PR",
   );
 
   const CorsRouters = Layer.mergeAll(

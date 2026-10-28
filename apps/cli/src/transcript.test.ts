@@ -10,6 +10,7 @@ import {
   formatEarlier,
   formatEntry,
   formatQueued,
+  isAnswer,
   readEarlier,
 } from "./transcript";
 
@@ -138,5 +139,32 @@ describe("reading earlier history from a terminal (LOB-243)", () => {
     );
     expect(page.earlier).toBeUndefined();
     expect(asked).toEqual(["11", "8", "5", "2"]);
+  });
+});
+
+describe("the run's answer (S-notifications)", () => {
+  const assistant = (
+    text: string,
+    failed?: { readonly error: string },
+  ): TranscriptEntry => ({
+    id: "5",
+    kind: "assistant",
+    text,
+    toolCalls: [],
+    ...(failed === undefined ? {} : { isError: true, error: failed.error }),
+  });
+
+  it("is an assistant entry with text", () => {
+    expect(isAnswer(assistant("done"))).toBe(true);
+    expect(isAnswer(assistant("  "))).toBe(false);
+  });
+
+  it("is never a failed model request, so a failed run prints no answer", () => {
+    expect(isAnswer(assistant("", { error: "invalid_api_key: refused" }))).toBe(
+      false,
+    );
+    expect(
+      isAnswer(assistant("partial answer", { error: "connection reset" })),
+    ).toBe(false);
   });
 });

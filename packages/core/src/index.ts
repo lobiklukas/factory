@@ -7,6 +7,7 @@ export * from "./TaskService";
 export * from "./taskProjection";
 export * from "./requirements";
 export * from "./boardConfig";
+export * from "./boardDefine";
 export * from "./pr";
 export * from "./prStep";
 
@@ -35,3 +36,4 @@ export * from "./PullRequestMerge";
 export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
+export * from "./Notifier";

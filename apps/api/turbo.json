@@ -87,7 +87,11 @@
         "SLACK_SESSION_URL_BASE",
         "NODE_ENV",
         "FACTORY_API_ACTOR",
-        "FACTORY_API_AUTH"
+        "FACTORY_API_AUTH",
+        "NOTIFY_NTFY_URL",
+        "NOTIFY_TYPES",
+        "NOTIFY_LINK_BASE",
+        "NOTIFY_POLL_MS"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       // The ANTHROPIC_* names are every variable pi-ai's Anthropic provider authenticates from, which
@@ -120,7 +124,12 @@
         "SLACK_BOT_TOKEN",
         // The control plane's own credentials (LOB-20): the shared token and the per-actor table.
         "FACTORY_API_TOKEN",
-        "FACTORY_API_TOKENS"
+        "FACTORY_API_TOKENS",
+        // The notifier's destinations (S-notifications): a Slack webhook URL and an ntfy topic are
+        // each the credential to post there, and an ntfy token is one outright.
+        "NOTIFY_SLACK_WEBHOOK_URL",
+        "NOTIFY_NTFY_TOPIC",
+        "NOTIFY_NTFY_TOKEN"
       ]
     }
   }

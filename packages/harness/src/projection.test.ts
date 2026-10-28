@@ -11,11 +11,14 @@
  */
 import {
   type ConversationView,
+  type EntryId,
+  type EntryRecord,
   ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
   diffView,
+  projectEntry,
   projectInbox,
   projectUsageDoc,
   usageCostTotal,
@@ -165,5 +168,63 @@ describe("diffView", () => {
       "live",
       "status",
     ]);
+  });
+});
+
+/** One assistant entry as Pi Durable appends it, ending with `stopReason`. */
+const assistantEntry = (
+  stopReason: "stop" | "error",
+  text: string,
+  errorMessage?: string,
+): EntryRecord => ({
+  id: 7 as EntryId,
+  conversationId: ROOT_CONVERSATION_ID,
+  kind: "pi.assistant",
+  model: [
+    {
+      role: "assistant",
+      content: text === "" ? [] : [{ type: "text", text }],
+      api: "faux",
+      provider: "faux",
+      model: "faux",
+      usage: entry(0, 0, 0),
+      stopReason,
+      ...(errorMessage === undefined ? {} : { errorMessage }),
+      timestamp: 0,
+    },
+  ],
+});
+
+describe("projectEntry on a failed model request (S-notifications)", () => {
+  it("marks the entry an error and carries the provider's message beside an empty text", () => {
+    const projected = projectEntry(
+      assistantEntry("error", "", "overloaded_error: try again later"),
+    );
+    expect(projected.kind).toBe("assistant");
+    expect(projected.isError).toBe(true);
+    // The text stays what the model answered — nothing — so no reader takes the error for an answer.
+    expect(projected.text).toBe("");
+    expect(projected.error).toBe("overloaded_error: try again later");
+  });
+
+  it("keeps an error's own text when the answer carried some", () => {
+    const projected = projectEntry(
+      assistantEntry("error", "partial answer", "connection reset"),
+    );
+    expect(projected.isError).toBe(true);
+    expect(projected.text).toBe("partial answer");
+    expect(projected.error).toBe("connection reset");
+  });
+
+  it("names a failure the provider gave no message for", () => {
+    const projected = projectEntry(assistantEntry("error", ""));
+    expect(projected.error).toBe("the model request failed");
+  });
+
+  it("says nothing about errors on an answer that stopped normally", () => {
+    const projected = projectEntry(assistantEntry("stop", "done"));
+    expect(projected.isError).toBeUndefined();
+    expect(projected.error).toBeUndefined();
+    expect(projected.text).toBe("done");
   });
 });

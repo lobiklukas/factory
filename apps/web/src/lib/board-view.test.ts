@@ -132,6 +132,21 @@ describe("blockedLabel", () => {
       ),
     ).toBe("blocked · needs input");
   });
+
+  it("names a run parked on its worktree setup (S-env-setup)", () => {
+    expect(
+      blockedLabel(
+        card("a", "building", {
+          blocked: {
+            reason: "setup_failed",
+            column: "building",
+            note: "setup failed: install `bun install` exited 1",
+            since: AT,
+          },
+        }),
+      ),
+    ).toBe("blocked · setup failed");
+  });
 });
 
 /** The default pipeline's columns and kinds (B4), as the seeded definition declares them. */

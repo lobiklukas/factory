@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_REPO_FORM,
   notRunnableCount,
+  readinessView,
   registerInput,
   registerRefusal,
   runnability,
@@ -109,6 +110,47 @@ describe("runnability", () => {
         row({ repo: slug("acme/moved"), localPath: "/m" }),
       ]),
     ).toBe(2);
+  });
+});
+
+describe("readinessView", () => {
+  it("is null when the server scored nothing, rather than a zero", () => {
+    expect(readinessView(row())).toBeNull();
+  });
+
+  it("shows the score and the reason of every failed check, in the server's order", () => {
+    const view = readinessView(
+      row({
+        readiness: {
+          score: 2,
+          max: 4,
+          checks: [
+            { name: "agents-md", passed: true, reason: "AGENTS.md present" },
+            { name: "package-scripts", passed: false, reason: "no build" },
+            { name: "verify-skills", passed: true, reason: "a verify skill" },
+            { name: "skill-dir", passed: false, reason: "no SKILL.md" },
+          ],
+        },
+      }),
+    );
+    expect(view).toEqual({
+      score: "2/4",
+      ready: false,
+      missing: ["no build", "no SKILL.md"],
+    });
+  });
+
+  it("is ready only when every check passed", () => {
+    const view = readinessView(
+      row({
+        readiness: {
+          score: 1,
+          max: 1,
+          checks: [{ name: "agents-md", passed: true, reason: "present" }],
+        },
+      }),
+    );
+    expect(view).toEqual({ score: "1/1", ready: true, missing: [] });
   });
 });
 

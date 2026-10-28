@@ -4,7 +4,8 @@
  * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
  * exist before any card and this service is the one that reads it back for every card; so are the
- * definitions they bind (`listDefinitions`, `getDefinition`, LOB-270), which only migrations write.
+ * definitions they bind (`listDefinitions`, `getDefinition`, LOB-270), which migrations seed and
+ * `defineBoard` (D4) adds versions to — validated first (`./boardDefine`), and never in place (B2).
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
@@ -68,6 +69,8 @@ import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
   AttentionItem,
+  BoardCaps,
+  BoardCard,
   BoardColumn,
   BoardDefinition,
   BoardInstance,
@@ -77,6 +80,9 @@ import {
   type DefinitionMoves,
   definitionProblems,
   type CreatedBoard,
+  type DefineBoardInput,
+  type DefinedBoard,
+  DefinitionFault,
   DefinitionSummary,
   gatedColumns,
   gatedExit,
@@ -109,6 +115,11 @@ import {
 import { PostgresStorage } from "@repo/storage-postgres";
 import { isSafeBranchName } from "./git";
 import { mintBoardId, mintTaskId } from "./ids";
+import {
+  authoredDefinitionFaults,
+  type DefinitionLibrary,
+  HARNESS_ROLES,
+} from "./boardDefine";
 import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
 import { measureBaseOf } from "./RepoRemote";
@@ -250,6 +261,20 @@ export class InvalidTaskInput extends Schema.TaggedError<InvalidTaskInput>()(
   { field: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * An authored definition version that cannot be used as written (D4, `./boardDefine`): `field` is
+ * the first fault's path into the definition, `problems` every fault. Nothing is written.
+ */
+export class InvalidDefinition extends Schema.TaggedError<InvalidDefinition>()(
+  "InvalidDefinition",
+  {
+    definitionId: Schema.String,
+    field: Schema.String,
+    problems: Schema.Array(DefinitionFault),
+    message: Schema.String,
+  },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -264,6 +289,7 @@ export type TaskError =
   | NotBlocked
   | EmptyComment
   | InvalidTaskInput
+  | InvalidDefinition
   | TaskStorageError;
 
 export type CreateTaskInput = {
@@ -344,6 +370,21 @@ export type AskTaskInput = {
 };
 
 /**
+ * A run parking its own card on something only a person can fix (S-env-setup): a block by the run
+ * itself, with the reason and a note saying what to fix.
+ *
+ * No expected revision, for the ask's reason: the writer is the run working the card, not a person
+ * who read it. A card already blocked keeps the block it has — whatever it waits on was there first,
+ * and replacing it would hide it — and is answered as it is.
+ */
+export type ParkRunInput = {
+  readonly taskId: string;
+  readonly reason: BlockReasonType;
+  readonly note: string;
+  readonly actor: Actor;
+};
+
+/**
  * A specifying run's spec, as its `spec` tool posts it on the card (LOB-238).
  *
  * Like the ask, no expected revision: the writer is the run working the card, not a person who read
@@ -402,6 +443,24 @@ export type TaskServiceShape = {
     definitionId: string,
     version?: number,
   ) => Effect.Effect<BoardDefinition, TaskError>;
+  /**
+   * A new version of a definition, authored (D4): written as the id's newest version + 1 (1 for an id
+   * the factory does not hold), never over a row that exists (B2). Content identical to the newest
+   * version writes nothing and answers that version (`unchanged`); a dry run validates and answers
+   * the version it would write (`validated`). A version the rules refuse (`./boardDefine`, against
+   * `library`'s skills and roles, plus the roles the definitions held already declare) is
+   * `InvalidDefinition`, naming the field, and nothing is written.
+   */
+  readonly defineBoard: (
+    input: DefineBoardInput,
+    library: DefinitionLibrary,
+  ) => Effect.Effect<
+    {
+      readonly outcome: DefinedBoard["outcome"];
+      readonly definition: BoardDefinition;
+    },
+    TaskError
+  >;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   /**
    * Make a card for an outside item unless the board already has one for it (LOB-254): the door a
@@ -413,11 +472,21 @@ export type TaskServiceShape = {
   readonly list: (
     input: ListTasksInput,
   ) => Effect.Effect<ReadonlyArray<Task>, TaskError>;
+  /**
+   * A board's cards in `list`'s order, each with its runs' newest status, PR link and summed spend
+   * (C10): three reads over the board's runs however many cards it has, so a lane's faces never cost
+   * a read per card.
+   */
+  readonly listCards: (
+    input: ListTasksInput,
+  ) => Effect.Effect<ReadonlyArray<BoardCard>, TaskError>;
   readonly move: (input: MoveTaskInput) => Effect.Effect<Task, TaskError>;
   readonly block: (input: BlockTaskInput) => Effect.Effect<Task, TaskError>;
   readonly unblock: (input: UnblockTaskInput) => Effect.Effect<Task, TaskError>;
   /** A run's question: a `question` comment and a `needs_input` block from the card's column. */
   readonly ask: (input: AskTaskInput) => Effect.Effect<Task, TaskError>;
+  /** A run's own block of its card (`ParkRunInput`): a card already blocked keeps its block. */
+  readonly parkRun: (input: ParkRunInput) => Effect.Effect<Task, TaskError>;
   /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
   readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
   /** The card's thread, oldest first: every `commented` event, verbatim. */
@@ -648,6 +717,37 @@ const capsField = (caps: unknown): { readonly caps?: unknown } =>
   caps === null || caps === undefined ? {} : { caps };
 
 /**
+ * A definition version's content as one string, for `defineBoard`'s "identical" (D4): object keys
+ * sorted and absent fields dropped, so a row read back from JSONB (which stores keys in its own order)
+ * and a file written in any key order compare equal exactly when they declare the same thing.
+ * Array order is kept — the order of columns, moves, requirements and skills is meaning.
+ */
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, field: unknown) =>
+    field !== null && typeof field === "object" && !Array.isArray(field)
+      ? Object.fromEntries(
+          Object.entries(field)
+            .filter(([, entry]) => entry !== undefined)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
+      : field,
+  );
+
+/** What `defineBoard` compares: everything a version declares but its id and its version number. */
+const definitionContent = (definition: {
+  readonly name: string;
+  readonly columns: ReadonlyArray<BoardColumn>;
+  readonly initialColumn?: string | undefined;
+  readonly caps?: BoardCaps | undefined;
+}): string =>
+  canonicalJson({
+    name: definition.name,
+    columns: definition.columns,
+    initialColumn: definition.initialColumn,
+    caps: definition.caps,
+  });
+
+/**
  * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
  * then session, then request id) into one, without reordering either. `key` is the request time at
  * microsecond precision, as the database orders it: the `requestedAt` an item carries is cut to
@@ -703,6 +803,12 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
     const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(TaskEvent));
+    const encodeColumnsJson = Schema.encodeEffect(
+      Schema.fromJsonString(Schema.Array(BoardColumn)),
+    );
+    const encodeCapsJson = Schema.encodeEffect(
+      Schema.fromJsonString(BoardCaps),
+    );
 
     const toInstance = (
       row: BoardInstanceRow,
@@ -1118,6 +1224,122 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    /**
+     * A new version of a definition (D4). The rules come first and touch nothing (`./boardDefine`);
+     * then one transaction takes an advisory lock on the definition's id, reads its newest version and
+     * either answers it (the same content: `unchanged`), answers the version a write would take (a
+     * dry run: `validated`), or inserts newest + 1. The lock is what makes "newest + 1" safe: two
+     * concurrent defines of one id are serialised, so the second reads the first's version as the
+     * newest and takes the next one, rather than meeting the primary key. Nothing here updates a row
+     * — a board pinned to an older version keeps reading exactly what it pinned (B2).
+     */
+    const defineBoard = (
+      input: DefineBoardInput,
+      library: DefinitionLibrary,
+    ): Effect.Effect<
+      {
+        readonly outcome: DefinedBoard["outcome"];
+        readonly definition: BoardDefinition;
+      },
+      TaskError
+    > =>
+      Effect.gen(function* () {
+        const { dryRun, ...authored } = input;
+        // The roles the definitions the factory holds already declare are accepted as known (the
+        // default pipeline's `planner` and `builder` among them): `ROLE_MODELS` is a partial override
+        // table, so re-authoring a version under one that names only `reviewer` must not be refused
+        // for the roles the version it replaces runs with today. A row whose `columns` is not an
+        // array (0007 leaves it unconstrained) contributes nothing rather than failing the read.
+        const declared = yield* withStorage(
+          sql<{ readonly role: string }>`
+            SELECT DISTINCT c ->> 'role' AS role
+            FROM board_definitions d
+            CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(d.columns) = 'array' THEN d.columns ELSE '[]'::jsonb END
+            ) AS c
+            WHERE jsonb_typeof(c) = 'object' AND c ->> 'role' IS NOT NULL
+          `,
+        );
+        const knownRoles: ReadonlySet<string> = new Set([
+          ...(library.knownRoles ?? HARNESS_ROLES),
+          ...declared.map((row) => row.role),
+        ]);
+        const faults = authoredDefinitionFaults(authored, {
+          ...library,
+          knownRoles,
+        });
+        const first = faults[0];
+        if (first !== undefined) {
+          return yield* new InvalidDefinition({
+            definitionId: input.id,
+            field: first.field,
+            problems: faults,
+            message: `definition ${input.id}: ${first.field}: ${first.message}${faults.length > 1 ? ` (and ${faults.length - 1} more)` : ""}`,
+          });
+        }
+        const encodedColumns = yield* encodeColumnsJson(authored.columns);
+        const encodedCaps =
+          authored.caps === undefined
+            ? null
+            : yield* encodeCapsJson(authored.caps);
+        return yield* withStorage(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`
+                SELECT pg_advisory_xact_lock(hashtext(${`board_definitions:${input.id}`}))
+              `;
+              const newest = yield* getDefinition(input.id).pipe(
+                Effect.map(Option.some),
+                Effect.catchTag("DefinitionNotFound", () => Effect.succeedNone),
+              );
+              if (
+                Option.isSome(newest) &&
+                definitionContent(newest.value) === definitionContent(authored)
+              ) {
+                return {
+                  outcome: "unchanged" as const,
+                  definition: newest.value,
+                };
+              }
+              const version = Option.match(newest, {
+                onNone: () => 1,
+                onSome: (definition) => definition.version + 1,
+              });
+              if (dryRun === true) {
+                return {
+                  outcome: "validated" as const,
+                  definition: {
+                    ...authored,
+                    version,
+                  } satisfies BoardDefinition,
+                };
+              }
+              yield* sql`
+                INSERT INTO board_definitions (id, version, name, columns, initial_column, caps)
+                VALUES (
+                  ${input.id}, ${version}, ${authored.name}, ${encodedColumns}::jsonb,
+                  ${authored.initialColumn ?? null}, ${encodedCaps}::jsonb
+                )
+              `;
+              // Read back through the one decoder every reader uses, so the answer is the row as
+              // `getDefinition` and a board pinned to it will read it — not the input echoed.
+              return {
+                outcome: "created" as const,
+                definition: yield* getDefinition(input.id, version),
+              };
+            }),
+          ),
+        );
+      }).pipe(
+        Effect.catchTag("SchemaError", (cause) =>
+          Effect.fail(
+            new TaskStorageError({
+              message: `definition ${input.id} does not encode: ${String(cause)}`,
+            }),
+          ),
+        ),
+      );
+
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
       withStorage(
         Effect.gen(function* () {
@@ -1180,8 +1402,8 @@ export const TaskServiceLive = Layer.effect(
         };
         // A definition that cannot be used as written (an initial column it lacks, no columns
         // at all, a move to a lane it lacks) makes no card: one would start in a lane the board
-        // does not render, with no moves out (LOB-267). Only migrations write definitions today,
-        // and 0026 holds its seed to the same check; an authored version will be too.
+        // does not render, with no moves out (LOB-267). 0026 holds its seed to the same check, and
+        // `defineBoard` (D4) an authored version; a row written any other way is held to it here.
         const problems = definitionProblems(definition);
         const column = initialColumnOf(definition);
         if (problems.length > 0 || column === undefined) {
@@ -1291,6 +1513,87 @@ export const TaskServiceLive = Layer.effect(
                   ORDER BY (priority = 'urgent') DESC, created_at, id
                 `;
           return yield* Effect.forEach(rows, toTask);
+        }),
+      );
+
+    /**
+     * The board's cards and what their runs say (C10). The card list is `list`'s; the run facts come
+     * from three statements scoped to the board, never one per card: the runs' count and summed
+     * spend, the newest run's session and status, and the newest PR any run recorded. A run whose
+     * session index row is missing counts for zero spend and reads `idle`, so a missing row never
+     * shows a card as working.
+     */
+    const listCards = (
+      input: ListTasksInput,
+    ): Effect.Effect<ReadonlyArray<BoardCard>, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const tasks = yield* list(input);
+          if (tasks.length === 0) return [];
+          const totals = yield* sql<{
+            taskId: string;
+            runCount: number;
+            costTotal: number;
+          }>`
+            SELECT tr.task_id, COUNT(*)::int AS run_count,
+                   COALESCE(SUM(sa.cost_total), 0)::float8 AS cost_total
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            LEFT JOIN session_activity sa ON sa.session_id = tr.session_id
+            WHERE t.board_id = ${input.boardId}
+            GROUP BY tr.task_id
+          `;
+          const newest = yield* sql<{
+            taskId: string;
+            sessionId: string;
+            startedAt: Date | string;
+            status: string | null;
+          }>`
+            SELECT DISTINCT ON (tr.task_id) tr.task_id, tr.session_id, tr.started_at, sa.status
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            LEFT JOIN session_activity sa ON sa.session_id = tr.session_id
+            WHERE t.board_id = ${input.boardId}
+            ORDER BY tr.task_id, tr.started_at DESC, tr.id DESC
+          `;
+          const pulls = yield* sql<{ taskId: string; prUrl: string }>`
+            SELECT DISTINCT ON (tr.task_id) tr.task_id, s.pr_url
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            JOIN sessions s ON s.id = tr.session_id
+            WHERE t.board_id = ${input.boardId} AND s.pr_url IS NOT NULL AND s.pr_url <> ''
+            ORDER BY tr.task_id, tr.started_at DESC, tr.id DESC
+          `;
+          const totalOf = new Map(totals.map((row) => [row.taskId, row]));
+          const newestOf = new Map(newest.map((row) => [row.taskId, row]));
+          const prOf = new Map(pulls.map((row) => [row.taskId, row.prUrl]));
+          return yield* Effect.forEach(tasks, (task) => {
+            const total = totalOf.get(task.id);
+            const run = newestOf.get(task.id);
+            const prUrl = prOf.get(task.id);
+            return decodeCard({
+              task,
+              runCount: total?.runCount ?? 0,
+              costTotal: total?.costTotal ?? 0,
+              ...(run === undefined
+                ? {}
+                : {
+                    run: {
+                      sessionId: run.sessionId,
+                      status: run.status === "busy" ? "busy" : "idle",
+                      startedAt: iso(run.startedAt),
+                    },
+                  }),
+              ...(prUrl === undefined ? {} : { prUrl }),
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TaskStorageError({
+                    message: `card ${task.id} does not read as a board card: ${String(cause)}`,
+                  }),
+              ),
+            );
+          });
         }),
       );
 
@@ -1785,6 +2088,40 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    const parkRun = (input: ParkRunInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (row.blockedReason !== null) return yield* toTask(row);
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = ${input.reason}, blocked_column = ${row.column},
+                  blocked_note = ${input.note}, blocked_since = now(),
+                  revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "blocked",
+              taskId: TaskId.make(input.taskId),
+              reason: input.reason,
+              column: row.column,
+              actor: input.actor,
+              revision: row.revision,
+            });
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
     const comment = (input: CommentTaskInput): Effect.Effect<Task, TaskError> =>
       withStorage(
         sql.withTransaction(
@@ -2042,6 +2379,7 @@ export const TaskServiceLive = Layer.effect(
       );
 
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
+    const decodeCard = Schema.decodeUnknownEffect(BoardCard);
 
     /**
      * A card's runs, newest first (LOB-76). The card is looked up first so an unknown id is a
@@ -2399,6 +2737,7 @@ export const TaskServiceLive = Layer.effect(
       createBoard,
       listDefinitions,
       getDefinition,
+      defineBoard,
       create,
       file,
       get,
@@ -2407,11 +2746,13 @@ export const TaskServiceLive = Layer.effect(
       block,
       unblock,
       ask,
+      parkRun,
       comment,
       comments,
       declareSpec,
       spec,
       replay,
+      listCards,
       listRuns,
       attention,
     } satisfies TaskServiceShape;

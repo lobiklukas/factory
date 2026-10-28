@@ -37,7 +37,30 @@ Built (LOB-270): definitions and a board's configuration are readable over RPC (
 config`). Each column is described with its declared exits and human gates (what `TaskService`
 refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS`), and
 its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-only, joined by
-`describeDefinition` in `packages/core`.
+`describeDefinition` in `packages/core`. The dashboard renders the same `getBoardConfig` answer
+read-only at `/boards/<id>/settings` and in each lane header's disclosure, and says when a version
+newer than the board's pin exists (`.pi/skills/verify-web/features/board-settings.md`).
+
+Built (D4): a new definition version is authored without a migration — `defineBoard` over RPC and
+`factory board define --file def.json [--dry-run]`. It is written as the id's newest version + 1, never
+over a row (one transaction under an advisory lock on the id); content identical to the newest version
+writes nothing and answers it; a dry run validates only. A version is refused as `InvalidDefinition`,
+naming the field, for a duplicate column, no (or a terminal, or an undeclared) initial column, a move to
+an undeclared column, a terminal column with exits, a non-terminal one with none, no terminal column, a
+terminal column not named `done`/`canceled` or a non-terminal one so named (the workspace release and
+the caps' in-flight count still decide "finished" by name), an unknown requires key, `human_move` or
+`human_merge` on a column with no gated move (the transition's `gate` is what gates), a skill the skill
+library lacks, or — when `ROLE_MODELS` has rows — a role it does not name that is neither one the
+harness gives meaning to nor one a held definition declares (`ROLE_MODELS` is a partial override
+table, so a typo is what this catches) (`authoredDefinitionFaults` in `packages/core`). An authored
+version therefore always declares its own moves and its initial column.
+
+**Seed migrations and authored versions share one id space.** The default pipeline's seeds write
+`default` at a fixed version with `ON CONFLICT (id, version) DO NOTHING` (0026 v4, 0038 v5). Since D4
+an operator may author `default` v6, and a later seed that writes `default` v6 would then do nothing,
+silently. A seed migration of an id that already exists must insert at the id's newest version + 1
+(read in the migration), never at a fixed number, and must not assume the newest version is the one
+an earlier seed wrote.
 
 Built (LOB-267): transitions, human gates and the initial column are definition data. A column
 declares `transitions: [{ to, gate? }]` and a definition its `initialColumn`
@@ -68,8 +91,10 @@ precedent ("an index, not a projection").
 | `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
-transient`) plus the column it blocked from, so a blocked card stays visible in its own lane and
-there is no "return to where it was" ambiguity. There is **no `ready` column** in the MVP: nothing
+transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
+lane and there is no "return to where it was" ambiguity. `setup_failed` is written by a run, not a
+person: its worktree's declared `install` or `build` failed before its first turn (S-env-setup), and
+the note names the step, its exit code and its output's last lines. There is **no `ready` column** in the MVP: nothing
 auto-starts, so `ready` only means something once a dispatcher exists (wave 2).
 
 ## B5 — Moves are the consequential act, so they are attributed and gated
@@ -234,6 +259,24 @@ and that run's log must record a PR (`factory.pr`, LOB-177) — so a card cannot
 change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
+
+Built (C18): a run whose column requires `pr_link` opens its PR itself. When this process sees the run
+settle (its session goes idle), the control plane runs the same PR step `factory pr` and the
+dashboard's Open pull request call — measured, capped, pushed with the provider's token and recorded
+as `factory.pr` — with no operator call (`packages/core/src/prOnSettle.ts`). A session a trigger opened
+with no card (`trigger:<source>`: Linear, Jira, GitHub, Slack, Sentry, the generic webhook, docs) does
+the same. Every other run's PR stays a person's call: a card's run in a column that requires no PR
+(the specifier, the reviewer), a person's own session, a fork or a replay (a trigger's session is
+read from the delivery it was created for, which a replay does not carry), and a working directory
+that is not its own checkout. Only a run that finished opens its PR: one parked on a person (an
+undecided approval, a blocked card) holds it until a later run settles done, which the process's log
+records as `parked`; one interrupted by an operator, stopped by its budget, or whose model answer
+failed opens none and says so. A settled run whose step opened nothing — stopped, no change, a
+diff over the cap, a remote branch the push may not overwrite, a failure — says so in its transcript
+(no-change's line, or `factory.pr.not-opened`) and as a note by the run on its card, which the card's
+next run is told; a later settle at the same commit an even branch was found at is not stepped again.
+The PR opens at the first settle that finds a change: commits a later run of the same session makes
+are not pushed by a later settle yet (the step answers `already-open` without pushing), a follow-up.
 
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
 declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or

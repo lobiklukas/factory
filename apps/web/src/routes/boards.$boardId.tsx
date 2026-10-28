@@ -13,6 +13,7 @@ import { BoardLanesView } from "@/components/board-lanes";
 import { CardPane } from "@/components/card-pane";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { EmptyPane } from "@/components/empty-pane";
+import { GettingStarted } from "@/components/getting-started";
 import { NewCardDialog } from "@/components/new-card";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -114,7 +115,8 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
 
   if (last === undefined) return null;
   const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
-  const { instance, definition, tasks, pinned } = last;
+  const { instance, definition, tasks, cards, pinned } = last;
+  const faces = new Map(cards.map((entry) => [entry.task.id, entry]));
   const selected =
     card === undefined ? undefined : tasks.find((task) => task.id === card);
   // The card's own pinned version (B2, LOB-267): the board's for every card made on it.
@@ -153,6 +155,15 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
             className="ml-auto text-xs text-muted-foreground hover:text-foreground"
           >
             Needs a person
+          </Link>
+          {/* What each column does (LOB-245): the pinned version described, read-only. */}
+          <Link
+            to="/boards/$boardId/settings"
+            params={{ boardId }}
+            data-board-settings
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Settings
           </Link>
           <span className="text-[11px] text-muted-foreground">
             {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
@@ -202,9 +213,14 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           }}
         />
         <CheckoutWarning warning={last.warning} />
+        {/* A board with no card is the next step of the checklist (C9); it leaves once a card exists. */}
+        {tasks.length === 0 ? (
+          <GettingStarted className="mx-4 mt-3 max-w-xl" boardId={boardId} />
+        ) : null}
         <BoardLanesView
           boardId={boardId}
           board={boardLanes(definition, tasks)}
+          faces={faces}
           selected={card}
         />
       </div>

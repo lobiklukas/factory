@@ -7,6 +7,7 @@ import { pendingApprovalsAtom } from "@/lib/atoms/board-atom";
 import { bySession, inboxSummary } from "@/lib/approvals-view";
 import { ApprovalItem } from "@/components/approvals";
 import { EmptyPane } from "@/components/empty-pane";
+import { EmptyLink } from "@/components/empty-link";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export const Route = createFileRoute("/approvals")({
@@ -58,6 +59,7 @@ function ApprovalsRoute() {
       icon={<CheckSquareIcon strokeWidth={1.75} />}
       title="No approvals pending"
       detail="No run is waiting on a person. A command this deployment gates (APPROVAL_REQUIRED) parks its run here until someone approves or denies it."
+      action={<EmptyLink to="/boards">Open the boards</EmptyLink>}
       visible={approvals.length === 0}
     >
       <div
