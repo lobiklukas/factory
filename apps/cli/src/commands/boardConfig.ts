@@ -1,11 +1,14 @@
-import { Console, Effect, Option, Schema } from "effect";
+import { Console, Effect, FileSystem, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import {
   BoardInstanceId,
+  DefineBoardInput,
   DefinitionId,
+  InvalidDefinition,
   LIST_BOARDS_LIMIT,
   type BoardInstance,
   type ColumnConfig,
+  type DefinedBoard,
   type DefinitionConfig,
   type DefinitionSummary,
 } from "@repo/domain/Task";
@@ -15,7 +18,9 @@ import { BoardClient } from "../rpc";
 
 /**
  * The board's configuration, read from a terminal (LOB-270): which boards and definitions exist, and
- * what one definition version — or the one a board pins — does, column by column.
+ * what one definition version — or the one a board pins — does, column by column. And the one write
+ * (D4): `board define --file`, a new version of a definition from a JSON file, validated by the
+ * server before anything is written.
  *
  * Every answer is the server's: the exits and human gates are the tables a move is refused by, a
  * requirement's `checked` is whether a move is refused over it today, and the model is the one this
@@ -287,10 +292,140 @@ const configCommand = Command.make(
   ),
 );
 
-/** The read-only configuration verbs, mounted under `factory board` beside the card verbs. */
+/**
+ * The file `board define` reads (D4): `defineBoard`'s payload less `dryRun`, which is the flag's. A
+ * key the schema does not name is refused rather than dropped — a misspelt `wipLimit` or `gate`
+ * would otherwise be a version that quietly lacks it.
+ */
+const { dryRun: _dryRun, ...definitionFileFields } = DefineBoardInput.fields;
+const DefinitionFile = Schema.fromJsonString(
+  Schema.Struct(definitionFileFields),
+);
+
+/**
+ * A definition file decoded, or why it cannot be: not JSON, or not a definition (a missing field, a
+ * column kind that is not one, an unknown key). Pure, so what is refused before anything is sent is
+ * a table in a test. The rules a version is held to beyond its shape are the server's.
+ */
+export const decodeDefinitionFile = (
+  text: string,
+):
+  | { readonly file: Omit<DefineBoardInput, "dryRun"> }
+  | { readonly refused: string } => {
+  const decoded = Schema.decodeResult(DefinitionFile)(text, {
+    onExcessProperty: "error",
+    errors: "all",
+  });
+  return decoded._tag === "Success"
+    ? { file: decoded.success }
+    : {
+        refused: `not a board definition: ${decoded.failure.message.replace(/\n\s+at /g, " at ").replaceAll("\n", "; ")}`,
+      };
+};
+
+/**
+ * What `board define` prints for an answer: what happened — the version written, the version that
+ * already holds this content, or the version a dry run would write — then that version described as
+ * `definition show` describes one.
+ */
+export const definedLines = (defined: DefinedBoard): ReadonlyArray<string> => {
+  const { id, version } = defined.definition;
+  const head =
+    defined.outcome === "created"
+      ? `defined     ${id} v${version}`
+      : defined.outcome === "unchanged"
+        ? `unchanged   ${id} v${version} already holds this definition; nothing written`
+        : `valid       ${id} would be written as v${version}; nothing written (--dry-run)`;
+  return [head, ...definitionLines(defined.definition)];
+};
+
+/**
+ * A refused version, as stderr prints it: the refusal line every command prints, naming the first
+ * field at fault, then every fault on its own line, so an author fixes the file in one pass.
+ */
+export const invalidDefinitionLines = (
+  refusal: InvalidDefinition,
+): ReadonlyArray<string> => [
+  `error: invalid_definition: ${refusal.message}`,
+  ...refusal.problems.map((fault) => `  ${fault.field}: ${fault.message}`),
+];
+
+/**
+ * `factory board define --file def.json [--dry-run]` — a new version of the definition the file
+ * names (D4): the server writes it as the id's newest version + 1, never over one that exists, and a
+ * board created after it pins it. A file whose content the newest version already holds writes
+ * nothing (`unchanged`). `--dry-run` validates against everything a write is checked against — the
+ * skill library and the role table included — and writes nothing. An unreadable or malformed file is
+ * `invalid_input` and nothing is sent; a version the server refuses is `invalid_definition`, every
+ * fault listed by field.
+ */
+const defineCommand = Command.make(
+  "define",
+  {
+    file: Flag.String("file").pipe(
+      Flag.withDescription("The definition, as JSON (- for stdin)"),
+    ),
+    dryRun: Flag.Boolean("dry-run").pipe(
+      Flag.withDescription("Validate the definition and write nothing"),
+      Flag.withDefault(false),
+    ),
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({ file, dryRun, api }) {
+    const apiUrl = yield* resolveApiUrl(api);
+    const fs = yield* FileSystem.FileSystem;
+    const read = yield* Effect.result(
+      fs.readFileString(file === "-" ? "/dev/stdin" : file),
+    );
+    if (read._tag === "Failure") {
+      return yield* reportFailure(
+        "invalid_input",
+        `--file "${file}" cannot be read: ${read.failure.message}`,
+      );
+    }
+    const decoded = decodeDefinitionFile(read.success);
+    if ("refused" in decoded) {
+      return yield* reportFailure(
+        "invalid_input",
+        `--file "${file}": ${decoded.refused}`,
+      );
+    }
+    const program = Effect.gen(function* () {
+      const { client } = yield* BoardClient;
+      const defined = yield* client.defineBoard({ ...decoded.file, dryRun });
+      for (const line of definedLines(defined)) yield* Console.log(line);
+    }).pipe(
+      Effect.catchIf(Schema.is(InvalidDefinition), (refusal) =>
+        Effect.gen(function* () {
+          for (const line of invalidDefinitionLines(refusal))
+            yield* Console.error(line);
+          return yield* Effect.sync(() => process.exit(1));
+        }),
+      ),
+    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "Define a new version of a board definition from a JSON file; boards created after it pin it",
+  ),
+  Command.withExamples([
+    {
+      command: "factory board define --file pipeline.json --dry-run",
+      description: "Validate a definition and write nothing",
+    },
+    {
+      command: "factory board define --file pipeline.json",
+      description: "Write it as the definition's next version",
+    },
+  ]),
+);
+
+/** The configuration verbs, mounted under `factory board` beside the card verbs. */
 export const boardConfigCommands = [
   listCommand,
   definitionsCommand,
   definitionCommand,
   configCommand,
+  defineCommand,
 ] as const;

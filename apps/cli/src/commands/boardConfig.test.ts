@@ -11,6 +11,7 @@ import {
   ColumnConfig,
   DefinitionConfig,
   DefinitionSummary,
+  InvalidDefinition,
   LIST_BOARDS_LIMIT,
 } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
@@ -18,8 +19,11 @@ import {
   boardLine,
   boardListLines,
   columnLines,
+  decodeDefinitionFile,
+  definedLines,
   definitionLines,
   definitionsLines,
+  invalidDefinitionLines,
 } from "./boardConfig";
 
 const planning = Schema.decodeSync(ColumnConfig)({
@@ -212,6 +216,112 @@ describe("boardLine and definitionsLines (LOB-270)", () => {
       "default  v1  Default pipeline  2026-10-01T00:00:00.000Z",
       "default  v2  Default pipeline  2026-10-02T00:00:00.000Z",
       "other  v1  Other  2026-10-03T00:00:00.000Z",
+    ]);
+  });
+});
+
+/**
+ * `factory board define --file` (D4): what is refused before anything is sent, and what is printed
+ * for each answer. The command against a real control plane is `.pi/skills/verify-board/define.sh`.
+ */
+describe("board define (D4)", () => {
+  const FILE = {
+    id: "authored",
+    name: "Authored",
+    initialColumn: "todo",
+    columns: [
+      {
+        name: "todo",
+        kind: "resting",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }],
+      },
+      {
+        name: "done",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+    ],
+  };
+
+  it("decodes a definition file into defineBoard's payload, with no dry-run of its own", () => {
+    const decoded = decodeDefinitionFile(JSON.stringify(FILE));
+    expect(decoded).toEqual({ file: FILE });
+  });
+
+  /**
+   * Mutation: decode with excess properties ignored — the misspelt `wiplimit` is dropped and the file
+   * is sent. Mutation: accept `dryRun` from the file — `--dry-run` is not the only switch.
+   */
+  it("refuses a file that is not JSON, not a definition, or carries a key the schema does not name", () => {
+    expect(decodeDefinitionFile("{ not json")).toHaveProperty("refused");
+    const badKind = decodeDefinitionFile(
+      JSON.stringify({
+        ...FILE,
+        columns: [{ ...FILE.columns[0], kind: "waiting" }],
+      }),
+    );
+    expect("refused" in badKind && badKind.refused).toContain("kind");
+    const misspelt = decodeDefinitionFile(
+      JSON.stringify({
+        ...FILE,
+        columns: [{ ...FILE.columns[0], wiplimit: 2 }, FILE.columns[1]],
+      }),
+    );
+    expect("refused" in misspelt && misspelt.refused).toContain("wiplimit");
+    expect(
+      decodeDefinitionFile(JSON.stringify({ ...FILE, dryRun: true })),
+    ).toHaveProperty("refused");
+    expect(
+      decodeDefinitionFile(JSON.stringify({ ...FILE, id: "Not An Id" })),
+    ).toHaveProperty("refused");
+  });
+
+  const described = Schema.decodeSync(DefinitionConfig)({
+    id: "authored",
+    version: 2,
+    name: "Authored",
+    initialColumn: "todo",
+    columns: [done],
+  });
+
+  it("says what each outcome did, then describes the version", () => {
+    const tail = definitionLines(described);
+    expect(definedLines({ outcome: "created", definition: described })).toEqual(
+      ["defined     authored v2", ...tail],
+    );
+    expect(
+      definedLines({ outcome: "unchanged", definition: described }),
+    ).toEqual([
+      "unchanged   authored v2 already holds this definition; nothing written",
+      ...tail,
+    ]);
+    expect(
+      definedLines({ outcome: "validated", definition: described }),
+    ).toEqual([
+      "valid       authored would be written as v2; nothing written (--dry-run)",
+      ...tail,
+    ]);
+  });
+
+  it("prints a refusal's line, then every fault by field", () => {
+    const refusal = new InvalidDefinition({
+      definitionId: "authored",
+      field: "initialColumn",
+      problems: [
+        { field: "initialColumn", message: "no initial column" },
+        { field: "columns[1].role", message: "unknown role" },
+      ],
+      message:
+        "definition authored: initialColumn: no initial column (and 1 more)",
+    });
+    expect(invalidDefinitionLines(refusal)).toEqual([
+      "error: invalid_definition: definition authored: initialColumn: no initial column (and 1 more)",
+      "  initialColumn: no initial column",
+      "  columns[1].role: unknown role",
     ]);
   });
 });

@@ -85,7 +85,7 @@ join and the reads; `apps/cli/src/commands/boardConfig.test.ts` the printed layo
 
 The dashboard's settings view reads this same `getBoardConfig` answer; verify-web's
 `board-settings.sh` proves it (`.pi/skills/verify-web/features/board-settings.md`).
-Nothing here writes a definition: versions are still written only by migrations, and the role table
-is deployment configuration, read-only. Transitions and gates are definition data since LOB-267; a
+Nothing here writes a definition: a new version is `factory board define`'s ([define.md](define.md),
+D4), and the role table is deployment configuration, read-only. Transitions and gates are definition data since LOB-267; a
 definition with its own column set is driven through the card pane by verify-web's `drive.mjs`
 (`features/card-pane.md`, "a definition's own moves").
