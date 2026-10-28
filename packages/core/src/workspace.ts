@@ -154,6 +154,8 @@ export const resolveWorkspace = (
       });
       void isGit;
       const baseRef = input.baseRef ?? "main";
+      // Set whenever there is a repo (above); narrowed here so it can be an argv entry.
+      const worktreeBranch = branch ?? `factory/${input.sessionId}`;
       // An empty directory is not a workspace yet (LOB-263): a session opened while its repo had no
       // checkout holds one (the owner makes the directory), and the worktree is cut into it once a
       // path is registered, so the fix the warning names reaches the sessions it was raised for.
@@ -167,7 +169,9 @@ export const resolveWorkspace = (
         yield* Effect.try({
           try: () => {
             const parent = deps.path.dirname(directory);
-            execSync(`mkdir -p ${JSON.stringify(parent)}`);
+            // Every call here takes an argv, never a shell line: the base ref is a card's or a
+            // create's (LOB-260), and a shell would expand `$(...)` inside JSON.stringify's quotes.
+            execFileSync("mkdir", ["-p", parent]);
             // A worktree whose directory went missing is still registered, and git refuses to
             // check its branch out a second time until that registration is cleared. Only this
             // path's is: a bare `git worktree prune` would clear every stale registration in the
@@ -185,17 +189,22 @@ export const resolveWorkspace = (
             // with the run's commits on it (LOB-268) — otherwise create it at the base ref.
             let created = false;
             try {
-              execSync(
-                `git worktree add ${JSON.stringify(directory)} ${JSON.stringify(branch)}`,
-                { cwd: input.localPath, stdio: "ignore" },
+              execFileSync(
+                "git",
+                ["worktree", "add", directory, worktreeBranch],
+                {
+                  cwd: input.localPath,
+                  stdio: "ignore",
+                },
               );
               created = true;
             } catch {
               // branch may not exist yet
             }
             if (!created) {
-              execSync(
-                `git worktree add -b ${JSON.stringify(branch)} ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`,
+              execFileSync(
+                "git",
+                ["worktree", "add", "-b", worktreeBranch, directory, baseRef],
                 { cwd: input.localPath, stdio: "ignore" },
               );
             }

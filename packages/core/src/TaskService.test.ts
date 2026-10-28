@@ -1055,7 +1055,7 @@ describe("TaskService — a card's repository (LOB-255)", () => {
    * made before cards carried a repo: each is bound to the board's repository, on `factory/<id>`, in
    * a worktree linked into the repository's registered checkout.
    *
-   * Mutation: drop `cardRepoFor` — the run with no repo named is a scratch session with no branch.
+   * Mutation: drop `cardBindingFor` — the run with no repo named is a scratch session with no branch.
    * Mutation: read `t.repo` alone — the legacy card's run is a scratch session.
    */
   it("binds every run on the card to the board's repository, in a factory/<session-id> worktree", async () => {
@@ -3035,7 +3035,7 @@ describe("TaskService — a definition's own transitions, gates and initial colu
   });
 
   /**
-   * Default version 4 (0024) holds exactly the table versions 1–3 resolve through, on its columns,
+   * Default version 4 (0026) holds exactly the table versions 1–3 resolve through, on its columns,
    * and starts a card in `intake`: a card on it moves as one on version 1 does.
    */
   it("seeds default v4 with today's table on its columns, gated the same", async () => {
@@ -3051,7 +3051,7 @@ describe("TaskService — a definition's own transitions, gates and initial colu
         }),
       ]);
     }
-    // Every other field is version 3's, unchanged (0024 reads it back rather than copying it).
+    // Every other field is version 3's, unchanged (0026 reads it back rather than copying it).
     const v3 = await withService((s) =>
       s.getDefinition(DEFAULT_DEFINITION_ID, 3),
     );

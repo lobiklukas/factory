@@ -1504,7 +1504,7 @@ describe("the board's tables and seed", () => {
   );
 
   /**
-   * 0024 (LOB-267): transitions, gates and the initial column as definition data. Version 4 is
+   * 0026 (LOB-267): transitions, gates and the initial column as definition data. Version 4 is
    * version 3 with the default pipeline's table written onto each column and `intake` as its initial
    * column; versions 1–3 keep no transitions and no initial column (B2), and a second pass writes no
    * second row. Read through `BoardDefinition`, so a seed the contract rejects fails here.
@@ -1565,7 +1565,7 @@ describe("the board's tables and seed", () => {
       }
 
       const migration = (
-        await import("./migrations/0025_seed_definition_transitions")
+        await import("./migrations/0026_seed_definition_transitions")
       ).default;
       await Effect.runPromise(
         migration.pipe(Effect.provideService(SqlClient, sql)),

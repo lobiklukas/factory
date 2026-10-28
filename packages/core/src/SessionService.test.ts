@@ -101,7 +101,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  closeHarness,
+  closeSession,
   compareReplay,
   createFauxModelAccess,
   createModelAccess,
@@ -1511,7 +1511,7 @@ describe("replay", () => {
           );
           if (prompt === undefined) throw new Error("unreachable");
           yield* waitForPrompt(opened.harness, prompt);
-          yield* closeHarness(opened.harness);
+          yield* closeSession(opened);
           return id;
         });
         // `bare` stopped before either side was written; `halfway` after the source's side alone.
@@ -1534,7 +1534,7 @@ describe("replay", () => {
           cwd,
         });
         yield* writeReplayComparison(sourceOwner.root, halfwayCompared.source);
-        yield* closeHarness(sourceOwner.harness);
+        yield* closeSession(sourceOwner);
 
         // The next process: its index learns the replays from their logs, and a fold of each is
         // what notices the comparison it is owed.
