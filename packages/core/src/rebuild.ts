@@ -26,6 +26,9 @@
  *   which the owner's activity projection writes. The upsert never writes it either, so a rebuild
  *   keeps it; a row the rebuild inserts reads `false` until its session is next owned, which costs a
  *   mission in flight its resume at the next boot, not its log.
+ * - `sessions.run_session_root` (LOB-25) — the same, for a run in flight in the session's
+ *   conversation: kept by a rebuild, `NULL` on a row the rebuild inserts, which costs an interrupted
+ *   run its resume at the next boot (it still continues when the session is next owned).
  *
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the
