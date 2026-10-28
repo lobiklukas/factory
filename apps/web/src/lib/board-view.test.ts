@@ -162,6 +162,21 @@ describe("blockedLabel", () => {
       ),
     ).toBe("blocked · PR closed");
   });
+
+  it("names a card a review of its PR asked for changes on (C21)", () => {
+    expect(
+      blockedLabel(
+        card("a", "review", {
+          blocked: {
+            reason: "changes_requested",
+            column: "review",
+            note: "@alice requested changes on pull request #7",
+            since: AT,
+          },
+        }),
+      ),
+    ).toBe("blocked · changes requested");
+  });
 });
 
 /** The default pipeline's columns and kinds (B4), as the seeded definition declares them. */

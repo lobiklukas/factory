@@ -53,6 +53,7 @@ const BLOCK_WORDS: Readonly<Record<BlockReason, string>> = {
   transient: "transient failure",
   setup_failed: "setup failed",
   pr_closed: "PR closed",
+  changes_requested: "changes requested",
 };
 
 /**

@@ -247,6 +247,11 @@ export const notificationOfAttention = (
           thread: true,
         }),
       };
+    case "review":
+      // A review that requested changes (C21) is listed on the attention page, but is not one of
+      // the notifier's kinds yet: `notification_deliveries.kind` admits these four (0039), and
+      // GitHub already tells the PR's watchers of the review. A follow-up of C21.
+      return undefined;
     case "gate":
       if (task === undefined) return undefined;
       return {

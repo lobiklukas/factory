@@ -328,6 +328,8 @@ describe("the board's columns", () => {
       "needs_input",
       "capability",
       "transient",
+      // A review that requested changes on the card's PR (C21).
+      "changes_requested",
     ]) {
       expect(refuses(BlockReason, reason)).toBe(false);
     }

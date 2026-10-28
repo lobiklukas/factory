@@ -97,6 +97,7 @@ import {
   isWebLink,
   LIST_BOARDS_LIMIT,
   MERGED_COLUMN,
+  MAX_COMMENT_CHARS,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
@@ -503,6 +504,47 @@ export const mergeActor = (prUrl: string): Actor => `merge:${prUrl}`;
 /** The actor an unmerged close's block records (C20), naming the PR by its page. */
 export const closeActor = (prUrl: string): Actor => `pr-closed:${prUrl}`;
 
+/**
+ * What a review or a check on the card's PR said (C21), as one comment on the card's thread: a review
+ * that requested changes, a reviewer's comment, a failing check. No expected revision, for the ask's
+ * reason: the writer is the forge's event, not a person who read the card.
+ */
+export type RecordPullRequestFeedbackInput = {
+  readonly taskId: string;
+  /** The outside item the comment carries (`TaskEvent`'s `commented.sourceId`): the redelivery key. */
+  readonly sourceId: string;
+  /**
+   * A prefix of `sourceId`s that already say what this one would (a check suite whose failing
+   * checks were each recorded): when a comment on the card carries one, nothing is recorded.
+   */
+  readonly coveredBy?: string;
+  /**
+   * One more `sourceId` that already says what this one would (a failing check run whose suite's
+   * note was delivered first): when a comment on the card carries it, nothing is recorded.
+   */
+  readonly coveredBySourceId?: string;
+  /** Who said it, as the comment's actor: `github:<login>`, or `github:checks`. */
+  readonly actor: Actor;
+  readonly body: string;
+  /**
+   * A block the feedback puts the card in (`changes_requested`, its note naming the review), unless
+   * the card is blocked already: whatever it waits on was there first.
+   */
+  readonly block?: {
+    readonly reason: BlockReasonType;
+    readonly note: string;
+  };
+};
+
+/** What `recordPullRequestFeedback` did: the card as it is now, and what this call wrote. */
+export type RecordedPullRequestFeedback = {
+  readonly task: Task;
+  /** Whether a comment was written; `false` for a redelivery, a covered item, or a finished card. */
+  readonly recorded: boolean;
+  /** Whether this call blocked the card. */
+  readonly blocked: boolean;
+};
+
 /** A planning run's plan, as its `plan` tool posts it on the card (D10); `DeclareSpecInput`'s shape. */
 export type DeclarePlanInput = {
   readonly taskId: string;
@@ -632,6 +674,30 @@ export type TaskServiceShape = {
   readonly settlePullRequest: (
     input: SettlePullRequestInput,
   ) => Effect.Effect<SettledPullRequest, TaskError>;
+  /**
+   * Record a review or a check of the card's PR on its thread (C21), exactly once per `sourceId`
+   * however often GitHub delivers it: a `commented` note by the review's or the check's actor, and —
+   * when `block` names one and the card is not blocked already — the block, from the card's column. A
+   * finished card (`done`, `canceled`), a `sourceId` already on the card's thread, a `coveredBy`
+   * prefix one of its comments carries, and a `coveredBySourceId` one of them is write nothing
+   * (`recorded: false`). The body is clipped to
+   * `MAX_COMMENT_CHARS`, since every run on the card is told the thread.
+   */
+  readonly recordPullRequestFeedback: (
+    input: RecordPullRequestFeedbackInput,
+  ) => Effect.Effect<RecordedPullRequestFeedback, TaskError>;
+  /**
+   * Lift a `changes_requested` block because a run that addresses it started on the card (C21): the
+   * run reads the review on the thread, so the card no longer waits on a person. Any other block, or
+   * none, is left as it is (`changed: false`).
+   */
+  readonly resumeAfterReview: (input: {
+    readonly taskId: string;
+    readonly actor: Actor;
+  }) => Effect.Effect<
+    { readonly task: Task; readonly changed: boolean },
+    TaskError
+  >;
   /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
   readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
   /** The card's thread, oldest first: every `commented` event, verbatim. */
@@ -680,7 +746,8 @@ export type TaskServiceShape = {
   ) => Effect.Effect<ReadonlyArray<TaskRun>, TaskError>;
   /**
    * What needs a person (LOB-77), on one board or every board: pending approvals on a card's runs,
-   * cards blocked `needs_input`, and cards whose done run waits at a human gate. An unknown board is
+   * cards blocked `needs_input`, cards blocked `changes_requested` by a review of their PR (C21), and
+   * cards whose done run waits at a human gate. An unknown board is
    * `BoardNotFound`.
    */
   readonly attention: (
@@ -2862,6 +2929,126 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    const recordPullRequestFeedback = (
+      input: RecordPullRequestFeedbackInput,
+    ): Effect.Effect<RecordedPullRequestFeedback, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            const unchanged = Effect.map(toTask(row), (task) => ({
+              task,
+              recorded: false,
+              blocked: false,
+            }));
+            if (isTerminalColumn(row.column)) return yield* unchanged;
+            // Read under the card's lock, so two deliveries of one review cannot both miss each other.
+            const seen = yield* sql<{ readonly one: number }>`
+              SELECT 1 AS one FROM task_events
+              WHERE task_id = ${input.taskId} AND kind = 'commented'
+                AND (payload->>'sourceId' = ${input.sourceId}
+                  OR payload->>'sourceId' = ${input.coveredBySourceId ?? null}::text
+                  OR starts_with(payload->>'sourceId', ${input.coveredBy ?? null}::text))
+              LIMIT 1
+            `;
+            if (seen.length > 0) return yield* unchanged;
+            const body =
+              input.body.length > MAX_COMMENT_CHARS
+                ? `${input.body.slice(0, MAX_COMMENT_CHARS - 40)}\n[… clipped to the thread's limit]`
+                : input.body;
+            yield* refuseEmpty(input.taskId, body, "the feedback");
+            const taskId = TaskId.make(input.taskId);
+            yield* appendEvent({
+              _tag: "commented",
+              taskId,
+              actor: input.actor,
+              body,
+              kind: "note",
+              revision: row.revision,
+              sourceId: input.sourceId,
+            });
+            if (input.block === undefined || row.blockedReason !== null) {
+              const rows = yield* sql<TaskRow>`
+                UPDATE tasks SET revision = revision + 1, updated_at = now()
+                WHERE id = ${input.taskId}
+                RETURNING ${sql.literal(TASK_COLUMNS)}
+              `;
+              return {
+                task: yield* toTask(rows[0] as TaskRow),
+                recorded: true,
+                blocked: false,
+              };
+            }
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = ${input.block.reason}, blocked_column = ${row.column},
+                  blocked_note = ${input.block.note}, blocked_since = now(),
+                  revision = revision + 2, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "blocked",
+              taskId,
+              reason: input.block.reason,
+              column: row.column,
+              actor: input.actor,
+              revision: row.revision + 1,
+            });
+            return {
+              task: yield* toTask(rows[0] as TaskRow),
+              recorded: true,
+              blocked: true,
+            };
+          }),
+        ),
+      );
+
+    const resumeAfterReview = (input: {
+      readonly taskId: string;
+      readonly actor: Actor;
+    }): Effect.Effect<
+      { readonly task: Task; readonly changed: boolean },
+      TaskError
+    > =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (row.blockedReason !== "changes_requested")
+              return { task: yield* toTask(row), changed: false };
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = NULL, blocked_column = NULL, blocked_note = NULL,
+                  blocked_since = NULL, revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "unblocked",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              revision: row.revision,
+            });
+            return { task: yield* toTask(rows[0] as TaskRow), changed: true };
+          }),
+        ),
+      );
+
     const comment = (input: CommentTaskInput): Effect.Effect<Task, TaskError> =>
       withStorage(
         sql.withTransaction(
@@ -3328,7 +3515,7 @@ export const TaskServiceLive = Layer.effect(
      * What needs a person (LOB-77): three statements over the rows the board and the approvals
      * service already keep, and no log fold — the view is polled, so its cost is a fixed number of
      * row reads, never a fold per card (R6). The approvals read starts from the
-     * `session_approvals_pending` index; the questions and gates reads filter `tasks` by block and
+     * `session_approvals_pending` index; the questions, reviews and gates reads filter `tasks` by block and
      * column, which no index covers, so the every-board view scans `tasks` — fine at the MVP's card
      * count, and a partial index on `blocked_reason` is the fix when it is not.
      *
@@ -3342,6 +3529,9 @@ export const TaskServiceLive = Layer.effect(
      *   comment asked since the block began (an answered question from an earlier block is not this
      *   block's), falling back to the block's note (a person may block a card `needs_input` by hand,
      *   with no run asking).
+     * - **Reviews** are cards blocked `changes_requested` (C21): a review of the card's PR requested
+     *   changes. The reason is the block's note, which names the reviewer, the PR and the start of the
+     *   review; the review itself is on the thread.
      * - **Gates** are unblocked cards in a column whose exit crosses a human gate (B5), with a run
      *   started in that column, no run of the card busy in `session_activity`, and no run of the
      *   card holding an undecided approval. In the MVP a person starts and drives every run, so an
@@ -3441,6 +3631,17 @@ export const TaskServiceLive = Layer.effect(
               LIMIT 1
             ) q ON true
             WHERE t.blocked_reason = 'needs_input'
+              AND (${board}::text IS NULL OR t.board_id = ${board})
+            ORDER BY t.blocked_since, t.id
+          `;
+
+          // A review that requested changes on the card's PR (C21): the review is on the thread, and
+          // the block's note names the reviewer and the PR, so the row says it without a thread read.
+          const reviews = yield* sql<TaskRow & { readonly boardRepo: string }>`
+            SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo
+            FROM tasks t
+            JOIN board_instances bi ON bi.id = t.board_id
+            WHERE t.blocked_reason = 'changes_requested'
               AND (${board}::text IS NULL OR t.board_id = ${board})
             ORDER BY t.blocked_since, t.id
           `;
@@ -3552,6 +3753,15 @@ export const TaskServiceLive = Layer.effect(
                 : { question: row.question }),
             }),
           );
+          const reviewItems = yield* Effect.forEach(reviews, (row) =>
+            toAttention(row, {
+              _tag: "review",
+              since: iso(row.blockedSince ?? row.updatedAt),
+              ...(row.blockedNote === null || row.blockedNote.trim() === ""
+                ? {}
+                : { review: row.blockedNote }),
+            }),
+          );
           // A gate whose exit still misses a document the card must hold (a planning run that
           // settled without a plan: `plan_doc`, D10) is still a person's — someone must start or
           // prompt a run — but not yet the gate's move, which `move` would refuse naming the key.
@@ -3615,6 +3825,7 @@ export const TaskServiceLive = Layer.effect(
           return [
             ...mergeByRequest(approvalItems, sessionApprovalItems),
             ...questionItems,
+            ...reviewItems,
             ...gateItems,
           ];
         }),
@@ -3640,6 +3851,8 @@ export const TaskServiceLive = Layer.effect(
       ask,
       parkRun,
       settlePullRequest,
+      recordPullRequestFeedback,
+      resumeAfterReview,
       comment,
       comments,
       declareSpec,
