@@ -60,6 +60,7 @@ import type { RpcClientError } from "effect/rpc/RpcClientError";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionRpcLive } from "./Session";
+import { FauxServerFacts } from "../ServerInfo.test-fake";
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-api-rpc-"));
 const run = randomBytes(4).toString("hex");
@@ -208,6 +209,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
       Layer.mergeAll(
         Layer.succeed(HttpClient.HttpClient, forge),
         Layer.succeed(CredentialProvider, credentials),
+        FauxServerFacts,
       ),
     ),
     Layer.provideMerge(

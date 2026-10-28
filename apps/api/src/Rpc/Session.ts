@@ -9,6 +9,7 @@ import { Effect, Layer } from "effect";
 import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
+import { ServerRpcHandlers } from "./Server";
 import { TaskRpcHandlers } from "./Task";
 import { TriggerRoutesRpcHandlers } from "./TriggerRoutes";
 
@@ -84,6 +85,7 @@ export const SessionRpcLive = RpcServer.layerHttp({
       ApprovalsRpcHandlers,
       TaskRpcHandlers,
       TriggerRoutesRpcHandlers,
+      ServerRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),

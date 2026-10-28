@@ -131,7 +131,7 @@ import {
   type VerifyRecord,
 } from "@repo/harness";
 import { mintSessionId } from "./ids";
-import { rebuildIndexes } from "./rebuild";
+import { backfillSessionModels, rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import type { RepoMirror } from "./RepoMirror";
 import { noCheckoutWarning } from "./workspace";
@@ -1634,6 +1634,161 @@ describe("replay", () => {
     expect(refusalCode(result.unknown)).toBe("not_found");
     expect(refusalCode(result.noModel)).toBe("invalid_input");
     expect(result.countAfter).toBe(result.countBefore);
+  }, 120_000);
+});
+
+/**
+ * Every session names the model it runs on (LOB-269): its summary, its snapshot and its list row
+ * carry `provider/modelId`, read from what its root conversation is pinned to — `pi.agent` — and
+ * not from the deployment's default, so a replay names the model it was replayed onto. The list
+ * reads the index column (R6), which the owner's open writes and `rebuildIndexes` refolds (D7).
+ */
+describe("the model a session runs on", () => {
+  const find = (entries: readonly SessionListEntry[], id: string) =>
+    entries.find((entry) => entry.id === id);
+
+  it("names faux/faux-1 on a faux session's summary, snapshot and list row, live and folded", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "which model" });
+        const live = yield* sessions.get(created.id);
+        const listed = find(
+          (yield* sessions.list({ limit: 100 })).sessions,
+          created.id,
+        );
+        yield* sessions.close;
+        const folded = yield* sessions.get(created.id);
+        return { created, live, listed, folded };
+      }),
+    );
+
+    expect(result.created.model).toBe("faux/faux-1");
+    expect(result.live.session.mode).toBe("live");
+    expect(result.live.session.model).toBe("faux/faux-1");
+    expect(result.listed?.model).toBe("faux/faux-1");
+    expect(result.folded.session.mode).toBe("historical");
+    expect(result.folded.session.model).toBe("faux/faux-1");
+  }, 120_000);
+
+  it("names the model a replay was replayed onto, not the deployment's", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const source = yield* sessions.create({
+          title: "replay onto faux-2",
+          repo: factoryRepo,
+        });
+        yield* sessions.send({ sessionId: source.id, content: "do the task" });
+        yield* waitUntil(
+          sessions.get(source.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the source's turn to settle",
+        );
+        const replay = yield* sessions.replay({
+          sessionId: source.id,
+          model: "faux/faux-2",
+        });
+        yield* waitUntil(
+          sessions.get(replay.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the replay's turn to settle",
+        );
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        return {
+          replay,
+          snapshot: yield* sessions.get(replay.id),
+          replayRow: find(listed, replay.id),
+          sourceRow: find(listed, source.id),
+        };
+      }),
+    );
+
+    expect(result.replay.model).toBe("faux/faux-2");
+    expect(result.snapshot.session.model).toBe("faux/faux-2");
+    expect(result.replayRow?.model).toBe("faux/faux-2");
+    expect(result.sourceRow?.model).toBe("faux/faux-1");
+  }, 120_000);
+
+  /**
+   * The column is an index of the log: blanked, the list stops naming the model (it is not served
+   * from anywhere else), a fold still does (it reads `pi.agent`), and `rebuildIndexes` writes it
+   * back. A row the rebuild has not reached is repaired by the session's next owner open too.
+   */
+  it("refolds the model column from the log, and the next owner open repairs a blank row", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({ title: "rebuild the model" });
+        const other = yield* sessions.create({ title: "reopen the model" });
+        yield* sessions.close;
+        yield* sql`UPDATE sessions SET model = NULL WHERE id IN (${created.id}, ${other.id})`;
+        const blankedRow = find(
+          (yield* sessions.list({ limit: 100 })).sessions,
+          created.id,
+        );
+        const blankedFold = yield* sessions.get(created.id);
+        const report = yield* rebuildIndexes;
+        const column = yield* sql<{ model: string | null }>`
+          SELECT model FROM sessions WHERE id = ${created.id}
+        `;
+        const refoldedRow = find(
+          (yield* sessions.list({ limit: 100 })).sessions,
+          created.id,
+        );
+        // The second session's row is blanked again after the rebuild, and its owner reopened.
+        yield* sql`UPDATE sessions SET model = NULL WHERE id = ${other.id}`;
+        yield* sessions.interrupt(other.id);
+        const reopened = yield* sql<{ model: string | null }>`
+          SELECT model FROM sessions WHERE id = ${other.id}
+        `;
+        return {
+          blankedRow,
+          blankedFold,
+          report,
+          column: column[0]?.model,
+          refoldedRow,
+          reopened: reopened[0]?.model,
+        };
+      }),
+    );
+
+    expect(result.blankedRow).toBeDefined();
+    expect(result.blankedRow?.model).toBeUndefined();
+    expect(result.blankedFold.session.model).toBe("faux/faux-1");
+    expect(result.report.sessions).toBeGreaterThan(0);
+    expect(result.column).toBe("faux/faux-1");
+    expect(result.refoldedRow?.model).toBe("faux/faux-1");
+    expect(result.reopened).toBe("faux/faux-1");
+  }, 120_000);
+
+  /**
+   * A row older than migration 0027 has a blank column and a log that names its model. The boot's
+   * backfill fills it from `pi.agent` without a rebuild or an owner open, and leaves a column that
+   * is already set alone.
+   */
+  it("backfills a blank model column from the log, and leaves a set one alone", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const old = yield* sessions.create({ title: "older than 0027" });
+        const set = yield* sessions.create({ title: "already named" });
+        yield* sessions.close;
+        yield* sql`UPDATE sessions SET model = NULL WHERE id = ${old.id}`;
+        yield* sql`UPDATE sessions SET model = 'faux/faux-2' WHERE id = ${set.id}`;
+        const filled = yield* backfillSessionModels;
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        return {
+          filled,
+          old: find(listed, old.id)?.model,
+          set: find(listed, set.id)?.model,
+        };
+      }),
+    );
+
+    expect(result.filled).toBeGreaterThanOrEqual(1);
+    expect(result.old).toBe("faux/faux-1");
+    expect(result.set).toBe("faux/faux-2");
   }, 120_000);
 });
 
@@ -7357,6 +7512,47 @@ describe("a run's prompt comes from its column", () => {
     expect(models.building).toEqual(["faux/faux-1"]);
     expect(models.review).toEqual(["faux/faux-1"]);
     expect(models.scratch).toEqual(["faux/faux-1"]);
+  }, 120_000);
+
+  /**
+   * The session names its role's model (LOB-269): a run in a column whose role has a `ROLE_MODELS`
+   * row reads that row's model on the summary `create` answers, on its snapshot and on its list row,
+   * and a run whose role has none reads the deployment's.
+   */
+  it("names a card run's role model on its summary, snapshot and list row", async () => {
+    const result = await roleRuntime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const boardId = yield* newBoard;
+        const named = (column: string) =>
+          Effect.gen(function* () {
+            const created = yield* sessions.create({
+              taskId: yield* newCard(boardId, column),
+              taskColumn: column,
+            });
+            const snapshot = yield* sessions.get(created.id);
+            const row = (yield* sessions.list({ limit: 100 })).sessions.find(
+              (entry) => entry.id === created.id,
+            );
+            return [created.model, snapshot.session.model, row?.model];
+          });
+        return {
+          specifying: yield* named("specifying"),
+          building: yield* named("building"),
+        };
+      }),
+    );
+
+    expect(result.specifying).toEqual([
+      "faux/faux-spec",
+      "faux/faux-spec",
+      "faux/faux-spec",
+    ]);
+    expect(result.building).toEqual([
+      "faux/faux-1",
+      "faux/faux-1",
+      "faux/faux-1",
+    ]);
   }, 120_000);
 });
 

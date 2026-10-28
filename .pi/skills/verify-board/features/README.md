@@ -3,7 +3,11 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: a card created with no repo (LOB-255, 2026-10-28,
+Status reflects the last verified runs: `factory board add` (LOB-261, 2026-10-28, `agent/LOB-261`), API on
+`:9650`, web on `:3650`, the GitHub fake on `:9653`: `./drive.sh` exit 0, **124/124** checks, its card
+made in the pane by `factory board add`, with `add.ts`'s **5/5** (`add.json`: the repo inherited, the
+body read back, another repo refused, the CLI's card and the form's `createTask` listing the same)
+folded in ([add.md](add.md)). Before it, a card created with no repo (LOB-255, 2026-10-28,
 `agent/LOB-255`), API on `:9530`, web on `:3530`, the GitHub fake on `:9533`: `./drive.sh` exit 0,
 **52/52** required checks, with `create.ts`'s **5/5** (`create.json`: the board's repo inherited, another
 refused as `BoardRepoMismatch`, no card written) and `build.ts`'s **4/4** (`build-built.json`: the
@@ -41,6 +45,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | Feature                                 | Status  | File                             |
 | --------------------------------------- | ------- | -------------------------------- |
 | `factory board create`                  | passing | [boards.md](boards.md)           |
+| `factory board add`                     | passing | [add.md](add.md)                 |
 | create a card (`createTask`)            | passing | [create.md](create.md)           |
 | `factory board ls`                      | passing | [ls.md](ls.md)                   |
 | `factory board show`                    | passing | [show.md](show.md)               |
@@ -59,9 +64,9 @@ Evidence: `.verify/evidence/latest/board/`.
 
 ## Deliberately absent
 
-- **Creating a card from the CLI.** Card creation is a trigger's job (docs/board.md B2): the card is
-  the tracker's work item, and `factory board` reads and moves what exists. The drive creates its
-  card over the API's `createTask` — the door a trigger uses — for the same reason
+- **A trigger's card.** A card from a tracker item is a trigger's job (docs/board.md B2) and is
+  `verify-api`'s; the drive's card is a person's, made with `factory board add` ([add.md](add.md)).
+  `create.ts` still makes the cards of `triage.sh` and `board-create.sh` over `createTask`
   ([create.md](create.md)).
 - **A block's other writers.** B7's block — `needs_input`, set by a run's `ask` and lifted by a
   person's `board comment` — is driven by `drive.sh`'s specify phase ([specify.md](specify.md)) and,

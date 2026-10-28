@@ -24,6 +24,7 @@
     "./Page": "./src/Page.ts",
     "./PullRequest": "./src/PullRequest.ts",
     "./Rpc": "./src/Rpc.ts",
+    "./Server": "./src/Server.ts",
     "./Session": "./src/Session.ts",
     "./Task": "./src/Task.ts",
     "./Skill": "./src/Skill.ts",

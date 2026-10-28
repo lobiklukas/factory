@@ -37,6 +37,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `factory history` (LOB-243)                               | not here: verify-api `./history.sh`, against a session grown past the window | a terminal reads the whole of a long session, page by page   |
 | `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake     | the link is the forge's answer, never assumed                |
 | `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                           | the card and its runs are the server's, never a local guess  |
+| `factory board add` (LOB-261)                             | not here: verify-board `./drive.sh`'s add phase (features/add.md)            | the card is the server's row, read back, never a local guess |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
