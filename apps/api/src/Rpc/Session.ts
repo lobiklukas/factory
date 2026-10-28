@@ -55,6 +55,8 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       listSessions: (input) => sessions.list(input),
       listSpend: () => sessions.spend,
       getOutcomes: (input) => sessions.outcomes(input),
+      predictCost: (input) => sessions.predictCost(input),
+      backtestCost: (input) => sessions.backtestCost(input),
       listPages: (input) => sessions.listPages(input),
       curateSession: (input) => sessions.curate(input),
       // Proposals only (LOB-201): nothing is created in a tracker and no session is started.

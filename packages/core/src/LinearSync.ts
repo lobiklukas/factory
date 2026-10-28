@@ -1437,10 +1437,12 @@ export const verifyGitHubSignature = (
   return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
-/** A webhook's answer: the status and the JSON body a route sends. */
+/** A webhook's answer: the status, the JSON body and any headers a route sends. */
 export type GitHubWebhookAnswer = {
   readonly status: number;
   readonly body: Readonly<Record<string, unknown>>;
+  /** `Retry-After` on an `at-capacity` refusal (LOB-70); absent on every other answer. */
+  readonly headers?: Readonly<Record<string, string>>;
 };
 
 /**

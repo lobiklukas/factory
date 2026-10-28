@@ -42,6 +42,7 @@ import {
   type TriggerEvent,
   type TriggerRule,
 } from "@repo/domain/Trigger";
+import { triggerErrorOfSession, triggerFailureAnswer } from "./admission";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
 import {
@@ -316,16 +317,7 @@ export const DocsSessionsFromSessionService = Layer.effect(
             content: input.content,
             requestId: input.requestId,
           })
-          .pipe(
-            Effect.asVoid,
-            Effect.mapError(
-              (cause) =>
-                new TriggerError({
-                  code: "session-create",
-                  message: cause.message,
-                }),
-            ),
-          ),
+          .pipe(Effect.asVoid, Effect.mapError(triggerErrorOfSession)),
       create: (input) => {
         const wanted = docsBranch(input.deliveryId);
         const branch =
@@ -351,13 +343,8 @@ export const DocsSessionsFromSessionService = Layer.effect(
           })
           .pipe(
             Effect.map((summary) => ({ id: summary.id })),
-            Effect.mapError(
-              (cause) =>
-                new TriggerError({
-                  code: "session-create",
-                  message: cause.message,
-                }),
-            ),
+            // `at_capacity` stays `at-capacity` (LOB-70), which the route answers `503`.
+            Effect.mapError(triggerErrorOfSession),
           );
       },
     });
@@ -515,17 +502,14 @@ export const handleDocsPushWebhook = (input: {
       } satisfies GitHubWebhookAnswer;
     }).pipe(
       Effect.provide(DocsTriggerLive(delivery.event.repo)),
-      // A refusal is an answer (`skipped`), so only a real failure reaches here: `500`, so the
-      // delivery log shows it, rather than `200` on work that never got recorded.
+      // A refusal is an answer (`skipped`), so only a failure reaches here: `500`, so the delivery
+      // log shows it, rather than `200` on work that never got recorded — or, when the server was
+      // at capacity (LOB-70), `503` with `Retry-After`: the claim was released, so a redelivery
+      // claims afresh.
       Effect.catchTag("TriggerError", (cause) =>
         Effect.logError(
           `docs push: delivery ${delivery.requestId} failed: ${cause.message}`,
-        ).pipe(
-          Effect.as<GitHubWebhookAnswer>({
-            status: 500,
-            body: { ok: false, error: cause.message, code: cause.code },
-          }),
-        ),
+        ).pipe(Effect.as(triggerFailureAnswer(cause))),
       ),
     );
   });

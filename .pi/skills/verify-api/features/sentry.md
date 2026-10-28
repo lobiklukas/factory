@@ -1,4 +1,4 @@
-# The Sentry receiver and its mapping (LOB-81 and LOB-82, parts 1 and 2 of LOB-33)
+# The Sentry receiver, its mapping and its link-back (LOB-81, LOB-82 and LOB-83, the parts of LOB-33)
 
 **What it is.** The inbound path for Sentry alerts, and its safety: `POST /webhooks/sentry` →
 `apps/api/src/Api/Webhook.ts` (the body cap, the signature, the rate cap) →
@@ -71,6 +71,29 @@ If the cause is outside this repository, or the alert is noise, say so and stop 
 So the documented default rule is `{"label":"sentry","repo":"<owner/name>","prompt":""}`; a rule
 that writes its own prompt keeps it.
 
+**The link-back (LOB-83).** The alert points at the session investigating it, once.
+`packages/core/src/SentryWriteBack.ts` is the seam's `TriggerWriteBack` for `source: "sentry"`: it
+reads the Sentry issue's notes (`GET /api/0/issues/{issue_id}/comments/`) and posts one
+(`POST` the same route, `{"text": "Factory is investigating this alert in session <id> (<url>)."}`)
+only when no note already names the session id. The address is the Sentry _issue_, which the adapter
+carries as `TriggerEvent.address` (`data.event.issue_id`; the event id is the delivery's key, not
+the note's home). The read-before-post check is the exactly-once mechanism: the seam writes back
+_before_ it marks the delivery processed, so a crash or a failed `processed` write gives the claim
+back and the retry calls the write-back again, and a note that landed with its acknowledgement lost
+is found by the retry's read. It is keyed per session, so a second alert LOB-82 binds to the same
+session adds none (the seam skips it before any call), and a _new_ session for the same issue (the
+first was released) gets its own note. It is best effort, as Linear's is: the whole call runs under
+a 4-second budget; an HTTP 5xx or refusal, an unreachable API, an unreadable answer or the budget is
+one log line naming the issue id, the session id and the cause, the delivery is `processed` and the
+session runs, and no retry queue exists. An alert with no `issue_id` opens its session and logs why
+nothing was posted. `TriggerWriteBackLive` was already a per-source composite
+(`TriggerWriteBackBySource`, LOB-259); Sentry's client is one more route in it, so a Linear delivery
+still moves its issue to started and makes no Sentry request, and a Sentry delivery touches no other
+tracker. Configuration (`apps/api/src/Api/TriggerAdapters.ts`): `SENTRY_API_TOKEN` (an internal
+integration's token with the scope to write issue comments; **unset, no write-back**),
+`SENTRY_API_URL` (default `https://sentry.io`), `SENTRY_SESSION_URL_BASE` (where a note links a
+session; unset, the note names the session id alone). The boot logs whether it is on.
+
 **How a user reaches it.** An operator creates a Sentry internal integration whose webhook URL is
 the route, sets `SENTRY_CLIENT_SECRET` to its Client Secret, and adds a rule to `TRIGGER_RULES` for
 the `sentry` label (every delivery carries it) or `sentry:project:<id>` (one project, ahead of the
@@ -85,12 +108,25 @@ the seam — `401`, `413`, `429` — writes one warning naming the route, the co
 the body's size, and never the body.
 
 **How the skill drives it.** `./sentry.sh` boots the skill's API (`up.sh`) with
-`SENTRY_CLIENT_SECRET`, `SENTRY_RATE_LIMIT=6`, the filter `SENTRY_MIN_LEVEL=error`, `SENTRY_ENVIRONMENTS=production`,
+`SENTRY_CLIENT_SECRET`, `SENTRY_RATE_LIMIT=12`, the filter `SENTRY_MIN_LEVEL=error`, `SENTRY_ENVIRONMENTS=production`,
 `SENTRY_RELEASES=verify@*`, a `sentry` rule on a per-run repo and, ahead of it, a
 `sentry:project:404` rule on a repo nobody registers and a `sentry:project:777` rule with a blank
-prompt, then runs
-`bun sentry.ts` in two phases around a restart, in `sigterm.sh`'s shape:
+prompt, and the link-back's client (`SENTRY_API_URL`, `SENTRY_API_TOKEN`, `SENTRY_SESSION_URL_BASE`)
+pointed at `sentry-api-fake.ts`, a loopback Sentry REST API it starts first, with a ledger file, that
+outlives both API processes and misbehaves for three issues on purpose (its first note create
+applied and the connection then dropped; every request a 503; every request unanswered). It then runs
+`bun sentry.ts` in phases around a restart, in `sigterm.sh`'s shape:
 
+0. **linkback** (LOB-83) — an alert for the lost-ack issue is a processed delivery; the ledger holds
+   exactly one note, naming the session and its URL, and the fake saw the connection dropped; one log
+   line names the issue, the session and the cause. The same event again is a replay and makes no
+   request. Then the crash window: the delivery's `processed` row is deleted (the state a crash
+   between the write-back and `processed` leaves), the same event is delivered afresh, runs for the
+   same session, and the ledger still holds one note (one more read, no post). An alert for the 503
+   issue is `processed`, its session has its prompt, and one log line names the issue, the session
+   and `HTTP 503`; one for the silent issue is `processed` after the 4-second budget (between 3 and 15
+   seconds) with one log line naming the budget; one with no `issue_id` opens its session, makes no
+   Sentry request and logs why.
 1. **first** — a signed alert opens a session; the same payload with the same headers again is
    `replayed: true`, and the repo has one session; the session's first message carries the alert's
    title and rule. The session's title is the alert's title with `(production, release verify@1.0.0)`;
@@ -104,21 +140,31 @@ prompt, then runs
    in the API's log carries the canary string both payloads contain. Then a firehose of ten signed
    `issue` deliveries: every one is `200` and a recorded skip, none `429`, because none can start
    work. Then a burst of ten signed alerts for project 404: the ones past the cap are `429
-rate-limited` with `Retry-After` equal to the body's `retryAfterSeconds` and `limit: 6`, none is a
+rate-limited` with `Retry-After` equal to the body's `retryAfterSeconds` and `limit: 12`, none is a
    `5xx`, none leaves a row, and the ones inside the cap are recorded `unregistered-repo` skips, so
-   the burst opens no session.
+   the burst opens no session. (LOB-83: the first alert's issue holds exactly one note after the post
+   and its replay, and the second alert bound to the same session left it at one note and made no
+   request.)
 2. **restart** — `down.sh` stops the process (SIGTERM, then SIGKILL if it lingers), and `up.sh`
    boots a fresh one on the same database; the script checks the pid changed.
 3. **after-restart** — the same alert (a new `Request-ID`) is `replayed: true` with status
    `processed`, the repo still has one session, and the row the first process wrote is still
    `processed`. A new event in the first alert's issue is still a skip naming the first process's
    session, and the `trigger_fingerprints` row still names it. The control: a new alert in the restarted process opens its session, so the replay
-   is the dedupe and not a process that cannot create.
+   is the dedupe and not a process that cannot create. (LOB-83: the first alert's issue still holds
+   its one note; the lost-ack case, its processed row deleted again, is replayed on the restarted
+   process and posts no second note; the control alert's issue holds one note, posted by the restarted
+   process.)
 
-**What proves it works.** `.verify/evidence/lob-82/` (gitignored; LOB-81's run is in
-`.verify/evidence/lob-81/`): `sentry-first.json` and
-`sentry-after-restart.json` (each phase's checks and every delivery's answer), `sentry-process.json`
-(the script's checks), and both processes' logs. `packages/core/src/Sentry.test.ts` proves the
+**What proves it works.** `.verify/evidence/lob-83/` (gitignored; LOB-81's run is in
+`.verify/evidence/lob-81/`, LOB-82's in `.verify/evidence/lob-82/`): `sentry-linkback.json`,
+`sentry-first.json` and `sentry-after-restart.json` (each phase's checks and every delivery's
+answer), `sentry-process.json` (the script's checks), both processes' logs, and
+`sentry-api-ledger.json` (every request the fake Sentry saw and each issue's notes).
+`packages/core/src/SentryWriteBack.test.ts` proves the link-back against a stateful HTTP-boundary
+fake: the requests, the read-before-post check, each failure logged and swallowed, the budget, the
+composite dispatch beside Linear's write-back, and through the real seam on Postgres a redelivery, a
+claim given back after the note landed, a bound second alert and a failed or silent Sentry. `packages/core/src/Sentry.test.ts` proves the
 signature, the filter and the key in isolation, and the dedupe through the real seam on Postgres —
 including across two runtimes — and, for LOB-82, the filter's reasons, the title, the default
 prompt verbatim, and the binding through the real seam: readable after a restart, a repeat event
@@ -135,9 +181,17 @@ session for the same alert. `.verify/evidence/lob-82/mutation-no-binding/`: skip
 claim fails the binding, repeat-alert and session-count checks in both phases (a repeat event opens a
 second session), and four cases in `Sentry.test.ts`.
 
+**Non-vacuity (LOB-83).** `.verify/evidence/lob-83/mutation-no-read-before-post/`: posting without
+the read fails the crash-window check in the `linkback` phase, the bound-alert check in `first`, and
+the replayed-past-a-lost-ack check after the restart (a second note on the issue). Running the lost-ack
+case also found a real hazard: Bun's `fetch` re-sends a POST whose reused connection drops before any
+answer, which put two notes on the issue before the read ever ran; the create is sent with
+`keepalive: false`.
+
 **What it cannot prove.** That Sentry signs the bytes it sends, whether Sentry retries a delivery
 or keeps its `Request-ID`, and its 1-second response budget (the route answers after the session
-is opened). See `docs/testing-third-parties.md`'s Sentry row. That `environment` is on
+is opened), and — for the link-back — that the real Sentry takes the notes routes and token as spelled
+(the public API reference does not document them). See `docs/testing-third-parties.md`'s two Sentry rows. That `environment` is on
 `data.event` (the documented example does not show it), so the drive's environment filter is our
 reading. The filter is deployment-wide, not per project or per rule. A repeat alert is recorded on
 the delivery, not posted into the open session. The link back to the alert is LOB-83.

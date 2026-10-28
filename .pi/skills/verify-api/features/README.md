@@ -73,6 +73,14 @@ own database on 5442): `./sentry.sh` **33/33** (23 checks on the first process, 
 one, 4 shell checks), evidence `.verify/evidence/lob-82/`, with a mutation run that skips the
 fingerprint claim failing it (`mutation-no-binding/`). See `sentry.md`.
 
+The Sentry link-back checks (LOB-83: one note on the alert's Sentry issue naming the session, once
+across a redelivery, a lost acknowledgement, a bound second alert and an API restart; a 503 or a silent
+Sentry never fails the delivery) were run from the `agent/LOB-83` worktree on 2026-10-28 (API on
+`:9560`, the fake Sentry REST API on `:9561`, faux, the worktree's own database on 5442): `./sentry.sh`
+**51/51** (12 checks in the `linkback` phase, 25 on the first process, 9 on the restarted one, 5 shell
+checks), evidence `.verify/evidence/lob-83/`, with a mutation run that skips the read-before-post
+failing it (`mutation-no-read-before-post/`). See `sentry.md`.
+
 The Jira, Slack and GitHub-issues adapters are served over HTTP (LOB-259) and their drives were run
 from the `agent/LOB-259` worktree on 2026-10-28 (faux, Postgres on 5442, the worktree's own database):
 `./jira.sh` **16/16 + 2/2**, `./slack.sh` **19/19 + 2/2** and `./github-issues.sh` **15/15 + 2/2**,
@@ -190,6 +198,12 @@ the hook installed and a fork writes its parent's cap, and nothing the drive ass
 [budget.md](budget.md), which names what the drive does not reach (forks and replays, the dashboard
 row).
 
+The cost-prediction checks (LOB-38) were run from the `agent/LOB-38` worktree on 2026-10-28
+(`DATABASE_URL` naming the worktree's own server on 5442, and the script minting and dropping its own
+`factory_verify_cost_<random>` database there; faux priced at `FAUX_COST=0.01`; API on
+`COST_PORT=9551`): `./cost.sh` **28/28** (11 driver checks, 2 capped-session checks, 15 shell checks),
+evidence `.verify/evidence/latest/api/cost*`. See [cost.md](cost.md).
+
 The PR-step RPC checks (LOB-213) were run from the `agent/LOB-213` worktree on 2026-10-27
 (`DATABASE_URL` the worktree's own `factory_agent_lob_213` on 5442, faux, API on `PR_RPC_PORT=9520`,
 the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** (7 driver checks, 5
@@ -256,6 +270,12 @@ reopen's resume lines. Re-run after review scoped the reopen's resume to the roo
 submissions. No drive mutation was run; the root scoping is mutation-checked in `packages/harness`'s
 `resume.test.ts`. See [lifecycle.md](lifecycle.md).
 
+The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree on 2026-10-28
+(`DATABASE_URL` the worktree's own `factory_agent_lob_70` on 5442, faux, the API on
+`ADMISSION_PORT=9500` with `SESSION_MAX_CONCURRENT=2` and `SESSION_IDLE_TIMEOUT_MS=3000`):
+`./admission.sh` **11/11** (8 driver checks, 3 shell checks), evidence
+`.verify/evidence/latest/api/admission*.json`. See [limits.md](limits.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |
@@ -279,6 +299,7 @@ submissions. No drive mutation was run; the root scoping is mutation-checked in 
 | Slack adapter            | passing | [slack.md](slack.md)                         |
 | Linear adapter           | passing | [linear.md](linear.md)                       |
 | Sentry receiver          | passing | [sentry.md](sentry.md)                       |
+| Sentry link-back         | passing | [sentry.md](sentry.md)                       |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
 | Approvals                | passing | [approvals.md](approvals.md)                 |
 | Curate a session's pages | passing | [curate.md](curate.md)                       |
@@ -298,6 +319,7 @@ submissions. No drive mutation was run; the root scoping is mutation-checked in 
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
 | Control-plane identity   | passing | [identity.md](identity.md)                   |
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
+| Cost prediction          | passing | [cost.md](cost.md)                           |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):

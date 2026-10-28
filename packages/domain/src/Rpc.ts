@@ -60,6 +60,12 @@ import {
   ListPagesInput,
   ListPagesOutput,
 } from "@repo/domain/Page";
+import {
+  BacktestCostInput,
+  CostBacktest,
+  CostPrediction,
+  PredictCostInput,
+} from "@repo/domain/Cost";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
 import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
@@ -210,6 +216,18 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("getOutcomes", {
     payload: OutcomesInput,
     success: OutcomeReport,
+    error: SessionError,
+  }),
+  // Cost prediction before a run (LOB-38): a range from the completed sessions most like the prompt,
+  // and the walk-forward backtest that says how wrong it has been — both from the same index.
+  Rpc.make("predictCost", {
+    payload: PredictCostInput,
+    success: CostPrediction,
+    error: SessionError,
+  }),
+  Rpc.make("backtestCost", {
+    payload: BacktestCostInput,
+    success: CostBacktest,
     error: SessionError,
   }),
   // The cited knowledge pages a session's log holds (LOB-204), read from the derived rows a rebuild
