@@ -331,6 +331,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Sentry receiver          | passing | [sentry.md](sentry.md)                       |
 | Sentry link-back         | passing | [sentry.md](sentry.md)                       |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
+| Linear questions (T5)    | passing | [linear-writeback.md](linear-writeback.md)   |
 | Approvals                | passing | [approvals.md](approvals.md)                 |
 | Curate a session's pages | passing | [curate.md](curate.md)                       |
 | A mission                | passing | [mission.md](mission.md)                     |
@@ -416,3 +417,12 @@ off, `apps/api/src/Rpc/Auth.test.ts` fails (2 and 7 cases). See [identity.md](id
 - **Isolation, sandboxes.** Nothing in this surface touches a cluster; sessions run in a
   directory under `SESSION_ROOT` — a linked git worktree when the repo is registered with a
   checkout, which `./sigterm.sh` registers (LOB-268), and a scratch directory otherwise.
+
+The trust-gate checks (S-trigger-trust-gating) were run from the `agent/S-trigger-trust-gating`
+worktree on 2026-10-28 (the worktree's own database on 5442, faux): `./linear.sh` **32/32** on `:9510`
+(checks 22–25 new: the untrusted labeller, the issue created before its route, the hidden
+instruction absent from the prompt, the trusted relabel reclaimed) and `./github-issues.sh` **16/16 +
+2/2** on `:9511` with the fake on `:9512` (check 13 new: a reader refused naming the role, a writer
+admitted), evidence `.verify/evidence/s-trigger-trust-gating/`. With the trust patterns removed from
+the work-keyed reclaim, or the raw body passed to the prompt, `TriggerService.trust.test.ts` fails
+(one and two cases). See [trigger.md](trigger.md).

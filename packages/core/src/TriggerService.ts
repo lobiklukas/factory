@@ -53,6 +53,19 @@
  * An adapter's own filter (`TriggerEvent.filtered`) is a recorded skip too, with the adapter's
  * reason, before any rule is consulted.
  *
+ * **A rule's trust gate runs before anything starts (S-trigger-trust-gating).** A rule may admit only
+ * listed authors, GitHub users with a role on the repo, and items created after it was enabled
+ * (`TriggerRule.trust`, `./triggerTrust`). A delivery the gate refuses is a recorded skip naming the
+ * author or the item's age, checked after the mapping (it is the mapped rule's gate) and before the
+ * registry, the board and the session — a card rule's delivery included, since its card's body is
+ * a later run's prompt. A delivery keyed by its work reclaims that skip, so a stranger's label does
+ * not lock an issue against the trusted person who labels it next.
+ *
+ * **The words are cleaned before anything reads them.** The event's title and body — and the rendered
+ * prompt, for what a template pulls from labels and keys — go through `sanitizeTriggerText`: Unicode
+ * normalized, and zero-width, bidi and tag characters and HTML comments removed, so the agent reads
+ * what a reviewer sees. The recorded reason says how much was removed.
+ *
  * **The write-back is optional and injected.** No adapter in part 1 needs one (the generic webhook
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
@@ -87,6 +100,13 @@ import { triggerErrorOfSession } from "./admission";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
+import { sanitizedNote, sanitizeTriggerText } from "./triggerText";
+import {
+  CREATED_BEFORE_PATTERN,
+  TriggerAuthorPermissions,
+  trustRefusal,
+  UNTRUSTED_AUTHOR_PATTERN,
+} from "./triggerTrust";
 
 export type TriggerServiceShape = {
   /**
@@ -399,6 +419,35 @@ export const TriggerSessionsFromSessionService = Layer.effect(
   }),
 );
 
+/** A person's reply to a question the factory asked in the source (`TriggerEvent.reply`). */
+export type TriggerReply = NonNullable<TriggerEvent["reply"]> & {
+  /** The issue (or item) the reply was left on: the event's `key`. */
+  readonly key: string;
+};
+
+/**
+ * What became of a reply (T5). `answered` is the card whose `needs_input` block it lifted; `unmatched`
+ * is why it lifted none — no card waits on that item, or the question was already answered — which
+ * the seam records as the delivery's skip, so a redelivered reply is a recorded no-op and not a
+ * second answer.
+ */
+export type TriggerReplyOutcome =
+  | {
+      readonly _tag: "answered";
+      readonly taskId: TaskId;
+      readonly reason: string;
+    }
+  | { readonly _tag: "unmatched"; readonly reason: string };
+
+/**
+ * The blocked-delivery skip reason (T5), and the `LIKE` pattern that recognizes it in a recorded row:
+ * one definition for both, so the reclaim cannot drift from the words the skip writes. Blockers are
+ * named by the identifiers a person reads (`ENG-41`).
+ */
+const blockedBy = (blockers: ReadonlyArray<string>): string =>
+  `blocked by ${blockers.join(", ")}`;
+const BLOCKED_PATTERN = "blocked by %";
+
 export type TriggerServiceOptions = {
   /**
    * The mapping rules, in the operator's order: the first rule whose label the event carries wins,
@@ -430,6 +479,33 @@ export type TriggerServiceOptions = {
    */
   readonly fingerprintIdleAfter?: Duration.Input;
 };
+
+/**
+ * The items an event waits on, by the identifiers a person reads (T5): a Linear issue's open
+ * `blockedBy` relations. A delivery whose rule maps it, whose repo is registered, and that has any
+ * is recorded `skipped` with `blocked by <ids>` and starts nothing. The delivery is keyed by its
+ * work, so the one that arrives once the blockers are done reclaims the skip and starts the work —
+ * as one for a repo registered later does. A source with no such notion answers `[]`; the function
+ * is asked of every event, so it decides which sources it speaks for. A read that fails fails the
+ * delivery (`tracker-read`): the sender retries it, and nothing starts on a guess.
+ *
+ * A `Context.Reference`, as `SessionWriteBack` is: the default waits on nothing, so a seam built
+ * without a tracker (the docs and review seams, every test) wires nothing.
+ */
+export const TriggerBlockers = Context.Reference<
+  (event: TriggerEvent) => Effect.Effect<ReadonlyArray<string>, TriggerError>
+>("@repo/core/TriggerBlockers", {
+  defaultValue: () => () => Effect.succeed([]),
+});
+
+/**
+ * Where a reply goes (T5): the card whose question it answers. The default is none: a deployment
+ * with nothing that asks in the source records a reply `skipped`, saying so.
+ */
+export const TriggerReplies = Context.Reference<
+  | ((reply: TriggerReply) => Effect.Effect<TriggerReplyOutcome, TriggerError>)
+  | undefined
+>("@repo/core/TriggerReplies", { defaultValue: () => undefined });
 
 /**
  * The default reclaim window. It has to outlast the slowest honest claim — opening a session can
@@ -648,6 +724,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
       const sessions = yield* TriggerSessions;
       const cards = yield* TriggerCards;
       const writeBack = yield* TriggerWriteBack;
+      // Optional: only a rule that admits authors by GitHub role needs it, and the gate fails such a
+      // delivery loudly when it is missing rather than admitting an author nobody checked.
+      const permissions = yield* Effect.serviceOption(TriggerAuthorPermissions);
+      const blockers = yield* TriggerBlockers;
+      const replies = yield* TriggerReplies;
       const fallback = envRoutedRules(options.rules, options.rulesOrigin);
       /** The rule set one delivery is routed with, stored routes first (LOB-266). */
       const routed =
@@ -730,6 +811,36 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         );
 
       /**
+       * A person's reply to a question asked in the source (T5): record what the port made of it. An
+       * unmatched reply is a skip, which is also what a redelivery of an answered one reads as.
+       */
+      const answerReply = (
+        requestId: string,
+        reply: TriggerReply,
+      ): Effect.Effect<TriggerOutcome, TriggerError> =>
+        Effect.gen(function* () {
+          if (replies === undefined) {
+            return yield* skip(
+              requestId,
+              `this deployment records no replies from ${reply.key}'s source`,
+            );
+          }
+          const outcome = yield* replies(reply);
+          if (outcome._tag === "unmatched") {
+            return yield* skip(requestId, outcome.reason);
+          }
+          yield* processed(requestId, outcome.reason, {
+            taskId: outcome.taskId,
+          });
+          return {
+            status: "processed",
+            replayed: false,
+            taskId: outcome.taskId,
+            reason: outcome.reason,
+          } as const;
+        });
+
+      /**
        * A card rule's delivery (LOB-254): one card on the repo's board, and no session. The board is
        * the repo's one board (`createBoard` keeps it to one); none is a recorded skip naming the
        * command that makes one. The card is filed under the item's key, so this delivery and any
@@ -741,6 +852,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         event: TriggerEvent,
         mapping: TriggerMapping,
         routedBy: string,
+        note: string | undefined,
       ): Effect.Effect<TriggerOutcome, TriggerError> =>
         Effect.gen(function* () {
           const boards = yield* storage(
@@ -794,7 +906,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
             body.cut === undefined
               ? ""
               : `; its body was cut to ${MAX_TASK_BODY_CHARS} of ${body.cut} characters`
-          }`;
+          }${note === undefined ? "" : `; ${note}`}`;
           yield* processed(requestId, reason, { taskId: card.id });
           return {
             status: "processed",
@@ -879,7 +991,18 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         delivery: TriggerDelivery,
       ): Effect.Effect<TriggerOutcome, TriggerError> =>
         Effect.gen(function* () {
-          const { requestId, event } = delivery;
+          const { requestId } = delivery;
+          // Everything from here reads the cleaned words (`sanitizeTriggerText`): the mapping's
+          // prompt, the session's title, the card's title and body, the write-back. Only the title
+          // and the body are cleaned; labels and keys are what rules match on, and the rendered
+          // prompt is cleaned below for what a template pulls from them.
+          const title = sanitizeTriggerText(delivery.event.title);
+          const body = sanitizeTriggerText(delivery.event.body);
+          const event: TriggerEvent = {
+            ...delivery.event,
+            title: title.text,
+            body: body.text,
+          };
 
           // The claim. `RETURNING` on a conflicting insert yields no row, which is exactly the
           // question "am I the first?" — one statement, so two workers cannot both win.
@@ -890,7 +1013,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // session, and two such deliveries still cannot both win (the second sees `received`).
           // The no-board skip and a fingerprint's pending-binding skip (LOB-82: it lost to a holder
           // that had not opened its session yet, and that holder may since have failed and given
-          // the binding back) are transient the same way.
+          // the binding back) are transient the same way. So are the trust gate's skips
+          // (S-trigger-trust-gating): the issue's key is shared by every delivery about it, so an
+          // untrusted author's label must not answer the trusted author's later one as a replay.
           //
           // Any delivery also wins over a *stale* claim: a row still `received` whose claim is older
           // than `reclaimAfter` belongs to a process that died between its claim and its outcome
@@ -911,7 +1036,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                       WHERE (webhook_deliveries.status = 'skipped'
                           AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
                             OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}
-                            OR webhook_deliveries.skip_reason LIKE ${PENDING_BINDING_PATTERN}))
+                            OR webhook_deliveries.skip_reason LIKE ${BLOCKED_PATTERN}
+                            OR webhook_deliveries.skip_reason LIKE ${PENDING_BINDING_PATTERN}
+                            OR webhook_deliveries.skip_reason LIKE ${UNTRUSTED_AUTHOR_PATTERN}
+                            OR webhook_deliveries.skip_reason LIKE ${CREATED_BEFORE_PATTERN}))
                         OR (webhook_deliveries.status = 'received'
                           AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
                     RETURNING request_id, claimed_at::text AS claim
@@ -936,6 +1064,15 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           const fingerprint = fingerprintOf(event);
           const claimedWork: Effect.Effect<TriggerOutcome, TriggerError> =
             Effect.gen(function* () {
+              // A reply is an answer, not work: it goes to the card its question parked, and no rule
+              // routes it. Claimed like any delivery, so a redelivery is one answer.
+              if (event.reply !== undefined) {
+                return yield* answerReply(requestId, {
+                  ...event.reply,
+                  key: event.key,
+                });
+              }
+
               // The filter. `create` always starts work; a lifecycle action (`push`, `schedule`)
               // only when the rule that would *route* this event asked for it, so widening what the
               // docs trigger needs did not widen what every adapter accepts (LOB-197).
@@ -973,10 +1110,26 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
               // The rule the filter consulted is the one that maps, and its origin comes from the same
               // list, so the reason cannot name a rule other than the one that chose the repo.
-              const mapping =
+              const resolved =
                 matched === undefined
                   ? undefined
                   : resolveMapping([matched.rule], event);
+              // What the template pulled in beside the title and body (labels, the key) is a
+              // stranger's text too, so the rendered prompt is cleaned as a whole.
+              const prompt =
+                resolved === undefined
+                  ? undefined
+                  : sanitizeTriggerText(resolved.prompt);
+              const mapping =
+                resolved === undefined || prompt === undefined
+                  ? undefined
+                  : { ...resolved, prompt: prompt.text };
+              const note = sanitizedNote({
+                hidden: title.hidden + body.hidden + (prompt?.hidden ?? 0),
+                comments:
+                  title.comments + body.comments + (prompt?.comments ?? 0),
+                markup: title.markup + body.markup + (prompt?.markup ?? 0),
+              });
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
                   requestId,
@@ -986,6 +1139,19 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                       : `no rule matches labels [${event.labels.join(", ")}]`
                   }${event.team === undefined ? "" : ` in team ${event.team}`}`,
                 );
+              }
+
+              // The rule's trust gate: who may start work through it, and which items. A refusal is a
+              // recorded skip naming the author or the item's age; a lookup that cannot answer fails
+              // the delivery (`author-check`), so the claim is given back for the next delivery
+              // (Linear's retry; on GitHub, a manual redelivery or a relabel).
+              const untrusted = yield* trustRefusal(
+                matched,
+                event,
+                permissions,
+              );
+              if (untrusted !== undefined) {
+                return yield* skip(requestId, untrusted);
               }
 
               // A rule can name a repo nobody registered — a configuration mistake the operator
@@ -1001,13 +1167,27 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 return yield* skip(requestId, unregisteredRepo(mapping.repo));
               }
 
+              // An item that waits on others does not start (T5). After the mapping and the registry,
+              // so only a delivery that would have started work asks the source anything, and a
+              // skip here is the one a later delivery of the same key reclaims.
+              const waiting = yield* blockers(event);
+              if (waiting.length > 0) {
+                return yield* skip(requestId, blockedBy(waiting));
+              }
+
               // What the delivery's recorded reason says chose the repo, whichever thing it starts.
               const routedBy = `rule "${mapping.label}"${
                 matched.origin === undefined ? "" : ` (${matched.origin})`
               } mapped it to ${mapping.repo}`;
 
               if (mapping.mode === "card") {
-                return yield* fileCard(requestId, event, mapping, routedBy);
+                return yield* fileCard(
+                  requestId,
+                  event,
+                  mapping,
+                  routedBy,
+                  note,
+                );
               }
 
               // A fingerprinted event (one occurrence of a Sentry issue) opens a session only if it
@@ -1068,10 +1248,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // (`skip_reason` is the delivery's recorded outcome reason, whatever the outcome), so a
               // replay of a processed delivery names the route that started it, and so does the row
               // an operator reads after the first response is gone.
-              const reason =
+              const reason = `${
                 setupFailure === undefined
                   ? routedBy
-                  : `${routedBy}, but the session's worktree setup failed, so its prompt was not sent: ${setupFailure.split("\n")[0]}`;
+                  : `${routedBy}, but the session's worktree setup failed, so its prompt was not sent: ${setupFailure.split("\n")[0]}`
+              }${note === undefined ? "" : `; ${note}`}`;
               yield* processed(requestId, reason, { sessionId: session.id });
 
               return {

@@ -27,6 +27,13 @@ parked card from the browser (LOB-239, the `needs_input` walk of LOB-22). Before
   lifts a block the pane says so (`[data-thread-lifted=<reason>]`: the card is no longer blocked, and
   the next run reads the answer), the card header's `blocked · needs input` badge goes, and the board
   and the attention view re-read (`BOARD_KEY`).
+- **An answer offers the run that reads it (C24).** After the answer lands, under the "Answered" line,
+  `[data-thread-next-run]` holds **Start the next run** (`[data-thread-start-next]`): one click opens a
+  run in the column the card is back in, sent the card's default prompt (the same text **Start run**
+  pre-fills), and takes the pane to it. The answer is not pasted into that prompt: every run on the
+  card is quoted the thread, answer included. A column no run starts in (`runStart`) shows
+  `[data-thread-next-run-unavailable]` with the reason instead. The offer goes with the click, so one
+  answer starts one run.
 - **A stale send is refused, re-read, and kept.** If the card changed while the person typed — a run
   added a note, someone else answered — the server refuses `StaleRevision`; the pane shows
   `[data-comment-refusal=StaleRevision]` with the service's words, re-reads the card and its thread,
@@ -73,13 +80,14 @@ revision N, not M`, the card still blocked on the server, and the typed text sti
    exactly two `commentTask`s, the second at the server's revision;
 6. `factory board show` to print `blocked   -`, `thread    3`, and the answer's lines indented
    verbatim under `[answer] dashboard`;
-7. **Start run** again and a message: `../verify-board/ask.ts MODE=told` reads the new run's
-   committed prompt from Postgres and finds the answer verbatim after the question, and the run did
-   not ask again; the pane lists both runs and the thread has one question;
+7. after the answer, **Start the next run** offered and enabled, naming `specifying`; one click on it
+   (not the Start run field): `../verify-board/ask.ts MODE=told` reads the new run's committed prompt
+   from Postgres and finds the answer verbatim after the question, and the run did not ask again; the
+   pane lists exactly both runs, the offer is gone, and the thread has one question;
 8. no console error.
 
 Evidence: `.verify/evidence/latest/thread/` — `thread-question.png`, `thread-from-attention.png`,
-`thread-stale.png`, `thread-answered.png`, `thread-next-run.png`, `board-show.txt`,
+`thread-stale.png`, `thread-answered.png`, `thread-offer.png`, `thread-next-run.png`, `board-show.txt`,
 `thread-told.json`, `observed.json`, `api.log`, `web.log`.
 
 ## Gotchas

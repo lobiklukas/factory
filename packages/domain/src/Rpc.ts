@@ -138,6 +138,8 @@ import {
   ForkSessionInput,
   GetRepoInput,
   InterruptSessionResult,
+  SetSessionBudgetInput,
+  SetSessionBudgetResult,
   ListReposInput,
   ListReposOutput,
   ListSessionsInput,
@@ -211,6 +213,14 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("interruptSession", {
     payload: SessionIdInput,
     success: InterruptSessionResult,
+    error: SessionError,
+  }),
+  // Setting a cap commits it on the session's log and clears the stop the old cap made, so a session
+  // the cap stopped runs again on its next message (C23). It is a cap raise in the usual case, and
+  // sets one on a session that had none.
+  Rpc.make("setSessionBudget", {
+    payload: SetSessionBudgetInput,
+    success: SetSessionBudgetResult,
     error: SessionError,
   }),
   Rpc.make("forkSession", {

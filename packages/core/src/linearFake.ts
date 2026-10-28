@@ -15,6 +15,10 @@
  * (`issuePlan`), children seeded by a case (`FakeOptions.children`), and the per-child writes a
  * re-scope and a close send — the issue read, `issueUpdate` and `commentCreate` on a child.
  *
+ * T5 adds what a delegated run's questions and an issue's blockers need: the issue's blockers
+ * (`FakeOptions.blockers`, read by `issueBlockers` as inverse relations), `agentSessionCreateOnIssue`
+ * and `agentActivityCreate` (the elicitation), recorded as `agentSessions` and `activities`.
+ *
  * A test file, not exported from the package: `LinearSync.test.ts` and `SessionService.test.ts` share
  * it so the approval cases run against the same fake the write-back cases do.
  */
@@ -62,6 +66,16 @@ export type FakeOptions = {
   readonly hang?: { readonly operation: string; readonly times: number };
   /** Answer the `nth` (1-based) request of this operation with GraphQL `errors`, that once. */
   readonly refuseNth?: { readonly operation: string; readonly nth: number };
+  /**
+   * Issues that block this one (T5), each by the identifier a person reads and the state it is in
+   * (default `In Progress`). The returned `blockers` are live: a case moves one to `DONE`.
+   */
+  readonly blockers?: ReadonlyArray<{
+    readonly identifier: string;
+    readonly state?: LinearWorkflowState;
+    /** The relation's type (default `blocks`): a `related` issue holds nothing up. */
+    readonly type?: string;
+  }>;
   /** Children the parent already has (LOB-45): the plan a plan-freshness pass reads. */
   readonly children?: ReadonlyArray<{
     readonly title: string;
@@ -86,6 +100,7 @@ export type CreatedChild = {
 /** The operations that only read: what `writes()` leaves out. */
 const READS = new Set([
   "issue",
+  "issueBlockers",
   "issueChildren",
   "issueRelations",
   "issuePlan",
@@ -135,6 +150,23 @@ export const makeLinear = (options: FakeOptions = {}) => {
     relatedIssueId: string;
     type: string;
   }> = [];
+  /** The issues blocking this one (T5); a case moves one by setting its `state`. */
+  const blockers = (options.blockers ?? []).map((blocker, index) => ({
+    id: `iss-blocker-${index + 1}`,
+    identifier: blocker.identifier,
+    state: blocker.state ?? PROGRESS,
+    type: blocker.type ?? "blocks",
+  }));
+  /** The agent sessions `agentSessionCreateOnIssue` opened (T5), by issue. */
+  const agentSessions: Array<{
+    readonly id: string;
+    readonly issueId: string;
+  }> = [];
+  /** Every `agentActivityCreate` that landed (T5): the session and the typed content. */
+  const activities: Array<{
+    readonly agentSessionId: string;
+    readonly content: Record<string, unknown>;
+  }> = [];
   const counts = new Map<string, number>();
   const seen: Seen[] = [];
   const lost = new Set<string>();
@@ -143,23 +175,29 @@ export const makeLinear = (options: FakeOptions = {}) => {
   let hangsLeft = options.hang?.times ?? 0;
 
   const operationOf = (query: string): string =>
-    query.includes("commentCreate")
-      ? "commentCreate"
-      : query.includes("issueUpdate")
-        ? "issueUpdate"
-        : query.includes("attachmentCreate")
-          ? "attachmentCreate"
-          : query.includes("issueRelationCreate")
-            ? "issueRelationCreate"
-            : query.includes("issueCreate")
-              ? "issueCreate"
-              : query.includes("FactoryParent")
-                ? "issueChildren"
-                : query.includes("FactoryRelations")
-                  ? "issueRelations"
-                  : query.includes("FactoryPlan")
-                    ? "issuePlan"
-                    : "issue";
+    query.includes("agentSessionCreateOnIssue")
+      ? "agentSessionCreateOnIssue"
+      : query.includes("agentActivityCreate")
+        ? "agentActivityCreate"
+        : query.includes("FactoryBlockers")
+          ? "issueBlockers"
+          : query.includes("commentCreate")
+            ? "commentCreate"
+            : query.includes("issueUpdate")
+              ? "issueUpdate"
+              : query.includes("attachmentCreate")
+                ? "attachmentCreate"
+                : query.includes("issueRelationCreate")
+                  ? "issueRelationCreate"
+                  : query.includes("issueCreate")
+                    ? "issueCreate"
+                    : query.includes("FactoryParent")
+                      ? "issueChildren"
+                      : query.includes("FactoryRelations")
+                        ? "issueRelations"
+                        : query.includes("FactoryPlan")
+                          ? "issuePlan"
+                          : "issue";
   const isParent = (id: unknown) => id === issue.id || id === issue.identifier;
   const everyIssue = () => [
     { id: issue.id, identifier: issue.identifier },
@@ -204,6 +242,44 @@ export const makeLinear = (options: FakeOptions = {}) => {
       return { issueUpdate: { success: true } };
     }
     switch (operation) {
+      case "issueBlockers":
+        return {
+          issue: isParent(variables["id"])
+            ? {
+                id: issue.id,
+                identifier: issue.identifier,
+                inverseRelations: {
+                  nodes: blockers.map((blocker) => ({
+                    type: blocker.type,
+                    issue: {
+                      id: blocker.id,
+                      identifier: blocker.identifier,
+                      state: { type: blocker.state.type },
+                    },
+                  })),
+                },
+              }
+            : null,
+        };
+      case "agentSessionCreateOnIssue": {
+        const made = {
+          id: `agent-session-${agentSessions.length + 1}`,
+          issueId: String(input["issueId"]),
+        };
+        agentSessions.push(made);
+        return {
+          agentSessionCreateOnIssue: {
+            success: true,
+            agentSession: { id: made.id },
+          },
+        };
+      }
+      case "agentActivityCreate":
+        activities.push({
+          agentSessionId: String(input["agentSessionId"]),
+          content: asRecord(input["content"]),
+        });
+        return { agentActivityCreate: { success: true } };
       case "issuePlan":
         return {
           issue: isParent(variables["id"])
@@ -412,5 +488,17 @@ export const makeLinear = (options: FakeOptions = {}) => {
         ? !READS.has(s.operation)
         : s.operation === operation,
     );
-  return { issue, teamId, children, relations, seen, writes, client, layer };
+  return {
+    issue,
+    teamId,
+    children,
+    relations,
+    blockers,
+    agentSessions,
+    activities,
+    seen,
+    writes,
+    client,
+    layer,
+  };
 };

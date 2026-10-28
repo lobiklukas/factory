@@ -7,7 +7,9 @@
  * something no comment lifts.
  */
 import { MAX_COMMENT_CHARS } from "@repo/domain/Task";
-import type { TaskBlocked } from "@repo/domain/Task";
+import type { BoardDefinition, Task, TaskBlocked } from "@repo/domain/Task";
+import { BoardInstanceId, DefinitionId, TaskId } from "@repo/domain/Task";
+import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   commentKindLabel,
@@ -16,6 +18,8 @@ import {
   composerIntent,
   draftAfterSend,
   liftedBlock,
+  nextRunOffer,
+  runStartedSince,
   sendable,
 } from "./thread-view";
 import { refusalIsCurrent } from "./board-view";
@@ -166,5 +170,80 @@ describe("a comment refusal is current by the move's rule", () => {
     );
     expect(refusalIsCurrent(stale, { revision: 5 })).toBe(true);
     expect(refusalIsCurrent(stale, { revision: 7 })).toBe(false);
+  });
+});
+
+describe("nextRunOffer", () => {
+  const definition: BoardDefinition = {
+    id: Schema.decodeSync(DefinitionId)("default"),
+    version: 1,
+    name: "Default",
+    columns: [
+      { name: "intake", kind: "resting", skills: [], requires: [] },
+      { name: "specifying", kind: "working", skills: [], requires: [] },
+    ],
+  };
+  const card = (column: string): Task => ({
+    id: Schema.decodeSync(TaskId)("tsk_00000000000000000000000001"),
+    boardId: Schema.decodeSync(BoardInstanceId)(
+      "brd_0000000000000000000000000a",
+    ),
+    title: "Pin the Postgres major",
+    column,
+    definitionVersion: 1,
+    revision: 4,
+    priority: "normal",
+    createdAt: AT,
+    updatedAt: AT,
+  });
+
+  it("offers the run in the column the answered card is back in", () => {
+    expect(
+      nextRunOffer(needsInput, card("specifying"), definition, false),
+    ).toEqual({
+      allowed: true,
+      column: "specifying",
+    });
+  });
+
+  it("offers nothing when no answer landed, and a reason when the column runs nothing", () => {
+    expect(nextRunOffer(undefined, card("specifying"), definition, false)).toBe(
+      undefined,
+    );
+    expect(
+      nextRunOffer(dependency, card("specifying"), definition, false),
+    ).toBeUndefined();
+    const resting = nextRunOffer(
+      { ...needsInput, column: "intake" },
+      card("intake"),
+      definition,
+      false,
+    );
+    expect(resting?.allowed).toBe(false);
+  });
+
+  it("is spent once a run has started since the answer, or the card has left its column", () => {
+    expect(
+      nextRunOffer(needsInput, card("specifying"), definition, true),
+    ).toBeUndefined();
+    expect(
+      nextRunOffer(needsInput, card("intake"), definition, false),
+    ).toBeUndefined();
+  });
+});
+
+describe("runStartedSince", () => {
+  it("is a run the pane did not know of when the answer was sent", () => {
+    const seen = new Set(["run_1"]);
+    expect(runStartedSince(seen, [{ id: "run_1" }])).toBe(false);
+    expect(runStartedSince(seen, [{ id: "run_2" }, { id: "run_1" }])).toBe(
+      true,
+    );
+    expect(runStartedSince(new Set(), [{ id: "run_1" }])).toBe(true);
+  });
+
+  it("is false while either read is missing", () => {
+    expect(runStartedSince(undefined, [{ id: "run_1" }])).toBe(false);
+    expect(runStartedSince(new Set(), undefined)).toBe(false);
   });
 });

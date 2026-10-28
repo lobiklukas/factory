@@ -298,6 +298,20 @@ one transaction over one table, and B3's "cards are rows" holds for the thread t
 the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
 card carries the thread as its `task_thread` prompt section.
 
+Built (C24): an answer offers the run that reads it. After an answer lifts a `needs_input` block the
+card pane offers **Start the next run** (the column the question was asked in, the card's default
+prompt), and `factory board comment --start` does the same from the CLI. The offer is spent by the
+first run that starts on the card afterwards, however it was started, and `--start` is refused before
+anything is written on a card that is not blocked `needs_input` or when `--actor` is a run (its
+comment would be a note); a comment that lands but leaves the card blocked fails with
+`start_not_started`.
+
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
+
 ## B8 — Evidence gates, not evidence prose
 
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body
@@ -455,8 +469,10 @@ customization, decomposition, and board metrics.
 
 1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, claiming under the caps/WIP
    limits (enforced on every start since LOB-71), TTL reclaim, priority
-   bands, trusted-actor and created-after-enable rules. Trigger: the first run you want started without
-   you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
+   bands, trusted-actor and created-after-enable rules (built for trigger intake, S-trigger-trust-gating:
+   a rule's `trust` gate — an author allowlist, a GitHub role, created after the rule was enabled — so
+   the dispatcher reuses it rather than inventing its own). Trigger: the first run you want started
+   without you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
 2. **Questions as durable objects** — dedup by question id, aging, resume after death, wake policy.
    Trigger: the first question asked while you are not watching. Linear's `elicitation` supplies the
    outward half, so this is smaller than it looks.

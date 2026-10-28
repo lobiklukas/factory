@@ -63,6 +63,8 @@ import type {
   ForkSessionInput,
   GetRepoInput,
   InterruptSessionResult,
+  SetSessionBudgetInput,
+  SetSessionBudgetResult,
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -221,6 +223,8 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  commitBudget,
+  formatDollars,
   writeBudget,
   writeCurationUsage,
   PLAN_FRESHNESS_SKILL,
@@ -322,6 +326,7 @@ import {
   type CostHistoryRow,
 } from "./costPrediction";
 import { TITLE_MAX, titleFrom } from "./sessionTitle";
+import { AskWriteBack } from "./AskWriteBack";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -421,6 +426,15 @@ export type SessionServiceShape = {
   readonly interrupt: (
     sessionId: SessionId,
   ) => Effect.Effect<InterruptSessionResult, SessionError>;
+  /**
+   * Set the session's spend cap (C23): commit the new ceiling on its log and clear the stop the old
+   * one made, so a session the cap stopped runs again on its next message. Works on an idle session,
+   * one that was stopped, and one with a run in flight (its next request is checked against the new
+   * cap); on a session created without a cap it sets one.
+   */
+  readonly setBudget: (
+    input: SetSessionBudgetInput,
+  ) => Effect.Effect<SetSessionBudgetResult, SessionError>;
   /**
    * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
    * message a run already took, or one already over, is an outcome rather than a failure.
@@ -1215,6 +1229,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const context = yield* Effect.context<never>();
       /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
       const writeBack = yield* SessionWriteBack;
+      /** Where a run's question is also asked, for a card filed from a tracker issue; a no-op unless wired (T5). */
+      const askWriteBack = yield* AskWriteBack;
       /** Where approved proposals become issues; refuses unless a deployment wires a tracker (LOB-202). */
       const tracker = yield* ProposalTracker;
       const writeBackBudget = Duration.fromInputUnsafe(
@@ -1702,12 +1718,42 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const askFor = (sessionId: SessionId, taskId: string): AskOptions => ({
         ask: ({ question, callId }) =>
           forHarness(
-            tasks.ask({
-              taskId,
-              question,
-              actor: sessionId,
-              askId: `${sessionId}:${callId}`,
-            }),
+            tasks
+              .ask({
+                taskId,
+                question,
+                actor: sessionId,
+                askId: `${sessionId}:${callId}`,
+              })
+              .pipe(
+                // The question is on the card; carrying it to the tracker its card came from is a
+                // mirror (`AskWriteBack`), so it is bounded and a failure is logged, never the ask's.
+                // Run for a replay too: the port is idempotent on the ask id, and a post that failed
+                // the first time is the one a replay heals.
+                Effect.tap(() =>
+                  askWriteBack
+                    .asked({
+                      sessionId,
+                      taskId,
+                      askId: `${sessionId}:${callId}`,
+                      question,
+                    })
+                    .pipe(
+                      Effect.timeoutOrElse({
+                        duration: writeBackBudget,
+                        orElse: () =>
+                          Effect.logWarning(
+                            `session ${sessionId}: carrying the question to its tracker did not finish within ${Duration.toMillis(writeBackBudget)}ms; the ask answers without it`,
+                          ),
+                      }),
+                      Effect.catchCause((cause) =>
+                        Effect.logError(
+                          `session ${sessionId}: carrying the question to its tracker failed; the ask answers without it: ${Cause.pretty(cause)}`,
+                        ),
+                      ),
+                    ),
+                ),
+              ),
           ).then((card) => ({
             taskId: card.id,
             column: card.blocked?.column ?? card.column,
@@ -3983,6 +4029,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             session,
             outcome,
             message: `session ${sessionId} was interrupted: its run stopped, and the session is ${session.status}`,
+          };
+        });
+
+      const setBudget = (
+        input: SetSessionBudgetInput,
+      ): Effect.Effect<SetSessionBudgetResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Paused (LOB-25): the cap lands before anything a dead process left is continued, so a
+          // run that was stopped by the old cap is not resumed under it.
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            resume: false,
+          });
+          yield* commitBudget(owner.root, input.budget);
+          yield* continueRemaining(input.sessionId, owner);
+          yield* touchActivity(input.sessionId);
+          const snapshot = yield* get(input.sessionId);
+          const budget = snapshot.budget;
+          if (budget === undefined) {
+            return yield* new SessionErrorClass({
+              code: "harness",
+              message: `session ${input.sessionId}: the cap was committed but the log reports none`,
+            });
+          }
+          const reached = budget.spent >= budget.cap;
+          return {
+            session: yield* describe(input.sessionId, row),
+            budget,
+            message: reached
+              ? `session ${input.sessionId} is capped at ${formatDollars(budget.cap)}, which its ${formatDollars(budget.spent)} of spend already reaches: its next run stops before its first request`
+              : `session ${input.sessionId} is capped at ${formatDollars(budget.cap)} (${formatDollars(budget.spent)} spent): its next run is let through until the cap is reached`,
           };
         });
 
@@ -7418,6 +7495,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         sendDeferringSetup,
         interrupt,
+        setBudget,
         withdraw,
         fork,
         replay,

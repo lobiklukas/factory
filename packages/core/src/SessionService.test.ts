@@ -150,6 +150,8 @@ import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { AskWriteBack } from "./AskWriteBack";
+import { LinearAskWriteBack } from "./LinearElicitation";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import {
   sessionRequestIdOf,
@@ -12609,6 +12611,134 @@ describe("the ask on the task", () => {
       ),
     ).toBe(false);
     expect(snapshot.entries.at(-1)?.text).toBe("faux-ok (re: hello)");
+  }, 120_000);
+});
+
+/**
+ * The ask carried to Linear (T5): a run asking on a card filed from a Linear issue also posts its
+ * question into Linear as an `elicitation`, through the session layer's own `AskWriteBack` — the real
+ * Linear port over the in-process fake, so what is proved is the wiring the `ask` tool reaches.
+ *
+ * The claims: the question is on the card and the card parked whatever Linear does; exactly one
+ * activity of type `elicitation` was posted for the one ask; and a port that breaks its contract —
+ * dies — does not fail the ask.
+ */
+describe("the ask carried to Linear", () => {
+  const carryRoot = mkdtempSync(join(tmpdir(), "factory-core-ask-linear-"));
+  const QUESTION = "Which Postgres major does this target?";
+
+  const runtimeWith = <E>(
+    askWriteBack: Layer.Layer<never, E>,
+    faux: ReturnType<typeof createFauxModelAccess>,
+  ) =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: faux.access, sessionRoot: carryRoot }).pipe(
+          Layer.provide(askWriteBack),
+        ),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A card in `specifying` filed from the Linear issue `issueId`, on a board of its own. */
+  const cardFiledFrom = (issueId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      const card = yield* tasks.create({
+        boardId,
+        title: "a thin card",
+        actor: "person:lukas",
+        externalRef: `linear:${issueId}`,
+      });
+      return yield* tasks.move({
+        taskId: card.id,
+        expectedRevision: card.revision,
+        to: "specifying",
+        actor: "person:lukas",
+      });
+    });
+
+  const askAndPark = (issueId: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const tasks = yield* TaskService;
+      const card = yield* cardFiledFrom(issueId);
+      const run = yield* sessions.create({
+        title: card.title,
+        taskId: card.id,
+        taskColumn: card.column,
+      });
+      yield* sessions.send({ sessionId: run.id, content: "specify it" });
+      yield* waitUntil(
+        Effect.map(tasks.get(card.id), (task) => task.blocked !== undefined),
+        "the run to ask",
+      );
+      return {
+        card: yield* tasks.get(card.id),
+        thread: yield* tasks.comments(card.id),
+        runId: run.id,
+      };
+    });
+
+  it("posts the run's one question into Linear as one elicitation, and the card is parked on it", async () => {
+    const fake = makeLinear({
+      identifier: `ENG-${randomBytes(3).toString("hex")}`,
+    });
+    const sync = LinearIssueSyncLive({
+      apiUrl: "http://linear.test/graphql",
+      apiKey: Redacted.make("lin_api_test"),
+      states: DEFAULT_LINEAR_STATES,
+    }).pipe(Layer.provide(fake.layer));
+    const runtime = runtimeWith(
+      LinearAskWriteBack.pipe(
+        Layer.provide(Layer.mergeAll(sync, DatabaseLayer)),
+      ),
+      createFauxModelAccess({ fauxAsk: QUESTION }),
+    );
+    const outcome = await runtime
+      .runPromise(askAndPark(fake.issue.id))
+      .finally(() => runtime.dispose());
+
+    expect(outcome.card.blocked?.reason).toBe("needs_input");
+    expect(outcome.thread).toEqual([
+      expect.objectContaining({ kind: "question", body: QUESTION }),
+    ]);
+    expect(fake.activities).toEqual([
+      {
+        agentSessionId: fake.agentSessions[0]?.id,
+        content: { type: "elicitation", body: QUESTION },
+      },
+    ]);
+    expect(fake.agentSessions).toHaveLength(1);
+  }, 120_000);
+
+  it("an ask whose tracker port dies still parks the card on its question", async () => {
+    const calls: string[] = [];
+    const runtime = runtimeWith(
+      Layer.succeed(AskWriteBack, {
+        asked: (input) =>
+          Effect.suspend(() => {
+            calls.push(input.question);
+            return Effect.die("the tracker port broke its contract");
+          }),
+      }),
+      createFauxModelAccess({ fauxAsk: QUESTION }),
+    );
+    const outcome = await runtime
+      .runPromise(askAndPark("iss-no-matter"))
+      .finally(() => runtime.dispose());
+    // The port was asked once, with the question; it died, and the card is parked all the same.
+    expect(calls).toEqual([QUESTION]);
+    expect(outcome.card.blocked?.reason).toBe("needs_input");
+    expect(outcome.thread).toEqual([
+      expect.objectContaining({ kind: "question", body: QUESTION }),
+    ]);
   }, 120_000);
 });
 
