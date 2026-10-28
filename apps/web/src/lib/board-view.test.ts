@@ -6,13 +6,20 @@
  * a reordered definition, and a card in a column the definition does not declare.
  */
 import type { BoardColumn, BoardDefinition, Task } from "@repo/domain/Task";
-import { BoardInstanceId, DefinitionId, TaskId } from "@repo/domain/Task";
+import {
+  BoardInstanceId,
+  DefinitionConfig,
+  DefinitionId,
+  TaskId,
+} from "@repo/domain/Task";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   awaitingMove,
   blockedLabel,
   boardLanes,
+  definitionFor,
+  definitionOfConfig,
   landedOn,
   moveRefusal,
   recordLanding,
@@ -178,6 +185,112 @@ describe("offeredMoves", () => {
     expect(
       offeredMoves(card("a", "intake"), pipeline()).map((move) => move.kind),
     ).toEqual(["working", "terminal"]);
+  });
+});
+
+/**
+ * A definition with moves of its own (LOB-267): todo → doing → done, a gate on doing → done. The pane
+ * offers what the definition declares, never the default pipeline's table by name.
+ */
+const synthetic = (): BoardDefinition => ({
+  id: Schema.decodeSync(DefinitionId)("todo"),
+  version: 1,
+  name: "Todo",
+  initialColumn: "todo",
+  columns: [
+    { ...column("todo"), kind: "resting", transitions: [{ to: "doing" }] },
+    { ...column("doing"), transitions: [{ to: "done", gate: "sign-off" }] },
+    // Named like the default pipeline's first column, but it declares nothing here.
+    column("intake"),
+    { ...column("done"), kind: "terminal", transitions: [] },
+  ],
+});
+
+describe("offeredMoves under a definition's own transitions (LOB-267)", () => {
+  /** Mutation: offer the default table by column name — `todo` is offered nothing, `intake` two moves. */
+  it("offers only the declared moves, the gate marked, and none where a column declares none", () => {
+    const todo = offeredMoves(card("t", "todo"), synthetic());
+    expect(todo).toEqual([{ to: "doing", gate: undefined, kind: "working" }]);
+    expect(todo.map((move) => move.to)).not.toContain("done");
+    expect(offeredMoves(card("d", "doing"), synthetic())).toEqual([
+      { to: "done", gate: "sign-off", kind: "terminal" },
+    ]);
+    expect(offeredMoves(card("i", "intake"), synthetic())).toEqual([]);
+    expect(offeredMoves(card("e", "done"), synthetic())).toEqual([]);
+  });
+
+  /** Mutation: drop the `gate` from the adapter — `doing`'s move reads unmarked. */
+  it("reads a described definition back as the moves the pane offers", () => {
+    const config = Schema.decodeSync(DefinitionConfig)({
+      id: "todo",
+      version: 2,
+      name: "Todo",
+      initialColumn: "todo",
+      columns: [
+        {
+          name: "todo",
+          kind: "resting",
+          model: { model: "faux/faux-1", source: "deployment" },
+          skills: [],
+          requires: [],
+          exits: [{ to: "doing" }],
+        },
+        {
+          name: "doing",
+          kind: "working",
+          role: "builder",
+          model: { model: "faux/builder", source: "role" },
+          skills: ["implement"],
+          requires: [{ key: "pr_link", description: "a PR", checked: true }],
+          exits: [{ to: "done", humanGate: "sign-off" }],
+        },
+        {
+          name: "done",
+          kind: "terminal",
+          model: { model: "faux/faux-1", source: "deployment" },
+          skills: [],
+          requires: [],
+          exits: [],
+        },
+      ],
+    });
+    const back = definitionOfConfig(config);
+    expect(back.initialColumn).toBe("todo");
+    expect(back.columns[1]).toEqual({
+      name: "doing",
+      kind: "working",
+      role: "builder",
+      skills: ["implement"],
+      requires: [{ key: "pr_link", description: "a PR" }],
+      transitions: [{ to: "done", gate: "sign-off" }],
+    });
+    expect(offeredMoves(card("d", "doing"), back)).toEqual([
+      { to: "done", gate: "sign-off", kind: "terminal" },
+    ]);
+    expect(offeredMoves(card("t", "todo"), back).map((m) => m.to)).toEqual([
+      "doing",
+    ]);
+  });
+
+  /** Mutation: always answer the board's version — the card pinned to v2 is offered v1's moves. */
+  it("reads a card's moves from the version it pinned, and none while that version is unread", () => {
+    const board = synthetic();
+    const v2: BoardDefinition = { ...synthetic(), version: 2 };
+    expect(definitionFor(card("a", "todo"), board, new Map())).toBe(board);
+    expect(
+      definitionFor(
+        card("b", "todo", { definitionVersion: 2 }),
+        board,
+        new Map([[2, v2]]),
+      ),
+    ).toBe(v2);
+    expect(
+      definitionFor(
+        card("c", "todo", { definitionVersion: 3 }),
+        board,
+        new Map(),
+      ),
+    ).toBeUndefined();
   });
 });
 

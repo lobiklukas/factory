@@ -62,7 +62,8 @@ the board, and requires one lane per column in definition order and the card in 
 the human gate marked, a stale-revision move refused in the service's words with the card left in
 place, a `factory board move` followed without a reload (and the card's new lane on reload and in a
 fresh browser context), a pane move that `factory board show` prints, and a run started from the
-card (`features/card-pane.md`). It then seeds a second board (`seed-attention.ts`) and requires
+card, then a second board over a synthetic definition (`seed-definition.ts`: todo → doing → done,
+gated on the last move) whose pane offers only that definition's moves (`features/card-pane.md`). It then seeds a second board (`seed-attention.ts`) and requires
 `/attention` to show an explicit empty state while nothing on it needs a person, then a run's
 pending approval, a run's question and a done run at the plan approval, each with its reason and a
 link that opens the card, and never a card blocked on a dependency; a card-less session's approval is

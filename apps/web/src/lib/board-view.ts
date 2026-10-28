@@ -2,9 +2,10 @@ import type {
   BlockReason,
   BoardColumn,
   BoardDefinition,
+  DefinitionConfig,
   Task,
 } from "@repo/domain/Task";
-import { declaredTransitions, humanGate } from "@repo/domain/Task";
+import { columnTransitions } from "@repo/domain/Task";
 
 /**
  * The board as lanes (LOB-75): what `/boards/$boardId` renders, computed from two server reads.
@@ -77,23 +78,71 @@ export type OfferedMove = {
 };
 
 /**
- * The moves a card is offered: exactly the transitions its column declares, in the order the
- * pipeline declares them (docs/board.md B5), and nothing else.
+ * The moves a card is offered: exactly the transitions its column declares under `definition`, the
+ * version the card pinned, in the order the definition declares them (docs/board.md B5, LOB-267),
+ * and nothing else.
  *
- * The list is `declaredTransitions` — the table `TaskService` refuses against — so a move the API
- * would refuse as undeclared is never offered: a card in `intake` is offered `specifying` and
- * `canceled`, never `done`. A target the definition does not declare is still listed with no kind
- * rather than dropped, so a table that disagrees with the definition shows up instead of hiding.
+ * The list is `columnTransitions` — what `TaskService` refuses against — so a move the API would
+ * refuse as undeclared is never offered: a card in the default pipeline's `intake` is offered
+ * `specifying` and `canceled`, never `done`. A target the definition does not declare is still
+ * listed with no kind rather than dropped, so a move that disagrees with the lanes shows up instead
+ * of hiding.
  */
 export const offeredMoves = (
   task: Task,
   definition: BoardDefinition,
 ): ReadonlyArray<OfferedMove> =>
-  declaredTransitions(task.column).map((to) => ({
+  columnTransitions(definition, task.column).map(({ to, gate }) => ({
     to,
-    gate: humanGate(task.column, to),
+    gate,
     kind: definition.columns.find((column) => column.name === to)?.kind,
   }));
+
+/**
+ * A definition version as `getDefinition` describes it, back as the columns a card's moves are read
+ * from (LOB-267): each column's exits are its declared transitions, its human gates their `gate`.
+ * The described exits are the server's own resolution (`columnTransitions`), so they are written
+ * onto every column — a version that declared none answers the table it resolves through, and that
+ * table is what the pane then offers.
+ */
+export const definitionOfConfig = (
+  config: DefinitionConfig,
+): BoardDefinition => ({
+  id: config.id,
+  version: config.version,
+  name: config.name,
+  ...(config.initialColumn === undefined
+    ? {}
+    : { initialColumn: config.initialColumn }),
+  columns: config.columns.map((column) => ({
+    name: column.name,
+    kind: column.kind,
+    ...(column.role === undefined ? {} : { role: column.role }),
+    skills: column.skills,
+    requires: column.requires.map(({ key, description }) => ({
+      key,
+      description,
+    })),
+    transitions: column.exits.map(({ to, humanGate }) =>
+      humanGate === undefined ? { to } : { to, gate: humanGate },
+    ),
+  })),
+});
+
+/**
+ * The definition version a card's moves are read from: the one it pinned (B2). That is the board's
+ * own version for every card made on it, and `pinned` — the other versions the board read fetched,
+ * keyed by version — for a card that pinned another. `undefined` while a pinned version is missing,
+ * so the pane offers nothing rather than another version's moves.
+ */
+export const definitionFor = (
+  task: Pick<Task, "definitionVersion">,
+  board: BoardDefinition,
+  pinned: ReadonlyMap<number, BoardDefinition>,
+): BoardDefinition | undefined =>
+  task.definitionVersion === board.version
+    ? board
+    : pinned.get(task.definitionVersion);
 
 /**
  * Whether the card pane offers a run start, and why not when it does not (LOB-76).

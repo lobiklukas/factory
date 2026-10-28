@@ -115,11 +115,15 @@ export const columnLines = (column: ColumnConfig): ReadonlyArray<string> => {
   ];
 };
 
-/** A definition version described: its id, version and name, then every column in order. */
+/**
+ * A definition version described: its id, version and name, the column a new card starts in
+ * (LOB-267), then every column in order.
+ */
 export const definitionLines = (
   definition: DefinitionConfig,
 ): ReadonlyArray<string> => [
   `definition  ${definition.id} v${definition.version}  ${definition.name}`,
+  `initial     ${definition.initialColumn ?? NONE}`,
   ...definition.columns.flatMap(columnLines),
 ];
 

@@ -31,6 +31,7 @@ import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
 import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
+import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import { LinearIssueSyncLayer, LinearSyncLog } from "./Api/LinearSync";
 import {
@@ -40,6 +41,12 @@ import {
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
+import {
+  DEFAULT_SANDBOX_RUNTIME,
+  describeSandboxRuntime,
+  SandboxRuntimeConfig,
+  selectSandboxRuntime,
+} from "./Sandbox";
 import {
   describeModelBackend,
   modelBackendWarnings,
@@ -400,6 +407,7 @@ const HttpLive = Effect.gen(function* () {
   const defaultBudget = yield* SessionBudgetConfig;
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const docsSchedule = yield* DocsScheduleConfig;
+  const sandboxChoice = yield* SandboxRuntimeConfig;
   const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
   if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
     return yield* new InvalidDocsSchedule({
@@ -439,6 +447,14 @@ const HttpLive = Effect.gen(function* () {
   for (const warning of modelBackendWarnings(backendChoice)) {
     yield* Effect.logWarning(warning);
   }
+  // Where sessions' commands run (LOB-244). Built in the boot's scope, so it outlives every owner:
+  // the session layer below releases its owners — and their sandboxes — before this is released.
+  const sandbox = yield* selectSandboxRuntime(
+    Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
+  );
+  yield* Effect.logInfo(
+    describeSandboxRuntime(sandbox.capabilities, Option.isSome(sandboxChoice)),
+  );
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).
   // The default first, so a run with no role row still talks to it (LOB-207).
@@ -520,6 +536,7 @@ const HttpLive = Effect.gen(function* () {
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,
+    sandbox,
     idleTimeoutMs: model.idleTimeoutMs,
     prCap,
     autonomy,
@@ -561,6 +578,7 @@ const HttpLive = Effect.gen(function* () {
     CredentialSelectionLog,
     LinearSyncLog,
     TriggerAdaptersLog,
+    TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance

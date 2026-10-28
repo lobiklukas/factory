@@ -6,9 +6,10 @@ import { KanbanSquareIcon } from "lucide-react";
 import { SessionId } from "@repo/domain/Session";
 import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import { boardAtom } from "@/lib/atoms/board-atom";
-import { boardLanes } from "@/lib/board-view";
+import { boardLanes, definitionFor } from "@/lib/board-view";
 import { BoardLanesView } from "@/components/board-lanes";
 import { CardPane } from "@/components/card-pane";
+import { CheckoutWarning } from "@/components/checkout-warning";
 import { EmptyPane } from "@/components/empty-pane";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -101,9 +102,14 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
 
   if (last === undefined) return null;
   const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
-  const { instance, definition, tasks } = last;
+  const { instance, definition, tasks, pinned } = last;
   const selected =
     card === undefined ? undefined : tasks.find((task) => task.id === card);
+  // The card's own pinned version (B2, LOB-267): the board's for every card made on it.
+  const selectedDefinition =
+    selected === undefined
+      ? undefined
+      : definitionFor(selected, definition, pinned);
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -141,6 +147,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
             to move it or start a run
           </span>
         </header>
+        <CheckoutWarning warning={last.warning} />
         <BoardLanesView
           boardId={boardId}
           board={boardLanes(definition, tasks)}
@@ -158,12 +165,26 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
             {card} is not one of this board&apos;s cards.
           </span>
         </aside>
+      ) : selectedDefinition === undefined ? (
+        <aside
+          aria-label="Card"
+          data-card-pane-unpinned={selected.id}
+          className="flex w-80 shrink-0 flex-col gap-1 border-l border-border p-4 text-xs"
+        >
+          <span className="font-medium">
+            This card&apos;s definition was not read
+          </span>
+          <span className="text-muted-foreground">
+            {selected.id} pins {instance.definitionId} v
+            {selected.definitionVersion}, which the board read did not return.
+          </span>
+        </aside>
       ) : (
         <CardPane
           key={selected.id}
           boardId={boardId}
           task={selected}
-          definition={definition}
+          definition={selectedDefinition}
           run={run}
         />
       )}

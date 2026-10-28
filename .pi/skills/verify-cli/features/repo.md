@@ -56,5 +56,6 @@ a second request that would find the row if the refusal had written one.
 
 **What it does not prove.** Cloning: a repo with only a URL stays `no local checkout` (LOB-265). The
 dashboard's Repositories page (LOB-262) is proven by
-[verify-web's repos.md](../../verify-web/features/repos.md); the refusal of a session or board on a
-repo with no checkout (LOB-263) is its own issue.
+[verify-web's repos.md](../../verify-web/features/repos.md). The `warning …` lines LOB-263 added to `factory run`, `board create`, `board start`
+and `board ls` are unit-tested (`board.test.ts`) and read by `verify-api`'s `repo-binding.md`; this
+skill's drive does not assert them.

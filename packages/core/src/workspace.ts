@@ -77,6 +77,15 @@ export type WorkspaceInput = {
   readonly cut?: boolean | undefined;
 };
 
+/**
+ * Why a repo-bound session or board that has no local checkout cannot produce a diff, and the
+ * command that fixes it (LOB-263). One text for every surface that names it — the session's
+ * workspace, a board's creation and read, the boot log of a trigger rule — so the operator reads the
+ * same sentence wherever they meet it. `factory repo add` is the CLI's own spelling of `registerRepo`.
+ */
+export const noCheckoutWarning = (repo: string): string =>
+  `repo ${repo} has no local checkout registered, so a run on it gets an empty directory instead of a worktree and can produce no diff: register one with \`factory repo add ${repo} --path <dir>\``;
+
 /** Read the declared commands from one directory, tolerating a missing or undecodable file. */
 const commandsIn = (
   directory: string,
@@ -145,14 +154,24 @@ export const resolveWorkspace = (
       });
       void isGit;
       const baseRef = input.baseRef ?? "main";
-      const exists = yield* deps.fs
-        .exists(directory)
-        .pipe(Effect.orElseSucceed(() => false));
-      if (!exists) {
+      // Set whenever there is a repo (above); narrowed here so it can be an argv entry.
+      const worktreeBranch = branch ?? `factory/${input.sessionId}`;
+      // An empty directory is not a workspace yet (LOB-263): a session opened while its repo had no
+      // checkout holds one (the owner makes the directory), and the worktree is cut into it once a
+      // path is registered, so the fix the warning names reaches the sessions it was raised for.
+      // `git worktree add` takes an existing empty directory; one with anything in it is the
+      // agent's, and is left as it is.
+      const occupied = yield* deps.fs.readDirectory(directory).pipe(
+        Effect.map((entries) => entries.length > 0),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!occupied) {
         yield* Effect.try({
           try: () => {
             const parent = deps.path.dirname(directory);
-            execSync(`mkdir -p ${JSON.stringify(parent)}`);
+            // Every call here takes an argv, never a shell line: the base ref is a card's or a
+            // create's (LOB-260), and a shell would expand `$(...)` inside JSON.stringify's quotes.
+            execFileSync("mkdir", ["-p", parent]);
             // A worktree whose directory went missing is still registered, and git refuses to
             // check its branch out a second time until that registration is cleared. Only this
             // path's is: a bare `git worktree prune` would clear every stale registration in the
@@ -170,17 +189,22 @@ export const resolveWorkspace = (
             // with the run's commits on it (LOB-268) — otherwise create it at the base ref.
             let created = false;
             try {
-              execSync(
-                `git worktree add ${JSON.stringify(directory)} ${JSON.stringify(branch)}`,
-                { cwd: input.localPath, stdio: "ignore" },
+              execFileSync(
+                "git",
+                ["worktree", "add", directory, worktreeBranch],
+                {
+                  cwd: input.localPath,
+                  stdio: "ignore",
+                },
               );
               created = true;
             } catch {
               // branch may not exist yet
             }
             if (!created) {
-              execSync(
-                `git worktree add -b ${JSON.stringify(branch)} ${JSON.stringify(directory)} ${JSON.stringify(baseRef)}`,
+              execFileSync(
+                "git",
+                ["worktree", "add", "-b", worktreeBranch, directory, baseRef],
                 { cwd: input.localPath, stdio: "ignore" },
               );
             }
@@ -208,6 +232,9 @@ export const resolveWorkspace = (
       ...(input.repo === undefined ? {} : { branch }),
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
+      ...(input.repo !== undefined && input.localPath === undefined
+        ? { warning: noCheckoutWarning(input.repo) }
+        : {}),
     };
   });
 

@@ -83,3 +83,35 @@ describe("foldSessionEvent and the live-task list", () => {
     ).toEqual([held]);
   });
 });
+
+describe("foldSessionEvent and the no-checkout warning (LOB-263)", () => {
+  const snapshotOf = (warning?: string): SessionEvent => ({
+    _tag: "snapshot",
+    session: summary,
+    workspace: {
+      path: "/tmp/session",
+      commands: {},
+      commandsSource: "none",
+      ...(warning === undefined ? {} : { warning }),
+    },
+    entries: [],
+    live: { busy: false, tools: [] },
+    usage: { models: [], tools: [] },
+    queued: [],
+    tasks: [],
+    approvals: [],
+  });
+
+  /** Mutation: drop the field from the fold — the pane has nothing to show. */
+  it("keeps the workspace's warning from the snapshot, and none when the snapshot has none", () => {
+    expect(
+      foldSessionEvent(view, snapshotOf("repo a/b has no local checkout"))
+        .workspaceWarning,
+    ).toBe("repo a/b has no local checkout");
+    // A re-attach after the repo was registered replaces it rather than keeping the old one.
+    const warned: SessionView = { ...view, workspaceWarning: "stale" };
+    expect("workspaceWarning" in foldSessionEvent(warned, snapshotOf())).toBe(
+      false,
+    );
+  });
+});

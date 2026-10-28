@@ -93,6 +93,44 @@ export type SandboxRuntimeShape = {
   readonly destroy: (sandbox: Sandbox) => Effect.Effect<void, SandboxFileError>;
 };
 
+/** How `bind` starts a sandbox's commands. */
+export type BindOptions = {
+  /**
+   * Variables every command in the sandbox starts with, over the runtime's own; an empty value
+   * overrides an inherited one, which is how a caller withholds a variable from the commands.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Leave the exec spill files on the host when the sandbox ends, rather than removing them with
+   * its other temporary files. A session's sandbox sets it (LOB-244): Pi Durable's bash tool tells
+   * the model where a truncated command's full output is, and the session's transcript, which a
+   * later turn reads, outlives the sandbox the command ran in. Absent: removed.
+   */
+  readonly keepSpillFiles?: boolean;
+};
+
+/**
+ * A runtime that can also run a sandbox in a directory that already exists: a session's git
+ * worktree, which the control plane cut on the host before the session opened (D10, LOB-244).
+ *
+ * Not one of D6's operations, and so not on `SandboxRuntimeShape`: only a runtime whose commands
+ * run on the host the directory is on can serve it honestly. The in-process runtime is one. A
+ * Kubernetes runtime is not — its workdir is a volume in the cluster, and its session's worktree is
+ * cut there — so it implements the shape above and nothing here.
+ */
+export type BindableSandboxRuntimeShape = SandboxRuntimeShape & {
+  /**
+   * A sandbox whose workdir is `workdir`, which must be an existing directory; a relative one is
+   * resolved against the server's working directory. The directory is the caller's: `destroy` and
+   * the runtime's release end the sandbox — its commands, its handles, its temporary files — and
+   * leave every file in it.
+   */
+  readonly bind: (
+    workdir: string,
+    options?: BindOptions,
+  ) => Effect.Effect<Sandbox, SandboxFileError>;
+};
+
 export class SandboxRuntime extends Context.Service<
   SandboxRuntime,
   SandboxRuntimeShape

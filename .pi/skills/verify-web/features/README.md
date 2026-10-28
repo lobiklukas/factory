@@ -3,13 +3,17 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-27, `chrome`, headless, API `:9560` / web `:3560` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 97/97 required checks passed,
-from the `agent/LOB-210` worktree against its own database on 5442, which adds LOB-210's five
-390 px shell checks ([fork-lineage.md](fork-lineage.md)) and the refused id's back link
-([routing.md](routing.md)), every one of which fails against the build before it; `thread.sh` last passed 15/15 on the
-`agent/LOB-239` worktree). The one console error in `drive.mjs` is the compaction block's injected
-500 ([compaction.md](compaction.md)). The run before it failed only the busy-compaction race named
+Status reflects the last verified run (2026-10-28, `chrome`, headless, API `:9510` / web `:3510` —
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 111/111 required checks
+passed, from the `agent/LOB-267` worktree against its own database on 5442, which adds LOB-267's
+card-pane checks over a synthetic definition (todo → doing → done, gated; evidence
+`card-pane-synthetic-todo.png`, `card-pane-synthetic-doing.png`, [card-pane.md](card-pane.md)) and
+reads the default card's expected moves from its pinned definition over the API. The run before it
+(2026-10-27, `agent/LOB-210`, 97/97) added LOB-210's five 390 px shell checks
+([fork-lineage.md](fork-lineage.md)) and the refused id's back link ([routing.md](routing.md));
+`thread.sh` last passed 15/15 on the `agent/LOB-239` worktree). The one console error in
+`drive.mjs` is the compaction block's injected 500 ([compaction.md](compaction.md)). An earlier run
+failed only the busy-compaction race named
 under Known gaps.
 
 | Feature                  | Status  | File                                       |
@@ -33,6 +37,8 @@ under Known gaps.
 
 ## Known gaps
 
+- **The no-checkout banner (`[data-checkout-warning]`) is unit-tested, not driven (LOB-263).** It sits
+  under a board's header ([board.md](board.md)) and a session's ([session-stream.md](session-stream.md)).
 - **The board follows moves by polling, every 2 s.** LOB-76's card pane moves cards and starts runs;
   a move made elsewhere reaches an open board within one interval, not instantly; the attention view
   (LOB-77) and the card's thread (LOB-239) poll on the same interval.

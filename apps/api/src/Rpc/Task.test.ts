@@ -12,6 +12,7 @@
  * `afterAll`, as `./Session.test.ts` does — so it holds exactly the definitions the migrations seed,
  * plus the one newer version a case adds, and "every version" is a claim this file can make whole.
  */
+import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -399,6 +400,16 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     expect(v3.version).toBe(3);
     expect(v3.name).toBe("Default pipeline");
     expect(v3.columns).toEqual(DEFAULT_V3);
+    expect(v3.initialColumn).toBe("intake");
+
+    // Version 4 (LOB-267) carries the moves on its columns and names its initial column, and they
+    // are exactly the table versions 1–3 resolve through: the same description, column by column.
+    const v4 = await call((client) =>
+      client.getDefinition({ definitionId: DEFAULT, version: 4 }),
+    );
+    expect(v4.version).toBe(4);
+    expect(v4.initialColumn).toBe("intake");
+    expect(v4.columns).toEqual(DEFAULT_V3);
 
     // Version 1 is its own row: no skills bound, and `review` does not declare `verified` yet.
     const v1 = await call((client) =>
@@ -459,10 +470,12 @@ describe("a board's configuration over RPC (LOB-270)", () => {
         return { board, config, listed };
       }),
     );
-    expect(outcome.config.instance).toEqual(outcome.board);
+    // `warning` (LOB-263) is the repository's, answered beside the instance, not inside it.
+    const { warning: _warning, ...instance } = outcome.board;
+    expect(outcome.config.instance).toEqual(instance);
     expect(outcome.config.definition.version).toBe(3);
     expect(outcome.config.definition.columns).toEqual(DEFAULT_V3);
-    expect(outcome.listed).toContainEqual(outcome.board);
+    expect(outcome.listed).toContainEqual(instance);
 
     const missing = BoardInstanceId.make(`brd_${"0".repeat(26)}`);
     const unknown = await call((client) =>
@@ -472,5 +485,44 @@ describe("a board's configuration over RPC (LOB-270)", () => {
       _tag: "BoardNotFound",
       boardId: missing,
     });
+  });
+  /**
+   * LOB-263 over the wire: `createBoard` and `getBoard` answer the warning a repository with no local
+   * checkout earns, the session's workspace says the same, and registering a path clears the board's.
+   * The text is the server's, so a client prints it as it is. Mutation: leave `warning` off the
+   * `CreatedBoard` or `BoardView` schema — the client's decode drops it and the first expectation fails.
+   */
+  it("carries the no-checkout warning on createBoard, getBoard and a session's workspace, and clears it once the repo has a path", async () => {
+    const repo = RepoSlug.make(`acme/rpc-no-checkout-${run}`);
+    const checkout = mkdtempSync(join(tmpdir(), "factory-api-rpc-checkout-"));
+    try {
+      execSync("git init -q -b main", { cwd: checkout });
+      const outcome = await call((client) =>
+        Effect.gen(function* () {
+          const made = yield* client.createBoard({
+            repo,
+            definitionId: DEFAULT,
+          });
+          const before = yield* client.getBoard({ boardId: made.id });
+          const session = yield* client.createSession({ repo });
+          const opened = yield* client.getSession({ sessionId: session.id });
+          const scratch = yield* client.createSession({});
+          const scratchOpened = yield* client.getSession({
+            sessionId: scratch.id,
+          });
+          yield* client.registerRepo({ repo, localPath: checkout });
+          const after = yield* client.getBoard({ boardId: made.id });
+          return { made, before, opened, scratchOpened, after };
+        }),
+      );
+      const guidance = `factory repo add ${repo} --path <dir>`;
+      expect(outcome.made.warning).toContain(guidance);
+      expect(outcome.before.warning).toBe(outcome.made.warning);
+      expect(outcome.opened.workspace.warning).toBe(outcome.made.warning);
+      expect(outcome.scratchOpened.workspace.warning).toBeUndefined();
+      expect(outcome.after.warning).toBeUndefined();
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   });
 });

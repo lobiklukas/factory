@@ -181,6 +181,29 @@ describe("a sandbox's environment", () => {
     expect(existsSync(tmpdir())).toBe(true);
   });
 
+  it("leaves its exec spill files when made to keep them, and still removes its other temporary files", async () => {
+    // A session's transcript names the spill file (Pi Durable's bash tool, "Full output: <path>"),
+    // and a later turn may read it after the sandbox it was written in has ended (LOB-244).
+    const keeping = new SandboxExecutionEnv(inner, sandboxId, {
+      keepSpillFiles: true,
+    });
+    const dir = await keeping.createTempDir("sandbox-probe-", context);
+    const spilled = await keeping.exec(
+      "seq 1 50",
+      { spill: { afterBytes: 10, afterLines: 2 } },
+      context,
+    );
+    const dirPath = dir.ok ? dir.value : "";
+    const spillPath = spilled.ok ? (spilled.value.spillPath ?? "") : "";
+    expect(spillPath).not.toBe("");
+
+    await keeping.destroy(context);
+
+    expect(existsSync(dirPath)).toBe(false);
+    expect(existsSync(spillPath)).toBe(true);
+    rmSync(dirname(spillPath), { recursive: true, force: true });
+  });
+
   it("keeps what it could not remove, and a later destroy removes it", async () => {
     const flaky = new FlakyRemoveEnv({ cwd: workdir });
     const wrapped = new SandboxExecutionEnv(flaky, sandboxId);

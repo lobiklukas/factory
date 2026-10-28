@@ -25,7 +25,7 @@ import path from "node:path";
 import { Effect, ManagedRuntime, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import {
-  closeHarness,
+  closeSession,
   createModelAccess,
   openSession,
   readSessionLog,
@@ -114,7 +114,8 @@ const openOwned = (logId: string) =>
 const write = Effect.gen(function* () {
   const logId = `verify-spec-${Date.now()}-${process.pid}`;
   observed.logId = logId;
-  const { harness, root } = yield* openOwned(logId);
+  const opened = yield* openOwned(logId);
+  const { harness, root } = opened;
 
   const before = yield* readSpec(harness, root);
   observed.before = before ?? null;
@@ -159,7 +160,7 @@ const write = Effect.gen(function* () {
     same(committed, SPEC) && same(live, SPEC),
     `readSpec=${JSON.stringify(live)}`,
   );
-  yield* closeHarness(harness);
+  yield* closeSession(opened);
   yield* Effect.promise(() => writeFile(STATE, logId));
 });
 
@@ -168,10 +169,11 @@ const reopen = Effect.gen(function* () {
     readFile(STATE, "utf8").then((value) => value.trim()),
   );
   observed.logId = logId;
-  const { harness, root } = yield* openOwned(logId);
+  const opened = yield* openOwned(logId);
+  const { harness, root } = opened;
   const reopened = yield* readSpec(harness, root);
   observed.reopened = reopened ?? null;
-  yield* closeHarness(harness);
+  yield* closeSession(opened);
   assert(
     "a fresh process reads the spec the first process committed, with the same content",
     same(reopened, SPEC),

@@ -16,7 +16,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import {
-  closeHarness,
+  closeSession,
   createModelAccess,
   isBusy,
   openSession,
@@ -41,11 +41,12 @@ const program = Effect.gen(function* () {
     });
   }
 
-  const { harness, root } = yield* openSession({
+  const opened = yield* openSession({
     storage: new MemoryStorage(),
     model: createModelAccess("anthropic"),
     cwd: process.cwd(),
   });
+  const { harness, root } = opened;
 
   yield* Effect.log("submitting turn");
   const submitted = yield* submitMessage(root, {
@@ -88,7 +89,7 @@ const program = Effect.gen(function* () {
     });
   }
 
-  yield* closeHarness(harness);
+  yield* closeSession(opened);
 });
 
 const outcome = await Effect.runPromise(program.pipe(Effect.result));

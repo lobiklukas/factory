@@ -279,6 +279,7 @@ describe("the dev tasks' environment", () => {
     "FAUX_MODEL_SCRIPTS",
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
+    "SANDBOX_RUNTIME",
     "PR_CAP_MAX_FILES",
     "PR_CAP_MAX_LINES",
     "DATABASE_MAX_CONNECTIONS",
@@ -693,6 +694,7 @@ describe("the API's environment reads (LOB-257)", () => {
       "packages/core/src",
       "packages/domain/src",
       "packages/harness/src",
+      "packages/sandbox/src",
       "packages/storage-postgres/src",
     ]);
   });
@@ -712,6 +714,7 @@ describe("the API's environment reads (LOB-257)", () => {
       "DATABASE_URL",
       "DATABASE_MAX_CONNECTIONS",
       "ANTHROPIC_API_KEY",
+      "SANDBOX_RUNTIME",
     ]) {
       expect(names).toContain(name);
     }
