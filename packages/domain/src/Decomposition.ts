@@ -29,6 +29,14 @@
  *
  * `goal` and `change` are carried but not judged: they are prose a person edits before approval.
  *
+ * **Reconciliation** (LOB-203, part 3 of LOB-43). A decomposition does not replace the set before it:
+ * `reconcileProposals` folds the new draft into what the session already holds, by title (`titleKey`).
+ * A title the session already proposed is updated in place and keeps its recorded tracker issue; a
+ * new title is added; a title the draft no longer proposes is *marked removed* — moved to `removed`
+ * with its recorded issue, never dropped — and comes back with that issue if a later draft proposes
+ * it again. So the same spec twice yields the same set and approving it twice creates nothing the
+ * second time, and a changed spec answers with a diff (`ProposalDiff`) rather than a second full set.
+ *
  * This module imports `@repo/domain/Ids` and nothing else of this package, as `Mission` does:
  * `Session.ts` imports *this* module for the snapshot's `proposedIssues` field.
  */
@@ -67,9 +75,29 @@ export const ProposedIssue = Schema.Struct({
 });
 export type ProposedIssue = typeof ProposedIssue.Type;
 
-/** A decomposition's whole answer: the proposals, in the order their indices name them. */
+/**
+ * A proposal a later decomposition no longer proposes (LOB-203), kept rather than dropped: if it
+ * had become a tracker issue, `created` is the only record of which one, and a draft that proposes
+ * the title again takes it back. It has no `blockedBy`: those indices named slots of a list that
+ * no longer exists, and a revived proposal's edges come from the draft that revives it.
+ */
+export const RemovedProposal = Schema.Struct({
+  title: Schema.String,
+  goal: Schema.String,
+  change: Schema.String,
+  acceptance: Schema.Array(Schema.String),
+  created: Schema.optional(CreatedIssue),
+});
+export type RemovedProposal = typeof RemovedProposal.Type;
+
+/**
+ * A decomposition's whole answer: the proposals, in the order their indices name them. A stored set
+ * may also carry `removed` (LOB-203): the proposals earlier decompositions made that the newest no
+ * longer does. Absent, not empty, when there are none — a draft never has any.
+ */
 export const ProposedIssues = Schema.Struct({
   proposals: Schema.Array(ProposedIssue),
+  removed: Schema.optional(Schema.Array(RemovedProposal)),
 });
 export type ProposedIssues = typeof ProposedIssues.Type;
 
@@ -88,8 +116,10 @@ const ProposalInput = Schema.Struct({
   created: Schema.optional(CreatedIssue),
 });
 
+/** The proposals as above, and — in a stored document only — the ones marked removed (LOB-203). */
 const ProposalsInput = Schema.Struct({
   proposals: Schema.Array(ProposalInput),
+  removed: Schema.optional(Schema.Array(RemovedProposal)),
 });
 
 /** Why a proposal set was refused. */
@@ -284,13 +314,25 @@ const refusal = (faults: readonly ProposalFault[]): ProposalsRefused =>
     message: `proposals refused: ${faults.map((fault) => fault.detail).join("; ")}`,
   });
 
+/** A draft read as a stored shape: whatever `removed` it sent is not read, so it cannot refuse it. */
+const draftOnly = (input: unknown): unknown =>
+  typeof input === "object" && input !== null && !Array.isArray(input)
+    ? { ...input, removed: undefined }
+    : input;
+
 const decodeShape = Schema.decodeUnknownResult(ProposalsInput);
 
+/**
+ * `stored` is a document read back: it keeps each `created` and carries `removed`. Otherwise the
+ * input is a writer's draft, which may claim neither (and is not refused for an extra key it sends).
+ */
 const validate = (
   input: unknown,
-  keepCreated: boolean,
+  stored: boolean,
 ): Result.Result<ProposedIssues, readonly ProposalFault[]> => {
-  const shape = decodeShape(input, { errors: "all" });
+  const shape = decodeShape(stored ? input : draftOnly(input), {
+    errors: "all",
+  });
   if (Result.isFailure(shape)) {
     return Result.fail([
       {
@@ -300,11 +342,15 @@ const validate = (
       },
     ]);
   }
-  const proposals = normalized(shape.success, keepCreated);
+  const proposals = normalized(shape.success, stored);
   const faults = proposalFaults(proposals);
-  return faults.length === 0
-    ? Result.succeed({ proposals })
-    : Result.fail(faults);
+  if (faults.length > 0) return Result.fail(faults);
+  const removed = stored ? shape.success.removed : undefined;
+  return Result.succeed(
+    removed === undefined || removed.length === 0
+      ? { proposals }
+      : { proposals, removed },
+  );
 };
 
 /**
@@ -341,6 +387,166 @@ export const projectProposedIssues = (
   value: unknown,
 ): ProposedIssues | undefined => Result.getOrUndefined(validate(value, true));
 
+/**
+ * What a decomposition changed against the set the session already held (LOB-203), as titles — a
+ * title is what names a proposal across runs, and the indices move. Every proposal of the new set
+ * is in exactly one of `added`, `updated` and `unchanged`; `removed` names the proposals the set
+ * no longer has, now in `removed` of the stored set. A first decomposition adds everything; a rerun
+ * over an unchanged spec, answered the same way, is all `unchanged`.
+ */
+export const ProposalDiff = Schema.Struct({
+  /** New titles, and titles a draft brought back from `removed` (which keep their tracker issue). */
+  added: Schema.Array(Schema.String),
+  /** Titles the session already proposed whose goal, change, acceptance or edges differ. */
+  updated: Schema.Array(Schema.String),
+  unchanged: Schema.Array(Schema.String),
+  /** Titles the previous set proposed that this draft does not, newly marked removed. */
+  removed: Schema.Array(Schema.String),
+});
+export type ProposalDiff = typeof ProposalDiff.Type;
+
+/**
+ * The most removed proposals that never became a tracker issue a stored set keeps (LOB-203), newest
+ * first out. A removed proposal that was created is never dropped — its `created` is the only
+ * record of the issue — so only drafts nothing was made for age out, which keeps a document a
+ * model rewrites on every run from growing without bound.
+ */
+export const MAX_REMOVED_DRAFTS = 50;
+
+/** A reconciliation: the set to store, and what changed against the one before it. */
+export type Reconciliation = {
+  readonly proposals: readonly ProposedIssue[];
+  readonly removed: readonly RemovedProposal[];
+  readonly diff: ProposalDiff;
+};
+
+/** A proposal's edges as the titles they name, sorted: the comparison that survives a reorder. */
+const blockerKeys = (
+  proposal: ProposedIssue,
+  list: readonly ProposedIssue[],
+): readonly string[] =>
+  proposal.blockedBy
+    .map((index) => titleKey(list[index]?.title ?? `#${index}`))
+    .sort();
+
+const sameLines = (left: readonly string[], right: readonly string[]) =>
+  left.length === right.length && left.every((line, i) => line === right[i]);
+
+/** The written content of a proposal and its edges, by title; `created` is not content. */
+const sameContent = (
+  previous: ProposedIssue,
+  previousList: readonly ProposedIssue[],
+  draft: ProposedIssue,
+  draftList: readonly ProposedIssue[],
+): boolean =>
+  previous.title === draft.title &&
+  previous.goal === draft.goal &&
+  previous.change === draft.change &&
+  sameLines(previous.acceptance, draft.acceptance) &&
+  sameLines(blockerKeys(previous, previousList), blockerKeys(draft, draftList));
+
+/**
+ * Fold a new draft into the set a session already holds (LOB-203), by title.
+ *
+ * - A draft proposal whose title the previous set has is the **same proposal**: the draft's content
+ *   replaces it in place and the recorded `created` stays. It is `updated` when its content differs
+ *   (goal, change, acceptance, or the *titles* of its blockers — indices move when proposals are
+ *   reordered, titles do not), `unchanged` when it does not.
+ * - A draft proposal whose title only `removed` has comes back with that entry's `created`, and is
+ *   `added`.
+ * - Any other draft proposal is `added`, with no `created`.
+ * - A previous proposal the draft does not have is marked removed with its `created`, never
+ *   dropped. Uncreated removed proposals past `MAX_REMOVED_DRAFTS` age out, oldest first.
+ *
+ * The order of `proposals` is the draft's: the indices a person approves by name the newest answer.
+ * `previous` is whatever the session stores (`undefined` for a session that never decomposed), and
+ * `draft` a set `decodeProposedIssues` accepted. Pure.
+ */
+export const reconcileProposals = (
+  previous: ProposedIssues | undefined,
+  draft: ProposedIssues,
+): Reconciliation => {
+  const before = previous?.proposals ?? [];
+  const removedBefore = previous?.removed ?? [];
+  const beforeByKey = new Map(
+    before.map((proposal) => [titleKey(proposal.title), proposal] as const),
+  );
+  const removedByKey = new Map(
+    removedBefore.map(
+      (proposal) => [titleKey(proposal.title), proposal] as const,
+    ),
+  );
+  const draftKeys = new Set(
+    draft.proposals.map((proposal) => titleKey(proposal.title)),
+  );
+  const added: string[] = [];
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  const proposals = draft.proposals.map((proposal): ProposedIssue => {
+    const key = titleKey(proposal.title);
+    const existing = beforeByKey.get(key);
+    const revived = existing === undefined ? removedByKey.get(key) : undefined;
+    const created = existing?.created ?? revived?.created;
+    if (existing === undefined) {
+      added.push(proposal.title);
+    } else if (sameContent(existing, before, proposal, draft.proposals)) {
+      unchanged.push(proposal.title);
+    } else {
+      updated.push(proposal.title);
+    }
+    return {
+      title: proposal.title,
+      goal: proposal.goal,
+      change: proposal.change,
+      acceptance: [...proposal.acceptance],
+      blockedBy: [...proposal.blockedBy],
+      ...(created === undefined
+        ? {}
+        : { created: { id: created.id, identifier: created.identifier } }),
+    };
+  });
+  const dropped = before.filter(
+    (proposal) => !draftKeys.has(titleKey(proposal.title)),
+  );
+  const kept = removedBefore.filter(
+    (proposal) => !draftKeys.has(titleKey(proposal.title)),
+  );
+  const marked = dropped.map((proposal): RemovedProposal => ({
+    title: proposal.title,
+    goal: proposal.goal,
+    change: proposal.change,
+    acceptance: [...proposal.acceptance],
+    ...(proposal.created === undefined
+      ? {}
+      : {
+          created: {
+            id: proposal.created.id,
+            identifier: proposal.created.identifier,
+          },
+        }),
+  }));
+  const all = [...kept, ...marked];
+  // Oldest first in `all`, so the drafts to forget are the first ones past the cap.
+  let draftsToForget =
+    all.filter((proposal) => proposal.created === undefined).length -
+    MAX_REMOVED_DRAFTS;
+  const removed = all.filter((proposal) => {
+    if (proposal.created !== undefined || draftsToForget <= 0) return true;
+    draftsToForget -= 1;
+    return false;
+  });
+  return {
+    proposals,
+    removed,
+    diff: {
+      added,
+      updated,
+      unchanged,
+      removed: marked.map((proposal) => proposal.title),
+    },
+  };
+};
+
 /** Propose child issues from a session's spec (LOB-201). */
 export const ProposeDecompositionInput = Schema.Struct({
   sessionId: SessionId,
@@ -348,11 +554,16 @@ export const ProposeDecompositionInput = Schema.Struct({
 export type ProposeDecompositionInput = typeof ProposeDecompositionInput.Type;
 
 /**
- * What one decomposition committed: the proposals, as stored. The same value `getSession`'s
- * snapshot carries as `proposedIssues` until the next decomposition replaces it.
+ * What one decomposition committed: the set as stored — the same value `getSession`'s snapshot
+ * carries as `proposedIssues` until the next decomposition reconciles into it — and the `diff`
+ * against the set the session held before (LOB-203).
  */
-export const ProposeDecompositionResult = ProposedIssues;
-export type ProposeDecompositionResult = ProposedIssues;
+export const ProposeDecompositionResult = Schema.Struct({
+  proposals: Schema.Array(ProposedIssue),
+  removed: Schema.optional(Schema.Array(RemovedProposal)),
+  diff: ProposalDiff,
+});
+export type ProposeDecompositionResult = typeof ProposeDecompositionResult.Type;
 
 /**
  * Approve a subset of a session's proposals (LOB-202, part 2 of LOB-43): the indices into

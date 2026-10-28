@@ -6323,7 +6323,16 @@ describe("proposing child issues from a spec", () => {
       }
       expect(outcome.calls).toBe(1);
       // Readable back through `getSession`, as the value committed.
-      expect(outcome.snapshot.proposedIssues).toEqual(outcome.proposed);
+      expect(outcome.snapshot.proposedIssues).toEqual({
+        proposals: outcome.proposed.proposals,
+      });
+      // The first decomposition adds everything and removes nothing (LOB-203).
+      expect(outcome.proposed.diff).toEqual({
+        added: SPEC.acceptance,
+        updated: [],
+        unchanged: [],
+        removed: [],
+      });
       // One document: of the log's new commits exactly one writes `factory.proposedIssues`.
       expect(
         outcome.writes.filter((writes) =>
@@ -6604,6 +6613,36 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
       fauxSpec: [SPEC],
       fauxDecomposition: JSON.stringify({ proposals: PROPOSALS }),
     });
+    // What the next decomposition answers: a case sets `answer.body` to change the "spec" between
+    // two decompositions (LOB-203) without a second specifier run.
+    const answer = { body: JSON.stringify({ proposals: PROPOSALS }) };
+    const models = faux.access.models;
+    const scripted: typeof models.completeSimple = async (
+      request,
+      context,
+      ...rest
+    ) => {
+      const message = await models.completeSimple(request, context, ...rest);
+      const decomposing = context.messages.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.startsWith(DECOMPOSITION_PROMPT_PREFIX),
+      );
+      return decomposing
+        ? { ...message, content: [{ type: "text", text: answer.body }] }
+        : message;
+    };
+    const access = {
+      ...faux.access,
+      models: new Proxy(models, {
+        get: (target, key) => {
+          if (key === "completeSimple") return scripted;
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
     const outbound: string[] = [];
     const ledger = Layer.succeed(
       HttpClient.HttpClient,
@@ -6625,7 +6664,7 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
           );
     const runtime = ManagedRuntime.make(
       Layer.mergeAll(
-        SessionServiceLive({ model: faux.access, sessionRoot: approveRoot }),
+        SessionServiceLive({ model: access, sessionRoot: approveRoot }),
         TaskServiceLive,
       ).pipe(
         Layer.provide(tracker),
@@ -6633,7 +6672,7 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
         Layer.provideMerge(DatabaseLayer),
       ),
     );
-    return { fake, key, outbound, runtime };
+    return { answer, fake, key, outbound, runtime };
   };
 
   /**
@@ -7046,6 +7085,250 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
       // The 500 was answered after the relation was made; the retry read it back and sent nothing.
       expect(fake.relations).toHaveLength(1);
       expect(fake.writes("issueRelationCreate")).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  /**
+   * Re-running a spec (LOB-203, part 3 of LOB-43). `answer.body` is the decomposition the model
+   * gives next, so one session is decomposed over and over with the spec "changing" between runs:
+   * every case approves into the same Linear fake and counts what the fake saw.
+   */
+  const decomposedSet = (...titles: string[]) =>
+    JSON.stringify({
+      proposals: titles.map((title, index) => ({
+        title,
+        goal: "the goal",
+        change: "the change",
+        acceptance: [`${title} works`],
+        blockedBy: index === 0 ? [] : [0],
+      })),
+    });
+
+  /** Everything the fake holds that a retried request could have changed. */
+  const trackerLedger = (fake: ReturnType<typeof makeLinear>) =>
+    JSON.stringify({
+      writes: fake.writes().map((request) => request.variables),
+      children: fake.children,
+      relations: fake.relations,
+    });
+
+  /** How many commits of the session's log write `factory.proposedIssues`. */
+  const documentCommits = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const [row] = yield* sql<{ readonly count: number }>`
+        SELECT count(*)::int AS count FROM commits
+        WHERE log_id = ${sessionId} AND strpos(writes::text, ${"factory.proposedIssues"}) > 0
+      `;
+      return row?.count ?? 0;
+    });
+
+  it("leaves the tracker's ledger and the document as they were when the same spec is proposed and approved again", async () => {
+    const { fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const first = yield* approve(sessions, sessionId, [0, 1, 2]);
+          const snapshotFirst = yield* sessions.get(sessionId);
+          const ledgerFirst = trackerLedger(fake);
+          const commitsFirst = yield* documentCommits(sessionId);
+          // The same spec decomposed again, and the same set approved again.
+          const proposed = yield* sessions.proposeDecomposition({ sessionId });
+          const second = yield* approve(sessions, sessionId, [0, 1, 2]);
+          return {
+            first,
+            second,
+            proposed,
+            snapshotFirst,
+            snapshotSecond: yield* sessions.get(sessionId),
+            ledgerFirst,
+            ledgerSecond: trackerLedger(fake),
+            commitsFirst,
+            commitsSecond: yield* documentCommits(sessionId),
+          };
+        }),
+      );
+      expect(outcome.first.created).toEqual([0, 1, 2]);
+      expect(fake.writes("issueCreate")).toHaveLength(3);
+      // The proposals are the proposals, with the ids they were created as: no second full set.
+      expect(outcome.proposed.diff).toEqual({
+        added: [],
+        updated: [],
+        unchanged: PROPOSALS.map((proposal) => proposal.title),
+        removed: [],
+      });
+      expect(outcome.proposed.proposals).toEqual(outcome.first.proposals);
+      expect(outcome.snapshotSecond.proposedIssues).toEqual(
+        outcome.snapshotFirst.proposedIssues,
+      );
+      // Approving creates nothing and relates nothing, and the fake saw not one more request.
+      expect(outcome.second.created).toEqual([]);
+      expect(outcome.second.related).toBe(0);
+      expect(outcome.ledgerSecond).toBe(outcome.ledgerFirst);
+      // Not even a commit of the document: an answer the session already holds is not written.
+      expect(outcome.commitsSecond).toBe(outcome.commitsFirst);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("answers a changed spec with a diff: the created ones keep their ids, a dropped one is marked removed, and a title that comes back takes its issue back", async () => {
+    const { answer, fake, key, runtime } = withApproval();
+    const [a, b, c] = PROPOSALS.map((proposal) => proposal.title);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          yield* approve(sessions, sessionId, [0, 1, 2]);
+          const original = yield* sessions.get(sessionId);
+          const originalBody = answer.body;
+
+          // The spec changes: C goes, D arrives, B is re-worded, A is as it was.
+          answer.body = JSON.stringify({
+            proposals: [
+              { ...PROPOSALS[0] },
+              { ...PROPOSALS[1], goal: "a better goal" },
+              {
+                title: "D: the docs",
+                goal: "the goal",
+                change: "the change",
+                acceptance: ["D works"],
+                blockedBy: [0],
+              },
+            ],
+          });
+          const diff = yield* sessions.proposeDecomposition({ sessionId });
+          const changed = yield* sessions.get(sessionId);
+          const second = yield* approve(sessions, sessionId, [0, 1, 2]);
+          const afterSecond = {
+            creates: fake.writes("issueCreate").length,
+            relations: fake.writes("issueRelationCreate").length,
+          };
+
+          // And the spec changes back: C comes back, D goes.
+          answer.body = originalBody;
+          const back = yield* sessions.proposeDecomposition({ sessionId });
+          const third = yield* approve(sessions, sessionId, [0, 1, 2]);
+          return {
+            original,
+            diff,
+            changed,
+            second,
+            afterSecond,
+            back,
+            third,
+            afterThird: {
+              creates: fake.writes("issueCreate").length,
+              relations: fake.writes("issueRelationCreate").length,
+            },
+          };
+        }),
+      );
+      const original = outcome.original.proposedIssues?.proposals ?? [];
+      // A diff, not a second full set.
+      expect(outcome.diff.diff).toEqual({
+        added: ["D: the docs"],
+        updated: [b],
+        unchanged: [a],
+        removed: [c],
+      });
+      const live = outcome.changed.proposedIssues;
+      expect(live?.proposals.map((p) => p.title)).toEqual([
+        a,
+        b,
+        "D: the docs",
+      ]);
+      expect(live?.proposals[0]?.created).toEqual(original[0]?.created);
+      expect(live?.proposals[1]?.created).toEqual(original[1]?.created);
+      expect(live?.proposals[1]?.goal).toBe("a better goal");
+      expect(live?.proposals[2]?.created).toBeUndefined();
+      // C is marked, not dropped: its tracker issue is still recorded.
+      expect(live?.removed).toEqual([
+        expect.objectContaining({ title: c, created: original[2]?.created }),
+      ]);
+      // Approving the changed set creates only D (and the one edge D needs); the fake gets no
+      // second A or B, and nothing is sent for C.
+      expect(outcome.second.created).toEqual([2]);
+      expect(outcome.afterSecond).toEqual({ creates: 4, relations: 4 });
+      expect(fake.children.map((child) => child.title)).toEqual([
+        a,
+        b,
+        c,
+        "D: the docs",
+      ]);
+      // C returns with the issue it had: nothing new is created, nothing new is related.
+      expect(outcome.back.diff).toEqual({
+        added: [c],
+        updated: [b],
+        unchanged: [a],
+        removed: ["D: the docs"],
+      });
+      expect(outcome.back.proposals[2]?.created).toEqual(original[2]?.created);
+      expect(outcome.third.created).toEqual([]);
+      expect(outcome.afterThird).toEqual({ creates: 4, relations: 4 });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("reproduces the proposals and their recorded ids when the derived rows are deleted and the log replayed", async () => {
+    const { answer, fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          yield* approve(sessions, sessionId, [0, 1, 2]);
+          // A second decomposition that drops C, so `removed` is part of what must come back.
+          answer.body = decomposedSet(
+            PROPOSALS[0]?.title ?? "",
+            PROPOSALS[1]?.title ?? "",
+          );
+          yield* sessions.proposeDecomposition({ sessionId });
+          const live = yield* sessions.get(sessionId);
+          const ledger = trackerLedger(fake);
+
+          // Drop the derived rows (the session's index row, its activity row with it), then rebuild:
+          // nobody owns the log afterwards, so what `get` answers is a fold of it.
+          yield* sessions.close;
+          yield* sql`DELETE FROM sessions WHERE id = ${sessionId}`;
+          const missing = yield* Effect.exit(sessions.get(sessionId));
+          yield* rebuildIndexes;
+          const rebuilt = yield* sessions.get(sessionId);
+
+          // The recorded ids are what keeps a replayed session from creating anything again. The
+          // delegating issue is operator input the log never held (`rebuild.ts`), so it is set again.
+          const requestId = sessionRequestIdOf(`linear:${key}:mapped`);
+          yield* sql`UPDATE sessions SET request_id = ${requestId} WHERE id = ${sessionId}`;
+          yield* sessions.proposeDecomposition({ sessionId });
+          const again = yield* approve(sessions, sessionId, [0, 1]);
+          return {
+            live,
+            missing,
+            rebuilt,
+            again,
+            ledger,
+            ledgerAfter: trackerLedger(fake),
+          };
+        }),
+      );
+      expect(Exit.isFailure(outcome.missing)).toBe(true);
+      expect(outcome.live.proposedIssues?.proposals).toHaveLength(2);
+      expect(outcome.live.proposedIssues?.removed).toHaveLength(1);
+      expect(outcome.live.proposedIssues?.proposals[0]?.created).toBeDefined();
+      // The same proposals, the same removal, the same ids: whole, as `get` reports them.
+      expect(outcome.rebuilt.proposedIssues).toEqual(
+        outcome.live.proposedIssues,
+      );
+      // Decomposing the replayed session again, and approving it, asks the tracker for nothing.
+      expect(outcome.again.created).toEqual([]);
+      expect(outcome.ledgerAfter).toBe(outcome.ledger);
     } finally {
       await runtime.dispose();
     }

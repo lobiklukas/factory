@@ -8,6 +8,8 @@
 //   spec       a card moved into `specifying`, a run started on it, and its `spec` call accepted
 //   propose    `proposeDecomposition` answers one proposal per criterion, each with acceptance lines
 //   read       `getSession` reports the same set as `proposedIssues`
+//   rerun      the same spec decomposed again answers a diff of nothing but `unchanged`, the same
+//              proposals, and no second commit of the document (LOB-203)
 //   nowhere    every table's content is as it was (a fingerprint, so an UPDATE counts), the log of
 //              every other session included, the card did not move, and the session's own log
 //              gained one commit of the document
@@ -21,7 +23,7 @@
 // DATABASE_URL (the scratch database the shell minted).
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ProposedIssues } from "@repo/domain/Decomposition";
+import type { ProposeDecompositionResult } from "@repo/domain/Decomposition";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DefinitionId } from "@repo/domain/Task";
@@ -50,7 +52,8 @@ const observed: {
   apiUrl: string;
   sessionId: SessionId | null;
   spec: typeof SPEC;
-  proposed: ProposedIssues | null;
+  proposed: ProposeDecompositionResult | null;
+  rerun: ProposeDecompositionResult | null;
   rows: Record<string, unknown>;
   newCommits: number;
   checks: Record<string, CheckRecord>;
@@ -59,6 +62,7 @@ const observed: {
   sessionId: null,
   spec: SPEC,
   proposed: null,
+  rerun: null,
   rows: {},
   newCommits: 0,
   checks: {},
@@ -189,7 +193,8 @@ const program = Effect.gen(function* () {
   const snapshot = yield* client.getSession({ sessionId: run.id });
   assert(
     "getSession reports the committed set as proposedIssues",
-    JSON.stringify(snapshot.proposedIssues) === JSON.stringify(proposed),
+    JSON.stringify(snapshot.proposedIssues) ===
+      JSON.stringify({ proposals: proposed.proposals }),
     `proposedIssues=${JSON.stringify(snapshot.proposedIssues?.proposals.length ?? null)} proposals`,
   );
 
@@ -229,6 +234,36 @@ const program = Effect.gen(function* () {
     "the session's own log gained one commit of the document (and the call's spend)",
     documentCommits === 1,
     `new commits=${newWrites.length} of which factory.proposedIssues=${documentCommits}`,
+  );
+
+  // --- rerun: the same spec, decomposed again, is the same proposals (LOB-203) -------------------------
+  const rerunSeq = yield* headSeq(run.id);
+  const rerun = yield* client.proposeDecomposition({ sessionId: run.id });
+  observed.rerun = rerun;
+  assert(
+    "decomposing the same spec again answers the same proposals as a diff of nothing but unchanged",
+    JSON.stringify(rerun.proposals) === JSON.stringify(proposed.proposals) &&
+      rerun.diff.added.length === 0 &&
+      rerun.diff.updated.length === 0 &&
+      rerun.diff.removed.length === 0 &&
+      JSON.stringify(rerun.diff.unchanged) ===
+        JSON.stringify(proposed.proposals.map((p) => p.title)),
+    `diff=${JSON.stringify(rerun.diff)}`,
+  );
+  const rerunWrites = yield* sql<{ writes: string }>`
+    SELECT writes::text AS writes FROM commits WHERE log_id = ${run.id} AND seq > ${rerunSeq} ORDER BY seq
+  `;
+  assert(
+    "the rerun committed no second copy of the document",
+    rerunWrites.every((row) => !row.writes.includes("factory.proposedIssues")),
+    `new commits=${rerunWrites.length}, none writing factory.proposedIssues`,
+  );
+  const rerunSnapshot = yield* client.getSession({ sessionId: run.id });
+  assert(
+    "getSession still reports the one set",
+    JSON.stringify(rerunSnapshot.proposedIssues) ===
+      JSON.stringify(snapshot.proposedIssues),
+    `proposedIssues=${rerunSnapshot.proposedIssues?.proposals.length ?? null} proposals`,
   );
 });
 

@@ -321,7 +321,10 @@ describe("the proposed-issues document", () => {
 
       // A session that never decomposed reports no proposals, not an empty set.
       expect(outcome.never.proposedIssues).toBeUndefined();
-      expect(outcome.committed).toEqual(outcome.set);
+      expect(outcome.committed).toEqual({
+        ...outcome.set,
+        diff: { added: ["A", "B"], updated: [], unchanged: [], removed: [] },
+      });
       expect(refusedWith(outcome.refused)).toEqual([[0, "no_acceptance"]]);
       expect(refusedWith(outcome.duplicate)).toEqual([[1, "duplicate_title"]]);
       expect(outcome.read).toEqual(outcome.set);
@@ -401,6 +404,112 @@ describe("a proposal's created issue (LOB-202)", () => {
       expect(
         outcome.renamed?.proposals.every((p) => p.created === undefined),
       ).toBe(true);
+      // The issue made for the old title is not lost with it: B is marked removed, recorded.
+      expect(outcome.renamed?.removed).toEqual([
+        expect.objectContaining({ title: "b", created }),
+      ]);
+    } finally {
+      await Effect.runPromise(closeHarness(harness));
+    }
+  });
+});
+
+describe("a decomposition reconciled into the set before it (LOB-203)", () => {
+  it("writes nothing for a set it already holds, updates in place, marks removals, and revives a title with its issue, live and folded", async () => {
+    const inner = new MemoryStorage();
+    // Every commit the log takes, so "writes nothing" is a count and not an inference.
+    let commits = 0;
+    const storage: MemoryStorage = new Proxy(inner, {
+      get: (target, key) => {
+        if (key === "commit") {
+          return (...args: Parameters<MemoryStorage["commit"]>) => {
+            commits += 1;
+            return target.commit(...args);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const cwd = mkdtempSync(join(tmpdir(), "factory-decompose-reconcile-"));
+    const { harness, root } = await Effect.runPromise(
+      openSession({ storage, model: createFauxModelAccess().access, cwd }),
+    );
+    try {
+      const created = { id: "uuid-2", identifier: "ENG-102" };
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const a = proposal("A");
+          const b = proposal("B", { blockedBy: [0] });
+          const first = yield* writeProposedIssues(root, {
+            proposals: [a, b],
+          });
+          yield* recordCreatedIssue(root, 1, "B", created);
+          const heads = commits;
+          // The same answer again: nothing to write, and B's issue is still B's.
+          const same = yield* writeProposedIssues(root, {
+            proposals: [a, b],
+          });
+          const headsAfterSame = commits;
+          // A changed answer: A updated, B dropped, C new.
+          const changed = yield* writeProposedIssues(root, {
+            proposals: [proposal("A", { goal: "a new goal" }), proposal("C")],
+          });
+          const afterChange = yield* readProposedIssues(harness, root);
+          const foldedAfterChange = yield* readHistoricalSnapshot(
+            storage,
+            ref(cwd),
+          );
+          // B comes back, and so does its issue.
+          const revived = yield* writeProposedIssues(root, {
+            proposals: [proposal("A", { goal: "a new goal" }), b],
+          });
+          return {
+            first,
+            same,
+            heads,
+            headsAfterSame,
+            changed,
+            afterChange,
+            foldedAfterChange,
+            revived,
+            afterRevive: yield* readProposedIssues(harness, root),
+          };
+        }),
+      );
+      expect(outcome.first.diff.added).toEqual(["A", "B"]);
+      expect(outcome.same.diff).toEqual({
+        added: [],
+        updated: [],
+        unchanged: ["A", "B"],
+        removed: [],
+      });
+      expect(outcome.same.proposals[1]?.created).toEqual(created);
+      // No commit at all: the log took none (and the count is live: the writes before counted).
+      expect(outcome.heads).toBeGreaterThan(0);
+      expect(outcome.headsAfterSame).toEqual(outcome.heads);
+
+      expect(outcome.changed.diff).toEqual({
+        added: ["C"],
+        updated: ["A"],
+        unchanged: [],
+        removed: ["B"],
+      });
+      expect(outcome.afterChange?.proposals.map((p) => p.title)).toEqual([
+        "A",
+        "C",
+      ]);
+      expect(outcome.afterChange?.removed).toEqual([
+        expect.objectContaining({ title: "B", created }),
+      ]);
+      expect(outcome.foldedAfterChange.proposedIssues).toEqual(
+        outcome.afterChange,
+      );
+
+      expect(outcome.revived.diff.added).toEqual(["B"]);
+      expect(outcome.revived.diff.removed).toEqual(["C"]);
+      expect(outcome.afterRevive?.proposals[1]?.created).toEqual(created);
+      expect(outcome.afterRevive?.removed?.map((p) => p.title)).toEqual(["C"]);
     } finally {
       await Effect.runPromise(closeHarness(harness));
     }

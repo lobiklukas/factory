@@ -24,7 +24,17 @@ else: no tracker issue, no session, no card, no event (LOB-201, part 1 of LOB-43
   (`invalid_input`). The prompt never cuts a criterion: the criteria are the contract the children
   are checked against, so a spec the call cannot carry whole is refused, not shortened.
 - `getSession`'s snapshot carries the newest set as `proposedIssues`, live and folded; absent when
-  the session never decomposed. A second decomposition replaces the first.
+  the session never decomposed.
+- A second decomposition does not replace the first, it is **reconciled** into it by normalized title
+  (LOB-203, `reconcileProposals`): a title the session already proposed is updated in place and keeps
+  its recorded tracker issue, a new title is added, and a title the new answer no longer proposes is
+  marked removed — kept in the document's `removed` list with its `created`, never dropped — and
+  takes its issue back if a later answer proposes it again. The result carries a `diff` (`added`,
+  `updated`, `unchanged`, `removed`, as titles), so a changed spec answers what changed rather than a
+  second full set, and an answer the session already holds commits nothing. Edges are compared by
+  the titles they name, so a reorder is not an update. Removed proposals that never became an issue
+  age out past 50; created ones are never forgotten. A removed proposal's tracker issue is left as it
+  is: the tracker port has no cancel.
 
 ## How a user reaches it
 
@@ -51,6 +61,8 @@ holding a SQL connection to the drive's database:
    its own activity row, which the call writes by design; no new session appears on the list, the
    card keeps its revision and column, and the session's own log gained exactly one commit of
    `factory.proposedIssues` (beside the call's spend).
+6. Decomposing the same spec again (LOB-203) answers the same proposals with a diff of nothing but
+   `unchanged`, commits no second copy of the document, and `getSession` still reports the one set.
 
 The drive does **not** prove that no tracker request is made: its API holds no tracker
 credentials, so a request it did not make says nothing. That claim is the core suite's, whose HTTP
