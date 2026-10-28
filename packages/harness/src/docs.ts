@@ -132,6 +132,11 @@ export const PrDoc = defineDoc({
  *
  * `rebuildIndexes` folds it into `sessions.pr_merged_at` and `pr_reverted_at`, which is where the
  * outcome metrics read delegation-to-merge lead time, recovery and defect pressure from.
+ *
+ * It also records the PR's close without a merge (`closedAt`, F12), which `rebuildIndexes` folds into
+ * `sessions.pr_closed_at`: a card's later run adopts the card's PR only while it is open, so a run
+ * after an unmerged close opens a new one rather than pushing onto a branch nobody will review. Added
+ * without a version: a document written before it lacks the key, which reads as "no close".
  */
 export const MergeDoc = defineDoc({
   kind: MERGE_DOC_KIND,
@@ -146,6 +151,7 @@ export const MergeDoc = defineDoc({
     commit: "",
     revertedBy: "",
     revertedAt: "",
+    closedAt: "",
   }),
 });
 

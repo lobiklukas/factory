@@ -1604,7 +1604,8 @@ export const readPullRequestDoc = (
 
 /**
  * What a session's `factory.merge` records (LOB-44): the merge of the PR it opened, and the revert
- * that undid it once one merged. `revert` is absent while nothing reverted it.
+ * that undid it once one merged. `revert` is absent while nothing reverted it. `mergedAt` is empty
+ * for a record that holds only a close (F12): `closedAt`, absent while no unmerged close was recorded.
  */
 export type MergeRecord = {
   readonly url: string;
@@ -1613,9 +1614,14 @@ export type MergeRecord = {
   /** The merge commit GitHub reported, when it reported one. */
   readonly commit?: string;
   readonly revert?: { readonly by: string; readonly at: string };
+  /** When the PR was closed without merging (F12). */
+  readonly closedAt?: string;
 };
 
-/** One fact the GitHub webhook reports about a session's PR: its merge, or its revert. */
+/**
+ * One fact the GitHub webhook reports about a session's PR: its merge, its revert, or (F12) its close
+ * without a merge.
+ */
 export type MergeEvent =
   | {
       readonly _tag: "merged";
@@ -1629,11 +1635,18 @@ export type MergeEvent =
       /** The PR that reverted this one, by its page. */
       readonly by: string;
       readonly revertedAt: string;
+    }
+  | {
+      readonly _tag: "closed";
+      readonly url: string;
+      readonly number: number;
+      readonly closedAt: string;
     };
 
-/** A `factory.merge` view as the record readers take: `undefined` for a document with neither fact. */
+/** A `factory.merge` view as the record readers take: `undefined` for a document with no fact. */
 const mergeRecordOf = (doc: MergeDocView): MergeRecord | undefined => {
-  if (doc.mergedAt === "" && doc.revertedAt === "") return undefined;
+  if (doc.mergedAt === "" && doc.revertedAt === "" && doc.closedAt === "")
+    return undefined;
   return {
     url: doc.url,
     number: doc.number,
@@ -1642,12 +1655,14 @@ const mergeRecordOf = (doc: MergeDocView): MergeRecord | undefined => {
     ...(doc.revertedAt === ""
       ? {}
       : { revert: { by: doc.revertedBy, at: doc.revertedAt } }),
+    ...(doc.closedAt === "" ? {} : { closedAt: doc.closedAt }),
   };
 };
 
 /**
  * Commit one merge fact to a session this process owns (LOB-44), unless the log already holds it:
- * the first merge and the first revert stand, so a redelivered webhook commits nothing and answers
+ * the first merge, the first revert and the first unmerged close (F12) stand — and a close of a PR
+ * the log holds as merged is no fact at all — so a redelivered webhook commits nothing and answers
  * `first: false` with what the log already says. The `sessions` columns are the caller's to update.
  *
  * Decided inside the commit, from the document as the mutation line holds it, and writing only the
@@ -1674,6 +1689,14 @@ export const recordMergeEvent = (
               doc.number = event.number;
               doc.mergedAt = event.mergedAt;
               doc.commit = event.commit ?? "";
+            } else if (event._tag === "closed") {
+              // A close is a fact about an unmerged PR: one the log already holds as merged, or as
+              // closed, takes nothing new (F12).
+              if (current.closedAt !== "" || current.mergedAt !== "")
+                return { first: false, next: current };
+              doc.url = event.url;
+              doc.number = event.number;
+              doc.closedAt = event.closedAt;
             } else {
               if (current.revertedAt !== "")
                 return { first: false, next: current };

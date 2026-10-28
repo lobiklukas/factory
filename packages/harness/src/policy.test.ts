@@ -19,6 +19,9 @@ import {
   DEFAULT_AUTONOMY,
   decideToolCall,
   docsPolicy,
+  PolicyLive,
+  Policy,
+  withColumnAutonomy,
   type AutonomyConfig,
 } from "./policy";
 
@@ -374,5 +377,177 @@ describe("a session pushes its own branch only", () => {
         bash("git push origin refs/heads/factory/ses_2"),
       ),
     ).toEqual({ _tag: "allow" });
+  });
+});
+
+/**
+ * F15: a session bound to a branch — a card's later run on its first change run's
+ * `factory/<that id>` (C19), a reviewer on `factory/review-…` — pushes that branch, and only it.
+ */
+describe("a session bound to a branch pushes that branch only (F15)", () => {
+  /** A card's later run `ses_2`, bound to the branch its first change run `ses_1` cut. */
+  const bound = autonomyRules(
+    DEFAULT_AUTONOMY,
+    "/work/ses_2",
+    "ses_2",
+    "factory/ses_1",
+  );
+
+  /** Mutation: judge the push by the session id alone — the card's branch is refused. */
+  it("allows the bound branch, by full ref or short name", () => {
+    expect(
+      decideToolCall(
+        bound,
+        bash("git push origin HEAD:refs/heads/factory/ses_1"),
+      ),
+    ).toEqual({ _tag: "allow" });
+    expect(
+      decideToolCall(bound, bash("git push origin factory/ses_1")),
+    ).toEqual({ _tag: "allow" });
+  });
+
+  /** Mutation: allow the bound branch beside the session's own — `factory/ses_2` is let through. */
+  it("refuses every other factory branch, its own id's included, naming the bound one", () => {
+    for (const ref of [
+      "refs/heads/factory/ses_2",
+      "refs/heads/factory/ses_3",
+      "refs/heads/factory/ses_1-extra",
+    ]) {
+      const decision = decideToolCall(
+        bound,
+        bash(`git push origin HEAD:${ref}`),
+      );
+      expect(decision._tag).toBe("block");
+      if (decision._tag !== "block") throw new Error("unreachable");
+      expect(decision.reason).toContain(ref);
+      expect(decision.reason).toContain(
+        "this session owns refs/heads/factory/ses_1",
+      );
+    }
+  });
+
+  /**
+   * Mutation: leave a refusal's hint at `factory/<session-id>` — a bound run that follows it pushes
+   * its own id's branch, which the namespace rule then refuses.
+   */
+  it("points every other refusal at the bound branch", () => {
+    for (const command of [
+      "git push --mirror origin",
+      "git push --force origin HEAD:refs/heads/factory/ses_1",
+      "git push --all origin",
+      "git push origin",
+      "git push origin +HEAD:refs/heads/factory/ses_1",
+      "git push origin HEAD:refs/heads/main",
+      "git remote add other https://example.com/x.git",
+      "git config remote.origin.url https://example.com/x.git",
+    ]) {
+      const decision = decideToolCall(bound, bash(command));
+      expect(decision._tag).toBe("block");
+      if (decision._tag !== "block") throw new Error("unreachable");
+      expect(decision.reason).toContain("refs/heads/factory/ses_1");
+      expect(decision.reason).not.toContain("<session-id>");
+    }
+    // A scratch session's hint is its own id's branch; rules naming no session keep D11's placeholder.
+    const scratch = autonomyRules(DEFAULT_AUTONOMY, "/work/ses_5", "ses_5");
+    const refusal = decideToolCall(scratch, bash("git push origin"));
+    expect(refusal).toMatchObject({ _tag: "block" });
+    expect(refusal._tag === "block" ? refusal.reason : "").toContain(
+      "git push origin refs/heads/factory/ses_5",
+    );
+  });
+
+  /** A reviewer's branch is its own too: before F15 its own id was the only one it could push. */
+  it("allows a bound branch that names no session", () => {
+    const reviewer = autonomyRules(
+      DEFAULT_AUTONOMY,
+      "/work/ses_9",
+      "ses_9",
+      "factory/review-12-abc",
+    );
+    expect(
+      decideToolCall(
+        reviewer,
+        bash("git push origin HEAD:refs/heads/factory/review-12-abc"),
+      ),
+    ).toEqual({ _tag: "allow" });
+    expect(
+      decideToolCall(reviewer, bash("git push origin refs/heads/factory/ses_9"))
+        ._tag,
+    ).toBe("block");
+  });
+
+  /** The prefixes still decide first: a bound branch outside them is not a way past D11. */
+  it("refuses a bound branch outside the push prefixes", () => {
+    const named = autonomyRules(
+      DEFAULT_AUTONOMY,
+      "/work/ses_4",
+      "ses_4",
+      "feature/widget",
+    );
+    const decision = decideToolCall(
+      named,
+      bash("git push origin refs/heads/feature/widget"),
+    );
+    expect(decision._tag).toBe("block");
+  });
+
+  /** A scratch session is bound to no branch: today's rule, `factory/<its id>` and nothing else. */
+  it("keeps a scratch session on its own id", () => {
+    const scratch = autonomyRules(
+      DEFAULT_AUTONOMY,
+      "/work/ses_5",
+      "ses_5",
+      undefined,
+    );
+    expect(
+      decideToolCall(scratch, bash("git push origin refs/heads/factory/ses_5")),
+    ).toEqual({ _tag: "allow" });
+    expect(
+      decideToolCall(scratch, bash("git push origin refs/heads/factory/ses_1"))
+        ._tag,
+    ).toBe("block");
+  });
+
+  /** Mutation: check the bound branch before the empty prefixes — a `push: none` column pushes it. */
+  it("still refuses every push in a `push: none` column", () => {
+    const none = autonomyRules(
+      withColumnAutonomy(DEFAULT_AUTONOMY, { push: "none" }),
+      "/work/ses_2",
+      "ses_2",
+      "factory/ses_1",
+    );
+    const decision = decideToolCall(
+      none,
+      bash("git push origin HEAD:refs/heads/factory/ses_1"),
+    );
+    expect(decision._tag).toBe("block");
+    if (decision._tag !== "block") throw new Error("unreachable");
+    expect(decision.reason).toContain("this session may push no ref");
+  });
+
+  /** Mutation: have `forWorktree` drop its fifth argument — the bound push is refused. */
+  it("is what `Policy.forWorktree` builds from the branch it is handed", async () => {
+    const decisions = await Effect.runPromise(
+      Effect.gen(function* () {
+        const policy = yield* Policy;
+        const run = policy.forWorktree(
+          "/work/ses_2",
+          "ses_2",
+          undefined,
+          undefined,
+          "factory/ses_1",
+        );
+        return {
+          card: yield* run.decide(
+            bash("git push origin HEAD:refs/heads/factory/ses_1"),
+          ),
+          own: yield* run.decide(
+            bash("git push origin HEAD:refs/heads/factory/ses_2"),
+          ),
+        };
+      }).pipe(Effect.provide(PolicyLive())),
+    );
+    expect(decisions.card).toEqual({ _tag: "allow" });
+    expect(decisions.own._tag).toBe("block");
   });
 });
