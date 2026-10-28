@@ -3046,7 +3046,8 @@ describe("the migrations directory", () => {
  * does. 0009 and the three seeds after it run first, as a real migrate runs them.
  *
  * Mutation: `USING version::int` — the edited row below keeps 3, not 1. Mutation: drop the `text`
- * guard — the second pass rewrites version 2 to 1 and meets the primary key.
+ * guard — the second pass rewrites version 2 to 1 and meets the primary key. Mutation: put 0009's
+ * `ON CONFLICT (name) DO NOTHING` back — running it again after 0037 has no constraint to name.
  */
 describe("0037 keys the skills 0009 created by name and version", () => {
   let scratchName: string;
@@ -3159,6 +3160,7 @@ describe("0037 keys the skills 0009 created by name and version", () => {
       );
       await run("0037_version_skills");
       for (const file of [
+        "0009_create_skills",
         "0015_seed_docs_skill",
         "0022_seed_decompose_skill",
         "0036_seed_plan_freshness_skill",

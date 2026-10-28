@@ -156,7 +156,7 @@ drive put2 skill-put-v2.txt "$FACTORY skill put --file $V2 --api $API_URL"
 check "skill put of an edit makes version 2 and names the version it superseded" \
   "$([ "$(exit_code put2)" = "0" ] && has skill-put-v2.txt "put          $SKILL@2" &&
     has skill-put-v2.txt "previous     $SKILL@1" &&
-    has skill-put-v2.txt "note         runs already open keep $SKILL@1; the next run is told $SKILL@2" &&
+    has skill-put-v2.txt "note         runs already open keep the version they opened with; the next run is told $SKILL@2" &&
     echo 0 || echo 1)" \
   "exit=$(exit_code put2)"
 check "an edit with no description keeps the superseded version's" \

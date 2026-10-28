@@ -19,7 +19,10 @@ version's (a `SKILL.md` declares none).
 **How the skill drives it.** `./skill.sh`, run by `./drive.sh` against the `./up.sh` instance, in a
 tmux server of its own. Each command's pane is kept as `skill-*.txt`; the checks are in `skill.json`.
 It puts only a skill named for its run (`verify-cli-skill-<run>`), so the shipped skills are never
-edited by a drive.
+edited by a drive. **Known cost:** there is no delete or archive path for a skill yet, so each drive
+leaves its two versions in the database it ran against, and `factory skill ls` there grows by one
+`verify-cli-skill-*` row per run beside the shipped skills. Point a drive at a database of its own
+(as a worktree's is) rather than one an operator reads.
 
 1. `skill ls` — exit 0, the header `name version columns updated-at description`, `specify` at a
    number with `specifying`, `implement` with `building`, `review` with `review`, `decompose` with
@@ -28,7 +31,7 @@ edited by a drive.
 3. `skill put --file v1.md` (frontmatter with a two-line `|` description) — `put <skill>@1`,
    `previous none (a new skill)`, the description folded onto one line.
 4. `skill put --file v2.md` (no description) — `put <skill>@2`, `previous <skill>@1`, the note that
-   open runs keep `@1`, and the description kept from version 1.
+   open runs keep the version they opened with and the next is told `@2`, and the description kept from version 1.
 5. `skill show <skill> --version 1` — `version      1 (newest is 2)` and version one's body, not two's;
    `skill show <skill>` — `version      2 (newest)` and version two's body. Version 1 was not
    overwritten.

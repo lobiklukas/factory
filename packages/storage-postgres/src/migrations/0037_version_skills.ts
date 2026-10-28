@@ -16,10 +16,10 @@ import { SqlClient } from "effect/sql/SqlClient";
  * - `created_at` and `author` say when and by whom a version was put (LOB-20's actor); the existing
  *   rows get the time this ran and no author.
  *
- * A seed written after this one inserts version `1` guarded by `WHERE NOT EXISTS` on the name, as
- * 0015, 0022 and 0036 now do — a guard that reads the same before this migration and after it, which
- * is what lets their suites run them again on a migrated database. `ON CONFLICT (name)` no longer
- * has a constraint to name (0009's own seed runs only on the table it has just created).
+ * Every skill seed inserts version `1` guarded by `WHERE NOT EXISTS` on the name, as 0009, 0015, 0022
+ * and 0036 now do — a guard that reads the same before this migration and after it, which is what
+ * lets their suites run them again on a migrated database. `ON CONFLICT (name)` no longer has a
+ * constraint to name, so a seed that still used it would fail when it ran after this one.
  *
  * Idempotent: the conversion runs only while the column is still `text`, so a second pass leaves a
  * history with many versions per name exactly as it is.

@@ -177,7 +177,7 @@ describe("rendering", () => {
     expect(lines[0]).toBe("put          specify@3");
     expect(lines[1]).toBe("previous     specify@2");
     expect(lines.at(-1)).toBe(
-      "note         runs already open keep specify@2; the next run is told specify@3",
+      "note         runs already open keep the version they opened with; the next run is told specify@3",
     );
     expect(skillPutLines(record({ version: 1, newest: 1 }), undefined)[1]).toBe(
       `previous     ${NONE} (a new skill)`,

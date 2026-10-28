@@ -114,6 +114,13 @@ follow that model's window, not today's row. One gap is the faux backend's: its 
 it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
 so it is not affected). Under faux, keep a row until the runs on it are done.
 
+A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
+(`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
+an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
+The deployment's model is `DEFAULT_MODEL` when it is set (validated at boot, like a row), else the
+backend's own. So a run's model is: its session's > its column role's row > `DEFAULT_MODEL` > the
+backend's, decided once, when its root is created.
+
 Built (D7): skills are versioned and edited without a migration. The table is keyed by `(name,
 version)` (`0037_version_skills`, which kept every existing row as version 1); `putSkill` adds
 version `newest + 1` and never rewrites a row. `listSkills`, `getSkill(name, version?)` and `putSkill`
@@ -123,12 +130,7 @@ that first resolves its column's skills records `name@version` in the run's log 
 every later open resolves from those pins (`loadRun`'s `pinned`), so a put reaches the next run and a
 reopened run keeps the body it opened with. A pinned version the table no longer holds refuses the open
 by name and version rather than moving the run onto another body.
-A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
-(`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
-an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
-The deployment's model is `DEFAULT_MODEL` when it is set (validated at boot, like a row), else the
-backend's own. So a run's model is: its session's > its column role's row > `DEFAULT_MODEL` > the
-backend's, decided once, when its root is created.
+
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for

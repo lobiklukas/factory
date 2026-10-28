@@ -101,7 +101,7 @@ export const skillPutLines = (
   ...skillHeaderLines(put).slice(2),
   previous === undefined
     ? `note         the next run in a column that binds ${put.name} is told ${skillLabel(put)}`
-    : `note         runs already open keep ${skillLabel(previous)}; the next run is told ${skillLabel(put)}`,
+    : `note         runs already open keep the version they opened with; the next run is told ${skillLabel(put)}`,
 ];
 
 /** The parts of a `SKILL.md` a put needs: its frontmatter's `name` and `description`, and the body. */
