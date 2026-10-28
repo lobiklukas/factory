@@ -29,7 +29,11 @@ import { FetchHttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import type { SessionError, SessionId } from "@repo/domain/Session";
+import type {
+  RepoCloneFailed,
+  SessionError,
+  SessionId,
+} from "@repo/domain/Session";
 import type { TriggerDelivery } from "@repo/domain/Trigger";
 import { createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
@@ -422,7 +426,7 @@ try {
   const phases: ReadonlyArray<
     Effect.Effect<
       void,
-      SqlError | SessionError | CredentialError | PrError,
+      SqlError | SessionError | CredentialError | PrError | RepoCloneFailed,
       SessionService | TriggerService | SqlClient
     >
   > = [push, schedule, ledger];

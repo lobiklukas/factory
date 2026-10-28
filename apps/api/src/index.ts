@@ -6,6 +6,7 @@ import {
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
+  gitRepoMirror,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
   runDocsSchedule,
@@ -287,6 +288,18 @@ const DocsScheduleConfig = Config.all({
   repo: Config.option(Config.schema(RepoSlug, "DOCS_SCHEDULE_REPO")),
 });
 
+/**
+ * Whether the boot resumes the missions its database says are in flight (LOB-231). On by default:
+ * a mission a restart interrupted waits on no client, so a deployment that did not resume it would
+ * leave it `pending` in its log. The resume only reopens rows marked under this process's
+ * `SESSION_ROOT`, which already keeps a verify skill's throwaway API off the development instance's
+ * missions; `MISSION_RESUME=false` is for a second process that shares the database *and* the root
+ * and must not take over the first one's logs — there is no ownership lease (docs/design.md D12).
+ */
+const MissionResumeConfig = Config.Boolean("MISSION_RESUME").pipe(
+  Config.withDefault(true),
+);
+
 /** A docs schedule the boot refuses: an interval with no repo to run it over. */
 class InvalidDocsSchedule extends Schema.TaggedError<InvalidDocsSchedule>()(
   "InvalidDocsSchedule",
@@ -398,6 +411,42 @@ const DocsScheduleDaemon = (schedule: {
   );
 
 /**
+ * Resume every mission the last process was stopped in the middle of (LOB-231), once, at boot.
+ *
+ * A mission is durable work no client is talking to: a shutdown leaves it `pending` in its log, and
+ * nothing would reopen that log until somebody sent the session a message. `resumeMissions` reopens
+ * each session whose row says a mission is in flight and schedules it, so the mission continues in
+ * the phase it died in. Forked beside `MigrationsDaemon` and for the same reason — the boot binds
+ * first — and retried until the query can run, because the column it reads is a migration's and
+ * the database may not be reachable or migrated yet. Built on `SessionShutdown`, like the docs
+ * schedule, so a resume still in progress is interrupted before the owners are released.
+ */
+const MissionResumeDaemon = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        for (;;) {
+          const exit = yield* Effect.exit(sessions.resumeMissions);
+          if (Exit.isSuccess(exit)) {
+            yield* Effect.logInfo(
+              exit.value.length === 0
+                ? "missions: none in flight to resume"
+                : `missions: resumed ${exit.value.length} in flight: ${exit.value.join(", ")}`,
+            );
+            return;
+          }
+          yield* Effect.logWarning(
+            `missions: could not resume; retrying in ${MIGRATION_RETRY_MS}ms: ${firstLine(exit.cause)}`,
+          );
+          yield* Effect.sleep(MIGRATION_RETRY_MS);
+        }
+      }),
+    );
+  }),
+);
+
+/**
  * Say which credential source the process selected (LOB-51). Building the provider is what refuses
  * an unsupported configuration (a GitHub App id with no App flow), so this line is also the boot's
  * evidence that the static token, not an App, is what the control plane will use.
@@ -451,6 +500,7 @@ const HttpLive = Effect.gen(function* () {
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
+  const missionResume = yield* MissionResumeConfig;
   const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
   if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
     return yield* new InvalidDocsSchedule({
@@ -581,6 +631,12 @@ const HttpLive = Effect.gen(function* () {
     `reviewer identity: ${reviewerIdentity === "github-app" ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : reviewerIdentity === "token" ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
   );
 
+  // A repo registered with only a URL is cloned into `<SESSION_ROOT>/.cache` with the worker's read
+  // credential, and its sessions' worktrees are cut from that clone (LOB-265).
+  const repoMirror = yield* gitRepoMirror({ root: model.sessionRoot }).pipe(
+    Effect.provide(Layer.mergeAll(CredentialProviderLive, BunServices.layer)),
+  );
+
   // What `getServerInfo` answers (LOB-269): the values resolved above, as they were resolved, so the
   // RPC and the boot lines say the same thing. Names and modes only — no credential is in here.
   const ServerFactsLive = Layer.succeed(ServerFacts, {
@@ -605,6 +661,7 @@ const HttpLive = Effect.gen(function* () {
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
     reviewPoster,
+    repoMirror,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,
@@ -633,15 +690,25 @@ const HttpLive = Effect.gen(function* () {
   // sequential scope, shutdown first, so the daemon's fiber is interrupted (and awaited) before
   // `sessions.close` releases the owners; siblings in `Layer.mergeAll` would close in parallel, and a
   // tick inside `sessions.create` could open an owner while `close` was releasing them.
+  // The mission resume (LOB-231) sits there too, for the same reason: a resume that is still
+  // reopening owners when the signal lands is interrupted before `close` releases them.
+  const MissionResume = missionResume
+    ? MissionResumeDaemon
+    : Layer.effectDiscard(
+        Effect.logInfo(
+          "missions: resume at boot off (MISSION_RESUME=false); a mission in flight waits for its next caller",
+        ),
+      );
   const SessionDaemons = Option.match(docsSchedule.repo, {
-    onNone: () => SessionShutdown,
+    onNone: () => MissionResume,
     onSome: (repo) =>
       docsEveryMs > 0
-        ? DocsScheduleDaemon({ everyMs: docsEveryMs, repo }).pipe(
-            Layer.provideMerge(SessionShutdown),
+        ? Layer.mergeAll(
+            MissionResume,
+            DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
           )
-        : SessionShutdown,
-  });
+        : MissionResume,
+  }).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
   }

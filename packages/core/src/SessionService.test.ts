@@ -42,7 +42,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -68,6 +68,7 @@ import type {
 } from "@repo/domain/Session";
 import {
   BranchName,
+  RepoCloneFailed,
   RepoNotFound,
   RepoSlug as RepoSlugSchema,
   SessionId as SessionIdSchema,
@@ -132,6 +133,7 @@ import {
 import { mintSessionId } from "./ids";
 import { backfillSessionModels, rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import type { RepoMirror } from "./RepoMirror";
 import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
@@ -9346,6 +9348,376 @@ describe("a mission on a session", () => {
 });
 
 /**
+ * A mission the process stopped in the middle of resumes in the phase it died in (LOB-231).
+ *
+ * Two runtimes over one database and one session root play two processes: the first starts a
+ * mission whose two workers hold in their check and is closed the way the API's SIGTERM finalizer
+ * closes it; the second boots, and only `resumeMissions` — nothing a client sends — reopens the
+ * session. Each check counts its runs into the worktree, so a worker that reran its phase is told
+ * apart from a mission that fanned out again, and the release file is the case's: the checks finish
+ * only once the case has read the resumed mission in `implement`.
+ */
+describe("a mission across a restart", () => {
+  const restartRoot = mkdtempSync(
+    join(tmpdir(), "factory-core-mission-restart-"),
+  );
+  const restartRuntime = (
+    extra: {
+      readonly idleTimeoutMs?: number;
+      readonly sweepIntervalMs?: number;
+    } = {},
+  ) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess().access,
+        sessionRoot: restartRoot,
+        ...extra,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+  const workersIn = (tasks: readonly SessionTask[]) =>
+    tasks.filter((task) => task.kind === "factory.mission.worker");
+  /** Whether the session's row says a mission is in flight — what the next boot reads. */
+  const inFlight = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ readonly missionInFlight: boolean }>`
+        SELECT mission_in_flight FROM sessions WHERE id = ${sessionId}
+      `;
+      return rows[0]?.missionInFlight;
+    });
+  /** The session root a mission in flight was marked under — the only boot that resumes it. */
+  const markedRoot = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ readonly missionSessionRoot: string | null }>`
+        SELECT mission_session_root FROM sessions WHERE id = ${sessionId}
+      `;
+      return rows[0]?.missionSessionRoot;
+    });
+  /** What a process that died with a mission in flight under `root` leaves in the row. */
+  const mark = (sessionId: SessionId, root: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`
+        UPDATE sessions SET mission_in_flight = true, mission_session_root = ${root}
+        WHERE id = ${sessionId}
+      `;
+    });
+  const runsOf = (worktree: string, name: string) =>
+    existsSync(join(worktree, `${name}.runs`))
+      ? readFileSync(join(worktree, `${name}.runs`), "utf8")
+          .split("\n")
+          .filter((line) => line !== "").length
+      : 0;
+  /** A mission whose two workers hold in their check until `release` exists; each check counts its runs. */
+  const holdingMission = (hold: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const created = yield* sessions.create({ title: "a mission to resume" });
+      const check = (name: string) =>
+        `echo run >> ${name}.runs; while [ ! -f ${join(hold, "release")} ]; do sleep 0.01; done`;
+      const started = yield* sessions.startMission({
+        sessionId: created.id,
+        feature: "a mission that outlives its process",
+        workers: [
+          { id: "a", prompt: "do part a", check: check("a") },
+          { id: "b", prompt: "do part b", check: check("b") },
+        ],
+      });
+      yield* waitUntil(
+        sessions
+          .get(created.id)
+          .pipe(
+            Effect.map(
+              (snapshot) =>
+                workersIn(snapshot.tasks).filter(
+                  (task) => task.phase === "check",
+                ).length === 2,
+            ),
+          ),
+        "both workers to reach their check",
+      );
+      const snapshot = yield* sessions.get(created.id);
+      // The phase is committed before its command starts, so the run counts are what say both
+      // checks are running.
+      yield* waitUntil(
+        Effect.sync(
+          () =>
+            runsOf(snapshot.workspace.path, "a") === 1 &&
+            runsOf(snapshot.workspace.path, "b") === 1,
+        ),
+        "both checks to start",
+      );
+      return { sessionId: created.id, started, snapshot };
+    });
+
+  it("reopens the session at boot, resumes the mission in implement, and its workers finish", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-mission-restart-hold-"));
+    const before = restartRuntime();
+    const armed = await before
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const quiet = yield* sessions.create({ title: "no mission here" });
+          const mission = yield* holdingMission(hold);
+          const marked = yield* inFlight(mission.sessionId);
+          const root = yield* markedRoot(mission.sessionId);
+          // What the API's shutdown finalizer runs on SIGTERM.
+          yield* sessions.close;
+          return { quiet: quiet.id, ...mission, marked, root };
+        }),
+      )
+      .finally(() => before.dispose());
+    const worktree = armed.snapshot.workspace.path;
+    const workersBefore = workersIn(armed.snapshot.tasks);
+    expect(armed.marked).toBe(true);
+    // Marked with the root of the process running it, the one whose boot resumes it.
+    expect(armed.root).toBe(restartRoot);
+    expect(workersBefore).toHaveLength(2);
+    // Both checks had started once, and the close stopped them: neither had finished.
+    expect(runsOf(worktree, "a")).toBe(1);
+    expect(runsOf(worktree, "b")).toBe(1);
+
+    const after = restartRuntime();
+    try {
+      const outcome = await after.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // Nobody owns the session yet: the fold already names the phase the mission died in.
+          const folded = yield* sessions.get(armed.sessionId);
+          const resumed = yield* sessions.resumeMissions;
+          const reopened = yield* sessions.get(armed.sessionId);
+          yield* waitUntil(
+            Effect.sync(
+              () => runsOf(worktree, "a") === 2 && runsOf(worktree, "b") === 2,
+            ),
+            "both workers to rerun their check",
+          );
+          const rerunning = yield* sessions.get(armed.sessionId);
+          writeFileSync(join(hold, "release"), "");
+          yield* waitUntil(
+            sessions
+              .get(armed.sessionId)
+              .pipe(Effect.map((snapshot) => snapshot.tasks.length === 0)),
+            "the resumed mission to settle",
+          );
+          const settled = yield* sessions.get(armed.sessionId);
+          // The projection clears the row once the mission is gone from the graph.
+          yield* waitUntil(
+            inFlight(armed.sessionId).pipe(
+              Effect.map((value) => value === false),
+            ),
+            "the row to say no mission is in flight",
+          );
+          const quiet = yield* sessions.get(armed.quiet);
+          yield* sessions.close;
+          return { folded, resumed, reopened, rerunning, settled, quiet };
+        }),
+      );
+
+      expect(outcome.folded.session.mode).toBe("historical");
+      expect(outcome.folded.mission).toEqual({
+        taskId: armed.started.taskId,
+        phase: "implement",
+        entered: ["plan", "implement"],
+      });
+      // The boot reopened the mission's session and only it: a session with no mission stays a
+      // fold until somebody uses it.
+      expect(outcome.resumed).toContain(armed.sessionId);
+      expect(outcome.resumed).not.toContain(armed.quiet);
+      expect(outcome.quiet.session.mode).toBe("historical");
+      // Resumed, the checkpoint and the document both say implement, and the mission waits on the
+      // workers it fanned out to before the stop — the same tasks, the same conversations.
+      expect(outcome.reopened.session.mode).toBe("live");
+      expect(outcome.reopened.mission?.phase).toBe("implement");
+      expect(
+        outcome.reopened.tasks.find((task) => task.id === armed.started.taskId),
+      ).toMatchObject({
+        kind: "factory.mission",
+        status: "waiting",
+        phase: "implement",
+        waitingOn: workersBefore.map((task) => task.id),
+      });
+      expect(
+        workersIn(outcome.rerunning.tasks).map((task) => ({
+          id: task.id,
+          conversations: task.conversations,
+          phase: task.phase,
+        })),
+      ).toEqual(
+        workersBefore.map((task) => ({
+          id: task.id,
+          conversations: task.conversations,
+          phase: "check",
+        })),
+      );
+      // And carries on to the end without passing through plan again.
+      expect(outcome.settled.mission).toEqual({
+        taskId: armed.started.taskId,
+        phase: "verify",
+        entered: ["plan", "implement", "verify"],
+      });
+      expect(runsOf(worktree, "a")).toBe(2);
+      expect(runsOf(worktree, "b")).toBe(2);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.dispose();
+    }
+  }, 120_000);
+
+  it("clears a row that outlived its mission, and resumes nothing for it", async () => {
+    const runtime = restartRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "a stale mark" });
+          // A crash between a mission settling and the projection writing it leaves the row set.
+          yield* sessions.close;
+          yield* mark(created.id, restartRoot);
+          const resumed = yield* sessions.resumeMissions;
+          const marked = yield* inFlight(created.id);
+          const root = yield* markedRoot(created.id);
+          yield* sessions.close;
+          return { id: created.id, resumed, marked, root };
+        }),
+      );
+      expect(outcome.resumed).not.toContain(outcome.id);
+      expect(outcome.marked).toBe(false);
+      expect(outcome.root).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("leaves a mission marked under another session root to the process that marked it", async () => {
+    const runtime = restartRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({
+            title: "another instance's",
+          });
+          yield* sessions.close;
+          // Another API on the same database with a root of its own — a verify skill's throwaway
+          // instance beside the development one — died with this mission in flight.
+          const elsewhere = join(restartRoot, "..", "another-instance-root");
+          yield* mark(created.id, elsewhere);
+          const resumed = yield* sessions.resumeMissions;
+          const snapshot = yield* sessions.get(created.id);
+          const marked = yield* inFlight(created.id);
+          const root = yield* markedRoot(created.id);
+          return { id: created.id, resumed, snapshot, marked, root, elsewhere };
+        }),
+      );
+      // Not reopened, not cleared: it is the other process's to resume at its boot.
+      expect(outcome.resumed).not.toContain(outcome.id);
+      expect(outcome.snapshot.session.mode).toBe("historical");
+      expect(outcome.marked).toBe(true);
+      expect(outcome.root).toBe(outcome.elsewhere);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("drops the mark of a released session, at its release and at the next boot", async () => {
+    const runtime = restartRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sql = yield* SqlClient;
+          const releasing = yield* sessions.create({
+            title: "released by an event",
+          });
+          const stale = yield* sessions.create({
+            title: "released under a mark",
+          });
+          yield* sessions.close;
+          // A terminal event takes the session's runs away, and with them its mission's resume.
+          yield* mark(releasing.id, restartRoot);
+          yield* sessions.releaseWorkspace({
+            sessionId: releasing.id,
+            reason: "discarded",
+          });
+          const afterRelease = yield* inFlight(releasing.id);
+          // A row released before releases cleared the mark: the boot drops it rather than read it
+          // at every boot, and reopens nothing.
+          yield* mark(stale.id, restartRoot);
+          yield* sql`
+            UPDATE sessions
+            SET workspace_released_at = now(), workspace_release_reason = 'discarded'
+            WHERE id = ${stale.id}
+          `;
+          const resumed = yield* sessions.resumeMissions;
+          const staleMarked = yield* inFlight(stale.id);
+          const staleSnapshot = yield* sessions.get(stale.id);
+          return {
+            ids: [releasing.id, stale.id],
+            afterRelease,
+            resumed,
+            staleMarked,
+            staleSnapshot,
+          };
+        }),
+      );
+      expect(outcome.afterRelease).toBe(false);
+      for (const id of outcome.ids) expect(outcome.resumed).not.toContain(id);
+      expect(outcome.staleMarked).toBe(false);
+      expect(outcome.staleSnapshot.session.mode).toBe("historical");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("keeps the owner of a mission in flight through the idle sweep", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-mission-sweep-hold-"));
+    const runtime = restartRuntime({ idleTimeoutMs: 200, sweepIntervalMs: 50 });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const mission = yield* holdingMission(hold);
+          // Untouched for many idle windows: a read is use and would keep any owner open. Released
+          // here, the mission would stay pending in its log and never settle below.
+          yield* Effect.sleep(1_500);
+          writeFileSync(join(hold, "release"), "");
+          yield* waitUntil(
+            sessions
+              .get(mission.sessionId)
+              .pipe(
+                Effect.map(
+                  (snapshot) =>
+                    snapshot.mission?.phase === "verify" &&
+                    snapshot.tasks.length === 0,
+                ),
+              ),
+            "the mission to settle",
+          );
+          const settled = yield* sessions.get(mission.sessionId);
+          // Once it has settled the owner is idle like any other, and the sweep lets it go.
+          yield* Effect.sleep(1_500);
+          const later = yield* sessions.get(mission.sessionId);
+          yield* sessions.close;
+          return { settled, later };
+        }),
+      );
+      expect(outcome.settled.session.mode).toBe("live");
+      expect(outcome.settled.mission?.entered).toEqual([
+        "plan",
+        "implement",
+        "verify",
+      ]);
+      expect(outcome.later.session.mode).toBe("historical");
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
  * The `verify` tool is given the workspace the service resolved (LOB-78): the repo's declared
  * `verify` command, and the base ref the branch's changes are measured against.
  *
@@ -9550,6 +9922,479 @@ describe("the verify tool reads the session's workspace", () => {
       expect(comment).not.toContain("No verification was recorded");
     } finally {
       await verifyRuntime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * A repo registered with only a URL (LOB-265): the session layer's side of the factory's own clone.
+ *
+ * The real mirror (`gitRepoMirror`, token over a loopback git server) is proven in `git.test.ts`.
+ * Here the mirror is a fake that fetches from a local bare repository with plain git, so what is
+ * under test is the wiring: which calls sync, when, and what a session's worktree is cut from.
+ */
+describe("a repo registered with only a URL (LOB-265)", () => {
+  const cloneRoot = mkdtempSync(join(tmpdir(), "factory-core-clone-"));
+  const upstream = join(cloneRoot, "upstream");
+  const bareUpstream = join(cloneRoot, "upstream.git");
+  const mirrors = join(cloneRoot, "mirrors");
+  const url = "https://github.com/factory-test/url-only.git";
+  const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
+    execFileSync("git", [...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@t.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@t.com",
+      },
+    }).trim();
+
+  /** What the fake was asked, and whether it should fail the next call. */
+  const calls: Array<{
+    readonly repo: string;
+    readonly url: string;
+    readonly baseRef: string;
+  }> = [];
+  const failing = { next: false };
+  /** A repo whose sync waits for this effect: a forge that is slow to answer. */
+  const holds = new Map<string, Effect.Effect<void>>();
+  const fakeMirror: RepoMirror = {
+    directory: (repo) => join(mirrors, `${repo.replace("/", "__")}.git`),
+    sync: (input) =>
+      Effect.gen(function* () {
+        calls.push(input);
+        const hold = holds.get(input.repo);
+        if (hold !== undefined) yield* hold;
+        if (failing.next)
+          return yield* new RepoCloneFailed({
+            repo: input.repo,
+            reason: "auth",
+            message: `repo ${input.repo}: fetch failed: the remote refused the credential`,
+          });
+        const mirror = join(mirrors, `${input.repo.replace("/", "__")}.git`);
+        if (!existsSync(join(mirror, "HEAD")))
+          git(cloneRoot, "init", "--bare", "--quiet", mirror);
+        git(
+          mirror,
+          "fetch",
+          "--quiet",
+          bareUpstream,
+          `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`,
+        );
+        return {
+          path: mirror,
+          ref: `refs/remotes/origin/${input.baseRef}`,
+          sha: git(mirror, "rev-parse", `refs/remotes/origin/${input.baseRef}`),
+        };
+      }),
+  };
+
+  beforeAll(() => {
+    mkdirSync(upstream, { recursive: true });
+    git(upstream, "init", "-q", "-b", "main");
+    writeFileSync(join(upstream, "README.md"), "from the forge\n");
+    git(upstream, "add", "README.md");
+    git(upstream, "commit", "-q", "-m", "seed");
+    git(cloneRoot, "clone", "-q", "--bare", upstream, bareUpstream);
+  });
+
+  afterAll(() => {
+    rmSync(cloneRoot, { recursive: true, force: true });
+  });
+
+  const runtimeWith = (mirror: RepoMirror | undefined) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot: join(cloneRoot, "sessions"),
+        ...(mirror === undefined ? {} : { repoMirror: mirror }),
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  it("clones on registration, cuts each session's worktree from the clone at the fetched base, and tears it down from there", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-only-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const registered = yield* sessions.registerRepo({ repo: slug, url });
+          const afterRegister = calls.length;
+          const created = yield* sessions.create({ repo: slug });
+          const snapshot = yield* sessions.get(created.id);
+          const afterCreate = calls.length;
+          // Reading it again fetches nothing: only cutting a worktree reaches the remote.
+          yield* sessions.get(created.id);
+          const afterRead = calls.length;
+          // Read while the worktree exists: what it is cut from and at.
+          const cutFrom = {
+            commonDir: realpathSync(
+              git(snapshot.workspace.path, "rev-parse", "--git-common-dir"),
+            ),
+            head: git(snapshot.workspace.path, "rev-parse", "HEAD"),
+            readme: readFileSync(
+              join(snapshot.workspace.path, "README.md"),
+              "utf8",
+            ),
+          };
+          const released = yield* sessions.releaseWorkspace({
+            sessionId: created.id,
+            reason: "discarded",
+          });
+          return {
+            registered,
+            afterRegister,
+            created,
+            snapshot,
+            afterCreate,
+            afterRead,
+            cutFrom,
+            released,
+          };
+        }),
+      );
+      const mirror = fakeMirror.directory(slug);
+      const worktree = result.snapshot.workspace.path;
+
+      // Registration cloned the default base, once, and the row says where.
+      expect(result.afterRegister).toBe(1);
+      expect(calls[0]).toEqual({ repo: slug, url, baseRef: "main" });
+      expect(result.registered.mirrorPath).toBe(mirror);
+      expect(result.registered.localPath).toBeUndefined();
+
+      // The session fetched its base ref, then was cut a linked worktree of the clone at it.
+      expect(result.afterCreate).toBe(2);
+      expect(calls[1]).toEqual({ repo: slug, url, baseRef: "main" });
+      expect(result.afterRead).toBe(2);
+      expect(result.snapshot.workspace.warning).toBeUndefined();
+      expect(result.snapshot.workspace.branch).toBe(
+        `factory/${result.created.id}`,
+      );
+      expect(result.cutFrom.commonDir).toBe(realpathSync(mirror));
+      expect(result.cutFrom.head).toBe(git(upstream, "rev-parse", "HEAD"));
+      expect(result.cutFrom.readme).toBe("from the forge\n");
+
+      // A discard removes the worktree and its branch from the clone, which is not a registered path.
+      expect(result.released.first).toBe(true);
+      expect(existsSync(worktree)).toBe(false);
+      expect(
+        git(mirror, "branch", "--list", `factory/${result.created.id}`),
+      ).toBe("");
+      expect(git(mirror, "worktree", "list", "--porcelain")).not.toContain(
+        worktree,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("registers a repo whose clone fails, names the repo and the reason, and clones it on syncRepo once the cause is fixed", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-fails-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      failing.next = true;
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const failed = yield* Effect.flip(
+            sessions.registerRepo({ repo: slug, url }),
+          );
+          // The row stays, un-cloned, so the clone can be retried.
+          const kept = yield* sessions.getRepo({ repo: slug });
+          const stillFailing = yield* Effect.flip(
+            sessions.syncRepo({ repo: slug }),
+          );
+          failing.next = false;
+          const synced = yield* sessions.syncRepo({ repo: slug });
+          const unknown = yield* Effect.flip(
+            sessions.syncRepo({
+              repo: RepoSlugSchema.make("factory-test/never"),
+            }),
+          );
+          return { failed, kept, stillFailing, synced, unknown };
+        }),
+      );
+      expect(result.failed).toBeInstanceOf(RepoCloneFailed);
+      expect(result.failed).toMatchObject({ repo: slug, reason: "auth" });
+      expect(result.failed.message).toContain(slug);
+      expect(result.kept.url).toBe(url);
+      expect(result.kept.mirrorPath).toBeUndefined();
+      expect(result.stillFailing).toBeInstanceOf(RepoCloneFailed);
+      expect(result.synced.mirrorPath).toBe(fakeMirror.directory(slug));
+      expect(result.unknown).toBeInstanceOf(RepoNotFound);
+    } finally {
+      failing.next = false;
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("clones nothing for a repo that has a checkout, has no URL, or a deployment with no cache", async () => {
+    const withPath = RepoSlugSchema.make(
+      `factory-test/has-path-${randomBytes(4).toString("hex")}`,
+    );
+    const noUrl = RepoSlugSchema.make(
+      `factory-test/no-url-${randomBytes(4).toString("hex")}`,
+    );
+    const noCache = RepoSlugSchema.make(
+      `factory-test/no-cache-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    const bare = runtimeWith(undefined);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo: withPath,
+            url,
+            localPath: upstream,
+          });
+          const cut = yield* sessions.create({ repo: withPath });
+          const cutView = yield* sessions.get(cut.id);
+          yield* sessions.registerRepo({ repo: noUrl });
+          const synced = yield* sessions.syncRepo({ repo: noUrl });
+          return { cutView, synced };
+        }),
+      );
+      expect(calls).toEqual([]);
+      // Cut from its own checkout: the worktree's common dir is the upstream clone's `.git`.
+      expect(
+        realpathSync(
+          git(result.cutView.workspace.path, "rev-parse", "--git-common-dir"),
+        ),
+      ).toBe(realpathSync(join(upstream, ".git")));
+      expect(result.synced.mirrorPath).toBeUndefined();
+
+      const view = await bare.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const registered = yield* sessions.registerRepo({
+            repo: noCache,
+            url,
+          });
+          const created = yield* sessions.create({ repo: noCache });
+          return { registered, snapshot: yield* sessions.get(created.id) };
+        }),
+      );
+      // As before LOB-265: a session with no checkout and nothing to clone it into warns.
+      expect(view.registered.mirrorPath).toBeUndefined();
+      expect(view.snapshot.workspace.warning).toBe(noCheckoutWarning(noCache));
+    } finally {
+      await runtime.dispose();
+      await bare.dispose();
+    }
+  }, 120_000);
+
+  it("registers an ssh URL whose username is the login, with or without a checkout", async () => {
+    const withPath = RepoSlugSchema.make(
+      `factory-test/ssh-path-${randomBytes(4).toString("hex")}`,
+    );
+    const sshUrl = "ssh://git@github.com/factory-test/ssh-path.git";
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const registered = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          return yield* sessions.registerRepo({
+            repo: withPath,
+            url: sshUrl,
+            localPath: upstream,
+          });
+        }),
+      );
+      expect(registered.url).toBe(sshUrl);
+      expect(registered.localPath).toBe(upstream);
+      // A token placed as the username of an https URL is still refused.
+      const refused = await runtime.runPromise(
+        Effect.flip(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            return yield* sessions.registerRepo({
+              repo: withPath,
+              url: "https://ghp_secret@github.com/factory-test/ssh-path.git",
+            });
+          }),
+        ),
+      );
+      expect(refused).toMatchObject({ code: "invalid_input" });
+      expect(refused.message).not.toContain("ghp_secret");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("reports a clone that fails while a session is created as repo_clone_failed, naming the reason", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/create-fails-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const error = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          failing.next = true;
+          return yield* Effect.flip(sessions.create({ repo: slug }));
+        }),
+      );
+      expect(error).toMatchObject({
+        _tag: "SessionError",
+        code: "repo_clone_failed",
+      });
+      expect(error.message).toContain(slug);
+      expect(error.message).toContain("auth");
+    } finally {
+      failing.next = false;
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("fetches the clone outside the owners' gate: a slow forge on one repo does not hold up a session on another", async () => {
+    const slow = RepoSlugSchema.make(
+      `factory-test/slow-forge-${randomBytes(4).toString("hex")}`,
+    );
+    const quick = RepoSlugSchema.make(
+      `factory-test/quick-forge-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    const forge = Deferred.makeUnsafe<void>();
+    const release = () => Deferred.doneUnsafe(forge, Effect.void);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slow, url });
+          yield* sessions.registerRepo({ repo: quick, url });
+          holds.set(slow, Deferred.await(forge));
+          const stalled = yield* Effect.forkChild(
+            sessions.create({ repo: slow }),
+          );
+          // Let the slow create reach its fetch, then open a session on the other repo.
+          yield* Effect.sleep("200 millis");
+          const other = yield* sessions
+            .create({ repo: quick })
+            .pipe(Effect.timeout("20 seconds"));
+          const slowStillWaiting = stalled.pollUnsafe() === undefined;
+          release();
+          const slowCreated = yield* Fiber.join(stalled);
+          return { other, slowStillWaiting, slowCreated };
+        }),
+      );
+      expect(result.slowStillWaiting).toBe(true);
+      expect(result.other.id).toBeDefined();
+      expect(result.slowCreated.id).toBeDefined();
+    } finally {
+      release();
+      holds.delete(slow);
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("tears a worktree down from the clone it was cut from after the repo is given a checkout of its own", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-then-path-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          const created = yield* sessions.create({ repo: slug });
+          const snapshot = yield* sessions.get(created.id);
+          yield* sessions.registerRepo({ repo: slug, localPath: upstream });
+          const released = yield* sessions.releaseWorkspace({
+            sessionId: created.id,
+            reason: "discarded",
+          });
+          return { created, snapshot, released };
+        }),
+      );
+      const mirror = fakeMirror.directory(slug);
+      expect(result.released.first).toBe(true);
+      expect(existsSync(result.snapshot.workspace.path)).toBe(false);
+      expect(
+        git(mirror, "branch", "--list", `factory/${result.created.id}`),
+      ).toBe("");
+      expect(git(mirror, "worktree", "list", "--porcelain")).not.toContain(
+        result.snapshot.workspace.path,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("does not fetch a branch for a session based at a commit id, as a review run is", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/review-sha-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      calls.length = 0;
+      const view = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          const afterRegister = calls.length;
+          const created = yield* sessions.create({
+            repo: slug,
+            baseRef: git(upstream, "rev-parse", "HEAD"),
+          });
+          return {
+            afterRegister,
+            afterCreate: calls.length,
+            snapshot: yield* sessions.get(created.id),
+          };
+        }),
+      );
+      // The same as before the clone existed: no fetch of `refs/heads/<sha>`, an empty directory.
+      expect(view.afterCreate).toBe(view.afterRegister);
+      expect(view.snapshot.workspace.warning).toBeDefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a URL that carries a credential, and stores nothing", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-secret-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const refused = yield* Effect.flip(
+            sessions.registerRepo({
+              repo: slug,
+              url: "https://x-access-token:ghs_secret@github.com/factory-test/url-secret.git",
+            }),
+          );
+          const missing = yield* Effect.flip(sessions.getRepo({ repo: slug }));
+          return { refused, missing };
+        }),
+      );
+      expect(result.refused).toMatchObject({
+        _tag: "SessionError",
+        code: "invalid_input",
+      });
+      expect(result.refused.message).toContain("carries a credential");
+      expect(result.refused.message).not.toContain("ghs_secret");
+      expect(result.missing).toBeInstanceOf(RepoNotFound);
+      expect(calls).toEqual([]);
+    } finally {
+      await runtime.dispose();
     }
   }, 120_000);
 });

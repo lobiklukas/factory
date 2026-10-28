@@ -71,6 +71,50 @@ outcomes themselves (the abort reason on the aborted worker, `allSettled` lettin
 join reading only once both are terminal) are not on the snapshot and are proven in
 `packages/harness/src/mission.fanout.test.ts` from the task graph.
 
+## Across a kill (LOB-231)
+
+A mission is durable work no client is talking to, so a process that stops in the middle of one
+must not leave it for a caller who never comes:
+
+- **The shutdown leaves it pending.** SIGTERM runs `SessionService.close`, which closes each owner's
+  harness. Pi Durable keeps an interrupted task `pending` in its log, so the mission's checkpoint is
+  still `implement`, its wait still names the same workers, and each worker's checkpoint is the
+  phase it was in (`converse` mid-turn, or `check`).
+- **The boot resumes it, unasked.** Each session's row carries `mission_in_flight` (migration
+  `0029`), mirrored from the live task graph by the owner's activity projection and set by
+  `startMission` before the task exists. At boot the API (`MissionResumeDaemon`) calls
+  `SessionService.resumeMissions`, which reopens every session the row names under this process's
+  session root whose workspace was not released, asks its task graph whether a mission is still
+  live, and only then calls `Harness.resume()` on it. The mission continues in the phase it died in: the
+  workers rerun their own phase in the conversations they already own — an interrupted tool call is
+  answered as interrupted, a prompt is not asked twice (its request id finds the submission) — and
+  the join, verify and the result follow as they would have. A row that outlived its mission costs
+  one reopen that finds nothing, schedules nothing in that log, and clears it; a released session's
+  mark is cleared by the release itself.
+- **The idle sweep keeps it.** An owner whose harness has a live mission is not released however
+  quiet its conversation is (`missionInFlight`); released, the mission would wait for the next boot.
+- **One process per database and session root.** The row is marked with the absolute `SESSION_ROOT`
+  of the process running the mission (`mission_session_root`), and a boot resumes only the rows
+  marked with its own, so the verify skills' throwaway APIs — the shared development database, roots
+  of their own — leave ./up.sh's missions alone. Two processes on one database _and_ one root would
+  both own a session's log (there is no presence lease yet, docs/design.md D12), so a second one sets
+  `MISSION_RESUME=false`. The restart drive mints a database of its own besides, so the boot's
+  "resumed 1" is exactly its mission.
+
+`mission-restart.sh` proves it over the wire: an API with `FAUX_COMMAND="sleep 8 && echo faux-ok"`
+holds both workers' conversations on a `bash` call while the mission waits in `implement`; SIGTERM;
+with no process running, the row still says a mission is in flight, marked with the script's
+session root; a fresh API (faux `echo`) that
+the driver only reads from is `live` for the session, the mission's task is `waiting` in
+`implement`, its document says `implement` with `entered` `plan,implement`, and it waits on the same
+worker tasks in the same conversations. Each worker's check holds on a file the driver writes, so
+that is read before the mission can leave `implement`; released, the mission settles in `verify`
+with `entered` exactly `plan,implement,verify`, the repo's verify command has left its mark, each
+check ran once, and the row is cleared. The same story is in
+`packages/harness/src/mission.fanout.test.ts` (a close and a reopen of one log) and
+`packages/core/src/SessionService.test.ts` ("a mission across a restart": the boot's resume, a stale
+row, the sweep).
+
 ## Why the phase is on the session and not on a group of its own
 
 A mission is not a thing a client holds, it is state of a session. A client that starts one and then
@@ -105,8 +149,8 @@ fan-out's under `missionFanOut` (`joined`, `failFast`).
 
 ## What it does not prove
 
-- **Resume across a kill.** A mission that dies mid-phase and is resumed in the phase it died in is
-  part 3 (LOB-231). This drive proves the id and the phase, not the recovery.
+- **Resume across a kill.** `drive.ts` proves the id and the phase; the recovery is
+  `mission-restart.sh`'s (above).
 - **What the phases do.** Plan is a checkpoint; implement fans out to workers when the mission names
   some (above) and is a checkpoint otherwise; verify runs the repo's own `verify` command. Each
   worker shares the session's one workspace — a worktree per worker is not part of this.

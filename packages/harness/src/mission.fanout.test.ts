@@ -13,7 +13,13 @@
  * from its own transcript. Postgres is required, because the tasks and their outcomes are the log
  * the API serves.
  */
-import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue } from "@earendil-works/chord";
@@ -552,6 +558,145 @@ describe("a mission's fan-out", () => {
       expect(workers.items).toEqual([]);
     } finally {
       await Effect.runPromise(closeHarness(harness));
+    }
+  }, 120_000);
+
+  it("resumes in implement after the process that ran it closes, and its workers carry on (LOB-231)", async () => {
+    // The harness is closed while both workers hold in their check — the shutdown a SIGTERM runs —
+    // and a fresh one opens the same log. Each check counts its runs into a file, so a worker whose
+    // phase reran is told apart from one that restarted from `open` (a second conversation) and
+    // from a mission that restarted from `plan` (a second fan-out, new worker ids).
+    const work = checkout();
+    const holds = (name: string) =>
+      `echo run >> ${name}.runs; ${work.holds(name)}`;
+    const runsOf = (name: string) =>
+      existsSync(join(work.dir, `${name}.runs`))
+        ? readFileSync(join(work.dir, `${name}.runs`), "utf8")
+            .split("\n")
+            .filter((line) => line !== "").length
+        : 0;
+    const id = `${logId}-resume`;
+    const first = await startWork(id);
+    let mission: TaskId<MissionResult>;
+    let before: TaskGraph;
+    try {
+      mission = await createMission(
+        first.root,
+        missionInput(work.dir, [
+          { id: "a", prompt: "do part a", check: holds("a") },
+          { id: "b", prompt: "do part b", check: holds("b") },
+        ]),
+      );
+      first.harness.resume();
+      await waitingOn(first.harness, mission);
+      await eventually(
+        "both workers to reach their check",
+        () => runsOf("a") === 1 && runsOf("b") === 1,
+      );
+      before = await graphOf(first.harness);
+    } finally {
+      // The close has to come back while both checks still hold: a shutdown that waited for the
+      // work it interrupts would never let the process stop.
+      await within(
+        "the close to settle what runs",
+        Effect.runPromise(closeHarness(first.harness)),
+        30_000,
+      );
+    }
+    const workersBefore = Object.entries(before.tasks)
+      .filter(([, node]) => node.kind === MISSION_WORKER_TASK_NAME)
+      .map(([taskId, node]) => ({ taskId, conversations: node.conversations }));
+    expect(workersBefore).toHaveLength(2);
+
+    const second = await startWork(id);
+    try {
+      // Reopened and not yet scheduled: the checkpoint and the document both name implement, and
+      // the mission still waits on the workers it fanned out to, not on new ones.
+      const reopened = await graphOf(second.harness);
+      const waited = before.tasks[String(mission)]?.state;
+      expect(waited?.status).toBe("waiting");
+      expect(reopened.tasks[String(mission)]?.state).toMatchObject({
+        status: "waiting",
+        phase: "implement",
+        on: waited?.status === "waiting" ? waited.on : [],
+      });
+      expect(
+        await Effect.runPromise(
+          readMission(second.harness, second.root.id, mission),
+        ),
+      ).toEqual({
+        phase: "implement",
+        definitionVersion: MISSION_VERSION,
+        entered: ["plan", "implement"],
+      });
+
+      // Scheduled: each worker reruns the phase it was in — its check — in the conversation it
+      // already owns.
+      second.harness.resume();
+      await eventually(
+        "both workers to rerun their check",
+        () => runsOf("a") === 2 && runsOf("b") === 2,
+      );
+      const resumed = await graphOf(second.harness);
+      expect(
+        Object.entries(resumed.tasks)
+          .filter(([, node]) => node.kind === MISSION_WORKER_TASK_NAME)
+          .map(([taskId, node]) => ({
+            taskId,
+            conversations: node.conversations,
+            phase:
+              node.state.status === "completing" ? undefined : node.state.phase,
+          })),
+      ).toEqual(workersBefore.map((each) => ({ ...each, phase: "check" })));
+
+      work.release("a");
+      work.release("b");
+      const settled = await second.harness.waitForTask(mission, context);
+      expect(settled.state.outcome).toMatchObject({
+        status: "completed",
+        result: {
+          verify: { command: "true", exitCode: 0 },
+          workers: workersBefore.map((each, index) => ({
+            id: index === 0 ? "a" : "b",
+            taskId: each.taskId,
+            conversationId: String(each.conversations[0]),
+          })),
+        },
+      });
+      expect(
+        await Effect.runPromise(
+          readMission(second.harness, second.root.id, mission),
+        ),
+      ).toEqual({
+        phase: "verify",
+        definitionVersion: MISSION_VERSION,
+        entered: ["plan", "implement", "verify"],
+      });
+      // Each worker was asked its prompt once: the rerun found the conversation's answer rather
+      // than asking again.
+      for (const each of workersBefore) {
+        const conversationId = each.conversations[0];
+        if (conversationId === undefined)
+          throw new Error("a worker owns no conversation");
+        const conversation = await second.harness.conversation(
+          conversationId,
+          context,
+        );
+        const view = await conversation?.viewState(context);
+        try {
+          expect(
+            (view?.value.entries ?? []).filter(
+              (entry) => entry.kind === "pi.user",
+            ),
+          ).toHaveLength(1);
+        } finally {
+          view?.dispose();
+        }
+      }
+    } finally {
+      work.release("a");
+      work.release("b");
+      await Effect.runPromise(closeHarness(second.harness));
     }
   }, 120_000);
 

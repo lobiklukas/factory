@@ -85,6 +85,12 @@ These are the reasons a naive `N agents in N worktrees` plan goes wrong here.
    run the test suites one at a time. Do not create it with `docker exec` or `docker compose exec`:
    see 7.
 
+   A booting `apps/api` also **claims the missions in flight** in its database (LOB-231): it reopens
+   and resumes every session whose row says a mission is running under its own `SESSION_ROOT`. Two
+   APIs on one database with different roots leave each other's missions alone; two with the same
+   database _and_ root would both own the log, so give the second one `MISSION_RESUME=false` (or its
+   own root, or its own database). See docs/design.md D12.
+
 2. **Ports and one run directory.** `.pi/skills/verify-api` uses port 9200; `.pi/skills/verify-web`
    uses 9100 (API) and 3100 (web). Both write `api.pid` into `.verify/run/`, so **one drive per
    checkout at a time**; pass `API_PORT` / `WEB_PORT` to run two, and do it from separate worktrees.

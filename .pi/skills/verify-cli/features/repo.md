@@ -18,8 +18,9 @@ with `factory repo add <slug> --path <dir>`.
 **How a user reaches it.** `factory repo add lobiklukas/factory --path .` from a checkout (the path is
 resolved against the directory the command runs in), then `factory repo ls` or `factory repo show`.
 `--path` may be left out only when the repo already has a checkout registered: a second `add` that
-names only `--base-ref` keeps the path. Until LOB-265 clones a URL-only repo into a factory cache, an
-`add` with no path for a repo that has none is refused `invalid_input`.
+names only `--base-ref` keeps the path. `--url` with no path has the API clone the repo into its own
+cache before it answers (LOB-265, [clone.md](clone.md)); with neither, an `add` for a repo that has
+no checkout and no URL is refused `invalid_input`.
 
 **How the skill drives it.** `./repo.sh`, run by `./drive.sh` against the `./up.sh` instance, in a
 tmux server of its own. Each command's pane is kept as `repo-*.txt`; the checks are in `repo.json`.
@@ -54,7 +55,7 @@ Every slug carries the run's id, so a row an earlier run wrote is never the one 
 disk. The refusal in step 3 is the server's (`invalid_input` naming the path), and step 3's `show` is
 a second request that would find the row if the refusal had written one.
 
-**What it does not prove.** Cloning: a repo with only a URL stays `no local checkout` (LOB-265). The
+**What it does not prove.** Cloning: that is [clone.md](clone.md)'s (`./clone.sh`). The
 dashboard's Repositories page (LOB-262) is proven by
 [verify-web's repos.md](../../verify-web/features/repos.md). The `warning …` lines LOB-263 added to `factory run`, `board create`, `board start`
 and `board ls` are unit-tested (`board.test.ts`) and read by `verify-api`'s `repo-binding.md`; this
