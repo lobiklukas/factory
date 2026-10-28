@@ -196,13 +196,15 @@ const assistantEntry = (
 });
 
 describe("projectEntry on a failed model request (S-notifications)", () => {
-  it("marks the entry an error and carries the provider's message as its text", () => {
+  it("marks the entry an error and carries the provider's message beside an empty text", () => {
     const projected = projectEntry(
       assistantEntry("error", "", "overloaded_error: try again later"),
     );
     expect(projected.kind).toBe("assistant");
     expect(projected.isError).toBe(true);
-    expect(projected.text).toBe("overloaded_error: try again later");
+    // The text stays what the model answered — nothing — so no reader takes the error for an answer.
+    expect(projected.text).toBe("");
+    expect(projected.error).toBe("overloaded_error: try again later");
   });
 
   it("keeps an error's own text when the answer carried some", () => {
@@ -211,11 +213,18 @@ describe("projectEntry on a failed model request (S-notifications)", () => {
     );
     expect(projected.isError).toBe(true);
     expect(projected.text).toBe("partial answer");
+    expect(projected.error).toBe("connection reset");
+  });
+
+  it("names a failure the provider gave no message for", () => {
+    const projected = projectEntry(assistantEntry("error", ""));
+    expect(projected.error).toBe("the model request failed");
   });
 
   it("says nothing about errors on an answer that stopped normally", () => {
     const projected = projectEntry(assistantEntry("stop", "done"));
     expect(projected.isError).toBeUndefined();
+    expect(projected.error).toBeUndefined();
     expect(projected.text).toBe("done");
   });
 });

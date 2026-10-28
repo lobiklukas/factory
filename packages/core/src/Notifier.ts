@@ -28,9 +28,14 @@
  * claims the undelivered ones and sends them; a sent one is stamped `delivered_at`. So a restart —
  * or a second replica polling the same database — that sees the same pending approval inserts
  * nothing and sends nothing, and a send that failed is retried once its claim is older than
- * `retryAfterMs`, up to `maxAttempts`. The window that is *not* covered is a process that dies
- * between a sink accepting a message and the stamp: that message is sent again after the retry
- * interval. At-least-once, then, with the duplicate confined to a crash inside one HTTP call.
+ * `retryAfterMs`, up to `maxAttempts`. A row is claimed just before it is sent and each send is cut
+ * off at `sendTimeoutMs` (under the retry interval), so a slow sink cannot hold a claim long enough
+ * for a second replica to take it over and send it too; each sink is flushed on its own fiber, so a
+ * sink that hangs delays only its own messages. A retry of an event that is no longer open — the
+ * approval was decided, the question answered — while the sink was down is dropped, not sent, and a
+ * kind turned off is not sent from the backlog either. The window that is *not* covered is a process
+ * that dies between a sink accepting a message and the stamp: that message is sent again after the
+ * retry interval. At-least-once, then, with the duplicate confined to a crash inside one HTTP call.
  *
  * A sink's id names its destination (`slack:<fingerprint>`, `ntfy:<fingerprint>`), never the
  * secret, so two processes configured with different destinations — a verify drive's loopback fake
@@ -74,7 +79,15 @@ export type Notification = {
 /** A sink refused or could not be reached; the message says which and why, never the secret. */
 export class NotifyError extends Schema.TaggedError<NotifyError>()(
   "NotifyError",
-  { sink: Schema.String, message: Schema.String },
+  {
+    sink: Schema.String,
+    message: Schema.String,
+    /**
+     * The sink said "slow down" (HTTP 429): the send is tried again after the retry interval without
+     * spending one of its attempts, and the sink is sent nothing more this pass.
+     */
+    rateLimited: Schema.optional(Schema.Boolean),
+  },
 ) {}
 
 /** The ledger or the attention view could not be read or written. */
@@ -114,15 +127,22 @@ export type NotifierOptions = {
   readonly maxAttempts?: number;
   /** How far back a failed run is still news. Default a day. */
   readonly failureLookbackMs?: number;
+  /**
+   * How long one send may take before it counts as failed. Default ten seconds, and never more than
+   * half of `retryAfterMs`, so a send still in flight is never re-claimed by another replica.
+   */
+  readonly sendTimeoutMs?: number;
 };
 
 const DEFAULT_RETRY_AFTER_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_FAILURE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
-/** Deliveries one claim takes at most; a pass claims again until nothing is left to claim. */
-const CLAIM_BATCH = 50;
-/** Claims one pass makes at most. */
-const MAX_CLAIMS_PER_PASS = 20;
+const DEFAULT_SEND_TIMEOUT_MS = 10_000;
+/** Sends one pass makes to one sink at most; the next pass goes on with the rest. */
+const MAX_SENDS_PER_PASS = 500;
+/** Why a retry was dropped instead of sent: what it announced is no longer open. */
+const SUPERSEDED =
+  "superseded: the event was no longer open when it was retried";
 /** Ledger rows one insert writes at most. */
 const INSERT_BATCH = 200;
 /** A detail longer than this is cut: a notification is a pointer to the card, not the transcript. */
@@ -360,6 +380,7 @@ const postJson = (
           return yield* new NotifyError({
             sink,
             message: `${what}: the sink answered HTTP ${response.status}`,
+            ...(response.status === 429 ? { rateLimited: true } : {}),
           });
         }
       });
@@ -441,6 +462,8 @@ type ClaimedRow = {
   readonly title: string;
   readonly body: string;
   readonly link: string;
+  /** The attempts after this claim: `1` is the first send. */
+  readonly attempts: number;
 };
 
 const decodeKind = Schema.decodeUnknownEffect(NotificationKind);
@@ -457,6 +480,14 @@ export const makeNotifier = (options: NotifierOptions) =>
     const retryAfterMs = options.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS;
     const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const lookbackMs = options.failureLookbackMs ?? DEFAULT_FAILURE_LOOKBACK_MS;
+    const sendTimeoutMs = Math.max(
+      1,
+      Math.min(
+        options.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+        retryAfterMs > 0 ? retryAfterMs / 2 : Number.POSITIVE_INFINITY,
+      ),
+    );
+    const kinds = [...options.kinds];
     const sinks = new Map(options.sinks.map((sink) => [sink.id, sink]));
 
     const storage = <A, E>(
@@ -575,108 +606,170 @@ export const makeNotifier = (options: NotifierOptions) =>
       });
 
     /**
-     * Claim the pending deliveries for this process's sinks — never claimed, or claimed longer than
-     * `retryAfterMs` ago and short of `maxAttempts` — and send them. `SKIP LOCKED` keeps two
-     * replicas' passes from claiming one row at once.
+     * Claim this sink's oldest pending delivery — never claimed, or claimed longer than
+     * `retryAfterMs` ago, short of `maxAttempts`, of a kind the deployment still wants, and not tried
+     * yet this pass — stamping the claim as it takes it. `SKIP LOCKED` keeps two replicas' passes
+     * from claiming one row at once.
      */
-    const claimBatch: Effect.Effect<
-      {
-        readonly claimed: number;
-        readonly delivered: number;
-        readonly failed: number;
-      },
-      NotifyStorageError
-    > = Effect.gen(function* () {
-      const claimed = yield* storage(
-        "claim deliveries",
+    const claimOne = (
+      sink: string,
+      tried: ReadonlyArray<string>,
+    ): Effect.Effect<ClaimedRow | undefined, NotifyStorageError> =>
+      storage(
+        "claim a delivery",
         sql<ClaimedRow>`
           UPDATE notification_deliveries d
           SET claimed_at = now(), attempts = d.attempts + 1
           FROM (
             SELECT event_id, sink FROM notification_deliveries
             WHERE delivered_at IS NULL
-              AND sink IN ${sql.in([...sinks.keys()])}
+              AND sink = ${sink}
+              AND kind IN ${sql.in(kinds)}
               AND attempts < ${maxAttempts}
               AND (claimed_at IS NULL
                    OR claimed_at < now() - make_interval(secs => ${retryAfterMs / 1000}))
-            ORDER BY created_at, event_id, sink
-            LIMIT ${CLAIM_BATCH}
+              ${tried.length === 0 ? sql`` : sql`AND event_id NOT IN ${sql.in(tried)}`}
+            ORDER BY created_at, event_id
+            LIMIT 1
             FOR UPDATE SKIP LOCKED
           ) p
           WHERE d.event_id = p.event_id AND d.sink = p.sink
-          RETURNING d.event_id, d.sink, d.kind, d.title, d.body, d.link
+          RETURNING d.event_id, d.sink, d.kind, d.title, d.body, d.link, d.attempts
         `,
+      ).pipe(Effect.map((rows) => rows[0]));
+
+    /** The send, cut off at `sendTimeoutMs`: a sink that never answers is a failed send. */
+    const sendBounded = (
+      sink: NotificationSink,
+      notification: Notification,
+    ): Effect.Effect<void, NotifyError> =>
+      sink.send(notification).pipe(
+        Effect.timeoutOrElse({
+          duration: sendTimeoutMs,
+          orElse: () =>
+            Effect.fail(
+              new NotifyError({
+                sink: sink.id,
+                message: `${notification.eventId}: the sink did not answer within ${sendTimeoutMs}ms`,
+              }),
+            ),
+        }),
       );
-      let delivered = 0;
-      let failed = 0;
-      for (const row of claimed) {
-        const sink = sinks.get(row.sink);
-        if (sink === undefined) continue;
-        const kind = yield* storage("decode a delivery", decodeKind(row.kind));
-        const sent = yield* Effect.result(
-          sink.send({
-            eventId: row.eventId,
-            kind,
-            title: row.title,
-            body: row.body,
-            link: row.link,
-          }),
-        );
-        if (sent._tag === "Success") {
-          delivered += 1;
-          yield* storage(
-            "stamp a delivery",
-            sql`
-              UPDATE notification_deliveries
-              SET delivered_at = now(), last_error = NULL
-              WHERE event_id = ${row.eventId} AND sink = ${row.sink}
-            `,
+
+    /**
+     * Send what is pending for one sink, one claimed row at a time, until nothing is left to claim,
+     * the sink says it is rate-limited, or the pass's bound is reached. `open` is the pass's events:
+     * a retry of one no longer among them is dropped rather than sent. A first attempt is always
+     * sent — another replica may have recorded an event newer than this pass's read.
+     */
+    const flushSink = (
+      sink: NotificationSink,
+      open: ReadonlySet<string>,
+    ): Effect.Effect<
+      { readonly delivered: number; readonly failed: number },
+      NotifyStorageError
+    > =>
+      Effect.gen(function* () {
+        let delivered = 0;
+        let failed = 0;
+        // With every kind turned off nothing is wanted, and an empty `IN ()` is not SQL.
+        if (kinds.length === 0) return { delivered, failed };
+        const tried: string[] = [];
+        while (tried.length < MAX_SENDS_PER_PASS) {
+          const row = yield* claimOne(sink.id, tried);
+          if (row === undefined) break;
+          tried.push(row.eventId);
+          if (row.attempts > 1 && !open.has(row.eventId)) {
+            yield* storage(
+              "drop a superseded delivery",
+              sql`
+                UPDATE notification_deliveries
+                SET attempts = GREATEST(attempts, ${maxAttempts}), last_error = ${SUPERSEDED}
+                WHERE event_id = ${row.eventId} AND sink = ${row.sink}
+              `,
+            );
+            yield* Effect.logInfo(
+              `notify: ${row.kind} ${row.eventId} not retried to ${sink.label}: ${SUPERSEDED}`,
+            );
+            continue;
+          }
+          const kind = yield* storage(
+            "decode a delivery",
+            decodeKind(row.kind),
           );
-          yield* Effect.logInfo(
-            `notify: ${row.kind} ${row.eventId} sent to ${sink.label}`,
+          const sent = yield* Effect.result(
+            sendBounded(sink, {
+              eventId: row.eventId,
+              kind,
+              title: row.title,
+              body: row.body,
+              link: row.link,
+            }),
           );
-        } else {
+          if (sent._tag === "Success") {
+            delivered += 1;
+            yield* storage(
+              "stamp a delivery",
+              sql`
+                UPDATE notification_deliveries
+                SET delivered_at = now(), last_error = NULL
+                WHERE event_id = ${row.eventId} AND sink = ${row.sink}
+              `,
+            );
+            yield* Effect.logInfo(
+              `notify: ${row.kind} ${row.eventId} sent to ${sink.label}`,
+            );
+            continue;
+          }
           failed += 1;
           const message = sent.failure.message;
+          const rateLimited = sent.failure.rateLimited === true;
+          // A rate-limited send gives its attempt back: being told to wait is not the send failing.
           yield* storage(
             "record a failed delivery",
             sql`
-              UPDATE notification_deliveries SET last_error = ${message}
+              UPDATE notification_deliveries
+              SET last_error = ${message},
+                  attempts = ${rateLimited ? sql`GREATEST(attempts - 1, 0)` : sql`attempts`}
               WHERE event_id = ${row.eventId} AND sink = ${row.sink}
             `,
           );
           yield* Effect.logWarning(
             `notify: ${row.kind} ${row.eventId} not sent to ${sink.label}: ${message}`,
           );
+          if (rateLimited) break;
         }
-      }
-      return { claimed: claimed.length, delivered, failed };
-    });
+        return { delivered, failed };
+      });
 
-    /**
-     * Claim and send until a claim comes back short — so a pass delivers everything pending, not
-     * one batch of it — bounded, so a pass over a huge backlog still ends and the next one goes on.
-     */
-    const flush: Effect.Effect<
+    /** Flush every sink on its own fiber, so one that hangs delays nobody else's messages. */
+    const flush = (
+      open: ReadonlySet<string>,
+    ): Effect.Effect<
       { readonly delivered: number; readonly failed: number },
       NotifyStorageError
-    > = Effect.gen(function* () {
-      let delivered = 0;
-      let failed = 0;
-      if (sinks.size === 0) return { delivered, failed };
-      for (let round = 0; round < MAX_CLAIMS_PER_PASS; round += 1) {
-        const batch = yield* claimBatch;
-        delivered += batch.delivered;
-        failed += batch.failed;
-        if (batch.claimed < CLAIM_BATCH) break;
-      }
-      return { delivered, failed };
-    });
+    > =>
+      Effect.forEach([...sinks.values()], (sink) => flushSink(sink, open), {
+        concurrency: "unbounded",
+      }).pipe(
+        Effect.map((results) =>
+          results.reduce(
+            (total, result) => ({
+              delivered: total.delivered + result.delivered,
+              failed: total.failed + result.failed,
+            }),
+            { delivered: 0, failed: 0 },
+          ),
+        ),
+      );
 
     const pass: Effect.Effect<NotifyPass, NotifyStorageError> = Effect.gen(
       function* () {
-        const recorded = yield* record(yield* events);
-        const { delivered, failed } = yield* flush;
+        const open = yield* events;
+        const recorded = yield* record(open);
+        const { delivered, failed } = yield* flush(
+          new Set(open.map((notification) => notification.eventId)),
+        );
         return { recorded, delivered, failed };
       },
     );

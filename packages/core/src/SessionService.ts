@@ -89,6 +89,7 @@ import type {
   SpendRow,
   SyncRepoInput,
   TranscriptEntry,
+  TranscriptEntryKind,
   WithdrawMessageInput,
   WithdrawMessageResult,
   WorkspaceRelease,
@@ -930,6 +931,21 @@ type CostHistoryIndexRow = {
   readonly createdAtMs: number;
   readonly finishedAtMs: number;
 };
+
+/**
+ * The entries after which a run did not end on the failed model request before them
+ * (S-notifications): the conversation went on, or an interrupt, a budget stop, a reset or a
+ * compaction ended or moved past it.
+ */
+const SUPERSEDES_FAILED_REQUEST: ReadonlySet<TranscriptEntryKind> = new Set([
+  "assistant",
+  "toolResult",
+  "user",
+  "interrupted",
+  "budget",
+  "reset",
+  "compaction",
+]);
 
 /**
  * Most completed sessions a prediction or a backtest reads, newest first (LOB-38). A range uses at
@@ -4475,26 +4491,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           case "usage":
             return setActivityCost(sessionId, costOf(event.usage));
           case "entry":
-            observeFailedRequest(sessionId, event.entry);
-            // A budget stop (LOB-163) is also a log line, so an operator reading the process's logs
-            // — or motel — sees which session the cap stopped, not only a client watching it. It is
-            // a failed run too, which a person is told about (S-notifications).
-            return event.entry.kind === "budget"
-              ? Effect.logWarning(
-                  `session ${sessionId} stopped by its budget: ${event.entry.text}`,
-                ).pipe(
-                  Effect.andThen(countRefusal("budget")),
-                  Effect.andThen(
-                    recordRunFailure(
-                      sessionId,
-                      event.entry.id,
-                      "budget",
-                      event.entry.text,
-                    ),
-                  ),
-                  Effect.andThen(touchActivity(sessionId)),
-                )
-              : touchActivity(sessionId);
+            return observeFailedRequest(sessionId, event.entry).pipe(
+              Effect.andThen(recordEntryActivity(sessionId, event.entry)),
+            );
           case "snapshot":
             return observeRun(sessionId, event.session.status).pipe(
               Effect.andThen(
@@ -4519,6 +4518,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       };
 
       /**
+       * What an entry does to the activity row, beyond the failed-request bookkeeping. A budget stop
+       * (LOB-163) is also a log line, so an operator reading the process's logs — or motel — sees
+       * which session the cap stopped, not only a client watching it. It is a failed run too, which a
+       * person is told about (S-notifications).
+       */
+      const recordEntryActivity = (
+        sessionId: SessionId,
+        entry: TranscriptEntry,
+      ): Effect.Effect<void> =>
+        entry.kind === "budget"
+          ? Effect.logWarning(
+              `session ${sessionId} stopped by its budget: ${entry.text}`,
+            ).pipe(
+              Effect.andThen(countRefusal("budget")),
+              Effect.andThen(
+                recordRunFailure(sessionId, entry.id, "budget", entry.text),
+              ),
+              Effect.andThen(touchActivity(sessionId)),
+            )
+          : touchActivity(sessionId);
+
+      /**
        * One failed run, indexed for the notifier (`run_failures`, S-notifications): keyed by the entry
        * that announced the failure, so a projection that sees it again writes nothing twice.
        * Best-effort like the other activity writes: a row that is missing is a notification not
@@ -4541,22 +4562,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       /**
        * Remember a failed model request as the newest thing the run did, or forget it once a later
-       * entry of the conversation shows the run went on (a retry's answer, a tool round).
+       * entry shows the run did not end on it: a retry's answer or a tool round went on, an operator's
+       * interrupt stopped it (C8 — a person who stopped a run is not told it failed), a budget stop
+       * ended it (recorded as that, not twice), or a reset or a compaction moved past it.
        */
       const observeFailedRequest = (
         sessionId: SessionId,
         entry: TranscriptEntry,
-      ): void => {
-        if (entry.kind === "assistant" && entry.isError === true) {
-          failedRequests.set(sessionId, { id: entry.id, text: entry.text });
-        } else if (
-          entry.kind === "assistant" ||
-          entry.kind === "toolResult" ||
-          entry.kind === "user"
-        ) {
-          failedRequests.delete(sessionId);
-        }
-      };
+      ): Effect.Effect<void> =>
+        Effect.sync(() => {
+          if (entry.kind === "assistant" && entry.isError === true) {
+            failedRequests.set(sessionId, {
+              id: entry.id,
+              text: entry.error ?? entry.text,
+            });
+          } else if (SUPERSEDES_FAILED_REQUEST.has(entry.kind)) {
+            failedRequests.delete(sessionId);
+          }
+        });
 
       /**
        * A run that turns idle on a failed model request ended on it — Pi Durable settles it

@@ -319,22 +319,43 @@ describe("the HTTP sinks", () => {
   });
 });
 
-/** A sink that records what it was sent and fails while `failing` is set. */
+/** The fake sinks' ids, the seeded boards and the seeded sessions, deleted after the file runs. */
+const made = {
+  sinks: [] as string[],
+  boards: [] as string[],
+  sessions: [] as string[],
+};
+
+/**
+ * A sink that records what it was sent; while `failing` is set it fails, while `rateLimited` is set
+ * it answers as a 429 would, and while `hanging` is set it never answers.
+ */
 const recordingSink = () => {
   const sent: Notification[] = [];
-  const state = { failing: false };
+  const state = { failing: false, rateLimited: false, hanging: false };
   const sink: NotificationSink = {
     id: `fake:${randomBytes(6).toString("hex")}`,
     label: "the test's fake",
     send: (notification) =>
-      state.failing
-        ? Effect.fail(
-            new NotifyError({ sink: "fake", message: "the fake is down" }),
-          )
-        : Effect.sync(() => {
-            sent.push(notification);
-          }),
+      state.hanging
+        ? Effect.never
+        : state.rateLimited
+          ? Effect.fail(
+              new NotifyError({
+                sink: "fake",
+                message: "the fake answered HTTP 429",
+                rateLimited: true,
+              }),
+            )
+          : state.failing
+            ? Effect.fail(
+                new NotifyError({ sink: "fake", message: "the fake is down" }),
+              )
+            : Effect.sync(() => {
+                sent.push(notification);
+              }),
   };
+  made.sinks.push(sink.id);
   return { sink, sent, state };
 };
 
@@ -343,6 +364,23 @@ const runtime = ManagedRuntime.make(
 );
 
 afterAll(async () => {
+  // Nothing this file seeded outlives it: a dashboard or a real sink pointed at the same database
+  // would otherwise be shown — or sent — every test question, approval, gate and failure.
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      if (made.sinks.length > 0) {
+        yield* sql`DELETE FROM notification_deliveries WHERE sink IN ${sql.in(made.sinks)}`;
+      }
+      if (made.boards.length > 0) {
+        yield* sql`DELETE FROM board_instances WHERE id IN ${sql.in(made.boards)}`;
+      }
+      if (made.sessions.length > 0) {
+        yield* sql`DELETE FROM task_runs WHERE session_id IN ${sql.in(made.sessions)}`;
+        yield* sql`DELETE FROM sessions WHERE id IN ${sql.in(made.sessions)}`;
+      }
+    }),
+  );
   await runtime.dispose();
 });
 
@@ -356,6 +394,7 @@ const seed = Effect.gen(function* () {
   const sql = yield* SqlClient;
   const tasks = yield* TaskService;
   const boardId = yield* mintBoardId;
+  made.boards.push(boardId);
   const repo = `notifier/test-${randomBytes(4).toString("hex")}`;
   yield* sql`
     INSERT INTO board_instances (id, repo, definition_id, definition_version)
@@ -372,6 +411,7 @@ const seed = Effect.gen(function* () {
   const run = (taskId: string, column: string) =>
     Effect.gen(function* () {
       const sessionId = yield* mintSessionId;
+      made.sessions.push(sessionId);
       yield* sql`INSERT INTO sessions (id, title, repo) VALUES (${sessionId}, ${`run of ${taskId}`}, ${repo})`;
       yield* sql`
         INSERT INTO task_runs (id, task_id, session_id, "column")
@@ -408,6 +448,7 @@ const seed = Effect.gen(function* () {
 
   return {
     boardId,
+    approvalRun,
     question: `question:${asked}:${parked.blocked?.since ?? ""}`,
     approval: `approval:${approvalRun}:req-1`,
     gate: `gate:${gated}:review:${gatedRun}`,
@@ -424,7 +465,11 @@ type Seeded = Effect.Success<typeof seed>;
 const notifierOver = (
   sinks: ReadonlyArray<NotificationSink>,
   kinds: ReadonlyArray<NotificationKind> = NOTIFICATION_KINDS,
-  over: { readonly retryAfterMs?: number; readonly maxAttempts?: number } = {},
+  over: {
+    readonly retryAfterMs?: number;
+    readonly maxAttempts?: number;
+    readonly sendTimeoutMs?: number;
+  } = {},
 ) => makeNotifier({ sinks, kinds: new Set(kinds), linkBase: BASE, ...over });
 
 const mine = (seeded: Seeded, sent: ReadonlyArray<Notification>) => {
@@ -463,8 +508,13 @@ describe("the notifier over the attention view and its ledger", () => {
         const afterSecond = mine(seeded, fake.sent).length;
         // A restart: a new notifier over the same database and the same destination.
         const restarted = yield* notifierOver([fake.sink]);
-        const report = yield* restarted.pass;
-        return { seeded, afterFirst, afterSecond, report };
+        yield* restarted.pass;
+        const afterRestart = mine(seeded, fake.sent).length;
+        const rows = yield* Effect.forEach(
+          [seeded.question, seeded.approval, seeded.gate, seeded.failed],
+          (eventId) => ledger(fake.sink.id, eventId),
+        );
+        return { seeded, afterFirst, afterSecond, afterRestart, rows };
       }),
     );
     const sent = mine(result.seeded, fake.sent);
@@ -484,8 +534,14 @@ describe("the notifier over the attention view and its ledger", () => {
     expect(sent.find((n) => n.kind === "failed")?.link).toBe(
       result.seeded.links.failed,
     );
-    // The restarted pass recorded nothing of this board's and sent nothing at all.
-    expect(result.report.delivered).toBe(0);
+    // The restarted pass sent none of this case's events again: each has one ledger row, sent once.
+    // (Read per event, not from the pass's report — other files' events reach the fake too.)
+    expect(result.afterRestart).toBe(4);
+    expect(result.rows).toEqual(
+      Array.from({ length: 4 }, () => [
+        { attempts: 1, delivered: true, lastError: null },
+      ]),
+    );
   }, 60_000);
 
   it("a kind turned off is neither sent nor recorded", async () => {
@@ -595,5 +651,123 @@ describe("the notifier over the attention view and its ledger", () => {
       }),
     );
     expect(mine(result, fake.sent)).toEqual([]);
+  }, 60_000);
+  it("a retry of an event resolved while the sink was down is dropped, not sent", async () => {
+    const fake = recordingSink();
+    fake.state.failing = true;
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const seeded = yield* seed;
+        const notifier = yield* notifierOver([fake.sink], ["approval"], {
+          retryAfterMs: 0,
+        });
+        yield* notifier.pass;
+        // The person decided the approval elsewhere before the sink came back.
+        yield* sql`
+          UPDATE session_approvals SET decision = 'approved', decided_at = now(), actor = 'person:notifier-test'
+          WHERE session_id = ${seeded.approvalRun} AND request_id = 'req-1'
+        `;
+        fake.state.failing = false;
+        yield* notifier.pass;
+        yield* notifier.pass;
+        return { seeded, row: yield* ledger(fake.sink.id, seeded.approval) };
+      }),
+    );
+    expect(mine(result.seeded, fake.sent)).toEqual([]);
+    expect(result.row).toEqual([
+      {
+        attempts: 5,
+        delivered: false,
+        lastError:
+          "superseded: the event was no longer open when it was retried",
+      },
+    ]);
+  }, 60_000);
+
+  it("a kind turned off after it was recorded is not sent from the backlog", async () => {
+    const fake = recordingSink();
+    fake.state.failing = true;
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const seeded = yield* seed;
+        const before = yield* notifierOver([fake.sink], ["question", "gate"], {
+          retryAfterMs: 0,
+        });
+        yield* before.pass;
+        // A restart with `gate` turned off, over the same ledger.
+        fake.state.failing = false;
+        const after = yield* notifierOver([fake.sink], ["question"], {
+          retryAfterMs: 0,
+        });
+        yield* after.pass;
+        return { seeded, gate: yield* ledger(fake.sink.id, seeded.gate) };
+      }),
+    );
+    expect(mine(result.seeded, fake.sent).map((n) => n.kind)).toEqual([
+      "question",
+    ]);
+    expect(result.gate).toEqual([
+      { attempts: 1, delivered: false, lastError: "the fake is down" },
+    ]);
+  }, 60_000);
+
+  it("a rate-limited send spends no attempt, and the sink is sent nothing more that pass", async () => {
+    const fake = recordingSink();
+    fake.state.rateLimited = true;
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const seeded = yield* seed;
+        const notifier = yield* notifierOver(
+          [fake.sink],
+          ["question", "failed"],
+          {
+            retryAfterMs: 0,
+          },
+        );
+        const report = yield* notifier.pass;
+        const rows = yield* Effect.forEach(
+          [seeded.question, seeded.failed],
+          (eventId) => ledger(fake.sink.id, eventId),
+        );
+        return { report, rows };
+      }),
+    );
+    // One send was tried and refused; the rest waits for the next pass, attempts untouched.
+    expect(result.report.failed).toBe(1);
+    expect(result.rows.flat().map((row) => row.attempts)).toEqual([0, 0]);
+  }, 60_000);
+
+  it("a sink that never answers is cut off and delays no other sink", async () => {
+    const hung = recordingSink();
+    hung.state.hanging = true;
+    const ok = recordingSink();
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const seeded = yield* seed;
+        const notifier = yield* notifierOver(
+          [hung.sink, ok.sink],
+          ["question"],
+          {
+            sendTimeoutMs: 100,
+          },
+        );
+        yield* notifier.pass;
+        return {
+          seeded,
+          hung: yield* ledger(hung.sink.id, seeded.question),
+        };
+      }),
+    );
+    expect(mine(result.seeded, ok.sent).map((n) => n.kind)).toEqual([
+      "question",
+    ]);
+    expect(result.hung).toEqual([
+      {
+        attempts: 1,
+        delivered: false,
+        lastError: `${result.seeded.question}: the sink did not answer within 100ms`,
+      },
+    ]);
   }, 60_000);
 });

@@ -11,7 +11,9 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
   (`TaskService.attention`, every board: approvals, questions, gates) and the failed runs of the last
   day (`run_failures`), turns each into a message (`notificationOfAttention`,
   `notificationOfFailure`), records one `notification_deliveries` row per event per sink, and sends
-  the undelivered rows. A sink is `slackWebhookSink` (a `POST {text}` to the webhook URL) or
+  the undelivered rows — claimed one at a time just before the send, each send cut off at ten
+  seconds, every sink on its own fiber; a retry of an event no longer open (the approval decided)
+  is dropped, a kind turned off is not sent from the backlog, and a 429 spends no attempt. A sink is `slackWebhookSink` (a `POST {text}` to the webhook URL) or
   `ntfySink` (ntfy's JSON publish to the server's root). Their ids fingerprint the destination, so the
   URL and the topic never reach the ledger or the log.
 - Event ids: `question:<card>:<blocked since>`, `approval:<session>:<request>`,
@@ -21,8 +23,10 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
   the session (`/sessions/<session>`).
 - `run_failures` (migration 0039) is written by the session's activity projection
   (`SessionService.recordActivity`): a `budget` entry, or a run that turns idle on an assistant entry
-  whose model request failed (`isError` on the transcript entry, set by `packages/harness`'s
-  `projectEntry` when Pi Durable's message has `stopReason: "error"`).
+  whose model request failed (`isError` on the transcript entry, with the provider's message in
+  `error`, set by `packages/harness`'s `projectEntry` when Pi Durable's message has
+  `stopReason: "error"`). An interrupt, a budget stop, a reset or a compaction after that entry means
+  the run did not end on it, so no `model_error` is recorded for it.
 - `apps/api/src/Notifications.ts` reads the configuration and forks the daemon; with no sink it logs
   `notifications: off (…)` and forks nothing.
 
@@ -55,9 +59,12 @@ across the three boots, and that the API called no route the fake does not serve
 In the gate: `packages/core/src/Notifier.test.ts` (the messages and links per kind, both sinks'
 bodies and requests against an in-process `HttpClient`, and over the real attention view and ledger:
 once per event across passes and a restarted notifier, two sinks each once, a kind turned off neither
-sent nor recorded, a failed send recorded and retried once, `maxAttempts`, the failure lookback);
+sent nor recorded, a failed send recorded and retried once, `maxAttempts`, the failure lookback, a
+retry of a decided approval dropped, a kind turned off not sent from the backlog, a 429 spending no
+attempt, a hanging sink cut off without delaying the other);
 `packages/core/src/SessionService.failures.test.ts` (a budget stop and a non-retryable model error
-each one `run_failures` row; an answered run none); `apps/api/src/Notifications.test.ts` (the
+each one `run_failures` row; an answered run none, and a run interrupted inside a retry's backoff
+none); `apps/cli/src/transcript.test.ts` (a failed request is never the CLI's answer); `apps/api/src/Notifications.test.ts` (the
 configuration and the boot line, no secret in it).
 
 ## What it does not reach

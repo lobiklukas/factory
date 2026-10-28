@@ -430,9 +430,14 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
         ? (stringAt(asObject(entry.data), "text") ?? "")
         : entry.kind === PR_INHERITED_ENTRY_KIND
           ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")
-          : failedRequest && messageText(message) === ""
-            ? (message.errorMessage ?? "the model request failed")
-            : messageText(message);
+          : messageText(message);
+  // A failed request's provider message rides beside the text, not in it: the text is what the
+  // model answered, and the CLI and the transcript read it as that (S-notifications).
+  const error = failedRequest
+    ? message.errorMessage === undefined || message.errorMessage === ""
+      ? "the model request failed"
+      : message.errorMessage
+    : undefined;
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),
@@ -440,6 +445,7 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
     toolCalls: toolCallRefs(message),
     ...(toolName === undefined ? {} : { toolName }),
     ...(isError === undefined ? {} : { isError }),
+    ...(error === undefined ? {} : { error }),
   };
 };
 
