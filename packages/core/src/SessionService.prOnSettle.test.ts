@@ -276,9 +276,13 @@ const said = (snapshot: SessionSnapshot, text: string) =>
 
 /**
  * A card in `building` on a new board over `repo`, and a run started on it with a first message.
- * `parked` blocks the card before the message, as a run's question would leave it (B7).
+ * `parked` blocks the card before the message, as a run's question would leave it (B7) — or, given a
+ * reason, with that reason (a review's `changes_requested`, C21).
  */
-const buildRun = (repo: RepoSlug, parked = false) =>
+const buildRun = (
+  repo: RepoSlug,
+  parked: boolean | "needs_input" | "changes_requested" = false,
+) =>
   Effect.gen(function* () {
     const tasks = yield* TaskService;
     const service = yield* SessionService;
@@ -298,9 +302,10 @@ const buildRun = (repo: RepoSlug, parked = false) =>
       taskId: card.id,
       taskColumn: "building",
     });
-    if (parked) {
+    if (parked !== false) {
+      const reason = parked === true ? "needs_input" : parked;
       yield* sql`
-        UPDATE tasks SET blocked_reason = 'needs_input', blocked_column = 'building',
+        UPDATE tasks SET blocked_reason = ${reason}, blocked_column = 'building',
           blocked_since = now()
         WHERE id = ${card.id}
       `;
@@ -527,6 +532,40 @@ describe("a settled run's PR (C18)", () => {
     expect(outcome.snapshot.session.prUrl).toBeUndefined();
     expect(said(outcome.snapshot, "opened no PR")).toEqual([]);
     expect(outcome.thread).toEqual([]);
+  }, 120_000);
+
+  /**
+   * Mutation: count every block as waiting in `settledRunOf` — a run in flight when a review requested
+   * changes, or one a person steered to answer it, would hold the very push that answers it (C21).
+   */
+  it("a card's building run that settles while a review's changes_requested blocks the card still opens its PR", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register;
+        const service = yield* SessionService;
+        const repo = RepoSlug.make(`c18-${runId}/reviewed`);
+        yield* service.registerRepo({
+          repo,
+          url: `https://github.com/${repo}.git`,
+          localPath: fixtureRepo(1),
+        });
+        const { sessionId } = yield* buildRun(repo, "changes_requested");
+        yield* settled(sessionId);
+        return {
+          decision: yield* decided(sessionId),
+          built: yield* waitUntil(
+            service.get(sessionId),
+            (read) => read.session.prUrl !== undefined,
+            "the run's PR",
+          ),
+        };
+      }),
+    );
+
+    expect(outcome.decision).toEqual(["opened"]);
+    expect(outcome.built.session.prUrl).toMatch(
+      new RegExp(`/c18-${runId}/reviewed/pull/\\d+$`),
+    );
   }, 120_000);
 
   it("a card's building run with a change opens its PR, and a later run in a column that requires none pushes onto it rather than opening another (C19)", async () => {

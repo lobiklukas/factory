@@ -1,6 +1,6 @@
 /* oxlint-disable effecttsgo/process-env effecttsgo/process-env-in-effect */
 /**
- * `POST /webhooks/github`: one GitHub webhook, two events, picked by `X-GitHub-Event`.
+ * `POST /webhooks/github`: one GitHub webhook, its events picked by `X-GitHub-Event`.
  *
  * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
  *   merge moves it to done, an unmerged close explains itself — a signed merge tears the PR's
@@ -49,6 +49,16 @@
  *   the same merge runs no second pass. Each claimed pass runs on `PlanFreshnessPasses`, past the
  *   answer, which carries each pass as `accepted` (or `replayed`) under `planFreshness`.
  *
+ * - `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite` and
+ *   `workflow_run` (C21) reach the card whose current PR they name (`@repo/core`'s
+ *   `handlePullRequestFeedbackWebhook`): a review, a line comment or a failing check is one note on
+ *   the card's thread — which the next run on the card is told — once however often GitHub
+ *   redelivers it, and a review that requests changes also blocks the card `changes_requested`, so
+ *   it shows in the attention view. A delivery that says nothing the card acts on (an approval with
+ *   no words, a passing check, a check of a commit the PR has moved past, a review by someone with
+ *   no standing on the repository) is `202` with the reason; a card that could not be written to is
+ *   `500`, so the delivery can be redelivered.
+ *
  * Any other event is answered `202` and ignored.
  */
 import { Effect, Layer, Stream } from "effect";
@@ -61,8 +71,10 @@ import {
   handleGitHubPullRequestWebhook,
   handleGitHubIssueWebhook,
   handlePlanFreshnessDelivery,
+  handlePullRequestFeedbackWebhook,
   handlePullRequestReviewWebhook,
   PLAN_FRESHNESS_OFF,
+  PULL_REQUEST_FEEDBACK_EVENTS,
   PlanFreshnessPasses,
   planFreshnessConfigOf,
   recordMergedDelivery,
@@ -198,6 +210,17 @@ const GitHubWebhookRoute = HttpRouter.add(
         mention: mention(),
       });
       return respond(answered);
+    }
+    if (event !== undefined && PULL_REQUEST_FEEDBACK_EVENTS.includes(event)) {
+      // A review or a check of a PR (C21): a note on the thread of the card whose PR it is, and —
+      // for a review that requested changes — a `changes_requested` block the attention view lists.
+      const fed = yield* handlePullRequestFeedbackWebhook({
+        secret,
+        raw,
+        signature,
+        event,
+      });
+      return respond(fed);
     }
     if (event === "push") {
       const pushed = yield* handleDocsPushWebhook({

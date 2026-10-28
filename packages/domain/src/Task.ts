@@ -948,7 +948,10 @@ export type TaskPriority = typeof TaskPriority.Type;
  * `setup_failed` is a run parked before its first turn because its worktree's declared `install` or
  * `build` failed (S-env-setup): the note names the step, its exit code and its output's last lines.
  * `pr_closed` is the card's PR closed without being merged (C20), as GitHub's `pull_request` delivery
- * or the PR-state read reports it: the note names the PR.
+ * or the PR-state read reports it: the note names the PR. `changes_requested` is a review of the
+ * card's PR that requested changes (C21), as GitHub's signed `pull_request_review` delivery reports
+ * it: the review is a comment on the card's thread, which the next run on the card reads, and the
+ * note names the reviewer and the PR. The next run started on the card lifts it.
  */
 export const BlockReason = Schema.Literals([
   "dependency",
@@ -957,6 +960,7 @@ export const BlockReason = Schema.Literals([
   "transient",
   "setup_failed",
   "pr_closed",
+  "changes_requested",
 ]);
 export type BlockReason = typeof BlockReason.Type;
 
@@ -1272,6 +1276,12 @@ export const TaskEvent = Schema.TaggedUnion({
      * finds the question it already recorded instead of asking twice (LOB-73).
      */
     askId: Schema.optional(Schema.String),
+    /**
+     * The outside item the comment carries (C21) — `github:review:<id>`, `github:review_comment:<id>`,
+     * `github:check_run:<suite>:<id>`, `github:check_suite:<id>` — so a redelivery of the same
+     * review, comment or check finds the comment it already recorded instead of adding a second.
+     */
+    sourceId: Schema.optional(Schema.String),
   },
   /**
    * A specifying run declared the card's spec (LOB-238). `actor` is the run's session id; `specId`
@@ -1790,7 +1800,7 @@ export const gatedColumns = (
     .filter((column) => gatedExit(definition, column) !== undefined);
 
 /**
- * Why a card needs a person (LOB-77): the three things the attention view lists.
+ * Why a card needs a person (LOB-77): the four things the attention view lists.
  *
  * - `approval` — a run of the card asked to make a gated call and waits on a decision (D11). Listed
  *   whatever the card's column or block, because nothing but a person settles it.
@@ -1805,6 +1815,10 @@ export const gatedColumns = (
  *   leaves `plan_doc`): the gate's move would be refused naming them, so what the person must do
  *   first is get them written. Absent when the card holds them. The log-judged keys are not judged
  *   here; the card's exit checklist (`getTaskExit`) shows those.
+ * - `review` — the card is blocked `changes_requested` (C21): a review of its PR requested changes,
+ *   and the review is on the card's thread. What the person does is start the next run on the card,
+ *   which reads the review and lifts the block. `review` is the block's note: who requested the
+ *   changes, on which PR, and the start of what they wrote.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
@@ -1819,6 +1833,10 @@ export const AttentionReason = Schema.TaggedUnion({
   },
   question: {
     question: Schema.optional(Schema.String),
+    since: Timestamp,
+  },
+  review: {
+    review: Schema.optional(Schema.String),
     since: Timestamp,
   },
   gate: {
@@ -1850,7 +1868,8 @@ export type AttentionItem = typeof AttentionItem.Type;
 
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
- * first (oldest request first, a card-less session's among them), then questions (oldest block first), then gates (least recently
+ * first (oldest request first, a card-less session's among them), then questions (oldest block first), then reviews
+ * (oldest block first), then gates (least recently
  * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */

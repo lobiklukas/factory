@@ -41,6 +41,7 @@ export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";
 export * from "./PullRequestMerge";
 export * from "./cardPullRequest";
+export * from "./pullRequestFeedback";
 export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
