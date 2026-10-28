@@ -61,6 +61,7 @@ import {
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
+  AskWriteBackLive,
   linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
@@ -806,6 +807,7 @@ const HttpLive = Effect.gen(function* () {
       Layer.mergeAll(
         SessionWriteBacksLive,
         ProposalTrackerLive,
+        AskWriteBackLive,
         PullRequestStepDeps,
         // The repos' secrets (S-agent-secrets): what the session's commands are given, and what
         // the push's scan looks for.

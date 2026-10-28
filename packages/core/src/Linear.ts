@@ -36,12 +36,19 @@
  * and turn the label that arrives later into a replay of a skip. Its own retry may record a second
  * skip row; a skip starts nothing, so that costs a row and not a session.
  *
+ * **A reply in an agent session is not an issue** (T5). An `AgentSessionEvent` of action `prompted` is a
+ * person answering a question the factory posted in Linear (`./LinearElicitation`): it normalizes to
+ * an event carrying `reply`, keyed by the activity that carries the text (`linear:<activity>:reply`),
+ * so Linear's redelivery is one answer, and the seam routes it to the card rather than through a rule.
+ * Any other agent-session event (`created`) is another entity, answered and skipped.
+ *
  * `webhookId` is not a delivery id. Linear's docs call it the "ID uniquely identifying this
  * webhook" — the subscription — so it is the same on every delivery that subscription sends, and
  * nothing here reads it.
  */
 import { isWebLink } from "@repo/domain/Task";
 import {
+  type TriggerAuthor,
   externalRefOf,
   resolveMapping,
   ruleClaims,
@@ -54,6 +61,16 @@ import {
 
 /** The one Linear entity type that starts work. */
 export const LINEAR_ISSUE_TYPE = "Issue";
+
+/**
+ * The webhook entity a Linear agent session sends (T5): `created` when the agent is brought onto an
+ * issue, `prompted` when a person writes in its thread — which is how the answer to an `elicitation`
+ * the factory posted reaches it.
+ */
+export const LINEAR_AGENT_SESSION_TYPE = "AgentSessionEvent";
+
+/** The action an `AgentSessionEvent` carries when a person replied in the session's thread. */
+export const LINEAR_AGENT_PROMPTED = "prompted";
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -130,6 +147,35 @@ const teamKey = (entity: Record<string, unknown>): string | undefined =>
   stringField(entity, "team") ?? stringField(asRecord(entity["team"]), "key");
 
 /**
+ * Who did what the delivery reports (S-trigger-trust-gating): Linear's top-level `actor` — the person
+ * who created the issue, or who added the label to it — by its user id, with its e-mail as the login
+ * an allowlist may name instead. A relay's body with no `actor` falls back to the issue's
+ * `creatorId` on a create, where the creator is the one who did it; on an update the creator is not
+ * the person who labelled it, so the event names nobody and a rule that lists authors refuses it.
+ */
+const linearAuthor = (
+  body: Record<string, unknown>,
+  entity: Record<string, unknown>,
+  action: string,
+): TriggerAuthor | undefined => {
+  const actor = asRecord(body["actor"]);
+  const id = stringField(actor, "id");
+  if (id !== undefined && id !== "") {
+    const email = stringField(actor, "email");
+    const name = stringField(actor, "name");
+    return {
+      id,
+      ...(email === undefined || email === "" ? {} : { login: email }),
+      ...(name === undefined || name === "" ? {} : { name }),
+    };
+  }
+  const creator = stringField(entity, "creatorId");
+  return action === TRIGGER_ACTION && creator !== undefined && creator !== ""
+    ? { id: creator }
+    : undefined;
+};
+
+/**
  * Whether an `update` added a label a rule claims. `updatedFrom` carries only the properties that
  * changed, so a `labelIds` there is the issue's label set *before* this update; a label the issue
  * carries now that is not in it was added. Only an added label whose name a rule names counts: an
@@ -163,6 +209,49 @@ const addedAClaimedLabel = (
 };
 
 /**
+ * An agent session's `prompted` event as a reply (T5): the issue the session is on, the session, the
+ * activity that carries the person's text, and the text. `undefined` when the payload is not that
+ * (another action, no issue, no activity id or an empty reply) — the caller then reads it as any
+ * other entity, a recorded skip.
+ *
+ * Linear puts the reply on `agentActivity.content.body` (the activity's typed content); a relay's
+ * hand-written body may carry it as `agentActivity.body`. The text is read from the event and never
+ * fetched again, because a Linear comment is editable and an event is what was said.
+ */
+const agentReply = (
+  body: Record<string, unknown>,
+): TriggerEvent | undefined => {
+  if (stringField(body, "action") !== LINEAR_AGENT_PROMPTED) return undefined;
+  const session = asRecord(body["agentSession"]);
+  const activity = asRecord(body["agentActivity"]);
+  const issue = asRecord(session?.["issue"]);
+  const agentSessionId = stringField(session, "id");
+  const activityId = stringField(activity, "id");
+  const issueId = issue === undefined ? undefined : entityId(issue);
+  const text =
+    stringField(asRecord(activity?.["content"]), "body") ??
+    stringField(activity, "body");
+  if (
+    agentSessionId === undefined ||
+    activityId === undefined ||
+    issueId === undefined ||
+    text === undefined ||
+    text.trim() === ""
+  ) {
+    return undefined;
+  }
+  return {
+    source: "linear",
+    key: issueId,
+    action: `${LINEAR_AGENT_SESSION_TYPE}:${LINEAR_AGENT_PROMPTED}`,
+    title: stringField(issue, "title") ?? "",
+    body: "",
+    labels: [],
+    reply: { agentSessionId, activityId, body: text },
+  };
+};
+
+/**
  * A Linear webhook payload, normalized against the rules that decide which label adds are work.
  *
  * `undefined` is "this names nothing this adapter can address": not an object, or an issue (a body
@@ -181,6 +270,11 @@ export const linearEvent = (
   // A payload with no `type` is a relay's hand-written issue; Linear itself always sends one.
   const type = stringField(body, "type") ?? LINEAR_ISSUE_TYPE;
   const action = stringField(body, "action") ?? TRIGGER_ACTION;
+
+  if (type === LINEAR_AGENT_SESSION_TYPE) {
+    const reply = agentReply(body);
+    if (reply !== undefined) return reply;
+  }
 
   if (type !== LINEAR_ISSUE_TYPE) {
     // Another entity: its own key space, and an action the filter cannot mistake for an issue's.
@@ -209,6 +303,9 @@ export const linearEvent = (
   // The issue's own link (Linear's `data.url`, or the webhook's top-level `url` for its subject), so a
   // card filed from it can link back (LOB-254). Only a web link: anything else is no link.
   const url = stringField(entity, "url") ?? stringField(body, "url");
+  const author = linearAuthor(body, entity, action);
+  // The issue's own creation, not the delivery's: an old issue labelled today is still old.
+  const createdAt = stringField(entity, "createdAt");
   return {
     source: "linear",
     key: id,
@@ -220,6 +317,8 @@ export const linearEvent = (
     labels: labelNames(entity["labels"]),
     ...(team === undefined ? {} : { team }),
     ...(url === undefined || !isWebLink(url) ? {} : { url }),
+    ...(author === undefined ? {} : { author }),
+    ...(createdAt === undefined ? {} : { createdAt }),
   };
 };
 
@@ -290,6 +389,10 @@ export const linearRequestId = (
   payload: unknown,
   headers: LinearDeliveryHeaders = {},
 ): string => {
+  // A reply is one answer however many times Linear sends it: keyed by the activity that carries it.
+  if (event.reply !== undefined) {
+    return `linear:${event.reply.activityId}:reply`;
+  }
   if (isMappedWork(event, rules)) return linearMappedRequestId(event.key);
   if (canStartWork(event, rules)) {
     const labels = [...new Set(event.labels)].sort().join(",");

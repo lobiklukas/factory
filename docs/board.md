@@ -267,6 +267,26 @@ it is, and both scopes), which the settings view, the lane disclosures and `fact
 show` print. An absent `autonomy` — every version written before the field — is the deployment's
 policy unchanged.
 
+Built (S-factory-config-as-code): **a repository's policy**, between the deployment's and the
+column's. A repo's `.factory/config` may carry a `policy` block — `approvalRequired[]` (gates added
+to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is) and
+`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows).
+It is read at the session's base ref in the registered checkout or the factory's mirror
+(`packages/core/src/repoPolicy.ts`, `git cat-file`), never from the worktree, and pinned in the log
+by the first open (`factory.policy`, which also records the effective rules the run met), so an
+agent that edits `.factory/config` on its branch — or a base that moves under a running session —
+changes nothing for that run; the next session reads the base again. The order is deployment, then
+repository (`withRepoPolicy`), then column (`withColumnAutonomy`), each tighten-only. A block that
+tries to allow something the deployment denies (a host off its allowlist), has a key the policy does
+not know, or a config that is not JSON, is refused at load (`RepoPolicyRejected`), and the session
+does not open (`policy_rejected`) and leaves no worktree behind; a base git could not read (failed or
+timed out) is never read as no policy, and refuses the open as transient (`policy_unreadable`). A
+review run is read at its pull request's base, fetched from the forge first, not at the head under
+review. For a repo with no remote, the base is the checkout's
+local branch, whose refs every session worktree shares, so it holds only as long as no run writes
+that ref (`.pi/skills/verify-api/features/repo-policy.md`). Per-repo `roles` model overrides and
+trigger rules in the same file are not built.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a
@@ -284,6 +304,20 @@ Built (LOB-73): the thread is `task_events` itself — a comment is a `commented
 one transaction over one table, and B3's "cards are rows" holds for the thread too. The run asks with
 the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
 card carries the thread as its `task_thread` prompt section.
+
+Built (C24): an answer offers the run that reads it. After an answer lifts a `needs_input` block the
+card pane offers **Start the next run** (the column the question was asked in, the card's default
+prompt), and `factory board comment --start` does the same from the CLI. The offer is spent by the
+first run that starts on the card afterwards, however it was started, and `--start` is refused before
+anything is written on a card that is not blocked `needs_input` or when `--actor` is a run (its
+comment would be a note); a comment that lands but leaves the card blocked fails with
+`start_not_started`.
+
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
 
 ## B8 — Evidence gates, not evidence prose
 
@@ -442,8 +476,10 @@ customization, decomposition, and board metrics.
 
 1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, claiming under the caps/WIP
    limits (enforced on every start since LOB-71), TTL reclaim, priority
-   bands, trusted-actor and created-after-enable rules. Trigger: the first run you want started without
-   you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
+   bands, trusted-actor and created-after-enable rules (built for trigger intake, S-trigger-trust-gating:
+   a rule's `trust` gate — an author allowlist, a GitHub role, created after the rule was enabled — so
+   the dispatcher reuses it rather than inventing its own). Trigger: the first run you want started
+   without you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
 2. **Questions as durable objects** — dedup by question id, aging, resume after death, wake policy.
    Trigger: the first question asked while you are not watching. Linear's `elicitation` supplies the
    outward half, so this is smaller than it looks.

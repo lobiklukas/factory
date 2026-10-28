@@ -66,6 +66,22 @@ export const readTriggerRules = (
           message: `${TRIGGER_RULES_VARIABLE} is not a valid rule list: ${cause.message}`,
         }),
     ),
+    // `createdAfter: "enabled"` is a stored route's own creation (S-trigger-trust-gating); an env
+    // rule has no such instant, and the seam would refuse every delivery through it. Said at boot,
+    // with the fix, rather than as a skip per delivery.
+    Effect.flatMap((rules) => {
+      const index = rules.findIndex(
+        (rule) => rule.trust?.createdAfter === "enabled",
+      );
+      return index === -1
+        ? Effect.succeed(rules)
+        : Effect.fail(
+            new InvalidTriggerRules({
+              variable: TRIGGER_RULES_VARIABLE,
+              message: `${TRIGGER_RULES_VARIABLE}[${index}] sets trust.createdAfter to "enabled", which only a stored route has (its creation); give the instant the rule was enabled instead, like "2026-10-28T00:00:00Z"`,
+            }),
+          );
+    }),
   );
 };
 

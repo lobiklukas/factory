@@ -30,7 +30,10 @@
  *   request re-checks after a restart and finds its stop already recorded, so a stop is announced once
  *   per generation task.
  * - **After a stop.** The session stays capped: a later message starts a run that stops before its
- *   first request, with a stop entry of its own and no spend. Raising a session's cap is not built.
+ *   first request, with a stop entry of its own and no spend, until its cap is raised.
+ * - **Raising the cap (C23).** `commitBudget` commits a new cap and clears the stop in one commit,
+ *   keeping what the session carried: the next request is checked against the new cap, so a run that
+ *   was stopped goes on with its next message. The stop's transcript entry stays, as history.
  * - **Forks and replays.** A fork keeps its parent's cap and carries its spend (`BudgetDoc.carried`),
  *   so a fork of a session the cap stopped is stopped too; a replay keeps its source's cap but starts
  *   at no spend, being a fresh run of the same task. A fork or a replay of an uncapped session gets
@@ -157,6 +160,37 @@ export const writeBudget = (
       new SessionErrorClass({
         code: "harness",
         message: `write budget: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }),
+  });
+
+/**
+ * Commit a session's cap on a log that is already running (C23): the new ceiling and the stop
+ * cleared, in one commit, so a snapshot never reports a stop against the cap that has replaced it.
+ * Spend the session carried (`BudgetDoc.carried`) is kept. The hook reads the cap before every
+ * request, so the next one — a stopped session's next message, or a run still working — is measured
+ * against this cap. The transcript's stop entry stays: it is what happened, and the cap moved after.
+ */
+export const commitBudget = (
+  conversation: Conversation,
+  cap: number,
+): Effect.Effect<void, SessionError> =>
+  Effect.tryPromise({
+    try: () =>
+      conversation.commit(
+        (tx) =>
+          tx.doc(BudgetDoc, conversation.id).then((doc) => {
+            doc.cap = cap;
+            doc.stoppedAt = "";
+            doc.stoppedSpent = 0;
+            doc.stoppedCap = 0;
+            doc.stoppedTask = "";
+          }),
+        BACKGROUND_CONTEXT,
+      ),
+    catch: (cause) =>
+      new SessionErrorClass({
+        code: "harness",
+        message: `set budget: ${cause instanceof Error ? cause.message : String(cause)}`,
       }),
   });
 

@@ -22,8 +22,9 @@
 //   answer    the second send lands: the pane says the block was lifted, the card's blocked marker
 //             goes, and the thread ends with the answer (kind answer, actor `dashboard`), its
 //             whitespace kept; the page sent exactly two `commentTask`s
+//   offer     after the answer, **Start the next run** (C24) is offered; one click starts it
 //   show      `factory board show` prints the card unblocked and the answer in its thread
-//   told      **Start run** again and a message: `../verify-board/ask.ts MODE=told` reads the run's
+//   told      the next run (the offer's click, not the Start run field): `../verify-board/ask.ts MODE=told` reads the run's
 //             committed prompt from Postgres and finds the answer verbatim after the question, and
 //             the run did not ask again
 //
@@ -258,6 +259,24 @@ const startRun = async (previous) => {
   await page.locator("aside[data-card-pane] [data-start-run]").click();
   // Start run opens the prompt field (C6); Send opens the run and sends its text.
   await page.locator("aside[data-card-pane] [data-start-send]").click();
+  const started = await waitFor(
+    (before) => {
+      const run = new URLSearchParams(window.location.search).get("run");
+      return run !== null && run !== before;
+    },
+    previous ?? null,
+    20_000,
+  );
+  const run = new URL(page.url()).searchParams.get("run");
+  return { started, run };
+};
+
+/**
+ * The offer after an answer (C24): **Start the next run**, one click, no prompt field. It starts the
+ * run with the card's default prompt and takes the pane to it, like Send does.
+ */
+const startNextRun = async (previous) => {
+  await page.locator("section[data-thread] [data-thread-start-next]").click();
   const started = await waitFor(
     (before) => {
       const run = new URLSearchParams(window.location.search).get("run");
@@ -670,6 +689,30 @@ assert(
   `sends ${JSON.stringify(pageComments.map((c) => [c.expectedRevision, c.actor]))}`,
 );
 
+// The answer offers the run that reads it (C24): one button, in the column the card is back in.
+const offer = await page.evaluate(() => {
+  const root = document.querySelector(
+    "section[data-thread] [data-thread-next-run]",
+  );
+  const button = root?.querySelector("[data-thread-start-next]") ?? null;
+  return {
+    present: root !== null,
+    label: button?.textContent?.trim() ?? null,
+    disabled: button?.hasAttribute("disabled") ?? null,
+    text: root?.textContent?.trim() ?? null,
+  };
+});
+observed.facts.offer = offer;
+await shot("thread-offer");
+assert(
+  "after the answer the thread offers Start the next run, enabled, naming the column",
+  offer.present &&
+    offer.label === "Start the next run" &&
+    offer.disabled === false &&
+    offer.text?.includes("specifying") === true,
+  JSON.stringify(offer),
+);
+
 // --- show -----------------------------------------------------------------------------------------
 const show = factory(["board", "show", "--task", CARD]);
 observed.facts.show = show;
@@ -691,7 +734,11 @@ assert(
 );
 
 // --- told -----------------------------------------------------------------------------------------
-const second = await startRun(first.run);
+// The next run is the offer's one click (C24), not the Start run field: the card's default prompt.
+const second = await startNextRun(first.run);
+const offerGone = await page
+  .locator("section[data-thread] [data-thread-start-next]")
+  .count();
 const told = spawnSync(
   "bun",
   [path.join(ROOT, ".pi/skills/verify-board/ask.ts")],
@@ -751,9 +798,11 @@ await waitFor(
 const settled = await readThread(page);
 await shot("thread-next-run");
 assert(
-  "the pane lists both runs, and the thread has no second question",
+  "the pane lists both runs (the offer started exactly one, and went), and the thread has no second question",
   settled?.runs.includes(first.run) &&
     settled.runs.includes(second.run) &&
+    settled.runs.length === 2 &&
+    offerGone === 0 &&
     settled.comments.filter((c) => c.kind === "question").length === 1 &&
     settled.blocked === null,
   `runs ${JSON.stringify(settled?.runs)}; kinds ${JSON.stringify(settled?.comments.map((c) => c.kind))}`,

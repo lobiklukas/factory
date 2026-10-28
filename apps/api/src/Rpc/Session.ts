@@ -47,6 +47,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       sendMessage: (input) => sessions.send(input),
       withdrawMessage: (input) => sessions.withdraw(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
+      setSessionBudget: (input) => sessions.setBudget(input),
       // A fork or a replay over the wire is the caller's new session, so its spend is the caller's;
       // with auth off it keeps its source's actor, as an in-process one does (LOB-162).
       forkSession: (input) =>

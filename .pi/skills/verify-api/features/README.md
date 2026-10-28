@@ -195,6 +195,11 @@ The repo instructions and skills checks (S-repo-instructions-and-skills) were ru
 `DATABASE_URL=…/factory_agent_s_repo_instructions_and_skills` on 5442): `./repo-context.sh` **9/9**,
 evidence `repo-context.json`. See [repo-context.md](repo-context.md).
 
+The repo policy checks (S-factory-config-as-code) were run from the `agent/S-factory-config-as-code`
+worktree on 2026-10-28 (`API_PORT=9530`, faux, `DATABASE_URL=…/factory_agent_s_factory_config_as_code`
+on 5442): `./repo-policy.sh` **12/12** (8 on the first process, 4 on the second), evidence
+`repo-policy-arm.json` and `repo-policy-verify.json`. See [repo-policy.md](repo-policy.md).
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
@@ -337,6 +342,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Sentry receiver          | passing | [sentry.md](sentry.md)                       |
 | Sentry link-back         | passing | [sentry.md](sentry.md)                       |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
+| Linear questions (T5)    | passing | [linear-writeback.md](linear-writeback.md)   |
 | Approvals                | passing | [approvals.md](approvals.md)                 |
 | Curate a session's pages | passing | [curate.md](curate.md)                       |
 | A mission                | passing | [mission.md](mission.md)                     |
@@ -346,6 +352,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | A worktree's setup       | passing | [setup.md](setup.md)                         |
 | Repo instructions        | passing | [repo-context.md](repo-context.md)           |
 | Scoped secrets           | passing | [secrets.md](secrets.md)                     |
+| Repo policy              | passing | [repo-policy.md](repo-policy.md)             |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |
@@ -423,3 +430,12 @@ off, `apps/api/src/Rpc/Auth.test.ts` fails (2 and 7 cases). See [identity.md](id
 - **Isolation, sandboxes.** Nothing in this surface touches a cluster; sessions run in a
   directory under `SESSION_ROOT` — a linked git worktree when the repo is registered with a
   checkout, which `./sigterm.sh` registers (LOB-268), and a scratch directory otherwise.
+
+The trust-gate checks (S-trigger-trust-gating) were run from the `agent/S-trigger-trust-gating`
+worktree on 2026-10-28 (the worktree's own database on 5442, faux): `./linear.sh` **32/32** on `:9510`
+(checks 22–25 new: the untrusted labeller, the issue created before its route, the hidden
+instruction absent from the prompt, the trusted relabel reclaimed) and `./github-issues.sh` **16/16 +
+2/2** on `:9511` with the fake on `:9512` (check 13 new: a reader refused naming the role, a writer
+admitted), evidence `.verify/evidence/s-trigger-trust-gating/`. With the trust patterns removed from
+the work-keyed reclaim, or the raw body passed to the prompt, `TriggerService.trust.test.ts` fails
+(one and two cases). See [trigger.md](trigger.md).

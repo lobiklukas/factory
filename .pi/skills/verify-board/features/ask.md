@@ -35,7 +35,13 @@ factory board start --task tsk_… --prompt "specify this card"   # the run asks
 factory board show --task tsk_…                                 # blocked needs_input from specifying, the question
 factory board comment --task tsk_… --expect-revision 4 --body "Postgres 16."   # the answer; unblocks
 factory board start --task tsk_… --prompt "go on"               # the next run is told the thread
+factory board comment --task tsk_… --expect-revision 4 --body "Postgres 16." --start   # both in one (C24)
 ```
+
+`--start` (C24) opens the next run with the card's default prompt after the answer lifts the block; the
+run reads the answer from the `task_thread` section, not from its first message. On a card that is not
+blocked `needs_input` it is refused (`error: start_needs_answer`) before anything is written. The
+dashboard offers the same after an answer: see [thread.md](../../verify-web/features/thread.md).
 
 ## How the skill drives it
 
@@ -50,8 +56,9 @@ factory board start --task tsk_… --prompt "go on"               # the next run
    question is on the task by the run. `factory board show` prints
    `needs_input from specifying` and the question verbatim.
 2. **SIGTERM**, then **process 2** (a different pid). `board show` still prints the block and the
-   question; `board comment` answers at the revision `show` printed and reports the block lifted;
-   `board start` opens the next run. `ask.ts MODE=told` reads that run's log through a
+   question; `board comment` answers at the revision `show` printed and reports the block lifted
+   and, with `--start`, opens the next run (a second `--start` on the now-unblocked card is refused and
+   writes nothing). `ask.ts MODE=told` reads that run's log through a
    `PostgresStorage` reader: its `task_thread` section contains the two-line, em-dashed answer
    verbatim, after the question; and the run — scripted to ask whenever it has no thread — did not.
 

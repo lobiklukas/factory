@@ -7,6 +7,7 @@ import {
   denyCommand,
 } from "./commands/approve";
 import { boardCommand } from "./commands/board";
+import { budgetCommand } from "./commands/budget";
 import { costCommand } from "./commands/cost";
 import { discardCommand } from "./commands/discard";
 import { doctorCommand } from "./commands/doctor";
@@ -46,6 +47,7 @@ const root = Command.make("factory").pipe(
     sendCommand,
     withdrawCommand,
     interruptCommand,
+    budgetCommand,
     discardCommand,
     forkCommand,
     resetCommand,

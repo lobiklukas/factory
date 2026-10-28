@@ -11,6 +11,12 @@
 // their titles, states and descriptions), children seeded before the API starts, and the per-child
 // writes an approved re-scope or close sends (the issue read, `issueUpdate`, `commentCreate`).
 //
+// T5 adds what a delegated run's questions and an issue's blockers need: the blockers read
+// (`query FactoryBlockers`: the issue's inverse relations, whose blocker's state says whether it still
+// holds the issue up — relations come from `issueRelationCreate`, states from `issueUpdate`), and the
+// two agent operations, `agentSessionCreateOnIssue` and `agentActivityCreate`, whose calls land in the
+// ledger's `agentSessions` and `activities`.
+//
 // Issues are created on first read, in `Todo`, in a team with Linear's default workflow states, so
 // the driver can name a fresh issue per run without seeding anything. The ledger is a file rather
 // than memory so "one comment, not two" is a countable fact a later reader can open: every request
@@ -51,6 +57,16 @@ type Ledger = {
   readonly lostAcks: string[];
   /** The issues `issueCreate` made (LOB-202), each under the parent it was given. */
   readonly children: Child[];
+  /** The agent sessions `agentSessionCreateOnIssue` opened (T5), in order. */
+  readonly agentSessions: Array<{
+    readonly id: string;
+    readonly issueId: string;
+  }>;
+  /** The `agentActivityCreate`s that landed (T5): the session and the typed content. */
+  readonly activities: Array<{
+    readonly agentSessionId: string;
+    readonly content: Record<string, unknown>;
+  }>;
   /** The `issueRelationCreate`s that landed, in order. */
   readonly relations: Array<{
     readonly issueId: string;
@@ -102,6 +118,8 @@ const empty: Ledger = {
   issues: {},
   lostAcks: [],
   children: [],
+  agentSessions: [],
+  activities: [],
   relations: [],
 };
 
@@ -150,25 +168,31 @@ const json = (status: number, body: unknown): Response =>
   });
 
 const operationOf = (query: string): string | undefined =>
-  query.startsWith("query FactoryPlan")
-    ? "issuePlan"
-    : query.startsWith("query FactoryIssue")
-      ? "issue"
-      : query.startsWith("query FactoryParent")
-        ? "issueChildren"
-        : query.startsWith("query FactoryRelations")
-          ? "issueRelations"
-          : query.includes("commentCreate(")
-            ? "commentCreate"
-            : query.includes("issueUpdate(")
-              ? "issueUpdate"
-              : query.includes("attachmentCreate(")
-                ? "attachmentCreate"
-                : query.includes("issueRelationCreate(")
-                  ? "issueRelationCreate"
-                  : query.includes("issueCreate(")
-                    ? "issueCreate"
-                    : undefined;
+  query.includes("agentSessionCreateOnIssue(")
+    ? "agentSessionCreateOnIssue"
+    : query.includes("agentActivityCreate(")
+      ? "agentActivityCreate"
+      : query.startsWith("query FactoryBlockers")
+        ? "issueBlockers"
+        : query.startsWith("query FactoryPlan")
+          ? "issuePlan"
+          : query.startsWith("query FactoryIssue")
+            ? "issue"
+            : query.startsWith("query FactoryParent")
+              ? "issueChildren"
+              : query.startsWith("query FactoryRelations")
+                ? "issueRelations"
+                : query.includes("commentCreate(")
+                  ? "commentCreate"
+                  : query.includes("issueUpdate(")
+                    ? "issueUpdate"
+                    : query.includes("attachmentCreate(")
+                      ? "attachmentCreate"
+                      : query.includes("issueRelationCreate(")
+                        ? "issueRelationCreate"
+                        : query.includes("issueCreate(")
+                          ? "issueCreate"
+                          : undefined;
 
 /** The issue a variable names — by UUID or identifier — created on first sight. */
 const issueFor = (ledger: Ledger, key: string): Issue => {
@@ -343,6 +367,63 @@ const server = Bun.serve({
               issue: { id: made.id, identifier: made.identifier },
             },
           },
+        });
+      }
+      case "issueBlockers": {
+        const issue = issueFor(ledger, String(variables["id"]));
+        write(ledger);
+        return json(200, {
+          data: {
+            issue: {
+              id: issue.id,
+              identifier: issue.identifier,
+              inverseRelations: {
+                nodes: ledger.relations
+                  .filter((relation) => relation.relatedIssueId === issue.id)
+                  .map((relation) => {
+                    // A relation names its blocker by UUID; the fake mints a UUID as `uuid-<key>`.
+                    const blocker = issueFor(
+                      ledger,
+                      relation.issueId.replace(/^uuid-/, ""),
+                    );
+                    return {
+                      type: relation.type,
+                      issue: {
+                        id: blocker.id,
+                        identifier: blocker.identifier,
+                        state: { type: blocker.state.type },
+                      },
+                    };
+                  }),
+              },
+            },
+          },
+        });
+      }
+      case "agentSessionCreateOnIssue": {
+        const made = {
+          id: `agent-session-${ledger.agentSessions.length + 1}`,
+          issueId: String(input["issueId"]),
+        };
+        ledger.agentSessions.push(made);
+        write(ledger);
+        return json(200, {
+          data: {
+            agentSessionCreateOnIssue: {
+              success: true,
+              agentSession: { id: made.id },
+            },
+          },
+        });
+      }
+      case "agentActivityCreate": {
+        ledger.activities.push({
+          agentSessionId: String(input["agentSessionId"]),
+          content: (input["content"] ?? {}) as Record<string, unknown>,
+        });
+        write(ledger);
+        return json(200, {
+          data: { agentActivityCreate: { success: true } },
         });
       }
       case "issueRelations": {

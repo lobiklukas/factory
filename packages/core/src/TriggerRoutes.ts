@@ -21,6 +21,7 @@ import {
   type AddTriggerRouteInput,
   TriggerRoute,
   type TriggerRouteId,
+  TriggerTrust,
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { mintTriggerRouteId } from "./ids";
@@ -30,6 +31,11 @@ export type RoutedRule = {
   readonly rule: TriggerRule;
   /** `route <id>` for a stored route, `env:TRIGGER_RULES[i]` for the fallback. */
   readonly origin: string | undefined;
+  /**
+   * When the rule was enabled, for a rule that has such an instant: a stored route's creation. What
+   * `trust.createdAfter: "enabled"` means (S-trigger-trust-gating); an env rule has none.
+   */
+  readonly enabledAt?: string;
 };
 
 /** What `TRIGGER_RULES` is called in a reason, and in the boot log. */
@@ -58,6 +64,8 @@ type RouteRow = {
   readonly startsWorkFor: ReadonlyArray<string> | null;
   /** `NULL` is `session`, what every route meant before there was a card mode (LOB-254). */
   readonly mode: string | null;
+  /** The route's `TriggerTrust` as JSON text; `NULL` is no gate (S-trigger-trust-gating). */
+  readonly trust: string | null;
   readonly createdAt: string;
 };
 
@@ -65,17 +73,34 @@ type RouteRow = {
 const toRoute = (
   row: RouteRow,
 ): Effect.Effect<TriggerRoute, Schema.SchemaError> =>
-  Schema.decodeUnknownEffect(TriggerRoute)({
-    id: row.id,
-    repo: row.repo,
-    prompt: row.prompt,
-    createdAt: row.createdAt,
-    ...(row.label === null ? {} : { label: row.label }),
-    ...(row.team === null ? {} : { team: row.team }),
-    ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
-    ...(row.startsWorkFor === null ? {} : { startsWorkFor: row.startsWorkFor }),
-    ...(row.mode === null ? {} : { mode: row.mode }),
+  Effect.gen(function* () {
+    // A gate that does not decode is a broken row, refused like any other: read as "no gate", it
+    // would admit every author the operator meant to keep out.
+    const trust =
+      row.trust === null
+        ? undefined
+        : yield* Schema.decodeEffect(Schema.fromJsonString(TriggerTrust))(
+            row.trust,
+          );
+    return yield* Schema.decodeUnknownEffect(TriggerRoute)({
+      id: row.id,
+      repo: row.repo,
+      prompt: row.prompt,
+      createdAt: row.createdAt,
+      ...(row.label === null ? {} : { label: row.label }),
+      ...(row.team === null ? {} : { team: row.team }),
+      ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+      ...(row.startsWorkFor === null
+        ? {}
+        : { startsWorkFor: row.startsWorkFor }),
+      ...(row.mode === null ? {} : { mode: row.mode }),
+      ...(trust === undefined ? {} : { trust }),
+    });
   });
+
+/** The columns every read of a route selects, `trust` as text so it decodes the same everywhere. */
+const ROUTE_COLUMNS =
+  "id, label, team, repo, base_ref, prompt, starts_work_for, mode, trust::text AS trust, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /**
  * Every stored route in the order the seam consults them: a route naming a label and a team first
@@ -87,8 +112,7 @@ export const readStoredRoutes = (
 ): Effect.Effect<ReadonlyArray<TriggerRoute>, SqlError | Schema.SchemaError> =>
   Effect.gen(function* () {
     const rows = yield* sql<RouteRow>`
-    SELECT id, label, team, repo, base_ref, prompt, starts_work_for, mode,
-      to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    SELECT ${sql.literal(ROUTE_COLUMNS)}
     FROM trigger_routes
     ORDER BY CASE WHEN label IS NOT NULL AND team IS NOT NULL THEN 0
                   WHEN label IS NOT NULL THEN 1
@@ -111,6 +135,7 @@ export const readRoutedRules = (
       ...stored.map((route) => ({
         rule: route satisfies TriggerRule,
         origin: `route ${route.id}`,
+        enabledAt: route.createdAt,
       })),
       ...fallback,
     ]),
@@ -184,17 +209,23 @@ export const TriggerRoutesLive = Layer.effect(
         });
       }
       const id = yield* mintTriggerRouteId;
+      const trust =
+        input.trust === undefined
+          ? undefined
+          : yield* Schema.encodeEffect(Schema.fromJsonString(TriggerTrust))(
+              input.trust,
+            ).pipe(Effect.mapError(storage("encode the route's trust gate")));
       const rows = yield* sql<RouteRow>`
         INSERT INTO trigger_routes (
-          id, label, team, repo, base_ref, prompt, starts_work_for, mode
+          id, label, team, repo, base_ref, prompt, starts_work_for, mode, trust
         )
         VALUES (
           ${id}, ${input.label ?? null}, ${input.team ?? null}, ${input.repo},
           ${input.baseRef ?? null}, ${input.prompt},
-          ${input.startsWorkFor ?? null}::text[], ${input.mode ?? null}
+          ${input.startsWorkFor ?? null}::text[], ${input.mode ?? null},
+          ${trust ?? null}::jsonb
         )
-        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for, mode,
-          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+        RETURNING ${sql.literal(ROUTE_COLUMNS)}
       `.pipe(Effect.mapError(storage("store trigger route")));
       return yield* storedRow(rows, id, "store trigger route");
     });
@@ -206,8 +237,7 @@ export const TriggerRoutesLive = Layer.effect(
       // removed it and the other is told the route is gone.
       const rows = yield* sql<RouteRow>`
         DELETE FROM trigger_routes WHERE id = ${id}
-        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for, mode,
-          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+        RETURNING ${sql.literal(ROUTE_COLUMNS)}
       `.pipe(Effect.mapError(storage("delete trigger route")));
       if (rows.length === 0) {
         return yield* new TriggerRouteNotFound({

@@ -13,6 +13,9 @@
 //             and the stop, and no reply; spend equals the cap; the snapshot's `budget.stopped` says so
 //   again     a second message on the stopped session starts a run that stops before its first
 //             request: a second stop, the spend unchanged
+//   raise     setSessionBudget commits a higher cap and clears the stop (C23): the answer and the
+//             snapshot report the new cap, unspent past what was spent, with no `budget.stopped`; the
+//             next message runs again and its reply is sent, spend passing the old cap, no third stop
 //   default   a session created without a cap gets SESSION_BUDGET, and a run under it answers
 //
 // Env: API_URL, EVIDENCE_DIR, FAUX_COST, SESSION_BUDGET.
@@ -225,6 +228,47 @@ const program = Effect.gen(function* () {
     JSON.stringify(kinds(again).slice(4)) ===
       JSON.stringify(["user", "budget"]) && close(spentOf(again), CAP),
     `kinds=${kinds(again).join(",")} spent=${spentOf(again)}`,
+  );
+
+  // --- raise: a stopped session runs again once its cap is raised (C23) ------------------------
+  const raisedTo = 5 * COST;
+  const raised = yield* client.setSessionBudget({
+    sessionId: created.id,
+    budget: raisedTo,
+  });
+  const afterRaise = yield* client.getSession({ sessionId: created.id });
+  observed.budgets["raised"] = afterRaise.budget;
+  assert(
+    "setSessionBudget answers the new cap, the spend so far and no stop",
+    raised.budget.cap === raisedTo &&
+      close(raised.budget.spent, CAP) &&
+      raised.budget.stopped === undefined &&
+      raised.session.id === created.id,
+    `budget=${JSON.stringify(raised.budget)} message=${JSON.stringify(raised.message)}`,
+  );
+  assert(
+    "the snapshot reports the raised cap with the stop cleared; the transcript keeps both stops",
+    afterRaise.budget?.cap === raisedTo &&
+      afterRaise.budget.stopped === undefined &&
+      stops(afterRaise).length === 2,
+    `budget=${JSON.stringify(afterRaise.budget)} stops=${stops(afterRaise).length}`,
+  );
+  yield* client.sendMessage({ sessionId: created.id, content: "now go on" });
+  const resumed = yield* settled(created.id, (s) =>
+    s.entries.some(
+      (entry) => entry.kind === "assistant" && entry.text.includes("(re:"),
+    ),
+  );
+  observed.transcripts["raised"] = transcriptOf(resumed);
+  assert(
+    "the session the cap stopped runs again after its cap is raised: its reply is sent",
+    close(spentOf(resumed), 2 * COST) && stops(resumed).length === 2,
+    `spent=${spentOf(resumed)} stops=${stops(resumed).length} kinds=${kinds(resumed).join(",")}`,
+  );
+  assert(
+    "and the run it makes is not stopped: no budget.stopped on the snapshot",
+    resumed.budget?.stopped === undefined && resumed.budget?.cap === raisedTo,
+    `budget=${JSON.stringify(resumed.budget)}`,
   );
 
   // --- default: the server's cap, not reached ------------------------------------------------------
