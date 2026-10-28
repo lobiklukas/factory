@@ -94,4 +94,34 @@ describe("the definition vocabulary (D6)", () => {
       ),
     ).toEqual(["columns[0].role"]);
   });
+
+  /**
+   * F4: with no role table every role is accepted, so a typed name may be offered; with one it is
+   * not. Mutation: derive openness from anything but the table (the declared roles, the harness's) —
+   * a deployment with `ROLE_MODELS` offers a typed typo the rules then refuse.
+   */
+  it("opens the role names exactly when there is no role table, as the rules do", () => {
+    expect(vocabulary.rolesOpen).toBe(false);
+    const none = definitionVocabulary({
+      table: new Set(),
+      declared: DECLARED,
+    });
+    expect(none.rolesOpen).toBe(true);
+    expect(none.roles).toEqual(
+      [...new Set([...HARNESS_ROLES, ...DECLARED])].toSorted(),
+    );
+    const noTable = {
+      skills: new Set<string>(),
+      roles: new Set<string>(),
+      knownRoles: new Set([...HARNESS_ROLES, ...DECLARED]),
+    };
+    expect(
+      authoredDefinitionFaults(authored([], "brand-new"), noTable),
+    ).toEqual([]);
+    expect(
+      authoredDefinitionFaults(authored([], "brand-new"), library).map(
+        (fault) => fault.field,
+      ),
+    ).toEqual(["columns[0].role"]);
+  });
 });
