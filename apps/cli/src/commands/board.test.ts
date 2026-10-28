@@ -41,6 +41,7 @@ import {
   specLines,
   startCard,
   type StartClient,
+  updateCard,
   threadLines,
   unblockCard,
   warningLines,
@@ -1084,5 +1085,105 @@ describe("startCard (C6)", () => {
       "warning no checkout",
     ]);
     expect(lines.some((line) => line.startsWith("sent"))).toBe(false);
+  });
+});
+
+describe("updateCard (C11)", () => {
+  /** A card enforcing the revision, recording what the command sent. */
+  const editable = (initial: Task) => {
+    let current = initial;
+    const sent: Array<Record<string, unknown>> = [];
+    const client = {
+      getTask: (): Effect.Effect<Task, StaleRevision> =>
+        Effect.succeed(current),
+      updateTask: (input: {
+        expectedRevision: number;
+        title?: string;
+        priority?: Task["priority"];
+      }): Effect.Effect<Task, StaleRevision> => {
+        sent.push(input);
+        if (input.expectedRevision !== current.revision)
+          return Effect.fail(
+            new StaleRevision({
+              taskId: TASK,
+              expected: input.expectedRevision,
+              actual: current.revision,
+              message: `task ${TASK} is at revision ${current.revision}, not ${input.expectedRevision}`,
+            }),
+          );
+        const title = input.title ?? current.title;
+        const priority = input.priority ?? current.priority;
+        if (title === current.title && priority === current.priority)
+          return Effect.succeed(current);
+        current = {
+          ...current,
+          title,
+          priority,
+          revision: current.revision + 1,
+        };
+        return Effect.succeed(current);
+      },
+    };
+    return { client, sent, read: () => current };
+  };
+
+  it("sends only what was named at the card's current revision, and prints the card as it now reads", async () => {
+    const b = editable(card());
+    const lines = await Effect.runPromise(
+      updateCard(b.client, {
+        taskId: TASK as never,
+        title: undefined,
+        priority: "urgent",
+        actor: "cli",
+        expectedRevision: undefined,
+      }),
+    );
+    expect(b.sent).toEqual([
+      { taskId: TASK, expectedRevision: 3, priority: "urgent", actor: "cli" },
+    ]);
+    expect(lines).toEqual([
+      `updated ${TASK} (revision 4)`,
+      `title     ${b.read().title}`,
+      "priority  urgent",
+    ]);
+  });
+
+  it("says nothing changed for a value the card already has, and sends a stale named revision as named", async () => {
+    const b = editable(card({ priority: "urgent" }));
+    const lines = await Effect.runPromise(
+      updateCard(b.client, {
+        taskId: TASK as never,
+        title: undefined,
+        priority: "urgent",
+        actor: "cli",
+        expectedRevision: undefined,
+      }),
+    );
+    expect(lines[0]).toBe(`unchanged ${TASK} (revision 3)`);
+    // Naming the current revision does not make a no-op an edit.
+    const named = await Effect.runPromise(
+      updateCard(b.client, {
+        taskId: TASK as never,
+        title: undefined,
+        priority: "urgent",
+        actor: "cli",
+        expectedRevision: 3,
+      }),
+    );
+    expect(named[0]).toBe(`unchanged ${TASK} (revision 3)`);
+    const stale = await Effect.runPromise(
+      Effect.flip(
+        updateCard(b.client, {
+          taskId: TASK as never,
+          title: "late",
+          priority: undefined,
+          actor: "cli",
+          expectedRevision: 1,
+        }),
+      ),
+    );
+    expect(stale).toBeInstanceOf(StaleRevision);
+    expect(b.sent.at(-1)).toMatchObject({ expectedRevision: 1, title: "late" });
+    expect(b.read().revision).toBe(3);
   });
 });

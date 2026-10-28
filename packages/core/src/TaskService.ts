@@ -1,5 +1,5 @@
 /**
- * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9),
+ * Tasks: create, read, list, move, block, unblock and update (title, priority) cards on a board (docs/board.md B1–B5, B7, B9),
  * the thread on each card — a run's question, a person's answer, a note (B7, LOB-73) — and the spec
  * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
@@ -9,7 +9,8 @@
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
- * row, and appends exactly one `task_events` row. A refusal fails the transaction before anything is
+ * row, and appends exactly one `task_events` row (an `ask` appends two, at two revisions; an `update`
+ * that changes both title and priority appends two, at the one revision it expected). A refusal fails the transaction before anything is
  * written, so a refused move leaves no event behind.
  *
  * Refusals are typed values (`TaskRefusal`-family, below), each naming what failed. They are not
@@ -91,6 +92,7 @@ import {
   LIST_BOARDS_LIMIT,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
+  MAX_TASK_TITLE_CHARS,
   NON_EMPTY_DIFF_REQUIREMENT,
   Task,
   TaskEvent,
@@ -349,6 +351,15 @@ export type UnblockTaskInput = {
   readonly actor: Actor;
 };
 
+/** A card's title and/or priority (C11); at least one is named. */
+export type UpdateTaskInput = {
+  readonly taskId: string;
+  readonly expectedRevision: number;
+  readonly title?: string;
+  readonly priority?: TaskPriorityType;
+  readonly actor: Actor;
+};
+
 export type ListTasksInput = {
   readonly boardId: string;
   readonly column?: string;
@@ -483,6 +494,13 @@ export type TaskServiceShape = {
   readonly move: (input: MoveTaskInput) => Effect.Effect<Task, TaskError>;
   readonly block: (input: BlockTaskInput) => Effect.Effect<Task, TaskError>;
   readonly unblock: (input: UnblockTaskInput) => Effect.Effect<Task, TaskError>;
+  /**
+   * Fix a card's title and/or priority (C11), revision-checked: a blank or over-long title, or a call
+   * naming neither field, is `InvalidTaskInput`. A value the card already has changes nothing — no
+   * revision, no event. Otherwise the revision moves on by one and each changed field writes its
+   * event (`retitled`, `priorityChanged`) at the revision the call expected.
+   */
+  readonly update: (input: UpdateTaskInput) => Effect.Effect<Task, TaskError>;
   /** A run's question: a `question` comment and a `needs_input` block from the card's column. */
   readonly ask: (input: AskTaskInput) => Effect.Effect<Task, TaskError>;
   /** A run's own block of its card (`ParkRunInput`): a card already blocked keeps its block. */
@@ -2003,6 +2021,73 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    const update = (input: UpdateTaskInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            if (input.title === undefined && input.priority === undefined) {
+              return yield* new InvalidTaskInput({
+                field: "update",
+                message: "an update names a title, a priority or both",
+              });
+            }
+            const title = input.title?.trim();
+            if (title !== undefined && title === "") {
+              return yield* new InvalidTaskInput({
+                field: "title",
+                message: "a card's title cannot be blank",
+              });
+            }
+            if (title !== undefined && title.length > MAX_TASK_TITLE_CHARS) {
+              return yield* new InvalidTaskInput({
+                field: "title",
+                message: `a card's title takes at most ${MAX_TASK_TITLE_CHARS} characters; this one has ${title.length}`,
+              });
+            }
+            const row = yield* lockExpected(
+              input.taskId,
+              input.expectedRevision,
+            );
+            const retitle = title !== undefined && title !== row.title;
+            const reprioritize =
+              input.priority !== undefined &&
+              input.priority !== (row.priority as TaskPriorityType);
+            // Saying what the card already says is no edit: nothing moves, nothing is recorded.
+            if (!retitle && !reprioritize) return yield* toTask(row);
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET title = ${retitle ? title : row.title},
+                  priority = ${reprioritize ? input.priority : row.priority},
+                  revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            const taskId = TaskId.make(input.taskId);
+            if (retitle) {
+              yield* appendEvent({
+                _tag: "retitled",
+                taskId,
+                from: row.title,
+                to: title,
+                actor: input.actor,
+                revision: input.expectedRevision,
+              });
+            }
+            if (reprioritize) {
+              yield* appendEvent({
+                _tag: "priorityChanged",
+                taskId,
+                from: row.priority as TaskPriorityType,
+                to: input.priority,
+                actor: input.actor,
+                revision: input.expectedRevision,
+              });
+            }
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
     /** A thread entry that says nothing is refused before anything is written. */
     const refuseEmpty = (taskId: string, body: string, what: string) =>
       body.trim().length === 0
@@ -2745,6 +2830,7 @@ export const TaskServiceLive = Layer.effect(
       move,
       block,
       unblock,
+      update,
       ask,
       parkRun,
       comment,

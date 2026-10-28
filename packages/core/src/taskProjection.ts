@@ -11,7 +11,8 @@
  *
  * Revisions: `created` records revision 1, and every other event the revision its mutation expected,
  * so the card is at the event's revision plus one after it. An ask (a `commented` question and a
- * `blocked` in one transaction) is two events and two revisions, exactly as `TaskService` writes it.
+ * `blocked` in one transaction) is two events and two revisions, exactly as `TaskService` writes it. An update that changes both title and priority is the
+ * opposite: two events (`retitled`, `priorityChanged`) at one revision, because the call is one write.
  *
  * What the fold cannot give is what the events never carried: the definition version and the repo
  * (both the board's when the card was made), a block's note, and the row's timestamps.
@@ -81,6 +82,9 @@ export const projectTask = (
       }
       case "priorityChanged":
         card = { ...card, priority: event.to, revision };
+        break;
+      case "retitled":
+        card = { ...card, title: event.to, revision };
         break;
       case "commented":
       case "specified":
