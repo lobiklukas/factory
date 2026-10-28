@@ -2599,8 +2599,7 @@ describe("TaskService — exit requirements", () => {
       await sessions.runPromise(
         Effect.gen(function* () {
           const service = yield* SessionService;
-          const id =
-            yield* Schema.decodeEffect(SessionIdSchema)(sessionId);
+          const id = yield* Schema.decodeEffect(SessionIdSchema)(sessionId);
           yield* service.recordMerge({
             sessionId: id,
             event: {
