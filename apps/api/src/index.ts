@@ -14,7 +14,11 @@ import {
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
-import { RepoSlug, SessionBudgetCap } from "@repo/domain/Session";
+import {
+  RepoSlug,
+  SessionBudgetCap,
+  type SessionError,
+} from "@repo/domain/Session";
 import {
   createModelAccess,
   DEFAULT_AUTONOMY,
@@ -289,9 +293,10 @@ const DocsScheduleConfig = Config.all({
 });
 
 /**
- * Whether the boot resumes the missions its database says are in flight (LOB-231). On by default:
- * a mission a restart interrupted waits on no client, so a deployment that did not resume it would
- * leave it `pending` in its log. The resume only reopens rows marked under this process's
+ * Whether the boot resumes the missions (LOB-231) and the runs (LOB-25) its database says are in
+ * flight. On by default: a mission a restart interrupted waits on no client, so a deployment that
+ * did not resume it would leave it `pending` in its log, and a run would sit placed and unanswered
+ * until its next message. The resume only reopens rows marked under this process's
  * `SESSION_ROOT`, which already keeps a verify skill's throwaway API off the development instance's
  * missions; `MISSION_RESUME=false` is for a second process that shares the database *and* the root
  * and must not take over the first one's logs — there is no ownership lease (docs/design.md D12).
@@ -411,37 +416,51 @@ const DocsScheduleDaemon = (schedule: {
   );
 
 /**
- * Resume every mission the last process was stopped in the middle of (LOB-231), once, at boot.
+ * One boot resume, retried until its query can run: the column it reads is a migration's, and the
+ * database may not be reachable or migrated yet. Logs what it resumed under `what`.
+ */
+const resumeAtBoot = (
+  what: "missions" | "runs",
+  resume: Effect.Effect<readonly string[], SessionError>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    for (;;) {
+      const exit = yield* Effect.exit(resume);
+      if (Exit.isSuccess(exit)) {
+        yield* Effect.logInfo(
+          exit.value.length === 0
+            ? `${what}: none in flight to resume`
+            : `${what}: resumed ${exit.value.length} in flight: ${exit.value.join(", ")}`,
+        );
+        return;
+      }
+      yield* Effect.logWarning(
+        `${what}: could not resume; retrying in ${MIGRATION_RETRY_MS}ms: ${firstLine(exit.cause)}`,
+      );
+      yield* Effect.sleep(MIGRATION_RETRY_MS);
+    }
+  });
+
+/**
+ * Resume every mission (LOB-231) and every run (LOB-25) the last process was stopped in the middle
+ * of, once, at boot.
  *
  * A mission is durable work no client is talking to: a shutdown leaves it `pending` in its log, and
  * nothing would reopen that log until somebody sent the session a message. `resumeMissions` reopens
  * each session whose row says a mission is in flight and schedules it, so the mission continues in
- * the phase it died in. Forked beside `MigrationsDaemon` and for the same reason — the boot binds
- * first — and retried until the query can run, because the column it reads is a migration's and
- * the database may not be reachable or migrated yet. Built on `SessionShutdown`, like the docs
+ * the phase it died in. A run is the same story for a conversation: a SIGTERM's close or a SIGKILL
+ * leaves its submission placed and unanswered, and `resumeRuns` reopens each session whose row says
+ * a run is in flight, which continues it as the same submission. Forked beside `MigrationsDaemon`
+ * and for the same reason — the boot binds first. Built on `SessionShutdown`, like the docs
  * schedule, so a resume still in progress is interrupted before the owners are released.
  */
 const MissionResumeDaemon = Layer.effectDiscard(
   Effect.gen(function* () {
     const sessions = yield* SessionService;
     yield* Effect.forkScoped(
-      Effect.gen(function* () {
-        for (;;) {
-          const exit = yield* Effect.exit(sessions.resumeMissions);
-          if (Exit.isSuccess(exit)) {
-            yield* Effect.logInfo(
-              exit.value.length === 0
-                ? "missions: none in flight to resume"
-                : `missions: resumed ${exit.value.length} in flight: ${exit.value.join(", ")}`,
-            );
-            return;
-          }
-          yield* Effect.logWarning(
-            `missions: could not resume; retrying in ${MIGRATION_RETRY_MS}ms: ${firstLine(exit.cause)}`,
-          );
-          yield* Effect.sleep(MIGRATION_RETRY_MS);
-        }
-      }),
+      resumeAtBoot("missions", sessions.resumeMissions).pipe(
+        Effect.andThen(resumeAtBoot("runs", sessions.resumeRuns)),
+      ),
     );
   }),
 );
@@ -696,7 +715,7 @@ const HttpLive = Effect.gen(function* () {
     ? MissionResumeDaemon
     : Layer.effectDiscard(
         Effect.logInfo(
-          "missions: resume at boot off (MISSION_RESUME=false); a mission in flight waits for its next caller",
+          "missions: resume at boot off (MISSION_RESUME=false); a mission or a run in flight waits for its next caller",
         ),
       );
   const SessionDaemons = Option.match(docsSchedule.repo, {

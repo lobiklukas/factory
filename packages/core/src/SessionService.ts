@@ -527,6 +527,22 @@ export type SessionServiceShape = {
    */
   readonly resumeMissions: Effect.Effect<readonly SessionId[], SessionError>;
   /**
+   * Reopen every session a stopped process left in the middle of a run, so the run continues
+   * (LOB-25): the boot's half of "a session whose process died mid-run carries on".
+   *
+   * A death — a SIGTERM's close, or a SIGKILL that runs no finalizer at all — leaves the run's
+   * submission placed and unanswered in the log, and any owner that opens the log continues it
+   * (`openSession`'s `resume`) as the same submission in the same conversation. But nothing opens
+   * a log until a client acts on the session, and a client that only reconnects to watch does not:
+   * a fold. So the boot opens the ones whose row says a run is in flight (`sessions.run_session_root`,
+   * kept by the owner's activity projection) under this process's session root, with the same
+   * scoping and release rules as `resumeMissions`. A reopened log with nothing unsettled — the row
+   * outlived the run — is cleared and left to the idle sweep. Answers the sessions whose run it
+   * continued; one that fails to reopen is logged, keeps its mark for the next boot, and does not
+   * stop the others.
+   */
+  readonly resumeRuns: Effect.Effect<readonly SessionId[], SessionError>;
+  /**
    * Close every harness this process owns: the idle sweep's release, for every owner at once, on
    * shutdown. The worktrees and branches stay (LOB-268), so a restarted process resumes on them.
    */
@@ -760,6 +776,11 @@ type LiveOwner = {
    * every later open. The index row is written from it.
    */
   readonly model: string;
+  /**
+   * The submissions the open continued (LOB-25): what the log held unsettled when this owner took
+   * it — a run a dead process left behind. Empty for an owner whose log held none.
+   */
+  readonly resumed: readonly string[];
   readonly lastUsedAt: number;
 };
 
@@ -830,8 +851,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const path = yield* Path.Path;
       /**
        * This process's session root as an absolute path (LOB-231): what a mission's row is marked
-       * with, and the only rows `resumeMissions` reopens. A relative root names a different
-       * directory from another working directory, so the comparison is between resolved paths.
+       * with, and the only rows `resumeMissions` reopens — and the same for a run in flight and
+       * `resumeRuns` (LOB-25). A relative root names a different directory from another working
+       * directory, so the comparison is between resolved paths.
        */
       const missionRoot = path.resolve(options.sessionRoot);
       const policy = yield* Policy;
@@ -1769,6 +1791,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly spec?: SpecOptions;
         /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
         readonly review?: ReviewOptions;
+        /**
+         * Whether the open continues the submissions the log left unsettled (LOB-25): every open
+         * but a released session's, whose run would have no directory to work in.
+         */
+        readonly resume: boolean;
       }) => Effect.Effect<OpenSession, SessionError>;
 
       /** What an owner acquisition is for (`acquireOwnerWith`). */
@@ -1848,6 +1875,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const opened = yield* open({
               storage,
               cwd: workspace.path,
+              resume: released === undefined,
               policy: policy.forWorktree(workspace.path, id),
               run,
               pages,
@@ -1885,6 +1913,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
               );
             }
+            // A run a dead process left behind carries on in this owner (LOB-25): said in the
+            // process's log, because nobody asked for it and an operator should see why it runs.
+            if (opened.resumed.length > 0) {
+              yield* Effect.logInfo(
+                `session ${id}: resumed ${opened.resumed.length} unsettled submission(s) on reopen: ${opened.resumed.join(", ")}`,
+              );
+            }
             yield* FiberMap.run(
               projectors,
               id,
@@ -1904,6 +1939,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               storage,
               workspace,
               model,
+              resumed: opened.resumed,
               lastUsedAt: now,
             };
             yield* Ref.update(live, HashMap.set(id, owner));
@@ -1974,10 +2010,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             body,
             spec,
             review,
+            resume,
           }) =>
             openSession({
               storage,
               model: options.model,
+              resume,
               ...(options.sandbox === undefined
                 ? {}
                 : { sandbox: options.sandbox }),
@@ -3423,7 +3461,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void> => {
         switch (event._tag) {
           case "status":
-            return setActivityStatus(sessionId, event.status);
+            return setActivityStatus(sessionId, event.status).pipe(
+              Effect.andThen(
+                setRunInFlight(sessionId, event.status === "busy"),
+              ),
+            );
           case "usage":
             return setActivityCost(sessionId, costOf(event.usage));
           case "entry":
@@ -3436,6 +3478,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               : touchActivity(sessionId);
           case "snapshot":
             return setActivityStatus(sessionId, event.session.status).pipe(
+              Effect.andThen(
+                setRunInFlight(sessionId, event.session.status === "busy"),
+              ),
               Effect.andThen(
                 setMissionInFlight(sessionId, hasLiveMission(event.tasks)),
               ),
@@ -3477,6 +3522,35 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 UPDATE sessions
                 SET mission_in_flight = false, mission_session_root = NULL
                 WHERE id = ${sessionId} AND mission_in_flight
+              `,
+        ).pipe(Effect.ignore);
+
+      /**
+       * Mirror whether the session has a run in flight into its row (LOB-25), so the next boot knows
+       * which logs a dead process left in the middle of a run (`resumeRuns`). The mission mark's
+       * twin: written only when it changes (a run's start and its end, not every entry), marked with
+       * this process's root, and best-effort — a row that lags costs a boot one reopen that finds
+       * nothing, or a run that waits for its next caller, never a failed run.
+       *
+       * Only the projection writes it, and a release does not clear it: a shutdown's close leaves the
+       * run placed in the log, and the next boot is what continues it. A SIGKILL writes nothing at
+       * all, which is the point — the mark the run set when it started is what the boot finds.
+       */
+      const setRunInFlight = (
+        sessionId: SessionId,
+        inFlight: boolean,
+      ): Effect.Effect<void> =>
+        paper(
+          "write run in flight",
+          inFlight
+            ? sql`
+                UPDATE sessions SET run_session_root = ${missionRoot}
+                WHERE id = ${sessionId}
+                  AND run_session_root IS DISTINCT FROM ${missionRoot}
+              `
+            : sql`
+                UPDATE sessions SET run_session_root = NULL
+                WHERE id = ${sessionId} AND run_session_root IS NOT NULL
               `,
         ).pipe(Effect.ignore);
 
@@ -4245,8 +4319,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sql<Marked>`
               UPDATE sessions
               SET workspace_released_at = now(), workspace_release_reason = ${reason},
-                -- A released session takes no new run, so no boot resumes its mission (LOB-231).
-                mission_in_flight = false, mission_session_root = NULL
+                -- A released session takes no new run, so no boot resumes its mission (LOB-231)
+                -- or the run it was in the middle of (LOB-25).
+                mission_in_flight = false, mission_session_root = NULL,
+                run_session_root = NULL
               WHERE id = ${sessionId} AND workspace_released_at IS NULL
               RETURNING
                 workspace_release_reason AS reason,
@@ -4396,10 +4472,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 const owner = yield* acquireOwner(sessionId, row, {
                   starts: true,
                 });
-                // Asked before anything is scheduled: the reopened graph already lists a mission the
-                // stop left pending. The row outlived its mission (a crash between the two writes):
-                // nothing to resume, so nothing else in the log is scheduled on the boot's behalf
-                // either, and the sweep releases the owner like any idle one.
+                // The reopened graph already lists a mission the stop left pending. The row outlived
+                // its mission (a crash between the two writes): nothing to resume, so nothing else in
+                // the log is scheduled on the boot's behalf beyond what every reopen continues — a
+                // run left unsettled (LOB-25) — and the sweep releases the owner like any idle one.
                 const live = yield* missionInFlight(owner.harness);
                 if (!live) {
                   yield* setMissionInFlight(sessionId, false);
@@ -4414,6 +4490,60 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             if (outcome._tag === "Failure") {
               yield* Effect.logWarning(
                 `session ${id}: could not resume its mission: ${outcome.failure.message}`,
+              );
+              continue;
+            }
+            if (outcome.success !== undefined) resumed.push(outcome.success);
+          }
+          return resumed;
+        });
+
+      const resumeRuns: Effect.Effect<readonly SessionId[], SessionError> =
+        Effect.gen(function* () {
+          // A released row takes no new run, and its run has no directory: the mark is dropped
+          // rather than read at every boot, as a mission's is.
+          yield* paper(
+            "clear runs on released sessions",
+            sql`
+              UPDATE sessions SET run_session_root = NULL
+              WHERE run_session_root = ${missionRoot}
+                AND workspace_released_at IS NOT NULL
+            `,
+          );
+          // Under this process's root only, for the reason a mission's are (`resumeMissions`).
+          const rows = yield* paper(
+            "read sessions with a run in flight",
+            sql<{ readonly id: string }>`
+              SELECT id FROM sessions
+              WHERE run_session_root = ${missionRoot}
+                AND workspace_released_at IS NULL
+              ORDER BY id
+            `,
+          );
+          const resumed: SessionId[] = [];
+          for (const { id } of rows) {
+            const outcome = yield* Effect.result(
+              Effect.gen(function* () {
+                const sessionId = yield* toSessionId(id);
+                const row = yield* requireSession(sessionId);
+                // The acquisition is the whole of the resume: the open continues what the log left
+                // unsettled (`openSession`'s `resume`). `starts` refuses a release that committed
+                // after the query read the row, as `send` would.
+                const owner = yield* acquireOwner(sessionId, row, {
+                  starts: true,
+                });
+                if (owner.resumed.length > 0) return sessionId;
+                // The row outlived its run (a death between the run settling and the projection
+                // writing it): nothing was continued, the mark goes, and the sweep releases the
+                // owner like any idle one. A run a client started here since keeps the mark.
+                const busy = yield* isBusy(owner.harness, owner.root);
+                if (!busy) yield* setRunInFlight(sessionId, false);
+                return undefined;
+              }),
+            );
+            if (outcome._tag === "Failure") {
+              yield* Effect.logWarning(
+                `session ${id}: could not resume its run: ${outcome.failure.message}`,
               );
               continue;
             }
@@ -4521,6 +4651,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         releaseWorkspace,
         roleModel,
         resumeMissions,
+        resumeRuns,
         close: closeAll,
       });
     }),

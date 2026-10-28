@@ -402,6 +402,13 @@ export type OpenSessionOptions = {
    * only when this is given *and* the run is a review (`RunProfile.reviewing`).
    */
   readonly review?: ReviewOptions;
+  /**
+   * Whether the open continues the submissions the log left unsettled (LOB-25, `resumePending`).
+   * Absent or `true`: it does, so a run a dead process left behind carries on in this one. `false`:
+   * the harness opens paused, and nothing in the log runs until a caller asks for progress — the
+   * control plane's choice for a session whose workspace is gone, where a run has no directory.
+   */
+  readonly resume?: boolean;
 };
 
 export type OpenSession = {
@@ -420,7 +427,39 @@ export type OpenSession = {
    * one the root was created with on every later open, whatever the role table says now (LOB-207).
    */
   readonly model: ModelAccess;
+  /**
+   * The submissions this open continued (LOB-25): the ids of the inputs the log held queued or
+   * placed — a run a previous process was in the middle of, or queued behind — in id order. Empty
+   * when the log held none, and when the open was asked not to resume.
+   */
+  readonly resumed: readonly string[];
 };
+
+/**
+ * Continue what a reopened log left unsettled (LOB-25), and answer the submissions that is.
+ *
+ * Pi Durable reconciles a dead process's `running` tasks to `pending` when a harness opens, but it
+ * schedules nothing until something asks for progress (`Harness.resume()`, or a submit or a wait).
+ * A run whose process died — a SIGTERM's close or a SIGKILL that ran no finalizer at all — would
+ * otherwise sit, placed and unanswered, until somebody happened to send the session something. So
+ * a log that holds a queued or placed submission is resumed here, deliberately: the run continues
+ * as the same submission in the same conversation, with the tool call the death interrupted settled
+ * as interrupted rather than run twice, and nothing is submitted again.
+ *
+ * A log with no such submission is left paused: nothing a reopen did not need to schedule is. Read
+ * through `inspect`, which writes nothing and runs no task code.
+ */
+export const resumePending = (
+  harness: Harness,
+): Effect.Effect<readonly string[], SessionError> =>
+  Effect.gen(function* () {
+    const inspection = yield* attempt("inspect pending work", () =>
+      harness.inspect(BACKGROUND_CONTEXT),
+    );
+    const pending = inspection.submissions.map((record) => String(record.id));
+    if (pending.length > 0) yield* Effect.sync(() => harness.resume());
+    return pending;
+  });
 
 /**
  * Credential-shaped variables the control plane holds in its own environment (LOB-51, D14).
@@ -443,7 +482,10 @@ export const sessionShellEnv = (
       .map((name) => [name, ""]),
   );
 
-/** Open a harness over one session's log and ensure its root conversation exists. */
+/**
+ * Open a harness over one session's log, ensure its root conversation exists, and continue the
+ * submissions the log left unsettled unless told not to (`resume`, LOB-25).
+ */
 export const openSession = (
   options: OpenSessionOptions,
 ): Effect.Effect<OpenSession, SessionError> =>
@@ -611,11 +653,17 @@ const openSessionIn = (
       dropped: pagesPrompt.dropped,
     });
 
+    // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
+    // on here rather than waiting for the next message.
+    const resumed =
+      options.resume === false ? [] : yield* resumePending(harness);
+
     return {
       harness,
       root,
       model,
       releaseEnvironment: environment.release,
+      resumed,
     };
   });
 

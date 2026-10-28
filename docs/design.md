@@ -236,6 +236,14 @@ mission and both own its log until Postgres poisons one of them on `PRIMARY KEY 
 second process sets `MISSION_RESUME=false`. The presence lease above replaces both the root scoping
 and the flag when replicas arrive.
 
+_As built (LOB-25)._ The same rule now covers a run in a conversation, not only a mission. Any owner
+that opens a log continues the submissions it holds unsettled (`openSession` → `resumePending`), so
+a run whose process died — a SIGTERM's close or a SIGKILL — carries on as the same submission rather
+than waiting for the next message. The boot finds those logs the way it finds missions: the owner's
+projection writes `sessions.run_session_root` while a run is in flight, and `resumeRuns` reopens the
+rows marked under its own root. `MISSION_RESUME=false` turns off both resumes for a second process on
+the same database and root. A released session's open does not resume: its run has no directory.
+
 ### D13 — Sandbox image: generic base, then templates where they pay
 
 Bun, Node, git, gh, ripgrep, plus Pi Durable and the harness. Repo-specific toolchains install

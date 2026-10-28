@@ -400,7 +400,12 @@ describe("a budget stop across a recovery", () => {
     const recovered = await Effect.runPromise(
       openSession({ storage: inner, model: second.access, cwd }),
     );
-    recovered.harness.resume();
+    // The open continues the run the death left placed (LOB-25), before anything here asks for
+    // progress: `waitForIdle` would enable the scheduler by itself.
+    expect(recovered.resumed).toHaveLength(1);
+    expect(
+      (await recovered.harness.inspect(BACKGROUND_CONTEXT)).scheduling,
+    ).toBe("running");
     await recovered.harness.waitForIdle(BACKGROUND_CONTEXT);
     const after = await Effect.runPromise(
       readLiveSnapshot(recovered, ref(cwd)),

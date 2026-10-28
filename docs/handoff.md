@@ -77,6 +77,17 @@ passes ten.
   `verify-api/degraded.sh` (11/11): with Postgres stopped the server still binds, `/livez` stays 200
   while `/readyz` reports 503 naming all three failing checks, a session request fails with typed
   `SessionError{code: "storage"}`, and when Postgres returns readiness goes green **on the same pid**.
+- **A run across a kill** (LOB-25). A run whose process died — SIGTERM's close or a `SIGKILL` that
+  ran no finalizer — continues when its session is reopened, as the same submission in the same
+  conversation, with nothing submitted twice and no manual `Harness.resume()`: `openSession` resumes
+  what the log holds unsettled (`resumePending`), and the boot's `resumeRuns` reopens the sessions
+  whose row says a run was in flight under its own root (`sessions.run_session_root`), so nobody has
+  to send the session anything. The tool call the death cut short settles as interrupted rather than
+  running twice, and the model answers after it; a client retrying the same request id gets the same
+  submission. `packages/core`'s "a run across a kill" SIGKILLs a real child process mid-run;
+  `packages/harness`'s `resume.test.ts` and the recovery cases in `policy.approval.test.ts` and
+  `budget.test.ts` reopen with no hand-written `resume()`; `verify-api/run-restart.sh` (17/17, and
+  again with `KILL_SIGNAL=TERM`) drives it over HTTP.
 - **The same session in a browser** — 10/10 checks in `.pi/skills/verify-web/drive.mjs`, off
   `MODEL_BACKEND=faux`, with a real tool call and a real log: the root redirect, the sidebar's honest
   empty state, the route moving to the created session, the header labelling the read path, the
@@ -108,10 +119,11 @@ passes ten.
 - **Sessions that predate migration `0005`.** Their activity row is backfilled from the `sessions`
   index (status `idle`, `last_activity_at` = the row's `created_at`), not from their logs, until a
   rebuild runs.
-- **A kill that runs no finalizer.** SIGTERM is proven to release the owners and leave a resumable
-  session; `SIGKILL` or a lost machine runs nothing, and what the log then holds is LOB-25's
-  (`Harness.resume()`) problem. The interrupted _tool call_ is not resumed either — the resumed turn
-  is a new turn.
+- **A kill that runs no finalizer — the rest.** LOB-25 proved the run continues (see _Proven_). Not
+  proven: a released session's interrupted run is left placed and never resumed (it has no
+  directory to run in), and two processes on one database _and_ one root would both resume it —
+  `MISSION_RESUME=false` turns the boot's resume off for the second, as for missions (D12). The
+  tool call the death cut short is settled as interrupted, never rerun, by design.
 - **The readiness probe's middle branch.** `/readyz` names a missing migration in principle; only
   the database-down branch is driven (`degraded.sh`), because dropping a migration row would corrupt
   the ledger the other suites share.

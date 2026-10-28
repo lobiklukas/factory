@@ -43,6 +43,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A mission (LOB-230)                     | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                                                                                                                                                                                                        | a mission's phase is the session's state, not a call                               |
 | A mission's fan-out (LOB-193)           | two `workers` live, owned, two conversations, `waiting` failFast; a failing worker stops its sibling's running check; a check outside the policy is refused                                                                                                                                                                 | a failing subtask stops its siblings, per policy                                   |
 | A mission across a kill (LOB-231)       | `mission-restart.sh`: SIGTERM while the checkpoint is `implement` and both workers are on a tool call; a fresh process resumes it at boot, unasked, in `implement`, and the same workers finish                                                                                                                             | a mission resumes in the phase it died in                                          |
+| A run across a kill (LOB-25)            | `run-restart.sh`: SIGKILL (or `KILL_SIGNAL=TERM`) while a run is on a tool call; a fresh process resumes it at boot, unasked: the same submission, the call settled as interrupted, an answer, a retry that submits nothing                                                                                                 | a run continues after its process dies                                             |
 | A docs trigger (LOB-197)                | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main                                                                                                                                                                                         | a docs run starts without a person, off the trunk                                  |
 | Docs trigger callers (LOB-234)          | `docs-trigger-http.sh`: `DOCS_SCHEDULE_MS=400` ticks sessions, unset none; a signed push processed, a redelivery replayed, another branch 400, a bad signature 401                                                                                                                                                          | a deployment starts docs runs with no script                                       |
 | The `verify` tool (LOB-78)              | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first                                                                                                                                                                                                | a run's verification is a record, not prose                                        |
@@ -109,6 +110,7 @@ running, and writes its own evidence:
 ./sigterm.sh     # api on :9400 (SIGTERM_PORT) — a busy session with a commit, SIGTERM, a fresh process resumes it on the same branch
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
 ./mission-restart.sh  # api on :9418 (MISSION_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGTERM mid-implement, a fresh process resumes the mission at boot (features/mission.md)
+./run-restart.sh      # api on :9430 (RUN_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGKILL mid-run (KILL_SIGNAL=TERM for the graceful path), a fresh process resumes the run at boot (features/lifecycle.md)
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight, a generic `push` refused
@@ -209,6 +211,10 @@ order you want the evidence to end in.
   call) and after the restart (resumed by the boot, then settled in verify)
 - `mission-restart-process.json`, `mission-restart-api.log` — what the process did: the exit, the
   shutdown and boot-resume log lines, and the row the next boot reads, set while nothing ran
+- `run-restart-arm.json` / `run-restart-verify.json` — from `./run-restart.sh`: the run on its tool
+  call before the kill, and the same run resumed by the boot and settled, with its transcript
+- `run-restart-process.json`, `run-restart-api.log` — what the process did: the signal and exit, no
+  shutdown line under SIGKILL, the row the next boot reads, and the boot's resume lines
 - `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
   `./degraded.sh`: the probes with Postgres stopped and back, and the process facts (one pid served
   both phases)

@@ -40,7 +40,29 @@ the PR's merge are proven there, the card's cancel and the discard over RPC in
 Linear mirror fails — in `apps/api/src/Api/GitHubWebhook.test.ts`, and the discard from the CLI by
 verify-cli's `./discard.sh`.
 
-**What it does not prove.** That the interrupted _tool call_ itself resumed — the resumed turn is a
-new turn. Pi Durable's abort/replay behavior under a harder kill (`SIGKILL`, a machine loss) is
-untested; `SIGKILL` runs no finalizer at all, and what that leaves is exactly what LOB-25
-(`Harness.resume()`) is for.
+**A kill that runs no finalizer (LOB-25).** `SIGKILL` releases nothing and commits nothing on its
+way out: the run's submission stays placed in the log, its tool task is reconciled to `pending` by
+the next harness that opens it, and the activity index still says `busy`. Any owner that opens the
+log continues it — `openSession` resumes the submissions a log holds unsettled (`resumePending`), so
+the run carries on as the same submission in the same conversation, the tool call the kill cut short
+settles as `interrupted` rather than running twice, and the model answers after it. The boot is what
+opens it: the owner's projection marks the row while a run is in flight
+(`sessions.run_session_root`, migration `0031`), and `resumeRuns` reopens the rows marked under the
+booting process's root, as `resumeMissions` does for missions (LOB-231). A SIGTERM's close leaves
+the same placed run, so the boot continues that too. A released session is the exception: its run
+has no directory, so it is left placed and never resumed.
+
+`./run-restart.sh` drives it on its own API (`:9430`, `RUN_RESTART_PORT`) and its own database: the
+faux tool call counts its run into the worktree and holds; the script sends `SIGKILL` (`KILL_SIGNAL=TERM`
+for the graceful path), checks no shutdown line was logged and the row still names the run, and
+starts a fresh API nobody sends anything to. The verify phase reads the session live, its transcript
+extending the dead process's entry for entry, one user message, the interrupted call settled as
+interrupted and not run again, an answer after it, and a retry of the same request id answered with
+the same submission. The boot's `runs: resumed 1 in flight` and the reopen's `resumed 1 unsettled
+submission(s)` lines are in the log. The same claims under `bun run test`: `packages/core`'s "a run
+across a kill" (a real child process, SIGKILLed) and `packages/harness`'s `resume.test.ts`.
+
+**What it does not prove.** That the interrupted _tool call_ itself reran — it does not: Pi Durable
+settles it as interrupted ("may have partially run") and the model decides what to do next, so a
+command with side effects is never run twice behind its back. A machine loss with the database
+mid-commit is Postgres's to make atomic; the drives kill only the process.
