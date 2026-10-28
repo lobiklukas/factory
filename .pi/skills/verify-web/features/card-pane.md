@@ -43,7 +43,13 @@ start` does, then `sendMessage` with the field's text, so the run is busy when t
   The card's runs are `listTaskRuns` (new on `TasksRpc`), newest first, as
   `li[data-run=<session id>]`; picking one sets `?run=`. `?run=` opens only a run the card lists: any
   other session id renders `[data-run-foreign=<id>]` and no run panes. Proven end to end, against the
-  CLI's twin, by verify-board's `start-prompt.sh`.
+  CLI's twin, by verify-board's `start-prompt.sh`. The form has a **Budget, US$** field
+  (`input[data-start-budget]`, C23): blank sends no cap of the run's own, an amount is the `budget` on
+  `createSession`, anything else shows `[data-start-budget-invalid]` and makes Send unavailable. A run
+  its cap stopped shows a **Raise cap** form (`form[data-raise-cap]`, `input[data-raise-cap-input]`,
+  `button[data-raise-cap-submit]`) under the stop in its transcript, opened at twice the stopping cap:
+  it sends `setSessionBudget`, refuses a cap the spend already reaches, and goes away once raised.
+  Driven by verify-board's `budget.sh`.
 - **Run panes.** Transcript (the session pane, composer and steering included), Approvals (the run's
   pending `listApprovals`, each `li[data-approval=<request id>]` with `[data-decide=approved|denied]`
   buttons, disabled while the decision is in flight; the click is `decideApproval` as `dashboard`,

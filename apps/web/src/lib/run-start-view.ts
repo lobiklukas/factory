@@ -31,7 +31,8 @@ export const startPrompt = (task: Task, definition: BoardDefinition): string =>
  * before anything is opened. The text is never trimmed: it is sent as typed.
  */
 export type StartSendable =
-  { readonly ok: true } | { readonly ok: false; readonly reason: string };
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
 
 export const startSendable = (draft: string): StartSendable =>
   draft.trim() === ""
