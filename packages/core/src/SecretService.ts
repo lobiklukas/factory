@@ -23,7 +23,15 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
+import {
+  Config,
+  Context,
+  DateTime,
+  Effect,
+  Layer,
+  Option,
+  Redacted,
+} from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
@@ -176,7 +184,7 @@ type SummaryRow = {
 type SealedRow = Sealed & { readonly name: string };
 
 const iso = (value: Date | string): string =>
-  (value instanceof Date ? value : new Date(value)).toISOString();
+  DateTime.formatIso(DateTime.makeUnsafe(value));
 
 const summaryOf = (row: SummaryRow): SecretSummary => ({
   repo: RepoSlug.make(row.repo),

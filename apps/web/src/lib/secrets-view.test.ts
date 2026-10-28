@@ -43,7 +43,7 @@ describe("secretInput", () => {
     expect(parsed.input.name).toBe("TEST_API_KEY");
     expect(Redacted.value(parsed.input.value)).toBe("fake-value-1234");
     // A redacted value does not print.
-    expect(String(parsed.input.value)).not.toContain("fake-value-1234");
+    expect(JSON.stringify(parsed.input)).not.toContain("fake-value-1234");
   });
 
   it("refuses a name that is no variable and a value shorter than the minimum", () => {

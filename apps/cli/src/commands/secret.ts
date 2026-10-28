@@ -85,7 +85,7 @@ const parseTarget = (
   if (!Schema.is(RepoSlug)(repo)) {
     return { refused: `"${repo}" is not a repo slug (owner/name)` };
   }
-  if (!Schema.is(SecretName)(name)) {
+  if (Option.isNone(Schema.decodeOption(SecretName)(name))) {
     return {
       refused: `"${name}" is not a secret name (uppercase letters, digits and _, not starting with a digit)`,
     };

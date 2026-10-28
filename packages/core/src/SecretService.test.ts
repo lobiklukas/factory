@@ -6,7 +6,7 @@
  * registered for it and deleted after (its secrets go with it). Every value is obviously fake.
  */
 import { randomBytes } from "node:crypto";
-import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
+import { Effect, ManagedRuntime, Redacted } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";

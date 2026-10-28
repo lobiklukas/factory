@@ -188,15 +188,22 @@ export const maskingEnv = (
   secrets: InjectedSecrets,
 ): ExecutionEnv => {
   if (secrets.length === 0) return env;
-  const exec: ExecutionEnv["exec"] = async (command, options, context) => {
+  const exec: ExecutionEnv["exec"] = (command, options, context) => {
     const onOutput = options?.onOutput;
     if (onOutput === undefined) return env.exec(command, options, context);
     const maskers = {
       stdout: secretMasker(secrets),
       stderr: secretMasker(secrets),
     };
-    try {
-      return await env.exec(
+    // What the maskers held back goes out before the command's answer does.
+    const flush = () => {
+      for (const stream of ["stdout", "stderr"] as const) {
+        const rest = maskers[stream].flush();
+        if (rest !== "") onOutput(rest, context, { stream });
+      }
+    };
+    return env
+      .exec(
         command,
         {
           ...options,
@@ -208,13 +215,8 @@ export const maskingEnv = (
           },
         },
         context,
-      );
-    } finally {
-      for (const stream of ["stdout", "stderr"] as const) {
-        const rest = maskers[stream].flush();
-        if (rest !== "") onOutput(rest, context, { stream });
-      }
-    }
+      )
+      .finally(flush);
   };
   return new Proxy(env, {
     get: (target, property) => {
