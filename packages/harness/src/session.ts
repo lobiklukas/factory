@@ -2666,6 +2666,8 @@ export type ForkSessionOptions = {
   readonly repo?: RepoContext;
   /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /** The values the fork's commands are given, masked in its log, as `OpenSessionOptions.secrets`. */
+  readonly secrets?: InjectedSecrets;
   /**
    * The cap a fork of an uncapped parent gets (LOB-163): the server's default, as a create gets it.
    * A capped parent's fork keeps the parent's cap and carries its spend (`inheritBudget`), so a fork
@@ -2710,6 +2712,7 @@ export const forkSession = (
       ...(options.pages === undefined ? {} : { pages: options.pages }),
       ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",

@@ -1,5 +1,6 @@
 import {
   CredentialProvider,
+  SecretServiceLive,
   SessionService,
   SkillServiceLive,
   TaskServiceLive,
@@ -13,6 +14,7 @@ import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
 import { DoctorRpcHandlers } from "./Doctor";
+import { SecretsRpcHandlers } from "./Secrets";
 import { ServerRpcHandlers } from "./Server";
 import { SkillsRpcHandlers } from "./Skills";
 import { TaskRpcHandlers } from "./Task";
@@ -111,6 +113,7 @@ export const SessionRpcLive = RpcServer.layerHttp({
       ServerRpcHandlers,
       DoctorRpcHandlers,
       SkillsRpcHandlers,
+      SecretsRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
@@ -118,4 +121,5 @@ export const SessionRpcLive = RpcServer.layerHttp({
   Layer.provide(TriggerRoutesLive),
   Layer.provide(TriggerDeliveriesLive),
   Layer.provide(SkillServiceLive),
+  Layer.provide(SecretServiceLive),
 );

@@ -90,12 +90,14 @@ import {
   readPullRequestDoc,
   writeNoDocumentationChange,
   writePullRequestDoc,
+  type InjectedSecrets,
   type PullRequestRecord,
 } from "@repo/harness";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import type { GitError, PushedBranch } from "./git";
 import type { DiffCap, OverCapPullRequest, PullRequestStep } from "./pr";
 import { resolveCommit } from "./repos";
+import { scanBranchForSecrets } from "./secretScan";
 import {
   buildPrBody,
   createPullRequest,
@@ -140,6 +142,16 @@ export type OpenPullRequestInput = {
   readonly adopt?: PullRequestRecord;
   /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
   readonly cap?: DiffCap;
+  /**
+   * The repo's stored secrets, for the scan a branch passes before it is pushed (S-agent-secrets,
+   * `./secretScan`): `known` are the values a line may not hold, `unreadable` the names the store
+   * holds and this control plane's key cannot read — which refuses the step, because a branch
+   * cannot be scanned for a value nobody can read. Absent: no stored value, only the patterns.
+   */
+  readonly secrets?: {
+    readonly known: InjectedSecrets;
+    readonly unreadable: readonly string[];
+  };
   /** What the session was asked to do, and the model and spend behind it, for the body. */
   readonly prompt: string;
   readonly model?: string;
@@ -222,6 +234,27 @@ export const openPullRequest = (
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR.
     if (Option.isSome(refused)) return refused.value;
+    // The scan before the push (S-agent-secrets): every line the branch's commits add, for a stored
+    // value or a credential's shape. Like the cap it writes nothing, so a refused session reads as
+    // one with no PR; unlike the cap it reads the history, because that is what a push publishes.
+    if (recorded === undefined && Option.isSome(measured)) {
+      const base = input.measureBase ?? input.base;
+      const unreadable = input.secrets?.unreadable ?? [];
+      if (unreadable.length > 0) {
+        return yield* new PrError({
+          operation: "secretScan",
+          ref: `${base}..${input.head}`,
+          message: `the repo's stored secret(s) ${unreadable.join(", ")} cannot be read with this control plane's FACTORY_SECRETS_KEY, so the branch cannot be scanned for them and nothing was pushed`,
+        });
+      }
+      const found = yield* scanBranchForSecrets({
+        checkout: input.worktree,
+        base,
+        head: measuredHead,
+        known: input.secrets?.known ?? [],
+      });
+      if (Option.isSome(found)) return found.value;
+    }
     // Published only when a PR is about to be asked for, and only a branch the step measured: a
     // directory that is not its own checkout has no branch to push. A rejected push writes nothing,
     // so the session reads as one with no PR, as a refusal above does.

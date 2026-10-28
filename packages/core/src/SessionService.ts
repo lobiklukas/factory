@@ -158,6 +158,7 @@ import {
   type PullRequestRecord,
   type ApprovalAsker,
   type SessionPolicy,
+  type InjectedSecrets,
   type VerifyOptions,
 } from "@repo/harness";
 import {
@@ -332,6 +333,13 @@ import {
   proposalIssueBody,
 } from "./ProposalTracker";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { SecretService } from "./SecretService";
+import {
+  grantSecrets,
+  NO_SECRETS,
+  secretNeedsAt,
+  type GrantedSecrets,
+} from "./secretNeeds";
 import {
   checkoutDefaultBranch,
   inspectCheckout,
@@ -1123,6 +1131,11 @@ type LiveOwner = {
    * it — a run a dead process left behind. Empty for an owner whose log held none.
    */
   readonly resumed: readonly string[];
+  /**
+   * The secrets this owner's commands are given (S-agent-secrets, `./secretNeeds`): read when it was
+   * opened, from the declaration at the session's base and the store. Its setup takes `setup`.
+   */
+  readonly secrets: GrantedSecrets;
   readonly lastUsedAt: number;
 };
 
@@ -1210,6 +1223,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const policy = yield* Policy;
       const skills = yield* SkillService;
       const tasks = yield* TaskService;
+      /**
+       * The repos' secrets (S-agent-secrets): optional, so a deployment or a test with no store runs
+       * every command with none, as before there was one.
+       */
+      const secretStore = Option.getOrUndefined(
+        yield* Effect.serviceOption(SecretService),
+      );
       // The services this layer was built with, for the one callback a harness calls back into from a
       // Promise (the `ask` tool, LOB-73): it runs with the same SQL client the rest of the service uses.
       const context = yield* Effect.context<never>();
@@ -2215,6 +2235,44 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return context;
         });
 
+      /**
+       * What a session's commands are given (S-agent-secrets, `./secretNeeds`): the secrets the repo's
+       * `.factory/config` declares at `base` — the ref its `verify` measures against, so never the
+       * run's own branch — and the store's values for them. Only for a repository's own checkout
+       * that is still there; anything else is given none.
+       */
+      const secretsFor = (
+        workspace: SessionWorkspace,
+        base: string | undefined,
+      ): Effect.Effect<GrantedSecrets> =>
+        Effect.gen(function* () {
+          if (
+            secretStore === undefined ||
+            workspace.repo === undefined ||
+            workspace.released !== undefined ||
+            base === undefined ||
+            base === ""
+          )
+            return NO_SECRETS;
+          const checkout = yield* fs
+            .exists(path.join(workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) return NO_SECRETS;
+          const registered = yield* readRepo(workspace.repo).pipe(
+            Effect.map((rows) => rows[0]),
+            Effect.orElseSucceed(() => undefined),
+          );
+          const needs = yield* secretNeedsAt(
+            {
+              directory: workspace.path,
+              ref: base,
+              localPath: registered?.localPath ?? undefined,
+            },
+            { fs, path },
+          );
+          return yield* grantSecrets(secretStore, workspace.repo, needs);
+        });
+
       /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
       const fetchedStartFor = (
         row: SessionRow,
@@ -2687,6 +2745,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * its changes are measured against, from the workspace resolved for this acquisition.
          */
         readonly verify: VerifyOptions;
+        /** Every secret value the session's commands are given, masked in its log (S-agent-secrets). */
+        readonly secrets: InjectedSecrets;
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
@@ -2842,6 +2902,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
             // ran reaches its next run, and an edit the run made on its own branch does not.
             const repoContext = yield* repoContextFor(workspace, verifyBase);
+            // What the session's commands are given (S-agent-secrets): the names the repo's config
+            // declares at that same base — never the branch's — and the store's values for them.
+            const granted = yield* secretsFor(workspace, verifyBase);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -2865,7 +2928,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               verify: {
                 command: workspace.commands.verify,
                 baseRef: verifyBase,
+                secrets: granted.verify.values,
+                missingSecrets: granted.verify.missing,
               },
+              secrets: granted.all,
               ...(card === undefined
                 ? {}
                 : {
@@ -2925,6 +2991,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               workspace,
               model,
               resumed: opened.resumed,
+              secrets: granted,
               lastUsedAt: now,
             };
             // The reservation becomes this owner in the same step, so the slot is counted once.
@@ -3012,6 +3079,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             pages,
             repo,
             verify,
+            secrets,
             ask,
             thread,
             body,
@@ -3039,6 +3107,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               pages,
               ...(repo === undefined ? {} : { repo }),
               verify,
+              secrets,
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
               approvalAsker: askerFor(id),
@@ -3871,6 +3940,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const record = yield* runSetup({
             env,
             commands: workspace.commands,
+            secrets: owner.secrets.setup.values,
+            missingSecrets: owner.secrets.setup.missing,
             ...(options.setupTimeoutSeconds === undefined
               ? {}
               : { timeoutSeconds: options.setupTimeoutSeconds }),
@@ -4188,11 +4259,34 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : costliest,
             undefined,
           );
+          // Every value the store holds for the repo, for the scan the branch passes before it is
+          // pushed (S-agent-secrets): a store that cannot answer refuses the step rather than
+          // letting a branch through unscanned.
+          const stored =
+            secretStore === undefined
+              ? undefined
+              : yield* secretStore.reveal(repo).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new SessionErrorClass({
+                        code: "storage",
+                        message: `session ${input.sessionId}: repo ${repo}'s secrets could not be read for the push's secret scan, so nothing was pushed: ${error.message}`,
+                      }),
+                  ),
+                );
           const stepped = yield* openPullRequest({
             harness: owner.harness,
             conversation: owner.root,
             sessionId: input.sessionId,
             repo,
+            ...(stored === undefined
+              ? {}
+              : {
+                  secrets: {
+                    known: stored.values,
+                    unreadable: stored.unreadable,
+                  },
+                }),
             title: input.title,
             head,
             base,
@@ -4612,6 +4706,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               pages,
               repo,
               verify,
+              secrets,
             }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
@@ -4625,6 +4720,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     pages,
                     ...(repo === undefined ? {} : { repo }),
                     verify,
+                    secrets,
                     approvalAsker: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
@@ -4724,7 +4820,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, repo, verify }) =>
+            ({
+              storage,
+              cwd,
+              policy: sessionPolicy,
+              run,
+              repo,
+              verify,
+              secrets,
+            }) =>
               replaySession({
                 source: origin,
                 sourceId: input.sessionId,
@@ -4742,6 +4846,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 run,
                 ...(repo === undefined ? {} : { repo }),
                 verify,
+                secrets,
                 approvalAsker: askerFor(id),
                 // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
                 // the default a create would (LOB-163).

@@ -49,6 +49,7 @@
  * skipped: the step there could not tell a change from none and would open a PR over nothing, which
  * an operator may ask for and a settled run must not.
  */
+import { secretFindingsText } from "@repo/domain/PullRequest";
 import type { RunEnding } from "@repo/harness";
 import type { PullRequestStep } from "./pr";
 
@@ -172,6 +173,8 @@ export const notOpenedText = (reason: NotOpened): string => {
       return `${head}: the branch's diff is over the cap (${reason.measured} ${reason.limit}, at most ${reason.cap})`;
     case "non-fast-forward":
       return `${head}: the remote's ${reason.head} has commits this branch does not, and the push is never forced; integrate them, then open the PR`;
+    case "secret-found":
+      return `${head}: secret_found: the branch's commits add a secret — ${secretFindingsText(reason)} — so nothing was pushed; take it out of the branch's history (rewrite the commits that add it), then open the PR`;
     case "stopped":
       return `the run settled without finishing, so no PR was opened over its branch: ${STOPPED[reason.ending]}; a run that finishes opens it, or \`factory pr\` does`;
     case "failed":

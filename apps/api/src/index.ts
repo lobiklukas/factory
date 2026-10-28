@@ -13,6 +13,7 @@ import {
   selectReviewerCredentialProvider,
   runDocsSchedule,
   SessionService,
+  SecretServiceLive,
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
@@ -806,6 +807,9 @@ const HttpLive = Effect.gen(function* () {
         SessionWriteBacksLive,
         ProposalTrackerLive,
         PullRequestStepDeps,
+        // The repos' secrets (S-agent-secrets): what the session's commands are given, and what
+        // the push's scan looks for.
+        SecretServiceLive,
       ),
     ),
   );
