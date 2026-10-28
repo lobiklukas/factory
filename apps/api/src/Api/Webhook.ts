@@ -92,6 +92,7 @@ import type {
 import { LIFECYCLE_ACTIONS, TRIGGER_ACTION } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readTriggerRules } from "./WebhookBoot";
+import { TriggerBlockersLive, TriggerRepliesLive } from "./LinearSync";
 import {
   slackEnv,
   TriggerAuthorPermissionsLive,
@@ -872,6 +873,10 @@ const seamFor = (rules: ReadonlyArray<TriggerRule>) =>
         TriggerWriteBacksLive,
         // The trust gate's GitHub role lookup (S-trigger-trust-gating), for a rule that asks.
         TriggerAuthorPermissionsLive,
+        // An issue with open blockers starts nothing, and a reply in a Linear agent session answers
+        // the card its question parked (T5).
+        TriggerBlockersLive,
+        TriggerRepliesLive.pipe(Layer.provide(TaskServiceLive)),
       ),
     ),
   );

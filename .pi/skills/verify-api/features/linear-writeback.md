@@ -68,7 +68,7 @@ so a slow or broken tracker cannot stall or fail the step's own answer.
 API (`linear-api-fake.ts`, port `LINEAR_WRITEBACK_PORT`, default `API_PORT` or `9416`) and GitHub's
 PR endpoint (`github-fake.ts`, the next port) — and runs `bun linear-writeback.ts`: the real
 `TriggerService`, the real `SessionService` with its PR step in a real worktree of a throwaway repo,
-and the real write-back. Sixteen checks, every one required:
+and the real write-back. Twenty-two checks, every one required (the T5 ones are 17–22 below):
 
 1. A delegated issue opens a session and moves Todo → In Progress.
 2. The session records the PR's page, not GitHub's API resource. The fake answers both fields, as
@@ -92,6 +92,17 @@ and the real write-back. Sixteen checks, every one required:
     issue reaches In Review with the PR attached and exactly one comment carrying its link; a retried
     PR step adds none.
 16. Every request carried the configured key, verbatim.
+17. A mapped issue with an open `blockedBy` relation is skipped with `blocked by <id>` and files no
+    card (T5).
+18. Once the blocker is Done in Linear, the same delivery files the card; a redelivery of that is a
+    replay.
+19. A run's `ask` on a Linear-sourced card parks it `needs_input` and posts exactly one agent
+    activity of type `elicitation`, carrying the question verbatim, in an agent session opened on
+    the issue.
+20. The ask replayed (the ask write-back called again with the ledger's ask id) posts nothing.
+21. A reply event (`AgentSessionEvent` `prompted`) lifts `needs_input` as the card's verbatim
+    `answer` comment, written by `trigger:linear`, and cost no request to Linear.
+22. A redelivered reply, and a second reply once the wait is answered, record nothing.
 
 That the checks are not vacuous is a mutation run: with the marker check removed from
 `LinearSync.ts`, checks 6, 8 and 9 fail (two comments each). Evidence in `.verify/evidence/lob-15/`;
@@ -101,6 +112,55 @@ never read), and `LinearSync.test.ts`'s "follows a card's run" turns red.
 
 Checks 10 and 11 are signed `pull_request` bodies through `handleGitHubPullRequestWebhook`, the code
 the route runs; the route itself is a thin wrapper over it (headers in, status and JSON out).
+
+**A question goes back to Linear, and an issue with open blockers does not start (T5).** Two more
+things the Linear adapter does, in `packages/core/src/LinearElicitation.ts`:
+
+- _The question._ When a run on a card filed from a Linear issue (`linear:<id>`) calls `ask`, the
+  card parks `needs_input` as always (B7) and the question is also posted into Linear as one agent
+  activity of type `elicitation` (`agentActivityCreate`, content `{type: "elicitation", body}`) in
+  the agent session the factory holds on that issue. The first question opens it
+  (`agentSessionCreateOnIssue`); `linear_agent_sessions` keeps it, so every later question on the
+  issue is one more activity in the same thread. `linear_elicitations` (keyed by the ask id,
+  `<session>:<tool call>`) is the ledger: written after Linear accepted the activity, so a replayed
+  ask posts nothing and an ask whose post failed is posted by its replay. It is a mirror — the
+  question is on the card first and a Linear that is down is a logged line, not a failed ask
+  (`AskWriteBack`, bounded by `SESSION_WRITE_BACK_BUDGET`). The two mutations are **not retried**
+  inside the request (unlike the read-before-write operations above): a timeout or a lost
+  acknowledgement cannot be told from a miss, and a retry would post the question twice. The
+  recovery is the ask's replay and the ledger. At-least-once, with the duplicate confined to a crash
+  between Linear accepting the activity and the ledger row. Posts are serialized per issue, so a slow
+  Linear on one issue does not hold another issue's question past the write-back budget.
+- _The reply._ The person answers in the thread and Linear sends an `AgentSessionEvent` of action
+  `prompted` carrying their text. The Linear route reads it as a reply (`TriggerEvent.reply`, keyed
+  by the activity: `linear:<activity id>:reply`) and the seam hands it to the board: if a card filed
+  from that issue is blocked `needs_input` **and the event is in the agent session the factory asked
+  in** (`linear_agent_sessions`; a message in any other session on the issue is a recorded skip
+  naming it), the text becomes its `answer` comment, verbatim, by
+  `trigger:linear` — which lifts the block — and the delivery is `processed` naming the card. The
+  text is the event's; nothing reads a comment back from Linear (docs/board.md B7: answers are
+  events, never re-read editable comments). A reply with no card waiting is a recorded skip, which
+  is also what a redelivered one reads as.
+- _The blockers._ For a delivery a rule maps and whose repo is registered, the seam asks Linear for
+  the issue's inverse relations (`query FactoryBlockers`) and skips it with `blocked by ENG-41,
+ENG-43` while any `blocks` blocker is not `completed` or `canceled`. The skip is keyed by the
+  issue (`keyedByWork`), so a delivery that arrives once the blockers are done reclaims it and files
+  the card. The skip is answered `200`, so Linear does not retry it, and Linear sends no event when
+  a blocker changes state: **a person must re-add the label** (or the issue be created again) once
+  the blockers are done. Nothing recomputes on its own when a blocker merges: that is the
+  dependency-ready dispatcher (LOB-42), not built. A blocker read that
+  fails fails the delivery (`tracker-read`, `500`): Linear retries it, and nothing starts on a guess.
+  Without `LINEAR_API_KEY` there is nothing to read and no gate.
+
+**What the deployment needs for T5.** The agent operations are for an _app actor_: the OAuth app's
+token (set `LINEAR_API_KEY` to `Bearer <token>`, as above), not a personal API key: Linear's agent API
+is for an app actor, so with a personal key expect `agentSessionCreateOnIssue` and
+`agentActivityCreate` to fail (unverified live), and every elicitation is then only a logged line. The app's webhook must also have the _Agent session events_ category enabled so
+`prompted` replies arrive. Known limits, follow-ups on the umbrella: a `created` event (the app was
+mentioned or an issue was delegated to it) is answered `200` and skipped, where Linear expects an
+activity within 10 seconds, and the delegated session is not adopted as the thread the question
+goes to (the factory opens its own); the answer is recorded as `trigger:linear`, not as the person
+who wrote it.
 
 **Not built: re-review.** LOB-15 asks that the review be its own item and that a new commit on a
 reviewed PR invalidate it. The first half holds — no review state is in the map, and a new commit

@@ -56,6 +56,18 @@
 //  25. the trusted author labelling the stranger's issue next starts it: the untrusted skip was
 //      reclaimed under the issue's key rather than answered as a replay
 //
+// A reply in Linear's agent session (T5): the answer to a question the factory asked there
+// (`packages/core/src/LinearElicitation.ts`; the question's half is `linear-writeback.sh`'s).
+//
+//  22. a signed `AgentSessionEvent` `prompted` naming no card that waits is answered 200 and skipped,
+//      saying nobody waits on that issue — not refused, which would make Linear retry it
+//  23. the same event naming the filed card, parked `needs_input` by hand, is processed: the answer is
+//      recorded on the card verbatim as an `answer` comment, written by `trigger:linear`, and the
+//      block is lifted — with no Linear API in reach of the API process at all, because the reply is
+//      an event and nothing re-reads it
+//  24. Linear's redelivery of that reply is a replay, and a second reply to the same wait (a new
+//      activity, the card no longer parked) records nothing: the thread keeps one answer
+//
 // `linear.sh` also reads the API's boot log after the drive: the rules line and one armed/unarmed
 // line per webhook route (LOB-266).
 //
@@ -68,6 +80,7 @@ import path from "node:path";
 import { SessionRpc, TasksRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
+import { SQL } from "bun";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -688,6 +701,118 @@ const program = Effect.gen(function* () {
     `retry=${JSON.stringify(retriedCard.body)}`,
   );
 
+  // 22–24: a reply in Linear's agent session (T5), against the card filed above.
+  const agentReply = (
+    issueId: string,
+    activityId: string,
+    text: string,
+    sessionKey = `agent-session-${STAMP}`,
+  ) => ({
+    type: "AgentSessionEvent",
+    action: "prompted",
+    createdAt: new Date().toISOString(),
+    agentSession: {
+      id: sessionKey,
+      issue: { id: issueId, identifier: `VER-${STAMP}9` },
+    },
+    agentActivity: { id: activityId, content: { type: "prompt", body: text } },
+    organizationId: "org-verify",
+    webhookTimestamp: Date.now(),
+    webhookId: "verify-api-linear-subscription",
+  });
+  const stray = yield* Effect.promise(() =>
+    deliver(
+      "reply-nobody-waits",
+      agentReply(cardIssue.id, `act-${STAMP}-stray`, "Is anyone there?"),
+    ),
+  );
+  assert(
+    "a reply on an issue whose card is not waiting is answered 200 and skipped, saying so",
+    stray.status === 200 &&
+      stray.body?.["status"] === "skipped" &&
+      String(stray.body?.["reason"] ?? "").includes("is waiting on an answer"),
+    `status=${stray.status} body=${JSON.stringify(stray.body)}`,
+  );
+  if (card === undefined) {
+    throw new Error("no card: the reply checks prove nothing");
+  }
+  const QUESTION = "Which Postgres major does this target?";
+  const ANSWER = "Postgres 16.\n  Keep port 5442 \u2014 it is shared.  ";
+  const parkedBy = "person:linear-drive";
+  const parked = yield* boards.blockTask({
+    taskId: card.id,
+    expectedRevision: card.revision,
+    reason: "needs_input",
+    note: QUESTION,
+    actor: parkedBy,
+  });
+  // The thread the factory asked in is a row it keeps; the drive parks the card by hand, so it
+  // records that row itself. Another session's message on the issue is not the answer.
+  const db = new SQL(
+    process.env["DATABASE_URL"] ??
+      "postgres://factory:factory@localhost:5442/factory",
+  );
+  yield* Effect.promise(
+    () => db`
+      INSERT INTO linear_agent_sessions (issue_id, agent_session_id)
+      VALUES (${cardIssue.id}, ${`agent-session-${STAMP}`})
+      ON CONFLICT (issue_id) DO UPDATE SET agent_session_id = EXCLUDED.agent_session_id
+    `,
+  );
+  yield* Effect.promise(() => db.close());
+  const otherSession = yield* Effect.promise(() =>
+    deliver(
+      "reply-other-session",
+      agentReply(
+        cardIssue.id,
+        `act-${STAMP}-other`,
+        "chatter in a session Linear opened",
+        `agent-session-${STAMP}-delegated`,
+      ),
+    ),
+  );
+  const stillParked = yield* boards.getTask({ taskId: card.id });
+  const reply = agentReply(cardIssue.id, `act-${STAMP}-answer`, ANSWER);
+  const answered = yield* Effect.promise(() => deliver("reply-answers", reply));
+  const afterAnswer = yield* boards.getTask({ taskId: card.id });
+  const thread = yield* boards.listTaskComments({ taskId: card.id });
+  assert(
+    "a reply in the agent session is recorded verbatim as the card's answer, by trigger:linear, and lifts needs_input",
+    parked.blocked?.reason === "needs_input" &&
+      otherSession.body?.["status"] === "skipped" &&
+      String(otherSession.body?.["reason"] ?? "").includes("is not the one") &&
+      stillParked.blocked?.reason === "needs_input" &&
+      answered.status === 200 &&
+      answered.body?.["status"] === "processed" &&
+      answered.body?.["taskId"] === card.id &&
+      afterAnswer.blocked === undefined &&
+      thread.length === 1 &&
+      thread[0]?.kind === "answer" &&
+      thread[0].body === ANSWER &&
+      thread[0].actor === "trigger:linear",
+    `answer=${JSON.stringify(answered.body)} blocked=${JSON.stringify(afterAnswer.blocked ?? null)} thread=${JSON.stringify(thread)}`,
+  );
+  const redelivered = yield* Effect.promise(() =>
+    deliver("reply-redelivered", {
+      ...reply,
+      webhookTimestamp: Date.now() + 60_000,
+    }),
+  );
+  const second = yield* Effect.promise(() =>
+    deliver(
+      "reply-second",
+      agentReply(cardIssue.id, `act-${STAMP}-again`, "Actually 15."),
+    ),
+  );
+  assert(
+    "a redelivered reply is a replay and a second reply to an answered wait records nothing: the thread keeps one answer",
+    redelivered.body?.["replayed"] === true &&
+      redelivered.body?.["status"] === "processed" &&
+      second.body?.["status"] === "skipped" &&
+      (yield* boards.listTaskComments({ taskId: card.id })).length === 1,
+    `redelivered=${JSON.stringify(redelivered.body)} second=${JSON.stringify(second.body)}`,
+  );
+
   // 21: what an operator reads when a labelled issue started nothing.
   const deliveries = yield* recorded;
   // Found by this run's delivery id, not by the reason: the reason is the same on every run and the
@@ -715,14 +840,27 @@ const program = Effect.gen(function* () {
         `rule "factory" (env:TRIGGER_RULES[0]) mapped it to ${REPO}`,
     `row=${JSON.stringify(startedRow ?? null)}`,
   );
-  const cardRow = deliveries.find((row) => row.taskId === card?.id);
+  const cardRow = deliveries.find(
+    (row) =>
+      row.taskId === card?.id && row.reason === filedCard.body?.["reason"],
+  );
   assert(
     "a card rule's delivery names its card and no session",
     card !== undefined &&
       cardRow?.status === "processed" &&
-      cardRow.sessionId === undefined &&
-      cardRow.reason === filedCard.body?.["reason"],
+      cardRow.sessionId === undefined,
     `row=${JSON.stringify(cardRow ?? null)}`,
+  );
+  const replyRow = deliveries.find(
+    (row) => row.deliveryId === `linear:act-${STAMP}-answer:reply`,
+  );
+  assert(
+    "the reply that answered the card is a recorded delivery naming the card it answered",
+    replyRow?.status === "processed" &&
+      replyRow.source === "linear" &&
+      replyRow.taskId === card?.id &&
+      String(replyRow.reason ?? "").includes("lifted its needs_input block"),
+    `row=${JSON.stringify(replyRow ?? null)}`,
   );
   const skippedOnly = yield* routes.listTriggerDeliveries({
     status: "skipped",

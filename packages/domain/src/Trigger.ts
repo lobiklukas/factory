@@ -123,6 +123,22 @@ export const TriggerEvent = Schema.Struct({
    * issue does not import a backlog.
    */
   createdAt: Schema.optional(Schema.String),
+  /**
+   * The event is a person's answer to a question the factory asked in the source, not work to start
+   * (T5): a Linear agent session's `prompted` event, whose activity carries the reply's text. The
+   * seam routes it to the card the question parked rather than through the rules, and `key` is the
+   * issue it was left on.
+   */
+  reply: Schema.optional(
+    Schema.Struct({
+      /** The agent session the question was posted in; replies arrive on it. */
+      agentSessionId: Schema.String,
+      /** The reply's own id, which is what makes a redelivered reply one answer. */
+      activityId: Schema.String,
+      /** What the person wrote. The event is the record: nothing re-reads it from the source. */
+      body: Schema.String,
+    }),
+  ),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
 
@@ -360,6 +376,8 @@ export type TriggerOutcome = typeof TriggerOutcome.Type;
  * `author-check` (S-trigger-trust-gating) is a trust gate that could not ask the source whether the
  * author is trusted (GitHub's permission API did not answer): a "not yet", retried like `storage`,
  * never an admission.
+ * `tracker-read` (T5) is a source's own read the seam needed before it could decide — whether the
+ * issue's blockers are done — failing: the delivery is retried rather than started blind.
  */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
@@ -369,6 +387,7 @@ export const TriggerErrorCode = Schema.Literals([
   "at-capacity",
   "setup-failed",
   "author-check",
+  "tracker-read",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 

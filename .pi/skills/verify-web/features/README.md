@@ -17,7 +17,7 @@ card-pane checks over a synthetic definition (todo → doing → done, gated; ev
 reads the default card's expected moves from its pinned definition over the API. The run before it
 (2026-10-27, `agent/LOB-210`, 97/97) added LOB-210's five 390 px shell checks
 ([fork-lineage.md](fork-lineage.md)) and the refused id's back link ([routing.md](routing.md));
-`thread.sh` last passed 15/15 on the `agent/LOB-239` worktree). The one console error in
+`thread.sh` last passed 17/17 on the `agent/C24` worktree). The one console error in
 `drive.mjs` is the compaction block's injected 500 ([compaction.md](compaction.md)). An earlier run
 failed only the busy-compaction race named
 under Known gaps.

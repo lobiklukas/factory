@@ -60,6 +60,7 @@ import {
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
+  AskWriteBackLive,
   linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
@@ -805,6 +806,7 @@ const HttpLive = Effect.gen(function* () {
       Layer.mergeAll(
         SessionWriteBacksLive,
         ProposalTrackerLive,
+        AskWriteBackLive,
         PullRequestStepDeps,
       ),
     ),

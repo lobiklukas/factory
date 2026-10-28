@@ -331,6 +331,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Sentry receiver          | passing | [sentry.md](sentry.md)                       |
 | Sentry link-back         | passing | [sentry.md](sentry.md)                       |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
+| Linear questions (T5)    | passing | [linear-writeback.md](linear-writeback.md)   |
 | Approvals                | passing | [approvals.md](approvals.md)                 |
 | Curate a session's pages | passing | [curate.md](curate.md)                       |
 | A mission                | passing | [mission.md](mission.md)                     |

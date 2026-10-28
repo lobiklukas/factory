@@ -506,6 +506,40 @@ describe("interruptSession over RPC (C8)", () => {
   }, 120_000);
 });
 
+describe("setSessionBudget over RPC (C23)", () => {
+  it("commits a cap and reports the budget off the wire, and refuses an unknown session", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const created = yield* client.createSession({
+          title: "raise my cap",
+          budget: 1,
+        });
+        const raised = yield* client.setSessionBudget({
+          sessionId: created.id,
+          budget: 2.5,
+        });
+        const read = yield* client.getSession({ sessionId: created.id });
+        const missing = yield* failureOf(
+          client.setSessionBudget({
+            sessionId: "ses_00000000000000000000000000" as SessionId,
+            budget: 2,
+          }),
+        );
+        return { created, raised, read, missing };
+      }),
+    );
+
+    expect(outcome.raised.budget).toEqual({ cap: 2.5, spent: 0 });
+    expect(outcome.raised.session.id).toBe(outcome.created.id);
+    expect(outcome.raised.message).toContain("$2.5000");
+    expect(outcome.read.budget).toEqual({ cap: 2.5, spent: 0 });
+    expect(outcome.missing).toMatchObject({
+      _tag: "SessionError",
+      code: "not_found",
+    });
+  }, 120_000);
+});
+
 describe("proposeDecomposition over RPC (LOB-201)", () => {
   it("carries a session without a spec, and a refused proposal set, across the wire with their own tags", async () => {
     const outcome = await callApi((client) =>
