@@ -127,6 +127,7 @@ import type {
   OpenSession,
   RoleModels,
   RunColumn,
+  RepoContext,
   ReviewOptions,
   RunProfile,
   SessionRef,
@@ -280,6 +281,7 @@ import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
 import { forgeUrlFor, measureBaseOf, type RepoRemote } from "./RepoRemote";
 import { mintSessionId } from "./ids";
+import { readRepoContext } from "./repoContext";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
@@ -2090,6 +2092,42 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           });
         });
 
+      /**
+       * What a session's repository tells its run (S-repo-instructions-and-skills, `./repoContext`):
+       * its `AGENTS.md` and skills at `base`, the ref its `verify` measures against, so the run is told
+       * what the base it was cut from says. Only for a repository's own checkout that is still there:
+       * a scratch session, a released one, or a directory with no `.git` reads nothing, and so does a
+       * base that does not resolve. What it came to is said in the process's log — the prompt record
+       * itself is the open's to commit.
+       */
+      const repoContextFor = (
+        workspace: SessionWorkspace,
+        base: string | undefined,
+      ): Effect.Effect<RepoContext | undefined> =>
+        Effect.gen(function* () {
+          if (
+            workspace.repo === undefined ||
+            workspace.released !== undefined ||
+            base === undefined ||
+            base === ""
+          )
+            return undefined;
+          const checkout = yield* fs
+            .exists(path.join(workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) return undefined;
+          const context = yield* readRepoContext({
+            directory: workspace.path,
+            ref: base,
+          });
+          if (context === undefined) {
+            yield* Effect.logWarning(
+              `${workspace.path}: ${base} names no commit in the worktree, so the run is told nothing of the repository's AGENTS.md or skills`,
+            );
+          }
+          return context;
+        });
+
       /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
       const fetchedStartFor = (
         row: SessionRow,
@@ -2446,6 +2484,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         /** The cited pages the session's prompt carries (LOB-205), read at every acquisition. */
         readonly pages: readonly Page[];
         /**
+         * What the session's repository tells its runs (S-repo-instructions-and-skills): its
+         * `AGENTS.md` and skills at the base, read at every acquisition; absent for a scratch
+         * session, a released one, or a worktree whose base does not resolve.
+         */
+        readonly repo?: RepoContext;
+        /**
          * What the session's `verify` tool runs (LOB-78): the repo's declared command and the base
          * its changes are measured against, from the workspace resolved for this acquisition.
          */
@@ -2601,6 +2645,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // measure it against (C17): the base the worktree was cut from, which is the fetched
             // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
             const verifyBase = yield* verifyBaseFor(workspace);
+            // What the repository tells the run (S-repo-instructions-and-skills), read at that same
+            // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
+            // ran reaches its next run, and an edit the run made on its own branch does not.
+            const repoContext = yield* repoContextFor(workspace, verifyBase);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -2613,6 +2661,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               policy: policy.forWorktree(workspace.path, id),
               run,
               pages,
+              ...(repoContext === undefined ? {} : { repo: repoContext }),
               verify: {
                 command: workspace.commands.verify,
                 baseRef: verifyBase,
@@ -2761,6 +2810,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             policy: sessionPolicy,
             run,
             pages,
+            repo,
             verify,
             ask,
             thread,
@@ -2787,6 +2837,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : { sessionModel: acquisition.model }),
               cwd,
               pages,
+              ...(repo === undefined ? {} : { repo }),
               verify,
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
@@ -4228,7 +4279,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, pages, verify }) =>
+            ({ storage, cwd, policy: sessionPolicy, run, pages, repo, verify }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
                 (parentStorage) =>
@@ -4239,6 +4290,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     lineage: input.sessionId,
                     run,
                     pages,
+                    ...(repo === undefined ? {} : { repo }),
                     verify,
                     approvalAsker: askerFor(id),
                     ...(binding.repo === undefined ||
@@ -4339,7 +4391,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, verify }) =>
+            ({ storage, cwd, policy: sessionPolicy, run, repo, verify }) =>
               replaySession({
                 source: origin,
                 sourceId: input.sessionId,
@@ -4355,6 +4407,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   : { sandbox: options.sandbox }),
                 policy: sessionPolicy,
                 run,
+                ...(repo === undefined ? {} : { repo }),
                 verify,
                 approvalAsker: askerFor(id),
                 // A replay keeps its source's cap, at no spend; an uncapped source's replay gets

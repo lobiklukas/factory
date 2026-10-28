@@ -11,7 +11,7 @@
  * Two sections, measured the way pages are (`./pages`), with the estimator compaction uses:
  *
  * - **`repo_instructions`** is `AGENTS.md` verbatim under a one-line preamble, capped at
- *   `INSTRUCTIONS_TOKEN_CAP`. A longer file is cut at a line boundary and says so, naming the file,
+ *   `REPO_INSTRUCTIONS_TOKEN_CAP`. A longer file is cut at a line boundary and says so, naming the file,
  *   so a run that needs the rest reads it rather than acting on half a rule.
  * - **`repo_skills`** is an index, not the bodies: one line per skill with its name, its frontmatter
  *   description and its path, capped at `REPO_SKILLS_TOKEN_CAP`. The run reads a skill's `SKILL.md`
@@ -31,30 +31,30 @@ import { defineExtension, section } from "@earendil-works/pi-durable";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 
 /** The instructions section's key, and so its `<repo_instructions>` tag. */
-export const INSTRUCTIONS_SECTION_KEY = "repo_instructions";
+export const REPO_INSTRUCTIONS_SECTION_KEY = "repo_instructions";
 
 /** The skills index's key, and so its `<repo_skills>` tag. */
 export const REPO_SKILLS_SECTION_KEY = "repo_skills";
 
 /** The extensions the two sections are installed as, at different places in the prompt. */
-export const INSTRUCTIONS_EXTENSION = "factory.repo.instructions";
+export const REPO_INSTRUCTIONS_EXTENSION = "factory.repo.instructions";
 export const REPO_SKILLS_EXTENSION = "factory.repo.skills";
 
 /** The file a repository's standing instructions are read from, at the worktree's root. */
-export const INSTRUCTIONS_FILE = "AGENTS.md";
+export const REPO_INSTRUCTIONS_FILE = "AGENTS.md";
 
 /**
  * The token budget `AGENTS.md` may spend. About 16 KB of text: this repo's own file is a tenth of
  * it, and a file several times larger than that is a manual rather than a set of standing rules — it
  * is cut, and the run is told where the rest is.
  */
-export const INSTRUCTIONS_TOKEN_CAP = 4096;
+export const REPO_INSTRUCTIONS_TOKEN_CAP = 4096;
 
 /** The token budget of the skills index: dozens of one-line entries, never the bodies. */
 export const REPO_SKILLS_TOKEN_CAP = 1536;
 
 /** How much of one skill's description its index line carries, in characters. */
-export const SKILL_DESCRIPTION_CHARS = 300;
+export const REPO_SKILL_DESCRIPTION_CHARS = 300;
 
 /** `AGENTS.md` as the control plane read it from the repository. */
 export type RepoInstructions = {
@@ -159,14 +159,14 @@ const renderInstructions = (
       path,
       bytes,
       text: inner,
-      tokens: estimateTextTokens(tagged(INSTRUCTIONS_SECTION_KEY, inner)),
+      tokens: estimateTextTokens(tagged(REPO_INSTRUCTIONS_SECTION_KEY, inner)),
       truncated: true,
       cap,
     };
   }
   const whole = `${preamble}\n\n${text}`;
   const wholeTokens = estimateTextTokens(
-    tagged(INSTRUCTIONS_SECTION_KEY, whole),
+    tagged(REPO_INSTRUCTIONS_SECTION_KEY, whole),
   );
   if (wholeTokens <= cap) {
     return {
@@ -182,7 +182,7 @@ const renderInstructions = (
   const cutAt = (kept: number): string =>
     `${preamble}\n\n${lines.slice(0, kept).join("\n")}\n\n[${path} continues: this section carries its first ${kept} of ${lines.length} lines. Read ${path} for the rest before relying on what is missing here.]`;
   const fits = (kept: number): boolean =>
-    estimateTextTokens(tagged(INSTRUCTIONS_SECTION_KEY, cutAt(kept))) <= cap;
+    estimateTextTokens(tagged(REPO_INSTRUCTIONS_SECTION_KEY, cutAt(kept))) <= cap;
   let low = 0;
   let high = lines.length - 1;
   while (low < high) {
@@ -195,7 +195,7 @@ const renderInstructions = (
     path,
     bytes,
     text: inner,
-    tokens: estimateTextTokens(tagged(INSTRUCTIONS_SECTION_KEY, inner)),
+    tokens: estimateTextTokens(tagged(REPO_INSTRUCTIONS_SECTION_KEY, inner)),
     truncated: true,
     cap,
   };
@@ -207,12 +207,12 @@ const SKILLS_PREAMBLE =
   "the worktree root) before acting on it. A factory skill in this prompt is the one to follow " +
   "where the two disagree.";
 
-/** One description as an index line carries it: one line, at most `SKILL_DESCRIPTION_CHARS`. */
+/** One description as an index line carries it: one line, at most `REPO_SKILL_DESCRIPTION_CHARS`. */
 const oneLine = (description: string): string => {
   const flat = description.replaceAll(/\s+/g, " ").trim();
-  return flat.length <= SKILL_DESCRIPTION_CHARS
+  return flat.length <= REPO_SKILL_DESCRIPTION_CHARS
     ? flat
-    : `${flat.slice(0, SKILL_DESCRIPTION_CHARS - 1).trimEnd()}…`;
+    : `${flat.slice(0, REPO_SKILL_DESCRIPTION_CHARS - 1).trimEnd()}…`;
 };
 
 const skillLine = (skill: RepoSkill): string => {
@@ -232,7 +232,7 @@ export const assembleRepoPrompt = (
   context: RepoContext,
   factorySkills: readonly string[] = [],
   caps: { readonly instructions: number; readonly skills: number } = {
-    instructions: INSTRUCTIONS_TOKEN_CAP,
+    instructions: REPO_INSTRUCTIONS_TOKEN_CAP,
     skills: REPO_SKILLS_TOKEN_CAP,
   },
 ): RepoPrompt => {
@@ -287,19 +287,15 @@ export const assembleRepoPrompt = (
   };
 };
 
-/** Whether the prompt renders anything at all: a repo with neither file renders no section. */
-export const repoPromptRenders = (prompt: RepoPrompt): boolean =>
-  prompt.instructions !== undefined || prompt.skills.text !== undefined;
-
 /**
  * The instructions as an extension. Installed first, ahead of the column's skills, so the factory's
  * own text for the stage comes after — and reads as the more specific word — the repository's.
  */
-export const instructionsExtension = (prompt: RepoPrompt): Extension => {
+export const repoInstructionsExtension = (prompt: RepoPrompt): Extension => {
   const sections: PromptSection[] = [
-    section(INSTRUCTIONS_SECTION_KEY, () => prompt.instructions?.text),
+    section(REPO_INSTRUCTIONS_SECTION_KEY, () => prompt.instructions?.text),
   ];
-  return defineExtension({ name: INSTRUCTIONS_EXTENSION, sections });
+  return defineExtension({ name: REPO_INSTRUCTIONS_EXTENSION, sections });
 };
 
 /** The skills index as an extension, installed right after the column's skills it defers to. */
@@ -310,19 +306,25 @@ export const repoSkillsExtension = (prompt: RepoPrompt): Extension => {
   return defineExtension({ name: REPO_SKILLS_EXTENSION, sections });
 };
 
-/** What the two sections came to when a session opened, as the log records it. */
+/**
+ * What the two sections came to when a session opened, as the log records it (`RepoPromptDoc`):
+ * where the files were read, the instructions' size in the repository and in the prompt, and which
+ * skills the index named, dropped or deferred to the column's. Sizes and names, not the text: the
+ * text is the `pi.system` entry the sections were committed as, and a second copy here is one a
+ * reader could find disagreeing with the first.
+ */
 export type RepoPromptRecord = {
-  /** The ref and commit the files were read at; empty when this open read none. */
+  /** The ref and commit the files were read at. */
   readonly ref: string;
   readonly commit: string;
-  /** The instructions section, absent when none was rendered. */
-  readonly instructions?: {
+  /** The instructions section; `null` when none was rendered (no `AGENTS.md`, or an empty one). */
+  readonly instructions: {
     readonly path: string;
     readonly bytes: number;
     readonly tokens: number;
     readonly cap: number;
     readonly truncated: boolean;
-  };
+  } | null;
   readonly skills: {
     readonly tokens: number;
     readonly cap: number;
@@ -332,31 +334,25 @@ export type RepoPromptRecord = {
   };
 };
 
-/** The record of an open, from the prompt it rendered (or none, for an open that read nothing). */
-export const repoPromptRecord = (
-  prompt: RepoPrompt | undefined,
-): RepoPromptRecord => ({
-  ref: prompt?.ref ?? "",
-  commit: prompt?.commit ?? "",
-  ...(prompt?.instructions === undefined
-    ? {}
-    : {
-        instructions: {
+/** The record of an open, from the prompt it rendered. */
+export const repoPromptRecord = (prompt: RepoPrompt): RepoPromptRecord => ({
+  ref: prompt.ref,
+  commit: prompt.commit,
+  instructions:
+    prompt.instructions === undefined
+      ? null
+      : {
           path: prompt.instructions.path,
           bytes: prompt.instructions.bytes,
           tokens: prompt.instructions.tokens,
           cap: prompt.instructions.cap,
           truncated: prompt.instructions.truncated,
         },
-      }),
   skills: {
-    tokens: prompt?.skills.tokens ?? 0,
-    cap: prompt?.skills.cap ?? REPO_SKILLS_TOKEN_CAP,
-    listed: (prompt?.skills.listed ?? []).map(({ name, path }) => ({
-      name,
-      path,
-    })),
-    dropped: [...(prompt?.skills.dropped ?? [])],
-    shadowed: [...(prompt?.skills.shadowed ?? [])],
+    tokens: prompt.skills.tokens,
+    cap: prompt.skills.cap,
+    listed: prompt.skills.listed.map(({ name, path }) => ({ name, path })),
+    dropped: [...prompt.skills.dropped],
+    shadowed: [...prompt.skills.shadowed],
   },
 });

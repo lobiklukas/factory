@@ -21,6 +21,7 @@ export const REVIEW_DOC_KIND = "factory.review";
 export const APPROVALS_DOC_KIND = "factory.approvals";
 export const PLAN_REVISIONS_DOC_KIND = "factory.planRevisions";
 export const SKILLS_DOC_KIND = "factory.skills";
+export const REPO_PROMPT_DOC_KIND = "factory.repo.prompt";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -204,6 +205,44 @@ export const SkillPinsDoc = defineDoc({
   fork: "current",
   initial: () => ({
     skills: [] as Array<{ name: string; version: number }>,
+  }),
+});
+
+/**
+ * What the repository told the session's last open (S-repo-instructions-and-skills, `./repoContext`):
+ * the ref and commit its `AGENTS.md` and skills were read at, the instructions' size in bytes and in
+ * prompt tokens (and whether the cap cut them), and the skills the index listed, dropped for the
+ * budget, or left to the column's own skill of the same name.
+ *
+ * Written by every open of a session on a repository checkout, in the open's one commit, so "what did
+ * this run's repo tell it, and what did that cost" is a read rather than a reconstruction; a
+ * scratch session, which has no repository, never writes it. `instructions` is `null` for a repo with
+ * no `AGENTS.md`, which is the record of the absence. `skills.cap` is the sentinel: the seed's `0`
+ * says no open recorded one.
+ */
+export const RepoPromptDoc = defineDoc({
+  kind: REPO_PROMPT_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    ref: "",
+    commit: "",
+    instructions: null as {
+      path: string;
+      bytes: number;
+      tokens: number;
+      cap: number;
+      truncated: boolean;
+    } | null,
+    skills: {
+      tokens: 0,
+      cap: 0,
+      listed: [] as Array<{ name: string; path: string }>,
+      dropped: [] as string[],
+      shadowed: [] as string[],
+    },
   }),
 });
 
