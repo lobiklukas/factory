@@ -255,8 +255,9 @@ the call was recorded, so a resumed older run's later call counts; a newest call
 `canceled` is never gated. Since LOB-240 `building`'s `non_empty_diff` and `pr_link` are checked too,
 on every version (all of them declare both): the card's latest run's branch must change at least one
 file against its base, measured as the PR step measures it (`git diff --numstat base...head`, LOB-196),
-and that run's log must record a PR (`factory.pr`, LOB-177) — so a card cannot leave `building` with no
-change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
+and the card must have a PR from that branch (`factory.pr`, LOB-177: the latest run's, or since C19 an
+earlier run's whose head is the branch the latest run continues) — so a card cannot leave `building`
+with no change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
 
@@ -277,6 +278,21 @@ diff over the cap, a remote branch the push may not overwrite, a failure — say
 next run is told; a later settle at the same commit an even branch was found at is not stepped again.
 The PR opens at the first settle that finds a change: commits a later run of the same session makes
 are not pushed by a later settle yet (the step answers `already-open` without pushing), a follow-up.
+
+Built (C19): a card's runs share one branch and one PR (`packages/core/src/cardBranch.ts`). The card's
+branch is its first change run's — a run started in a column that requires `pr_link` or
+`non_empty_diff` — for as long as an unreleased run of the card is bound to it; a run of an earlier
+column (a specifier, a planner) keeps a branch of its own. Every later run of the card is bound to the
+card's branch by name (LOB-197), on the base it was cut from, so a second building run and a run in
+`review` start from the change the first building run made. Git checks a branch out in one worktree
+at a time, so the newest run's worktree takes it over and the earlier run's is left on a detached
+HEAD at the commit it was on, its files and uncommitted edits untouched; an earlier run still going
+when a later one starts commits off the branch from then on (a board that must never run two at once
+caps `task` at 1). A later run's PR step, finding no PR in its own log, adopts the PR an earlier run of
+the card recorded on the same head and base (unmerged): it is measured, capped and pushed as an open
+is — so its commits reach the PR — but GitHub is asked for nothing, the card's PR is recorded in its
+log, and the answer is `already-open`. A workspace release keeps a branch another unreleased session
+is bound to, so discarding one run never deletes the branch the others work on.
 
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
 declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or

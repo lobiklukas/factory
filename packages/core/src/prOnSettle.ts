@@ -34,7 +34,10 @@
  * The PR opens at the first settle that finds a change. A later run of the same session — a steered
  * trigger session, a building run sent on — that commits more is not pushed by a later settle: the
  * step answers `already-open` for a recorded PR without pushing (C17's push is the first open's).
- * Pushing a recorded PR's new head on settle is a follow-up.
+ * Pushing a recorded PR's new head on settle is a follow-up. A *later run of the card* is another
+ * session on the card's branch (C19, `./cardBranch`): it has no PR recorded yet, so its settle takes
+ * the step, which adopts the card's PR — measured, capped and pushed, answered `already-open` — rather
+ * than opening a second one.
  *
  * A session with no repo, a PR already recorded, or a released workspace has nothing to open, and a
  * working directory that is not its own checkout (a bare slug's plain directory, `diffSize`) is

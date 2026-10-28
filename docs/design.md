@@ -224,6 +224,13 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (C19):_ a card's runs are one change, so they share one branch and one PR. The card's first
+run in a column that asks for the change (`pr_link` or `non_empty_diff`, B4's `building`) cuts
+`factory/<its session-id>`; every later run of the card — a second building run, a run in `review` —
+is bound to that branch by name, and the newest run's worktree takes it over (the earlier one is left
+on a detached HEAD, its files intact). A later run's PR step adopts the PR an earlier run opened from
+the branch — measured, capped and pushed as an open is, but answered `already-open` with no second
+PR — and a branch is torn down only with the last workspace bound to it.
 
 ### D11 — Autonomy: the branch is the boundary
 
