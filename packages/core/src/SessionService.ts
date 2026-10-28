@@ -413,9 +413,11 @@ export type SessionServiceShape = {
    *
    * A run in flight is interrupted and the owner released first, so nothing is writing into the
    * directory while it goes. The release is recorded on the session before the filesystem is
-   * touched, and from then on a read resolves the workspace without cutting a new one and `send`,
-   * `reset` and `startMission` are refused. Idempotent: a repeat answers `first: false` with the
-   * first call's reason, and still finishes a teardown a crash cut short.
+   * touched, and from then on no owner acquisition cuts the worktree again and `send`, `reset` and
+   * `startMission` are refused — both decided from the release read under the owners' gate, so a
+   * caller that read the session just before the release is refused too. A read never cuts a
+   * worktree. Idempotent: a repeat answers `first: false` with the first call's reason, and still
+   * finishes a teardown a crash cut short.
    */
   readonly releaseWorkspace: (input: {
     readonly sessionId: SessionId;
@@ -1107,18 +1109,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
-       * The session's workspace. A released one (LOB-268) resolves where it was without cutting it
-       * again, and says so; `released` is passed by a caller that has just read it under the gate.
+       * The session's workspace. A released one (LOB-268) says so, and resolves where it was.
+       *
+       * `cut` is whether a missing worktree is cut, and only the owner's acquisition asks for it,
+       * with the release it has just re-read under the owners' gate: a read has no use for a
+       * worktree, and a read that cut one from a row read before a release committed would leave a
+       * fresh worktree and branch nothing sweeps. `released`, when given, replaces the row's.
        */
       const workspaceFor = (
         row: SessionRow,
-        released?: WorkspaceRelease,
+        resolution: {
+          readonly cut: boolean;
+          readonly released?: WorkspaceRelease | undefined;
+        },
       ): Effect.Effect<SessionWorkspace, SessionError> =>
         Effect.gen(function* () {
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
           const localPath = yield* localPathFor(repo);
-          const release = released ?? (yield* releaseOf(row));
+          const release = resolution.cut
+            ? resolution.released
+            : (resolution.released ?? (yield* releaseOf(row)));
           const workspace = yield* resolveWorkspace(
             {
               sessionRoot: options.sessionRoot,
@@ -1127,7 +1138,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: row.baseRef ?? undefined,
               ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
-              cut: release === undefined,
+              cut: resolution.cut && release === undefined,
             },
             { fs, path },
           ).pipe(
@@ -1145,9 +1156,19 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
-       * Refuse to start work on a session whose workspace was torn down (LOB-268): the branch is gone,
+       * Why a session whose workspace was torn down takes no new run (LOB-268): the branch is gone,
        * and a run there would start over on an empty one at the base. Reads, approvals, pages and
        * the curator still reach it; a new run is a new session.
+       */
+      const releasedError = (id: string, release: WorkspaceRelease) =>
+        new SessionErrorClass({
+          code: "invalid_input",
+          message: `session ${id} is finished: its workspace was released (${release.reason}) at ${release.at}, so it takes no new run`,
+        });
+
+      /**
+       * Refuse early, from a row already read — `startMission`, before it polices its checks. The
+       * check that holds is `acquireOwner`'s `starts`, made under the gate.
        */
       const refuseReleased = (
         row: SessionRow,
@@ -1155,10 +1176,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const release = yield* releaseOf(row);
           if (release === undefined) return;
-          return yield* new SessionErrorClass({
-            code: "invalid_input",
-            message: `session ${row.id} is finished: its workspace was released (${release.reason}) at ${release.at}, so it takes no new run`,
-          });
+          return yield* releasedError(row.id, release);
         });
 
       const localPathFor = (
@@ -1263,6 +1281,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly review?: ReviewOptions;
       }) => Effect.Effect<OpenSession, SessionError>;
 
+      /** What an owner acquisition is for (`acquireOwnerWith`). */
+      type OwnerAcquisition = {
+        readonly reviewing?: boolean;
+        readonly starts?: boolean;
+      };
+
       /**
        * Open this process's owner of one session, or return the one already open.
        *
@@ -1273,12 +1297,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * `reviewing` says the session is a review run before its log can (LOB-36): `create` opens the
        * owner before it commits the review target, and the run's read-only stage and tool filter are
        * pinned at that first open. Every later acquisition reads it from the log's `factory.review`.
+       *
+       * `starts` says the caller is about to start work (`send`, `reset`, `startMission`): on a
+       * session whose workspace was released (LOB-268) it is refused, from the release read under
+       * the gate, rather than handed a directory-less owner to prompt.
        */
       const acquireOwnerWith = (
         id: SessionId,
         row: SessionRow,
         open: OwnerOpening,
-        reviewing = false,
+        acquisition: OwnerAcquisition = {},
       ): Effect.Effect<LiveOwner, SessionError> =>
         gate.withPermits(1)(
           Effect.gen(function* () {
@@ -1296,7 +1324,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // (LOB-268). A released session still opens — its log takes approvals, pages and a
             // curator's charge — but in no directory, because there is none to work in.
             const released = yield* releaseOf(yield* requireSession(id));
-            const workspace = yield* workspaceFor(row, released);
+            if (released !== undefined && acquisition.starts === true) {
+              return yield* releasedError(id, released);
+            }
+            const workspace = yield* workspaceFor(row, {
+              cut: released === undefined,
+              released,
+            });
             if (released === undefined) {
               yield* Effect.mapError(
                 fs.makeDirectory(workspace.path, { recursive: true }),
@@ -1315,7 +1349,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const column = yield* runProfileFor(id);
             // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
             const reviews =
-              reviewing ||
+              acquisition.reviewing === true ||
               (yield* readRecordedReview(storage).pipe(
                 Effect.tapError(() => Effect.promise(() => storage.dispose())),
               )) !== undefined;
@@ -1383,7 +1417,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const acquireOwner = (
         id: SessionId,
         row: SessionRow,
-        reviewing = false,
+        acquisition: OwnerAcquisition = {},
       ): Effect.Effect<LiveOwner, SessionError> =>
         acquireOwnerWith(
           id,
@@ -1427,7 +1461,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               policy: sessionPolicy,
               run,
             }),
-          reviewing,
+          acquisition,
         );
 
       const describe = (
@@ -1466,7 +1500,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
           if (row.repo === null) return;
-          const owner = yield* acquireOwner(id, row, true);
+          const owner = yield* acquireOwner(id, row, { reviewing: true });
           const recorded = yield* readRecordedReview(owner.storage);
           if (recorded !== undefined) return;
           yield* writeReviewTarget(owner.root, { repo: row.repo, ...review });
@@ -1543,11 +1577,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   ON CONFLICT (session_id) DO NOTHING`,
             );
           }
-          const owner = yield* acquireOwner(
-            id,
-            row,
-            input.review !== undefined,
-          );
+          const owner = yield* acquireOwner(id, row, {
+            reviewing: input.review !== undefined,
+          });
           if (input.review !== undefined && binding.repo !== undefined) {
             // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
             // it is the first: a reopen reads the read-only stage from it alone, so no other write
@@ -1609,7 +1641,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               refOf(sessionId, row, owner.value.workspace),
             );
           }
-          const workspace = yield* workspaceFor(row);
+          const workspace = yield* workspaceFor(row, { cut: false });
           // A fold is also where a replay whose run settled with no comparison written (the process
           // stopped first) is noticed: nobody may open its owner again (LOB-199).
           yield* armComparison(sessionId);
@@ -1630,8 +1662,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
 
           const row = yield* requireSession(input.sessionId);
-          yield* refuseReleased(row);
-          const owner = yield* acquireOwner(input.sessionId, row);
+          // A released session is refused by the acquisition, from the release it reads under the
+          // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            starts: true,
+          });
 
           // The first message names the session when nothing else has.
           const title =
@@ -2193,9 +2228,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
-          yield* refuseReleased(row);
           const handoff = input.handoff?.trim();
-          const owner = yield* acquireOwner(input.sessionId, row);
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            starts: true,
+          });
           yield* resetSession(
             owner.root,
             handoff === undefined || handoff === "" ? undefined : handoff,
@@ -2320,13 +2356,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
-          const workspace = yield* workspaceFor(row);
-          yield* refuseUnpolicedChecks(
-            input.sessionId,
-            workspace.path,
-            workers,
-          );
-          const owner = yield* acquireOwner(input.sessionId, row);
+          // The checks are policed against the worktree's path, which needs no worktree: the one the
+          // mission runs in is the owner's, cut under the gate.
+          const planned = yield* workspaceFor(row, { cut: false });
+          yield* refuseUnpolicedChecks(input.sessionId, planned.path, workers);
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            starts: true,
+          });
+          // Resolved again now the owner's worktree exists, so the commands are the ones it holds.
+          const workspace = yield* workspaceFor(row, { cut: false });
           const taskId = yield* beginMission(owner, {
             feature,
             workspace: {
@@ -3424,7 +3462,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }
             // Nobody owns it: fold once, send the snapshot, and end the stream, so a client can
             // tell a completed fold from a dropped connection (D8).
-            const workspace = yield* workspaceFor(row);
+            const workspace = yield* workspaceFor(row, { cut: false });
             // As `get` does: a fold notices a replay still owed its comparison (LOB-199).
             yield* armComparison(sessionId);
             const snapshot = yield* withReader(sessionId, (storage) =>
@@ -3534,7 +3572,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* releaseOwner(input.sessionId, owner.value);
           }
           // Every time, not only the first: a teardown a crash cut short is finished by the repeat.
-          const workspace = yield* workspaceFor(row, release);
+          const workspace = yield* workspaceFor(row, {
+            cut: false,
+            released: release,
+          });
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
           yield* removeWorkspace(

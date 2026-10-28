@@ -2,9 +2,9 @@
  * Rebuilding the index tables from the log (docs/design.md D7, docs/features.md §3 A2).
  *
  * `sessions`, `session_activity`, and `repos` are derived: every column in them is a fold of
- * `commits` plus the session id, so losing any of them costs timeliness, not truth. This module is
- * the proof of that, and the recovery path: it folds every log the `commits` table holds and
- * rewrites the three indexes to match.
+ * `commits` plus the session id — but for the few listed below — so losing any of them costs
+ * timeliness, not truth. This module is the proof of that, and the recovery path: it folds every
+ * log the `commits` table holds and rewrites the three indexes to match.
  *
  * Only logs whose id is a session id are indexed: the `commits` table is shared with Pi Durable
  * logs that are not sessions (the harness suite's fixtures, the M0 spike), and a session index row
@@ -15,6 +15,13 @@
  * - `repos.url` and `repos.local_path` — operator input. A slug a log names is added with no URL,
  *   an already-registered slug keeps what it has.
  * - `sessions.request_id` — the client's deduplication key, which was never committed.
+ * - `sessions.workspace_released_at` and `workspace_release_reason` (LOB-268) — that a terminal event
+ *   tore the session's worktree and branch down. It is a fact about the filesystem, done outside any
+ *   log, so the fold cannot recover it: the upsert never writes these columns, so a rebuild over
+ *   existing rows keeps them. Dropping the `sessions` table is the one repair that loses them — every
+ *   released session would read as unreleased, cut a fresh worktree at its base on its next owner
+ *   acquisition, and take a new run. That is the exception to D7's "droppable" recorded in
+ *   `docs/design.md`.
  *
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the

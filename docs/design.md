@@ -126,6 +126,16 @@ as a `factory.title` entry, so dropping the table loses nothing but the index. A
 `ses_` + ten Crockford base32 characters of millisecond timestamp + sixteen of randomness: one
 identifier that is a `log_id`, a URL segment, and a git branch (D10).
 
+_As built (LOB-268): one exception to "droppable"._ `sessions.workspace_released_at` and
+`workspace_release_reason` record that a terminal event (the card's `done` or `canceled`, the PR's
+merge, an operator's discard) tore the session's worktree and branch down. That is a fact about the
+filesystem, not about the log, so `rebuildIndexes` cannot refold it; it leaves the columns alone, so a
+rebuild over existing rows keeps them, but dropping the `sessions` table loses them, and every released
+session would then cut a fresh worktree at its base and take a new run. Kept on `sessions` rather than
+in a table of its own because it is read on every owner acquisition beside the rest of the row; if
+this table is ever dropped as a repair, the releases are to be re-derived from the cards in a terminal
+column, the merged PRs and the absent `factory/<id>` branches first.
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.

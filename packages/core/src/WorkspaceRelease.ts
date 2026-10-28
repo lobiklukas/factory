@@ -8,8 +8,10 @@
  *   the move's consequence and never its gate — a teardown that fails is logged, and the card is
  *   still where the person put it.
  * - **The PR merges**: every session whose recorded PR (`sessions.pr_url`, LOB-177) is the merged
- *   one is released as `merged`. An unmerged close is not terminal — the card may still reopen it or
- *   open another — so it releases nothing.
+ *   one is released as `merged`, and so is every reviewer run of that PR (LOB-36: one per head, on
+ *   `factory/review-<number>-<sha12>` in the same repo), which records the PR as its review target
+ *   rather than as a PR of its own. An unmerged close is not terminal — the card may still reopen
+ *   it or open another — so it releases nothing.
  * - **An operator discards a session**: `discardSession` over RPC (`factory discard`), which calls
  *   `releaseWorkspace` directly.
  *
@@ -30,8 +32,10 @@ import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { isTerminalColumn, type Task } from "@repo/domain/Task";
 import {
   githubPullRequestLifecycle,
+  refuseGitHubDelivery,
   type PullRequestLifecycle,
 } from "./LinearSync";
+import { REVIEW_BRANCH_PREFIX } from "./ReviewTrigger";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 
@@ -93,9 +97,9 @@ export const releaseFinishedCard = (
   });
 
 /**
- * Release the workspaces of the sessions that opened a PR that merged. Answers how many sessions
- * this call released — a redelivered merge finds them released already and answers `0` — and
- * anything but a merge releases none.
+ * Release the workspaces of the sessions that opened a PR that merged, and of the reviewer runs
+ * that reviewed it. Answers how many sessions this call released — a redelivered merge finds them
+ * released already and answers `0` — and anything but a merge releases none.
  */
 export const releaseMergedPullRequest = (
   event: PullRequestLifecycle,
@@ -104,10 +108,21 @@ export const releaseMergedPullRequest = (
     if (event._tag !== "merged") return 0;
     const sql = yield* SqlClient;
     // Matched as the Linear mirror matches them (`syncPullRequestLifecycle`): by the PR's page, or
-    // by its API resource for a session whose PR predates the step recording the page.
+    // by its API resource for a session whose PR predates the step recording the page. A reviewer
+    // run is matched by its branch, which names the PR's number, in the repo of a session that
+    // opened the PR: the review trigger reviews only a PR the factory opened (`ReviewTrigger.ts`).
+    const reviewBranches = `${REVIEW_BRANCH_PREFIX}${event.pr.number}-%`;
     const rows = yield* sql<{ readonly id: string }>`
-      SELECT id FROM sessions
-      WHERE pr_url = ${event.pr.url} OR pr_url = ${event.apiUrl ?? event.pr.url}
+      WITH opened AS (
+        SELECT id, repo FROM sessions
+        WHERE pr_url = ${event.pr.url} OR pr_url = ${event.apiUrl ?? event.pr.url}
+      )
+      SELECT id FROM opened
+      UNION
+      SELECT reviewer.id FROM sessions AS reviewer
+      WHERE reviewer.branch LIKE ${reviewBranches}
+        AND reviewer.repo IN (SELECT repo FROM opened WHERE repo IS NOT NULL)
+      ORDER BY id
     `.pipe(
       Effect.catch((error) =>
         Effect.as(
@@ -130,14 +145,19 @@ export const releaseMergedPullRequest = (
 const JsonBody = Schema.fromJsonString(Schema.Unknown);
 
 /**
- * The same, from a GitHub `pull_request` delivery's raw body. The caller has already checked the
- * delivery's signature: this is what `POST /webhooks/github` runs after the mirror accepted it.
+ * The same, from one GitHub `pull_request` delivery, as `POST /webhooks/github` receives it. The
+ * delivery's signature is checked here, so nothing unsigned tears anything down, and nothing else
+ * gates it: a merge releases its sessions whatever the Linear mirror of the same delivery answered,
+ * because GitHub does not redeliver a failed delivery on its own.
  */
-export const releaseMergedDelivery = (
-  raw: string,
-): Effect.Effect<number, never, SessionService | SqlClient> =>
+export const releaseMergedDelivery = (input: {
+  readonly secret: string | undefined;
+  readonly raw: string;
+  readonly signature: string | undefined;
+}): Effect.Effect<number, never, SessionService | SqlClient> =>
   Effect.gen(function* () {
-    const payload = yield* Schema.decodeEffect(JsonBody)(raw).pipe(
+    if (refuseGitHubDelivery(input) !== undefined) return 0;
+    const payload = yield* Schema.decodeEffect(JsonBody)(input.raw).pipe(
       Effect.orElseSucceed(() => undefined),
     );
     const lifecycle = githubPullRequestLifecycle(payload);

@@ -154,14 +154,17 @@ export const resolveWorkspace = (
             const parent = deps.path.dirname(directory);
             execSync(`mkdir -p ${JSON.stringify(parent)}`);
             // A worktree whose directory went missing is still registered, and git refuses to
-            // check its branch out a second time until the registration is pruned.
+            // check its branch out a second time until that registration is cleared. Only this
+            // path's is: a bare `git worktree prune` would clear every stale registration in the
+            // operator's checkout, theirs included (a worktree on an unmounted volume, say).
             try {
-              execSync("git worktree prune", {
-                cwd: input.localPath,
-                stdio: "ignore",
-              });
+              execFileSync(
+                "git",
+                ["worktree", "remove", "--force", directory],
+                { cwd: input.localPath, stdio: "ignore" },
+              );
             } catch {
-              // nothing to prune
+              // not registered: nothing to clear
             }
             // Reuse the session's branch when it exists — the idle sweep and a restart leave it,
             // with the run's commits on it (LOB-268) — otherwise create it at the base ref.
@@ -264,7 +267,10 @@ export const removeWorkspace = (
       .remove(input.directory, { recursive: true, force: true })
       .pipe(Effect.ignore);
     if (checkout !== undefined) {
-      yield* git(checkout, "worktree", "prune");
+      // The registration `worktree remove` left when the directory was already gone, or when it
+      // failed: removed by path, never by a bare `worktree prune`, which would clear every stale
+      // registration in the operator's checkout and not only this session's.
+      yield* git(checkout, "worktree", "remove", "--force", input.directory);
       if (input.branch !== undefined) {
         yield* git(checkout, "branch", "-D", input.branch);
       }

@@ -36,6 +36,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -63,6 +64,7 @@ import type {
   SpendReport,
 } from "@repo/domain/Session";
 import {
+  BranchName,
   RepoSlug as RepoSlugSchema,
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
@@ -9895,7 +9897,24 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
           const refused = yield* sessions
             .send({ sessionId: work.id, content: "more" })
             .pipe(Effect.flip);
-          return { work, first, gone, repeat, read, afterRead, refused };
+          const resetRefused = yield* sessions
+            .reset({ sessionId: work.id })
+            .pipe(Effect.flip);
+          const afterRefusals = {
+            directory: existsSync(work.path),
+            branch: branchSha(work.branch),
+          };
+          return {
+            work,
+            first,
+            gone,
+            repeat,
+            read,
+            afterRead,
+            refused,
+            resetRefused,
+            afterRefusals,
+          };
         }),
       );
       expect(outcome.first.first).toBe(true);
@@ -9910,6 +9929,49 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
       expect(outcome.afterRead.branch).toBeUndefined();
       expect(outcome.refused.code).toBe("invalid_input");
       expect(outcome.refused.message).toContain("discarded");
+      expect(outcome.resetRefused.code).toBe("invalid_input");
+      // A refused run cut nothing back on the way to its refusal.
+      expect(outcome.afterRefusals).toEqual({
+        directory: false,
+        branch: undefined,
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("never cuts a worktree on a read, and touches no other registration when the owner cuts one back", async () => {
+    const runtime = keptRuntime();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          // An operator's own worktree whose directory went missing (an unmounted volume, say):
+          // registered, prunable, and not the factory's to clear.
+          const theirs = join(keptRepoRoot, "..", `theirs-${work.id}`);
+          git(
+            keptRepoRoot,
+            `git worktree add -q -b theirs-${work.id} ${theirs}`,
+          );
+          rmSync(theirs, { recursive: true, force: true });
+          // The session's worktree goes missing while nobody owns it.
+          yield* sessions.close;
+          rmSync(work.path, { recursive: true, force: true });
+          yield* sessions.get(work.id);
+          yield* Stream.runDrain(sessions.events(work.id));
+          const afterReads = existsSync(work.path);
+          // The next run's owner cuts it back on the branch, with the commit on it.
+          const seen = yield* nextRunSees(work.id);
+          yield* sessions.close;
+          const listed = git(keptRepoRoot, "git worktree list --porcelain");
+          return { work, theirs, afterReads, seen, listed };
+        }),
+      );
+      expect(outcome.afterReads).toBe(false);
+      expect(outcome.seen).toContain(SUBJECT);
+      expect(existsSync(outcome.work.path)).toBe(true);
+      expect(outcome.listed).toContain(`theirs-${outcome.work.id}`);
     } finally {
       await runtime.dispose();
     }
@@ -10020,6 +10082,24 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
             url: `https://github.com/${keptRepo}/pull/7`,
           };
           yield* sql`UPDATE sessions SET pr_url = ${pr.url} WHERE id = ${work.id}`;
+          // The PR's reviewer run (LOB-36), which names the PR in its branch rather than in pr_url,
+          // and another PR's, which this merge must leave alone.
+          const sessions = yield* SessionService;
+          const reviewOf = (number: number) =>
+            Effect.gen(function* () {
+              const created = yield* sessions.create({
+                title: `review #${number}`,
+                repo: keptRepo,
+                baseRef: "main",
+                branch: BranchName.make(
+                  `factory/review-${number}-0123456789ab`,
+                ),
+              });
+              const workspace = (yield* sessions.get(created.id)).workspace;
+              return { path: workspace.path, branch: workspace.branch ?? "" };
+            });
+          const reviewer = yield* reviewOf(7);
+          const otherReviewer = yield* reviewOf(70);
           const closed = yield* releaseMergedPullRequest({
             _tag: "closed",
             pr,
@@ -10033,14 +10113,27 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
             _tag: "merged",
             pr,
           });
-          return { work, closed, keptWhileClosed, merged, redelivered };
+          return {
+            work,
+            reviewer,
+            otherReviewer,
+            closed,
+            keptWhileClosed,
+            merged,
+            redelivered,
+          };
         }),
       );
       expect(outcome.closed).toBe(0);
       expect(outcome.keptWhileClosed).toBe(outcome.work.sha);
-      expect(outcome.merged).toBe(1);
+      expect(outcome.merged).toBe(2);
       expect(existsSync(outcome.work.path)).toBe(false);
       expect(branchSha(outcome.work.branch)).toBeUndefined();
+      expect(existsSync(outcome.reviewer.path)).toBe(false);
+      expect(branchSha(outcome.reviewer.branch)).toBeUndefined();
+      // `factory/review-70-…` starts with `factory/review-7`, and is still another PR's.
+      expect(existsSync(outcome.otherReviewer.path)).toBe(true);
+      expect(branchSha(outcome.otherReviewer.branch)).toBeDefined();
       expect(outcome.redelivered).toBe(0);
     } finally {
       await runtime.dispose();

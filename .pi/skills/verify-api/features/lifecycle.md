@@ -35,7 +35,10 @@ discard answers `first: false` with the first's time, and the session reads back
 _next run's tool calls_ see the commit — after the idle sweep and after a restart — is
 `packages/core`'s claim (`SessionService.test.ts`, "a session's workspace outlives its owner"),
 because the faux resumed turn here replies without calling a tool. The card's `done`/`canceled` and
-the PR's merge are proven there and in `apps/api/src/Rpc/Session.test.ts`.
+the PR's merge are proven there, the card's cancel and the discard over RPC in
+`apps/api/src/Rpc/Session.test.ts`, the merge's route wiring — a merge tears down even when the
+Linear mirror fails — in `apps/api/src/Api/GitHubWebhook.test.ts`, and the discard from the CLI by
+verify-cli's `./discard.sh`.
 
 **What it does not prove.** That the interrupted _tool call_ itself resumed — the resumed turn is a
 new turn. Pi Durable's abort/replay behavior under a harder kill (`SIGKILL`, a machine loss) is
