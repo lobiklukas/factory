@@ -95,7 +95,8 @@ export const projectTask = (
             ? undefined
             : {
                 ...card.blocked,
-                column: event.mapping[card.blocked.column] ?? card.blocked.column,
+                column:
+                  event.mapping[card.blocked.column] ?? card.blocked.column,
               };
         card = {
           ...card,

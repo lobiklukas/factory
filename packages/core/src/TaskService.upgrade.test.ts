@@ -243,15 +243,24 @@ describe("TaskService.upgradeBoard", () => {
     expect(upgraded.fromVersion).toBe(1);
     expect(upgraded.repinned).toEqual([]);
     expect(upgraded.unmigrated).toBe(1);
-    expect((await withService((s) => s.getBoard(boardId))).definition.version).toBe(2);
+    expect(
+      (await withService((s) => s.getBoard(boardId))).definition.version,
+    ).toBe(2);
 
     // The old card is untouched: same version, revision and history, and v1's moves.
     const kept = await withService((s) => s.get(old.id));
     expect(kept).toMatchObject({ definitionVersion: 1, revision: 1 });
     expect(
-      (await refusal((s) =>
-        s.move({ taskId: old.id, expectedRevision: 1, to: "review", actor: LUKAS }),
-      ))._tag,
+      (
+        await refusal((s) =>
+          s.move({
+            taskId: old.id,
+            expectedRevision: 1,
+            to: "review",
+            actor: LUKAS,
+          }),
+        )
+      )._tag,
     ).toBe("UndeclaredTransition");
     expect((await move(kept, "doing")).column).toBe("doing");
 
@@ -259,9 +268,16 @@ describe("TaskService.upgradeBoard", () => {
     const fresh = await card(boardId, "new");
     expect(fresh.definitionVersion).toBe(2);
     expect(
-      (await refusal((s) =>
-        s.move({ taskId: fresh.id, expectedRevision: 1, to: "doing", actor: LUKAS }),
-      ))._tag,
+      (
+        await refusal((s) =>
+          s.move({
+            taskId: fresh.id,
+            expectedRevision: 1,
+            to: "doing",
+            actor: LUKAS,
+          }),
+        )
+      )._tag,
     ).toBe("UndeclaredTransition");
     expect((await move(fresh, "review")).column).toBe("review");
   });
@@ -289,19 +305,45 @@ describe("TaskService.upgradeBoard", () => {
   it("refuses a version that is not newer, or not held, and an unknown board", async () => {
     const { boardId } = await twoVersions();
     await withService((s) =>
-      s.upgradeBoard({ boardId, toVersion: 2, expectedVersion: 1, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 2,
+        expectedVersion: 1,
+        actor: LUKAS,
+      }),
     );
     const down = await refusal((s) =>
-      s.upgradeBoard({ boardId, toVersion: 1, expectedVersion: 2, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 1,
+        expectedVersion: 2,
+        actor: LUKAS,
+      }),
     );
-    expect(down).toMatchObject({ _tag: "InvalidTaskInput", field: "toVersion" });
+    expect(down).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "toVersion",
+    });
     // The pin itself is no upgrade unless it carries a migration of the cards left behind.
     const same = await refusal((s) =>
-      s.upgradeBoard({ boardId, toVersion: 2, expectedVersion: 2, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 2,
+        expectedVersion: 2,
+        actor: LUKAS,
+      }),
     );
-    expect(same).toMatchObject({ _tag: "InvalidTaskInput", field: "toVersion" });
+    expect(same).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "toVersion",
+    });
     const missing = await refusal((s) =>
-      s.upgradeBoard({ boardId, toVersion: 9, expectedVersion: 2, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 9,
+        expectedVersion: 2,
+        actor: LUKAS,
+      }),
     );
     expect(missing).toMatchObject({ _tag: "DefinitionNotFound", version: 9 });
     const noBoard = await refusal((s) =>
@@ -346,7 +388,13 @@ describe("TaskService.upgradeBoard", () => {
     );
     expect(upgraded.unmigrated).toBe(0);
     expect(upgraded.repinned).toEqual([
-      { taskId: waiting.id, fromVersion: 1, from: "todo", to: "todo", revision: 2 },
+      {
+        taskId: waiting.id,
+        fromVersion: 1,
+        from: "todo",
+        to: "todo",
+        revision: 2,
+      },
       {
         taskId: blocked.id,
         fromVersion: 1,
@@ -366,7 +414,12 @@ describe("TaskService.upgradeBoard", () => {
     const events = await runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
-        return yield* sql<{ kind: string; actor: string; revision: number; payload: unknown }>`
+        return yield* sql<{
+          kind: string;
+          actor: string;
+          revision: number;
+          payload: unknown;
+        }>`
           SELECT kind, actor, revision, payload FROM task_events
           WHERE task_id = ${blocked.id} ORDER BY id
         `;
@@ -396,11 +449,19 @@ describe("TaskService.upgradeBoard", () => {
 
     // The old revision is stale now, and the card moves by v2's moves.
     const stale = await refusal((s) =>
-      s.unblock({ taskId: blocked.id, expectedRevision: blocked.revision, actor: LUKAS }),
+      s.unblock({
+        taskId: blocked.id,
+        expectedRevision: blocked.revision,
+        actor: LUKAS,
+      }),
     );
     expect(stale._tag).toBe("StaleRevision");
     const unblocked = await withService((s) =>
-      s.unblock({ taskId: blocked.id, expectedRevision: after.revision, actor: LUKAS }),
+      s.unblock({
+        taskId: blocked.id,
+        expectedRevision: after.revision,
+        actor: LUKAS,
+      }),
     );
     expect((await move(unblocked, "done")).column).toBe("done");
   });
@@ -413,7 +474,10 @@ describe("TaskService.upgradeBoard", () => {
     const { boardId } = await twoVersions();
     const movable = await card(boardId, "movable");
     const running = await move(await card(boardId, "running"), "doing");
-    const finishedRun = await move(await card(boardId, "finished run"), "doing");
+    const finishedRun = await move(
+      await card(boardId, "finished run"),
+      "doing",
+    );
     const canceled = await move(await card(boardId, "canceled"), "canceled");
     const before = await snapshot(boardId);
 
@@ -440,7 +504,9 @@ describe("TaskService.upgradeBoard", () => {
       { taskId: running.id, column: "doing", reason: "unfinished_run" },
       { taskId: canceled.id, column: "canceled", reason: "unmapped_column" },
     ]);
-    expect(err.message).toContain(`${running.id} (doing) has an unfinished run`);
+    expect(err.message).toContain(
+      `${running.id} (doing) has an unfinished run`,
+    );
     expect(err.message).toContain(
       `${canceled.id} (canceled) is in a column the mapping does not name`,
     );
@@ -487,7 +553,12 @@ describe("TaskService.upgradeBoard", () => {
     const { boardId } = await twoVersions();
     const behind = await card(boardId, "behind");
     await withService((s) =>
-      s.upgradeBoard({ boardId, toVersion: 2, expectedVersion: 1, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 2,
+        expectedVersion: 1,
+        actor: LUKAS,
+      }),
     );
     const current = await card(boardId, "current");
     const migrated = await withService((s) =>
@@ -526,11 +597,21 @@ describe("TaskService.upgradeBoard", () => {
       );
     const exitTo = (task: Task) =>
       refusal((s) =>
-        s.move({ taskId: task.id, expectedRevision: task.revision, to: "done", actor: LUKAS }),
+        s.move({
+          taskId: task.id,
+          expectedRevision: task.revision,
+          to: "done",
+          actor: LUKAS,
+        }),
       );
     const old = await seat((await card(boardId, "old")).id);
     await withService((s) =>
-      s.upgradeBoard({ boardId, toVersion: 3, expectedVersion: 2, actor: LUKAS }),
+      s.upgradeBoard({
+        boardId,
+        toVersion: 3,
+        expectedVersion: 2,
+        actor: LUKAS,
+      }),
     );
     const fresh = await seat((await card(boardId, "new")).id);
     expect(fresh.definitionVersion).toBe(3);
@@ -544,7 +625,9 @@ describe("TaskService.upgradeBoard", () => {
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
     const exit = await withService((s) => s.exit(old.id));
-    expect(exit.requirements.map((r) => r.key)).not.toContain(VERIFIED_REQUIREMENT);
+    expect(exit.requirements.map((r) => r.key)).not.toContain(
+      VERIFIED_REQUIREMENT,
+    );
 
     const columns = [
       "intake",
@@ -565,7 +648,13 @@ describe("TaskService.upgradeBoard", () => {
       }),
     );
     expect(migrated.repinned).toEqual([
-      { taskId: old.id, fromVersion: 2, from: "review", to: "review", revision: old.revision + 1 },
+      {
+        taskId: old.id,
+        fromVersion: 2,
+        from: "review",
+        to: "review",
+        revision: old.revision + 1,
+      },
     ]);
     const repinned = await withService((s) => s.get(old.id));
     expect(await exitTo(repinned)).toMatchObject({

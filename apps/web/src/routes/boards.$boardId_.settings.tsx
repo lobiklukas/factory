@@ -183,11 +183,10 @@ const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
         <NewerVersions boardId={boardId} definition={definition} />
         <p className="max-w-3xl text-[11px] text-muted-foreground">
           A definition version is never edited in place, so a board&apos;s
-          pipeline changes only by moving to a new version — the Upgrade
-          action, when one exists. The
-          model is this deployment&apos;s for the column&apos;s role; a
-          requirement marked checked is one a move out of the column is refused
-          over today.
+          pipeline changes only by moving to a new version — the Upgrade action,
+          when one exists. The model is this deployment&apos;s for the
+          column&apos;s role; a requirement marked checked is one a move out of
+          the column is refused over today.
         </p>
         <Link
           to="/boards/$boardId/settings/edit"

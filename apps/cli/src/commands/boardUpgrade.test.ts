@@ -30,7 +30,12 @@ describe("upgradeMapping", () => {
         targetColumns: ["todo", "review", "doing"],
       }),
     ).toEqual(
-      Exit.succeed({ todo: "todo", review: "review", doing: "review", old: "todo" }),
+      Exit.succeed({
+        todo: "todo",
+        review: "review",
+        doing: "review",
+        old: "todo",
+      }),
     );
   });
 
@@ -58,7 +63,13 @@ describe("upgradedLines", () => {
       instance,
       fromVersion: 2,
       repinned: [
-        { taskId: TASK, fromVersion: 2, from: "review", to: "review", revision: 5 },
+        {
+          taskId: TASK,
+          fromVersion: 2,
+          from: "review",
+          to: "review",
+          revision: 5,
+        },
       ],
       unmigrated: 1,
     });

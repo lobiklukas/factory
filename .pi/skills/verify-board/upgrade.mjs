@@ -117,12 +117,10 @@ try {
       waitUntil: "domcontentloaded",
     });
     const section = page.locator("[data-board-upgrade]");
-    const offered = await section
-      .waitFor({ timeout: OPEN_TIMEOUT_MS })
-      .then(
-        () => true,
-        () => false,
-      );
+    const offered = await section.waitFor({ timeout: OPEN_TIMEOUT_MS }).then(
+      () => true,
+      () => false,
+    );
     check(
       "the settings page offers Upgrade for a board with a newer version",
       offered,
@@ -151,9 +149,15 @@ try {
       .locator("[data-upgrade-done]")
       .waitFor({ timeout: OPEN_TIMEOUT_MS })
       .then(
-        async () => (await page.locator("[data-upgrade-done]").textContent()) ?? "",
         async () =>
-          `refused: ${(await page.locator("[data-upgrade-refused]").textContent().catch(() => "")) ?? ""}`,
+          (await page.locator("[data-upgrade-done]").textContent()) ?? "",
+        async () =>
+          `refused: ${
+            (await page
+              .locator("[data-upgrade-refused]")
+              .textContent()
+              .catch(() => "")) ?? ""
+          }`,
       );
     observed.done = done;
     check(

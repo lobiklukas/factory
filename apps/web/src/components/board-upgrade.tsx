@@ -86,7 +86,10 @@ const MappingRows = ({
                   onChange(
                     shown.map((entry, at) =>
                       at === index
-                        ? { from: entry.from, to: to === UNMAPPED ? undefined : to }
+                        ? {
+                            from: entry.from,
+                            to: to === UNMAPPED ? undefined : to,
+                          }
                         : entry,
                     ),
                   );
@@ -248,7 +251,11 @@ export const BoardUpgrade = ({
       )}
       {done === null ? null : <UpgradeDone upgraded={done} />}
       {refused === null ? null : (
-        <div role="alert" data-upgrade-refused className="text-[11px] text-destructive">
+        <div
+          role="alert"
+          data-upgrade-refused
+          className="text-[11px] text-destructive"
+        >
           <p>{refused.message}</p>
           {refused.cards.length === 0 ? null : (
             <ul className="list-disc pl-4">

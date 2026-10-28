@@ -19,7 +19,7 @@ board is no way to pick up a newer pipeline. An upgrade moves the pin:
   otherwise) and one that can start a card. After it, a new card pins `toVersion`, and every card
   already on the board keeps the version it pinned, with its moves and exit requirements.
 - **The explicit migration.** `migrateCards` is a column mapping (`{ <column a card is in>: <column of
-  toVersion> }`). Every card not already on `toVersion` is re-pinned in the column its own maps to,
+toVersion> }`). Every card not already on `toVersion` is re-pinned in the column its own maps to,
   with a `repinned` event (`fromVersion`, `toVersion`, `from`, `to`, the whole mapping, the actor) at
   the revision it was read at, and a new revision. A blocked card keeps its block, its blocked column
   mapped the same way.
@@ -66,7 +66,7 @@ from the tables. Its board is its own (`verify-board/upgrade-<hex>`), created on
 - `--to 3 --expect-version 2` moves the pin to v3 and only the pin — the old card's row and history
   are byte for byte what they were — and says one card still pins an older version;
 - a card made after it prints `pinned    v3`; `board ls` and the board page (`upgrade.mjs
-  MODE=notice`) say the cards pin v2 and v3;
+MODE=notice`) say the cards pin v2 and v3;
 - with both cards seated in `review` (a fixture write: reaching review honestly takes a building run
   with a diff and a PR, which `requires.sh` proves), the new card's exit lists `verified` and the old
   card's does not, and `review → done` is refused naming `verified` for the new card and

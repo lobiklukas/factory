@@ -190,7 +190,8 @@ const upgradeCommand = Command.make(
     {
       command:
         "factory board upgrade --board brd_… --to 4 --expect-version 3 --same-columns --map doing=review",
-      description: "Migrate cards, sending the old doing column's cards to review",
+      description:
+        "Migrate cards, sending the old doing column's cards to review",
     },
   ]),
 );

@@ -514,7 +514,10 @@ export const cardsByVersion = (
 ): ReadonlyArray<{ readonly version: number; readonly cards: number }> => {
   const counts = new Map<number, number>();
   for (const task of tasks)
-    counts.set(task.definitionVersion, (counts.get(task.definitionVersion) ?? 0) + 1);
+    counts.set(
+      task.definitionVersion,
+      (counts.get(task.definitionVersion) ?? 0) + 1,
+    );
   return [...counts.entries()]
     .toSorted(([a], [b]) => a - b)
     .map(([version, cards]) => ({ version, cards }));
@@ -1323,7 +1326,11 @@ export class StaleBoardVersion extends Schema.TaggedError<StaleBoardVersion>()(
 export const CardMigrationProblem = Schema.Struct({
   taskId: TaskId,
   column: Schema.String,
-  reason: Schema.Literals(["unfinished_run", "unmapped_column", "kind_changed"]),
+  reason: Schema.Literals([
+    "unfinished_run",
+    "unmapped_column",
+    "kind_changed",
+  ]),
 });
 export type CardMigrationProblem = typeof CardMigrationProblem.Type;
 

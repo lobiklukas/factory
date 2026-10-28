@@ -22,7 +22,9 @@ const TASK = TaskId.make(`tsk_${"0".repeat(26)}`);
 describe("defaultMapping", () => {
   /** Mutation: map an unmatched column to the target's first — a card would land somewhere unasked. */
   it("offers each pinned column the target's column of its name, and nothing for one it lacks", () => {
-    expect(defaultMapping(["todo", "doing", "done"], ["todo", "review", "done"])).toEqual([
+    expect(
+      defaultMapping(["todo", "doing", "done"], ["todo", "review", "done"]),
+    ).toEqual([
       { from: "todo", to: "todo" },
       { from: "doing", to: undefined },
       { from: "done", to: "done" },
@@ -39,10 +41,29 @@ describe("upgradeInputOf", () => {
   /** Mutation: send the mapping without the person asking — every card would be migrated. */
   it("sends the pin it read as the expected version, and the mapping only when asked to migrate", () => {
     expect(
-      upgradeInputOf({ boardId: BOARD, pinned: 2, toVersion: 3, migrate: false, rows, actor: "dashboard" }),
-    ).toEqual({ boardId: BOARD, toVersion: 3, expectedVersion: 2, actor: "dashboard" });
+      upgradeInputOf({
+        boardId: BOARD,
+        pinned: 2,
+        toVersion: 3,
+        migrate: false,
+        rows,
+        actor: "dashboard",
+      }),
+    ).toEqual({
+      boardId: BOARD,
+      toVersion: 3,
+      expectedVersion: 2,
+      actor: "dashboard",
+    });
     expect(
-      upgradeInputOf({ boardId: BOARD, pinned: 2, toVersion: 3, migrate: true, rows, actor: "dashboard" }),
+      upgradeInputOf({
+        boardId: BOARD,
+        pinned: 2,
+        toVersion: 3,
+        migrate: true,
+        rows,
+        actor: "dashboard",
+      }),
     ).toEqual({
       boardId: BOARD,
       toVersion: 3,
@@ -65,7 +86,9 @@ describe("upgradedSummary", () => {
   it("says what moved, what was migrated and what was left behind", () => {
     const decode = Schema.decodeUnknownSync(UpgradedBoard);
     expect(
-      upgradedSummary(decode({ instance, fromVersion: 2, repinned: [], unmigrated: 2 })),
+      upgradedSummary(
+        decode({ instance, fromVersion: 2, repinned: [], unmigrated: 2 }),
+      ),
     ).toBe(
       "Upgraded from v2 to v3: new cards pin v3. 2 cards still pin an older version and move by it.",
     );
@@ -74,7 +97,15 @@ describe("upgradedSummary", () => {
         decode({
           instance,
           fromVersion: 3,
-          repinned: [{ taskId: TASK, fromVersion: 2, from: "review", to: "review", revision: 4 }],
+          repinned: [
+            {
+              taskId: TASK,
+              fromVersion: 2,
+              from: "review",
+              to: "review",
+              revision: 4,
+            },
+          ],
           unmigrated: 0,
         }),
       ),
@@ -90,7 +121,8 @@ describe("upgradeRefusal", () => {
         new CardMigrationRefused({
           boardId: BOARD,
           cards: [{ taskId: TASK, column: "doing", reason: "unfinished_run" }],
-          message: "the board's cards cannot all move to default v3, so none did",
+          message:
+            "the board's cards cannot all move to default v3, so none did",
         }),
         "pretty",
       ),
@@ -100,10 +132,18 @@ describe("upgradeRefusal", () => {
     });
     expect(
       upgradeRefusal(
-        new StaleBoardVersion({ boardId: BOARD, expected: 2, actual: 3, message: "stale" }),
+        new StaleBoardVersion({
+          boardId: BOARD,
+          expected: 2,
+          actual: 3,
+          message: "stale",
+        }),
         "pretty",
       ),
     ).toEqual({ message: "stale", cards: [] });
-    expect(upgradeRefusal(undefined, "pretty")).toEqual({ message: "pretty", cards: [] });
+    expect(upgradeRefusal(undefined, "pretty")).toEqual({
+      message: "pretty",
+      cards: [],
+    });
   });
 });

@@ -1044,7 +1044,10 @@ describe("cards pinned to more than one version (D5)", () => {
   it("says nothing when every card pins one version, and names each version and its cards otherwise", () => {
     expect(pinnedVersionsNotice(3, [])).toBeNull();
     expect(
-      pinnedVersionsNotice(3, [{ definitionVersion: 2 }, { definitionVersion: 2 }]),
+      pinnedVersionsNotice(3, [
+        { definitionVersion: 2 },
+        { definitionVersion: 2 },
+      ]),
     ).toBeNull();
     expect(
       cardsByVersion([

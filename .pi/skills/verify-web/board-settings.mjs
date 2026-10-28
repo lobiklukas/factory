@@ -184,7 +184,9 @@ const writeControls = (boardId) =>
 
 /** Whether the settings page offers the Upgrade action (D5). */
 const upgradeOffered = (boardId) =>
-  page.locator(`[data-board-settings-page='${boardId}'] [data-board-upgrade]`).count();
+  page
+    .locator(`[data-board-settings-page='${boardId}'] [data-board-upgrade]`)
+    .count();
 
 /** Every column's facts under `scope`, read from what the page renders. */
 const readColumns = (scope) =>
@@ -423,7 +425,11 @@ try {
   assert(
     "a board on the newest version says it is the newest, claims no newer one, and offers no upgrade",
     header.newest && header.newer === null && newestOffered === 0,
-    JSON.stringify({ newest: header.newest, newer: header.newer, upgrade: newestOffered }),
+    JSON.stringify({
+      newest: header.newest,
+      newer: header.newer,
+      upgrade: newestOffered,
+    }),
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "board-settings-newest.png"),

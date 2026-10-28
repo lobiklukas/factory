@@ -1563,22 +1563,31 @@ export const TaskServiceLive = Layer.effect(
                 const landing = target.columns.find(
                   (column) => column.name === to,
                 );
-                const problem: CardMigrationProblem | undefined = card.unfinished
-                  ? { taskId, column: card.column, reason: "unfinished_run" }
-                  : to === undefined
-                    ? { taskId, column: card.column, reason: "unmapped_column" }
-                    : card.blockedColumn !== null &&
-                        mapped(card.blockedColumn) === undefined
+                const problem: CardMigrationProblem | undefined =
+                  card.unfinished
+                    ? { taskId, column: card.column, reason: "unfinished_run" }
+                    : to === undefined
                       ? {
                           taskId,
-                          column: card.blockedColumn,
+                          column: card.column,
                           reason: "unmapped_column",
                         }
-                      : declared !== undefined &&
-                          landing !== undefined &&
-                          declared.kind !== landing.kind
-                        ? { taskId, column: card.column, reason: "kind_changed" }
-                        : undefined;
+                      : card.blockedColumn !== null &&
+                          mapped(card.blockedColumn) === undefined
+                        ? {
+                            taskId,
+                            column: card.blockedColumn,
+                            reason: "unmapped_column",
+                          }
+                        : declared !== undefined &&
+                            landing !== undefined &&
+                            declared.kind !== landing.kind
+                          ? {
+                              taskId,
+                              column: card.column,
+                              reason: "kind_changed",
+                            }
+                          : undefined;
                 if (problem !== undefined) problems.push(problem);
               }
               if (problems.length > 0) {
