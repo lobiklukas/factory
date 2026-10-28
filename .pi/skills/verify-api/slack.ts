@@ -1,195 +1,114 @@
-// The Slack adapter end to end (LOB-191): a signed Slack message in, one session and one threaded
-// reply out.
+// The Slack adapter over HTTP (LOB-191, served by LOB-259): a signed Slack Events API delivery posted
+// at a running API's `POST /webhooks/slack`, one session and one threaded reply out, and the PR's
+// link in the same thread once the session's PR opens.
 //
-//   bun slack.ts
+//   MODE=configured bun slack.ts     # the API booted with the signing secret, the bot token, a watched channel
+//   MODE=unconfigured bun slack.ts   # the same API with `SLACK_SIGNING_SECRET` unset
 //
-// What runs is the real seam, not a model of it: `TriggerService` on the run's Postgres, the real
-// `SessionService` behind its `TriggerSessions` port (so the session, its log and its first message
-// are real), the adapter's real signature check (`verifySlackSignature`, fed a signature computed
-// the way Slack computes it) and the real `SlackWriteBack` over an Effect `HttpClient` pointed at
-// `./slack-fake.ts` on loopback. Only the Slack Web API is fake.
+// (`./slack.sh` boots the API and the fakes and runs both.) What runs is the real thing: the route,
+// Slack's own signature check, `TriggerService` on the API's Postgres, the real `SessionService`, the
+// real `SlackWriteBack` over HTTP to `./slack-fake.ts`, and the PR step over HTTP to `./github-fake.ts`.
+// Only Slack and GitHub are fake, and this driver is Slack's sender: it signs `v0:<ts>:<body>` the way
+// Slack does (`slackSignature`).
 //
-// The checks:
+// The checks, `configured`:
 //
-//   1. a signed message in a watched channel starts a session, and it is named by the message
-//   2. the session is the message's own words: first line as the title, the rendered rule first
-//   3. the write-back replied once, in the message's thread, naming the session
-//   4. Slack's own two calls: the thread is read first, then one reply is posted, as the bot token
-//   5. the same message again — Slack's retry, with a new `event_id` — is a replay: one session,
-//      one reply
-//   6. a delivery whose timestamp is outside Slack's 5-minute window is refused, typed, and starts
-//      nothing (a replayed delivery is one whose signature is *right*, so it must not read as
-//      bad-signature)
-//   7. a body changed after it was signed is refused as bad-signature, and no signature at all as
-//      missing-signature
-//   8. a message in a channel the filter does not watch is skipped, and the recorded reason says so
-//   9. a message without the filter's phrase is skipped for that reason
-//  10. a bot's own message in a watched channel starts nothing — the loop guard
-//  11. a message that is already in a thread is answered in that thread
-//  12. a reply that landed and whose acknowledgement was lost fails the delivery, and the retry
-//      reads the thread, posts no second reply, and reuses the session
+//   1. Slack's `url_verification` handshake is answered with its challenge; unsigned, it is refused
+//   2. a signed message in a watched channel opens a session, named by the message, in the rule's repo
+//   3. the session is the message's own words: first line as the title, the rendered rule first
+//   4. the write-back replied once, in the message's thread, naming and linking the session; the
+//      thread was read first and the reply posted as the bot token
+//   5. the same message again — Slack's retry, a new event_id — is a replay: one session, one reply
+//   6. a delivery outside Slack's five-minute window is 401 outside-window, and starts nothing; one
+//      inside it passes
+//   7. a body changed after signing is 401 bad-signature, no signature 401 missing-signature, and
+//      neither records a delivery
+//   8. a message in a channel the filter does not watch is skipped, naming the filter
+//   9. a bot's own message in a watched channel starts nothing — the loop guard
+//  10. a message already in a thread is answered in that thread
+//  11. an @mention opens a session, and the `message` twin Slack sends for it is the same delivery
+//  12. a payload that carries no event is answered 200 and ignored
+//  13. a reply that landed and whose acknowledgement was lost fails the delivery (500 write-back);
+//      the retry is processed, posts no second reply, and reuses the session
+//  14. the session's PR opened over RPC posts its link in the thread that started it, once: opening it
+//      again answers `already-open` and posts nothing more
 //
-// Env: DATABASE_URL (via DatabaseLive), SESSION_ROOT, SLACK_FAKE_URL, SLACK_FAKE_LEDGER,
-// SLACK_TRIGGER_REPO, SLACK_SIGNING_SECRET, EVIDENCE_DIR.
-import { readFileSync } from "node:fs";
+// `unconfigured`: a delivery and the handshake, signed with the empty key — what an unset secret
+// degrades to — are 503 naming `SLACK_SIGNING_SECRET`, and open nothing.
+//
+// Env: API_URL, DATABASE_URL, SLACK_FAKE_LEDGER, SLACK_GITHUB_LEDGER, SLACK_TRIGGER_REPO,
+// SLACK_RUN_STAMP, SLACK_SIGNING_SECRET, EVIDENCE_DIR.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { BunServices } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
-import { FetchHttpClient } from "effect/http";
-import { SqlClient } from "effect/sql/SqlClient";
-import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
-import type { SessionId } from "@repo/domain/Session";
-import type { TriggerDelivery, TriggerRule } from "@repo/domain/Trigger";
+import { slackSignature, SLACK_REPLAY_WINDOW_SECONDS } from "@repo/core";
+import { RepoSlug } from "@repo/domain/Session";
+import { Effect } from "effect";
 import {
-  slackDelivery,
-  SlackWriteBack,
-  verifySlackSignature,
-  slackSignature,
-  SLACK_REPLAY_WINDOW_SECONDS,
-  SessionService,
-  SessionServiceLive,
-  TriggerService,
-  TriggerServiceLive,
-  TriggerSessionsFromSessionService,
-  type SlackFilter,
-} from "@repo/core";
-import { createModelAccess } from "@repo/harness";
-import { DatabaseLive } from "@repo/storage-postgres";
-import { makeChecker } from "./harness.ts";
+  deliveryRows,
+  field,
+  postRaw,
+  readLedger,
+  sessionClient,
+  sessionIdOf,
+  sessionsOf,
+  type Answer,
+} from "./adapter-http.ts";
+import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const SESSION_ROOT =
-  process.env["SESSION_ROOT"] ?? ".verify/run/slack/sessions";
-/**
- * A per-run stamp. The repo carries it so the drive can be re-run against the same database: a
- * delivery id is stable for one run (which is what the replay checks need) and new for the next
- * one, and the repo starts with no sessions to count.
- */
-const RUN_STAMP = String(process.env["SLACK_RUN_STAMP"] ?? Date.now());
-const REPO = RepoSlugSchema.make(
-  `${process.env["SLACK_TRIGGER_REPO"] ?? "acme/verify-api-slack"}-${RUN_STAMP}`,
-);
-const FAKE_URL = process.env["SLACK_FAKE_URL"] ?? "http://127.0.0.1:9414";
+const MODE = process.env["MODE"] ?? "configured";
+const API_URL = process.env["API_URL"] ?? "http://127.0.0.1:9425";
+const DATABASE_URL =
+  process.env["DATABASE_URL"] ??
+  "postgres://factory:factory@localhost:5442/factory";
 const LEDGER =
   process.env["SLACK_FAKE_LEDGER"] ?? ".verify/run/slack/slack-ledger.json";
-const EVIDENCE_DIR =
-  process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api";
+const GITHUB_LEDGER =
+  process.env["SLACK_GITHUB_LEDGER"] ?? ".verify/run/slack/github-ledger.json";
 const SIGNING_SECRET =
-  process.env["SLACK_SIGNING_SECRET"] ?? "lob191-drive-signing-secret";
-const BOT_TOKEN = "xoxb-drive-token";
+  process.env["SLACK_SIGNING_SECRET"] ?? "lob259-drive-signing-secret";
+const RUN_STAMP = String(process.env["SLACK_RUN_STAMP"] ?? Date.now());
+const REPO = RepoSlug.make(
+  process.env["SLACK_TRIGGER_REPO"] ?? `acme/verify-api-slack-${RUN_STAMP}`,
+);
+const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-259";
 
 /**
- * A message `ts` for this run. Slack's `ts` is what the seam dedupes a message by, and it is the
- * one thing a payload does not carry from the repo, so it has to be run-stamped or a second run
- * against the same database would replay the first run's deliveries instead of starting clean (the
- * `github-issues.ts` `RUN_STAMP` convention). `slack.sh` stamps the same value into
+ * A message `ts` for this run. Slack's `ts` is what the seam dedupes a message by, and it is the one
+ * thing a payload does not carry from the repo, so it has to be run-stamped or a second run against
+ * the same database would replay the first run's deliveries. `slack.sh` stamps the same value into
  * `SLACK_FAKE_FAIL_AFTER_WRITE` as `messageTs(9)`, so the lost-acknowledgement case cannot silently
  * stop firing.
  */
 const messageTs = (n: number): string =>
   `${RUN_STAMP}.${String(n).padStart(4, "0")}`;
-
-/** The opening message's `ts`; it is also the root of the thread the threaded case replies in. */
 const ROOT_TS = messageTs(1);
-/** The message whose reply the fake records and then answers `500` for (see `messageTs`). */
 const LOST_ACK_TS = messageTs(9);
 
-await mkdir(EVIDENCE_DIR, { recursive: true });
-await mkdir(path.dirname(LEDGER), { recursive: true });
-
-/** The channel the operator watches: the label a mapping rule matches, as Slack spells it. */
+/** The watched channel is the label a mapping rule matches, as Slack spells it. */
 const WATCHED = "C0ENG";
 const UNWATCHED = "C0RANDOM";
 
-const filter: SlackFilter = { channels: [WATCHED] };
-const withPhrase: SlackFilter = { channels: [WATCHED], text: "deploy" };
-
-const rules: ReadonlyArray<TriggerRule> = [
-  {
-    label: WATCHED,
-    repo: REPO,
-    baseRef: "main",
-    prompt: "Work on {{title}}:\n{{body}}",
-  },
-  // Deliberately a rule for the channel the filter refuses. Without it the unwatched message would
-  // be stopped twice over — by the filter and by "no rule matches" — and check 12 could pass by
-  // accident (reviewer P1): with it, the filter is the *only* thing standing between that message
-  // and a session, which is what the check and the mutation are about.
-  {
-    label: UNWATCHED,
-    repo: REPO,
-    prompt: "Work on {{title}}:\n{{body}}",
-  },
-];
+await mkdir(EVIDENCE_DIR, { recursive: true });
 
 const observed: {
-  sessionId: SessionId | null;
-  sessionRepo: string | null;
-  refusals: Record<string, string>;
-  skipped: Array<{ why: string; status: string; reason: string | undefined }>;
+  mode: string;
+  apiUrl: string;
+  repo: string;
+  deliveries: Array<{ what: string; status: number; body: unknown }>;
   replies: unknown;
+  pullRequest: unknown;
   checks: Record<string, CheckRecord>;
 } = {
-  sessionId: null,
-  sessionRepo: null,
-  refusals: {},
-  skipped: [],
+  mode: MODE,
+  apiUrl: API_URL,
+  repo: REPO,
+  deliveries: [],
   replies: null,
+  pullRequest: null,
   checks: {},
 };
 const assert = makeChecker(observed);
-
-/** The session layer, the seam, and the adapter's own write-back client — one runtime. */
-const base = SessionServiceLive({
-  model: createModelAccess("faux"),
-  sessionRoot: SESSION_ROOT,
-}).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)));
-
-const triggers = TriggerServiceLive({ rules }).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      TriggerSessionsFromSessionService,
-      SlackWriteBack({
-        apiUrl: FAKE_URL,
-        botToken: Redacted.make(BOT_TOKEN),
-        sessionUrlBase: "http://localhost:3000/sessions",
-      }).pipe(Layer.provide(FetchHttpClient.layer)),
-    ),
-  ),
-  Layer.provideMerge(base),
-);
-
-const runtime = ManagedRuntime.make(triggers);
-
-/** The moment every delivery in this run is signed at; the window checks move around it. */
-const NOW = Math.floor(Date.now() / 1000);
-
-/** Slack's `event_callback` for a message, shaped as the Events API documents it. */
-const payload = (over: {
-  readonly channel?: string;
-  readonly ts?: string;
-  readonly threadTs?: string;
-  readonly text?: string;
-  readonly botId?: string;
-  readonly eventId?: string;
-}): Record<string, unknown> => ({
-  token: "verification-token",
-  team_id: "T0ACME",
-  api_app_id: "A0ACME",
-  type: "event_callback",
-  event_id: over.eventId ?? `Ev${String(over.ts ?? ROOT_TS)}`,
-  event_time: NOW,
-  event: {
-    type: "message",
-    channel: over.channel ?? WATCHED,
-    user: "U0ALICE",
-    text: over.text ?? "Fix the widget\nIt wobbles when it spins.",
-    ts: over.ts ?? ROOT_TS,
-    ...(over.threadTs === undefined ? {} : { thread_ts: over.threadTs }),
-    ...(over.botId === undefined ? {} : { bot_id: over.botId }),
-  },
-});
 
 type Ledger = {
   readonly requests: ReadonlyArray<{
@@ -205,92 +124,144 @@ type Ledger = {
     readonly text: string;
   }>;
 };
+const ledger = (): Ledger => readLedger(LEDGER, { requests: [], replies: [] });
 
-const readLedger = (): Ledger => {
-  try {
-    return JSON.parse(readFileSync(LEDGER, "utf8")) as Ledger;
-  } catch {
-    return { requests: [], replies: [] };
-  }
-};
+const nowSeconds = (): number => Math.floor(Date.now() / 1000);
+
+/** Slack's `event_callback` for a message (or a mention), shaped as the Events API documents it. */
+const payload = (over: {
+  readonly type?: "message" | "app_mention";
+  readonly channel?: string;
+  readonly ts?: string;
+  readonly threadTs?: string;
+  readonly text?: string;
+  readonly botId?: string;
+  readonly eventId?: string;
+}): Record<string, unknown> => ({
+  token: "verification-token",
+  team_id: "T0ACME",
+  api_app_id: "A0ACME",
+  type: "event_callback",
+  event_id: over.eventId ?? `Ev${String(over.ts ?? ROOT_TS)}`,
+  event_time: nowSeconds(),
+  event: {
+    type: over.type ?? "message",
+    channel: over.channel ?? WATCHED,
+    user: "U0ALICE",
+    text: over.text ?? "Fix the widget\nIt wobbles when it spins.",
+    ts: over.ts ?? ROOT_TS,
+    ...(over.threadTs === undefined ? {} : { thread_ts: over.threadTs }),
+    ...(over.botId === undefined ? {} : { bot_id: over.botId }),
+  },
+});
 
 /**
- * Sign a payload the way Slack does, then check it the way a route would: this is the one place the
- * drive and the adapter must agree, so it computes nothing itself.
+ * One signed POST. `secret` is what the body is signed with (`null`: no signature at all), `at` the
+ * timestamp it is signed for, and `tamper` changes the body after it was signed.
  */
-const signed = (body: Record<string, unknown>, at: number = NOW) => {
+const post = async (
+  what: string,
+  body: Record<string, unknown>,
+  options: {
+    readonly secret?: string | null;
+    readonly at?: number;
+    readonly tamper?: boolean;
+  } = {},
+): Promise<Answer> => {
   const raw = JSON.stringify(body);
-  const timestamp = String(at);
-  const signature = slackSignature(raw, timestamp, SIGNING_SECRET);
-  return {
-    raw,
-    verdict: verifySlackSignature({
-      raw,
-      signature,
-      timestamp,
-      signingSecret: SIGNING_SECRET,
-      nowSeconds: NOW,
-    }),
-    signedRaw: raw,
-    timestamp,
-    signature,
-  };
+  const timestamp = String(options.at ?? nowSeconds());
+  const secret = options.secret === undefined ? SIGNING_SECRET : options.secret;
+  const answer = await postRaw(
+    `${API_URL}/webhooks/slack`,
+    options.tamper === true ? `${raw} ` : raw,
+    {
+      "x-slack-request-timestamp": timestamp,
+      ...(secret === null
+        ? {}
+        : { "x-slack-signature": slackSignature(raw, timestamp, secret) }),
+    },
+  );
+  observed.deliveries.push({ what, status: answer.status, body: answer.body });
+  return answer;
 };
-
-/** The delivery a signed payload makes, when its signature was accepted. */
-const deliveryOf = (
-  body: Record<string, unknown>,
-  which: SlackFilter = filter,
-  at: number = NOW,
-): TriggerDelivery | undefined => {
-  const check = signed(body, at);
-  if (!check.verdict.ok) return undefined;
-  return slackDelivery(body, which);
-};
-
-const deliver = (
-  body: Record<string, unknown>,
-  which: SlackFilter = filter,
-) => {
-  const delivery = deliveryOf(body, which);
-  if (delivery === undefined) {
-    throw new Error(`the payload did not normalize: ${JSON.stringify(body)}`);
-  }
-  return Effect.gen(function* () {
-    const service = yield* TriggerService;
-    return yield* service.deliver(delivery);
-  });
-};
-
-const sessionCount = Effect.gen(function* () {
-  const sql = yield* SqlClient;
-  const rows = yield* sql<{ count: number }>`
-    SELECT count(*)::int AS count FROM sessions WHERE repo = ${REPO}
-  `;
-  return rows[0]?.count ?? 0;
-});
 
 const firstMessage = (entries: ReadonlyArray<{ kind: string; text: string }>) =>
   entries.find((entry) => entry.kind === "user")?.text;
 
-const run = Effect.gen(function* () {
-  const sessions = yield* SessionService;
-  yield* sessions.registerRepo({ repo: REPO, defaultBaseRef: "main" });
+const program = Effect.gen(function* () {
+  const client = yield* sessionClient;
+  const sessionCount = sessionsOf(client, REPO);
 
-  // 1 + 2: the signed message starts one real session carrying the message's own words.
-  const created = yield* deliver(payload({}));
-  observed.sessionId = created.sessionId ?? null;
-  assert(
-    "a signed message in a watched channel starts a session and names it",
-    created.status === "processed" && created.sessionId !== undefined,
-    `status=${created.status} session=${String(created.sessionId)} reason=${String(created.reason)}`,
+  if (MODE === "unconfigured") {
+    const before = yield* sessionCount;
+    const message = yield* Effect.promise(() =>
+      post("unset secret", payload({ ts: messageTs(20) }), { secret: "" }),
+    );
+    const handshake = yield* Effect.promise(() =>
+      post(
+        "unset secret, handshake",
+        { type: "url_verification", challenge: "abc" },
+        { secret: "" },
+      ),
+    );
+    assert(
+      "with SLACK_SIGNING_SECRET unset a delivery and the handshake are 503 not-configured, naming the variable",
+      message.status === 503 &&
+        handshake.status === 503 &&
+        field(message, "code") === "not-configured" &&
+        JSON.stringify(handshake.body).includes("SLACK_SIGNING_SECRET"),
+      `status=${message.status}/${handshake.status} body=${JSON.stringify(message.body)}`,
+    );
+    const rows = yield* Effect.promise(() =>
+      deliveryRows(DATABASE_URL, [
+        `slack:${WATCHED}:${messageTs(20)}:${messageTs(20)}`,
+      ]),
+    );
+    assert(
+      "and they record no delivery and open no session",
+      rows.length === 0 && (yield* sessionCount) === before,
+      `rows=${rows.length} sessions=${before}→${yield* sessionCount}`,
+    );
+    return;
+  }
+
+  yield* client.registerRepo({ repo: REPO, defaultBaseRef: "main" });
+
+  // 1: the handshake Slack makes when an operator enters the Request URL.
+  const challenge = "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P";
+  const handshake = yield* Effect.promise(() =>
+    post("handshake", { type: "url_verification", challenge }),
   );
-  if (created.sessionId === undefined) {
+  const strangers = yield* Effect.promise(() =>
+    post(
+      "handshake, unsigned",
+      { type: "url_verification", challenge: "stranger" },
+      { secret: null },
+    ),
+  );
+  assert(
+    "Slack's url_verification handshake is answered with its challenge; unsigned, it is refused",
+    handshake.status === 200 &&
+      field(handshake, "challenge") === challenge &&
+      strangers.status === 401 &&
+      !JSON.stringify(strangers.body).includes("stranger"),
+    `handshake=${handshake.status} ${JSON.stringify(handshake.body)} unsigned=${strangers.status}`,
+  );
+
+  // 2 + 3: the signed message opens one real session carrying the message's own words.
+  const created = yield* Effect.promise(() => post("created", payload({})));
+  const sessionId = sessionIdOf(created);
+  assert(
+    "a signed message in a watched channel is processed and names the session",
+    created.status === 200 &&
+      field(created, "status") === "processed" &&
+      sessionId !== undefined,
+    `status=${created.status} body=${JSON.stringify(created.body)}`,
+  );
+  if (sessionId === undefined) {
     return yield* Effect.die(new Error("no session: the rest proves nothing"));
   }
-  const sessionId = created.sessionId;
-  const read = yield* sessions.get(sessionId);
-  observed.sessionRepo = read.session.repo ?? null;
+  const read = yield* client.getSession({ sessionId });
   assert(
     "the session is in the rule's repo, mapped by the channel",
     read.session.repo === REPO,
@@ -304,22 +275,17 @@ const run = Effect.gen(function* () {
     `title=${JSON.stringify(read.session.title)} first=${JSON.stringify(firstMessage(read.entries))}`,
   );
 
-  // 3 + 4: one reply, in the message's own thread, through Slack's own two calls.
-  const afterCreate = readLedger();
+  // 4: one reply, in the message's own thread, through Slack's own two calls.
+  const afterCreate = ledger();
   const reply = afterCreate.replies[0];
   assert(
-    "the write-back replied exactly once, in the message's thread",
+    "the write-back replied exactly once, in the message's thread, naming and linking the session",
     afterCreate.replies.length === 1 &&
       reply?.channel === WATCHED &&
-      reply?.root === ROOT_TS,
-    `replies=${afterCreate.replies.length} channel=${String(reply?.channel)} root=${String(reply?.root)}`,
-  );
-  assert(
-    "the reply names the session and links to it",
-    typeof reply?.text === "string" &&
+      reply?.root === ROOT_TS &&
       reply.text.includes(sessionId) &&
       reply.text.includes(`http://localhost:3000/sessions/${sessionId}`),
-    String(reply?.text),
+    `replies=${afterCreate.replies.length} root=${String(reply?.root)} text=${String(reply?.text)}`,
   );
   const posts = afterCreate.requests.filter(
     (request) => request.method === "POST",
@@ -331,210 +297,271 @@ const run = Effect.gen(function* () {
       (afterCreate.requests[0]?.query ?? "").includes(`channel=${WATCHED}`) &&
       posts.length === 1 &&
       posts[0]?.path === "/api/chat.postMessage" &&
-      posts[0]?.authorization === `Bearer ${BOT_TOKEN}`,
+      posts[0]?.authorization === "Bearer xoxb-drive-token",
     `methods=${afterCreate.requests.map((request) => request.method).join(",")} posts=${posts.length} auth=${String(posts[0]?.authorization).slice(0, 20)}…`,
   );
 
   // 5: Slack's retry of the same message carries a new `event_id`; it is the same delivery.
-  const retried = yield* deliver(
-    payload({
-      eventId: "Ev0RETRY",
-      text: "Fix the widget\nIt wobbles when it spins.",
+  const retried = yield* Effect.promise(() =>
+    post("retried", payload({ eventId: "Ev0RETRY" })),
+  );
+  assert(
+    "the same message again — a new event_id, a fresh signature — is a replay: one session, one reply",
+    retried.status === 200 &&
+      field(retried, "replayed") === true &&
+      (yield* sessionCount) === 1 &&
+      ledger().replies.length === 1,
+    `status=${retried.status} replayed=${String(field(retried, "replayed"))} sessions=${yield* sessionCount} replies=${ledger().replies.length}`,
+  );
+
+  // 6: a delivery captured and replayed later is refused, and says so; one inside the window passes.
+  const staleTs = messageTs(2);
+  const stale = yield* Effect.promise(() =>
+    post("stale", payload({ ts: staleTs }), {
+      at: nowSeconds() - SLACK_REPLAY_WINDOW_SECONDS - 5,
+    }),
+  );
+  const staleRows = yield* Effect.promise(() =>
+    deliveryRows(DATABASE_URL, [`slack:${WATCHED}:${staleTs}:${staleTs}`]),
+  );
+  assert(
+    "a delivery outside Slack's five-minute window is 401 outside-window and records nothing",
+    stale.status === 401 &&
+      field(stale, "code") === "outside-window" &&
+      staleRows.length === 0 &&
+      (yield* sessionCount) === 1,
+    `status=${stale.status} code=${String(field(stale, "code"))} rows=${staleRows.length}`,
+  );
+  const insideTs = messageTs(3);
+  const inside = yield* Effect.promise(() =>
+    post("inside the window", payload({ ts: insideTs }), {
+      at: nowSeconds() - SLACK_REPLAY_WINDOW_SECONDS + 20,
     }),
   );
   assert(
-    "the same message again — a new event_id, a fresh signature — is a replay",
-    retried.replayed === true &&
-      (yield* sessionCount) === 1 &&
-      readLedger().replies.length === 1,
-    `replayed=${String(retried.replayed)} sessions=${yield* sessionCount} replies=${readLedger().replies.length}`,
+    "a delivery inside the window is accepted",
+    inside.status === 200 && field(inside, "status") === "processed",
+    `status=${inside.status} body=${JSON.stringify(inside.body)}`,
   );
 
-  // 6: a delivery captured and replayed later is refused before its body is read, and says so.
-  const staleAt = NOW - SLACK_REPLAY_WINDOW_SECONDS - 1;
-  const stale = signed(payload({ ts: messageTs(2) }), staleAt);
-  observed.refusals["outside-window"] = stale.verdict.ok
-    ? "accepted"
-    : stale.verdict.refusal;
-  assert(
-    "a delivery outside Slack's five-minute window is refused, as outside-window",
-    stale.verdict.ok === false && stale.verdict.refusal === "outside-window",
-    stale.verdict.ok ? "accepted" : stale.verdict.refusal,
+  // 7: the two other ways a signature fails are told apart, and record nothing.
+  const forgedTs = messageTs(4);
+  const tampered = yield* Effect.promise(() =>
+    post("tampered", payload({ ts: forgedTs }), { tamper: true }),
+  );
+  const unsigned = yield* Effect.promise(() =>
+    post("unsigned", payload({ ts: forgedTs }), { secret: null }),
+  );
+  const forgedRows = yield* Effect.promise(() =>
+    deliveryRows(DATABASE_URL, [`slack:${WATCHED}:${forgedTs}:${forgedTs}`]),
   );
   assert(
-    "and the refused delivery starts nothing, because no delivery was made from it",
-    deliveryOf(payload({ ts: messageTs(2) }), filter, staleAt) === undefined &&
-      (yield* sessionCount) === 1,
-    `sessions=${yield* sessionCount}`,
-  );
-  // The window is symmetric and Slack's own edge is inclusive: one second inside it still passes.
-  const edge = signed(
-    payload({ ts: messageTs(3) }),
-    NOW - SLACK_REPLAY_WINDOW_SECONDS,
-  );
-  assert(
-    "a delivery exactly at the edge of the window is still accepted",
-    edge.verdict.ok === true,
-    edge.verdict.ok ? "accepted at the edge" : edge.verdict.refusal,
-  );
-
-  // 7: the two other ways a signature fails are told apart.
-  const tampered = signed(payload({ ts: messageTs(4) }));
-  const tamperedVerdict = verifySlackSignature({
-    raw: `${tampered.raw} `,
-    signature: tampered.signature,
-    timestamp: tampered.timestamp,
-    signingSecret: SIGNING_SECRET,
-    nowSeconds: NOW,
-  });
-  observed.refusals["bad-signature"] = tamperedVerdict.ok
-    ? "accepted"
-    : tamperedVerdict.refusal;
-  const unsigned = verifySlackSignature({
-    raw: tampered.raw,
-    signature: undefined,
-    timestamp: undefined,
-    signingSecret: SIGNING_SECRET,
-    nowSeconds: NOW,
-  });
-  observed.refusals["missing-signature"] = unsigned.ok
-    ? "accepted"
-    : unsigned.refusal;
-  assert(
-    "a body changed after signing is bad-signature, and no signature is missing-signature",
-    tamperedVerdict.ok === false &&
-      tamperedVerdict.refusal === "bad-signature" &&
-      unsigned.ok === false &&
-      unsigned.refusal === "missing-signature",
-    `${tamperedVerdict.ok ? "accepted" : tamperedVerdict.refusal} / ${unsigned.ok ? "accepted" : unsigned.refusal}`,
+    "a body changed after signing is 401 bad-signature, no signature 401 missing-signature, and neither records a delivery",
+    tampered.status === 401 &&
+      field(tampered, "code") === "bad-signature" &&
+      unsigned.status === 401 &&
+      field(unsigned, "code") === "missing-signature" &&
+      forgedRows.length === 0,
+    `${String(field(tampered, "code"))} / ${String(field(unsigned, "code"))} rows=${forgedRows.length}`,
   );
 
   // 8: a message in a channel the filter does not watch creates nothing, and the skip says why.
-  const unwatched = yield* deliver(
-    payload({ channel: UNWATCHED, ts: messageTs(5) }),
+  const sessionsBefore = yield* sessionCount;
+  const unwatched = yield* Effect.promise(() =>
+    post("unwatched", payload({ channel: UNWATCHED, ts: messageTs(5) })),
   );
-  observed.skipped.push({
-    why: "unwatched channel",
-    status: unwatched.status,
-    reason: unwatched.reason,
-  });
   assert(
     "a message in a channel the filter does not watch is skipped, naming the filter",
-    unwatched.status === "skipped" &&
-      (unwatched.reason ?? "").includes("filtered:channel"),
-    `status=${unwatched.status} reason=${String(unwatched.reason)}`,
+    unwatched.status === 200 &&
+      field(unwatched, "status") === "skipped" &&
+      String(field(unwatched, "reason")).includes("filtered:channel") &&
+      (yield* sessionCount) === sessionsBefore,
+    `status=${unwatched.status} reason=${String(field(unwatched, "reason"))}`,
   );
 
-  // 9: the phrase filter refuses a message that does not carry it.
-  const noPhrase = yield* deliver(
-    payload({ ts: messageTs(6), text: "the widgets look fine" }),
-    withPhrase,
+  // 9: the loop guard — the bot's own message in a watched channel starts nothing.
+  const repliesBefore = ledger().replies.length;
+  const botMessage = yield* Effect.promise(() =>
+    post(
+      "bot",
+      payload({
+        ts: messageTs(6),
+        text: "Factory started session 01J8ZOTHER for this message.",
+        botId: "B0ACME",
+      }),
+    ),
   );
-  observed.skipped.push({
-    why: "missing phrase",
-    status: noPhrase.status,
-    reason: noPhrase.reason,
-  });
-  assert(
-    "a message without the filter's phrase is skipped, naming the filter",
-    noPhrase.status === "skipped" &&
-      (noPhrase.reason ?? "").includes("filtered:text"),
-    `status=${noPhrase.status} reason=${String(noPhrase.reason)}`,
-  );
-
-  // 10: the loop guard — the bot's own message in a watched channel starts nothing.
-  const botMessage = yield* deliver(
-    payload({
-      ts: messageTs(7),
-      text: "Factory started session 01J8ZOTHER for this message.",
-      botId: "B0ACME",
-    }),
-  );
-  observed.skipped.push({
-    why: "bot message",
-    status: botMessage.status,
-    reason: botMessage.reason,
-  });
   assert(
     "a bot's own message in a watched channel starts nothing",
-    botMessage.status === "skipped" &&
-      (botMessage.reason ?? "").includes("filtered:bot") &&
-      (yield* sessionCount) === 1 &&
-      readLedger().replies.length === 1,
-    `status=${botMessage.status} reason=${String(botMessage.reason)} sessions=${yield* sessionCount}`,
+    botMessage.status === 200 &&
+      field(botMessage, "status") === "skipped" &&
+      String(field(botMessage, "reason")).includes("filtered:bot") &&
+      (yield* sessionCount) === sessionsBefore &&
+      ledger().replies.length === repliesBefore,
+    `status=${botMessage.status} reason=${String(field(botMessage, "reason"))}`,
   );
 
-  // 11: a message already in a thread is answered in that thread, not in a new one.
-  const threaded = yield* deliver(
-    payload({
-      ts: messageTs(8),
-      threadTs: ROOT_TS,
-      text: "Also the left widget wobbles.",
-    }),
+  // 10: a message already in a thread is answered in that thread, not in a new one.
+  const threaded = yield* Effect.promise(() =>
+    post(
+      "threaded",
+      payload({
+        ts: messageTs(8),
+        threadTs: ROOT_TS,
+        text: "Also the left widget wobbles.",
+      }),
+    ),
   );
-  const threadedReply = readLedger().replies.at(-1);
+  const threadedReply = ledger().replies.at(-1);
   assert(
     "a message in a thread is answered in that thread",
-    threaded.status === "processed" &&
+    threaded.status === 200 &&
+      field(threaded, "status") === "processed" &&
       threadedReply?.root === ROOT_TS &&
       threadedReply.channel === WATCHED,
-    `status=${threaded.status} root=${String(threadedReply?.root)} sessions=${yield* sessionCount}`,
+    `status=${threaded.status} root=${String(threadedReply?.root)}`,
   );
 
-  // 12: the reply landed and its acknowledgement did not (the fake records it, then answers 500).
-  // The seam gives the claim back, so the sender's retry runs the delivery again — and must find
-  // its own reply rather than posting a second one.
-  const lost = payload({ ts: LOST_ACK_TS });
-  const lostAttempt = yield* Effect.exit(deliver(lost));
+  // 11: an @mention is the same ask, and the message twin Slack sends for it is the same delivery.
+  const mentionTs = messageTs(10);
+  const countBeforeMention = yield* sessionCount;
+  const mention = yield* Effect.promise(() =>
+    post(
+      "mention",
+      payload({
+        type: "app_mention",
+        ts: mentionTs,
+        threadTs: ROOT_TS,
+        text: "<@U0FACTORY> please take this one",
+      }),
+    ),
+  );
+  const twin = yield* Effect.promise(() =>
+    post(
+      "mention's message twin",
+      payload({
+        ts: mentionTs,
+        threadTs: ROOT_TS,
+        text: "<@U0FACTORY> please take this one",
+        eventId: "Ev0TWIN",
+      }),
+    ),
+  );
   assert(
-    "a delivery whose reply landed but whose answer was lost fails",
-    lostAttempt._tag === "Failure",
-    lostAttempt._tag === "Failure"
-      ? String(lostAttempt.cause).includes("write-back")
-        ? "write-back error"
-        : String(lostAttempt.cause).slice(0, 120)
-      : "the delivery answered success",
+    "an @mention opens one session, and the message twin Slack sends for it is a replay",
+    mention.status === 200 &&
+      field(mention, "status") === "processed" &&
+      twin.status === 200 &&
+      field(twin, "replayed") === true &&
+      (yield* sessionCount) === countBeforeMention + 1,
+    `mention=${String(field(mention, "status"))} twin replayed=${String(field(twin, "replayed"))} sessions=${countBeforeMention}→${yield* sessionCount}`,
+  );
+
+  // 12: a signed payload that carries no event is answered, not retried.
+  const limited = yield* Effect.promise(() =>
+    post("app_rate_limited", {
+      type: "app_rate_limited",
+      minute_rate_limited: nowSeconds(),
+    }),
+  );
+  assert(
+    "a signed payload that carries no event is answered 200 and ignored",
+    limited.status === 200 && field(limited, "ok") === true,
+    `status=${limited.status} body=${JSON.stringify(limited.body)}`,
+  );
+
+  // 13: the reply landed and its acknowledgement did not (the fake records it, then answers 500).
+  // The seam gives the claim back, so the sender's retry runs the delivery again — and must find its
+  // own reply rather than posting a second one.
+  const lost = payload({ ts: LOST_ACK_TS });
+  const lostAttempt = yield* Effect.promise(() => post("lost ack", lost));
+  assert(
+    "a delivery whose reply landed but whose answer was lost is 500 write-back",
+    lostAttempt.status === 500 && field(lostAttempt, "code") === "write-back",
+    `status=${lostAttempt.status} body=${JSON.stringify(lostAttempt.body)}`,
   );
   const beforeRetry = yield* sessionCount;
-  const retry = yield* deliver(lost);
-  const retryLedger = readLedger();
-  const forThread = (method: string) =>
-    retryLedger.requests.filter(
-      (request) =>
-        request.method === method &&
-        (request.path === "/api/chat.postMessage"
-          ? true
-          : (request.query ?? "").includes(`ts=${LOST_ACK_TS}`)),
-    ).length;
+  const retry = yield* Effect.promise(() => post("lost ack, retried", lost));
+  const retryLedger = ledger();
+  const gets = retryLedger.requests.filter(
+    (request) =>
+      request.method === "GET" && request.query.includes(`ts=${LOST_ACK_TS}`),
+  ).length;
+  const inThread = retryLedger.replies.filter(
+    (entry) => entry.root === LOST_ACK_TS,
+  ).length;
   assert(
-    "the retry reads the thread before it replies, and posts no second reply",
-    forThread("GET") >= 2 &&
-      retryLedger.replies.filter((entry) => entry.root === LOST_ACK_TS)
-        .length === 1,
-    `gets=${forThread("GET")} repliesInThread=${retryLedger.replies.filter((entry) => entry.root === LOST_ACK_TS).length}`,
-  );
-  assert(
-    "and the retry is processed, reusing the session the failed attempt opened",
-    retry.status === "processed" && (yield* sessionCount) === beforeRetry,
-    `status=${retry.status} sessions=${yield* sessionCount} before=${beforeRetry}`,
+    "the retry is processed, reads the thread before it replies, posts no second reply, and reuses the session",
+    retry.status === 200 &&
+      field(retry, "status") === "processed" &&
+      gets >= 2 &&
+      inThread === 1 &&
+      (yield* sessionCount) === beforeRetry,
+    `status=${retry.status} gets=${gets} repliesInThread=${inThread} sessions=${beforeRetry}→${yield* sessionCount}`,
   );
 
-  observed.replies = readLedger().replies;
+  // 14: the session's PR is opened over RPC (the fake GitHub answers), and its link is posted in the
+  // thread of the message that started the session — once, however often the step is asked.
+  const opened = yield* client.openPullRequest({
+    sessionId,
+    title: "factory: the widget",
+  });
+  const prUrl =
+    opened.outcome === "opened" || opened.outcome === "already-open"
+      ? opened.url
+      : undefined;
+  observed.pullRequest = opened;
+  const threadReplies = yield* waitUntil(
+    Effect.sync(() => {
+      const replies = ledger().replies.filter(
+        (entry) => entry.root === ROOT_TS && entry.text.includes(prUrl ?? "?"),
+      );
+      return replies.length > 0 ? replies : undefined;
+    }),
+    "the PR's link in the thread",
+  );
+  const again = yield* client.openPullRequest({
+    sessionId,
+    title: "factory: the widget",
+  });
+  yield* Effect.sleep(1500);
+  const prReplies = ledger().replies.filter(
+    (entry) => entry.root === ROOT_TS && entry.text.includes(prUrl ?? "?"),
+  );
+  assert(
+    "the PR's link is posted in the thread that started the session, once, and a repeat of the step posts nothing",
+    opened.outcome === "opened" &&
+      again.outcome === "already-open" &&
+      threadReplies.length === 1 &&
+      prReplies.length === 1 &&
+      (threadReplies[0]?.text ?? "").includes("pull request"),
+    `outcome=${opened.outcome}/${again.outcome} url=${String(prUrl)} replies=${prReplies.length}`,
+  );
+  const github = readLedger<{
+    readonly pulls: ReadonlyArray<{ readonly url: string }>;
+  }>(GITHUB_LEDGER, { pulls: [] });
+  assert(
+    "and the PR is the fake GitHub's one PR for the session's repo",
+    github.pulls.filter((pull) => pull.url.includes(`/${REPO}/pull/`))
+      .length === 1,
+    `pulls=${github.pulls.length}`,
+  );
+
+  observed.replies = ledger().replies;
 });
 
-const exit = await runtime.runPromiseExit(run);
-if (exit._tag === "Failure") {
-  console.error(exit.cause);
-}
-await runtime.dispose();
+const exit = await Effect.runPromiseExit(
+  program.pipe(Effect.provide(protocolFor(API_URL)), Effect.scoped),
+);
+if (exit._tag === "Failure") console.error(exit.cause);
 
 const checks = Object.values(observed.checks);
 const failed = checks.filter((check) => !check.passed).length;
 await writeFile(
-  path.join(EVIDENCE_DIR, "slack-observed.json"),
+  path.join(EVIDENCE_DIR, `slack-${MODE}-observed.json`),
   `${JSON.stringify({ ...observed, failed }, null, 2)}\n`,
 );
 console.log(
-  `\nslack: ${checks.length - failed}/${checks.length} checks passed — evidence in ${EVIDENCE_DIR}`,
+  `\nslack (${MODE}): ${checks.length - failed}/${checks.length} checks passed — evidence in ${EVIDENCE_DIR}`,
 );
 process.exit(failed === 0 && exit._tag === "Success" ? 0 : 1);

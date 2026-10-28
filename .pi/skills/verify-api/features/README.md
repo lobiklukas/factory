@@ -67,16 +67,16 @@ run failing it (`mutation-key-by-request-id/`). `./webhook.sh` (17/17) and `./li
 re-run there too, because the route they drive gained the refusal log and the shared signature
 verdict. See `sentry.md`.
 
-The Slack adapter checks (LOB-191) were run from the `ralph/LOB-191` worktree on 2026-10-24
-(`DATABASE_URL` the worker's own database on 5442, faux, the loopback Slack fake on `:9410`):
-`./slack.sh` **18/18**, evidence `.verify/evidence/lob-191/`. They run no API instance — the driver
-builds the seam, the session layer and the adapter in-process, as `./jira.sh` and
-`./github-issues.sh` do — so `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
-
-The GitHub issues adapter checks (LOB-190) were run from the `ralph/LOB-190` worktree on 2026-10-24
-(faux, Postgres on 5442): **19/19** via `./github-issues.sh`, evidence
-`.verify/evidence/lob-190/`. Like `./jira.sh` it starts no API process: the driver builds the seam
-and the fake listens on the port the run reserves for this surface.
+The Jira, Slack and GitHub-issues adapters are served over HTTP (LOB-259) and their drives were run
+from the `agent/LOB-259` worktree on 2026-10-28 (faux, Postgres on 5442, the worktree's own database):
+`./jira.sh` **16/16 + 2/2**, `./slack.sh` **19/19 + 2/2** and `./github-issues.sh` **15/15 + 2/2**,
+evidence `.verify/evidence/lob-259/`. Each boots its own API (`adapter-lib.sh`) pointed at a loopback
+fake of the third party — twice, the second time with the route's secret unset, which is the `2/2` —
+and posts signed deliveries at it; `./up.sh`, `./sigterm.sh` and `./degraded.sh` were not part of it.
+`./docs-trigger-http.sh`, `./review.sh` and `./linear-writeback.sh` were re-run there (all green)
+because `POST /webhooks/github` and the session layer's write-back changed under them: the push and
+`pull_request` paths are the same code, and Linear's mirror of the PR step now runs beside Slack's.
+See [jira.md](jira.md), [slack.md](slack.md) and [github.md](github.md).
 
 The approval-restart checks (LOB-52) were run from the `agent/LOB-52` worktree on 2026-10-27 (API
 on `:9501`, faux, the worktree's own database on 5442): `./approval-restart.sh` **22/22**, evidence
@@ -237,6 +237,7 @@ resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-b
 | Reset a session          | passing | [reset.md](reset.md)                       |
 | Compact on demand        | passing | [compact.md](compact.md)                   |
 | Fold a released session  | passing | [fold.md](fold.md)                         |
+| A long session's history | passing | [history.md](history.md)                   |
 | Fork a session           | passing | [fork.md](fork.md)                         |
 | Replay a session         | passing | [replay.md](replay.md)                     |
 | Request limits           | passing | [limits.md](limits.md)                     |
