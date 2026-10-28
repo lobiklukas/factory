@@ -68,6 +68,7 @@ import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
   AttentionItem,
+  BoardCard,
   BoardColumn,
   BoardDefinition,
   BoardInstance,
@@ -413,6 +414,14 @@ export type TaskServiceShape = {
   readonly list: (
     input: ListTasksInput,
   ) => Effect.Effect<ReadonlyArray<Task>, TaskError>;
+  /**
+   * A board's cards in `list`'s order, each with its runs' newest status, PR link and summed spend
+   * (C10): three reads over the board's runs however many cards it has, so a lane's faces never cost
+   * a read per card.
+   */
+  readonly listCards: (
+    input: ListTasksInput,
+  ) => Effect.Effect<ReadonlyArray<BoardCard>, TaskError>;
   readonly move: (input: MoveTaskInput) => Effect.Effect<Task, TaskError>;
   readonly block: (input: BlockTaskInput) => Effect.Effect<Task, TaskError>;
   readonly unblock: (input: UnblockTaskInput) => Effect.Effect<Task, TaskError>;
@@ -1294,6 +1303,87 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    /**
+     * The board's cards and what their runs say (C10). The card list is `list`'s; the run facts come
+     * from three statements scoped to the board, never one per card: the runs' count and summed
+     * spend, the newest run's session and status, and the newest PR any run recorded. A run whose
+     * session index row is missing counts for zero spend and reads `idle`, so a missing row never
+     * shows a card as working.
+     */
+    const listCards = (
+      input: ListTasksInput,
+    ): Effect.Effect<ReadonlyArray<BoardCard>, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const tasks = yield* list(input);
+          if (tasks.length === 0) return [];
+          const totals = yield* sql<{
+            taskId: string;
+            runCount: number;
+            costTotal: number;
+          }>`
+            SELECT tr.task_id, COUNT(*)::int AS run_count,
+                   COALESCE(SUM(sa.cost_total), 0)::float8 AS cost_total
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            LEFT JOIN session_activity sa ON sa.session_id = tr.session_id
+            WHERE t.board_id = ${input.boardId}
+            GROUP BY tr.task_id
+          `;
+          const newest = yield* sql<{
+            taskId: string;
+            sessionId: string;
+            startedAt: Date | string;
+            status: string | null;
+          }>`
+            SELECT DISTINCT ON (tr.task_id) tr.task_id, tr.session_id, tr.started_at, sa.status
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            LEFT JOIN session_activity sa ON sa.session_id = tr.session_id
+            WHERE t.board_id = ${input.boardId}
+            ORDER BY tr.task_id, tr.started_at DESC, tr.id DESC
+          `;
+          const pulls = yield* sql<{ taskId: string; prUrl: string }>`
+            SELECT DISTINCT ON (tr.task_id) tr.task_id, s.pr_url
+            FROM task_runs tr
+            JOIN tasks t ON t.id = tr.task_id
+            JOIN sessions s ON s.id = tr.session_id
+            WHERE t.board_id = ${input.boardId} AND s.pr_url IS NOT NULL AND s.pr_url <> ''
+            ORDER BY tr.task_id, tr.started_at DESC, tr.id DESC
+          `;
+          const totalOf = new Map(totals.map((row) => [row.taskId, row]));
+          const newestOf = new Map(newest.map((row) => [row.taskId, row]));
+          const prOf = new Map(pulls.map((row) => [row.taskId, row.prUrl]));
+          return yield* Effect.forEach(tasks, (task) => {
+            const total = totalOf.get(task.id);
+            const run = newestOf.get(task.id);
+            const prUrl = prOf.get(task.id);
+            return decodeCard({
+              task,
+              runCount: total?.runCount ?? 0,
+              costTotal: total?.costTotal ?? 0,
+              ...(run === undefined
+                ? {}
+                : {
+                    run: {
+                      sessionId: run.sessionId,
+                      status: run.status === "busy" ? "busy" : "idle",
+                      startedAt: iso(run.startedAt),
+                    },
+                  }),
+              ...(prUrl === undefined ? {} : { prUrl }),
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TaskStorageError({
+                    message: `card ${task.id} does not read as a board card: ${String(cause)}`,
+                  }),
+              ),
+            );
+          });
+        }),
+      );
+
     const decodeColumns = Schema.decodeUnknownEffect(
       Schema.fromJsonString(Schema.Array(BoardColumn)),
     );
@@ -2042,6 +2132,7 @@ export const TaskServiceLive = Layer.effect(
       );
 
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
+    const decodeCard = Schema.decodeUnknownEffect(BoardCard);
 
     /**
      * A card's runs, newest first (LOB-76). The card is looked up first so an unknown id is a
@@ -2412,6 +2503,7 @@ export const TaskServiceLive = Layer.effect(
       declareSpec,
       spec,
       replay,
+      listCards,
       listRuns,
       attention,
     } satisfies TaskServiceShape;

@@ -65,8 +65,9 @@ export const NavRail = () => {
       aria-label="Sections"
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar py-3"
     >
+      {/* The dashboard's front door (C9): `/` opens the only board, or the boards list. */}
       <Link
-        to="/sessions"
+        to="/"
         aria-label="factory"
         className="mb-3 grid size-7 shrink-0 place-items-center bg-foreground text-background"
       >

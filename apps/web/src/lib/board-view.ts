@@ -10,7 +10,7 @@ import { columnTransitions, isWebLink } from "@repo/domain/Task";
 /**
  * The board as lanes (LOB-75): what `/boards/$boardId` renders, computed from two server reads.
  *
- * Lanes come from the definition, cards from `listTasks`, and nothing else: no position, no
+ * Lanes come from the definition, cards from `listBoardCards`, and nothing else: no position, no
  * client-side ordering, no remembered state (docs/board.md B9 — a drag-ordered queue would be a
  * second source of truth about "what is next"). Pure on purpose, so the cases a screenshot cannot
  * settle — an empty lane, a card in a column the definition does not declare — are unit cases.
