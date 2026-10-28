@@ -777,52 +777,52 @@ describe("POST /webhooks/github records the merge on the session's log (LOB-44)"
   }, 120_000);
 });
 
-let boards = 0;
-
-/**
- * A card in `review` on a board of its own (one board per repository, so a fresh repository over
- * the same checkout), with one run that opened PR `number`.
- */
-const cardWithPr = (number: number) =>
-  inService(
-    Effect.gen(function* () {
-      const tasks = yield* TaskService;
-      const sessions = yield* SessionService;
-      const sql = yield* SqlClient;
-      boards += 1;
-      const cardRepo = RepoSlug.make(`acme/gh-card-${run}-${boards}`);
-      yield* sessions.registerRepo({ repo: cardRepo, localPath: checkout });
-      const board = yield* tasks.createBoard({
-        repo: cardRepo,
-        definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
-        definitionVersion: 1,
-      });
-      const card = yield* tasks.create({
-        boardId: board.id,
-        title: `card ${number}`,
-        actor: "person:lukas",
-      });
-      yield* sql`UPDATE tasks SET "column" = 'review', revision = 2 WHERE id = ${card.id}`;
-      const created = yield* sessions.create({
-        repo: cardRepo,
-        baseRef: "main",
-        taskId: card.id,
-        taskColumn: "building",
-      });
-      const url = `https://github.com/${cardRepo}/pull/${number}`;
-      yield* sql`UPDATE sessions SET pr_url = ${url} WHERE id = ${created.id}`;
-      return { taskId: card.id, url };
-    }).pipe(Effect.provide(TaskServiceLive)),
-  );
-
-const cardOf = (taskId: string) =>
-  inService(
-    Effect.flatMap(TaskService, (tasks) => tasks.get(taskId)).pipe(
-      Effect.provide(TaskServiceLive),
-    ),
-  );
-
 describe("POST /webhooks/github settles the PR's card (C20)", () => {
+  let boards = 0;
+
+  /**
+   * A card in `review` on a board of its own (one board per repository, so a fresh repository over
+   * the same checkout), with one run that opened PR `number`.
+   */
+  const cardWithPr = (number: number) =>
+    inService(
+      Effect.gen(function* () {
+        const tasks = yield* TaskService;
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        boards += 1;
+        const cardRepo = RepoSlug.make(`acme/gh-card-${run}-${boards}`);
+        yield* sessions.registerRepo({ repo: cardRepo, localPath: checkout });
+        const board = yield* tasks.createBoard({
+          repo: cardRepo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+          definitionVersion: 1,
+        });
+        const card = yield* tasks.create({
+          boardId: board.id,
+          title: `card ${number}`,
+          actor: "person:lukas",
+        });
+        yield* sql`UPDATE tasks SET "column" = 'review', revision = 2 WHERE id = ${card.id}`;
+        const created = yield* sessions.create({
+          repo: cardRepo,
+          baseRef: "main",
+          taskId: card.id,
+          taskColumn: "building",
+        });
+        const url = `https://github.com/${cardRepo}/pull/${number}`;
+        yield* sql`UPDATE sessions SET pr_url = ${url} WHERE id = ${created.id}`;
+        return { taskId: card.id, url };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+
+  const cardOf = (taskId: string) =>
+    inService(
+      Effect.flatMap(TaskService, (tasks) => tasks.get(taskId)).pipe(
+        Effect.provide(TaskServiceLive),
+      ),
+    );
+
   /** Mutation: leave the settle out of the route — the core suite passes and the card stays in review. */
   it("moves a merged PR's card to done once across a redelivery, and blocks an unmerged close's", async () => {
     const merged = await cardWithPr(61);
@@ -865,92 +865,92 @@ describe("POST /webhooks/github settles the PR's card (C20)", () => {
     ).toBe(401);
     expect(await cardOf(unsigned.taskId)).toMatchObject({ column: "review" });
   }, 120_000);
-});
 
-describe("POST /webhooks/github brings a PR's reviews and checks to its card (C21)", () => {
-  const sign = (raw: string) =>
-    `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
+  describe("POST /webhooks/github brings a PR's reviews and checks to its card (C21)", () => {
+    const sign = (raw: string) =>
+      `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
 
-  const commentsOf = (taskId: string) =>
-    inService(
-      Effect.flatMap(TaskService, (tasks) => tasks.comments(taskId)).pipe(
-        Effect.provide(TaskServiceLive),
-      ),
-    );
+    const commentsOf = (taskId: string) =>
+      inService(
+        Effect.flatMap(TaskService, (tasks) => tasks.comments(taskId)).pipe(
+          Effect.provide(TaskServiceLive),
+        ),
+      );
 
-  /**
-   * Mutation: leave the feedback events out of the route — each delivery falls through to the
-   * `pull_request` mirror, answered `202` with nothing written.
-   */
-  it("blocks the card on a signed changes_requested review, once, and puts a failing check on its thread", async () => {
-    const reviewed = await cardWithPr(71);
-    const review = {
-      action: "submitted",
-      review: {
-        id: 7101,
-        user: { login: "alice" },
-        body: "Split the migration out.",
-        state: "changes_requested",
-        html_url: `${reviewed.url}#pullrequestreview-7101`,
-      },
-      pull_request: { number: 71, html_url: reviewed.url },
-    };
-    const first = await deliver(review, sign, "pull_request_review");
-    expect(first.status).toBe(200);
-    expect(await first.json()).toEqual({
-      ok: true,
-      event: "changes_requested",
-      feedback: { recorded: 1, blocked: 1 },
-    });
-    const again = await deliver(review, sign, "pull_request_review");
-    expect(await again.json()).toMatchObject({
-      feedback: { recorded: 0, blocked: 0 },
-    });
-    expect(await cardOf(reviewed.taskId)).toMatchObject({
-      column: "review",
-      blocked: { reason: "changes_requested" },
-    });
-    const comments = await commentsOf(reviewed.taskId);
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).toContain("\nSplit the migration out.");
-
-    const page = reviewed.url.replace(/\/pull\/71$/, "");
-    const check = await deliver(
-      {
-        action: "completed",
-        check_run: {
-          id: 7102,
-          name: "gate",
-          head_sha: "a".repeat(40),
-          conclusion: "failure",
-          html_url: `${page}/runs/7102`,
-          check_suite: { id: 7103 },
-          pull_requests: [{ number: 71, head: { sha: "a".repeat(40) } }],
+    /**
+     * Mutation: leave the feedback events out of the route — each delivery falls through to the
+     * `pull_request` mirror, answered `202` with nothing written.
+     */
+    it("blocks the card on a signed changes_requested review, once, and puts a failing check on its thread", async () => {
+      const reviewed = await cardWithPr(71);
+      const review = {
+        action: "submitted",
+        review: {
+          id: 7101,
+          user: { login: "alice" },
+          body: "Split the migration out.",
+          state: "changes_requested",
+          html_url: `${reviewed.url}#pullrequestreview-7101`,
         },
-        repository: { html_url: page },
-      },
-      sign,
-      "check_run",
-    );
-    expect(await check.json()).toMatchObject({
-      event: "check_failed",
-      feedback: { recorded: 1, blocked: 0 },
-    });
-    expect((await commentsOf(reviewed.taskId))[1]?.body).toContain(
-      'Check "gate" failed (failure)',
-    );
+        pull_request: { number: 71, html_url: reviewed.url },
+      };
+      const first = await deliver(review, sign, "pull_request_review");
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({
+        ok: true,
+        event: "changes_requested",
+        feedback: { recorded: 1, blocked: 1 },
+      });
+      const again = await deliver(review, sign, "pull_request_review");
+      expect(await again.json()).toMatchObject({
+        feedback: { recorded: 0, blocked: 0 },
+      });
+      expect(await cardOf(reviewed.taskId)).toMatchObject({
+        column: "review",
+        blocked: { reason: "changes_requested" },
+      });
+      const comments = await commentsOf(reviewed.taskId);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("\nSplit the migration out.");
 
-    // An unsigned review writes nothing.
-    const unsigned = await cardWithPr(72);
-    expect(
-      (
-        await deliver(
-          { ...review, pull_request: { number: 72, html_url: unsigned.url } },
-          () => "sha256=00",
-          "pull_request_review",
-        )
-      ).status,
-    ).toBe(401);
-    expect((await cardOf(unsigned.taskId)).blocked).toBeUndefined();
-  }, 120_000);
+      const page = reviewed.url.replace(/\/pull\/71$/, "");
+      const check = await deliver(
+        {
+          action: "completed",
+          check_run: {
+            id: 7102,
+            name: "gate",
+            head_sha: "a".repeat(40),
+            conclusion: "failure",
+            html_url: `${page}/runs/7102`,
+            check_suite: { id: 7103 },
+            pull_requests: [{ number: 71, head: { sha: "a".repeat(40) } }],
+          },
+          repository: { html_url: page },
+        },
+        sign,
+        "check_run",
+      );
+      expect(await check.json()).toMatchObject({
+        event: "check_failed",
+        feedback: { recorded: 1, blocked: 0 },
+      });
+      expect((await commentsOf(reviewed.taskId))[1]?.body).toContain(
+        'Check "gate" failed (failure)',
+      );
+
+      // An unsigned review writes nothing.
+      const unsigned = await cardWithPr(72);
+      expect(
+        (
+          await deliver(
+            { ...review, pull_request: { number: 72, html_url: unsigned.url } },
+            () => "sha256=00",
+            "pull_request_review",
+          )
+        ).status,
+      ).toBe(401);
+      expect((await cardOf(unsigned.taskId)).blocked).toBeUndefined();
+    }, 120_000);
+  });
 });
