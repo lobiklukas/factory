@@ -91,6 +91,7 @@ import type {
 import { LIFECYCLE_ACTIONS, TRIGGER_ACTION } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readTriggerRules } from "./WebhookBoot";
+import { TriggerBlockersLive, TriggerRepliesLive } from "./LinearSync";
 import { slackEnv, TriggerWriteBacksLive } from "./TriggerAdapters";
 
 /** The default cap on a trigger delivery, in bytes. */
@@ -840,6 +841,10 @@ const seamFor = (rules: ReadonlyArray<TriggerRule>) =>
         TriggerSessionsFromSessionService,
         TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
         TriggerWriteBacksLive,
+        // An issue with open blockers starts nothing, and a reply in a Linear agent session answers
+        // the card its question parked (T5).
+        TriggerBlockersLive,
+        TriggerRepliesLive.pipe(Layer.provide(TaskServiceLive)),
       ),
     ),
   );

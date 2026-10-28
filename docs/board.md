@@ -293,6 +293,12 @@ anything is written on a card that is not blocked `needs_input` or when `--actor
 comment would be a note); a comment that lands but leaves the card blocked fails with
 `start_not_started`.
 
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
+
 ## B8 — Evidence gates, not evidence prose
 
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body
