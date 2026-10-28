@@ -48,3 +48,5 @@ export * from "./admission";
 export * from "./Notifier";
 export * from "./SecretService";
 export * from "./secretScan";
+export * from "./AutomationService";
+export * from "./automationSchedule";

@@ -417,6 +417,13 @@ export const approvalResumeMessage = (
 export const approvalResumeRequestId = (requestId: string): string =>
   `approval-resume:${requestId}`;
 
+/** `baseHead`'s answer: the ref read, and its tip — or, when no git could say, why not. */
+export type RepoBaseHead = {
+  readonly ref: string;
+  readonly sha?: string;
+  readonly note?: string;
+};
+
 export type SessionServiceShape = {
   readonly create: (
     input?: CreateSessionInput,
@@ -564,6 +571,18 @@ export type SessionServiceShape = {
   readonly getRepo: (
     input: GetRepoInput,
   ) => Effect.Effect<RepoSummary, SessionError | RepoNotFound>;
+  /**
+   * Where a registered repo's base is now (S-general-automations): the commit a session cut from
+   * `baseRef` (default: the repo's default base ref) would start at, read the way that cut reads it —
+   * the factory's clone of a URL-only repo synced, the base of a checkout with a forge fetched into
+   * it (falling back to the checkout's own refs when the fetch fails), and otherwise the checkout's
+   * `<base>` or `origin/<base>`. `sha` is absent, with `note` saying why, when no git could say.
+   * `RepoNotFound` for a slug the registry has no row for.
+   */
+  readonly baseHead: (input: {
+    readonly repo: RepoSlug;
+    readonly baseRef?: string | undefined;
+  }) => Effect.Effect<RepoBaseHead, SessionError | RepoNotFound>;
   /**
    * A session's events: live from the harness while this process owns it; live from its log while
    * another process does (LOB-18), ending when that ownership does; a single historical snapshot
@@ -3229,6 +3248,61 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           yield* syncMirrorOf(row);
           return yield* repoSummary(row);
+        });
+
+      const baseHead = (input: {
+        readonly repo: RepoSlug;
+        readonly baseRef?: string | undefined;
+      }): Effect.Effect<RepoBaseHead, SessionError | RepoNotFound> =>
+        Effect.gen(function* () {
+          const row = (yield* paper("read repo", readRepo(input.repo)))[0];
+          if (row === undefined) {
+            return yield* new RepoNotFound({
+              repo: input.repo,
+              message: `repo ${input.repo} is not registered`,
+            });
+          }
+          const ref = input.baseRef ?? row.defaultBaseRef;
+          if (isCommitId(ref)) return { ref, sha: ref };
+          const unknown = (note: string): RepoBaseHead => ({ ref, note });
+          const mirrored = mirrorOf(row);
+          if (mirrored !== undefined) {
+            return yield* mirrored.mirror
+              .sync({ repo: input.repo, url: mirrored.url, baseRef: ref })
+              .pipe(
+                Effect.map((tip): RepoBaseHead => ({ ref, sha: tip.sha })),
+                Effect.catch((error) => Effect.succeed(unknown(error.message))),
+              );
+          }
+          const checkout = row.localPath;
+          if (checkout === null) {
+            return unknown(
+              `repo ${input.repo} has no checkout and no clone to read ${ref} in`,
+            );
+          }
+          const remote = options.repoRemote;
+          if (remote !== undefined && isSafeBranchName(ref)) {
+            const url = yield* forgeUrlFor(input.repo, row.url, checkout);
+            if (url !== undefined) {
+              const fetched = yield* remote
+                .fetchBase({ repo: input.repo, url, checkout, branch: ref })
+                .pipe(
+                  Effect.map((tip) => tip.sha),
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `repo ${input.repo}: could not fetch ${ref} from its forge, so its base is read from the checkout: ${error.message}`,
+                    ).pipe(Effect.as(undefined)),
+                  ),
+                );
+              if (fetched !== undefined) return { ref, sha: fetched };
+            }
+          }
+          const sha =
+            (yield* resolveCommit(checkout, ref)) ??
+            (yield* resolveCommit(checkout, `refs/remotes/origin/${ref}`));
+          return sha === undefined
+            ? unknown(`no commit named ${ref} in ${checkout}`)
+            : { ref, sha };
         });
 
       const listRepos: Effect.Effect<ListReposOutput, SessionError> =
@@ -8654,6 +8728,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         listRepos,
         getRepo,
         syncRepo,
+        baseHead,
         events,
         requestApproval,
         decideApproval,
