@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Drive the Sentry receiver (LOB-81) end to end, across a restart: boot this skill's API with a
-# Sentry client secret, post signed alerts at `/webhooks/sentry`, stop the process, boot a fresh one
-# on the same database, and post the same alert again.
+# Drive the Sentry receiver (LOB-81) and its mapping (LOB-82) end to end, across a restart: boot this
+# skill's API with a Sentry client secret and filter, post signed alerts at `/webhooks/sentry`, stop
+# the process, boot a fresh one on the same database, and post the same alert — and another event in
+# the same Sentry issue — again.
 #
 #   ./sentry.sh
 #
@@ -9,13 +10,18 @@
 # the Sentry configuration, which has to exist *before* the API boots because the routes read the
 # rules once when they are built:
 #
-#   TRIGGER_RULES               two rules: `sentry:project:404` → this run's repo with an
+#   TRIGGER_RULES               three rules: `sentry:project:404` → this run's repo with an
 #                               `-unregistered` suffix, which nobody registers (so the alert burst
-#                               records skips and opens no session), ahead of the catch-all: the
+#                               records skips and opens no session); `sentry:project:777` → this
+#                               run's repo with a blank prompt, so its session gets the default
+#                               investigate-before-edit template (LOB-82); and the catch-all: the
 #                               `sentry` label → this run's own repo (per run, so another run's
 #                               sessions cannot answer "how many did this open?")
 #   SENTRY_CLIENT_SECRET        the integration's client secret the drive signs with
 #   SENTRY_RATE_LIMIT           6 per SENTRY_RATE_WINDOW_SECONDS=60, so a burst of 10 alerts is past it
+#   SENTRY_MIN_LEVEL            error, SENTRY_ENVIRONMENTS=production and SENTRY_RELEASES=verify@*:
+#                               the filter the drive's warning, staging and other-release alerts fail
+#                               (LOB-82)
 #
 # The two-process shape is `sigterm.sh`'s: phase `first` runs against the first process; `down.sh`
 # stops it with SIGTERM (and SIGKILL if it lingers); phase `after-restart` runs against a fresh
@@ -31,7 +37,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9423}"
 API_URL="http://localhost:$API_PORT"
 RUN_DIR="$ROOT/.verify/run"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-81}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-82}"
 STATE="$EVIDENCE_DIR/sentry-state.json"
 DRIVER="$ROOT/.pi/skills/verify-api/sentry.ts"
 
@@ -39,9 +45,12 @@ export TRIGGER_REPO="${TRIGGER_REPO:-acme/verify-api-sentry-$(date +%s)}"
 export SENTRY_CLIENT_SECRET="${SENTRY_CLIENT_SECRET:-verify-api-sentry-secret}"
 export SENTRY_RATE_LIMIT="${SENTRY_RATE_LIMIT:-6}"
 export SENTRY_RATE_WINDOW_SECONDS="${SENTRY_RATE_WINDOW_SECONDS:-60}"
+export SENTRY_MIN_LEVEL="${SENTRY_MIN_LEVEL:-error}"
+export SENTRY_ENVIRONMENTS="${SENTRY_ENVIRONMENTS:-production}"
+export SENTRY_RELEASES="${SENTRY_RELEASES:-verify@*}"
 TRIGGER_RULES="$(printf \
-  '[{"label":"sentry:project:404","repo":"%s-unregistered","prompt":"{{title}}"},{"label":"sentry","repo":"%s","baseRef":"main","prompt":"Investigate {{title}} before editing anything:\\n{{body}}"}]' \
-  "$TRIGGER_REPO" "$TRIGGER_REPO")"
+  '[{"label":"sentry:project:404","repo":"%s-unregistered","prompt":"{{title}}"},{"label":"sentry:project:777","repo":"%s","prompt":""},{"label":"sentry","repo":"%s","baseRef":"main","prompt":"Investigate {{title}} before editing anything:\\n{{body}}"}]' \
+  "$TRIGGER_REPO" "$TRIGGER_REPO" "$TRIGGER_REPO")"
 export TRIGGER_RULES
 
 mkdir -p "$EVIDENCE_DIR"
