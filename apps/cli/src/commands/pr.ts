@@ -31,6 +31,8 @@ export const prAnswer = (
   switch (step.outcome) {
     case "opened":
     case "already-open":
+    // The PR was already open and this call pushed the branch's new commits onto it (F14).
+    case "updated":
       return {
         _tag: "Opened",
         lines: [

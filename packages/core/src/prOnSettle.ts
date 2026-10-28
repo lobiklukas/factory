@@ -37,14 +37,18 @@
  * nothing (`notOpenedText`), and a person can still open the PR over it with `factory pr`.
  *
  * The PR opens at the first settle that finds a change. A later run of the same session — a steered
- * trigger session, a building run sent on — that commits more is not pushed by a later settle: the
- * step answers `already-open` for a recorded PR without pushing (C17's push is the first open's).
- * Pushing a recorded PR's new head on settle is a follow-up. A *later run of the card* is another
+ * trigger session, a building run sent on — that commits more is pushed onto that PR by its settle
+ * (F14): a session with its PR recorded still declares the step, and the step, finding the branch
+ * past the commit the PR was published at, measures, caps and pushes the new tip and answers
+ * `updated`. A settle with no new commit is answered from the log and reaches no forge; a PR that
+ * merged takes nothing more, because a push to a merged PR's branch reaches nobody's review. A
+ * refusal of the push says so in the same words as for an open, naming the PR it left as it was. A
+ * *later run of the card* is another
  * session on the card's branch (C19, `./cardBranch`): it has no PR recorded yet, so its settle takes
  * the step, which adopts the card's PR — measured, capped and pushed, answered `already-open` — rather
  * than opening a second one.
  *
- * A session with no repo, a PR already recorded, or a released workspace has nothing to open, and a
+ * A session with no repo, a PR that merged, or a released workspace has nothing to publish, and a
  * working directory that is not its own checkout (a bare slug's plain directory, `diffSize`) is
  * skipped: the step there could not tell a change from none and would open a PR over nothing, which
  * an operator may ask for and a settled run must not.
@@ -59,6 +63,11 @@ export type SettledRun = {
   /** The request id the session was created under; `trigger:<delivery>` for a trigger's session. */
   readonly requestId: string | null;
   readonly prUrl: string | null;
+  /**
+   * Whether the session's PR merged (`sessions.pr_merged_at`, C20): its branch is done, so a later
+   * commit on it is pushed onto nothing (F14). Absent reads as no.
+   */
+  readonly prMerged?: boolean;
   readonly actor: string | null;
   readonly forkedFrom: string | null;
   readonly released: boolean;
@@ -96,14 +105,15 @@ export const PR_LINK_REQUIREMENT = "pr_link";
  * What a settled run's provenance says about its PR (see the module comment for the rules):
  * `declared` when it opens one now, `parked` when it declares one but ended waiting on a person (so
  * a later run that settles done opens it), and `undeclared` when it has none to open — a person's
- * session, a fork, a column that requires no PR, or nothing left to open (no repo, a PR already
- * recorded, a released workspace).
+ * session, a fork, a column that requires no PR, or nothing left to publish (no repo, a PR that
+ * merged, a released workspace). A PR already recorded and unmerged is still declared (F14): the
+ * step is what pushes a later commit onto it.
  */
 export type SettleDeclaration = "declared" | "parked" | "undeclared";
 
 export const settleDeclarationOf = (run: SettledRun): SettleDeclaration => {
-  if (run.repo === null || run.prUrl !== null || run.released)
-    return "undeclared";
+  if (run.repo === null || run.released) return "undeclared";
+  if (run.prUrl !== null && run.prMerged === true) return "undeclared";
   if (run.forkedFrom !== null) return "undeclared";
   const declares =
     run.columnRequires !== undefined
@@ -144,9 +154,12 @@ const STOPPED: Record<Exclude<RunEnding, "finished">, string> = {
 
 /**
  * What one settle's PR step came to: a session that does not declare it (`undeclared`), one that
- * does but ended waiting on a person (`parked`), one this process no longer owns or whose directory is not its own checkout, a branch still at the commit
- * its last settle found even (`unchanged`), a PR opened, a reason it opened none (`NotOpened`'s
- * outcome), or a step that died or whose bookkeeping failed — the last two logged as such.
+ * does but ended waiting on a person (`parked`), one this process no longer owns or whose directory
+ * is not its own checkout, a branch still at the commit its last settle found even (`unchanged`), a
+ * PR opened (or a card's PR adopted), a recorded PR the branch's new commits were pushed onto
+ * (`updated`, F14) or whose branch is still where it was published (`up-to-date`), a reason it
+ * opened none (`NotOpened`'s outcome), or a step that died or whose bookkeeping failed — the last
+ * two logged as such.
  */
 export type SettleDecision =
   | "undeclared"
@@ -155,6 +168,8 @@ export type SettleDecision =
   | "not-checkout"
   | "unchanged"
   | "opened"
+  | "updated"
+  | "up-to-date"
   | NotOpened["outcome"]
   | "died"
   | "bookkeeping-failed";
@@ -164,19 +179,26 @@ export type SettleDecision =
  * the control plane, never by the model, so it names the step's own numbers and nothing a token or a
  * URL could leak through: a failure's message is the typed error's, which already omits both.
  */
-export const notOpenedText = (reason: NotOpened): string => {
-  const head = "the run settled and the PR step opened no PR";
+export const notOpenedText = (reason: NotOpened, pr?: string): string => {
+  // A session whose PR is already open (F14) was refused a push onto it, not an open.
+  const head =
+    pr === undefined
+      ? "the run settled and the PR step opened no PR"
+      : `the run settled and the PR step pushed nothing to ${pr}`;
+  const then = pr === undefined ? "open the PR" : "push it (`factory pr`)";
   switch (reason.outcome) {
     case "no-change":
       return `${head}: the branch has no change against its base`;
     case "over-cap":
       return `${head}: the branch's diff is over the cap (${reason.measured} ${reason.limit}, at most ${reason.cap})`;
     case "non-fast-forward":
-      return `${head}: the remote's ${reason.head} has commits this branch does not, and the push is never forced; integrate them, then open the PR`;
+      return `${head}: the remote's ${reason.head} has commits this branch does not, and the push is never forced; integrate them, then ${then}`;
     case "secret-found":
-      return `${head}: secret_found: the branch's commits add a secret — ${secretFindingsText(reason)} — so nothing was pushed; take it out of the branch's history (rewrite the commits that add it), then open the PR`;
+      return `${head}: secret_found: the branch's commits add a secret — ${secretFindingsText(reason)} — so nothing was pushed; take it out of the branch's history (rewrite the commits that add it), then ${then}`;
     case "stopped":
-      return `the run settled without finishing, so no PR was opened over its branch: ${STOPPED[reason.ending]}; a run that finishes opens it, or \`factory pr\` does`;
+      return pr === undefined
+        ? `the run settled without finishing, so no PR was opened over its branch: ${STOPPED[reason.ending]}; a run that finishes opens it, or \`factory pr\` does`
+        : `the run settled without finishing, so nothing was pushed to ${pr}: ${STOPPED[reason.ending]}; a run that finishes pushes it, or \`factory pr\` does`;
     case "failed":
       return `${head}: ${reason.tag}: ${reason.message}`;
   }

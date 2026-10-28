@@ -486,7 +486,7 @@ const DocsScheduleDaemon = (schedule: {
  * database may not be reachable or migrated yet. Logs what it resumed under `what`.
  */
 const resumeAtBoot = (
-  what: "missions" | "runs",
+  what: "missions" | "runs" | "settled PR steps",
   resume: Effect.Effect<readonly string[], SessionError>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -516,7 +516,10 @@ const resumeAtBoot = (
  * each session whose row says a mission is in flight and schedules it, so the mission continues in
  * the phase it died in. A run is the same story for a conversation: a SIGTERM's close or a SIGKILL
  * leaves its submission placed and unanswered, and `resumeRuns` reopens each session whose row says
- * a run is in flight, which continues it as the same submission. Forked beside `MigrationsDaemon`
+ * a run is in flight, which continues it as the same submission. Then the PR step a settled run was
+ * owed and no process took (F16): `settlePullRequestsAtBoot` runs it for each session the settle rule
+ * declares that records no PR and whose step never answered at its branch's tip — a process killed
+ * between a run settling and its step leaves exactly that. Forked beside `MigrationsDaemon`
  * and for the same reason — the boot binds first. Built on `SessionShutdown`, like the docs
  * schedule, so a resume still in progress is interrupted before the owners are released.
  */
@@ -526,6 +529,10 @@ const BootResumeDaemon = Layer.effectDiscard(
     yield* Effect.forkScoped(
       resumeAtBoot("missions", sessions.resumeMissions).pipe(
         Effect.andThen(resumeAtBoot("runs", sessions.resumeRuns)),
+        // After the runs, so a run the boot continued settles and takes its step as a live one does.
+        Effect.andThen(
+          resumeAtBoot("settled PR steps", sessions.settlePullRequestsAtBoot),
+        ),
       ),
     );
   }),

@@ -115,8 +115,9 @@ export type PullRequestReport =
 /**
  * One reading of the PR step's exit.
  *
- * `opened` and `already-open` are both a PR: a retry that the log answered is the same PR, and a
- * mirror that missed the first report has to learn it from the second. The two refusals are failed
+ * `opened`, `already-open` and `updated` are all a PR: a retry that the log answered is the same PR,
+ * a push of later commits onto it (F14) is too, and a mirror that missed the first report has to
+ * learn it from the second. The two refusals are failed
  * runs — the run ended and there is no PR — and so is a typed error or a defect. An interrupt is
  * none of these: the caller stopped asking, which says nothing about the run, so it is not reported.
  */
@@ -128,6 +129,7 @@ export const pullRequestReport = (
     switch (step.outcome) {
       case "opened":
       case "already-open":
+      case "updated":
         return {
           _tag: "opened",
           pr: { number: step.number, url: step.url },

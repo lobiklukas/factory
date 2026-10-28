@@ -221,6 +221,7 @@ import {
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
   PR_NOT_OPENED_ENTRY_KIND,
+  PR_UPDATED_ENTRY_KIND,
   INTERRUPTED_ENTRY_KIND,
   INTERRUPT_DOC_KIND,
   LIVE_DOC,
@@ -1575,6 +1576,62 @@ export const writePullRequestDoc = (
   );
 
 /**
+ * A recorded PR's push of later commits, announced in the transcript (F14). It carries no model
+ * content, so the agent never reads it as a turn; its text names the PR and both commits, so a
+ * person reading the session sees that the PR moved and where to.
+ */
+export const PullRequestUpdatedEntry = defineEntry<{
+  readonly text: string;
+  readonly url: string;
+  readonly number: number;
+  readonly commit: string;
+  readonly from: string;
+}>(PR_UPDATED_ENTRY_KIND);
+
+/** The line a PR-updated entry reads as. */
+export const pullRequestUpdatedText = (
+  url: string,
+  from: string,
+  commit: string,
+): string =>
+  `pushed ${commit.slice(0, 12)} to ${url}${from === "" ? "" : ` (it was published at ${from.slice(0, 12)})`}`;
+
+/**
+ * Record that the session's PR now carries `commit` (F14): the `factory.pr` document's published
+ * commit moves to it, and the transcript says so — one commit, as an open is. Every other field of the
+ * record stands: it is the same PR, opened when it was, with the body it was opened with.
+ */
+export const writePullRequestUpdate = (
+  conversation: Conversation,
+  pullRequest: PullRequestRecord,
+  commit: string,
+): Effect.Effect<void, SessionError> =>
+  attempt("write pull request update", () =>
+    conversation.commit(
+      (tx) =>
+        Promise.all([
+          tx.doc(PrDoc, conversation.id).then((doc) => {
+            doc.commit = commit;
+          }),
+          tx.appendEntry(PullRequestUpdatedEntry, conversation.id, {
+            data: {
+              text: pullRequestUpdatedText(
+                pullRequest.url,
+                pullRequest.commit ?? "",
+                commit,
+              ),
+              url: pullRequest.url,
+              number: pullRequest.number,
+              commit,
+              from: pullRequest.commit ?? "",
+            },
+          }),
+        ]),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
  * The PR this session already opened, read from the committed document — so a step that runs twice
  * reads the first run's answer instead of asking GitHub again. `undefined` when there is none.
  */
@@ -1782,6 +1839,12 @@ export const readPlan = (
  */
 export const NoDocumentationChangeEntry = defineEntry<{
   readonly text: string;
+  /**
+   * The commit the branch was measured at (F16): what a boot's settle sweep compares with the
+   * branch's tip, so a branch still even is not announced again on every boot. Absent on an entry
+   * written before it existed, and for a directory whose head did not resolve.
+   */
+  readonly commit?: string;
 }>(NO_CHANGE_ENTRY_KIND);
 
 /** The line this entry carries: what a no-op run says it did. */
@@ -1795,13 +1858,17 @@ export const noDocumentationChange = (base: string): string =>
 export const writeNoDocumentationChange = (
   conversation: Conversation,
   base: string,
+  commit?: string,
 ): Effect.Effect<EntryId, SessionError> =>
   attempt("write no documentation change", () =>
     conversation
       .commit(
         (tx) =>
           tx.appendEntry(NoDocumentationChangeEntry, conversation.id, {
-            data: { text: noDocumentationChange(base) },
+            data: {
+              text: noDocumentationChange(base),
+              ...(commit === undefined ? {} : { commit }),
+            },
           }),
         BACKGROUND_CONTEXT,
       )
@@ -1815,19 +1882,25 @@ export const writeNoDocumentationChange = (
  */
 export const PullRequestNotOpenedEntry = defineEntry<{
   readonly text: string;
+  /** The branch's tip when the step decided (F16), as `NoDocumentationChangeEntry`'s `commit`. */
+  readonly commit?: string;
 }>(PR_NOT_OPENED_ENTRY_KIND);
 
-/** Announce why a settled run's PR step opened nothing; `text` is the control plane's sentence. */
+/**
+ * Announce why a settled run's PR step opened nothing; `text` is the control plane's sentence, and
+ * `commit` the branch's tip it was decided at.
+ */
 export const writePullRequestNotOpened = (
   conversation: Conversation,
   text: string,
+  commit?: string,
 ): Effect.Effect<EntryId, SessionError> =>
   attempt("write PR not opened", () =>
     conversation
       .commit(
         (tx) =>
           tx.appendEntry(PullRequestNotOpenedEntry, conversation.id, {
-            data: { text },
+            data: { text, ...(commit === undefined ? {} : { commit }) },
           }),
         BACKGROUND_CONTEXT,
       )
@@ -3060,6 +3133,47 @@ export const readRunTurn = (
       if (page.items.some((entry) => entry.kind === "pi.user")) break;
     }
     return runTurnOf(read);
+  });
+
+/**
+ * What the newest run's settle already announced about its PR (F16): the newest no-change or
+ * not-opened entry after that run's newest user input, as the commit it was decided at — `""` for an
+ * entry that names none (written before the field existed) — or `undefined` when the run's tail
+ * holds neither, which is a settle whose step never said anything: the process died first. Read
+ * newest first and only as far back as the run's start, as `readRunTurn` reads, from a log nobody
+ * owns, so a boot can decide without opening an owner.
+ */
+export const readSettleAnnouncement = (
+  storage: Storage,
+): Effect.Effect<string | undefined, SessionError> =>
+  Effect.gen(function* () {
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* attempt("scan the run's entries", () =>
+        storage.scanEntries(
+          { conversationId: ROOT_CONVERSATION_ID },
+          RUN_ENDING_PAGE,
+          cursor,
+          BACKGROUND_CONTEXT,
+        ),
+      );
+      for (const entry of page.items) {
+        if (entry.kind === "pi.user") return undefined;
+        if (
+          entry.kind === NO_CHANGE_ENTRY_KIND ||
+          entry.kind === PR_NOT_OPENED_ENTRY_KIND
+        ) {
+          const data = entry.data;
+          const commit =
+            data !== null && typeof data === "object" && !Array.isArray(data)
+              ? (data as JsonRecord)["commit"]
+              : undefined;
+          return typeof commit === "string" ? commit : "";
+        }
+      }
+      cursor = page.next;
+      if (cursor === undefined) return undefined;
+    }
   });
 
 /**

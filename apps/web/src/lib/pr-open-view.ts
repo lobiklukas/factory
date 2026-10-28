@@ -37,6 +37,7 @@ export const attemptOfStep = (step: PullRequestStep): PrAttempt => {
   switch (step.outcome) {
     case "opened":
     case "already-open":
+    case "updated":
       return { _tag: "opened", url: step.url };
     // The same words the tracker write-back posts: one function in the domain, not a copy.
     case "over-cap":

@@ -41,8 +41,17 @@ export class CredentialError extends Schema.TaggedError<CredentialError>()(
  * LOB-179 the call adopts the PR a killed attempt left behind when GitHub refuses the duplicate, and
  * that is still the call path. The tag separates "went to GitHub" from "the log answered", which is
  * the distinction a caller can act on; whether the PR existed before the call is the log's business.
+ *
+ * `"updated"` (F14) is the third path: the log already held the PR, the branch had moved past the
+ * commit it was published at, and this call measured, capped, scanned and pushed the new tip onto
+ * it — the forge was reached, GitHub's PR endpoint was not. `"already-open"` stays the answer of a
+ * recorded PR whose branch is where it was published, which reaches nothing at all.
  */
-export const PullRequestOutcome = Schema.Literals(["opened", "already-open"]);
+export const PullRequestOutcome = Schema.Literals([
+  "opened",
+  "already-open",
+  "updated",
+]);
 export type PullRequestOutcome = typeof PullRequestOutcome.Type;
 
 /**

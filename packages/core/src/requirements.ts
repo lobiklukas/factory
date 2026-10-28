@@ -76,7 +76,10 @@
  * worktree moves into the sandbox, the measurement has to follow it (or read the recorded PR's own
  * diff), or `non_empty_diff` refuses every move. `pr_link` is met
  * when a `factory.pr` document with a link (LOB-177) is the card's PR as above: the record the PR
- * step commits, not the index's `pr_url` column a rebuild derives from it.
+ * step commits, not the index's `pr_url` column a rebuild derives from it — and only while the
+ * branch is at the commit that record was published at (C19 for an earlier run's PR, F14 for the
+ * latest run's own), so a run that committed after its PR was recorded is refused until the step
+ * pushes the new commits onto it.
  *
  * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
  * records a `factory.review` target, which the review trigger opens one per head of a PR — and
@@ -290,8 +293,9 @@ export type CardEvidence = {
   readonly reviews?: readonly ReviewRunEvidence[];
   readonly reviewHeads?: readonly ReportedHead[];
   /**
-   * The commit the latest run's branch is at in the registered checkout (C19), read when `pr_link`
-   * would stand on an earlier run's PR; absent when it was not read or does not resolve.
+   * The commit the latest run's branch is at in the registered checkout (C19), which `pr_link`
+   * compares with the published commit of the PR it stands on (the latest run's own since F14, or an
+   * earlier run's); absent when it was not read or does not resolve.
    */
   readonly branchTip?: string;
 };
@@ -478,7 +482,23 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
   const latest = evidence.runs.at(-1);
   if (latest === undefined)
     return { met: false, reason: "the card has no runs, so none opened a PR" };
-  if (latest.prUrl !== undefined) return { met: true };
+  if (latest.prUrl !== undefined) {
+    // The latest run's own PR is the card's only at the commit it was published at (F14): a run that
+    // committed after its PR was recorded, and whose step has not pushed it, has a branch the PR does
+    // not carry. A record or a tip that cannot be read is judged as before — met — since there is
+    // nothing to compare.
+    if (
+      latest.prCommit === undefined ||
+      evidence.branchTip === undefined ||
+      latest.prHead !== latest.branch ||
+      latest.prCommit === evidence.branchTip
+    )
+      return { met: true };
+    return {
+      met: false,
+      reason: `the card's latest run ${latest.sessionId} recorded the PR ${latest.prUrl}, but its branch ${latest.branch ?? ""} is at ${evidence.branchTip.slice(0, 12)}, past ${latest.prCommit.slice(0, 12)} where that PR was published: push the run's commits to the PR (factory pr ${latest.sessionId}) before moving the card on`,
+    };
+  }
   const onBranch =
     latest.branch === undefined
       ? undefined
