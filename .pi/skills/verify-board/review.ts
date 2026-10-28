@@ -15,7 +15,7 @@
 // is read back through `factory board` by the calling script.
 //
 // Env: API_URL, GITHUB_WEBHOOK_SECRET, REPO (the PR's repository slug), PR_URL (its page, which the
-// build run's `factory pr` recorded), PR_NUMBER, ACTION, HEAD, HEAD_REF, BASE_SHA, EXPECT (`pass`,
+// build run's PR step recorded), PR_NUMBER, ACTION, HEAD, HEAD_REF, BASE_SHA, EXPECT (`pass`,
 // `fail`, or `replay`: a head already reviewed, whose run the delivery replays and does not wait
 // for), LABEL, EVIDENCE_DIR, DATABASE_URL. Exits non-zero when a check fails.
 import { createHmac, randomUUID } from "node:crypto";
