@@ -7,11 +7,10 @@
 // made without a repo reaches review. A second create naming another repository is refused as
 // `BoardRepoMismatch`, naming both, and leaves no card behind.
 //
-// No `factory` command creates a card (card creation is a trigger's job, docs/board.md B2), so the
-// create is made from here, over the same RPC client the CLI and the dashboard build. Everything
-// after it — the lanes, the moves and the three refusals — is driven through `factory board` in
-// `drive.sh`. A fresh card per drive is what makes the drive's revisions true on a second run
-// against one `./up.sh` instance.
+// `drive.sh` makes its card with `factory board add` (LOB-261, `add.ts` reads it back); this script is
+// the card factory for the drivers that need a card and not the command (`triage.sh`,
+// `board-create.sh`), over the same RPC client the CLI and the dashboard build. A fresh card per
+// drive is what makes a drive's revisions true on a second run against one `./up.sh` instance.
 //
 // Env: API_URL, BOARD_ID, EVIDENCE_DIR, CARD_FILE. Writes `create.json` (the created card, its
 // read-back and the checks) and, when every check passed, one JSON line into CARD_FILE for

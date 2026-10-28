@@ -12,7 +12,11 @@ import { SessionError } from "@repo/domain/Session";
 import {
   AttentionItem,
   BlockReason,
+  BoardInstanceId,
+  BoardNotFound,
   CreatedBoard,
+  CreateTaskInput,
+  MAX_TASK_BODY_CHARS,
   NotBlocked,
   StaleRevision,
   Task,
@@ -26,6 +30,8 @@ import {
   MISSING_SESSION,
   NOTHING_NEEDS_A_PERSON,
   RUNS_HEADER,
+  addCard,
+  addFlagsToCard,
   attentionLines,
   blockCard,
   bodyLines,
@@ -624,5 +630,263 @@ describe("createdLines and warningLines (LOB-263)", () => {
   it("prints exactly the three lines it always did when the repo has a checkout", () => {
     expect(createdLines(board)).toHaveLength(3);
     expect(warningLines(undefined, "warning ")).toEqual([]);
+  });
+});
+
+describe("addCard (LOB-261)", () => {
+  const BOARD = Schema.decodeSync(BoardInstanceId)(`brd_${"1".repeat(26)}`);
+  const flags = (over: Partial<Parameters<typeof addCard>[1]> = {}) => ({
+    boardId: BOARD,
+    title: "Pin the Postgres major",
+    repo: undefined,
+    priority: undefined,
+    body: undefined,
+    baseRef: undefined,
+    actor: "cli",
+    ...over,
+  });
+
+  /**
+   * A board that makes the card `createTask` makes: revision 1 in `intake`, the input recorded as
+   * it was sent. A card on a board it does not know is the server's `BoardNotFound`.
+   */
+  const server = () => {
+    const sent: CreateTaskInput[] = [];
+    const client = {
+      createTask: (input: CreateTaskInput) => {
+        sent.push(input);
+        return input.boardId === BOARD
+          ? Effect.succeed(
+              card({ column: "intake", revision: 1, title: input.title }),
+            )
+          : Effect.fail(
+              new BoardNotFound({
+                boardId: input.boardId,
+                message: `no board ${input.boardId}`,
+              }),
+            );
+      },
+    };
+    return { client, sent };
+  };
+
+  /** Mutation: print the title or the board, or drop a field — the next command has no id to use. */
+  it("prints the card's id, revision and column on one line", async () => {
+    const s = server();
+    const lines = await Effect.runPromise(
+      addCard(s.client, flags({ body: "Compose names one major." })),
+    );
+    expect(lines).toEqual([`task ${TASK} revision 1 column intake`]);
+  });
+
+  /**
+   * The input is exactly the one the dashboard's form sends. Mutation: send `repo: undefined` for
+   * no repo — `toStrictEqual` tells a missing key from an undefined one, and over JSON they differ
+   * for nothing but a reader of the input — or default the priority here and not at the server.
+   */
+  it("sends only the fields it was given, trimming the title and keeping the body as typed", async () => {
+    const s = server();
+    await Effect.runPromise(
+      addCard(s.client, flags({ title: "  Pin the Postgres major\n" })),
+    );
+    await Effect.runPromise(
+      addCard(
+        s.client,
+        flags({
+          repo: "acme/widgets" as never,
+          priority: "urgent",
+          body: "## Goal\n  keep 5442  \n",
+          baseRef: "release",
+          actor: "person:lukas",
+        }),
+      ),
+    );
+    expect(s.sent).toStrictEqual([
+      { boardId: BOARD, title: "Pin the Postgres major", actor: "cli" },
+      {
+        boardId: BOARD,
+        title: "Pin the Postgres major",
+        repo: "acme/widgets",
+        priority: "urgent",
+        body: "## Goal\n  keep 5442  \n",
+        baseRef: "release",
+        actor: "person:lukas",
+      },
+    ]);
+  });
+
+  /** Mutation: skip the title check, or check `=== ""` without trimming — a blank card is made. */
+  it("refuses an empty or blank title as invalid_input before any request", async () => {
+    for (const title of ["", "   ", "\n\t"]) {
+      const s = server();
+      const error = await Effect.runPromise(
+        Effect.flip(addCard(s.client, flags({ title }))),
+      );
+      expect(error).toBeInstanceOf(SessionError);
+      expect(error).toMatchObject({ code: "invalid_input" });
+      expect(s.sent).toEqual([]);
+    }
+  });
+
+  /** Mutation: drop the length checks — an oversize body is a payload that cannot be encoded. */
+  it("refuses a body or a base ref over the card's limit, naming the limit, before any request", async () => {
+    const s = server();
+    const body = await Effect.runPromise(
+      Effect.flip(
+        addCard(s.client, flags({ body: "x".repeat(MAX_TASK_BODY_CHARS + 1) })),
+      ),
+    );
+    expect(body).toMatchObject({ code: "invalid_input" });
+    expect(body.message).toContain(String(MAX_TASK_BODY_CHARS));
+    const ref = await Effect.runPromise(
+      Effect.flip(addCard(s.client, flags({ baseRef: "r".repeat(1_025) }))),
+    );
+    expect(ref).toMatchObject({ code: "invalid_input" });
+    expect(s.sent).toEqual([]);
+    // The limit itself is a body a card takes.
+    await Effect.runPromise(
+      addCard(s.client, flags({ body: "x".repeat(MAX_TASK_BODY_CHARS) })),
+    );
+    expect(s.sent).toHaveLength(1);
+  });
+
+  describe("what the terminal prints for a refusal", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const printed = async (title: string, boardId = BOARD) => {
+      const lines: string[] = [];
+      vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+        lines.push(String(line));
+      });
+      const exit = vi
+        .spyOn(process, "exit")
+        .mockImplementation((() => undefined) as never);
+      const s = server();
+      await Effect.runPromise(
+        reportFailures(addCard(s.client, flags({ title, boardId }))),
+      );
+      return { lines, codes: exit.mock.calls.map(([code]) => code), s };
+    };
+
+    /** Mutation: swallow the refusal or print a generic one — a script cannot branch on it. */
+    it("prints an unknown board as the server's board_not_found, verbatim, and exits 1", async () => {
+      const other = Schema.decodeSync(BoardInstanceId)(`brd_${"2".repeat(26)}`);
+      const out = await printed("a card", other);
+      expect(out.lines).toEqual([
+        `error: board_not_found: no board brd_${"2".repeat(26)}`,
+      ]);
+      expect(out.codes).toEqual([1]);
+      expect(out.s.sent).toHaveLength(1);
+    });
+
+    it("prints an empty title as invalid_input, exits 1, and sends nothing", async () => {
+      const out = await printed("  ");
+      expect(out.lines).toEqual([
+        "error: invalid_input: --title is empty: a card needs a title",
+      ]);
+      expect(out.codes).toEqual([1]);
+      expect(out.s.sent).toEqual([]);
+    });
+  });
+});
+
+describe("addFlagsToCard (LOB-261)", () => {
+  const BOARD_ID = `brd_${"1".repeat(26)}`;
+  const raw = (over: Partial<Parameters<typeof addFlagsToCard>[0]> = {}) => ({
+    board: BOARD_ID,
+    title: "Pin the Postgres major",
+    body: undefined,
+    bodyFile: undefined,
+    repo: undefined,
+    priority: undefined,
+    baseRef: undefined,
+    actor: "cli",
+    ...over,
+  });
+  /** A disk with the files named; any other path is unreadable, as the real reader reports it. */
+  const disk = (files: Record<string, string>) => {
+    const read: string[] = [];
+    return {
+      read,
+      readFile: (path: string) => {
+        read.push(path);
+        return path in files
+          ? Effect.succeed(files[path] as string)
+          : Effect.fail(
+              new SessionError({
+                code: "invalid_input",
+                message: `--body-file "${path}" cannot be read: no such file`,
+              }),
+            );
+      },
+    };
+  };
+  const refusal = async (over: Partial<Parameters<typeof addFlagsToCard>[0]>) =>
+    Effect.runPromise(
+      Effect.flip(addFlagsToCard(raw(over), disk({ "spec.md": "x" }).readFile)),
+    );
+
+  it("decodes the board and repo and carries every other flag through", async () => {
+    const decoded = await Effect.runPromise(
+      addFlagsToCard(
+        raw({ repo: "acme/api", priority: "urgent", baseRef: "release" }),
+        disk({}).readFile,
+      ),
+    );
+    expect(decoded).toMatchObject({
+      boardId: BOARD_ID,
+      repo: "acme/api",
+      priority: "urgent",
+      baseRef: "release",
+      body: undefined,
+    });
+  });
+
+  it("takes the body from --body-file, verbatim, without touching the disk for --body", async () => {
+    const d = disk({ "spec.md": "# Spec\n\nline\n" });
+    const fromFile = await Effect.runPromise(
+      addFlagsToCard(raw({ bodyFile: "spec.md" }), d.readFile),
+    );
+    expect(fromFile.body).toBe("# Spec\n\nline\n");
+    const typed = await Effect.runPromise(
+      addFlagsToCard(raw({ body: "typed" }), d.readFile),
+    );
+    expect(typed.body).toBe("typed");
+    expect(d.read).toEqual(["spec.md"]);
+  });
+
+  it("refuses --body with --body-file as invalid_input, reading nothing", async () => {
+    const d = disk({ "spec.md": "x" });
+    const error = await Effect.runPromise(
+      Effect.flip(
+        addFlagsToCard(raw({ body: "typed", bodyFile: "spec.md" }), d.readFile),
+      ),
+    );
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain("name one");
+    expect(d.read).toEqual([]);
+  });
+
+  it("refuses a malformed --board or --repo as invalid_input, naming the flag", async () => {
+    const board = await refusal({ board: "not-a-board" });
+    expect(board.code).toBe("invalid_input");
+    expect(board.message).toContain('--board "not-a-board"');
+    for (const repo of ["not-a-slug", "a/b/c", ""]) {
+      const error = await refusal({ repo });
+      expect(error.code).toBe("invalid_input");
+      expect(error.message).toContain(`--repo "${repo}"`);
+    }
+  });
+
+  it("refuses an unreadable --body-file as invalid_input naming the path", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
+        addFlagsToCard(raw({ bodyFile: "/nonexistent" }), disk({}).readFile),
+      ),
+    );
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain('--body-file "/nonexistent"');
   });
 });
