@@ -77,6 +77,33 @@ describe("opensPullRequestOnSettle", () => {
     );
   });
 
+  // C19 review: a fix run started in `review` works on the card's branch, so its commits are owed
+  // to the card's PR although its column requires none.
+  it("takes the step for a card's run of any column that continues a branch with the card's PR (C19)", () => {
+    const review = {
+      ...trigger,
+      actor: "person:lukas",
+      columnRequires: ["verified", "review_verdict"],
+    };
+    expect(opensPullRequestOnSettle({ ...review, continuesCardPr: true })).toBe(
+      true,
+    );
+    expect(
+      opensPullRequestOnSettle({ ...review, continuesCardPr: false }),
+    ).toBe(false);
+    // Still not once it recorded the PR itself, nor when it ended parked on a person.
+    expect(
+      settleDeclarationOf({
+        ...review,
+        continuesCardPr: true,
+        prUrl: "https://github.com/acme/widget/pull/1",
+      }),
+    ).toBe("undeclared");
+    expect(
+      settleDeclarationOf({ ...review, continuesCardPr: true, waiting: true }),
+    ).toBe("parked");
+  });
+
   it("has nothing to open with no repo, a PR already recorded, or a released workspace", () => {
     expect(opensPullRequestOnSettle({ ...trigger, repo: null })).toBe(false);
     expect(

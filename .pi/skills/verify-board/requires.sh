@@ -11,7 +11,11 @@
 #   0. building        with no run, `board move --to review` is refused naming "non_empty_diff"; a
 #                      builder run commits a change on its branch and settles, and its PR is opened
 #                      on a loopback GitHub fake with no call (C18) — `factory pr` answers it
-#                      `already-open` — and the move goes through
+#                      `already-open`
+#   0b. a second run   a second builder run on the card (C19) is cut on the first run's branch at its
+#                      commit, commits on top of it, and its settle adopts the card's PR: the fake is
+#                      asked for no second PR, `factory pr` answers it `already-open`, and the move
+#                      goes through on the card's branch and PR
 #   1. no evidence     `board move --to done` is refused: `requirement_unmet`, the words name
 #                      "verified", the exit is non-zero, and the card is still in `review`
 #   2. web, passing    a run (`board start`) changes apps/web and verifies it with the fixture's
@@ -32,8 +36,10 @@
 #                      newest run, yet the move is refused on B's fail (review_heads); back at C, the
 #                      same move goes through to `done`
 #
-# Each review run's change is the fixture's `change.sh`, committed on `main` before the run starts, so
-# the worktree the run is cut from carries it and FAUX_COMMAND stays one fixed `bash change.sh`. The
+# Each review run's change is `change.sh` beside the fixture, rewritten before the run starts, so
+# FAUX_COMMAND stays one fixed `bash <run dir>/change.sh`. Since C19 every run after the first
+# building run is cut on the card's branch, so each one also carries the building runs' web change,
+# and its verify record names web beside the surface it changed. The
 # builder run is the `builder` role's own faux model (`ROLE_MODELS=builder=faux/builder`, as ./up.sh
 # does), whose script commits one file on the run's branch and calls no `verify` — so the review
 # phases below start, as before, with no verification of the card's change. The runs are real
@@ -70,9 +76,10 @@ GITHUB_PORT="${REQUIRES_GITHUB_PORT:-9404}"
 API_URL="http://localhost:$PORT"
 RUN_DIR="$ROOT/.verify/run/requires"
 LEDGER="$RUN_DIR/github-ledger.json"
-# The builder's change: one file, committed on the run's own branch, so `non_empty_diff` has a diff
-# to measure and the PR something to carry. No `verify` call (LOB-240; see the header).
-BUILD_CHANGE="mkdir -p apps/web/src && echo 'export const built = 1;' > apps/web/src/built.ts && git add apps/web/src/built.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m 'build the card' && echo built"
+# The builder's change: one more numbered file than the branch holds, committed on it, so
+# `non_empty_diff` has a diff to measure, the PR something to carry, and a second building run on the
+# card's branch (C19) a commit of its own on top of the first's. No `verify` call (LOB-240).
+BUILD_CHANGE="mkdir -p apps/web/src && n=\$(ls apps/web/src/built-*.ts 2>/dev/null | wc -l | tr -d ' ') && n=\$((n+1)) && echo \"export const built\$n = \$n;\" > apps/web/src/built-\$n.ts && git add apps/web/src/built-\$n.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m \"build the card (\$n)\" && echo built"
 FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: false } }))')"
 # The reviewer's `review` calls (see the header): a fail that names a file only head B changes, then
 # a clean pass.
@@ -84,6 +91,10 @@ LOG="$RUN_DIR/api.log"
 FACTORY=(bun run "$ROOT/apps/cli/src/index.ts")
 PROBE="$ROOT/.pi/skills/verify-board/requires.ts"
 REPO="$RUN_DIR/repo"
+# The review runs' change script lives beside the fixture, not in it: since C19 a later run on the
+# card works on the card's branch, so a script committed into the repository would be part of the
+# card's change (a path in no package, which nothing verifies).
+CHANGE_SCRIPT="$RUN_DIR/change.sh"
 DATABASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
 export DATABASE_URL
 
@@ -160,15 +171,13 @@ git -C "$REPO" config user.name "verify-board"
 printf '# verify-board requires fixture\n' > "$REPO/README.md"
 printf 'echo "verify-web fixture: 2/2 checks passed (surface=$FACTORY_VERIFY_SURFACE)"\n' \
   > "$REPO/.pi/skills/verify-web/drive.sh"
-printf 'echo "no change yet"\n' > "$REPO/change.sh"
+printf 'echo "no change yet"\n' > "$CHANGE_SCRIPT"
 git -C "$REPO" add -A
 git -C "$REPO" commit -q -m "requires fixture"
 
-# The next run's change, committed on `main` so the worktree `board start` cuts carries it.
+# The next run's change: the script its `bash` call runs in the worktree `board start` cuts.
 next_change() { # script body
-  printf '%s\n' "$1" > "$REPO/change.sh"
-  git -C "$REPO" add change.sh
-  git -C "$REPO" commit -q -m "next change"
+  printf '%s\n' "$1" > "$CHANGE_SCRIPT"
 }
 
 # The forge: the loopback GitHub fake, its ledger on disk (LOB-179), as ./up.sh starts it.
@@ -192,7 +201,7 @@ grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null ||
     HOST="127.0.0.1" \
     ALLOWED_ORIGINS="http://localhost:$PORT" \
     MODEL_BACKEND=faux \
-    FAUX_COMMAND="bash change.sh" \
+    FAUX_COMMAND="bash $CHANGE_SCRIPT" \
     FAUX_VERIFY=true \
     ROLE_MODELS="builder=faux/builder" \
     FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \
@@ -255,7 +264,7 @@ check "the builder run answered, with no verify call (probe)" "$probe_rc" "see r
 # The branch's diff, from git itself: what the board's non_empty_diff measures too.
 git -C "$REPO" diff --numstat "main...factory/${BUILD_SESSION:-none}" > "$EVIDENCE_DIR/requires-build-diff.txt" 2>&1
 check "the builder run's branch carries its committed change" \
-  "$(grep -qE '^[0-9]+[[:space:]]+[0-9]+[[:space:]]+apps/web/src/built.ts$' "$EVIDENCE_DIR/requires-build-diff.txt" && echo 0 || echo 1)" \
+  "$(grep -qE '^[0-9]+[[:space:]]+[0-9]+[[:space:]]+apps/web/src/built-1.ts$' "$EVIDENCE_DIR/requires-build-diff.txt" && echo 0 || echo 1)" \
   "$(head -1 "$EVIDENCE_DIR/requires-build-diff.txt" | tr '\t' ' ')"
 
 # The builder run's PR is the settled run's own (C18): `building` requires one, so the run that
@@ -281,11 +290,55 @@ check "factory pr answers the PR the settled run opened, already-open" \
   "$([ "$rc" = "0" ] && [ -n "$PR_URL" ] && grep -qx "pr       $PR_URL" "$EVIDENCE_DIR/requires-pr.txt" && grep -qx "outcome  already-open" "$EVIDENCE_DIR/requires-pr.txt" && echo 0 || echo 1)" \
   "exit=$rc $(head -3 "$EVIDENCE_DIR/requires-pr.txt" | tr '\n' ' ')"
 
+# --- 0b. a second building run continues the card's branch and its PR (C19) -------------------------
+# A later run on the card is bound to the branch the first building run cut, at its commit, and its
+# settle adopts the card's PR: the forge is asked for no second one, and `factory pr` answers the
+# first run's link `already-open`. The card's branch then holds both runs' commits, one on the other.
+REPO_SLUG="$(json repo)"
+PR_BRANCH="factory/${BUILD_SESSION:-none}"
+worktree_of() { printf '%s/sessions/%s/%s' "$RUN_DIR" "$REPO_SLUG" "$1"; }
+FIRST_HEAD="$(git -C "$REPO" rev-parse "$PR_BRANCH" 2>/dev/null)"
+rc="$(cli requires-start-build2.txt board start --task "$TASK_ID" --prompt "build on what the first run made")"
+BUILD2_SESSION="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/requires-start-build2.txt" | head -1)"
+check "board start opens a second builder run on the card in building" \
+  "$([ "$rc" = "0" ] && [ -n "$BUILD2_SESSION" ] && [ "$BUILD2_SESSION" != "$BUILD_SESSION" ] && grep -q "task    $TASK_ID in building" "$EVIDENCE_DIR/requires-start-build2.txt" && echo 0 || echo 1)" \
+  "exit=$rc session=${BUILD2_SESSION:-none}"
+MODE=answered API_URL="$API_URL" SESSION_ID="$BUILD2_SESSION" LABEL=build2 \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$PROBE" > "$RUN_DIR/probe-build2.log" 2>&1
+probe_rc=$?
+cat "$RUN_DIR/probe-build2.log"
+check "the second builder run answered, with no verify call (probe)" "$probe_rc" "see requires-build2.json"
+WT2="$(worktree_of "${BUILD2_SESSION:-none}")"
+WT2_BRANCH="$(git -C "$WT2" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+check "the second builder run's worktree is on the card's branch, not a fresh one from main" \
+  "$([ -n "$FIRST_HEAD" ] && [ "$WT2_BRANCH" = "$PR_BRANCH" ] && echo 0 || echo 1)" \
+  "${WT2_BRANCH:-no worktree} (card branch $PR_BRANCH)"
+git -C "$REPO" log --format=%s "main..$PR_BRANCH" > "$EVIDENCE_DIR/requires-build2-log.txt" 2>&1
+SECOND_HEAD="$(git -C "$REPO" rev-parse "$PR_BRANCH" 2>/dev/null)"
+check "the card's branch holds the first run's commit and the second run's on top of it" \
+  "$([ -n "$SECOND_HEAD" ] && [ "$SECOND_HEAD" != "$FIRST_HEAD" ] && git -C "$REPO" merge-base --is-ancestor "$FIRST_HEAD" "$SECOND_HEAD" && grep -qx 'build the card (1)' "$EVIDENCE_DIR/requires-build2-log.txt" && grep -qx 'build the card (2)' "$EVIDENCE_DIR/requires-build2-log.txt" && echo 0 || echo 1)" \
+  "$(tr '\n' ';' < "$EVIDENCE_DIR/requires-build2-log.txt")"
+MODE=settled API_URL="$API_URL" SESSION_ID="${BUILD2_SESSION:-}" TASK_ID="$TASK_ID" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$ROOT/.pi/skills/verify-board/build.ts" > "$EVIDENCE_DIR/requires-settled2.txt" 2>&1
+settled_rc=$?
+cat "$EVIDENCE_DIR/requires-settled2.txt"
+PR2_URL="$(sed -n 's/^pr       \(https:\/\/[^ ]*\)$/\1/p' "$EVIDENCE_DIR/requires-settled2.txt" | head -1)"
+check "the second run's settle records the card's PR, the first run's link" \
+  "$([ "$settled_rc" = "0" ] && [ -n "$PR_URL" ] && [ "$PR2_URL" = "$PR_URL" ] && echo 0 || echo 1)" \
+  "exit=$settled_rc ${PR2_URL:-no link}"
+CREATES="$(LEDGER="$LEDGER" bun -e 'const l = JSON.parse(require("node:fs").readFileSync(process.env.LEDGER, "utf8")); console.log(l.requests.filter((r) => r.method === "POST").length)')"
+check "the fake forge was asked for one PR across both building runs" \
+  "$([ "$CREATES" = "1" ] && echo 0 || echo 1)" "creates=$CREATES"
+rc="$(cli requires-pr2.txt pr "${BUILD2_SESSION:-ses_missing}")"
+check "factory pr on the second run answers the card's PR, already-open" \
+  "$([ "$rc" = "0" ] && [ -n "$PR_URL" ] && grep -qx "pr       $PR_URL" "$EVIDENCE_DIR/requires-pr2.txt" && grep -qx "outcome  already-open" "$EVIDENCE_DIR/requires-pr2.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -3 "$EVIDENCE_DIR/requires-pr2.txt" | tr '\n' ' ')"
+
 rc="$(cli requires-move-review.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION" --actor "${BUILD_SESSION:-ses_missing}")"
 if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to review (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-move-review.txt"; then
   REVISION=$((REVISION + 1))
 fi
-check "with the change and its PR, the run's building → review goes through" \
+check "with the card's change and its PR, the run's building → review goes through" \
   "$([ "$REVISION" = "5" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
 
 # --- 1. no evidence: refused, naming the requirement -------------------------------------------------
@@ -294,7 +347,7 @@ check "with no evidence, review → done is refused as requirement_unmet" \
   "$(grep -qF 'error: requirement_unmet: the move review → done needs "verified"' "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
   "$(head -1 "$EVIDENCE_DIR/requires-refused-none.txt" | cut -c1-120)"
 check "and the refusal says what is missing, not just denied" \
-  "$(grep -qF "which is not met: none of the card's 1 run(s) recorded a verify call over a change (0 call(s) recorded)" "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
+  "$(grep -qF "which is not met: none of the card's 2 run(s) recorded a verify call over a change (0 call(s) recorded)" "$EVIDENCE_DIR/requires-refused-none.txt" && echo 0 || echo 1)" \
   "reason verbatim"
 check "and it exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)" "exit=$rc"
 rc="$(cli requires-show-refused.txt board show --task "$TASK_ID")"
@@ -321,10 +374,18 @@ start_run() { # label, expect
 next_change 'mkdir -p apps/web/src && echo "export const page = 1;" > apps/web/src/page.ts && echo changed web'
 start_run web "web:VerifyRan:0"
 WEB_SESSION="$RUN_SESSION"
+# A run started in `review` is cut on the card's branch too (C19): its worktree holds the building
+# runs' change against the base, which is what it reviews and fixes.
+git -C "$(worktree_of "${WEB_SESSION:-none}")" diff --name-only main...HEAD > "$EVIDENCE_DIR/requires-review-diff.txt" 2>&1
+check "the review-column run's worktree holds the building runs' diff" \
+  "$(grep -qx 'apps/web/src/built-1.ts' "$EVIDENCE_DIR/requires-review-diff.txt" && grep -qx 'apps/web/src/built-2.ts' "$EVIDENCE_DIR/requires-review-diff.txt" && echo 0 || echo 1)" \
+  "$(tr '\n' ' ' < "$EVIDENCE_DIR/requires-review-diff.txt")"
 
 # --- 3. the change moves to api, which nothing verifies: web's evidence does not count ---------------
 next_change 'mkdir -p apps/api/src && echo "export const feature = 1;" > apps/api/src/feature.ts && echo changed api'
-start_run api-unverified "api:VerifyNoEvidence"
+# The building runs' web change is on the card's branch under every later run, so each record names
+# web too; what changes from run to run is api.
+start_run api-unverified "web:VerifyRan:0,api:VerifyNoEvidence"
 API_SESSION="$RUN_SESSION"
 rc="$(cli requires-refused-surface.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
 check "evidence from a different surface (web) does not satisfy verified" \
@@ -339,16 +400,14 @@ check "and the refusal names the remedy for a surface nothing can verify" \
 
 # --- 4. api verified: the same move goes through -----------------------------------------------------
 next_change 'mkdir -p apps/api/src .pi/skills/verify-api && echo "export const feature = 2;" > apps/api/src/feature.ts && printf "echo \"verify-api fixture: 3/3 checks passed\"\n" > .pi/skills/verify-api/drive.sh && echo changed api with its skill'
-start_run api-verified "api:VerifyRan:0"
+start_run api-verified "web:VerifyRan:0,api:VerifyRan:0"
 rc="$(cli requires-unreviewed.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
 check "once the change's surface passed, review → done is held on review_verdict: no review ran" \
   "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: ' "$EVIDENCE_DIR/requires-unreviewed.txt" && echo 0 || echo 1)" \
   "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-unreviewed.txt" | cut -c1-140)"
 
 # --- 5-7. the reviewer's verdict, per head of the PR (LOB-36, LOB-241) -------------------------------
-REPO_SLUG="$(json repo)"
-PR_BRANCH="factory/${BUILD_SESSION:-none}"
-# The builder's worktree holds the PR's branch; a push to the PR is a commit there.
+# The newest run of the card holds the PR's branch (C19); a push to the PR is a commit there.
 PR_WORKTREE="$(git -C "$REPO" worktree list --porcelain | awk -v b="branch refs/heads/$PR_BRANCH" '/^worktree /{w=substr($0,10)} $0==b{print w}')"
 push_pr() { # message, command — commit on the PR's branch, print the new head
   ( cd "$PR_WORKTREE" && eval "$2" && git add -A && \
@@ -368,7 +427,7 @@ review_head() { # label, action, head, expect — deliver the event, wait for th
 }
 
 HEAD_A="$(git -C "$REPO" rev-parse "$PR_BRANCH" 2>/dev/null)"
-check "the PR's branch is checked out in the builder's worktree" \
+check "the PR's branch is checked out in the newest run's worktree" \
   "$([ -n "$PR_WORKTREE" ] && [ -d "$PR_WORKTREE" ] && [ -n "$HEAD_A" ] && echo 0 || echo 1)" \
   "${PR_WORKTREE:-no worktree} at ${HEAD_A:-no head}"
 review_head a opened "$HEAD_A" pass
@@ -406,7 +465,7 @@ cp "$LOG" "$EVIDENCE_DIR/requires-api.log"
   printf '  "apiUrl": "%s",\n' "$API_URL"
   printf '  "taskId": "%s",\n' "$TASK_ID"
   printf '  "definitionVersion": "%s",\n' "$VERSION"
-  printf '  "runs": {"build": "%s", "web": "%s", "apiUnverified": "%s", "apiVerified": "%s"},\n' "${BUILD_SESSION:-}" "${WEB_SESSION:-}" "${API_SESSION:-}" "${RUN_SESSION:-}"
+  printf '  "runs": {"build": "%s", "build2": "%s", "web": "%s", "apiUnverified": "%s", "apiVerified": "%s"},\n' "${BUILD_SESSION:-}" "${BUILD2_SESSION:-}" "${WEB_SESSION:-}" "${API_SESSION:-}" "${RUN_SESSION:-}"
   printf '  "prUrl": "%s",\n' "${PR_URL:-}"
   printf '  "heads": {"a": "%s", "b": "%s", "c": "%s"},\n' "${HEAD_A:-}" "${HEAD_B:-}" "${HEAD_C:-}"
   printf '  "checks": {\n'
