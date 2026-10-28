@@ -805,7 +805,10 @@ export const CreateSessionInput = Schema.Struct({
   branch: Schema.optional(BranchName),
   /** The task this session runs against. Absent means a scratch session. */
   taskId: Schema.optional(Schema.String),
-  /** The column the run was started from. Defaults to "building". */
+  /**
+   * The column the run starts in, which the card's pinned definition must declare (C22: the run's
+   * prompt and autonomy are its). Absent: the card's own column.
+   */
   taskColumn: Schema.optional(Schema.String),
   /**
    * The session's spend ceiling, in US dollars (LOB-163). A run stops before the first model request

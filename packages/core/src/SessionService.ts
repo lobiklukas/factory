@@ -1584,6 +1584,53 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * The column a new run of `taskId` starts in (B6, C22): the one the caller names, else the
+       * card's own column. A run's prompt and its autonomy are its start column's, so a name the
+       * card's pinned definition does not declare is refused rather than written: `runColumnFor`
+       * would read it as no column, and a gated column's run would run ungated because of a typo
+       * (D15: a gate stops accidents). A card this process cannot read is left to the run row's
+       * foreign key to refuse, under the name it was given (or `building`, the old default).
+       */
+      const startColumnFor = (
+        taskId: string,
+        requested: string | undefined,
+      ): Effect.Effect<string, SessionError> =>
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read the card's columns",
+            sql<{ column: string; columns: string | null }>`
+              SELECT t."column", bd.columns::text AS columns
+              FROM tasks t
+              LEFT JOIN board_instances bi ON bi.id = t.board_id
+              LEFT JOIN board_definitions bd
+                ON bd.id = bi.definition_id AND bd.version = t.definition_version
+              WHERE t.id = ${taskId}
+            `,
+          );
+          const row = rows[0];
+          if (row === undefined) return requested ?? "building";
+          const column = requested ?? row.column;
+          if (row.columns === null) return column;
+          const declared = yield* Schema.decodeEffect(
+            Schema.fromJsonString(Schema.Array(BoardColumn)),
+          )(row.columns).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `the board definition holds an invalid column set: ${String(cause)}`,
+                }),
+            ),
+          );
+          if (declared.some((candidate) => candidate.name === column))
+            return column;
+          return yield* new SessionErrorClass({
+            code: "invalid_input",
+            message: `task ${taskId}'s board definition declares no column "${column}" (it declares ${declared.map((candidate) => candidate.name).join(", ")})`,
+          });
+        });
+
+      /**
        * The card this session is a run of (B1), or `undefined` for a session with no card. Read from
        * the run row `create` writes before the harness opens, like the run's column.
        */
@@ -3065,6 +3112,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the lookup a replay does — before anything is written: a model this process cannot serve
           // is refused here, not registered as a repo, an index row and a log that never run.
           const model = yield* sessionModelFor(input.model);
+          // The column the run starts in, before anything is written: it is what the run's prompt
+          // and its autonomy are resolved from (B6, C22), so it has to be one the card's pinned
+          // definition declares.
+          const column =
+            input.taskId === undefined
+              ? undefined
+              : yield* startColumnFor(input.taskId, input.taskColumn);
           // A slot before anything is written (LOB-70): a create refused at capacity registers no
           // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
           // the owner below is open, which takes it over; given back on any other exit.
@@ -3074,10 +3128,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The index row is written before the log because it carries the request-id dedupe key.
           // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
           // re-derives the truth from the log rather than trusting the row.
-          const column =
-            input.taskId === undefined
-              ? undefined
-              : (input.taskColumn ?? "building");
           const admittedRun = yield* withRunAdmitted(
             input.taskId,
             column,

@@ -10103,7 +10103,7 @@ describe("a gated call asks through the approvals service", () => {
  * prefixes to `refs/heads/sandbox/` so the ref is not the session's own, which the run cannot know),
  * followed by an echo that says the command ran — so only the column differs between the two runs.
  * Mutation: have the acquisition call `forWorktree` without the run's autonomy, or have
- * `runColumnFor` drop it — the careful run's push runs unasked.
+ * `runColumnFor` or `loadRun` drop it — the careful run's push runs unasked.
  */
 describe("a column's autonomy reaches its runs' policy (C22)", () => {
   const autonomyRoot = mkdtempSync(join(tmpdir(), "factory-core-columns-"));
@@ -10143,11 +10143,14 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
       requires: [],
       transitions: [{ to: "done" }, { to: "canceled" }],
     },
+    // `careful` binds a seeded skill, so its run's profile is resolved through `loadRun` (the path
+    // every default-pipeline column takes); `building` binds none, so its run takes the early
+    // return. Both paths have to carry the column's autonomy.
     {
       name: "careful",
       kind: "working",
       role: "builder",
-      skills: [],
+      skills: ["implement"],
       requires: [],
       transitions: [{ to: "done" }, { to: "canceled" }],
       autonomy: { approvalRequired: ["git push"] },
@@ -10183,7 +10186,7 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
             columns,
             initialColumn: "todo",
           },
-          { skills: new Set(), roles: new Set() },
+          { skills: new Set(["implement"]), roles: new Set() },
         );
         const board = yield* tasks.createBoard({
           repo: RepoSlugSchema.make(
@@ -10191,17 +10194,26 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
           ),
           definitionId: definition.id,
         });
-        const run = (column: string) =>
+        const newCard = (column: string) =>
           Effect.gen(function* () {
             const cardId = `tsk_${randomBytes(13).toString("hex")}`;
             yield* sql`
               INSERT INTO tasks (id, board_id, title, "column", definition_version, revision)
               VALUES (${cardId}, ${board.id}, ${`a card in ${column}`}, ${column}, ${definition.version}, 1)
             `;
+            return cardId;
+          });
+        /** A run of a new card in `column`; `named: false` starts it without naming the column. */
+        const run = (column: string, named = true) =>
+          Effect.gen(function* () {
+            const cardId = yield* newCard(column);
             const created = yield* sessions.create({
               taskId: cardId,
-              taskColumn: column,
+              ...(named ? { taskColumn: column } : {}),
             });
+            const [started] = yield* sql<{ column: string }>`
+              SELECT "column" FROM task_runs WHERE session_id = ${created.id}
+            `;
             yield* sessions.send({ sessionId: created.id, content: "push" });
             yield* waitUntil(
               sessions
@@ -10211,6 +10223,7 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
             );
             const snapshot = yield* sessions.get(created.id);
             return {
+              started: started?.column,
               status: snapshot.session.status,
               pending: (yield* sessions.listApprovals(created.id)).approvals,
               result: snapshot.entries.find(
@@ -10223,6 +10236,13 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
             ?.autonomy,
           careful: yield* run("careful"),
           building: yield* run("building"),
+          unnamed: yield* run("careful", false),
+          typo: yield* Effect.flip(
+            sessions.create({
+              taskId: yield* newCard("careful"),
+              taskColumn: "carefull",
+            }),
+          ),
         };
       }).pipe(Effect.provide(TaskServiceLive)),
     );
@@ -10244,6 +10264,16 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
     expect(outcome.building.pending).toEqual([]);
     expect(outcome.building.result?.text).toContain("push-ran");
     expect(outcome.building.result?.text).not.toContain("asked for");
+
+    // A start that names no column is a run of the card's own column, gated like one — not of
+    // `building`, whose run would push unasked.
+    expect(outcome.unnamed.started).toBe("careful");
+    expect(outcome.unnamed.pending).toHaveLength(1);
+    expect(outcome.unnamed.result?.text).not.toContain("push-ran");
+
+    // A column the card's definition does not declare is refused, not run under no autonomy.
+    expect(outcome.typo.code).toBe("invalid_input");
+    expect(outcome.typo.message).toContain('declares no column "carefull"');
   }, 120_000);
 });
 

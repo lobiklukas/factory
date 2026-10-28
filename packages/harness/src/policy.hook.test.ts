@@ -302,6 +302,71 @@ describe("a run holding the docs skill writes documentation only", () => {
 });
 
 /**
+ * A column's declared write scope through the install site (C22). The columns hold no `docs` skill
+ * and declare no read-only role: the only thing that narrows them is `autonomy.write`, so a refusal
+ * here is the declaration reaching `openSession` (through `columnWriteScope`, the function the
+ * settings view describes the column with), not the skill or the role.
+ */
+describe("a column that declares its write scope is held to it", () => {
+  const DECLARED_DOCS_RUN: RunProfile = {
+    column: "careful",
+    skills: [
+      { name: "implement", version: 1, body: "# Implement\n\nWrite code." },
+    ],
+    autonomy: { write: "docs" },
+  };
+  const DECLARED_NONE_RUN: RunProfile = {
+    column: "looking",
+    role: "builder",
+    skills: [],
+    autonomy: { write: "none" },
+  };
+
+  it("refuses a code write in a column that declares write: docs, and allows a docs write", async () => {
+    mkdirSync(join(worktree, "docs"), { recursive: true });
+    const entries = await transcript(
+      [
+        {
+          name: "write",
+          args: { path: "src/declared-docs.ts", content: "export {};" },
+        },
+        { name: "write", args: { path: "docs/declared.md", content: "docs" } },
+      ],
+      false,
+      DECLARED_DOCS_RUN,
+    );
+
+    const results = toolResults(entries);
+    expect(results.map((entry) => entry.isError)).toEqual([true, false]);
+    expect(results[0]?.text).toContain("is refused by the docs rule");
+    expect(existsSync(join(worktree, "src/declared-docs.ts"))).toBe(false);
+    expect(readFileSync(join(worktree, "docs/declared.md"), "utf8")).toBe(
+      "docs",
+    );
+  });
+
+  it("refuses a shell write in a column that declares write: none, naming the column as the stage", async () => {
+    const entries = await transcript(
+      [
+        { name: "bash", args: { command: "echo x > declared-none.txt" } },
+        { name: "write", args: { path: "declared-none.md", content: "x" } },
+      ],
+      false,
+      DECLARED_NONE_RUN,
+    );
+
+    const results = toolResults(entries);
+    expect(results.map((entry) => entry.isError)).toEqual([true, true]);
+    expect(results[0]?.text).toContain("Tool call blocked");
+    expect(results[0]?.text).toContain('column "looking"');
+    // Not offered at all: a declared `none` is a read-only stage, like a specifier's.
+    expect(results[1]?.text).toContain("Tool write is not available");
+    expect(existsSync(join(worktree, "declared-none.txt"))).toBe(false);
+    expect(existsSync(join(worktree, "declared-none.md"))).toBe(false);
+  });
+});
+
+/**
  * The read-only stage through the install site (LOB-74). As with the docs rule, nothing here builds
  * a policy: the run profile is what `SessionService` hands `openSession` — the column the run
  * started in and the role it declares — and the two cases differ only in that profile. So the
