@@ -36,6 +36,10 @@ card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-
 them, with default v4 (LOB-267's seeded transitions) as the newest version. `./start-body.sh` (LOB-260, 2026-10-28, `agent/LOB-260`), API on `:9500`, web on `:3500`, the
 GitHub fake on `:9503`: **8/8** checks passed (`start-body.json`), with `body-create.json`'s **4/4** (the refused `$(touch …)` base ref among them) and
 `body-told.json`'s **6/6** folded in, and `./drive.sh` exit 0 beside it against the same instance.
+The both-ways phase's new-card leg (LOB-275, 2026-10-28, `agent/LOB-275`), API on `:9600`, web on
+`:3600`, the GitHub fake on `:9603`: `./drive.sh` exit 0, **66/66**, with `card-create.sh`'s **8/8**
+(`card-create.json`) and `card-create.mjs`'s **10/10** (`card-create-web.json`) folded in; standalone
+`./card-create.sh` also passed with LOB-261's `factory board add` making the twin.
 Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                                 | Status  | File                             |
@@ -55,6 +59,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | the ask on the task                     | passing | [ask.md](ask.md)                 |
 | `requires[]` on exit                    | passing | [requires.md](requires.md)       |
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
+| a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |
 
 ## Deliberately absent

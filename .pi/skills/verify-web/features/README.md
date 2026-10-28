@@ -16,24 +16,25 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
-| Feature                  | Status  | File                                       |
-| ------------------------ | ------- | ------------------------------------------ |
-| Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)   |
-| Routing                  | passing | [routing.md](routing.md)                   |
-| Approvals inbox          | passing | [routing.md](routing.md)                   |
-| Browser reaches the API  | passing | [api-connectivity.md](api-connectivity.md) |
-| Session stream           | passing | [session-stream.md](session-stream.md)     |
-| Fork lineage             | passing | [fork-lineage.md](fork-lineage.md)         |
-| Transcript               | passing | [transcript.md](transcript.md)             |
-| Live tasks               | passing | [live-tasks.md](live-tasks.md)             |
-| Compaction from the pane | passing | [compaction.md](compaction.md)             |
-| Board lanes              | passing | [board.md](board.md)                       |
-| Card pane (write path)   | passing | [card-pane.md](card-pane.md)               |
-| What needs a person      | passing | [attention.md](attention.md)               |
-| The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)       |
-| The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
-| Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
-| Repositories             | passing | [repos.md](repos.md) (`repos.sh`)          |
+| Feature                  | Status  | File                                                               |
+| ------------------------ | ------- | ------------------------------------------------------------------ |
+| Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)                           |
+| Routing                  | passing | [routing.md](routing.md)                                           |
+| Approvals inbox          | passing | [routing.md](routing.md)                                           |
+| Browser reaches the API  | passing | [api-connectivity.md](api-connectivity.md)                         |
+| Session stream           | passing | [session-stream.md](session-stream.md)                             |
+| Fork lineage             | passing | [fork-lineage.md](fork-lineage.md)                                 |
+| Transcript               | passing | [transcript.md](transcript.md)                                     |
+| Live tasks               | passing | [live-tasks.md](live-tasks.md)                                     |
+| Compaction from the pane | passing | [compaction.md](compaction.md)                                     |
+| Board lanes              | passing | [board.md](board.md)                                               |
+| Card pane (write path)   | passing | [card-pane.md](card-pane.md)                                       |
+| What needs a person      | passing | [attention.md](attention.md)                                       |
+| The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)                               |
+| The session's PR link    | passing | [pr-link.md](pr-link.md)                                           |
+| Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)                                  |
+| Repositories             | passing | [repos.md](repos.md) (`repos.sh`)                                  |
+| New card (board page)    | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`) |
 
 ## Known gaps
 
