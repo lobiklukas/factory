@@ -32,7 +32,7 @@
  * - **A start while a run on the branch is still going is refused** (`busy`, naming that run): the
  *   hand-over would detach it mid-turn. A board pinned to a version with no caps (default versions
  *   1–4) can otherwise start a second run on a card whose first is busy. A run owned by another API
- *   process is not seen here; its card's `task` cap (B9) is what holds that case.
+ *   process is seen through its presence lease and the activity index that process writes (F13).
  * - **A message to a run whose worktree was handed over is refused** (`invalid_input`, naming the
  *   later run that took the branch): steering it would reopen a turn on the detached HEAD. The card's
  *   newest run is the one to send to, or a new run started on the card, which continues the branch.

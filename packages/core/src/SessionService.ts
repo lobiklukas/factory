@@ -310,11 +310,7 @@ import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
 import { checkRunCaps } from "./boardCaps";
-import {
-  type CardBranch,
-  cardBranchOf,
-  changeColumnsOf,
-} from "./cardBranch";
+import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
   countRefusal,
   countSessionCreate,
@@ -1432,10 +1428,52 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Serializes the PR steps of one card's runs (C19), inside each one's session gate: a card's
        * runs share one branch and one PR (`./cardBranch`), so two of them stepping close together
        * — a run that settles while the run before it is still pushing — would each read no PR on the
-       * card and each ask GitHub for one. Keyed by task, in this process; across processes a second
-       * open of the same head is GitHub's own refusal.
+       * card and each ask GitHub for one. Keyed by task, in this process.
        */
-      const withCardPrGate = keyedGate<string>();
+      const withCardPrInProcess = keyedGate<string>();
+      /**
+       * The same across processes (F13): under the in-process gate — so one fiber per card per
+       * process waits on the database, holding one connection — the step takes a transaction-scoped
+       * advisory lock on the card (`pg_advisory_xact_lock`, as `TaskService.file` and the run caps
+       * do). Two API processes on one database stepping the same card's PR then step one after the
+       * other: the second reads the PR the first recorded (`cardPullRequestFor`) and adopts it,
+       * answering `already-open`, rather than asking GitHub for a second open of the same head.
+       *
+       * Only the lock is in the transaction. The step runs in the context it was called in, which
+       * holds none of the lock's connection, so its own statements — the `pr_url` it records, the reads before it —
+       * go to the pool and commit as they always did, and nothing it writes waits on the lock's
+       * commit; its push and its GitHub call hold no row. The lock goes when the step ends (the
+       * transaction commits, or rolls back on a failure or an interruption) or with the connection,
+       * when the process holding it dies.
+       */
+      const withCardPrGate = <A, E, R>(
+        taskId: string,
+        step: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | SessionError, R> =>
+        withCardPrInProcess(
+          taskId,
+          Effect.gen(function* () {
+            // The context the step was called in, which holds no transaction of the lock's.
+            const outside = yield* Effect.context<R>();
+            return yield* sql
+              .withTransaction(
+                Effect.andThen(
+                  sql`SELECT pg_advisory_xact_lock(hashtext(${`card_pr:${taskId}`}))`,
+                  Effect.provideContext(step, outside),
+                ),
+              )
+              .pipe(
+                Effect.catchTag("SqlError", (cause) =>
+                  Effect.fail(
+                    new SessionErrorClass({
+                      code: "storage",
+                      message: `take task ${taskId}'s PR lock: ${String(cause)}`,
+                    }),
+                  ),
+                ),
+              );
+          }),
+        );
       /**
        * Serializes the approvals of one session, for the reason `withPrGate` serializes PR opens: two
        * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
@@ -2759,8 +2797,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /**
        * Refuse a start that would hand the card's branch over from under a run still working on it
        * (C19, `./cardBranch`): the hand-over detaches that run's worktree, and every commit it made
-       * from then on would miss the card's branch and PR. Seen for the runs this process owns; a run
-       * owned by another process is held by the card's `task` cap (B9).
+       * from then on would miss the card's branch and PR. A run this process owns is asked directly;
+       * one another process owns (F13) is busy when that process's presence lease on it is live
+       * (LOB-18) and the activity index it writes says `busy` — a lease that lapsed is a process that
+       * died, whose last `busy` nobody is working under.
        */
       const refuseBusyHolder = (
         branch: CardBranch,
@@ -2769,8 +2809,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const owners = yield* Ref.get(live);
           for (const holder of branch.holders) {
-            const owner = HashMap.get(owners, yield* toSessionId(holder));
-            if (Option.isNone(owner)) continue;
+            const holderId = yield* toSessionId(holder);
+            const owner = HashMap.get(owners, holderId);
+            if (Option.isNone(owner)) {
+              const elsewhere = yield* ownerElsewhere(holderId);
+              if (Option.isNone(elsewhere)) continue;
+              const status = yield* paper(
+                "read the status of a run on the card's branch",
+                sql<{ status: string }>`
+                  SELECT status FROM session_activity WHERE session_id = ${holderId}
+                `,
+              );
+              if (status[0]?.status === "busy")
+                return yield* new SessionErrorClass({
+                  code: "busy",
+                  message: `run ${holder} of task ${taskId ?? ""} is still working on the card's branch ${branch.branch} in another process (${elsewhere.value.holder}, home ${elsewhere.value.home}): wait for it to settle, or interrupt it there, before starting another run on the card (the new run would take the branch over from under it)`,
+                });
+              continue;
+            }
             const busy = yield* isBusy(
               owner.value.harness,
               owner.value.root,
