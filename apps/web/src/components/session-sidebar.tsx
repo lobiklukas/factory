@@ -14,6 +14,7 @@ import {
   modelInput,
   SERVER_DEFAULT,
 } from "@/lib/model-picker-view";
+import { sessionModel } from "@/lib/server-info-view";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -154,6 +155,19 @@ export const SessionSidebar = () => {
                     {session.status === "busy" ? "busy" : "idle"}
                     <span className="truncate">{session.id}</span>
                   </span>
+                  {/*
+                   * The model the session is pinned to (LOB-272), so a scripted transcript is
+                   * recognizable from the list. A row that names none prints no line.
+                   */}
+                  {sessionModel(session.model) === null ? null : (
+                    <span
+                      data-session-model
+                      className="truncate font-mono text-[10px] text-muted-foreground"
+                      title={session.model}
+                    >
+                      {session.model}
+                    </span>
+                  )}
                   {/*
                    * Lineage (LOB-182): the row keeps its two lines when a session has no parent,
                    * so the list does not jump for the one row that does. The parent's id is plain

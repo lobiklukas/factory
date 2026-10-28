@@ -257,7 +257,7 @@ export const ReplayDoc = defineDoc({
 });
 
 /** One stored proposal: `ProposedIssue` (`@repo/domain/Decomposition`) as a mutable document value. */
-type StoredProposal = {
+export type StoredProposal = {
   title: string;
   goal: string;
   change: string;
@@ -265,6 +265,21 @@ type StoredProposal = {
   blockedBy: number[];
   /** Set by `recordCreatedIssue` (LOB-202) once the tracker has created the proposal. */
   created?: { id: string; identifier: string };
+};
+
+/** A stored proposal a later decomposition dropped (LOB-203): `RemovedProposal`, mutable. */
+export type StoredRemoved = {
+  title: string;
+  goal: string;
+  change: string;
+  acceptance: string[];
+  created?: { id: string; identifier: string };
+};
+
+/** The document's value. `removed` is absent until a decomposition has removed something. */
+type StoredProposedIssues = {
+  proposals: StoredProposal[];
+  removed?: StoredRemoved[];
 };
 
 /**
@@ -275,8 +290,9 @@ type StoredProposal = {
  * already accepted, and the snapshot reads it back through the same decoder, so a set the rules
  * refuse is never stored and never reported.
  *
- * `history: "latest"` because a decomposition replaces the one before it: the proposals are a
- * draft a person reviews, not an append-only record. The seed holds no proposals, which the
+ * `history: "latest"` because a decomposition reconciles into the one before it (LOB-203) and the
+ * document is the current answer: the proposals are a draft a person reviews, not an append-only
+ * record, and the ones a rerun dropped sit in `removed` with their tracker issues. The seed holds no proposals, which the
  * validator refuses, so a session that never decomposed reads as none rather than as an empty set.
  */
 export const ProposedIssuesDoc = defineDoc({
@@ -285,7 +301,7 @@ export const ProposedIssuesDoc = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "current",
-  initial: () => ({ proposals: [] as StoredProposal[] }),
+  initial: (): StoredProposedIssues => ({ proposals: [] }),
 });
 
 /**

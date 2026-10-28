@@ -67,6 +67,10 @@ pane() { t capture-pane -p -J -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]
 # link is the sixth (LOB-65). Empty when the file has no row for the id.
 pr_field() { awk -v id="$2" '$1 == id { print $6; exit }' "$EVIDENCE_DIR/$1"; }
 
+# The `model` field of one session's `ls` row: the seventh, right after the PR link (LOB-272). The
+# column is placed after `pr` so the link stays the sixth field a script already reads.
+model_field() { awk -v id="$2" '$1 == id { print $7; exit }' "$EVIDENCE_DIR/$1"; }
+
 capture() { pane > "$EVIDENCE_DIR/$1"; }
 
 # Start each command from an empty pane: assertions must not match an earlier command's output.
@@ -136,6 +140,16 @@ check "run prints the answer the tool produced" \
   "$(grep -qF "answer: $ANSWER" "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
   "answer matches the prompt echo"
 
+# LOB-272: the model the session is pinned to, and the warning a scripted one earns. This instance
+# is `MODEL_BACKEND=faux`, so both lines are required; the same line carries no warning on anthropic
+# (proved by verify-web's `backend.sh`, which runs `factory status` and `factory ls` against one).
+check "run prints the model the session is pinned to" \
+  "$(grep -qx 'model faux/faux-1' "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
+  "model=$(grep -m1 '^model ' "$EVIDENCE_DIR/run.txt")"
+check "run warns that the faux backend is scripted" \
+  "$(grep -q '^warning: faux backend' "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^warning: faux backend' "$EVIDENCE_DIR/run.txt" | cut -c1-90)"
+
 # --- ls: the server's list, not a local registry -------------------------------------------------
 fresh
 run_cmd ls "$FACTORY ls --api $API_URL" || true
@@ -148,12 +162,31 @@ check "ls reads the title from the index" \
   "$(grep -qF "$PROMPT" "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
   "title present"
 check "ls prints a pr column" \
-  "$(grep -q '^id  status  repo  last-activity  cost  pr  title$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
+  "$(grep -q '^id  status  repo  last-activity  cost  pr  model  title$' "$EVIDENCE_DIR/ls.txt" && echo 0 || echo 1)" \
   "header names pr"
 RUN_PR="$(pr_field ls.txt "$SESSION_ID")"
 check "a session with no PR shows the placeholder, not an empty cell" \
   "$([ "$RUN_PR" = "$NO_PR" ] && echo 0 || echo 1)" \
   "pr=${RUN_PR:-<empty>}"
+
+check "ls has a MODEL column with the session's model" \
+  "$([ "$(model_field ls.txt "$SESSION_ID")" = "faux/faux-1" ] && echo 0 || echo 1)" \
+  "model=$(model_field ls.txt "$SESSION_ID")"
+
+# --- status: what the control plane runs, and why (LOB-272) ---------------------------------------
+fresh
+run_cmd status "$FACTORY status --api $API_URL" || true
+capture status.txt
+check "factory status exits 0" "$([ "$(exit_code status)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code status)"
+check "status prints the backend" \
+  "$(grep -qx 'backend faux' "$EVIDENCE_DIR/status.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^backend ' "$EVIDENCE_DIR/status.txt")"
+check "status prints what chose it, and the boot's reason" \
+  "$(grep -qx 'selected-by MODEL_BACKEND' "$EVIDENCE_DIR/status.txt" && grep -qx 'reason model backend: faux (selected by MODEL_BACKEND)' "$EVIDENCE_DIR/status.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^selected-by ' "$EVIDENCE_DIR/status.txt")"
+check "status prints the default model, the faux warning and the sandbox" \
+  "$(grep -qx 'default-model faux/faux-1' "$EVIDENCE_DIR/status.txt" && grep -q '^warning .*faux provider' "$EVIDENCE_DIR/status.txt" && grep -q '^sandbox ' "$EVIDENCE_DIR/status.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^default-model ' "$EVIDENCE_DIR/status.txt")"
 
 # --- watch, live: this process owns the session ---------------------------------------------------
 fresh

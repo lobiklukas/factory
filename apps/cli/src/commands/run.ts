@@ -3,8 +3,9 @@ import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
-import { SessionClient } from "../rpc";
+import { BoardClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
+import { runModelLines } from "./status";
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -13,9 +14,11 @@ import { followSession, formatDollars } from "../transcript";
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
  * `factory approve` decides as `cli`), and `--model` the model it runs on (LOB-274; one of
- * `getServerInfo`'s models, otherwise the server's default or the column role's). The workspace and
- * model lines are the server's own answers for where the work will live and what it runs on, so the
- * run proves the read path as well as the write.
+ * `getServerInfo`'s models, otherwise the server's default or the column role's). The workspace line is
+ * the server's own answer for where the work will live, so the run proves the read path as well as the
+ * write. The `model` line is the model the session is pinned to (LOB-272), and under the faux backend a
+ * `warning: faux backend` line follows it: a scripted answer reads exactly like a real one, so the run
+ * says which it is getting.
  */
 export const runCommand = Command.make(
   "run",
@@ -67,7 +70,7 @@ export const runCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
-      const { client } = yield* SessionClient;
+      const { client } = yield* BoardClient;
 
       const input: {
         repo?: RepoSlug;
@@ -83,12 +86,16 @@ export const runCommand = Command.make(
 
       const session = yield* client.createSession(input);
       yield* Console.log(`session ${session.id}`);
-      // The model the server pinned the session to, not the flag echoed back (LOB-274).
-      if (session.model !== undefined) {
-        yield* Console.log(`model ${session.model}`);
-      }
       if (Option.isSome(budget)) {
         yield* Console.log(`budget ${formatDollars(budget.value)}`);
+      }
+
+      // A server that cannot answer `getServerInfo` costs the run its warning, never the run.
+      const info = yield* client
+        .getServerInfo({})
+        .pipe(Effect.option, Effect.map(Option.getOrUndefined));
+      for (const line of runModelLines(session.model, info)) {
+        yield* Console.log(line);
       }
 
       const opened = yield* client.getSession({ sessionId: session.id });
@@ -120,7 +127,7 @@ export const runCommand = Command.make(
       }
     });
 
-    yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription(
