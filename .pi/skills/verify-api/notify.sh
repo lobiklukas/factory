@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Prove the notifier (S-notifications): a parked question, a pending approval and a run its budget
-# stopped each reach a person exactly once — on a Slack incoming webhook and on an ntfy topic, both
+# Prove the notifier (S-notifications): a parked question, a pending approval, a run its budget
+# stopped and a run whose model request failed (on `faux/faulted`, a faux model whose script fails
+# every request — F6's `fail`) each reach a person exactly once — on a Slack incoming webhook and on an ntfy topic, both
 # the loopback fake (`notify-fake.ts`) — with a link to the card; a restarted API sends none of them
 # again; and `NOTIFY_TYPES` keeps a kind it leaves out off a sink.
 #
 # This script owns everything it drives: a scratch database minted on DATABASE_URL's server (so the
-# fake's ledger holds this drive's messages and nothing else, and "three messages" is a count), the
+# fake's ledger holds this drive's messages and nothing else, and "four messages" is a count), the
 # fake, and the API — booted three times over that database: twice with both sinks (the restart),
 # then with `NOTIFY_TYPES=question,failed` and a fresh ntfy topic. The model is a priced faux so a
 # one-cent cap is reachable. It leaves nothing running and drops the database.
@@ -142,6 +143,8 @@ start_api() { # extra env assignments…
       HOST="127.0.0.1" \
       MODEL_BACKEND=faux \
       FAUX_COST=0.01 \
+      ROLE_MODELS="faulted=faux/faulted" \
+      FAUX_MODEL_SCRIPTS='{"faulted":{"fail":"model_error"}}' \
       SESSION_ROOT="$RUN_DIR/sessions" \
       SESSION_IDLE_TIMEOUT_MS=600000 \
       DATABASE_URL="$DATABASE_URL" \
@@ -172,7 +175,7 @@ drive() { # phase, topic
 
 : > "$LOG"
 
-# --- 1. both sinks: the three events, once each ---------------------------------------------------
+# --- 1. both sinks: the four events, once each ----------------------------------------------------
 start_api NOTIFY_SLACK_WEBHOOK_URL="$FAKE_URL$WEBHOOK_PATH" NOTIFY_NTFY_TOPIC="$TOPIC" || exit 1
 check "the boot names both sinks, every kind, the interval and the links" \
   "$(grep -q "notifications: question, approval, gate, failed to a Slack incoming webhook and ntfy at $FAKE_URL, every ${POLL_MS}ms, linking to $LINK_BASE" "$LOG" && echo 0 || echo 1)" \
