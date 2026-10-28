@@ -32,7 +32,11 @@ surface ([board.md](board.md)), so the dashboard now opens on it.
   form (`unit: first-run-view.test.ts`, `first-run-read.test.ts`).
 - **Every empty state names a press.** `/attention`, `/approvals`, `/sandboxes` link to the boards
   (`[data-empty-action]`), `/spend` to the sessions, `/sessions`' empty pane to the boards beside the
-  sidebar's **New session**. `apps/web/src/empty-states.test.ts` fails on a `factory <command>` in any route
+  sidebar's **New session**. Each also links the step of the getting-started guide it is about (G1,
+  `[data-guide-link]`, `GuideLink`; `docs/getting-started.md`): `/boards` (empty) and `/repos` (empty) the
+  board and repository steps, the four checklist steps their own (3 to 6), the rest the run step or, for
+  `/approvals`, plan approval. The href is the guide at the step's heading, and
+  `apps/web/src/lib/guide-links.test.ts` fails when a heading is renamed. `apps/web/src/empty-states.test.ts` fails on a `factory <command>` in any route
   or component's copy.
 
 ## How to get to it (user POV)
@@ -48,8 +52,10 @@ oracle (the one board made over RPC is the routing case's second):
 
 1. **Empty.** The database holds no repository, board or session; `/` opens `/boards`; the checklist
    lists the four steps with nothing ticked, the first next, the first two linking to their forms and the
-   other two naming what they wait for; the page has no `factory <command>`.
-2. **States.** Each of the five empty routes names a press; none gives a command.
+   other two naming what they wait for; the page has no `factory <command>`; it links the guide's board
+   step and one guide step per checklist step (texts "Getting started, step N: …").
+2. **States.** Each of the five empty routes names a press and links one step of the guide; none gives a
+   command.
 3. **Repo.** The first step's link opens `/repos`; registering a throwaway checkout there ticks step 1 only
    (`x---`), equal to `listRepos`.
 4. **Board.** The second step's link opens the New board form; creating on the registered repository ticks

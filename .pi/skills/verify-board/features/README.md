@@ -3,7 +3,10 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+Status reflects the last verified runs: the getting-started guide (G1, 2026-10-28, `agent/G1-F11-F18`), API
+on `:9550`, GitHub fake on `:9553`: `./guide.sh` exit 0 (**10/10**), its 14 walk blocks run from the
+guide itself, and `./caps.sh` exit 0 (**25/25**) again with its starts `--idle` ([guide.md](guide.md),
+[caps.md](caps.md)). Before it, the planning run's plan (D10, 2026-10-28, `agent/D10`), API
 on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
 planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
 `./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
@@ -76,6 +79,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | `factory board move` + refusals         | passing | [move.md](move.md)               |
 | `factory board start`                   | passing | [start.md](start.md)             |
 | board caps and WIP limits (LOB-71)      | passing | [caps.md](caps.md)               |
+| the getting-started guide, walked (G1)  | passing | [guide.md](guide.md)             |
 | a card's body and base ref in its runs  | passing | [body.md](body.md)               |
 | `board block\|unblock\|attention\|runs` | passing | [triage.md](triage.md)           |
 | the board read back in the web          | passing | [dashboard.md](dashboard.md)     |
