@@ -38,7 +38,7 @@ import {
   readVerifyRecords,
 } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Exit, Layer, ManagedRuntime } from "effect";
+import { Effect, Exit, Fiber, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -66,7 +66,17 @@ const runtime = ManagedRuntime.make(
   ).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer))),
 );
 
+/** A second process on the same database whose sends wait for a setup only briefly. */
+const impatient = ManagedRuntime.make(
+  SessionServiceLive({
+    model: faux.access,
+    sessionRoot: join(scratch, "impatient-sessions"),
+    setupWaitMs: 300,
+  }).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer))),
+);
+
 afterAll(async () => {
+  await impatient.dispose();
   await runtime.dispose();
   rmSync(scratch, { recursive: true, force: true });
 });
@@ -278,11 +288,16 @@ describe("a worktree's declared setup", () => {
           SELECT finished_at IS NOT NULL AS finished FROM task_runs
           WHERE session_id = ${run.id}
         `;
-        // The next message is still the first: the setup runs again, and the card keeps its block.
+        // The run ended with its setup: a message to it is refused with that failure, runs nothing,
+        // and leaves the card's block and the ended run as they are.
         const again = yield* Effect.exit(
           sessions.send({ sessionId: run.id, content: "try again" }),
         );
         const stillParked = yield* tasks.get(card.id);
+        const runRowsAfter = yield* sql<{ finished: boolean }>`
+          SELECT finished_at IS NOT NULL AS finished FROM task_runs
+          WHERE session_id = ${run.id}
+        `;
         return {
           refused,
           again,
@@ -293,6 +308,7 @@ describe("a worktree's declared setup", () => {
           snapshot,
           logged,
           runRows,
+          runRowsAfter,
         };
       }),
     );
@@ -336,10 +352,140 @@ describe("a worktree's declared setup", () => {
       existsSync(join(outcome.snapshot.workspace.path, "built-marker")),
     ).toBe(false);
 
-    // Retried: it ran again and failed again, and the block it first parked on is the one standing.
-    expect(failure(outcome.again)?.code).toBe("setup_failed");
-    expect(readFileSync(attempts, "utf8")).toBe("attempt\nattempt\n");
+    // Sent to again: refused with the recorded failure and what to do, and the install did not rerun.
+    const again = failure(outcome.again);
+    expect(again?.code).toBe("setup_failed");
+    expect(again?.message).toContain("exited 7");
+    expect(again?.message).toContain("start a new run");
+    expect(readFileSync(attempts, "utf8")).toBe("attempt\n");
     expect(outcome.stillParked.blocked).toEqual(outcome.parked.blocked);
+    expect(outcome.runRowsAfter).toEqual([{ finished: true }]);
+    expect(faux.faux.state.callCount).toBe(outcome.calls);
+  }, 180_000);
+
+  it("runs a failed setup again on the next message to a session that is no card's run, and works once it passes", async () => {
+    const attempts = join(scratch, "installs-retried.txt");
+    const fixed = join(scratch, "installs-retried.fixed");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("flaky", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo attempt >> ${attempts}; if [ -f ${fixed} ]; then bun install; else touch ${fixed}; echo "network blip" >&2; exit 4; fi`,
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "retried" });
+        const first = yield* Effect.exit(
+          sessions.send({ sessionId: created.id, content: "go" }),
+        );
+        const failed = yield* readSetup(created.id);
+        yield* sessions.send({ sessionId: created.id, content: "go again" });
+        const snapshot = yield* settled(created.id);
+        return {
+          first,
+          failed,
+          snapshot,
+          logged: yield* readSetup(created.id),
+        };
+      }),
+    );
+    expect(Exit.isFailure(outcome.first)).toBe(true);
+    expect(outcome.failed.setup?.outcome).toBe("failed");
+    expect(readFileSync(attempts, "utf8")).toBe("attempt\nattempt\n");
+    expect(outcome.logged.setup?.outcome).toBe("succeeded");
+    // The message that ran is the second, the first was never submitted.
+    expect(
+      outcome.snapshot.entries
+        .filter((entry) => entry.kind === "user")
+        .map((entry) => entry.text),
+    ).toEqual(["go again"]);
+    const probe = outcome.snapshot.entries.find(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+    );
+    expect(probe?.text).toContain("deps-present");
+  }, 180_000);
+
+  it("keeps a setup running when the send waiting on it goes away, and the next send waits for it instead of installing again", async () => {
+    const attempts = join(scratch, "installs-abandoned.txt");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("abandoned", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo start >> ${attempts}; sleep 2; bun install; echo done >> ${attempts}`,
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "abandoned" });
+        // A client that goes away mid-install: its request's fiber is interrupted.
+        const abandoned = yield* Effect.forkChild(
+          sessions.send({ sessionId: created.id, content: "first try" }),
+        );
+        yield* waitUntil(
+          Effect.sync(() => existsSync(attempts)),
+          "the install to start",
+        );
+        yield* Fiber.interrupt(abandoned);
+        // The retry arrives while the first install still runs.
+        yield* sessions.send({ sessionId: created.id, content: "retry" });
+        const snapshot = yield* settled(created.id);
+        return { snapshot, logged: yield* readSetup(created.id) };
+      }),
+    );
+    expect(readFileSync(attempts, "utf8")).toBe("start\ndone\n");
+    expect(outcome.logged.setup?.outcome).toBe("succeeded");
+    expect(
+      outcome.snapshot.entries
+        .filter((entry) => entry.kind === "user")
+        .map((entry) => entry.text),
+    ).toEqual(["retry"]);
+    const probe = outcome.snapshot.entries.find(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+    );
+    expect(probe?.text).toContain("deps-present");
+  }, 180_000);
+
+  it("answers setup_running to a send that outwaits its bound, and the setup it left finishes once", async () => {
+    const attempts = join(scratch, "installs-slow.txt");
+    const outcome = await impatient.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("slow", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo start >> ${attempts}; sleep 2; bun install; echo done >> ${attempts}`,
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "slow" });
+        const first = yield* Effect.exit(
+          sessions.send({ sessionId: created.id, content: "go" }),
+        );
+        // Sent again until the setup the first send left has finished; each waits for that one.
+        let retries = 0;
+        for (;;) {
+          const sent = yield* Effect.exit(
+            sessions.send({ sessionId: created.id, content: "go" }),
+          );
+          if (Exit.isSuccess(sent)) break;
+          retries += 1;
+          if (retries > 100)
+            return yield* Effect.die(new Error("never set up"));
+        }
+        yield* settled(created.id);
+        return { first, retries };
+      }),
+    );
+    const failure = Exit.isFailure(outcome.first)
+      ? outcome.first.cause.reasons.find((reason) => reason._tag === "Fail")
+          ?.error
+      : undefined;
+    expect(failure?.code).toBe("setup_running");
+    expect(failure?.message).toContain("still running");
+    expect(readFileSync(attempts, "utf8")).toBe("start\ndone\n");
   }, 180_000);
 
   it("runs and records nothing for a repo that declares no install or build", async () => {

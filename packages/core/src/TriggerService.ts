@@ -1019,11 +1019,22 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 );
               }
 
-              yield* sessions.send({
-                sessionId: session.id,
-                content: mapping.prompt,
-                requestId: sessionRequestId,
-              });
+              // A session whose worktree setup failed (S-env-setup) is the delivery's outcome, not a
+              // failure to retry: the setup is recorded in its log, and a sender's retry would only
+              // run the same install again. The delivery is processed, and its reason says so.
+              const setupFailure = yield* sessions
+                .send({
+                  sessionId: session.id,
+                  content: mapping.prompt,
+                  requestId: sessionRequestId,
+                })
+                .pipe(
+                  Effect.as(undefined),
+                  Effect.catchIf(
+                    (error) => error.code === "setup-failed",
+                    (error) => Effect.succeed(error.message),
+                  ),
+                );
 
               yield* writeBack.write({ event, sessionId: session.id });
 
@@ -1031,7 +1042,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // (`skip_reason` is the delivery's recorded outcome reason, whatever the outcome), so a
               // replay of a processed delivery names the route that started it, and so does the row
               // an operator reads after the first response is gone.
-              const reason = routedBy;
+              const reason =
+                setupFailure === undefined
+                  ? routedBy
+                  : `${routedBy}, but the session's worktree setup failed, so its prompt was not sent: ${setupFailure.split("\n")[0]}`;
               yield* processed(requestId, reason);
 
               return {

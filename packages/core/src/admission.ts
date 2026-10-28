@@ -93,14 +93,20 @@ export const AT_CAPACITY_RETRY_AFTER_S = 60;
 
 /**
  * A session failure as the trigger seam reports it: `at_capacity` keeps its meaning as
- * `at-capacity`, so a route can answer "not now" rather than "broken"; every other code is a
- * failed session create, as it was.
+ * `at-capacity`, so a route can answer "not now" rather than "broken", and `setup_failed` its as
+ * `setup-failed` (S-env-setup), which the seam records as an outcome; every other code is a failed
+ * session create, as it was.
  */
 export const triggerErrorOfSession = (
   cause: Pick<SessionError, "code" | "message">,
 ): TriggerError =>
   new TriggerError({
-    code: cause.code === "at_capacity" ? "at-capacity" : "session-create",
+    code:
+      cause.code === "at_capacity"
+        ? "at-capacity"
+        : cause.code === "setup_failed"
+          ? "setup-failed"
+          : "session-create",
     message: cause.message,
   });
 

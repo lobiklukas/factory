@@ -71,10 +71,16 @@ default 3441) and its own throwaway git checkouts under `.verify/run/repos/check
 9. **Follow.** The checkout is renamed away behind the registry's back; the open page flips the row
    to `not runnable` (`not_a_work_tree`) naming the path on its next poll, without a reload; a reload
    shows the same rows.
-10. **No console errors.**
+10. **A card parked `setup_failed`** (S-env-setup). A checkout whose `.factory/config` install exits
+    7 is registered over RPC, a card's run on it is sent its first message (refused `setup_failed`),
+    and the board page opened on the card shows `[data-card-block-note=setup_failed]` in the card
+    pane: the heading `Blocked: its worktree setup failing` and the note naming `exited 7` and the
+    stderr line.
+11. **No console errors.**
 
 Evidence: `.verify/evidence/latest/repos/` holds `repos-flagged.png`, `repos-refused.png`,
-`repos-added.png`, `repos-moved.png`, `observed.json`, `api.log` and `web.log`.
+`repos-added.png`, `repos-moved.png`, `repos-setup-failed-card.png`, `observed.json`, `api.log` and
+`web.log`.
 
 ## Gotchas
 

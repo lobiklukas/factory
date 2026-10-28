@@ -12,12 +12,21 @@
 //   broken    the install exits 7. A card's first message is refused `setup_failed` in the step's own
 //             words; the card is blocked `setup_failed` with the same words as its note; the session
 //             holds no message and no answer (no model was called); the log keeps the step's tail.
+//             A second message to that run is refused the same way and runs no install: it ended.
+//   abandoned the install sleeps; the first send's client goes away mid-install and a second send
+//             follows at once. The install runs once, is recorded, and the second send waits for it.
 //   readiness the registry answers each checkout's agent-readiness score on registration, and
 //             `listRepos` the same score.
 //
 // Env: API_URL, DATABASE_URL (to read the session logs), SETUP_REPOS, EVIDENCE_DIR.
 import { execSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
@@ -25,7 +34,7 @@ import { RepoSlug } from "@repo/domain/Session";
 import { BoardInstanceId, DefinitionId, TaskId } from "@repo/domain/Task";
 import { readLoggedSetup, readVerifyRecords } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Exit, Layer } from "effect";
+import { Effect, Exit, Fiber, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
 import { SqlClient } from "effect/sql/SqlClient";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -45,6 +54,7 @@ const observed: {
   run: string;
   ok?: unknown;
   broken?: unknown;
+  abandoned?: unknown;
   readiness?: unknown;
   checks: Record<string, CheckRecord>;
 } = { apiUrl: API_URL, run: RUN, checks: {} };
@@ -199,8 +209,7 @@ const program = Effect.gen(function* () {
     localPath: fixtureRepo("broken", {
       ...PACKAGE,
       ".factory/config": JSON.stringify({
-        install:
-          'echo "resolving local-dep"; echo "error: registry unreachable" >&2; exit 7',
+        install: `echo attempt >> ${path.join(REPOS, "broken-attempts.txt")}; echo "resolving local-dep"; echo "error: registry unreachable" >&2; exit 7`,
         build: BUILD,
         verify: VERIFY,
       }),
@@ -229,6 +238,18 @@ const program = Effect.gen(function* () {
   const brokenSnapshot = yield* client.getSession({ sessionId: run.id });
   const brokenLog = yield* logged(run.id);
   const runs = yield* client.listTaskRuns({ taskId: TaskId.make(card.id) });
+  // The run ended with its setup: a second message is refused with that failure and runs nothing.
+  const again = yield* Effect.exit(
+    client.sendMessage({ sessionId: run.id, content: "try again" }),
+  );
+  const againError = Exit.isFailure(again)
+    ? again.cause.reasons.find((reason) => reason._tag === "Fail")?.error
+    : undefined;
+  const brokenAttempts = readFileSync(
+    path.join(REPOS, "broken-attempts.txt"),
+    "utf8",
+  );
+  const parkedAfter = yield* client.getTask({ taskId: TaskId.make(card.id) });
   observed.broken = {
     sessionId: run.id,
     taskId: card.id,
@@ -237,6 +258,8 @@ const program = Effect.gen(function* () {
     setup: brokenLog.setup,
     runs,
     entries: brokenSnapshot.entries.map((entry) => entry.kind),
+    again: againError,
+    attempts: brokenAttempts,
   };
   const errorCode =
     error !== undefined && "code" in error ? String(error.code) : undefined;
@@ -275,6 +298,89 @@ const program = Effect.gen(function* () {
     "broken: the card's run is over, not holding a cap slot",
     runs.length === 1 && runs[0]?.finishedAt !== undefined,
     JSON.stringify(runs.map((row) => row.finishedAt ?? null)),
+  );
+
+  const againCode =
+    againError !== undefined && "code" in againError
+      ? String(againError.code)
+      : undefined;
+  const againMessage =
+    againError !== undefined && "message" in againError
+      ? String(againError.message)
+      : "";
+  assert(
+    "broken: a second message to the ended run is refused setup_failed and runs no install",
+    againCode === "setup_failed" &&
+      againMessage.includes("start a new run") &&
+      brokenAttempts === "attempt\n" &&
+      JSON.stringify(parkedAfter.blocked) === JSON.stringify(parked.blocked),
+    `${againCode}; installs: ${brokenAttempts.split("\n").length - 1}`,
+  );
+
+  // --- abandoned: a client that goes away mid-install -------------------------------------------
+  const abandonedLog = path.join(REPOS, "abandoned-attempts.txt");
+  const abandonedRepo = RepoSlug.make(`verify-setup-${RUN}/abandoned`);
+  yield* client.registerRepo({
+    repo: abandonedRepo,
+    defaultBaseRef: "main",
+    localPath: fixtureRepo("abandoned", {
+      ...PACKAGE,
+      ".factory/config": JSON.stringify({
+        install: `echo start >> ${abandonedLog}; sleep 3; bun install; echo done >> ${abandonedLog}`,
+        verify: "true",
+      }),
+    }),
+  });
+  const abandonedSession = yield* client.createSession({
+    repo: abandonedRepo,
+    title: "verify-setup abandoned",
+  });
+  const gone = yield* Effect.forkChild(
+    client.sendMessage({
+      sessionId: abandonedSession.id,
+      content: "first try",
+    }),
+  );
+  yield* waitUntil(
+    Effect.sync(() => existsSync(abandonedLog)),
+    "the abandoned install to start",
+  );
+  // The request goes away (the server sees its client leave), then the retry arrives at once.
+  yield* Fiber.interrupt(gone);
+  yield* client.sendMessage({
+    sessionId: abandonedSession.id,
+    content: "retry",
+  });
+  const abandonedSnapshot = yield* waitUntil(
+    Effect.map(
+      client.getSession({ sessionId: abandonedSession.id }),
+      (snapshot) =>
+        !snapshot.live.busy &&
+        snapshot.entries.some(
+          (entry) => entry.kind === "assistant" && entry.text !== "",
+        )
+          ? snapshot
+          : undefined,
+    ),
+    "the abandoned session's run to answer",
+  );
+  const abandonedAttempts = readFileSync(abandonedLog, "utf8");
+  const abandonedSetup = (yield* logged(abandonedSession.id)).setup;
+  const abandonedUsers = abandonedSnapshot.entries
+    .filter((entry) => entry.kind === "user")
+    .map((entry) => entry.text);
+  observed.abandoned = {
+    sessionId: abandonedSession.id,
+    attempts: abandonedAttempts,
+    setup: abandonedSetup,
+    users: abandonedUsers,
+  };
+  assert(
+    "abandoned: the install a gone client left ran once, was recorded, and the retry waited for it",
+    abandonedAttempts === "start\ndone\n" &&
+      abandonedSetup?.outcome === "succeeded" &&
+      JSON.stringify(abandonedUsers) === JSON.stringify(["retry"]),
+    `${JSON.stringify(abandonedAttempts)}; ${abandonedSetup?.outcome}; ${JSON.stringify(abandonedUsers)}`,
   );
 
   // --- readiness: scored at registration and on read ----------------------------------------------

@@ -1063,7 +1063,13 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   (S-env-setup): the repo's declared `install` or `build` exited non-zero or could not run, so the
  *   message was not submitted and no model was called. The message names the step, the command, its
  *   exit code and its output's last lines; the whole tail is the log's `factory.setup` document, and
- *   a session that is a card's run blocked the card `setup_failed`. The next send runs the setup again.
+ *   a session that is a card's run blocked the card `setup_failed` and ended. The next send to a
+ *   session that is no card's run runs the setup again; one to a card's run whose setup failed is
+ *   refused the same way without running it, because that run has ended: fix the repo, unblock the
+ *   card and start a new run.
+ * - `setup_running` — the session's worktree setup is still running after the send waited the time
+ *   it waits for one (S-env-setup), so nothing was submitted. Transient: the setup goes on without
+ *   the request, and the same send again waits for that setup rather than starting another.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1075,6 +1081,7 @@ export const SessionErrorCode = Schema.Literals([
   "owned_elsewhere",
   "at_capacity",
   "setup_failed",
+  "setup_running",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

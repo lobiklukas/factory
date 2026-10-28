@@ -68,8 +68,10 @@ precedent ("an index, not a projection").
 | `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
-transient`) plus the column it blocked from, so a blocked card stays visible in its own lane and
-there is no "return to where it was" ambiguity. There is **no `ready` column** in the MVP: nothing
+transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
+lane and there is no "return to where it was" ambiguity. `setup_failed` is written by a run, not a
+person: its worktree's declared `install` or `build` failed before its first turn (S-env-setup), and
+the note names the step, its exit code and its output's last lines. There is **no `ready` column** in the MVP: nothing
 auto-starts, so `ready` only means something once a dispatcher exists (wave 2).
 
 ## B5 — Moves are the consequential act, so they are attributed and gated

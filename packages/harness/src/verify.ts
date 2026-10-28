@@ -62,7 +62,10 @@
  * attributable to the session only on a host where this control plane is the one running skills.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  BACKGROUND_CONTEXT,
+  withAbortSignal,
+} from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import type {
   Cursor,
@@ -376,12 +379,16 @@ export type ExecInput = {
 /**
  * Run one command to its exit code, crossing the Promise boundary once: the `verify` tool's runs and
  * `./setup`'s install and build alike, so both go through the session's `ExecutionEnv` one way.
+ *
+ * Interrupting it stops the command: the fiber's abort signal joins `input.context`, and the
+ * environment kills what it spawned when that signal fires. Without it an interrupted caller would
+ * leave the process running, unrecorded, beside whatever ran next in the same directory.
  */
 export const execToExit = (
   input: ExecInput,
 ): Effect.Effect<number, ExecFailure> =>
   Effect.tryPromise({
-    try: () =>
+    try: (signal) =>
       input.env.exec(
         input.command,
         {
@@ -393,7 +400,7 @@ export const execToExit = (
             : { timeout: input.timeoutSeconds }),
           onOutput: (text, _context, info) => input.onOutput(text, info.stream),
         },
-        input.context,
+        withAbortSignal(signal, input.context),
       ),
     catch: (cause) =>
       new ExecFailure({ code: "unknown", message: describe(cause) }),

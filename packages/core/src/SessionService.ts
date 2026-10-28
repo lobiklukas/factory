@@ -29,6 +29,7 @@ import {
   Duration,
   Effect,
   Exit,
+  Fiber,
   FiberMap,
   FileSystem,
   HashMap,
@@ -318,6 +319,13 @@ import {
 
 /** Longest message a session accepts, in characters. Beyond this the call is refused, not truncated. */
 export const MAX_MESSAGE_CHARS = 100_000;
+
+/**
+ * How long a send waits for its session's worktree setup before answering `setup_running`
+ * (S-env-setup, `SessionServiceOptions.setupWaitMs`): under the API's default `IDLE_TIMEOUT` of
+ * 120 s, so a slow install is answered with a typed error rather than a dropped connection.
+ */
+export const SETUP_WAIT_MS = 90_000;
 
 /** How often idle owners are swept, when sweeping is at all. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -785,6 +793,13 @@ export type SessionServiceOptions = {
    * `@repo/harness`'s `SETUP_TIMEOUT_SECONDS`. A step that outlives it is stopped and the setup fails.
    */
   readonly setupTimeoutSeconds?: number;
+  /**
+   * How long a send waits for its session's worktree setup before it answers `setup_running`
+   * (S-env-setup), in milliseconds. Absent: `SETUP_WAIT_MS`. The setup does not run in the request:
+   * it goes on without a caller that gave up, so the bound only keeps a request shorter than the
+   * server's own idle timeout (`IDLE_TIMEOUT`, 120 s by default), which would drop it unanswered.
+   */
+  readonly setupWaitMs?: number;
   /**
    * Admission control (LOB-70): how many sessions this process may own at once. An owner is an open
    * harness, the log's single-writer lock, a worktree and a projection fiber, so this is the budget
@@ -1263,16 +1278,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const withProposalGate = keyedGate();
       /**
-       * Serializes one session's worktree setup (S-env-setup): two first messages sent at once would
-       * each read no setup record and each run the install. The second waits, reads the first's
-       * record, and runs nothing when it succeeded.
+       * Serializes the decision to start one session's worktree setup (S-env-setup): two first
+       * messages sent at once would each read no setup record and each start the install. The second
+       * waits, then finds the first's setup running in `setups` (and waits for it) or its record.
        */
       const withSetupGate = keyedGate();
       /**
-       * The sessions whose setup is running in this process: the idle sweep leaves their owners, for
-       * the reason it leaves a busy one — releasing it would end the sandbox the install runs in.
+       * The worktree setups running in this process, one per session (S-env-setup). In the layer's
+       * scope, not a request's: a send that gave up (a client gone, an idle timeout) leaves its setup
+       * running and recorded, and the next send waits for that one rather than starting a second
+       * install in the same worktree. The idle sweep leaves these sessions' owners, for the reason it
+       * leaves a busy one — releasing it would end the sandbox the install runs in. A fiber this
+       * scope interrupts (shutdown) stops its command: the exec is handed the interruption's signal.
        */
-      const settingUp = new Set<SessionId>();
+      const setups = yield* FiberMap.make<
+        SessionId,
+        SessionError | undefined,
+        never
+      >();
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -2127,7 +2150,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const readiness =
             localPath === undefined || !facts.localPathIsGit
               ? undefined
-              : yield* Effect.sync(() => scoreRepoReadiness(localPath));
+              : yield* scoreRepoReadiness(localPath).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fs),
+                  Effect.provideService(Path.Path, path),
+                );
           return {
             repo: yield* toRepoSlug(row.slug),
             url: row.url,
@@ -3244,13 +3270,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Nothing runs for a released session (no directory), a repo that declares neither command, a
        * log whose setup already succeeded, or one whose root already took a submission with no setup
        * recorded — a session that worked in its worktree before setups were run here, which set
-       * itself up. A failed setup is retried by the next call: it submitted nothing, so the next
-       * message is still the first.
+       * itself up. A failed setup of a session that is no card's run is retried by the next call: it
+       * submitted nothing, so the next message is still the first.
+       *
+       * The setup runs in `setups`, not in the caller: the caller waits for it, at most
+       * `setupWaitMs`, and one that stops waiting (gives up, or answers `setup_running`) leaves it to
+       * finish and record. A caller that arrives while it runs waits for the same one.
        *
        * A failure is `setup_failed`, carrying the step, its exit code and its output's last lines.
        * A session that is a card's run parks the card `setup_failed` with the same words, and its run
        * ends (`endOpenRun`): it took no turn, so nothing else would end it, and an open one would
-       * hold a cap slot on the card and its board until somebody fixed the repo.
+       * hold a cap slot on the card and its board until somebody fixed the repo. Because it ended, a
+       * later send to that run is refused with the recorded failure and runs nothing: the card says
+       * the run failed, and a run that went on working under that block would contradict it. The fix
+       * is a new run, once the repo is fixed and the card unblocked.
        */
       const ensureSetup = (
         sessionId: SessionId,
@@ -3260,79 +3293,123 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const { workspace } = owner;
           if (workspace.released !== undefined) return;
           if (setupSteps(workspace.commands).length === 0) return;
-          yield* withSetupGate(
+          const running = yield* withSetupGate(
             sessionId,
             Effect.gen(function* () {
+              const inFlight = yield* FiberMap.get(setups, sessionId);
+              if (Option.isSome(inFlight)) return inFlight.value;
               const recorded = yield* readSetupRecord(
                 owner.harness,
                 owner.root,
               );
-              if (recorded?.outcome === "succeeded") return;
+              if (recorded?.outcome === "succeeded") return undefined;
               if (
                 recorded === undefined &&
                 (yield* rootEverSubmitted(owner.storage))
               )
-                return;
-              const env = yield* Effect.tryPromise({
-                try: () => owner.env(workspace.path),
-                catch: (cause) =>
-                  new SessionErrorClass({
-                    code: "harness",
-                    message: `session ${sessionId}: its worktree ${workspace.path} cannot run its setup: ${cause instanceof Error ? cause.message : String(cause)}`,
-                  }),
-              });
-              const record = yield* Effect.acquireUseRelease(
-                Effect.sync(() => settingUp.add(sessionId)),
-                () =>
-                  runSetup({
-                    env,
-                    commands: workspace.commands,
-                    ...(options.setupTimeoutSeconds === undefined
-                      ? {}
-                      : { timeoutSeconds: options.setupTimeoutSeconds }),
-                  }),
-                () =>
-                  Effect.andThen(
-                    Effect.sync(() => settingUp.delete(sessionId)),
-                    touch(sessionId),
-                  ),
+                return undefined;
+              if (
+                recorded !== undefined &&
+                (yield* runTaskFor(sessionId)) !== undefined
+              ) {
+                yield* countRefusal("setup_failed");
+                return yield* new SessionErrorClass({
+                  code: "setup_failed",
+                  message: `session ${sessionId}: ${setupFailureText(recorded)}\nthis run ended when its setup failed: fix the repo's setup, unblock the card and start a new run`,
+                });
+              }
+              return yield* FiberMap.run(
+                setups,
+                sessionId,
+                setUp(sessionId, owner),
               );
-              // `setupSteps` found a step, so the setup ran one.
-              if (record === undefined) return;
-              yield* writeSetupRecord(owner.root, record);
-              if (record.outcome === "succeeded") {
-                yield* Effect.logInfo(
-                  `session ${sessionId}: setup ran ${record.steps.map((step) => step.step).join(", ")} in ${record.directory}`,
-                );
-                return;
-              }
-              const text = setupFailureText(record);
-              const card = yield* runTaskFor(sessionId);
-              if (card !== undefined) {
-                yield* tasks
-                  .parkRun({
-                    taskId: card,
-                    reason: "setup_failed",
-                    note: text,
-                    actor: sessionId,
-                  })
-                  .pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning(
-                        `session ${sessionId}: its card ${card} was not parked setup_failed: ${error.message}`,
-                      ),
-                    ),
-                  );
-                yield* endOpenRun(sessionId);
-              }
-              yield* countRefusal("setup_failed");
-              return yield* new SessionErrorClass({
-                code: "setup_failed",
-                message: `session ${sessionId}: ${text}`,
-              });
             }),
           );
+          if (running === undefined) return;
+          const waitMs = options.setupWaitMs ?? SETUP_WAIT_MS;
+          const outcome = yield* Fiber.join(running).pipe(
+            Effect.timeoutOption(Duration.millis(waitMs)),
+          );
+          if (Option.isNone(outcome)) {
+            return yield* new SessionErrorClass({
+              code: "setup_running",
+              message: `session ${sessionId}: its worktree's setup (${setupSteps(
+                workspace.commands,
+              )
+                .map((step) => step.step)
+                .join(
+                  ", ",
+                )}) is still running after ${Math.round(waitMs / 1000)}s, so the message was not sent: send it again to wait for that setup, which goes on without this request`,
+            });
+          }
+          if (outcome.value !== undefined) return yield* outcome.value;
         }).pipe(Effect.withSpan("SessionService.ensureSetup"));
+
+      /**
+       * One setup of one session's worktree, as `setups` runs it: the steps, the record, and on a
+       * failure the card's block and the end of its run. Answers the refusal a failure is, rather
+       * than failing, so every caller waiting on it reads the same one and the work it did is done
+       * once. A failure to write the record is answered the same way: the setup is not known to have
+       * happened, so the next send runs it again.
+       */
+      const setUp = (
+        sessionId: SessionId,
+        owner: LiveOwner,
+      ): Effect.Effect<SessionError | undefined> =>
+        Effect.gen(function* () {
+          const { workspace } = owner;
+          const env = yield* Effect.tryPromise({
+            try: () => owner.env(workspace.path),
+            catch: (cause) =>
+              new SessionErrorClass({
+                code: "harness",
+                message: `session ${sessionId}: its worktree ${workspace.path} cannot run its setup: ${cause instanceof Error ? cause.message : String(cause)}`,
+              }),
+          });
+          const record = yield* runSetup({
+            env,
+            commands: workspace.commands,
+            ...(options.setupTimeoutSeconds === undefined
+              ? {}
+              : { timeoutSeconds: options.setupTimeoutSeconds }),
+          }).pipe(Effect.ensuring(touch(sessionId)));
+          // `ensureSetup` found a step, so the setup ran one.
+          if (record === undefined) return undefined;
+          yield* writeSetupRecord(owner.root, record);
+          if (record.outcome === "succeeded") {
+            yield* Effect.logInfo(
+              `session ${sessionId}: setup ran ${record.steps.map((step) => step.step).join(", ")} in ${record.directory}`,
+            );
+            return undefined;
+          }
+          const text = setupFailureText(record);
+          const card = yield* runTaskFor(sessionId);
+          if (card !== undefined) {
+            yield* tasks
+              .parkRun({
+                taskId: card,
+                reason: "setup_failed",
+                note: text,
+                actor: sessionId,
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${sessionId}: its card ${card} was not parked setup_failed: ${error.message}`,
+                  ),
+                ),
+              );
+            yield* endOpenRun(sessionId);
+          }
+          yield* countRefusal("setup_failed");
+          return new SessionErrorClass({
+            code: "setup_failed",
+            message: `session ${sessionId}: ${text}`,
+          });
+        }).pipe(
+          Effect.catch((error: SessionError) => Effect.succeed(error)),
+          Effect.withSpan("SessionService.setUp"),
+        );
 
       /**
        * Continue what the root still holds unsettled once a caller that took the owner paused
@@ -6229,7 +6306,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           if (now - owner.lastUsedAt < (options.idleTimeoutMs ?? 0)) continue;
           // A setup in progress is work, though no run is (S-env-setup): its install runs in the
           // sandbox a release would end.
-          if (settingUp.has(sessionId)) continue;
+          if (yield* FiberMap.has(setups, sessionId)) continue;
           // Only idle owners are closed: a run in flight is durable either way, but closing it
           // would throw away the fold a live client is streaming from.
           const busy = yield* isBusy(owner.harness, owner.root).pipe(
