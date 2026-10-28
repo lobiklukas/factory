@@ -138,6 +138,21 @@ the flagged repo turned runnable in place, a session on the registered repo cut 
 behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
 `.verify/evidence/latest/repos/`.
 
+### The model backend and each session's model
+
+```sh
+BACKEND_API_PORT=9451 BACKEND_WEB_PORT=3451 ./backend.sh   # its own anthropic-inferred instance; leaves nothing running
+```
+
+`drive.mjs` proves the faux half (the `role="alert"` banner on `/sessions`, on a board and on `/spend`;
+`faux/faux-1` in the pane header and the list row, equal to `getSession`'s). The no-banner half needs a
+deployment that is not scripted, so `backend.sh` starts its own API (no `MODEL_BACKEND`, a _dummy_
+`ANTHROPIC_API_KEY`, so the backend is inferred from the credential) and dashboard, runs `backend.mjs`,
+and stops both. It requires no banner after the page's own `getServerInfo` read has landed,
+`anthropic/claude-sonnet-5-5` in the pane header and the row of a session created over the RPC (no
+message is sent, so no request leaves the machine), and `factory status` / `factory ls` against it
+(`features/backend-badge.md`). Evidence goes to `.verify/evidence/latest/backend/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -150,6 +165,8 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
 - `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png`, `attention-scratch.png` — the attention
   view of the seeded board with nothing waiting, with its three rows, the card a row opened, every
   board's view, and the every-board view with a card-less session's approval
+- `backend-banner.png`, `session-model.png` — the faux banner on `/sessions`, and a session's pane header
+  and list row naming `faux/faux-1` (LOB-272, `features/backend-badge.md`)
 - `session-pane-narrow.png`, `fork-lineage-narrow.png` — a session's pane at 390 px, and the session
   list its header's back link opened there (LOB-210, `features/fork-lineage.md`)
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's
@@ -182,19 +199,20 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                                 |
-| ------------------- | ----------------------------------------------------------------------- |
-| `up.sh`             | Launch isolated API + web, wait for readiness                           |
-| `down.sh`           | Stop only what `up.sh` started                                          |
-| `doctor.sh`         | Read-only health check of the instance                                  |
-| `drive.mjs`         | Browser drive + evidence capture                                        |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask                    |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)        |
-| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)      |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from           |
-| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`) |
-| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)  |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it       |
+| File                | Purpose                                                                   |
+| ------------------- | ------------------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                             |
+| `down.sh`           | Stop only what `up.sh` started                                            |
+| `doctor.sh`         | Read-only health check of the instance                                    |
+| `drive.mjs`         | Browser drive + evidence capture                                          |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask                      |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)          |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)        |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from             |
+| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)   |
+| `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`) |
+| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)    |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it         |
 
 ## Feature map
 

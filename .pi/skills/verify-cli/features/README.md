@@ -35,6 +35,10 @@ A mutation run with the nap off (`STEER_SLEEP_MS=0`) failed 9 of them.
 with `./withdraw.sh` (API on `:9561`) — **13/13** checks — and `./drive.sh` re-run there (API on
 `:9560`) at 20/20.
 
+`factory status`, the `model` line of `factory run` and the `model` column of `factory ls` were
+verified **2026-10-28** from the `agent/LOB-272` worktree with `./drive.sh` (API on `:9550`, approve
+on `:9552`) — all checks passed, including 7 new ones ([status.md](status.md)).
+
 Status reflects the last verified run: **2026-10-27**, from the `agent/LOB-65` worktree, API on
 `:9500` (not the usual `:9300`), the seed's GitHub fake on `:9503`, `MODEL_BACKEND=faux`,
 `./drive.sh` in tmux — **20/20** required checks passed, including the PR column (LOB-65). A
@@ -44,6 +48,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | ----------------------------------------------- | ------- | --------------------------------------------------------------- |
 | `factory run`                                   | passing | [run.md](run.md)                                                |
 | `factory ls`                                    | passing | [ls.md](ls.md)                                                  |
+| `factory status`, the model in `run` and `ls`   | passing | [status.md](status.md)                                          |
 | `factory watch`                                 | passing | [watch.md](watch.md)                                            |
 | Typed errors                                    | passing | [errors.md](errors.md)                                          |
 | `factory send` / `factory withdraw`             | passing | [withdraw.md](withdraw.md)                                      |

@@ -16,6 +16,7 @@ import { repoCommand } from "./commands/repo";
 import { replayCommand } from "./commands/replay";
 import { runCommand } from "./commands/run";
 import { sendCommand } from "./commands/send";
+import { statusCommand } from "./commands/status";
 import { watchCommand } from "./commands/watch";
 import { withdrawCommand } from "./commands/withdraw";
 import { DevToolsLive } from "./observability/DevTools";
@@ -38,6 +39,7 @@ const root = Command.make("factory").pipe(
     repoCommand,
     replayCommand,
     doctorCommand,
+    statusCommand,
     approvalsCommand,
     approveCommand,
     denyCommand,
