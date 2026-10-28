@@ -627,6 +627,13 @@ export type ModelAccessOptions = {
    */
   readonly fauxCost?: number | undefined;
   /**
+   * Fail the faux's requests on demand (F6, `FAUX_FAIL`): once a session's transcript holds
+   * `afterAnswers` model answers, every step of a turn it asks for ends with `stopReason: "error"`
+   * and `FAUX_FAIL_MESSAGE`, as a provider ends a request it refused. Absent: the faux never fails.
+   * A model's own script may fail where the process does not (`FauxScript.fail`).
+   */
+  readonly fauxFail?: FauxFail | undefined;
+  /**
    * A script per published faux model id, overriding `fauxCommand` and `fauxVerify` for a request
    * made under that model (LOB-86). Under the faux backend a model *is* its script, so a role that
    * runs another model (`ROLE_MODELS`, LOB-207) is how one process plays two kinds of run: a
@@ -653,6 +660,8 @@ export type FauxScript = {
    * tool's arguments, verbatim, tried in order until one is accepted.
    */
   readonly plan?: readonly FauxSpecAttempt[] | undefined;
+  /** When its requests fail (F6), instead of `fauxFail`: a failing model beside working ones. */
+  readonly fail?: FauxFail | undefined;
 };
 
 /** Faux model id → its script. */
@@ -674,6 +683,7 @@ const FauxModelScriptsJson = Schema.fromJsonString(
       plan: Schema.optional(
         Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
       ),
+      fail: Schema.optional(Schema.String),
     }),
   ),
 );
@@ -699,7 +709,7 @@ export const parseFauxModelScripts = (
       Effect.mapError(
         (cause) =>
           new InvalidFauxModelScripts({
-            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?, "plan"?}} object: ${cause.message}`,
+            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?, "plan"?, "fail"?}} object: ${cause.message}`,
           }),
       ),
     );
@@ -710,10 +720,64 @@ export const parseFauxModelScripts = (
           message: `faux model script for ${model}, which the faux backend does not publish (it publishes ${published.join(", ")})`,
         });
       }
-      scripts.set(model, script);
+      const { fail, ...rest } = script;
+      const parsed =
+        fail === undefined
+          ? undefined
+          : yield* parseFauxFail(fail).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new InvalidFauxModelScripts({
+                    message: `faux model script for ${model}: ${cause.message}`,
+                  }),
+              ),
+            );
+      scripts.set(model, parsed === undefined ? rest : { ...rest, fail: parsed });
     }
     return scripts;
   });
+
+/**
+ * The error a request `FAUX_FAIL` fails ends with (F6). Worded so pi-ai's retry pattern
+ * (`isRetryableAssistantError`) does not match it: Pi Durable gives the request up at once rather
+ * than retrying it, and the run ends `unanswered`, `model_error`, as on a provider's refusal.
+ */
+export const FAUX_FAIL_MESSAGE =
+  "model_error: the faux backend refused this request, as FAUX_FAIL asks";
+
+/** When the faux fails a request (F6): once the session's transcript holds `afterAnswers` answers. */
+export type FauxFail = { readonly afterAnswers: number };
+
+/** `FAUX_FAIL` (or a script's `fail`) is not `model_error` or `model_error:<answers>`. */
+export class InvalidFauxFail extends Schema.TaggedError<InvalidFauxFail>()(
+  "InvalidFauxFail",
+  { message: Schema.String },
+) {}
+
+/**
+ * Read `FAUX_FAIL` (F6): blank is never; `model_error` fails every step of a turn from the first
+ * request; `model_error:<n>` lets a session's model answer `n` times first — `model_error:1` is a run
+ * whose first step (its `bash` call) runs and whose next request fails. Anything else fails the boot:
+ * a drive that meant to fail a run and did not would prove the run it did not mean to.
+ */
+export const parseFauxFail = (
+  text: string,
+): Effect.Effect<FauxFail | undefined, InvalidFauxFail> => {
+  const value = text.trim();
+  if (value === "") return Effect.succeed(undefined);
+  const match = /^model_error(?::(\d+))?$/.exec(value);
+  if (match === null)
+    return Effect.fail(
+      new InvalidFauxFail({
+        message: `FAUX_FAIL is "${value}", which is neither model_error nor model_error:<answers>`,
+      }),
+    );
+  return Effect.succeed({ afterAnswers: Number(match[1] ?? "0") });
+};
+
+/** How many model answers a request's transcript holds: what `FauxFail.afterAnswers` counts. */
+const answersIn = (messages: readonly Message[]): number =>
+  messages.filter((message) => message.role === "assistant").length;
 
 /** An answer with `amount` added to what it cost, as a provider reports its own price. */
 const charge = (
@@ -892,6 +956,17 @@ export const createFauxModelAccess = (
   ) => {
     faux.appendResponses([repeat]);
     const script = options.fauxModelScripts?.get(model.id);
+    // A failed request is a step of a turn only: a compaction's summary or a curation still answers.
+    const fail = script?.fail ?? options.fauxFail;
+    if (
+      fail !== undefined &&
+      isFauxTurnStep(context.messages) &&
+      answersIn(context.messages) >= fail.afterAnswers
+    )
+      return fauxAssistantMessage([], {
+        stopReason: "error",
+        errorMessage: FAUX_FAIL_MESSAGE,
+      });
     const answer = () =>
       fauxAnswer(
         context.messages,
