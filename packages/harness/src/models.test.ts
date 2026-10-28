@@ -514,9 +514,9 @@ describe("the failing faux (F6)", () => {
     });
     expect((await turn(access, [user], "faulted")).stopReason).toBe("error");
     expect((await turn(access, [user], "faux-1")).stopReason).toBe("toolUse");
-    expect(
-      (await turn(createModelAccess("faux"), [user])).stopReason,
-    ).toBe("toolUse");
+    expect((await turn(createModelAccess("faux"), [user])).stopReason).toBe(
+      "toolUse",
+    );
   });
 
   it("reads FAUX_FAIL as model_error or model_error:<answers>, blank as never, and refuses anything else", () => {

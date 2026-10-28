@@ -163,9 +163,9 @@ describe("failed runs in run_failures", () => {
       // Two requests, the second not retried: Pi Durable's retry pattern does not match the message.
       expect(calls).toBe(2);
       expect(snapshot.session.status).toBe("idle");
-      expect(snapshot.entries.some((entry) => entry.kind === "toolResult")).toBe(
-        true,
-      );
+      expect(
+        snapshot.entries.some((entry) => entry.kind === "toolResult"),
+      ).toBe(true);
       const failed = snapshot.entries.find(
         (entry) => entry.kind === "assistant" && entry.isError === true,
       );

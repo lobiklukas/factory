@@ -732,7 +732,10 @@ export const parseFauxModelScripts = (
                   }),
               ),
             );
-      scripts.set(model, parsed === undefined ? rest : { ...rest, fail: parsed });
+      scripts.set(
+        model,
+        parsed === undefined ? rest : { ...rest, fail: parsed },
+      );
     }
     return scripts;
   });
@@ -762,18 +765,17 @@ export class InvalidFauxFail extends Schema.TaggedError<InvalidFauxFail>()(
  */
 export const parseFauxFail = (
   text: string,
-): Effect.Effect<FauxFail | undefined, InvalidFauxFail> => {
-  const value = text.trim();
-  if (value === "") return Effect.succeed(undefined);
-  const match = /^model_error(?::(\d+))?$/.exec(value);
-  if (match === null)
-    return Effect.fail(
-      new InvalidFauxFail({
+): Effect.Effect<FauxFail | undefined, InvalidFauxFail> =>
+  Effect.gen(function* () {
+    const value = text.trim();
+    if (value === "") return undefined;
+    const match = /^model_error(?::(\d+))?$/.exec(value);
+    if (match === null)
+      return yield* new InvalidFauxFail({
         message: `FAUX_FAIL is "${value}", which is neither model_error nor model_error:<answers>`,
-      }),
-    );
-  return Effect.succeed({ afterAnswers: Number(match[1] ?? "0") });
-};
+      });
+    return { afterAnswers: Number(match[1] ?? "0") };
+  });
 
 /** How many model answers a request's transcript holds: what `FauxFail.afterAnswers` counts. */
 const answersIn = (messages: readonly Message[]): number =>
