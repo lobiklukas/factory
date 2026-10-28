@@ -7775,6 +7775,49 @@ describe("a run's prompt comes from its column", () => {
   }, 120_000);
 
   /**
+   * E6: a create the server refuses because it cannot cut the worktree (a base ref the checkout does
+   * not have) leaves nothing behind — no index row, so no untitled session in the list — and the
+   * request id it named is free, so a retry under it is a fresh attempt that creates the session
+   * once. A card's run is the exception: its rows stay and its run ends (`endOpenRun`).
+   * Mutation: drop the compensation in `create` — the refused request id still has a row (and the
+   * retry returns that row's id, cutting nothing).
+   */
+  it("leaves no session behind when the worktree cannot be cut, and frees the request id", async () => {
+    const tag = randomBytes(4).toString("hex");
+    const repo = RepoSlugSchema.make(`factory-test/uncut-${tag}`);
+    const requestId = `uncut-${tag}`;
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        yield* sessions.registerRepo({ repo, localPath: emptyRepoRoot });
+        const attempt = (baseRef: string) =>
+          sessions.create({
+            title: `uncut ${tag}`,
+            requestId,
+            repo,
+            baseRef,
+          });
+        const refused = yield* Effect.flip(attempt("no-such-branch"));
+        const rows = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE request_id = ${requestId} OR title = ${`uncut ${tag}`}
+        `;
+        const retried = yield* attempt("trunk");
+        const after = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE request_id = ${requestId}
+        `;
+        return { refused, rows, retried, after };
+      }),
+    );
+
+    expect(result.refused._tag).toBe("SessionError");
+    expect(result.refused.message).toContain("no-such-branch");
+    expect(result.rows).toEqual([]);
+    expect(result.retried.baseRef).toBe("trunk");
+    expect(result.after.map((row) => row.id)).toEqual([result.retried.id]);
+  }, 120_000);
+
+  /**
    * The whole production path, with no SQL written by the case (LOB-208): `createBoard` makes the
    * board at the default pipeline's newest version, `TaskService.create` puts a card on it, a person
    * moves the card to `specifying`, and the run started there is told the column's skill — which only

@@ -83,18 +83,32 @@ export const backtestHeadline = (
   };
 };
 
-/** The family key of one prediction: the prompt and the model choice, as one string. */
-export const predictionKey = (prompt: string, model: string): string =>
-  JSON.stringify([prompt, model]);
+/**
+ * The family key of one prediction: the prompt, the model choice and the repo (blank for none), as
+ * one string — the three `predictCost` predicts from, as `factory run` asks it (E6).
+ */
+export const predictionKey = (
+  prompt: string,
+  model: string,
+  repo = "",
+): string => JSON.stringify([prompt, model, repo]);
 
-/** The prompt and model choice a `predictionKey` was built from. */
+/** The prompt, model choice and repo a `predictionKey` was built from. */
 export const fromPredictionKey = (
   key: string,
-): { readonly prompt: string; readonly model: string } => {
+): {
+  readonly prompt: string;
+  readonly model: string;
+  readonly repo: string;
+} => {
   const parsed: unknown = JSON.parse(key);
   return Array.isArray(parsed) &&
     typeof parsed[0] === "string" &&
     typeof parsed[1] === "string"
-    ? { prompt: parsed[0], model: parsed[1] }
-    : { prompt: "", model: "" };
+    ? {
+        prompt: parsed[0],
+        model: parsed[1],
+        repo: typeof parsed[2] === "string" ? parsed[2] : "",
+      }
+    : { prompt: "", model: "", repo: "" };
 };

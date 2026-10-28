@@ -3,26 +3,26 @@
 **What it is.** LOB-38 puts cost prediction in two places on the dashboard:
 
 - **The New session form** shows what the next session would cost before it exists: `predictCost`'s
-  range for the form's prompt on the picked model, its median, how many sessions it came from and
+  range for the typed prompt on the picked model and repo (asked once the prompt rests, E6), its median, how many sessions it came from and
   how they were chosen. With too little history it says "No estimate yet" and why.
   **Cap at predicted high** creates the session with `budget` set to the range's high. The choice is
   disabled while there is no range; changing the model unticks it, and if it is ticked with no range
-  to cap at, **New session** is disabled with a line saying why (`capBlocked`), so a cap asked for is
-  never silently dropped. The range re-reads every 30 s, so a run that finishes reaches it.
+  to cap at, **Start session** refuses with a line saying why (`capBlocked`), so a cap asked for is
+  never silently dropped. A ticked cap replaces a typed budget. The range re-reads every 30 s, so a run that finishes reaches it.
 - **`/spend`** publishes the backtest under its header (re-read every minute, summary only): the median error over the sessions scored,
   the median absolute error, how often the range held the actual, and — below twenty scored sessions
   — that the number is too few to mean much.
 
-**How a user reaches it.** `/sessions`: read the line under **Model**, tick the cap if wanted, then
-press **New session**. `/spend`: the **Cost prediction** strip.
+**How a user reaches it.** `/sessions`: press **New session**, type the prompt, read the line under
+**Model**, tick the cap if wanted, then press **Start session**. `/spend`: the **Cost prediction** strip.
 
 **How the skill drives it.** `./cost.sh` owns its API (`COST_API_PORT`, default `:9452`; a priced
 faux, `FAUX_COST=0.01`), its dashboard (`COST_WEB_PORT`, default `:3452`), and a throwaway database
 it mints on `DATABASE_URL`'s server and drops on exit. `cost.mjs`:
 
-1. Reads the empty form.
+1. Opens the form, types its prompt, and reads the prediction.
 2. Runs three sessions on the form's prompt over the RPC (2, 3 and 4 cents) and reloads.
-3. Ticks the cap and presses **New session**.
+3. Opens the form again, types the prompt, ticks the cap and presses **Start session**.
 4. Opens `/spend`.
 
 **What proves it.** The oracle is the RPC, read from the drive's own process, never the page:

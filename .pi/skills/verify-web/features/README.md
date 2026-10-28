@@ -22,6 +22,11 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
+`session-new.sh` (the New session form, E6) last passed **16/16** on 2026-10-28 from the `agent/E6`
+worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-stream case now typing its
+own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
+(6/6) re-passed beside it, as each opens the same form.
+
 `pr.sh` (Open pull request on the session pane and a card's run row, C7) last passed on 2026-10-28
 from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571`, and
 `.pi/skills/verify-board`'s `drive.sh` opened its build run's PR in the browser there
@@ -64,6 +69,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | New card (board page)      | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
 | Earlier history            | passing | [history.md](history.md) (`history.sh`)                                       |
 | Model backend and model    | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
+| New session form           | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
 | New session model picker   | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
 | Cost prediction            | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run       | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
