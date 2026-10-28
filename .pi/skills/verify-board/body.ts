@@ -6,6 +6,8 @@
 //
 //   MODE=create                  two cards on BOARD_ID: one with BODY, base ref `release` and an
 //                                external ref, one with nothing; each read back with `getTask`.
+//                                A third create, with a base ref of `$(touch …)`, is refused as
+//                                InvalidTaskInput and writes no card.
 //                                Writes {"bodyTask":"tsk_…","bareTask":"tsk_…"} into CARD_FILE.
 //   MODE=told SESSION_ID=… BARE_SESSION_ID=… RELEASE_SHA=… MAIN_SHA=…
 //                                both runs settled; the body card's run is bound to `release`, its
@@ -105,6 +107,33 @@ const create = Effect.gen(function* () {
       bareRead.baseRef === undefined &&
       bareRead.externalRef === undefined,
     `${bareRead.id}`,
+  );
+  // A base ref every run would hand to git (LOB-260): one that is not a plain ref — here a shell
+  // substitution — is refused at create, naming the field, and writes no card.
+  const marker = path.join(EVIDENCE_DIR, `body-injected-${tag}`);
+  const refusedTitle = `verify-board refused card ${tag}`;
+  const refused = yield* client
+    .createTask({
+      boardId,
+      title: refusedTitle,
+      baseRef: `$(touch ${marker})`,
+      actor: "verify-board",
+    })
+    .pipe(
+      Effect.match({
+        onFailure: (error) => error,
+        onSuccess: (task) => task,
+      }),
+    );
+  const cards = yield* client.listTasks({ boardId });
+  observed.facts["refused"] = refused;
+  check(
+    "a base ref that is not a plain git ref is refused, naming the field, and writes no card",
+    "_tag" in refused &&
+      refused._tag === "InvalidTaskInput" &&
+      refused.field === "baseRef" &&
+      !cards.some((c) => c.title === refusedTitle),
+    "_tag" in refused ? `${refused._tag}: ${refused.message}` : "created",
   );
   return { bodyTask: card.id, bareTask: bare.id };
 });

@@ -7,6 +7,9 @@
 A card says what it is for (LOB-260, docs/board.md B1). `createTask` takes a markdown `body`, a
 `baseRef` and an `externalRef` (the tracker issue the card was filed from); each is stored on the card
 and in its `created` event, so the card is derivable from `task_events` alone. A blank one is none.
+The refs are trimmed, and a base ref that is not a plain git ref (a shell substitution, an option, a
+`..`) or a field over its cap is refused at create as `InvalidTaskInput`, naming the field: every run
+on the card hands its base ref to git, which now always gets it as an argv entry, never a shell line.
 
 Every run on the card is told the body verbatim as its `task_body` prompt section, beside
 `task_thread`; a card with no body gives its runs no section at all. A run that names no base of its
@@ -20,7 +23,7 @@ factory board show --task tsk_0123456789abcdefghjkmnpqrs
 # title     release notes
 # base      release
 # external  LOB-260
-# body      8 lines
+# body      6 lines
 #       ## Goal
 #     …
 factory board start --task tsk_0123456789abcdefghjkmnpqrs --prompt "work on this card"
@@ -37,8 +40,9 @@ No `factory` command creates a card yet (`factory board add` is LOB-261): a trig
    (`git commit-tree`, so the working tree is never touched).
 2. `body.ts MODE=create` creates a card with a body (markdown, an em dash, leading spaces and trailing
    blank lines a trim would lose), base ref `release` and external ref `LOB-260`, and a bare card with
-   none, over the API's `createTask`; `getTask` reads both back.
-3. `factory board show` prints `base      release`, `external  LOB-260` and the body's eight lines,
+   none, over the API's `createTask`; `getTask` reads both back. A third create, with a base ref of
+   `$(touch …)`, is refused as `InvalidTaskInput` on `baseRef` and writes no card.
+3. `factory board show` prints `base      release`, `external  LOB-260` and the body's six lines (its trailing newlines are not counted),
    indented; on the bare card a `-` for each.
 4. `factory board start --prompt` starts a run on each card, the way a person does.
 5. `body.ts MODE=told` waits for both runs to take their turn, then reads the body card's run: bound to

@@ -256,18 +256,26 @@ export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
 /**
  * What the card says and where its runs start (LOB-260): its base ref and external ref, `-` when it
  * has none, then its body — `body      -` for a card with none, or the line count and each line of
- * the markdown indented, exactly as it was filed, the way a thread comment's body is printed.
+ * the markdown indented, exactly as it was filed, the way a thread comment's body is printed. Its
+ * trailing newlines are neither counted nor printed: `"a\n"` is one line.
  */
-export const bodyLines = (card: Task): ReadonlyArray<string> => [
-  `base      ${card.baseRef ?? "-"}`,
-  `external  ${card.externalRef ?? "-"}`,
-  ...(card.body === undefined
-    ? ["body      -"]
-    : [
-        `body      ${card.body.split("\n").length} lines`,
-        ...card.body.split("\n").map((line) => `    ${line}`),
-      ]),
-];
+export const bodyLines = (card: Task): ReadonlyArray<string> => {
+  // Trailing newlines end the last line; they are not lines of their own to count or print.
+  const lines =
+    card.body === undefined
+      ? undefined
+      : card.body.replace(/\n+$/, "").split("\n");
+  return [
+    `base      ${card.baseRef ?? "-"}`,
+    `external  ${card.externalRef ?? "-"}`,
+    ...(lines === undefined
+      ? ["body      -"]
+      : [
+          `body      ${lines.length} ${lines.length === 1 ? "line" : "lines"}`,
+          ...lines.map((line) => `    ${line}`),
+        ]),
+  ];
+};
 
 /**
  * `factory board show <task>` — one card, as the server has it, its spec (LOB-238), and its thread

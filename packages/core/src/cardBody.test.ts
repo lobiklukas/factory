@@ -177,6 +177,78 @@ describe("a card's body, base ref and external ref (LOB-260)", () => {
   });
 
   /**
+   * Every run on the card hands its base ref to git (LOB-260), so a ref that is not a plain git ref
+   * is refused once, at create, naming the field — and so is a body or ref over its cap, which the
+   * RPC schema alone would leave an in-process caller (a trigger, a sync) free to store.
+   *
+   * Mutation: drop the `isSafeBranchName` check — `$(touch …)` and `-x` are stored.
+   * Mutation: drop the length checks — the oversize body is stored.
+   */
+  it("refuses a base ref that is not a plain git ref, and a body or ref over its cap, writing nothing", async () => {
+    const board = await newBoard();
+    const marker = join(mkdtempSync(join(tmpdir(), "card-ref-")), "touched");
+    const attempts = [
+      { field: "baseRef", input: { baseRef: `$(touch ${marker})` } },
+      { field: "baseRef", input: { baseRef: "`touch x`" } },
+      { field: "baseRef", input: { baseRef: "-x" } },
+      { field: "baseRef", input: { baseRef: "a..b" } },
+      { field: "baseRef", input: { baseRef: "main@{1}" } },
+      { field: "baseRef", input: { baseRef: "has space" } },
+      { field: "baseRef", input: { baseRef: "a".repeat(1025) } },
+      { field: "externalRef", input: { externalRef: "x".repeat(1025) } },
+      { field: "body", input: { body: "b".repeat(32_001) } },
+    ] as const;
+    for (const { field, input } of attempts) {
+      const refused = await run(
+        Effect.flip(
+          Effect.flatMap(TaskService, (tasks) =>
+            tasks.create({
+              boardId: board.id,
+              title: `refused ${field}`,
+              ...input,
+              actor: LUKAS,
+            }),
+          ),
+        ),
+      );
+      expect(refused._tag, JSON.stringify(input).slice(0, 40)).toBe(
+        "InvalidTaskInput",
+      );
+      expect(refused).toMatchObject({ field });
+    }
+    const cards = await run(
+      Effect.flatMap(TaskService, (tasks) => tasks.list({ boardId: board.id })),
+    );
+    expect(cards).toEqual([]);
+  });
+
+  /** Mutation: store the refs as given — the card reads back with their whitespace. */
+  it("trims a base ref and an external ref, and takes a tag, a remote branch or a sha", async () => {
+    const board = await newBoard();
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const made = await run(
+      Effect.flatMap(TaskService, (tasks) =>
+        Effect.forEach([" release ", "v1.2.3", "origin/main", sha], (baseRef) =>
+          tasks.create({
+            boardId: board.id,
+            title: `ref ${baseRef}`,
+            baseRef,
+            externalRef: " LOB-42\n",
+            actor: LUKAS,
+          }),
+        ),
+      ),
+    );
+    expect(made.map((card) => card.baseRef)).toEqual([
+      "release",
+      "v1.2.3",
+      "origin/main",
+      sha,
+    ]);
+    expect(made.every((card) => card.externalRef === "LOB-42")).toBe(true);
+  });
+
+  /**
    * The card's row is derivable from its history: after a move, an ask, its answer, a block and an
    * unblock, the projection folded from `task_events` is the card `get` reads — and it still is once
    * the row's body, base ref and external ref are wiped, because it never reads the row.

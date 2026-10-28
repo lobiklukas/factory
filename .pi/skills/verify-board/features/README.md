@@ -34,8 +34,8 @@ card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-
 `:9510`, **18/18** checks passed (`create-board.json`). `./definitions.sh` (LOB-270, 2026-10-28,
 `agent/LOB-270`), API on `:9550`, **30/30** checks passed (`definitions.json`), the tmux pane among
 them. `./start-body.sh` (LOB-260, 2026-10-28, `agent/LOB-260`), API on `:9500`, web on `:3500`, the
-GitHub fake on `:9503`: **8/8** checks passed (`start-body.json`), with `body-create.json`'s **3/3** and
-`body-told.json`'s **6/6** folded in,, and `./drive.sh` exit 0 beside it against the same instance.
+GitHub fake on `:9503`: **8/8** checks passed (`start-body.json`), with `body-create.json`'s **4/4** (the refused `$(touch …)` base ref among them) and
+`body-told.json`'s **6/6** folded in, and `./drive.sh` exit 0 beside it against the same instance.
 Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                                 | Status  | File                             |

@@ -100,7 +100,7 @@ check "board show prints the base ref and the external ref" \
   "$([ "$rc" = "0" ] && has show "base      release" && has show "external  LOB-260" && echo 0 || echo 1)" \
   "exit=$rc"
 check "and the body, every line indented as it was filed" \
-  "$(has show "body      8 lines" && has show "      ## Goal" && has show "    - keep port 5442" && echo 0 || echo 1)" \
+  "$(has show "body      6 lines" && has show "      ## Goal" && has show "    - keep port 5442" && echo 0 || echo 1)" \
   "$(grep -c '^    ' "$EVIDENCE_DIR/body-show.txt") indented lines"
 run show-bare board show --task "${BARE_TASK:-tsk_missing}" --api "$API_URL"
 check "the bare card prints a dash for each" \

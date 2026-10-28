@@ -72,6 +72,8 @@ import {
   GATED_COLUMNS,
   gatedExit,
   LIST_BOARDS_LIMIT,
+  MAX_TASK_BODY_CHARS,
+  MAX_TASK_REF_CHARS,
   humanGate,
   NON_EMPTY_DIFF_REQUIREMENT,
   isDeclaredTransition,
@@ -95,6 +97,7 @@ import {
   readVerifyCalls,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
+import { isSafeBranchName } from "./git";
 import { mintBoardId, mintTaskId } from "./ids";
 import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
@@ -227,6 +230,17 @@ export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
   { taskId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A create carried a field the card cannot take (LOB-260): a body or ref over its cap, or a base ref
+ * that is not a plain git ref. `field` names it. Checked in the service, not only in the RPC schema,
+ * so every in-process caller (a trigger, a sync) is held to it, and a base ref — which every run on
+ * the card hands to git — is refused once, at create, rather than failing each run's worktree cut.
+ */
+export class InvalidTaskInput extends Schema.TaggedError<InvalidTaskInput>()(
+  "InvalidTaskInput",
+  { field: Schema.String, message: Schema.String },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -240,6 +254,7 @@ export type TaskError =
   | AlreadyBlocked
   | NotBlocked
   | EmptyComment
+  | InvalidTaskInput
   | TaskStorageError;
 
 export type CreateTaskInput = {
@@ -253,7 +268,11 @@ export type CreateTaskInput = {
    * is stored as none, so a card with nothing to say gets no `task_body` prompt section.
    */
   readonly body?: string;
-  /** The ref the card's runs cut their worktree from (LOB-260). Blank is none: the repo's default. */
+  /**
+   * The ref the card's runs cut their worktree from (LOB-260). Blank is none: the repo's default.
+   * Trimmed, then held to `isSafeBranchName` (a branch, a tag, `origin/main` or a sha), since every
+   * run on the card passes it to git: anything else is `InvalidTaskInput`.
+   */
   readonly baseRef?: string;
   /** The tracker issue the card was filed from (LOB-260): a URL or a key. Blank is none. */
   readonly externalRef?: string;
@@ -515,6 +534,54 @@ const iso = (value: Date | string): string =>
 /** A create's optional text, or `undefined` when it is absent or says nothing but whitespace. */
 const present = (value: string | undefined): string | undefined =>
   value === undefined || value.trim() === "" ? undefined : value;
+
+/**
+ * A create's body, base ref and external ref as the card stores them (LOB-260), or the first field
+ * it cannot take. The body is kept verbatim; the refs are trimmed, since a ref or a key never means
+ * its surrounding whitespace. The caps are the domain schema's, so an in-process caller is held to
+ * what the RPC decode already enforces.
+ */
+export const cardText = (input: {
+  readonly body?: string | undefined;
+  readonly baseRef?: string | undefined;
+  readonly externalRef?: string | undefined;
+}): Effect.Effect<
+  {
+    readonly body: string | undefined;
+    readonly baseRef: string | undefined;
+    readonly externalRef: string | undefined;
+  },
+  InvalidTaskInput
+> =>
+  Effect.gen(function* () {
+    const body = present(input.body);
+    const baseRef = present(input.baseRef)?.trim();
+    const externalRef = present(input.externalRef)?.trim();
+    if (body !== undefined && body.length > MAX_TASK_BODY_CHARS) {
+      return yield* new InvalidTaskInput({
+        field: "body",
+        message: `a card's body takes at most ${MAX_TASK_BODY_CHARS} characters; this one has ${body.length}`,
+      });
+    }
+    for (const [field, value] of [
+      ["baseRef", baseRef],
+      ["externalRef", externalRef],
+    ] as const) {
+      if (value !== undefined && value.length > MAX_TASK_REF_CHARS) {
+        return yield* new InvalidTaskInput({
+          field,
+          message: `a card's ${field} takes at most ${MAX_TASK_REF_CHARS} characters; this one has ${value.length}`,
+        });
+      }
+    }
+    if (baseRef !== undefined && !isSafeBranchName(baseRef)) {
+      return yield* new InvalidTaskInput({
+        field: "baseRef",
+        message: `"${baseRef}" is not a base ref a run can start from: name a branch, a tag or a commit (letters, digits, '.', '_', '-' and '/', no '..')`,
+      });
+    }
+    return { body, baseRef, externalRef };
+  });
 
 /**
  * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
@@ -1002,9 +1069,7 @@ export const TaskServiceLive = Layer.effect(
             const priority = input.priority ?? "normal";
             // What the card says and where its runs start (LOB-260). A blank value is none, so an
             // empty body is no body — the row's '' and the event's absence — and no prompt section.
-            const body = present(input.body);
-            const baseRef = present(input.baseRef);
-            const externalRef = present(input.externalRef);
+            const { body, baseRef, externalRef } = yield* cardText(input);
             const rows = yield* sql<TaskRow>`
               INSERT INTO tasks (
                 id, board_id, title, "column", repo, definition_version,

@@ -97,10 +97,23 @@ describe("bodyLines (LOB-260)", () => {
     ).toEqual([
       "base      release",
       "external  LOB-42",
-      "body      3 lines",
+      "body      2 lines",
       "    ## Goal",
       "      keep 5442  ",
+    ]);
+  });
+
+  /** Mutation: count `split("\n")` as is — `"a\n"` reads as two lines and prints a blank one. */
+  it("counts neither a trailing newline nor the empty line after it", () => {
+    expect(bodyLines(card({ body: "a\n\n" })).slice(2)).toEqual([
+      "body      1 line",
+      "    a",
+    ]);
+    expect(bodyLines(card({ body: "a\n\nb" })).slice(2)).toEqual([
+      "body      3 lines",
+      "    a",
       "    ",
+      "    b",
     ]);
   });
 

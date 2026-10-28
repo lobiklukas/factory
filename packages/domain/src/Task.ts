@@ -729,6 +729,15 @@ export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
   { taskId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A create carried a field the card cannot take (LOB-260): a body or ref over its cap, or a base ref
+ * that is not a plain git ref — every run on the card hands it to git. `field` names it.
+ */
+export class InvalidTaskInput extends Schema.TaggedError<InvalidTaskInput>()(
+  "InvalidTaskInput",
+  { field: Schema.String, message: Schema.String },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -742,6 +751,7 @@ export type TaskError =
   | AlreadyBlocked
   | NotBlocked
   | EmptyComment
+  | InvalidTaskInput
   | TaskStorageError;
 
 /**

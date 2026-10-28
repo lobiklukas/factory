@@ -22,7 +22,8 @@ issue it was filed from), set by `createTask` and written into its `created` eve
 so `TaskService.replay` folds the card back out of `task_events` alone (`projectTask`). Every run on
 the card is told the body verbatim as its `task_body` prompt section, beside `task_thread` — an empty
 body is no section — and a run that names no base of its own cuts its worktree from the card's base
-ref rather than the repository's default. `factory board show` prints all three.
+ref rather than the repository's default. A base ref that is not a plain git ref, or a body or ref
+over its cap, is refused at create as `InvalidTaskInput`. `factory board show` prints all three.
 
 ## B2 — The board is definitions plus instances, in the factory's own database
 
