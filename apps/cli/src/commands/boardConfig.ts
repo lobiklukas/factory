@@ -3,6 +3,7 @@ import { Argument, Command, Flag } from "effect/cli";
 import {
   BoardInstanceId,
   DefinitionId,
+  LIST_BOARDS_LIMIT,
   type BoardInstance,
   type ColumnConfig,
   type DefinitionConfig,
@@ -44,6 +45,25 @@ export const boardLine = (board: BoardInstance): string =>
     `${board.definitionId} v${board.definitionVersion}`,
     board.createdAt,
   ].join("  ");
+
+/**
+ * `factory board list`, whole: one line per board, or `no boards`. `listBoards` answers at most
+ * `LIST_BOARDS_LIMIT` boards, so a full page ends with a line saying the list may be cut short —
+ * a person never reads a capped list as every board.
+ */
+export const boardListLines = (
+  boards: ReadonlyArray<BoardInstance>,
+): ReadonlyArray<string> =>
+  boards.length === 0
+    ? ["no boards"]
+    : [
+        ...boards.map(boardLine),
+        ...(boards.length >= LIST_BOARDS_LIMIT
+          ? [
+              `(showing the newest ${LIST_BOARDS_LIMIT} boards; older boards may exist)`,
+            ]
+          : []),
+      ];
 
 /** `factory board definitions`: one line per definition version, oldest first within each id. */
 export const definitionsLines = (
@@ -104,8 +124,9 @@ export const definitionLines = (
 ];
 
 /**
- * `factory board list` — every board (LOB-75's `listBoards`, newest first), with its repository and
- * pinned definition version: how a person finds the `brd_…` id every other board command takes.
+ * `factory board list` — the boards (LOB-75's `listBoards`, newest first, at most `LIST_BOARDS_LIMIT`),
+ * with their repository and pinned definition version: how a person finds the `brd_…` id every other
+ * board command takes. A capped answer says so on its last line.
  */
 const listCommand = Command.make(
   "list",
@@ -115,17 +136,13 @@ const listCommand = Command.make(
     const program = Effect.gen(function* () {
       const { client } = yield* BoardClient;
       const boards = yield* client.listBoards({});
-      if (boards.length === 0) {
-        yield* Console.log("no boards");
-        return;
-      }
-      for (const board of boards) yield* Console.log(boardLine(board));
+      for (const line of boardListLines(boards)) yield* Console.log(line);
     });
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription(
-    "List every board, with its repository and pinned definition version",
+    `List the boards, newest first (at most ${LIST_BOARDS_LIMIT}), with their repository and pinned definition version`,
   ),
 );
 

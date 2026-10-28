@@ -31,7 +31,7 @@ tables, so the read cannot drift from what a move or a run does.
 factory board definitions                                 # every id and version, oldest first
 factory board definition show default --version 3         # one version, column by column
 factory board definition show default                     # the newest — the one `board create` pins
-factory board list                                        # every board: id, repo, pinned version
+factory board list                                        # the newest 100 boards: id, repo, pinned version
 factory board config --board brd_…                        # a board's repo and pinned version, described
 ```
 
@@ -58,7 +58,9 @@ and how many boards the database holds. It asserts:
 - an unknown id and an unknown version are `error: definition_not_found: …` verbatim, non-zero; a
   malformed id is `invalid_input`, sent nowhere;
 - `board list` prints the seeded board and a v1 board made for the check, each with its repo and
-  pinned version, and one line per board the database holds;
+  pinned version, and one line per board the database holds up to `listBoards`' cap of 100 — at
+  the cap its last line says `(showing the newest 100 boards; older boards may exist)`, and
+  under it no such line appears;
 - `board config` names the board, repo and pinned version, and its columns are exactly what
   `definition show` prints for that version; a v1 board's config describes v1 (`review` has no
   `verified` yet); an unknown board is `board_not_found`, a malformed one `invalid_input`;

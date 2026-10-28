@@ -471,9 +471,8 @@ export const TaskServiceLive = Layer.effect(
     const decodeBoard = Schema.decodeUnknownEffect(BoardView);
     const decodeInstance = Schema.decodeUnknownEffect(BoardInstance);
     const decodeDefinition = Schema.decodeUnknownEffect(BoardDefinition);
-    const decodeDefinitions = Schema.decodeUnknownEffect(
-      Schema.Array(DefinitionSummary),
-    );
+    const decodeDefinitionSummary =
+      Schema.decodeUnknownEffect(DefinitionSummary);
     const decodeColumnsJson = Schema.decodeEffect(
       Schema.fromJsonString(Schema.Array(BoardColumn)),
     );
@@ -791,12 +790,18 @@ export const TaskServiceLive = Layer.effect(
             grouped.push({ id: row.id, versions: [version] });
           }
         }
-        return yield* decodeDefinitions(grouped).pipe(
-          Effect.mapError(
-            (cause) =>
-              new TaskStorageError({
-                message: `board definitions do not decode: ${String(cause)}`,
-              }),
+        // A row that does not decode (an id outside `DefinitionId`, which the table does not check)
+        // is a storage fault, and fails the whole list rather than hiding a definition: a list that
+        // silently skips one would read as "it does not exist". The error names the row's id, so an
+        // operator can find it.
+        return yield* Effect.forEach(grouped, (definition) =>
+          decodeDefinitionSummary(definition).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `board definition ${JSON.stringify(definition.id)} does not decode: ${String(cause)}`,
+                }),
+            ),
           ),
         );
       }),

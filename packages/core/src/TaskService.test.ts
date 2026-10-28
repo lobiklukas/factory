@@ -729,12 +729,28 @@ describe("TaskService — creating a board (LOB-208)", () => {
  * themselves.
  */
 describe("TaskService — reading definitions (LOB-270)", () => {
+  /**
+   * Every id this run made. The database outlives the run and `factory board definitions` lists
+   * every row it holds, so the rows go when the cases are done (no board pins them).
+   */
+  const madeIds: Array<string> = [];
+  afterAll(() =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        if (madeIds.length === 0) return;
+        yield* sql`DELETE FROM board_definitions WHERE id IN ${sql.in(madeIds)}`;
+      }),
+    ),
+  );
+
   /** A definition of the case's own, one row per version, each with the default v1 columns. */
   const newDefinition = (versions: ReadonlyArray<number>) =>
     runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
         const id = `lst${hex(4)}`;
+        madeIds.push(id);
         for (const version of versions) {
           yield* sql`
             INSERT INTO board_definitions (id, version, name, columns)
@@ -817,6 +833,54 @@ describe("TaskService — reading definitions (LOB-270)", () => {
         .find((column) => column.name === "review")
         ?.requires.map((requirement) => requirement.key),
     ).toContain(VERIFIED_REQUIREMENT);
+  });
+
+  /**
+   * A row whose id is outside `DefinitionId` (the table does not check it) is a storage fault that
+   * names the row. Written and read inside one rolled-back transaction, so no other case or suite
+   * sharing the database ever lists it. Mutation: decode the list as one array — the message no
+   * longer names the id.
+   */
+  it("fails the list as a storage fault naming a row whose id does not decode", async () => {
+    const bad = `Bad Id ${hex(4)}`;
+    const failure = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const service = yield* TaskService;
+        const rollback = new Error("rollback");
+        let seen: TaskError | undefined;
+        yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`
+                INSERT INTO board_definitions (id, version, name, columns)
+                SELECT ${bad}, 1, 'Bad', columns
+                FROM board_definitions WHERE id = 'default' AND version = 1
+              `;
+              seen = yield* service.listDefinitions.pipe(
+                Effect.match({
+                  onFailure: (error): TaskError | undefined => error,
+                  onSuccess: () => undefined,
+                }),
+              );
+              return yield* Effect.die(rollback);
+            }),
+          )
+          .pipe(
+            Effect.catchDefect((defect) =>
+              defect === rollback ? Effect.void : Effect.die(defect),
+            ),
+          );
+        return seen;
+      }),
+    );
+    expect(failure?._tag).toBe("TaskStorageError");
+    expect(failure?.message).toContain(
+      `board definition ${JSON.stringify(bad)} does not decode`,
+    );
+    // Rolled back: the row is not there for anyone else.
+    const listed = await withService((s) => s.listDefinitions);
+    expect(listed.map((definition) => definition.id)).not.toContain(bad);
   });
 
   /** The refusal is `createBoard`'s, in the same words. */

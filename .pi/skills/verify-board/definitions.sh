@@ -166,6 +166,10 @@ DB_BOARDS="$(MODE=boards bun "$SKILL/board-create.ts" 2>"$RUN_DIR/definitions-bo
 check "it prints one line per board the database holds (up to the list's cap of 100)" \
   "$([ -n "$DB_BOARDS" ] && [ "$LISTED_BOARDS" = "$(( DB_BOARDS > 100 ? 100 : DB_BOARDS ))" ] && echo 0 || echo 1)" \
   "listed=$LISTED_BOARDS, database=${DB_BOARDS:-unread}"
+CAPPED_NOTE="$(grep -c '^(showing the newest 100 boards; older boards may exist)$' "$RUN_DIR/definitions-list.out")"
+check "a list cut at the cap says so on its last line, and an uncut one does not" \
+  "$([ -n "$DB_BOARDS" ] && { { [ "$DB_BOARDS" -ge 100 ] && [ "$CAPPED_NOTE" = "1" ] && tail -1 "$RUN_DIR/definitions-list.out" | grep -q '^(showing'; } || { [ "$DB_BOARDS" -lt 100 ] && [ "$CAPPED_NOTE" = "0" ]; }; } && echo 0 || echo 1)" \
+  "note=$CAPPED_NOTE, database=${DB_BOARDS:-unread}"
 
 # --- config: a board's pinned version, described ---------------------------------------------------
 run config board config --board "$SEEDED_BOARD" --api "$API_URL"

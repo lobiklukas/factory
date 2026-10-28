@@ -112,8 +112,10 @@ import {
   EMPTY_RUN_PROFILE,
   loadRun,
   MISSION_TASKS,
+  NO_ROLE_MODELS,
   Policy,
   PolicyLive,
+  resolveRole,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
   // owns which half.
@@ -3397,13 +3399,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* setActivityStatus(sessionId, "idle");
         });
 
-      // `resolveRole`'s model half, which `openSession` takes a run's model from (LOB-270).
+      // The model `openSession` gives a run in this role (LOB-270), taken from `resolveRole` itself so
+      // the description and the run share one rule. `source` says whether the answer is the role
+      // table's row or the deployment's model.
       const roleModel = (role: string | undefined): ResolvedModel => {
-        const access =
-          role === undefined ? undefined : options.roleModels?.get(role);
-        return access === undefined
-          ? { model: modelKey(options.model), source: "deployment" }
-          : { model: modelKey(access), source: "role" };
+        const roles = options.roleModels ?? NO_ROLE_MODELS;
+        const { model } = resolveRole(
+          role === undefined ? undefined : { ...EMPTY_RUN_PROFILE, role },
+          options.model,
+          roles,
+        );
+        const fromRole = role !== undefined && roles.get(role) === model;
+        return {
+          model: modelKey(model),
+          source: fromRole ? "role" : "deployment",
+        };
       };
 
       const closeAll = Effect.gen(function* () {

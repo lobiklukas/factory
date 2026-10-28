@@ -329,42 +329,60 @@ describe("a board's configuration over RPC (LOB-270)", () => {
 
   /**
    * Mutation: answer the newest version only, or order versions newest first — the list is not
-   * `[1, 2, 3]`. Mutation: read the newest once at boot — the version added below never appears, and
-   * `getDefinition` with no version keeps answering 3.
+   * `1..newest`. Mutation: read the newest once at boot — the version added below never appears, and
+   * `getDefinition` with no version keeps answering the seeded newest.
    */
-  it("lists default v1–v3, then a newer version once one is written, and reads the newest by default", async () => {
+  it("lists default v1 through the seeded newest, then a newer version once one is written, and reads the newest by default", async () => {
+    // The oracle is the scratch database's rows: the migrations seed v1–v3 and any later version.
+    const seeded = await scratch.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ newest: number }>`
+          SELECT max(version)::int AS newest FROM board_definitions WHERE id = 'default'
+        `;
+        return rows[0]?.newest ?? 0;
+      }),
+    );
+    expect(seeded).toBeGreaterThanOrEqual(3);
+    const upTo = (newest: number) =>
+      Array.from({ length: newest }, (_, index) => index + 1);
+
     const before = await call((client) => client.listDefinitions({}));
     expect(before.map((definition) => definition.id)).toEqual(["default"]);
-    expect(before[0]?.versions.map((version) => version.version)).toEqual([
-      1, 2, 3,
-    ]);
-    for (const version of before[0]?.versions ?? []) {
+    expect(before[0]?.versions.map((version) => version.version)).toEqual(
+      upTo(seeded),
+    );
+    for (const version of before[0]?.versions.slice(0, 3) ?? []) {
       expect(version.name).toBe("Default pipeline");
+    }
+    for (const version of before[0]?.versions ?? []) {
       expect(Number.isNaN(Date.parse(version.createdAt))).toBe(false);
     }
 
-    // A fourth version, written as a migration writes one: a new row, never an update (B2).
+    // One version past the seeded newest, written as a migration writes one: a new row, never an
+    // update (B2).
+    const added = seeded + 1;
     await scratch.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
         yield* sql`
           INSERT INTO board_definitions (id, version, name, columns)
-          SELECT id, 4, 'Default pipeline, v4', columns
-          FROM board_definitions WHERE id = 'default' AND version = 3
+          SELECT id, ${added}, ${`Default pipeline, v${added}`}, columns
+          FROM board_definitions WHERE id = 'default' AND version = ${seeded}
         `;
       }),
     );
     const after = await call((client) => client.listDefinitions({}));
-    expect(after[0]?.versions.map((version) => version.version)).toEqual([
-      1, 2, 3, 4,
-    ]);
-    expect(after[0]?.versions[3]?.name).toBe("Default pipeline, v4");
+    expect(after[0]?.versions.map((version) => version.version)).toEqual(
+      upTo(added),
+    );
+    expect(after[0]?.versions.at(-1)?.name).toBe(`Default pipeline, v${added}`);
 
     const newest = await call((client) =>
       client.getDefinition({ definitionId: DEFAULT }),
     );
-    expect(newest.version).toBe(4);
-    expect(newest.name).toBe("Default pipeline, v4");
+    expect(newest.version).toBe(added);
+    expect(newest.name).toBe(`Default pipeline, v${added}`);
   });
 
   /**

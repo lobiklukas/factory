@@ -11,10 +11,12 @@ import {
   ColumnConfig,
   DefinitionConfig,
   DefinitionSummary,
+  LIST_BOARDS_LIMIT,
 } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
 import {
   boardLine,
+  boardListLines,
   columnLines,
   definitionLines,
   definitionsLines,
@@ -99,6 +101,27 @@ describe("boardLine and definitionsLines (LOB-270)", () => {
     });
     expect(boardLine(board)).toBe(
       `brd_${"0".repeat(26)}  acme/widgets  default v2  2026-10-28T00:00:00.000Z`,
+    );
+  });
+
+  it("prints `no boards` for none, and says so when the list hit its cap", () => {
+    const boards = Array.from({ length: LIST_BOARDS_LIMIT }, (_, index) =>
+      Schema.decodeSync(BoardInstance)({
+        id: `brd_${String(index).padStart(26, "0")}`,
+        repo: `acme/repo-${index}`,
+        definitionId: "default",
+        definitionVersion: 1,
+        createdAt: "2026-10-28T00:00:00.000Z",
+      }),
+    );
+    expect(boardListLines([])).toEqual(["no boards"]);
+    const short = boardListLines(boards.slice(0, 2));
+    expect(short).toEqual(boards.slice(0, 2).map(boardLine));
+    const full = boardListLines(boards);
+    expect(full).toHaveLength(LIST_BOARDS_LIMIT + 1);
+    expect(full.slice(0, LIST_BOARDS_LIMIT)).toEqual(boards.map(boardLine));
+    expect(full.at(-1)).toBe(
+      `(showing the newest ${LIST_BOARDS_LIMIT} boards; older boards may exist)`,
     );
   });
 
