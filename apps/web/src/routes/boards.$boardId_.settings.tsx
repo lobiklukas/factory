@@ -11,6 +11,7 @@ import {
   newerVersions,
   newerVersionsNotice,
 } from "@/lib/board-settings-view";
+import { BoardUpgrade } from "@/components/board-upgrade";
 import { ColumnSettings } from "@/components/column-settings";
 import { EmptyPane } from "@/components/empty-pane";
 import { Badge } from "@/components/ui/badge";
@@ -43,12 +44,15 @@ function BoardSettingsRoute() {
 }
 
 /**
- * Whether a version newer than the board's pin exists (B2), from `listDefinitions`. A failed list
- * says it could not tell rather than claiming the board is on the newest version.
+ * Whether a version newer than the board's pin exists (B2), from `listDefinitions`, and the Upgrade
+ * action when one does (D5). A failed list says it could not tell rather than claiming the board is on
+ * the newest version.
  */
 const NewerVersions = ({
+  boardId,
   definition,
 }: {
+  readonly boardId: BoardInstanceId;
   readonly definition: DefinitionConfig;
 }) => {
   const result = useAtomValue(definitionsAtom);
@@ -71,13 +75,16 @@ const NewerVersions = ({
       v{definition.version} is the newest version of {definition.id}.
     </p>
   ) : (
-    <p
-      role="status"
-      data-newer-versions={newer.join(",")}
-      className="border border-border bg-muted/40 px-3 py-2 text-xs"
-    >
-      {notice}
-    </p>
+    <>
+      <p
+        role="status"
+        data-newer-versions={newer.join(",")}
+        className="border border-border bg-muted/40 px-3 py-2 text-xs"
+      >
+        {notice}
+      </p>
+      <BoardUpgrade boardId={boardId} definition={definition} newer={newer} />
+    </>
   );
 };
 
@@ -85,9 +92,10 @@ const NewerVersions = ({
  * One board's settings: the definition version it pins, as `getBoardConfig` describes it (the same
  * description `getDefinition` answers for that version), every column in order with what it does.
  *
- * Read-only. A version is never edited in place (docs/board.md B2): a change to a board's pipeline is
- * a new version, and the page says when one exists. "Edit as new version" opens the editor (D6) on
- * its own page, which authors one; nothing on this page writes. Nothing here is this browser's: a reload is a
+ * A version is never edited in place (docs/board.md B2): a change to a board's pipeline is a new
+ * version, and the page says when one exists and offers to upgrade the board to it (D5). "Edit as new
+ * version" opens the editor (D6) on its own page, which authors one; the upgrade is the one write on
+ * this page. Nothing here is this browser's: a reload is a
  * fresh read of both calls.
  */
 const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
@@ -168,10 +176,11 @@ const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           <dt className="text-muted-foreground">Run caps</dt>
           <dd data-settings-caps>{caps ?? NONE}</dd>
         </dl>
-        <NewerVersions definition={definition} />
+        <NewerVersions boardId={boardId} definition={definition} />
         <p className="max-w-3xl text-[11px] text-muted-foreground">
-          Read-only: a definition version is never edited in place, so a
-          board&apos;s pipeline changes only by moving to a new version. The
+          A definition version is never edited in place, so a board&apos;s
+          pipeline changes only by moving to a new version — the Upgrade
+          action, when one exists. The
           model is this deployment&apos;s for the column&apos;s role; a
           requirement marked checked is one a move out of the column is refused
           over today.

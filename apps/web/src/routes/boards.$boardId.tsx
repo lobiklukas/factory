@@ -5,7 +5,12 @@ import { AsyncResult } from "effect/reactivity";
 import { Cause, Option, Schema } from "effect";
 import { KanbanSquareIcon, PlusIcon } from "lucide-react";
 import { SessionId } from "@repo/domain/Session";
-import { BoardInstanceId, initialColumnOf, TaskId } from "@repo/domain/Task";
+import {
+  BoardInstanceId,
+  initialColumnOf,
+  pinnedVersionsNotice,
+  TaskId,
+} from "@repo/domain/Task";
 import { boardAtom } from "@/lib/atoms/board-atom";
 import { boardLanes, definitionFor } from "@/lib/board-view";
 import { NEW_CARD } from "@/lib/card-create-view";
@@ -65,6 +70,34 @@ function BoardRoute() {
     </EmptyPane>
   );
 }
+
+/**
+ * Says when the board's cards pin more than one definition version (D5): after an upgrade that did
+ * not migrate them, the lanes are the new version's while some cards still move by an older one's.
+ * Nothing when every card pins one version.
+ */
+const PinnedVersions = ({
+  version,
+  tasks,
+}: {
+  readonly version: number;
+  readonly tasks: ReadonlyArray<{ readonly definitionVersion: number }>;
+}) => {
+  const notice = pinnedVersionsNotice(version, tasks);
+  return notice === null ? null : (
+    <p
+      role="status"
+      data-board-pinned-versions={[
+        ...new Set(tasks.map((task) => task.definitionVersion)),
+      ]
+        .toSorted((a, b) => a - b)
+        .join(",")}
+      className="mx-4 mt-3 max-w-3xl border border-border bg-muted/40 px-3 py-2 text-xs"
+    >
+      {notice}
+    </p>
+  );
+};
 
 /**
  * One board's lanes (LOB-75): columns from the definition version the board binds, cards from the
@@ -213,6 +246,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           }}
         />
         <CheckoutWarning warning={last.warning} />
+        <PinnedVersions version={definition.version} tasks={tasks} />
         {/* A board with no card is the next step of the checklist (C9); it leaves once a card exists. */}
         {tasks.length === 0 ? (
           <GettingStarted className="mx-4 mt-3 max-w-xl" boardId={boardId} />

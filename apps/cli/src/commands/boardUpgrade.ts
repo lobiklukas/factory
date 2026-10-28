@@ -90,7 +90,7 @@ export const upgradedLines = (
     ),
     upgraded.unmigrated === 0
       ? `cards       every card pins v${to}`
-      : `cards       ${upgraded.unmigrated} ${upgraded.unmigrated === 1 ? "card still pins" : "cards still pin"} an older version and moves by it; migrate with --same-columns or --map`,
+      : `cards       ${upgraded.unmigrated === 1 ? "1 card still pins an older version and moves by it" : `${upgraded.unmigrated} cards still pin an older version and move by it`}; migrate with --same-columns or --map`,
   ];
 };
 
