@@ -21,8 +21,8 @@
  * as no context at all: the session opens as it did before this existed. The skills are never stored
  * in the factory's database: this reads the repository, and the run reads the `SKILL.md` itself.
  */
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- the local git CLI, as `repos.ts`'s probes are; a blob is read untrimmed, which `gitAnswer` is not.
 import { execFile } from "node:child_process";
-import { posix } from "node:path";
 import { Effect } from "effect";
 import { parseSkillDocument } from "@repo/domain/Skill";
 import {
@@ -46,7 +46,7 @@ export const REPO_SKILLS_MAX = 100;
 export const REPO_SKILL_ROOTS = [".pi/skills", ".agents/skills"] as const;
 
 /** How long one git read may take before it is answered as nothing. */
-const GIT_READ_TIMEOUT_MS = 5_000;
+const GIT_READ_TIMEOUT_MS = 15_000;
 
 /** A skill's `SKILL.md`, one directory under one of the roots. */
 const SKILL_PATH = /^(\.pi|\.agents)\/skills\/([^/]+)\/SKILL\.md$/;
@@ -148,10 +148,14 @@ const isSymlink = (entry: TreeEntry): boolean =>
 export const symlinkTargetInRepo = (target: string): string | undefined => {
   const trimmed = target.trim();
   if (trimmed === "" || trimmed.startsWith("/")) return undefined;
-  const normal = posix.normalize(trimmed);
-  return normal === "." || normal === ".." || normal.startsWith("../")
-    ? undefined
-    : normal;
+  // A link's target is a POSIX path in git whatever the host is: `.` and `..` resolved by hand.
+  const kept: string[] = [];
+  for (const segment of trimmed.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment !== "..") kept.push(segment);
+    else if (kept.pop() === undefined) return undefined;
+  }
+  return kept.length === 0 ? undefined : kept.join("/");
 };
 
 /** `AGENTS.md` at `commit`, followed through one symlink; `undefined` when there is none. */

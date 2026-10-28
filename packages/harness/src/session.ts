@@ -985,15 +985,15 @@ const RepoPromptRecordSchema = Schema.Struct({
   instructions: Schema.NullOr(
     Schema.Struct({
       path: Schema.String,
-      bytes: Schema.Number,
-      tokens: Schema.Number,
-      cap: Schema.Number,
+      bytes: Schema.Finite,
+      tokens: Schema.Finite,
+      cap: Schema.Finite,
       truncated: Schema.Boolean,
     }),
   ),
   skills: Schema.Struct({
-    tokens: Schema.Number,
-    cap: Schema.Number,
+    tokens: Schema.Finite,
+    cap: Schema.Finite,
     listed: Schema.Array(
       Schema.Struct({ name: Schema.String, path: Schema.String }),
     ),
