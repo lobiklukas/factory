@@ -671,6 +671,33 @@ export const readMission = (
     return { ...record, definitionVersion: doc.definitionVersion };
   });
 
+/** Whether a task kind is one a mission runs as: the mission itself, not its workers. */
+export const isMissionTask = (kind: string): boolean =>
+  kind === MISSION_TASK_NAME;
+
+/**
+ * Whether a harness has a mission still live in it — `pending`, `running`, `waiting` or
+ * `completing` — read off the task graph a session's snapshot projects (LOB-231).
+ *
+ * The question a process asks before it lets a log go: a mission that is still live when its
+ * harness closes stays `pending` in the log and runs again only once a harness over that log is
+ * resumed, so an owner holding one is not idle however quiet its conversation is. A mission's
+ * workers are not asked about: they are the mission's, and live only while it is.
+ */
+export const missionInFlight = (
+  harness: Harness,
+): Effect.Effect<boolean, SessionError> =>
+  Effect.acquireUseRelease(
+    attempt("read task graph", () => harness.taskGraph(BACKGROUND_CONTEXT)),
+    (graph) =>
+      Effect.sync(() =>
+        Object.values(graph.value.tasks).some((node) =>
+          isMissionTask(node.kind),
+        ),
+      ),
+    (graph) => Effect.sync(() => graph.dispose()),
+  );
+
 /**
  * Start one mission in a session's conversation (LOB-230), and answer the id it was given.
  *

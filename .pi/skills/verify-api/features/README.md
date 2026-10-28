@@ -226,6 +226,15 @@ branch and worktree on disk while no process ran), evidence `.verify/evidence/lo
 old teardown put back into the owner's release, seven checks fail — the branch is gone after the
 shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md](lifecycle.md).
 
+The mission-restart checks (LOB-231) were run from the `agent/LOB-231` worktree on 2026-10-28
+(`API_PORT=9640`, faux, a scratch database minted on the worktree's own server on 5442):
+`./mission-restart.sh` **21/21** (12 driver checks across the two phases, 9 shell checks of the
+process, the boot's log, and the row the next boot reads with the session root it is marked under;
+re-run after review scoped the boot's resume to its own root), evidence `.verify/evidence/lob-231/api/`.
+With the boot's resume query made to find nothing, the verify phase times out waiting for the
+resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-boot-resume/`. See
+[mission.md](mission.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |

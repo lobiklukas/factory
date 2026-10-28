@@ -22,6 +22,10 @@
  *   released session would read as unreleased, cut a fresh worktree at its base on its next owner
  *   acquisition, and take a new run. That is the exception to D7's "droppable" recorded in
  *   `docs/design.md`.
+ * - `sessions.mission_in_flight` (LOB-231) — whether a mission is live in the session's task graph,
+ *   which the owner's activity projection writes. The upsert never writes it either, so a rebuild
+ *   keeps it; a row the rebuild inserts reads `false` until its session is next owned, which costs a
+ *   mission in flight its resume at the next boot, not its log.
  *
  * What it always answers from the fold: title (`factory.title` entries), repo, base ref and a
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the

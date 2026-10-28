@@ -51,6 +51,7 @@
         "GITHUB_API_URL",
         "DOCS_SCHEDULE_MS",
         "DOCS_SCHEDULE_REPO",
+        "MISSION_RESUME",
         "TRIGGER_RULES",
         "TRIGGER_SECRET_HEADER",
         "TRIGGER_DELIVERY_HEADER",
