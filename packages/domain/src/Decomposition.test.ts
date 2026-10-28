@@ -13,10 +13,14 @@ import { describe, expect, it } from "vitest";
 import { Effect, Exit, Option } from "effect";
 import {
   MAX_PROPOSALS,
+  MAX_REMOVED_DRAFTS,
   decodeProposedIssues,
   projectProposedIssues,
   type ProposalFault,
   type ProposedIssue,
+  type ProposedIssues,
+  reconcileProposals,
+  type RemovedProposal,
 } from "./Decomposition";
 
 const proposal = (
@@ -201,6 +205,197 @@ describe("a proposal's created issue (LOB-202)", () => {
     expect(
       projectProposedIssues({
         proposals: [{ ...proposal("A"), created: { id: 7 } }],
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("reconcileProposals (LOB-203)", () => {
+  const created = { id: "uuid-1", identifier: "ENG-101" };
+  const gone = (
+    title: string,
+    overrides: Partial<RemovedProposal> = {},
+  ): RemovedProposal => ({
+    title,
+    goal: `the goal of ${title}`,
+    change: `the change for ${title}`,
+    acceptance: [`${title} is observable`],
+    ...overrides,
+  });
+  const set = (proposals: ProposedIssue[], removed?: RemovedProposal[]) =>
+    ({
+      proposals,
+      ...(removed === undefined ? {} : { removed }),
+    }) satisfies ProposedIssues;
+
+  it("adds everything for a session that never decomposed", () => {
+    const result = reconcileProposals(
+      undefined,
+      set([proposal("A"), proposal("B")]),
+    );
+    expect(result.diff).toEqual({
+      added: ["A", "B"],
+      updated: [],
+      unchanged: [],
+      removed: [],
+    });
+    expect(result.proposals).toEqual([proposal("A"), proposal("B")]);
+    expect(result.removed).toEqual([]);
+  });
+
+  it("keeps the recorded issues and changes nothing when the same set comes again", () => {
+    const previous = set([
+      proposal("A", { created }),
+      proposal("B", { blockedBy: [0] }),
+    ]);
+    const result = reconcileProposals(
+      previous,
+      set([proposal("A"), proposal("B", { blockedBy: [0] })]),
+    );
+    expect(result.diff).toEqual({
+      added: [],
+      updated: [],
+      unchanged: ["A", "B"],
+      removed: [],
+    });
+    expect(result.proposals).toEqual(previous.proposals);
+    expect(result.proposals[0]?.created).toEqual(created);
+  });
+
+  it("matches by title, not by index or spelling: a reorder is not an update", () => {
+    const previous = set([
+      proposal("A", { created }),
+      proposal("B", { blockedBy: [0] }),
+    ]);
+    // B first and A second, A spelled differently: the edge still names A, and A is still A.
+    const result = reconcileProposals(
+      previous,
+      set([proposal("B", { blockedBy: [1] }), proposal("a")]),
+    );
+    expect(result.diff.added).toEqual([]);
+    expect(result.diff.removed).toEqual([]);
+    // Only A's spelling differs, which is content.
+    expect(result.diff.updated).toEqual(["a"]);
+    expect(result.diff.unchanged).toEqual(["B"]);
+    expect(result.proposals.map((p) => p.title)).toEqual(["B", "a"]);
+    expect(result.proposals[1]?.created).toEqual(created);
+  });
+
+  it("updates a proposal in place when its content or its blockers' titles change", () => {
+    const previous = set([
+      proposal("A", { created }),
+      proposal("B", { created: { id: "uuid-2", identifier: "ENG-102" } }),
+      proposal("C"),
+    ]);
+    const result = reconcileProposals(
+      previous,
+      set([
+        proposal("A", { goal: "a new goal" }),
+        proposal("B", { blockedBy: [0] }),
+        proposal("C"),
+      ]),
+    );
+    expect(result.diff).toEqual({
+      added: [],
+      updated: ["A", "B"],
+      unchanged: ["C"],
+      removed: [],
+    });
+    expect(result.proposals[0]?.goal).toBe("a new goal");
+    expect(result.proposals[0]?.created).toEqual(created);
+    expect(result.proposals[1]?.created?.identifier).toBe("ENG-102");
+  });
+
+  it("marks a dropped proposal removed with its recorded issue, rather than deleting it", () => {
+    const previous = set([
+      proposal("A"),
+      proposal("B", { created }),
+      proposal("C"),
+    ]);
+    const result = reconcileProposals(
+      previous,
+      set([proposal("A"), proposal("D")]),
+    );
+    expect(result.diff).toEqual({
+      added: ["D"],
+      updated: [],
+      unchanged: ["A"],
+      removed: ["B", "C"],
+    });
+    expect(result.proposals.map((p) => p.title)).toEqual(["A", "D"]);
+    expect(result.removed).toEqual([gone("B", { created }), gone("C")]);
+  });
+
+  it("brings a removed proposal back with the issue it had", () => {
+    const previous = set([proposal("A")], [gone("B", { created }), gone("C")]);
+    const result = reconcileProposals(
+      previous,
+      set([proposal("A"), proposal("B", { blockedBy: [0] })]),
+    );
+    // Revived is added to the set again; its issue was never lost.
+    expect(result.diff.added).toEqual(["B"]);
+    expect(result.proposals[1]?.created).toEqual(created);
+    expect(result.proposals[1]?.blockedBy).toEqual([0]);
+    expect(result.removed).toEqual([gone("C")]);
+    expect(result.diff.removed).toEqual([]);
+  });
+
+  it("forgets only removed drafts nothing was created for, oldest first, past the cap", () => {
+    const old = Array.from({ length: MAX_REMOVED_DRAFTS }, (_, i) =>
+      gone(`old ${i}`),
+    );
+    const previous = set(
+      [proposal("A"), proposal("B")],
+      [gone("kept", { created }), ...old],
+    );
+    const result = reconcileProposals(previous, set([proposal("A")]));
+    // "B" joins the end; one draft (the oldest) ages out; the created one is never forgotten.
+    expect(result.removed).toHaveLength(MAX_REMOVED_DRAFTS + 1);
+    expect(result.removed[0]).toEqual(gone("kept", { created }));
+    expect(result.removed.some((p) => p.title === "old 0")).toBe(false);
+    expect(result.removed.at(-1)?.title).toBe("B");
+  });
+});
+
+describe("a stored set's removed proposals (LOB-203)", () => {
+  const created = { id: "uuid-1", identifier: "ENG-101" };
+  const removed = [
+    {
+      title: "Gone",
+      goal: "g",
+      change: "c",
+      acceptance: ["a"],
+      created,
+    },
+  ];
+
+  it("read back from a stored document, and absent when there are none", () => {
+    const proposals = [proposal("A")];
+    expect(projectProposedIssues({ proposals, removed })).toEqual({
+      proposals,
+      removed,
+    });
+    expect(projectProposedIssues({ proposals, removed: [] })).toEqual({
+      proposals,
+    });
+  });
+
+  it("is not something a model's answer may carry: a draft drops it, and is not refused for it", () => {
+    expect(accepted({ proposals: [proposal("A")], removed })).toEqual([
+      proposal("A"),
+    ]);
+    expect(
+      Effect.runSync(
+        decodeProposedIssues({ proposals: [proposal("A")], removed: 5 }),
+      ),
+    ).toEqual({ proposals: [proposal("A")] });
+  });
+
+  it("makes a stored set unreadable when a removed entry is not a proposal", () => {
+    expect(
+      projectProposedIssues({
+        proposals: [proposal("A")],
+        removed: [{ title: "x" }],
       }),
     ).toBeUndefined();
   });

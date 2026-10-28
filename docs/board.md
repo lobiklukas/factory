@@ -297,8 +297,11 @@ customization, decomposition, and board metrics.
    `getSession`); it creates no card, no tracker issue and no session — and the approving half
    (LOB-202) — `approveProposals` creates the approved ones as Linear issues, children of the issue
    the session was delegated from, in its team, with the `blockedBy` edges whose ends exist, and
-   records each created id in the document. Still not built: child cards and `task_links` (wave 2)
-   and idempotent re-runs of the same spec (LOB-203).
+   records each created id in the document — and idempotent re-runs (LOB-203): a decomposition is
+   reconciled into the set the session holds by normalized title, so the same spec twice is the
+   same proposals and creates nothing the second time, a changed spec answers a diff (added,
+   updated, unchanged, removed), and a dropped proposal is marked `removed` with its tracker id
+   rather than deleted. Still not built: child cards and `task_links` (wave 2).
 10. **Board metrics** — cycle time, aging, WIP over time, cost per task (LOB-17, LOB-28, LOB-44).
     Trigger: once real cards exist to measure.
 
