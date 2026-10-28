@@ -95,16 +95,15 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       upgradeBoard: (input) =>
         attributed(input).pipe(Effect.flatMap(tasks.upgradeBoard)),
       // The editor's pickers (D6): the keys and roles the rules `defineBoard` runs accept, against the
-      // same role table and the same held definitions, read afresh for every call.
+      // same role table and the same held definitions, read afresh for every call. The table is
+      // `ROLE_MODELS` alone, as the rules read it, so its emptiness is whether any role is accepted (F4);
+      // the role policy rows are roles the harness knows, like the declared ones.
       getDefinitionVocabulary: () =>
         tasks.declaredRoles.pipe(
           Effect.map((declared) =>
             definitionVocabulary({
-              table: new Set([
-                ...sessions.roles,
-                ...sessions.rolePolicies.keys(),
-              ]),
-              declared,
+              table: sessions.roles,
+              declared: new Set([...declared, ...sessions.rolePolicies.keys()]),
             }),
           ),
         ),

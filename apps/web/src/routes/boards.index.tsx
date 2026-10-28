@@ -8,6 +8,7 @@ import { boardsAtom } from "@/lib/atoms/board-atom";
 import { NEW_BOARD } from "@/lib/board-create-view";
 import { EmptyPane } from "@/components/empty-pane";
 import { GettingStarted } from "@/components/getting-started";
+import { GuideLink } from "@/components/guide-link";
 import { NewBoardDialog } from "@/components/new-board";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -83,6 +84,7 @@ function BoardsRoute() {
         action={
           <div className="flex w-full flex-col items-center gap-4">
             <NewBoardLink where="empty" />
+            <GuideLink step="board" />
             <GettingStarted className="w-full" />
           </div>
         }

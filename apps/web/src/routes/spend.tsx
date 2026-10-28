@@ -19,6 +19,7 @@ import {
 } from "@/lib/spend-view";
 import { EmptyPane } from "@/components/empty-pane";
 import { EmptyLink } from "@/components/empty-link";
+import { GuideLink } from "@/components/guide-link";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export const Route = createFileRoute("/spend")({
@@ -102,7 +103,12 @@ function SpendRoute() {
             icon={<CoinsIcon strokeWidth={1.75} />}
             title="No spend recorded"
             detail="No session on this control plane has run yet. Spend appears here, per repo and per actor, once a session makes a model request."
-            action={<EmptyLink to="/sessions">Start a session</EmptyLink>}
+            action={
+              <>
+                <EmptyLink to="/sessions">Start a session</EmptyLink>
+                <GuideLink step="run" />
+              </>
+            }
             visible
           />
         </div>

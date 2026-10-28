@@ -8,6 +8,7 @@ import { bySession, inboxSummary } from "@/lib/approvals-view";
 import { ApprovalItem } from "@/components/approvals";
 import { EmptyPane } from "@/components/empty-pane";
 import { EmptyLink } from "@/components/empty-link";
+import { GuideLink } from "@/components/guide-link";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export const Route = createFileRoute("/approvals")({
@@ -59,7 +60,12 @@ function ApprovalsRoute() {
       icon={<CheckSquareIcon strokeWidth={1.75} />}
       title="No approvals pending"
       detail="No run is waiting on a person. A command this deployment gates (APPROVAL_REQUIRED), or that a run's column gates on its board, parks its run here until someone approves or denies it."
-      action={<EmptyLink to="/boards">Open the boards</EmptyLink>}
+      action={
+        <>
+          <EmptyLink to="/boards">Open the boards</EmptyLink>
+          <GuideLink step="plan" />
+        </>
+      }
       visible={approvals.length === 0}
     >
       <div

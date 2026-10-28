@@ -8,6 +8,7 @@ import type {
 import { DefinitionId } from "@repo/domain/Task";
 import {
   addColumn,
+  addGate,
   addRequirement,
   addSkill,
   addTransition,
@@ -16,9 +17,13 @@ import {
   defineRefusal,
   definitionDiff,
   draftOf,
+  gatesOf,
   moveColumn,
+  limitFaults,
+  parseLimit,
   placeFaults,
   removeColumn,
+  removeGate,
   removeRequirement,
   removeSkill,
   removeTransition,
@@ -26,13 +31,18 @@ import {
   requirementOptions,
   roleOptions,
   savedNotice,
+  setCap,
+  setGate,
   setInitialColumn,
   setKind,
   setName,
+  setPushScope,
   setRequirementDescription,
   setRole,
   setTransitionGate,
   setTransitionTarget,
+  setWipLimit,
+  setWriteScope,
   skillOptions,
   supersedeNotice,
   targetOptions,
@@ -151,14 +161,14 @@ describe("draftOf and defineInputOf", () => {
   });
 
   /**
-   * C22 (and any later change) adds definition fields this editor has no control for: the draft
-   * carries the column objects themselves, so such a field reaches the server as it came.
+   * A later change adds definition fields this editor has no control for: the draft carries the
+   * column objects themselves, so such a field reaches the server as it came.
    * Mutation: copy only the fields the editor knows into the draft.
    */
   it("round-trips a column field and a definition field the editor does not know", () => {
     const future = {
       ...column("todo", "resting", [{ to: "done" }]),
-      autonomy: { approvalRequired: ["git push"] },
+      lane: "fast",
     };
     const pinned = {
       ...PINNED,
@@ -181,6 +191,22 @@ describe("draftOf and defineInputOf", () => {
     ]);
     expect(columnOf(draft, "done").transitions).toEqual([]);
     expect(definitionDiff(LEGACY, draft)).toEqual([]);
+  });
+
+  /**
+   * F4. The harness finds a role's policy by exact name, so `planner ` would save a role no policy
+   * names. Mutation: send the typed text untrimmed, or keep a whitespace-only role.
+   */
+  it("sends a typed role trimmed, and none when only whitespace is left", () => {
+    const draft = draftOf(PINNED);
+    const key = keyOf(draft, "doing");
+    const sent = (role: string) =>
+      defineInputOf(PINNED, setRole(draft, key, role)).columns.find(
+        (column) => column.name === "doing",
+      );
+    expect(sent("  planner ")?.role).toBe("planner");
+    expect(sent("   ")).not.toHaveProperty("role");
+    expect(sent("planner")?.role).toBe("planner");
   });
 
   /** Mutation: send `initialColumn: ""` — a schema-valid payload the server reads as a column name. */
@@ -442,11 +468,268 @@ describe("the pickers", () => {
   /** Mutation: drop the column's own role — the select would show another role than it holds. */
   it("offers the vocabulary's roles and the column's own", () => {
     const doing = columnOf(draftOf(PINNED), "doing");
-    expect(roleOptions(["reviewer", "specifier"], doing)).toEqual([
-      "builder",
-      "reviewer",
-      "specifier",
+    expect(
+      roleOptions(
+        { roles: ["reviewer", "specifier"], rolesOpen: false },
+        doing,
+      ),
+    ).toEqual({ names: ["builder", "reviewer", "specifier"], typed: false });
+  });
+
+  /**
+   * F4. With a role table the picker is closed: the table's roles and the column's own, and no typed
+   * name. With none every role is accepted, so a name may be typed beside the suggestions.
+   * Mutation: offer a typed name under a table (the server refuses a typo), or never offer one (a
+   * brand-new role could only be authored with `factory board define`).
+   */
+  it("takes a typed role name exactly when the vocabulary says roles are open", () => {
+    const doing = columnOf(draftOf(PINNED), "doing");
+    const closed = roleOptions(
+      { roles: ["builder", "reviewer"], rolesOpen: false },
+      doing,
+    );
+    expect(closed.typed).toBe(false);
+    expect(closed.names).toEqual(["builder", "reviewer"]);
+    const open = roleOptions(
+      { roles: ["reviewer", "specifier"], rolesOpen: true },
+      doing,
+    );
+    expect(open.typed).toBe(true);
+    expect(open.names).toEqual(["builder", "reviewer", "specifier"]);
+    // An older server sends no `rolesOpen`: the roles are a closed list.
+    expect(roleOptions({ roles: ["reviewer"] }, doing).typed).toBe(false);
+    // A role typed into a column is that column's own, so the suggestions still list it.
+    const typed = columnOf(setRole(draftOf(PINNED), "c1", "triager"), "doing");
+    expect(
+      roleOptions({ roles: ["reviewer"], rolesOpen: true }, typed).names,
+    ).toEqual(["reviewer", "triager"]);
+    // A column with no role offers the vocabulary alone.
+    expect(
+      roleOptions(
+        { roles: ["reviewer"], rolesOpen: true },
+        columnOf(draftOf(PINNED), "todo"),
+      ).names,
+    ).toEqual(["reviewer"]);
+  });
+});
+
+/** What `defineInputOf` sends for the column named `name`. */
+const sentColumn = (
+  pinned: BoardDefinition,
+  draft: DefinitionDraft,
+  name: string,
+) => defineInputOf(pinned, draft).columns.find((entry) => entry.name === name);
+
+describe("a column's autonomy (F2)", () => {
+  /**
+   * Mutation: drop `autonomy` while rebuilding the column — a narrowed column would be widened by an
+   * unrelated edit. A column the person never touched sends exactly what the pinned one holds.
+   */
+  it("round-trips an untouched column's autonomy and reports no change", () => {
+    const autonomy = {
+      approvalRequired: ["git push", "rm -rf"],
+      write: "docs",
+      push: "none",
+    } as const;
+    const pinned: BoardDefinition = {
+      ...PINNED,
+      columns: PINNED.columns.map((entry) =>
+        entry.name === "doing" ? { ...entry, autonomy } : entry,
+      ),
+    };
+    const draft = draftOf(pinned);
+    expect(sentColumn(pinned, draft, "doing")?.autonomy).toEqual(autonomy);
+    expect(definitionDiff(pinned, draft)).toEqual([]);
+    // Editing another field of the column keeps the autonomy beside it.
+    const renamed = setRole(draft, keyOf(draft, "doing"), "reviewer");
+    expect(sentColumn(pinned, renamed, "doing")?.autonomy).toEqual(autonomy);
+  });
+
+  /** Mutation: write the scope to the wrong field, or keep a gate list after removing its last row. */
+  it("edits the gates, the write scope and the push scope, and names each in the diff", () => {
+    let draft = draftOf(PINNED);
+    const doing = keyOf(draft, "doing");
+    draft = addGate(draft, doing);
+    draft = setGate(draft, doing, 0, "git push");
+    draft = addGate(draft, doing);
+    draft = setGate(draft, doing, 1, "npm publish");
+    draft = setWriteScope(draft, doing, "docs");
+    draft = setPushScope(draft, doing, "none");
+    expect(columnOf(draft, "doing").autonomy).toEqual({
+      approvalRequired: ["git push", "npm publish"],
+      write: "docs",
+      push: "none",
+    });
+    expect(definitionDiff(PINNED, draft)).toEqual([
+      { sign: "+", text: '"doing" approval gate "git push"' },
+      { sign: "+", text: '"doing" approval gate "npm publish"' },
+      { sign: "~", text: '"doing" write scope: — → docs' },
+      { sign: "~", text: '"doing" push scope: — → none' },
     ]);
+    draft = removeGate(draft, doing, 0);
+    expect(gatesOf(columnOf(draft, "doing"))).toEqual(["npm publish"]);
+    expect(
+      sentColumn(PINNED, draft, "doing")?.autonomy?.approvalRequired,
+    ).toEqual(["npm publish"]);
+  });
+
+  /**
+   * Mutation: leave `autonomy: {}` behind — the version would differ from one that never set it, so
+   * `defineBoard` writes a new version for no change (and the diff would never go quiet).
+   */
+  it("drops the autonomy field once nothing is left in it, so a reverted edit is no change", () => {
+    let draft = draftOf(PINNED);
+    const doing = keyOf(draft, "doing");
+    draft = setWriteScope(draft, doing, "none");
+    draft = addGate(draft, doing);
+    expect(definitionDiff(PINNED, draft)).not.toEqual([]);
+    draft = setWriteScope(draft, doing, undefined);
+    draft = removeGate(draft, doing, 0);
+    expect("autonomy" in columnOf(draft, "doing")).toBe(false);
+    expect(definitionDiff(PINNED, draft)).toEqual([]);
+  });
+
+  /** A blank gate is sent as typed: the server refuses it, beside the row (`columns[i].autonomy…`). */
+  it("sends a blank gate to the server rather than dropping it", () => {
+    const draft = addGate(draftOf(PINNED), keyOf(draftOf(PINNED), "doing"));
+    expect(sentColumn(PINNED, draft, "doing")?.autonomy).toEqual({
+      approvalRequired: [""],
+    });
+  });
+
+  /** Mutation: merge a changed scope into the diff of a gate, or compare scopes by reference. */
+  it("diffs a changed scope and a removed gate against what was pinned", () => {
+    const pinned: BoardDefinition = {
+      ...PINNED,
+      columns: PINNED.columns.map((entry) =>
+        entry.name === "doing"
+          ? {
+              ...entry,
+              autonomy: {
+                approvalRequired: ["git push"],
+                write: "docs" as const,
+              },
+            }
+          : entry,
+      ),
+    };
+    let draft = draftOf(pinned);
+    const doing = keyOf(draft, "doing");
+    draft = removeGate(draft, doing, 0);
+    draft = setWriteScope(draft, doing, "none");
+    expect(definitionDiff(pinned, draft)).toEqual([
+      { sign: "-", text: '"doing" approval gate "git push"' },
+      { sign: "~", text: '"doing" write scope: docs → none' },
+    ]);
+  });
+});
+
+describe("limits and caps (F3)", () => {
+  /** Mutation: read `""` as 0 — clearing a field would send a limit the server refuses. */
+  it("reads a number field's text as a limit, empty as none and anything else as the number", () => {
+    expect(parseLimit("")).toBeUndefined();
+    expect(parseLimit("  ")).toBeUndefined();
+    expect(parseLimit("3")).toBe(3);
+    expect(parseLimit("0")).toBe(0);
+    expect(parseLimit("-2")).toBe(-2);
+    expect(parseLimit("1.5")).toBe(1.5);
+    expect(parseLimit("abc")).toBeUndefined();
+  });
+
+  /** Mutation: write the limit to the draft's caps, or keep `wipLimit: undefined` as a key. */
+  it("sets and clears a column's WIP limit, and diffs it", () => {
+    const draft = draftOf(PINNED);
+    const todo = keyOf(draft, "todo");
+    const set = setWipLimit(draft, todo, 4);
+    expect(columnOf(set, "todo").wipLimit).toBe(4);
+    expect(definitionDiff(PINNED, set)).toEqual([
+      { sign: "~", text: '"todo" wipLimit: — → 4' },
+    ]);
+    const cleared = setWipLimit(set, keyOf(set, "doing"), undefined);
+    expect("wipLimit" in columnOf(cleared, "doing")).toBe(false);
+    expect(definitionDiff(PINNED, cleared)).toEqual([
+      { sign: "~", text: '"todo" wipLimit: — → 4' },
+      { sign: "~", text: '"doing" wipLimit: 2 → —' },
+    ]);
+    // A limit the server will refuse is still the person's to send.
+    expect(columnOf(setWipLimit(draft, todo, 0), "todo").wipLimit).toBe(0);
+  });
+
+  /** Mutation: send the pinned caps after the draft changed them, or `caps: {}` once all are cleared. */
+  it("sets and clears each cap, sends the draft's caps and none when none is left", () => {
+    let draft = draftOf(PINNED);
+    expect(draft.caps).toEqual({ board: 2 });
+    draft = setCap(draft, "task", 1);
+    draft = setCap(draft, "repo", 5);
+    draft = setCap(draft, "board", 3);
+    expect(defineInputOf(PINNED, draft).caps).toEqual({
+      board: 3,
+      task: 1,
+      repo: 5,
+    });
+    expect(definitionDiff(PINNED, draft)).toEqual([
+      { sign: "~", text: "caps.board: 2 → 3" },
+      { sign: "~", text: "caps.task: — → 1" },
+      { sign: "~", text: "caps.repo: — → 5" },
+    ]);
+    draft = setCap(
+      setCap(setCap(draft, "task", undefined), "repo", undefined),
+      "board",
+      undefined,
+    );
+    expect(draft.caps).toBeUndefined();
+    expect("caps" in defineInputOf(PINNED, draft)).toBe(false);
+    expect(definitionDiff(PINNED, draft)).toEqual([
+      { sign: "~", text: "caps.board: 2 → —" },
+    ]);
+  });
+
+  it("sends a version that had no caps with none until one is set", () => {
+    const pinned: BoardDefinition = { ...PINNED, caps: undefined };
+    const draft = draftOf(pinned);
+    expect(draft.caps).toBeUndefined();
+    expect("caps" in defineInputOf(pinned, draft)).toBe(false);
+    expect(defineInputOf(pinned, setCap(draft, "task", 2)).caps).toEqual({
+      task: 2,
+    });
+  });
+});
+
+describe("limits the domain schema refuses (F3)", () => {
+  /**
+   * Mutation: judge only the WIP limits (or only the caps), check `> 0` instead of the schema's
+   * whole-number minimum of one, or index the column by key rather than position — the fault would
+   * land beside another column's field.
+   */
+  it("names each refused limit at the path the server would, in the schema's words", () => {
+    let draft = draftOf(PINNED);
+    expect(limitFaults(draft)).toEqual([]);
+    draft = setWipLimit(draft, keyOf(draft, "doing"), 0);
+    draft = setWipLimit(draft, keyOf(draft, "canceled"), 1.5);
+    draft = setCap(draft, "task", -2);
+    draft = setCap(draft, "repo", 4);
+    expect(limitFaults(draft)).toEqual([
+      {
+        field: "columns[1].wipLimit",
+        message: "Expected a value greater than or equal to 1",
+      },
+      { field: "columns[3].wipLimit", message: "Expected an integer" },
+      {
+        field: "caps.task",
+        message: "Expected a value greater than or equal to 1",
+      },
+    ]);
+  });
+
+  it("places them beside the field like any fault", () => {
+    const draft = setWipLimit(draftOf(PINNED), "c0", 0);
+    const placed = placeFaults(
+      limitFaults(draft),
+      draft.columns.map((entry) => entry.key),
+      draft,
+    );
+    expect(placed.slots.get(columnSlot("c0", "wipLimit"))).toHaveLength(1);
+    expect(placed.unplaced).toEqual([]);
   });
 });
 
@@ -556,7 +839,11 @@ describe("placeFaults", () => {
     const sentDraft = addColumn(draftOf(PINNED));
     const sent = sentDraft.columns.map((entry) => entry.key);
     const added = keyOf(sentDraft, "new_column");
-    const now = moveColumn(sentDraft, added, -1);
+    // `doing` holds one gate now, so a fault at row 0 is its row and one at row 7 is a row since removed.
+    const now = addGate(
+      moveColumn(sentDraft, added, -1),
+      keyOf(sentDraft, "doing"),
+    );
     const faults = [
       { field: "name", message: "no name" },
       { field: "initialColumn", message: "no initial column" },
@@ -569,9 +856,22 @@ describe("placeFaults", () => {
       },
       { field: "columns[1].skills[0]", message: "unknown skill" },
       { field: "columns[1].role", message: "unknown role" },
-      { field: "columns[1].wipLimit", message: "a field with no control" },
+      { field: "columns[1].wipLimit", message: "limit" },
+      { field: "columns[1].autonomy.write", message: "write" },
+      { field: "columns[1].autonomy.push", message: "push" },
+      {
+        field: "columns[1].autonomy.approvalRequired[0]",
+        message: "blank gate",
+      },
+      {
+        field: "columns[1].autonomy.approvalRequired[7]",
+        message: "a gate since removed",
+      },
+      { field: "columns[1].lane", message: "a field with no control" },
       { field: "columns[9].name", message: "a column the draft never had" },
-      { field: "caps.board", message: "a definition field with no control" },
+      { field: "caps.board", message: "cap" },
+      { field: "caps", message: "caps as a whole" },
+      { field: "caps.nope", message: "a cap that is not one" },
     ];
     const placed = placeFaults(faults, sent, now);
     const at = (slot: string) =>
@@ -587,10 +887,21 @@ describe("placeFaults", () => {
     ]);
     expect(at(columnSlot(doing, "skills[0]"))).toEqual(["unknown skill"]);
     expect(at(columnSlot(doing, "role"))).toEqual(["unknown role"]);
+    expect(at(columnSlot(doing, "wipLimit"))).toEqual(["limit"]);
+    expect(at(columnSlot(doing, "autonomy.write"))).toEqual(["write"]);
+    expect(at(columnSlot(doing, "autonomy.push"))).toEqual(["push"]);
+    expect(at(columnSlot(doing, "autonomy.approvalRequired[0]"))).toEqual([
+      "blank gate",
+    ]);
+    expect(at(columnSlot(doing, "autonomy.approvalRequired"))).toEqual([
+      "a gate since removed",
+    ]);
     expect(at(columnSlot(doing))).toEqual(["a field with no control"]);
+    expect(at("caps.board")).toEqual(["cap"]);
+    expect(at("caps")).toEqual(["caps as a whole"]);
     expect(placed.unplaced.map((fault) => fault.message)).toEqual([
       "a column the draft never had",
-      "a definition field with no control",
+      "a cap that is not one",
     ]);
   });
 
