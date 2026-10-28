@@ -151,6 +151,7 @@ const settled = Effect.gen(function* () {
     snapshot.entries.find(
       (entry) =>
         entry.text.startsWith(NOT_OPENED) ||
+        entry.text.startsWith("no change: ") ||
         entry.text.startsWith("no documentation change: "),
     )?.text;
   // Nothing asks for the PR: the drive only reads, until the step has answered one way or the other.

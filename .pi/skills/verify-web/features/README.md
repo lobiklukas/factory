@@ -36,6 +36,10 @@ from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571
 the `agent/C9` worktree, API `:9562` / web `:3562`, on an empty throwaway database; `drive.mjs` passed
 (API `:9560` / web `:3560`) and `board-create.sh` passed beside it, as the checklist sits on `/boards`.
 
+`first-run.sh` also passed on 2026-10-28 from the `agent/G1-F11-F18` worktree, API `:9550` / web `:3550`,
+with its getting-started guide-link assertions (`[data-guide-link]` on `/boards`, `/repos` and the five
+empty routes, G1; see [first-run.md](first-run.md)).
+
 `board-create.sh` (the New board form, C5) passed **20/20** on 2026-10-28 from the `agent/C5` worktree,
 API `:9561` / web `:3561`, on an empty throwaway database; `drive.mjs` passed 120/120 there (API `:9560` /
 web `:3560`), its board now made through the form.
