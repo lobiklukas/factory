@@ -9,9 +9,12 @@
  */
 import { Effect, Layer, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { SessionId } from "@repo/domain/Session";
 import {
+  JIRA_SIGNATURE_HEADER,
+  verifyJiraSignature,
   jiraComment,
   jiraConfigFromEnv,
   jiraDelivery,
@@ -351,5 +354,35 @@ describe("JiraWriteBack", () => {
     );
     expect(error.code).toBe("write-back");
     expect(error.message).toContain("403");
+  });
+});
+
+describe("verifyJiraSignature", () => {
+  const secret = "lob-259-jira-secret";
+  const raw = JSON.stringify(created());
+  const digest = (body: string, key = secret) =>
+    createHmac("sha256", key).update(body).digest("hex");
+  const verify = (signature: string | undefined, body = raw) =>
+    verifyJiraSignature({ raw: body, signature, secret });
+
+  it("reads Jira's X-Hub-Signature, whose value is sha256= and the body's hex HMAC", () => {
+    expect(JIRA_SIGNATURE_HEADER).toBe("x-hub-signature");
+    expect(verify(`sha256=${digest(raw)}`)).toEqual({ ok: true });
+  });
+
+  it("says unsigned for no header, and wrong for a digest of another body, key or shape", () => {
+    expect(verify(undefined)).toEqual({
+      ok: false,
+      refusal: "missing-signature",
+    });
+    expect(verify("")).toEqual({ ok: false, refusal: "missing-signature" });
+    const wrong = { ok: false, refusal: "bad-signature" };
+    expect(verify(`sha256=${digest(`${raw} `)}`)).toEqual(wrong);
+    expect(verify(`sha256=${digest(raw, "another")}`)).toEqual(wrong);
+    // The digest alone is GitHub-without-prefix, not WebSub's: refused, not accepted by accident.
+    expect(verify(digest(raw))).toEqual(wrong);
+    expect(verify(`sha1=${digest(raw)}`)).toEqual(wrong);
+    expect(verify("sha256=not-hex")).toEqual(wrong);
+    expect(verify("sha256=")).toEqual(wrong);
   });
 });
