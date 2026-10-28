@@ -22,6 +22,12 @@ describe("the at_capacity refusal", () => {
     expect(refused.code).toBe("at_capacity");
     expect(refused.message).toContain("at most 3 sessions");
     expect(refused.message).toContain("SESSION_MAX_CONCURRENT=3");
+    // Typed (LOB-71): the server's own cap, beside a board definition's run caps.
+    expect(refused.cap).toEqual({
+      kind: "server",
+      limit: 3,
+      source: SESSION_MAX_CONCURRENT,
+    });
     expect(atCapacity({ limit: 1, source: "X" }).message).toContain(
       "at most 1 session may",
     );

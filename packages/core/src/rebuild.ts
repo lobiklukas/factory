@@ -399,14 +399,24 @@ export const rebuildIndexes: Effect.Effect<
   }
 
   // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links. A row the
-  // rebuild re-creates starts at its session's first commit rather than at the rebuild; its
-  // `finished_at` is no fact any log holds (LOB-44, docs/design.md D7), so it stays NULL, and the
-  // outcome metrics' factory time reads such a run as ending at its session's last activity —
-  // refolded from the log above.
+  // rebuild re-creates starts at its session's first commit rather than at the rebuild. Its
+  // `finished_at` is no fact any log holds (LOB-44, docs/design.md D7), so it is the session's last
+  // activity — refolded from the log above, and the end the outcome metrics would read anyway —
+  // as the fold reads every session idle. It cannot stay NULL: a board's run caps count a run
+  // with no end as in flight (B9, LOB-71), so a rebuilt `task_runs` would hold every past run's
+  // slot on a card that is not finished, refusing its card and board until each was discarded.
+  // A rebuild frees slots rather than holding them: a run opened without a prompt loses its slot.
+  // The one exception is a row whose `run_session_root` the rebuild kept (a run a dead process
+  // left in flight, LOB-25): its end is left NULL for the boot's `resumeRuns`, which continues the
+  // run and ends it at its next idle, or ends it at once if it had settled.
   for (const run of taskRuns) {
     yield* sql`
-      INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
-      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column}, ${run.startedAt}::timestamptz)
+      INSERT INTO task_runs (id, task_id, session_id, "column", started_at, finished_at)
+      SELECT ${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column}, ${run.startedAt}::timestamptz,
+        (SELECT a.last_activity_at
+         FROM session_activity a
+         JOIN sessions s ON s.id = a.session_id
+         WHERE a.session_id = ${run.sessionId} AND s.run_session_root IS NULL)
       ON CONFLICT (session_id) DO NOTHING
     `;
   }

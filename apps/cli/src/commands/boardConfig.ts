@@ -112,18 +112,41 @@ export const columnLines = (column: ColumnConfig): ReadonlyArray<string> => {
           index === 0 ? field("requires", line) : field("", line),
         )),
     field("exits", exits.length === 0 ? NONE : exits.join(", ")),
+    ...(column.wipLimit === undefined
+      ? []
+      : [
+          field(
+            "wip",
+            `at most ${column.wipLimit} run${column.wipLimit === 1 ? "" : "s"} in flight`,
+          ),
+        ]),
   ];
 };
 
 /**
+ * A definition version's run caps (B9, LOB-71), one line, or none for a version that declares none:
+ * `caps        board 2 · task 1 · repo 2`, each kind it does not cap left out.
+ */
+const capsLines = (caps: DefinitionConfig["caps"]): ReadonlyArray<string> => {
+  if (caps === undefined) return [];
+  const declared = (["board", "task", "repo"] as const).flatMap((kind) =>
+    caps[kind] === undefined ? [] : [`${kind} ${caps[kind]}`],
+  );
+  return declared.length === 0
+    ? []
+    : [`caps        ${declared.join(" · ")} runs in flight`];
+};
+
+/**
  * A definition version described: its id, version and name, the column a new card starts in
- * (LOB-267), then every column in order.
+ * (LOB-267), its run caps when it declares any (LOB-71), then every column in order.
  */
 export const definitionLines = (
   definition: DefinitionConfig,
 ): ReadonlyArray<string> => [
   `definition  ${definition.id} v${definition.version}  ${definition.name}`,
   `initial     ${definition.initialColumn ?? NONE}`,
+  ...capsLines(definition.caps),
   ...definition.columns.flatMap(columnLines),
 ];
 
