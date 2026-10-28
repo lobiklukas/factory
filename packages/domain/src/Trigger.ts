@@ -255,11 +255,17 @@ export const TriggerOutcome = Schema.Struct({
 });
 export type TriggerOutcome = typeof TriggerOutcome.Type;
 
+/**
+ * Why a delivery failed. `at-capacity` (LOB-70) is the session layer's `at_capacity`: the delivery
+ * would have opened one more session than the server runs at once. It is the one code a route
+ * answers `503` with `Retry-After` rather than `500`, because it is a "not now", not a fault.
+ */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
   "session-create",
   "card-create",
   "write-back",
+  "at-capacity",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 

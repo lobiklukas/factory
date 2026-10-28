@@ -53,6 +53,7 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { CredentialProvider } from "./credentials";
+import { triggerFailureAnswer } from "./admission";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { githubApiUrl } from "./pr";
 import { TriggerService, TriggerWriteBack } from "./TriggerService";
@@ -434,16 +435,12 @@ export const handleGitHubIssueWebhook = (input: {
           },
         };
       }),
-      // A refusal is an answer (`skipped`), so only a real failure reaches here.
+      // A refusal is an answer (`skipped`), so only a failure reaches here: `500`, or `503` with
+      // `Retry-After` when the server was at capacity (LOB-70).
       Effect.catchTag("TriggerError", (cause) =>
         Effect.logError(
           `github issue: delivery ${intake.delivery.requestId} failed: ${cause.message}`,
-        ).pipe(
-          Effect.as<GitHubWebhookAnswer>({
-            status: 500,
-            body: { ok: false, error: cause.message, code: cause.code },
-          }),
-        ),
+        ).pipe(Effect.as(triggerFailureAnswer(cause))),
       ),
     );
   });

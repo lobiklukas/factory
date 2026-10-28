@@ -35,7 +35,9 @@
  * 5. **Delegate.** Everything about replays, refusals, mapping and sessions is
  *    `@repo/core`'s `TriggerService`, so an adapter cannot invent its own claim or skip. The one
  *    outcome the route translates is a replay still `received` — work claimed with no outcome
- *    yet — which is `503 in-progress` rather than `200`, so the sender keeps retrying (LOB-216).
+ *    yet — which is `503 in-progress` rather than `200`, so the sender keeps retrying (LOB-216) —
+ *    and one failure: a session the server had no slot for (LOB-70) is `503 at-capacity` with
+ *    `Retry-After`, never a `500`, and its claim is released so the retry is a fresh delivery.
  *
  * The signature scheme is shared (`hmac-sha256` over the raw body, hex, in a configurable header)
  * because that is what Linear already does; an adapter whose provider signs differently brings its
@@ -79,6 +81,7 @@ import {
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
+  triggerFailureAnswer,
 } from "@repo/core";
 import type {
   TriggerDelivery,
@@ -558,13 +561,24 @@ const handle = (adapter: () => Adapter) =>
 
     const outcome = yield* triggers.deliver(delivery).pipe(
       Effect.map((delivered) => ({ ok: true as const, delivered })),
-      // A refusal is an answer (`skipped`), so only a real failure reaches here: answer `500` so
-      // the sender retries, rather than `200` on work that never got recorded.
+      // A refusal is an answer (`skipped`), so only a failure reaches here: answer `500` so the
+      // sender retries, rather than `200` on work that never got recorded — or, when the session
+      // layer was at capacity (LOB-70), `503 at-capacity` with `Retry-After`: a "not now", whose
+      // claim the seam released, so the redelivery claims afresh and opens the session then.
       Effect.catchTag("TriggerError", (cause) =>
         Effect.succeed({ ok: false as const, cause }),
       ),
     );
-    if (!outcome.ok) return storageFailure(outcome.cause);
+    if (!outcome.ok) {
+      if (outcome.cause.code !== "at-capacity")
+        return storageFailure(outcome.cause);
+      yield* logRefusal("at-capacity");
+      const answer = triggerFailureAnswer(outcome.cause);
+      return HttpServerResponse.jsonUnsafe(answer.body, {
+        status: answer.status,
+        ...(answer.headers === undefined ? {} : { headers: answer.headers }),
+      });
+    }
     const delivered = outcome.delivered;
     if (delivered.replayed && delivered.status === "received") {
       // A replay of a claim with no outcome yet is not an answer a sender may stop on: the first
