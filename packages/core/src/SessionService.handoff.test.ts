@@ -4,7 +4,8 @@
  * refuses an oversized one, and a run cut on a fresh branch has the patch committed on
  * `factory/<session-id>` before its agent's first turn — which the faux agent's one command proves by
  * reading the handed-off file. A patch that does not apply refuses the run and leaves its worktree at
- * the base; a later run that continues the card's branch (C19) does not apply it twice.
+ * the base, and so are a later run that continues its branch and a message to it; a later run that
+ * continues the card's branch (C19) does not apply it twice, and one whose branch lacks it applies it.
  *
  * Real Postgres, real git worktrees, the real session and task services; the model is faux.
  *
@@ -16,7 +17,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RepoSlug } from "@repo/domain/Session";
+import { RepoSlug, SessionId } from "@repo/domain/Session";
 import {
   BoardInstanceId,
   DEFAULT_DEFINITION_ID,
@@ -343,6 +344,103 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
     expect(outcome.head).toBe(baseCommit);
     expect(outcome.status).toBe("");
   }, 60_000);
+
+  /**
+   * Mutations this catches: key "the branch has it" on the run's binding rather than on the branch —
+   * the second run continues the refused run's `factory/<id>` (C19) and opens on the base with no
+   * handoff commit; apply only at create — the message to the refused run starts a turn without it.
+   */
+  it("a run after a refused apply, and a message to the refused run, are refused too", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const sql = yield* SqlClient;
+        const made = yield* card({ patch: strayPatch });
+        const first = yield* service
+          .create({ taskId: made.id, taskColumn: "building" })
+          .pipe(Effect.flip);
+        const runs = yield* sql<{ sessionId: string }>`
+          SELECT session_id FROM task_runs WHERE task_id = ${made.id}
+        `;
+        const refusedId = runs[0]?.sessionId ?? "";
+        const sent = yield* service
+          .send({ sessionId: SessionId.make(refusedId), content: "carry on" })
+          .pipe(Effect.flip);
+        const second = yield* service
+          .create({ taskId: made.id, taskColumn: "building" })
+          .pipe(Effect.flip);
+        const after = yield* sql<{ sessionId: string }>`
+          SELECT session_id FROM task_runs WHERE task_id = ${made.id}
+          ORDER BY started_at, id
+        `;
+        const secondId = after[1]?.sessionId ?? "";
+        const snapshot = yield* service.get(SessionId.make(refusedId));
+        yield* finish(made.id);
+        return {
+          first,
+          sent,
+          second,
+          secondBranch: git(
+            worktreeOf(secondId),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+          ),
+          secondHead: git(worktreeOf(secondId), "rev-parse", "HEAD"),
+          refusedId,
+          turns: snapshot.entries.filter((entry) => entry.kind === "assistant")
+            .length,
+        };
+      }),
+    );
+    for (const refusal of [outcome.first, outcome.sent, outcome.second]) {
+      expect(refusal.code).toBe("invalid_input");
+      expect(refusal.message).toContain(
+        "the card's handoff patch does not apply on this run's base",
+      );
+    }
+    // The second run continued the refused run's branch, and that branch still holds no handoff.
+    expect(outcome.secondBranch).toBe(`factory/${outcome.refusedId}`);
+    expect(outcome.secondHead).toBe(baseCommit);
+    expect(outcome.turns).toBe(0);
+  }, 60_000);
+
+  /**
+   * Mutations this catches: trust the binding over the branch — a run that continues a branch whose
+   * create died between cutting the worktree and committing opens with no handoff commit.
+   */
+  it("a run that continues a branch with no handoff commit applies it there", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const sql = yield* SqlClient;
+        const made = yield* card({ patch });
+        const first = yield* service.create({
+          taskId: made.id,
+          taskColumn: "building",
+        });
+        // As if the create had died before its commit: the branch back at the base, and the run
+        // ended without a turn.
+        git(worktreeOf(first.id), "reset", "-q", "--hard", "main");
+        yield* sql`UPDATE task_runs SET finished_at = now() WHERE session_id = ${first.id}`;
+        const second = yield* service.create({
+          taskId: made.id,
+          taskColumn: "building",
+        });
+        const worktree = worktreeOf(second.id);
+        yield* finish(made.id);
+        return {
+          first,
+          branch: git(worktree, "rev-parse", "--abbrev-ref", "HEAD"),
+          commits: handoffCommits(worktree),
+          diff: `${git(worktree, "diff", "--binary", "--full-index", "main", "HEAD")}\n`,
+        };
+      }),
+    );
+    expect(outcome.branch).toBe(`factory/${outcome.first.id}`);
+    expect(outcome.commits).toHaveLength(1);
+    expect(outcome.diff).toBe(patch);
+  }, 120_000);
 
   /**
    * Mutations this catches: drop the server's cap — the card is made; measure characters rather

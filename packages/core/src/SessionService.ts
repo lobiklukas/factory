@@ -34,6 +34,7 @@ import {
   FiberSet,
   FileSystem,
   HashMap,
+  HashSet,
   Layer,
   Option,
   Path,
@@ -3722,6 +3723,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             });
           if (input.review !== undefined)
             yield* ensureReviewTarget(sessionId, already, input.review);
+          // A retried card run whose first attempt was refused applying the card's handoff, or died
+          // before it: answered with the handoff on its branch, or refused again, when its owner is
+          // open here. One that is not open is held to it by the message that first prompts it.
+          const owner = HashMap.get(yield* Ref.get(live), sessionId);
+          if (input.taskId !== undefined && Option.isSome(owner))
+            yield* ensureHandoffBeforeFirstTurn(sessionId, already, owner.value);
           return yield* describe(sessionId, already);
         });
 
@@ -3912,17 +3919,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             if (budget !== undefined) {
               yield* writeBudget(owner.root, budget);
             }
-            // A handed-off card's work in progress, on a branch this run has just cut at the card's
-            // base (S-local-agent-handoff-mcp): applied and committed before create answers, so the
+            // A handed-off card's work in progress, on the branch this run is on — one it has just
+            // cut at the card's base, or the card's it continues (C19), which may already carry it —
+            // (S-local-agent-handoff-mcp): applied and committed before create answers, so the
             // agent's first turn — whoever sends it — starts on the same diff.
             if (
               input.taskId !== undefined &&
               column !== undefined &&
               input.review === undefined &&
-              binding.repo !== undefined &&
-              binding.branch === undefined
+              binding.repo !== undefined
             ) {
               yield* applyCardHandoff(id, input.taskId, binding.repo, owner);
+              yield* Ref.update(handoffSettled, HashSet.add(id));
             }
           });
           // A card's run whose owner or first log writes fail here was committed above: it is
@@ -3937,12 +3945,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         }).pipe(Effect.scoped);
 
       /**
-       * Put a handed-off card's patch on a run's fresh branch (S-local-agent-handoff-mcp, `./handoff`).
-       * Only a run in the card's own repository takes it — the patch is that repository's — and only
-       * one whose branch it has just cut: a run that continues the card's branch (C19) finds the
-       * commit already there. A patch that cannot land refuses the create (`invalid_input`, naming
-       * git's reason), and the card's run is ended like any other refused open: a run that started
-       * without the work it was handed would be a run on the wrong change.
+       * The sessions this process has seen carry their card's handoff, or need none (a session that
+       * is no card's run, a reviewer, a run in another repository, a card with no handoff, one that
+       * already took a turn): `ensureHandoffBeforeFirstTurn` reads nothing for them again.
+       */
+      const handoffSettled = yield* Ref.make(HashSet.empty<SessionId>());
+
+      /**
+       * Make sure a handed-off card's run has the card's patch on its branch (S-local-agent-handoff-mcp,
+       * `./handoff`). Only a run in the card's own repository takes it — the patch is that
+       * repository's. Whether the branch has it is read from the branch (`applyHandoff`), so a run
+       * that continues the card's branch (C19) finds the commit an earlier run made, and one that
+       * continues the branch of a run whose apply was refused applies it there, or is refused too. A
+       * patch that cannot land is `invalid_input`, naming git's reason: a run that started without
+       * the work it was handed would be a run on the wrong change.
        */
       const applyCardHandoff = (
         sessionId: SessionId,
@@ -3963,12 +3979,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ),
           );
           if (handoff === undefined) return;
-          const applied = yield* applyHandoff({
+          const checkedOut = yield* fs
+            .exists(path.join(owner.workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkedOut) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `session ${sessionId}: ${owner.workspace.path} is not a worktree, so there is nowhere to apply the card's handoff patch: register the repo's checkout (factory repo add <repo> --path <dir>) and start a new run`,
+            });
+          }
+          const outcome = yield* applyHandoff({
             worktree: owner.workspace.path,
             patch: handoff.patch,
             taskId,
             branch: handoff.branch,
             baseCommit: handoff.baseCommit,
+            createdAt: handoff.createdAt,
           }).pipe(
             Effect.mapError(
               (error) =>
@@ -3978,12 +4004,48 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
             ),
           );
+          const on = owner.workspace.branch ?? "its branch";
           yield* Effect.logInfo(
-            applied === undefined
-              ? `session ${sessionId}: task ${taskId}'s handoff changes nothing on ${owner.workspace.branch ?? "its branch"}: the base already holds it`
-              : `session ${sessionId}: applied task ${taskId}'s handoff (${applied.files.length} file(s)) as ${applied.commit} on ${owner.workspace.branch ?? "its branch"}`,
+            outcome._tag === "committed"
+              ? `session ${sessionId}: applied task ${taskId}'s handoff (${outcome.files.length} file(s)) as ${outcome.commit} on ${on}`
+              : outcome.commit === undefined
+                ? `session ${sessionId}: task ${taskId}'s handoff changes nothing on ${on}: it already holds it`
+                : `session ${sessionId}: ${on} already carries task ${taskId}'s handoff as ${outcome.commit}`,
           );
         }).pipe(Effect.withSpan("SessionService.applyCardHandoff"));
+
+      /**
+       * A card's run whose first turn is about to start (a message, a mission, a retried create) has
+       * its card's handoff on its branch (`applyCardHandoff`), or is refused. The create applies it
+       * before it answers; this covers a run that reaches its first turn some other way — one whose
+       * create was refused or died before the commit, retried or sent to. A run that already took a
+       * turn is the agent's from then on, and nothing is applied to its worktree.
+       */
+      const ensureHandoffBeforeFirstTurn = (
+        sessionId: SessionId,
+        row: SessionRow,
+        owner: LiveOwner,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (HashSet.has(yield* Ref.get(handoffSettled), sessionId)) return;
+          const settled = Ref.update(handoffSettled, HashSet.add(sessionId));
+          if (
+            row.repo === null ||
+            owner.workspace.released !== undefined ||
+            (yield* rootEverSubmitted(owner.storage)) ||
+            (yield* readRecordedReview(owner.storage)) !== undefined
+          )
+            return yield* settled;
+          const taskId = yield* runTaskFor(sessionId);
+          if (taskId !== undefined)
+            yield* applyCardHandoff(
+              sessionId,
+              taskId,
+              yield* toRepoSlug(row.repo),
+              owner,
+            );
+          yield* settled;
+        });
 
       /**
        * The live lease of another process on a session (LOB-18), or none: none when nobody holds one,
@@ -4167,6 +4229,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             starts: true,
           });
           yield* refuseHandedOver(input.sessionId, row, owner);
+          // The card's handoff before the agent's first turn (S-local-agent-handoff-mcp), and before
+          // the setup, which builds what the handed-off work changed.
+          yield* ensureHandoffBeforeFirstTurn(input.sessionId, row, owner);
 
           // The worktree's declared setup before the agent's first turn (S-env-setup): a setup that
           // fails refuses the send, so no message is submitted, nothing is titled from it, and no
@@ -4196,6 +4261,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             starts: true,
           });
           yield* refuseHandedOver(input.sessionId, row, owner);
+          yield* ensureHandoffBeforeFirstTurn(input.sessionId, row, owner);
           const pending = yield* startSetup(input.sessionId, owner);
           if (pending === undefined) {
             yield* submitTo(input, row, owner);
@@ -5680,7 +5746,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
-          // A mission's workers work in this worktree, so it is set up first, as a run's is.
+          // A mission's workers work in this worktree, so it is set up first, as a run's is — on the
+          // card's handoff, when the session is a handed-off card's run (S-local-agent-handoff-mcp).
+          yield* ensureHandoffBeforeFirstTurn(input.sessionId, row, owner);
           yield* ensureSetup(input.sessionId, owner);
           // Resolved again now the owner's worktree exists, so the commands are the ones it holds.
           const workspace = yield* workspaceFor(row, { cut: false });
