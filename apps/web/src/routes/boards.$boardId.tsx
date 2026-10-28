@@ -1,26 +1,34 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause, Option, Schema } from "effect";
-import { KanbanSquareIcon } from "lucide-react";
+import { KanbanSquareIcon, PlusIcon } from "lucide-react";
 import { SessionId } from "@repo/domain/Session";
-import { BoardInstanceId, TaskId } from "@repo/domain/Task";
+import { BoardInstanceId, initialColumnOf, TaskId } from "@repo/domain/Task";
 import { boardAtom } from "@/lib/atoms/board-atom";
 import { boardLanes, definitionFor } from "@/lib/board-view";
+import { NEW_CARD } from "@/lib/card-create-view";
 import { BoardLanesView } from "@/components/board-lanes";
 import { CardPane } from "@/components/card-pane";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { EmptyPane } from "@/components/empty-pane";
+import { NewCardDialog } from "@/components/new-card";
+import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
  * Which card the pane shows, and which of its runs (LOB-76). In the URL rather than in this
  * browser, so a link to a card opens the same pane anywhere and a reload keeps it open. Each is
  * kept only when it decodes as the id it names; anything else reads as no selection.
+ *
+ * `new=card` opens the "New card" form (LOB-275) over whatever the rest selects: the stable action a
+ * page links to when it means "put work on this board". Any other value reads as closed.
  */
 type BoardSearch = {
   readonly card?: TaskId | undefined;
   readonly run?: SessionId | undefined;
+  readonly new?: typeof NEW_CARD | undefined;
 };
 
 const decodeTaskId = Schema.decodeUnknownOption(TaskId);
@@ -30,11 +38,11 @@ export const Route = createFileRoute("/boards/$boardId")({
   validateSearch: (search: Record<string, unknown>): BoardSearch => {
     const card = Option.getOrUndefined(decodeTaskId(search["card"]));
     const run = Option.getOrUndefined(decodeSessionId(search["run"]));
-    return card === undefined
-      ? {}
-      : run === undefined
-        ? { card }
-        : { card, run };
+    const selection: BoardSearch =
+      card === undefined ? {} : run === undefined ? { card } : { card, run };
+    return search["new"] === NEW_CARD
+      ? { ...selection, new: NEW_CARD }
+      : selection;
   },
   component: BoardRoute,
 });
@@ -64,7 +72,11 @@ function BoardRoute() {
  */
 const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
   const result = useAtomValue(boardAtom(boardId));
-  const { card, run } = Route.useSearch();
+  const { card, run, new: creating } = Route.useSearch();
+  const navigate = useNavigate();
+  // The card this page just created (LOB-275), whose pane is opened before the board read that
+  // lists it lands: until then the pane says it is opening it, not that the board has no such card.
+  const [created, setCreated] = useState<TaskId | null>(null);
 
   if (AsyncResult.isInitial(result)) {
     return (
@@ -146,7 +158,49 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
             {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
             to move it or start a run
           </span>
+          {/* A link, not a button: the form is a URL (`?new=card`), so it opens in a new tab too. */}
+          <Link
+            to="/boards/$boardId"
+            params={{ boardId }}
+            search={{
+              ...(card === undefined ? {} : { card }),
+              ...(run === undefined ? {} : { run }),
+              new: NEW_CARD,
+            }}
+            data-new-card
+            className={buttonVariants({ size: "sm", className: "self-center" })}
+          >
+            <PlusIcon strokeWidth={1.75} />
+            New card
+          </Link>
         </header>
+        <NewCardDialog
+          boardId={boardId}
+          repo={instance.repo}
+          column={initialColumnOf(definition)}
+          open={creating === NEW_CARD}
+          onOpenChange={(open) => {
+            if (open) return;
+            void navigate({
+              to: "/boards/$boardId",
+              params: { boardId },
+              search: {
+                ...(card === undefined ? {} : { card }),
+                ...(run === undefined ? {} : { run }),
+              },
+            });
+          }}
+          onCreated={(task) => {
+            // The new card's pane opens at once, and the lanes show it once the board read the
+            // create invalidated (`BOARD_KEY`) answers: the server's list, never this answer.
+            setCreated(task.id);
+            void navigate({
+              to: "/boards/$boardId",
+              params: { boardId },
+              search: { card: task.id },
+            });
+          }}
+        />
         <CheckoutWarning warning={last.warning} />
         <BoardLanesView
           boardId={boardId}
@@ -154,7 +208,19 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           selected={card}
         />
       </div>
-      {card === undefined ? null : selected === undefined ? (
+      {card === undefined ? null : selected === undefined &&
+        card === created ? (
+        <aside
+          aria-label="Card"
+          data-card-pane-opening={card}
+          className="flex w-80 shrink-0 flex-col gap-1 border-l border-border p-4 text-xs"
+        >
+          <span className="font-medium">Opening the new card</span>
+          <span className="text-muted-foreground">
+            {card} was created; the board is reading it back.
+          </span>
+        </aside>
+      ) : selected === undefined ? (
         <aside
           aria-label="Card"
           data-card-pane-missing={card}
