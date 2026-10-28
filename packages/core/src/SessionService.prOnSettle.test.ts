@@ -529,7 +529,7 @@ describe("a settled run's PR (C18)", () => {
     expect(outcome.thread).toEqual([]);
   }, 120_000);
 
-  it("a card's building run with a change opens its PR, and a run of a column that requires none does not", async () => {
+  it("a card's building run with a change opens its PR, and a later run in a column that requires none pushes onto it rather than opening another (C19)", async () => {
     const outcome = await runtime.runPromise(
       Effect.gen(function* () {
         yield* register;
@@ -550,8 +550,10 @@ describe("a settled run's PR (C18)", () => {
           (read) => read.session.prUrl !== undefined,
           "the building run's PR",
         );
-        // The same card, a run in `review` (which requires a verdict, not a PR): it settles on the
-        // same kind of change and opens nothing.
+        // The same card, a run in `review` (which requires a verdict, not a PR). Since C19 it
+        // continues the card's branch, so its settle adopts the card's PR — pushed, no second PR —
+        // rather than opening nothing (a column that requires none and continues no card PR still
+        // opens nothing: `prOnSettle.test.ts`).
         yield* sql`UPDATE tasks SET "column" = 'review' WHERE id = ${taskId}`;
         const reviewed = yield* service.create({
           taskId,
@@ -573,8 +575,8 @@ describe("a settled run's PR (C18)", () => {
     expect(outcome.built.session.prUrl).toMatch(
       new RegExp(`/c18-${runId}/card/pull/\\d+$`),
     );
-    expect(outcome.reviewDecision).toEqual(["undeclared"]);
-    expect(outcome.review.session.prUrl).toBeUndefined();
+    expect(outcome.reviewDecision).toEqual(["opened"]);
+    expect(outcome.review.session.prUrl).toBe(outcome.built.session.prUrl);
     // An opened PR is its own announcement; nothing is noted on the card.
     expect(outcome.thread).toEqual([]);
   }, 120_000);

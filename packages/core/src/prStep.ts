@@ -64,6 +64,13 @@
  * does not hold. The push is never forced, so a remote branch that moved past this one is the
  * `non-fast-forward` outcome — nothing opened, nothing recorded — rather than a PR over commits the
  * run never saw. Any other push failure is a `PrError` naming the push.
+ *
+ * A card's later run adopts the card's PR rather than opening a second one (C19): it continues the
+ * branch an earlier run of the card opened the PR from (`./cardBranch`), so the caller hands the step
+ * that PR (`adopt`). The step then does everything an open does but the GitHub call — the same
+ * measurement, cap and push, so this run's commits reach the PR under the same guards — and records
+ * the card's PR in this session's log, answering `already-open`. The guard is still keyed by the
+ * session: only the caller decides that two sessions are one card's.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -123,6 +130,14 @@ export type OpenPullRequestInput = {
   readonly push?: (
     commit: string | undefined,
   ) => Effect.Effect<PushedBranch, GitError | CredentialError>;
+  /**
+   * The PR the session's card already has on this head and base (C19), opened by an earlier run of
+   * the card on the branch this one continues. With one, a session whose log records no PR yet takes
+   * every step of an open — measured, capped, pushed — but asks GitHub for nothing: the PR exists,
+   * and the push is what brings this run's commits onto it. The record is committed to this log as
+   * it stands, and the answer is `already-open`. Absent: the step opens one, as before.
+   */
+  readonly adopt?: PullRequestRecord;
   /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
   readonly cap?: DiffCap;
   /** What the session was asked to do, and the model and spend behind it, for the body. */
@@ -152,7 +167,11 @@ export const openPullRequest = (
     );
     // Read before the call, so the tag names the path this invocation took rather than what the
     // document ends the turn holding: a first open that lost its index row is still "opened".
-    const outcome = recorded === undefined ? "opened" : "already-open";
+    // A card's PR this run adopts (C19) is one already open, so it is not "opened" either.
+    const outcome =
+      recorded === undefined && input.adopt === undefined
+        ? "opened"
+        : "already-open";
     // Measured only when a PR would actually be opened: a recorded PR is the answer whatever the
     // branch has grown to since, and re-measuring it would turn a retry into a refusal. The same
     // measurement is what the body lists, so the cap and the changed-path list can never disagree
@@ -216,11 +235,17 @@ export const openPullRequest = (
     }
     const pr =
       recorded ??
-      (yield* open(
-        input,
-        Option.match(measured, { onNone: () => [], onSome: (s) => s.paths }),
-        measuredHead,
-      ));
+      (input.adopt === undefined
+        ? yield* open(
+            input,
+            Option.match(measured, {
+              onNone: () => [],
+              onSome: (s) => s.paths,
+            }),
+            measuredHead,
+            commit,
+          )
+        : yield* adoptCardPr(input.conversation, input.adopt, commit));
 
     const sql = yield* SqlClient;
     yield* sql`
@@ -280,6 +305,8 @@ const open = (
   changed: readonly string[],
   /** The commit (or, unresolved, the branch) those paths were measured at. */
   measuredHead: string,
+  /** The commit measured and pushed, recorded as the PR's published head (C19). */
+  commit: string | undefined,
 ): Effect.Effect<
   PullRequestRecord,
   PrError | CredentialError | SessionError,
@@ -323,11 +350,35 @@ const open = (
       base: input.base,
       head: input.head,
       openedAt: DateTime.formatIso(now),
+      ...(commit === undefined ? {} : { commit }),
       evidence,
     };
     yield* writePullRequestDoc(input.conversation, record);
     return record;
   });
+
+/**
+ * Record the card's PR in this session's log (C19, `adopt`): the PR an earlier run of the card
+ * opened, at the commit *this* step measured and pushed — never the earlier run's commit, which is
+ * not what the branch holds now. With no commit resolved, the record names none, which `pr_link`
+ * reads as unknown.
+ */
+const adoptCardPr = (
+  conversation: Conversation,
+  card: PullRequestRecord,
+  commit: string | undefined,
+): Effect.Effect<PullRequestRecord, SessionError> => {
+  const record: PullRequestRecord = {
+    url: card.url,
+    number: card.number,
+    base: card.base,
+    head: card.head,
+    openedAt: card.openedAt,
+    ...(commit === undefined ? {} : { commit }),
+    ...(card.evidence === undefined ? {} : { evidence: card.evidence }),
+  };
+  return Effect.as(writePullRequestDoc(conversation, record), record);
+};
 
 /** How much a session's branch changes, as the PR step measures it. */
 export type DiffSize = {

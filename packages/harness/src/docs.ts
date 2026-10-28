@@ -75,7 +75,9 @@ export const CriteriaDoc = defineDoc({
  * `PrEvidence` the body's `## Verification` section was rendered from, so a later reader (a column's
  * `requires[]` check, LOB-80) reads the same verdict the reviewer did. `null` in the seed and in a
  * document written before evidence existed; readers decode it and treat anything else as absent,
- * which is why adding it needs no version bump.
+ * which is why adding it needs no version bump. `commit` (C19) is the same kind of addition: the
+ * commit the PR's head was published at when this session recorded it, `""` in the seed and in a
+ * document written before it existed, which a reader treats as unknown.
  */
 export const PrDoc = defineDoc({
   kind: PR_DOC_KIND,
@@ -90,6 +92,7 @@ export const PrDoc = defineDoc({
     head: "",
     openedAt: "",
     evidence: null as JsonValue,
+    commit: "",
   }),
 });
 

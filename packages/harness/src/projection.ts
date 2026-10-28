@@ -541,6 +541,8 @@ export type PrDocView = {
   readonly base: string;
   readonly head: string;
   readonly openedAt: string;
+  /** The commit the PR's head was published at when the session recorded it (C19); `""` unknown. */
+  readonly commit: string;
   /**
    * What the PR says was verified (LOB-79). Absent for a PR recorded before evidence existed, and
    * for a value that does not decode: a document is read defensively, so a stray shape drops out
@@ -565,6 +567,7 @@ export const projectPrDoc = (value: JsonValue | undefined): PrDocView => {
     base: stringAt(value, "base") ?? "",
     head: stringAt(value, "head") ?? "",
     openedAt: stringAt(value, "openedAt") ?? "",
+    commit: stringAt(value, "commit") ?? "",
     ...(evidence === undefined ? {} : { evidence }),
   };
 };
