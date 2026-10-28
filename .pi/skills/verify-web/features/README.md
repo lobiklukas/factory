@@ -29,6 +29,7 @@ under Known gaps.
 | The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)       |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 | Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
+| Repositories             | passing | [repos.md](repos.md) (`repos.sh`)          |
 
 ## Known gaps
 
