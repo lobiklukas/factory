@@ -76,6 +76,7 @@ import type {
   SessionSnapshot,
   SessionStatus,
   SessionSummary,
+  SessionTask,
   SessionUsage,
   SessionWorkspace,
   SpendReport,
@@ -115,8 +116,10 @@ import type {
 } from "@repo/harness";
 import {
   EMPTY_RUN_PROFILE,
+  isMissionTask,
   loadRun,
   MISSION_TASKS,
+  missionInFlight,
   NO_ROLE_MODELS,
   Policy,
   PolicyLive,
@@ -448,6 +451,20 @@ export type SessionServiceShape = {
    */
   readonly roleModel: (role: string | undefined) => ResolvedModel;
   /**
+   * Reopen every session that had a mission in flight when the last process stopped, and schedule
+   * its log again (LOB-231): the boot's half of "a mission resumes in the phase it died in".
+   *
+   * Pi Durable keeps an interrupted mission `pending` in its log and runs it again once that log's
+   * harness is resumed, but nothing else reopens a log until a client sends the session something,
+   * and a mission's progress waits on no client. The sessions are the ones whose row says a mission
+   * is in flight (`sessions.mission_in_flight`, kept by the owner's activity projection); a session
+   * whose workspace was released is left alone, as `startMission` would refuse it. A reopened log
+   * with no live mission after all — the row outlived the mission by a crash — is cleared and left
+   * to the idle sweep. Answers the sessions it resumed; one that fails to reopen is logged and does
+   * not stop the others.
+   */
+  readonly resumeMissions: Effect.Effect<readonly SessionId[], SessionError>;
+  /**
    * Close every harness this process owns: the idle sweep's release, for every owner at once, on
    * shutdown. The worktrees and branches stay (LOB-268), so a restarted process resumes on them.
    */
@@ -676,6 +693,10 @@ const sameStrings = (
  * spend is a tool's would otherwise show a live total the rebuilt index cannot reproduce.
  */
 const costOf = (usage: SessionUsage): number => usageCostTotal(usage);
+
+/** Whether a session's live tasks include a mission (LOB-231). */
+const hasLiveMission = (tasks: readonly SessionTask[]): boolean =>
+  tasks.some((task) => isMissionTask(task.kind));
 
 const paper = <A, E>(
   what: string,
@@ -2533,6 +2554,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           });
           // Resolved again now the owner's worktree exists, so the commands are the ones it holds.
           const workspace = yield* workspaceFor(row, { cut: false });
+          // Marked before the mission exists rather than after, so a process stopped the moment the
+          // start commits still finds it at its next boot. The projection settles the row from the
+          // graph from then on: a mission that settles before this call returns is cleared by it,
+          // and a start that fails leaves a mark the next boot clears.
+          yield* setMissionInFlight(input.sessionId, true);
           const taskId = yield* beginMission(owner, {
             feature,
             workspace: {
@@ -3020,12 +3046,40 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               : touchActivity(sessionId);
           case "snapshot":
             return setActivityStatus(sessionId, event.session.status).pipe(
+              Effect.andThen(
+                setMissionInFlight(sessionId, hasLiveMission(event.tasks)),
+              ),
               Effect.andThen(touchActivity(sessionId)),
             );
+          case "tasks":
+            return setMissionInFlight(
+              sessionId,
+              hasLiveMission(event.tasks),
+            ).pipe(Effect.andThen(touchActivity(sessionId)));
           default:
             return touchActivity(sessionId);
         }
       };
+
+      /**
+       * Mirror whether the session's task graph holds a live mission into its row (LOB-231), so the
+       * next boot knows which logs to reopen (`resumeMissions`). Written only when it changes: the
+       * graph changes on every generation and tool call, and the row only when a mission starts or
+       * settles. Best-effort like the other activity writes — a row that lags costs a boot one
+       * reopen that finds nothing (or, at worst, a mission that waits for its next caller), never a
+       * failed run.
+       */
+      const setMissionInFlight = (
+        sessionId: SessionId,
+        inFlight: boolean,
+      ): Effect.Effect<void> =>
+        paper(
+          "write mission in flight",
+          sql`
+            UPDATE sessions SET mission_in_flight = ${inFlight}
+            WHERE id = ${sessionId} AND mission_in_flight <> ${inFlight}
+          `,
+        ).pipe(Effect.ignore);
 
       const touchActivity = (sessionId: SessionId): Effect.Effect<void> =>
         Effect.gen(function* () {
@@ -3799,6 +3853,48 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         };
       };
 
+      const resumeMissions: Effect.Effect<readonly SessionId[], SessionError> =
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read sessions with a mission in flight",
+            sql<{ readonly id: string }>`
+              SELECT id FROM sessions
+              WHERE mission_in_flight AND workspace_released_at IS NULL
+              ORDER BY id
+            `,
+          );
+          const resumed: SessionId[] = [];
+          for (const { id } of rows) {
+            const outcome = yield* Effect.result(
+              Effect.gen(function* () {
+                const sessionId = yield* toSessionId(id);
+                const row = yield* requireSession(sessionId);
+                // `starts`: a release that committed after the query read the row is refused under
+                // the owners' gate, as a `startMission` would be.
+                const owner = yield* acquireOwner(sessionId, row, {
+                  starts: true,
+                });
+                // Scheduling is what a reopen does not do by itself: Pi Durable runs the log's
+                // pending tasks once its harness is resumed, and a mission's phases are among them.
+                owner.harness.resume();
+                const live = yield* missionInFlight(owner.harness);
+                // The row outlived its mission (a crash between the two writes): nothing to resume,
+                // and the sweep releases the owner like any idle one.
+                if (!live) yield* setMissionInFlight(sessionId, false);
+                return live ? sessionId : undefined;
+              }),
+            );
+            if (outcome._tag === "Failure") {
+              yield* Effect.logWarning(
+                `session ${id}: could not resume its mission: ${outcome.failure.message}`,
+              );
+              continue;
+            }
+            if (outcome.success !== undefined) resumed.push(outcome.success);
+          }
+          return resumed;
+        });
+
       const closeAll = Effect.gen(function* () {
         // A comparison still waiting would reopen the owners this is closing (LOB-199), so the waits
         // end first. Nothing is lost: what is owed is in the logs, and the next owner or fold of
@@ -3824,6 +3920,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             Effect.orElseSucceed(() => true),
           );
           if (busy) continue;
+          // A mission in flight is work too, however quiet the conversation (LOB-231): released, it
+          // would stay `pending` in the log until something reopened the session, so its workers
+          // would stop until the next boot. The owner stays until the mission settles.
+          const mission = yield* missionInFlight(owner.harness).pipe(
+            Effect.orElseSucceed(() => true),
+          );
+          if (mission) continue;
           // Removed only if it is still the owner the snapshot read: a caller that acquired it while
           // `isBusy` was answering touched it (a new value), and is about to use the harness this
           // would otherwise close under it — a replay's comparison commit among them (LOB-199).
@@ -3887,6 +3990,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         openPullRequest: openPr,
         releaseWorkspace,
         roleModel,
+        resumeMissions,
         close: closeAll,
       });
     }),

@@ -355,6 +355,42 @@ const DocsScheduleDaemon = (schedule: {
   );
 
 /**
+ * Resume every mission the last process was stopped in the middle of (LOB-231), once, at boot.
+ *
+ * A mission is durable work no client is talking to: a shutdown leaves it `pending` in its log, and
+ * nothing would reopen that log until somebody sent the session a message. `resumeMissions` reopens
+ * each session whose row says a mission is in flight and schedules it, so the mission continues in
+ * the phase it died in. Forked beside `MigrationsDaemon` and for the same reason — the boot binds
+ * first — and retried until the query can run, because the column it reads is a migration's and
+ * the database may not be reachable or migrated yet. Built on `SessionShutdown`, like the docs
+ * schedule, so a resume still in progress is interrupted before the owners are released.
+ */
+const MissionResumeDaemon = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        for (;;) {
+          const exit = yield* Effect.exit(sessions.resumeMissions);
+          if (Exit.isSuccess(exit)) {
+            yield* Effect.logInfo(
+              exit.value.length === 0
+                ? "missions: none in flight to resume"
+                : `missions: resumed ${exit.value.length} in flight: ${exit.value.join(", ")}`,
+            );
+            return;
+          }
+          yield* Effect.logWarning(
+            `missions: could not resume; retrying in ${MIGRATION_RETRY_MS}ms: ${firstLine(exit.cause)}`,
+          );
+          yield* Effect.sleep(MIGRATION_RETRY_MS);
+        }
+      }),
+    );
+  }),
+);
+
+/**
  * Say which credential source the process selected (LOB-51). Building the provider is what refuses
  * an unsupported configuration (a GitHub App id with no App flow), so this line is also the boot's
  * evidence that the static token, not an App, is what the control plane will use.
@@ -559,15 +595,18 @@ const HttpLive = Effect.gen(function* () {
   // sequential scope, shutdown first, so the daemon's fiber is interrupted (and awaited) before
   // `sessions.close` releases the owners; siblings in `Layer.mergeAll` would close in parallel, and a
   // tick inside `sessions.create` could open an owner while `close` was releasing them.
+  // The mission resume (LOB-231) sits there too, for the same reason: a resume that is still
+  // reopening owners when the signal lands is interrupted before `close` releases them.
   const SessionDaemons = Option.match(docsSchedule.repo, {
-    onNone: () => SessionShutdown,
+    onNone: () => MissionResumeDaemon,
     onSome: (repo) =>
       docsEveryMs > 0
-        ? DocsScheduleDaemon({ everyMs: docsEveryMs, repo }).pipe(
-            Layer.provideMerge(SessionShutdown),
+        ? Layer.mergeAll(
+            MissionResumeDaemon,
+            DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
           )
-        : SessionShutdown,
-  });
+        : MissionResumeDaemon,
+  }).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
   }
