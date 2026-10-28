@@ -286,11 +286,7 @@ import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
 import { checkRunCaps } from "./boardCaps";
-import {
-  type CardBranch,
-  cardBranchOf,
-  changeColumnsOf,
-} from "./cardBranch";
+import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
   countRefusal,
   countSessionCreate,
@@ -6801,7 +6797,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // workspace bound to it, never from under a run that still works on it.
           const branch =
             workspace.branch === undefined ||
-            (yield* branchHeldElsewhere(input.sessionId, row.repo, workspace.branch))
+            (yield* branchHeldElsewhere(
+              input.sessionId,
+              row.repo,
+              workspace.branch,
+            ))
               ? undefined
               : workspace.branch;
           // Once with no checkout when there is none, so a plain session directory is still removed.

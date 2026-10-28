@@ -238,7 +238,10 @@ export const openPullRequest = (
       (input.adopt === undefined
         ? yield* open(
             input,
-            Option.match(measured, { onNone: () => [], onSome: (s) => s.paths }),
+            Option.match(measured, {
+              onNone: () => [],
+              onSome: (s) => s.paths,
+            }),
             measuredHead,
           )
         : yield* Effect.as(

@@ -290,8 +290,15 @@ describe("a card's runs share one branch and one PR (C19)", () => {
             "HEAD",
           ),
           head: git(worktreeOf(second.id), "rev-parse", "HEAD"),
-          hasFirstChange: existsSync(join(worktreeOf(second.id), "change-1.txt")),
-          firstDetached: git(worktreeOf(first), "rev-parse", "--abbrev-ref", "HEAD"),
+          hasFirstChange: existsSync(
+            join(worktreeOf(second.id), "change-1.txt"),
+          ),
+          firstDetached: git(
+            worktreeOf(first),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+          ),
         };
         yield* service.send({ sessionId: second.id, content: "fix it up" });
         yield* waitUntil(
