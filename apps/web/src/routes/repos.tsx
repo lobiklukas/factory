@@ -17,6 +17,9 @@ import {
   registerInput,
   registerRefusal,
   runnability,
+  RUNNABLE_TITLE,
+  sameDirectory,
+  BASE_REF_HELP,
   urlLabel,
   type RegisterRefusal,
   type RepoForm,
@@ -225,10 +228,14 @@ const AddRepository = () => {
             value={form.defaultBaseRef}
             onInput={edit("defaultBaseRef")}
             placeholder="main"
+            aria-describedby="repo-base-help"
             autoComplete="off"
             spellCheck={false}
             className="font-mono"
           />
+          <p id="repo-base-help" className="text-[11px] text-muted-foreground">
+            {BASE_REF_HELP}
+          </p>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="repo-url">Clone URL (optional)</Label>
@@ -319,6 +326,7 @@ const RepoRow = ({ repo }: { readonly repo: RepoSummary }) => {
         {state.runnable ? (
           <span
             data-repo-state="runnable"
+            title={RUNNABLE_TITLE}
             className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
           >
             <CircleCheckIcon className="size-3" strokeWidth={1.75} />
@@ -342,10 +350,9 @@ const RepoRow = ({ repo }: { readonly repo: RepoSummary }) => {
         <dd data-repo-path className="min-w-0 font-mono break-all">
           {repo.localPath ?? "none registered"}
         </dd>
-        {repo.workTree === undefined ||
-        repo.workTree === repo.localPath ? null : (
+        {sameDirectory(repo.workTree, repo.localPath) ? null : (
           <>
-            <dt className="text-muted-foreground">Work tree</dt>
+            <dt className="text-muted-foreground">Repository root</dt>
             <dd data-repo-work-tree className="min-w-0 font-mono break-all">
               {repo.workTree}
             </dd>

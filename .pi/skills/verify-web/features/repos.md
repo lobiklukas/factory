@@ -13,8 +13,8 @@ add|ls|show` is the CLI's ([verify-cli's repo.md](../../verify-cli/features/repo
   (`true`/`false`) and, when it cannot run, `data-repo-cause` (`no_checkout` or `not_a_work_tree`). It
   carries the checkout path, the clone URL, the default base ref and whether `.factory/config`
   declares commands. When the git work tree the path is inside is not the path itself (a package
-  inside a monorepo, or a plain directory under an unrelated repository) a **Work tree** line names
-  the repository sessions are cut from.
+  inside a monorepo, or a plain directory under an unrelated repository) a **Repository root** line names
+  the repository sessions are cut from (git's resolved path, so a symlinked path can show it too).
 - **Not runnable** is a row with no local checkout, or whose checkout is no longer inside a git work
   tree (moved or deleted since it was registered: the server reads that from the disk each time).
   The row says why (`[data-repo-reason]`) and what to do (`[data-repo-fix]`). The rule is
@@ -56,7 +56,8 @@ default 3441) and its own throwaway git checkouts under `.verify/run/repos/check
    without a reload, and keeps the base ref.
 8. **A run.** `createSession` on the registered repo answers a snapshot whose branch is
    `factory/<session-id>`, whose path holds a worktree (`.git`), and whose branch exists in the
-   checkout (`git rev-parse`); the session opened while the other repo had no checkout has a
+   checkout (`git rev-parse`); the same holds for a session on the flagged repo once step 7 gave
+   it a checkout (the first-run path); the session opened while the other repo had no checkout has a
    directory but no worktree.
 9. **Follow.** The checkout is renamed away behind the registry's back; the open page flips the row
    to `not runnable` (`not_a_work_tree`) naming the path on its next poll, without a reload; a reload
@@ -68,12 +69,20 @@ Evidence: `.verify/evidence/latest/repos/` holds `repos-flagged.png`, `repos-ref
 
 ## Gotchas
 
+- **`runnable` means a checkout, not a proven session.** The server reports whether the path is in a
+  git work tree, not whether the default base ref (`main` unless given) exists in it; a `master`-only
+  or empty checkout reads runnable and `createSession` then fails with `failed to create worktree`.
+  The row's tooltip and the form's help text say so. A server-side `baseRefResolves` fact is a
+  follow-up (see LOB-262's comments).
+- **The drive cleans up after itself.** `repos.sh` deletes the `verify-repos-%` rows it registered on
+  exit (no `deleteRepo` RPC exists); a run killed before cleanup leaves them, and they show as not
+  runnable.
 - **The registry is global.** The page lists every repo the database holds (other suites' rows too),
   so the drive asserts the rows it made by slug and compares counts to `listRepos`, never to a fixed
   list.
 - **A directory under a git work tree is accepted.** `registerRepo` refuses a path outside any work
   tree, not one inside it (LOB-253: a monorepo package is valid). The drive's refused path is
-  therefore a `mkdtemp` under the OS temp dir, not a folder in this checkout. The row's Work tree
+  therefore a `mkdtemp` under the OS temp dir, not a folder in this checkout. The row's Repository root
   line is how a person sees which repository sessions would really be cut from.
 - **`workspace.branch` is not proof of a worktree.** A session on a repo with no checkout still
   reports `factory/<id>` as its branch; the drive checks the worktree's `.git` and the branch in the

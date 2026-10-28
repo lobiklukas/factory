@@ -45,6 +45,13 @@ cleanup() {
   cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/api.log" 2>/dev/null || true
   cp "$RUN_DIR/web.log" "$EVIDENCE_DIR/web.log" 2>/dev/null || true
   rm -rf "$RUN_DIR/sessions" "$RUN_DIR/checkouts"
+  # The registry has no delete RPC: take back the rows this run registered (their checkouts are gone
+  # now), so a database an operator reads is not left with not-runnable rows. Over TCP, as always.
+  bun -e '
+    const sql = new Bun.SQL(process.argv[1]);
+    try { await sql`DELETE FROM repos WHERE slug LIKE ${"verify-repos-%"}`; } finally { await sql.close(); }
+  ' "${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory}" >/dev/null 2>&1 ||
+    echo "repos: could not delete the verify-repos-* rows; they remain in the database" >&2
 }
 trap cleanup EXIT
 

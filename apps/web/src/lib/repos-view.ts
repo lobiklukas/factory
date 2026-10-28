@@ -49,6 +49,33 @@ export const runnability = (repo: RepoSummary): Runnability => {
   return { runnable: true };
 };
 
+/**
+ * What "runnable" does and does not promise. The server reports a checkout, not whether the base
+ * ref exists in it: a checkout whose default branch is `master`, or one with no commits, is flagged
+ * runnable here and still refused at `createSession` ("failed to create worktree at main").
+ */
+export const RUNNABLE_TITLE =
+  "A git checkout is registered. A session also needs the default base ref to exist in it.";
+
+/** The form's note under the base ref: the one condition the page cannot check for the person. */
+export const BASE_REF_HELP =
+  "Must name a branch or commit that exists in the checkout; a blank ref keeps the row's, or uses main for a new one.";
+
+/**
+ * Whether two paths name the same directory as written: trailing slashes ignored. The server's
+ * `workTree` is git's resolved root, so a path through a symlink still differs from it, which is why
+ * the row labels the line "Repository root" rather than claiming a difference.
+ */
+export const sameDirectory = (
+  workTree: string | undefined,
+  localPath: string | undefined,
+): boolean => {
+  if (workTree === undefined) return true;
+  const strip = (value: string): string =>
+    value.length > 1 ? value.replace(/\/+$/, "") : value;
+  return localPath !== undefined && strip(workTree) === strip(localPath);
+};
+
 /** How many of `repos` cannot run: the number the page's header and its empty-state rules read. */
 export const notRunnableCount = (repos: ReadonlyArray<RepoSummary>): number =>
   repos.filter((repo) => !runnability(repo).runnable).length;

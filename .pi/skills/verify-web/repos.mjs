@@ -16,7 +16,7 @@
 //   add       the form registers the throwaway checkout: the row appears without a reload, runnable,
 //             and equals `listRepos`' row (base ref, URL, path, work tree); the form is cleared
 //   fix       the same form, naming the flagged repo's slug and a path, turns it runnable in place
-//   run       a session created on a registered repo has `factory/<session-id>` as its branch, a real
+//   run       a session created on a registered repo, and on the flagged one once fixed, has `factory/<session-id>` as its branch, a real
 //             worktree on disk and the branch in the checkout; one opened on the repo while it had no checkout has a directory but no worktree
 //   follow    the checkout moved away behind the registry's back: the open page flips the row to
 //             `not runnable`, cause `not_a_work_tree`, on its next poll, without a reload
@@ -56,6 +56,8 @@ const PLAIN_DIR = await mkdtemp(path.join(os.tmpdir(), `verify-repos-${TAG}-`));
 const WIDGETS_URL = `https://example.invalid/${TAG}/widgets.git`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
+// A failure shot from an earlier run must not sit beside this run's passing evidence.
+await rm(path.join(EVIDENCE_DIR, "repos-failure.png"), { force: true });
 for (const dir of [WIDGETS_DIR, NOPATH_DIR]) {
   const init = spawnSync("git", ["init", "-q", "-b", "main", dir], {
     encoding: "utf8",
@@ -386,6 +388,26 @@ try {
       existsSync(path.join(workspace.path, ".git")) &&
       branchInCheckout.status === 0,
     `branch=${workspace.branch} path=${workspace.path} branchInCheckout=${branchInCheckout.status}`,
+  );
+  // The first-run path itself: the repo a session registered with no checkout, once it has one, is
+  // cut a worktree like any other.
+  const healed = await rpc("createSession", { repo: NOPATH });
+  const healedWorkspace = (await rpc("getSession", { sessionId: healed.id }))
+    .workspace;
+  const healedBranch = `factory/${healed.id}`;
+  const healedInCheckout = spawnSync(
+    "git",
+    ["-C", NOPATH_DIR, "rev-parse", "--verify", "--quiet", healedBranch],
+    { encoding: "utf8" },
+  );
+  observed.healed = { session: healed.id, workspace: healedWorkspace };
+  assert(
+    "a session on the auto-registered repo, once it has a checkout, gets a factory/<session-id> worktree",
+    healedWorkspace.repo === NOPATH &&
+      healedWorkspace.branch === healedBranch &&
+      existsSync(path.join(healedWorkspace.path, ".git")) &&
+      healedInCheckout.status === 0,
+    `branch=${healedWorkspace.branch} path=${healedWorkspace.path} branchInCheckout=${healedInCheckout.status}`,
   );
   // The contrast: the snapshot names `factory/<id>` as the branch for any repo-bound session, so the
   // name alone proves nothing. What the repo with no checkout lacks is the worktree itself.

@@ -14,6 +14,7 @@ import {
   registerInput,
   registerRefusal,
   runnability,
+  sameDirectory,
   slugProblem,
   urlLabel,
 } from "./repos-view";
@@ -187,5 +188,21 @@ describe("urlLabel", () => {
   it("says so for a repo nobody gave a clone URL", () => {
     expect(urlLabel("")).toBe("no clone URL");
     expect(urlLabel("https://x/y.git")).toBe("https://x/y.git");
+  });
+});
+
+describe("sameDirectory", () => {
+  it("treats a trailing slash as the same directory", () => {
+    expect(sameDirectory("/src/widgets", "/src/widgets/")).toBe(true);
+    expect(sameDirectory("/src/widgets/", "/src/widgets")).toBe(true);
+  });
+
+  it("is quiet when there is no work tree to compare", () => {
+    expect(sameDirectory(undefined, "/src/widgets")).toBe(true);
+    expect(sameDirectory(undefined, undefined)).toBe(true);
+  });
+
+  it("names a different root: a package inside a repository", () => {
+    expect(sameDirectory("/src/mono", "/src/mono/packages/a")).toBe(false);
   });
 });
