@@ -91,6 +91,7 @@ import {
   ListSessionsInput,
   ListSessionsOutput,
   ListSpendInput,
+  ReadSessionHistoryInput,
   RegisterRepoInput,
   ReleaseWorkspaceResult,
   ReplaySessionInput,
@@ -101,6 +102,7 @@ import {
   SendMessageResult,
   SessionError,
   SessionEvent,
+  SessionHistoryPage,
   SessionIdInput,
   SessionSnapshot,
   SessionSummary,
@@ -130,6 +132,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("getSession", {
     payload: SessionIdInput,
     success: SessionSnapshot,
+    error: SessionError,
+  }),
+  // A historical snapshot carries the newest entries of a long transcript; this pages back through
+  // the rest on request (LOB-243).
+  Rpc.make("readSessionHistory", {
+    payload: ReadSessionHistoryInput,
+    success: SessionHistoryPage,
     error: SessionError,
   }),
   Rpc.make("sendMessage", {

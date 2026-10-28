@@ -22,7 +22,7 @@
  * `pullRequestReport` is the one reading of a step's exit, so every tracker agrees on which exits
  * are a PR, which are a failed run, and which are an interrupt that says nothing about the run.
  */
-import { Cause, Context, Duration, Effect, Exit, Option } from "effect";
+import { Cause, Context, Duration, Effect, Exit, Layer, Option } from "effect";
 import type { SessionError, SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
 import type { CredentialError } from "./credentials";
@@ -58,6 +58,38 @@ export const SessionWriteBack = Context.Reference<SessionWriteBackShape>(
   "@repo/core/SessionWriteBack",
   { defaultValue: () => ({ pullRequest: () => Effect.void }) },
 );
+
+/**
+ * Several trackers' write-backs as one: each report goes to every layer's `SessionWriteBack`, in
+ * parallel, so a deployment with Linear and Slack configured mirrors the PR step on both
+ * (LOB-259). A `Context.Reference` holds one value, so two layers provided side by side would
+ * leave the last one standing; this is what makes them add up.
+ *
+ * Each layer is built here and read back as the reference's value, which is why every one of them
+ * has the `never` output `LinearSessionWriteBack` has. Each implementation already cannot fail or
+ * stall the step (the contract above), so one that is slow delays the others only up to
+ * `SESSION_WRITE_BACK_BUDGET`, the bound the session layer puts on the whole report.
+ */
+export const SessionWriteBacksAll = <E, R>(
+  layers: ReadonlyArray<Layer.Layer<never, E, R>>,
+): Layer.Layer<never, E, R> =>
+  Layer.effect(
+    SessionWriteBack,
+    Effect.gen(function* () {
+      const shapes: SessionWriteBackShape[] = [];
+      for (const layer of layers) {
+        const context = yield* Layer.build(layer);
+        shapes.push(Context.get(context, SessionWriteBack));
+      }
+      return {
+        pullRequest: (input) =>
+          Effect.forEach(shapes, (shape) => shape.pullRequest(input), {
+            concurrency: "unbounded",
+            discard: true,
+          }),
+      };
+    }),
+  );
 
 /** What a step's exit means to a tracker. */
 export type PullRequestReport =
