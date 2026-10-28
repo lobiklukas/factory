@@ -18,6 +18,7 @@ import {
   CHECKED_REQUIREMENTS,
   exitRequirements,
   exitView,
+  humanMergeVerdict,
   nonEmptyDiffVerdict,
   prLinkVerdict,
   requirementVerdict,
@@ -113,9 +114,16 @@ describe("exitRequirements", () => {
       "review_verdict",
       "spec_doc",
       "run_completed",
+      "human_merge",
     ]);
-    // `human_merge` is the merge gate, enforced by actor, not by a check of evidence.
+    // `human_merge` is checked against the card's PR's merge since C20, on a move into done only.
     expect(exitRequirements(review, "done").map((r) => r.key)).toEqual([
+      "verified",
+      "review_verdict",
+      "human_merge",
+    ]);
+    // Sending a card back from review is no merge, so the move is not held to one.
+    expect(exitRequirements(review, "building").map((r) => r.key)).toEqual([
       "verified",
       "review_verdict",
     ]);
@@ -254,8 +262,74 @@ describe("the run_completed requirement (D9)", () => {
   });
 });
 
+describe("the human_merge requirement (C20)", () => {
+  const PR = "https://github.com/o/r/pull/7";
+  const OTHER = "https://github.com/o/r/pull/9";
+  const unmet = (verdict: { met: boolean; reason?: string }): string => {
+    if (verdict.met) throw new Error("expected the requirement to be unmet");
+    return verdict.reason ?? "";
+  };
+
+  /** Mutation: met with no PR on record — a card nobody opened a PR for would pass the merge gate. */
+  it("is unmet for a card with no PR on record", () => {
+    expect(
+      unmet(humanMergeVerdict({ runs: [run("ses_a"), run("ses_b")] })),
+    ).toContain("the card has no PR on record");
+  });
+
+  /** Mutation: met on a recorded PR alone — an open PR would pass. */
+  it("is unmet while the card's PR has no merge on record, naming the PR", () => {
+    const reason = unmet(
+      humanMergeVerdict({ runs: [{ ...run("ses_a"), prUrl: PR }] }),
+    );
+    expect(reason).toContain(`no merge of the card's PR ${PR} is on record`);
+    expect(reason).toContain("closed without being merged");
+  });
+
+  it("is met once a run of the card recorded the merge of the card's PR", () => {
+    expect(
+      humanMergeVerdict({
+        runs: [
+          { ...run("ses_a"), prUrl: PR },
+          { ...run("ses_b"), prUrl: PR, mergedPr: PR },
+        ],
+      }),
+    ).toEqual({ met: true });
+    // A card none of whose runs recorded the PR itself is judged on the PR its merge names.
+    expect(
+      humanMergeVerdict({ runs: [{ ...run("ses_a"), mergedPr: PR }] }),
+    ).toEqual({ met: true });
+  });
+
+  /** Mutation: any recorded merge counts — a replaced PR's merge would pass the card's new one. */
+  it("is not met by the merge of a PR the card's newest PR replaced", () => {
+    expect(
+      unmet(
+        humanMergeVerdict({
+          runs: [
+            { ...run("ses_a"), prUrl: OTHER, mergedPr: OTHER },
+            { ...run("ses_b"), prUrl: PR },
+          ],
+        }),
+      ),
+    ).toContain(PR);
+  });
+
+  it("is what requirementVerdict judges human_merge with, and exitView lists it as checked", () => {
+    expect(
+      requirementVerdict(
+        { key: "human_merge", description: "a human merge" },
+        { runs: [{ ...run("ses_a"), prUrl: PR, mergedPr: PR }] },
+      ),
+    ).toEqual({ met: true });
+    expect(
+      exitView(review, { runs: [{ ...run("ses_a"), prUrl: PR }] })[2],
+    ).toMatchObject({ key: "human_merge", status: "unmet" });
+  });
+});
+
 describe("exitView (D9)", () => {
-  /** Mutation: mark an unchecked key `met` — `plan_doc` or `human_merge` would read as satisfied. */
+  /** Mutation: mark an unchecked key `met` — `plan_doc` or `human_move` would read as satisfied. */
   it("lists every declared key in order: judged ones met or unmet with a reason, the rest unchecked", () => {
     const planning: BoardColumn = {
       name: "planning",
