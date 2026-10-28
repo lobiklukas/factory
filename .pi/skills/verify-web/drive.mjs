@@ -300,6 +300,41 @@ assert(
     : `no tool result within 40s; pane: ${JSON.stringify(paneText.slice(0, 200))}`,
 );
 
+// Feature: a transcript shows each message once, under its real author (LOB-273). The session's
+// title entry carries the first prompt, and with no branch for it the row used to fall through to
+// assistant prose: the prompt appeared as a plain paragraph, then again as the user's bubble, then
+// an empty SYSTEM divider. The scroller's items are the transcript alone (the header also names the
+// session by that prompt, which is why this reads the scroller and not the page).
+const transcriptItems = await page
+  .locator("[data-slot='message-scroller-item']")
+  .evaluateAll((items) =>
+    items.map((item) => ({
+      text: item.innerText.trim(),
+      bubble: item.querySelector("[data-slot='bubble']") !== null,
+    })),
+  );
+// Keep in step with PROMPT in apps/web/src/components/session-sidebar.tsx, the sample the sidebar sends.
+const promptText = "Run echo faux-ok and tell me what it printed.";
+// Equal to, not containing: the agent's answer quotes the prompt ("faux-ok (re: ...)").
+const promptRows = transcriptItems.filter((item) => item.text === promptText);
+const bareMarkers = transcriptItems.filter((item) =>
+  /^system$/i.test(item.text),
+);
+observed.transcriptAttribution = { transcriptItems, promptRows, bareMarkers };
+assert(
+  "the first prompt appears once in the transcript, as the user's bubble",
+  sessionWorked && promptRows.length === 1 && promptRows[0].bubble,
+  `${promptRows.length} transcript row(s) hold the prompt; rows: ${JSON.stringify(transcriptItems.map((item) => item.text.slice(0, 40)))}`,
+);
+assert(
+  "the transcript shows no bare SYSTEM divider",
+  sessionWorked && bareMarkers.length === 0,
+  `${bareMarkers.length} bare system marker(s)`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "transcript-attribution.png"),
+});
+
 // A task that settles leaves the panel: the graph no longer carries it, the stream says so, and the
 // strip goes back to its empty state in the same document the run started in.
 await page
