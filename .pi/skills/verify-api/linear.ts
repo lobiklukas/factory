@@ -504,6 +504,27 @@ const program = Effect.gen(function* () {
     `sessions=${JSON.stringify(onStored.map((entry) => entry.id))}`,
   );
 
+  // The reason is recorded with the delivery, so the same delivery again still names the route.
+  const replayedRoute = yield* Effect.promise(() =>
+    deliver(
+      "stored-after-route",
+      issueBody({
+        ...storedIssue,
+        action: "update",
+        labels: [STORED],
+        updatedFrom: { labelIds: [] },
+      }),
+    ),
+  );
+  assert(
+    "a replay of the stored route's delivery still names the route that started it",
+    replayedRoute.body?.["replayed"] === true &&
+      replayedRoute.body?.["status"] === "processed" &&
+      replayedRoute.body?.["reason"] ===
+        `rule "${STORED.name}" (route ${route.id}) mapped it to ${STORED_REPO}`,
+    `replay=${JSON.stringify(replayedRoute.body)}`,
+  );
+
   yield* routes.removeTriggerRoute({ id: route.id });
   const afterRemoval = yield* Effect.promise(() =>
     deliver(

@@ -28,7 +28,8 @@ export default Effect.gen(function* () {
       prompt TEXT NOT NULL,
       starts_work_for TEXT[],
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CHECK (label IS NOT NULL OR team IS NOT NULL)
+      CHECK (label IS NOT NULL OR team IS NOT NULL),
+      CHECK (label <> '' AND team <> '')
     )
   `;
 });

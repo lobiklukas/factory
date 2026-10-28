@@ -80,9 +80,9 @@ export type TriggerEvent = typeof TriggerEvent.Type;
  * first message without a rule per issue.
  */
 const triggerRuleFields = {
-  label: Schema.optional(Schema.String),
+  label: Schema.optional(Schema.NonEmptyString),
   /** A source's team key (`TriggerEvent.team`); absent means "any team". */
-  team: Schema.optional(Schema.String),
+  team: Schema.optional(Schema.NonEmptyString),
   repo: RepoSlug,
   baseRef: Schema.optional(Schema.String),
   prompt: Schema.String,

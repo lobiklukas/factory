@@ -64,7 +64,7 @@ LOB-235's re-run is `.verify/evidence/lob-235/webhook/`: 17/17 on `:9520`; the s
 the adapter from before LOB-235 fails check 12 with `{"status":"processed","reason":"rule \"docs\"
 mapped it to acme/verify-api-trigger"}` and a `processed` row, which is the defect.
 `apps/api/src/Api/Webhook.test.ts` pins the refusal in-process for `push` and `schedule`, and for
-a rule-admitted `release` (`webhookRoutesFor` serves the routes with that rule), with two controls: a `create` on `docs` reaches the seam as a create, and `update` still reaches the
+a rule-admitted `release` (the case serves `WebhookRoutes` over a fake seam whose `rules` answers the widened rule), with two controls: a `create` on `docs` reaches the seam as a create, and `update` still reaches the
 seam's filter (a route that refused every non-create would fail it).
 
 **Non-vacuity.** A mutation run of `TriggerService.test.ts`, recorded here rather than kept: with

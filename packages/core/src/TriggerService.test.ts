@@ -1056,6 +1056,21 @@ describe("stored trigger routes", () => {
       expect(created[0]?.repo).toBe(routeRepo);
       expect(created[0]?.baseRef).toBe("develop");
       expect(created[0]?.messages).toEqual([`stored: ${runId}-issue`]);
+
+      // The reason is stored with the delivery, not only in the first response: the row names the
+      // route, and a replay of the processed delivery answers with it.
+      const replayed = await run(
+        trigger.deliver(
+          deliver(`${runId}-stored-after`, {
+            source: "linear",
+            labels: [routeLabel],
+          }),
+        ),
+      );
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.status).toBe("processed");
+      expect(replayed.reason).toBe(after.reason);
+      expect(replayed.reason).toContain(`route ${route.id}`);
     });
   }, 60_000);
 
@@ -1224,6 +1239,11 @@ describe("stored trigger routes", () => {
         ),
       );
       expect(other.status).toBe("skipped");
+      // The reason names the team, so an operator who stored a team route can see why this one was not
+      // claimed.
+      expect(other.reason).toBe(
+        "the event carries no labels, so no rule maps it in team ELSEWHERE",
+      );
       const none = await run(
         trigger.deliver(deliver(`${runId}-team-none`, { labels: [] })),
       );
@@ -1340,6 +1360,25 @@ describe("stored trigger routes", () => {
           (error: unknown) => error,
         );
       expect(missing).toMatchObject({ _tag: "TriggerRouteNotFound" });
+    });
+  }, 60_000);
+
+  it("answers one of two concurrent removals of a route with the row and the other with not-found", async () => {
+    await withStored(async ({ stored }) => {
+      const route = await stored.add({
+        label: `${routeLabel}-race`,
+        repo: routeRepo,
+        prompt: "x",
+      });
+      const settled = await Promise.allSettled([
+        stored.remove(route.id),
+        stored.remove(route.id),
+      ]);
+      expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const lost = settled.find((r) => r.status === "rejected");
+      expect(lost).toMatchObject({
+        reason: { _tag: "TriggerRouteNotFound" },
+      });
     });
   }, 60_000);
 });

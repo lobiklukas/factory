@@ -152,4 +152,17 @@ describe("a rule that names a team (LOB-266)", () => {
       prompt: "x",
     });
   });
+
+  it("refuses an empty label or team, which would claim nothing just as a missing one does", () => {
+    const decode = Schema.decodeUnknownSync(TriggerRuleSchema);
+    expect(() =>
+      decode({ label: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
+    expect(() =>
+      decode({ team: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
+    expect(() =>
+      decode({ label: "docs", team: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
+  });
 });

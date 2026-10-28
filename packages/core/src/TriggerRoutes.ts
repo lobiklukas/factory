@@ -12,14 +12,14 @@
  * `RoutedRule`: the rule and where it came from (`route <id>` for a row, `env:TRIGGER_RULES[i]` for
  * the fallback). Nothing in this file decides whether an event starts work; that is the seam's.
  */
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
   TriggerRouteError,
   TriggerRouteNotFound,
   type AddTriggerRouteInput,
-  type TriggerRoute,
+  TriggerRoute,
   type TriggerRouteId,
   type TriggerRule,
 } from "@repo/domain/Trigger";
@@ -59,8 +59,11 @@ type RouteRow = {
   readonly createdAt: string;
 };
 
-const toRoute = (row: RouteRow): TriggerRoute =>
-  ({
+/** A stored row, checked: a repo slug or id this build does not know is a broken row, not a route. */
+const toRoute = (
+  row: RouteRow,
+): Effect.Effect<TriggerRoute, Schema.SchemaError> =>
+  Schema.decodeEffect(TriggerRoute)({
     id: row.id,
     repo: row.repo,
     prompt: row.prompt,
@@ -69,16 +72,16 @@ const toRoute = (row: RouteRow): TriggerRoute =>
     ...(row.team === null ? {} : { team: row.team }),
     ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
     ...(row.startsWorkFor === null ? {} : { startsWorkFor: row.startsWorkFor }),
-  }) as TriggerRoute;
+  });
 
 /**
  * Every stored route in the order the seam consults them: a route naming a label and a team first
  * (the most specific), then a label alone, then a team alone, the older route first within each. The
- * order is the precedence, and it is a function of the rows alone, so two processes agree on it.
+ * order is a function of the rows alone, so two processes agree on it.
  */
 export const readStoredRoutes = (
   sql: SqlClient,
-): Effect.Effect<ReadonlyArray<TriggerRoute>, SqlError> =>
+): Effect.Effect<ReadonlyArray<TriggerRoute>, SqlError | Schema.SchemaError> =>
   Effect.gen(function* () {
     const rows = yield* sql<RouteRow>`
     SELECT id, label, team, repo, base_ref, prompt, starts_work_for,
@@ -89,7 +92,7 @@ export const readStoredRoutes = (
                   ELSE 2 END,
              created_at, id
   `;
-    return rows.map(toRoute);
+    return yield* Effect.forEach(rows, toRoute);
   });
 
 /**
@@ -99,7 +102,7 @@ export const readStoredRoutes = (
 export const readRoutedRules = (
   sql: SqlClient,
   fallback: ReadonlyArray<RoutedRule>,
-): Effect.Effect<ReadonlyArray<RoutedRule>, SqlError> =>
+): Effect.Effect<ReadonlyArray<RoutedRule>, SqlError | Schema.SchemaError> =>
   readStoredRoutes(sql).pipe(
     Effect.map((stored) => [
       ...stored.map((route) => ({
@@ -133,7 +136,7 @@ export class TriggerRoutes extends Context.Service<
 
 const storage =
   (what: string) =>
-  (cause: SqlError): TriggerRouteError =>
+  (cause: { readonly message: string }): TriggerRouteError =>
     new TriggerRouteError({
       code: "storage",
       message: `${what}: ${cause.message}`,
@@ -148,6 +151,23 @@ export const TriggerRoutesLive = Layer.effect(
       Effect.mapError(storage("read trigger routes")),
     );
 
+    /** The one row a `RETURNING` answered, decoded. */
+    const storedRow = (
+      rows: ReadonlyArray<RouteRow>,
+      id: TriggerRouteId,
+      what: string,
+    ) =>
+      Effect.gen(function* () {
+        const row = rows[0];
+        if (row === undefined) {
+          return yield* new TriggerRouteError({
+            code: "storage",
+            message: `${what}: trigger route ${id} returned no row`,
+          });
+        }
+        return yield* toRoute(row).pipe(Effect.mapError(storage(what)));
+      });
+
     const add = Effect.fn("TriggerRoutes.add")(function* (
       input: AddTriggerRouteInput,
     ) {
@@ -161,38 +181,36 @@ export const TriggerRoutesLive = Layer.effect(
         });
       }
       const id = yield* mintTriggerRouteId;
-      yield* sql`
+      const rows = yield* sql<RouteRow>`
         INSERT INTO trigger_routes (id, label, team, repo, base_ref, prompt, starts_work_for)
         VALUES (
           ${id}, ${input.label ?? null}, ${input.team ?? null}, ${input.repo},
           ${input.baseRef ?? null}, ${input.prompt},
           ${input.startsWorkFor ?? null}::text[]
         )
+        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for,
+          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
       `.pipe(Effect.mapError(storage("store trigger route")));
-      const stored = (yield* list).find((route) => route.id === id);
-      if (stored === undefined) {
-        return yield* new TriggerRouteError({
-          code: "storage",
-          message: `trigger route ${id} was stored but could not be read back`,
-        });
-      }
-      return stored;
+      return yield* storedRow(rows, id, "store trigger route");
     });
 
     const remove = Effect.fn("TriggerRoutes.remove")(function* (
       id: TriggerRouteId,
     ) {
-      const existing = (yield* list).find((route) => route.id === id);
-      if (existing === undefined) {
+      // One statement: of two concurrent removes only one gets the row back, so only one is told it
+      // removed it and the other is told the route is gone.
+      const rows = yield* sql<RouteRow>`
+        DELETE FROM trigger_routes WHERE id = ${id}
+        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for,
+          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      `.pipe(Effect.mapError(storage("delete trigger route")));
+      if (rows.length === 0) {
         return yield* new TriggerRouteNotFound({
           id,
           message: `trigger route ${id} does not exist`,
         });
       }
-      yield* sql`DELETE FROM trigger_routes WHERE id = ${id}`.pipe(
-        Effect.mapError(storage("delete trigger route")),
-      );
-      return existing;
+      return yield* storedRow(rows, id, "delete trigger route");
     });
 
     return TriggerRoutes.of({ add, list, remove });

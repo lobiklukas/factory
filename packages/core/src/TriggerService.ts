@@ -241,6 +241,7 @@ type ClaimRow = {
 /** One `webhook_deliveries` row as the replay read returns it. */
 type DeliveryRow = {
   readonly status: string;
+  /** The outcome's recorded reason: why it was skipped, or which rule mapped a processed one. */
   readonly skipReason: string | null;
 };
 
@@ -254,7 +255,7 @@ const UNREGISTERED_REPO_PATTERN = "repo % is not registered";
 
 const toTriggerError =
   (what: string) =>
-  (cause: SqlError): TriggerError =>
+  (cause: { readonly message: string }): TriggerError =>
     new TriggerError({ code: "storage", message: `${what}: ${cause.message}` });
 
 export const TriggerServiceLive = (options: TriggerServiceOptions) =>
@@ -429,9 +430,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
                   requestId,
-                  event.labels.length === 0
-                    ? "the event carries no labels, so no rule maps it"
-                    : `no rule matches labels [${event.labels.join(", ")}]`,
+                  `${
+                    event.labels.length === 0
+                      ? "the event carries no labels, so no rule maps it"
+                      : `no rule matches labels [${event.labels.join(", ")}]`
+                  }${event.team === undefined ? "" : ` in team ${event.team}`}`,
                 );
               }
 
@@ -471,9 +474,17 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
               yield* writeBack.write({ event, sessionId: session.id });
 
+              // The reason is stored with the outcome, in the same column a skip's reason goes in
+              // (`skip_reason` is the delivery's recorded outcome reason, whatever the outcome), so a
+              // replay of a processed delivery names the route that started it, and so does the row
+              // an operator reads after the first response is gone.
+              const reason = `rule "${mapping.label}"${
+                matched.origin === undefined ? "" : ` (${matched.origin})`
+              } mapped it to ${mapping.repo}`;
               yield* storage(
                 "record processed delivery",
-                sql`UPDATE webhook_deliveries SET status = 'processed'
+                sql`UPDATE webhook_deliveries
+                  SET status = 'processed', skip_reason = ${reason}
                   WHERE request_id = ${requestId}`,
               );
 
@@ -481,9 +492,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 status: "processed",
                 replayed: false,
                 sessionId: session.id,
-                reason: `rule "${mapping.label}"${
-                  matched.origin === undefined ? "" : ` (${matched.origin})`
-                } mapped it to ${mapping.repo}`,
+                reason,
               } as const;
             });
 
