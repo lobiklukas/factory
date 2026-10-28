@@ -50,10 +50,7 @@ const check = makeChecker(observed);
 
 /** Field by field, so a reordered list or a dropped item is a difference. */
 const same = (
-  a:
-    | Pick<Plan, "summary" | "steps" | "surfaces" | "risks">
-    | undefined
-    | null,
+  a: Pick<Plan, "summary" | "steps" | "surfaces" | "risks"> | undefined | null,
   b: Plan,
 ): boolean =>
   a !== undefined &&

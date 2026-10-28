@@ -128,7 +128,7 @@ alongside the role's tool policy. The stored shape mirrors `.pi/skills/<name>/SK
 repository skills later is a copy rather than a translation.
 
 Built (LOB-74): the first role → tool-policy row. A column whose role is `specifier` is the read-only
-specifying stage (`READ_ONLY_ROLES` in `packages/harness/src/policy.ts`): `openSession` composes the
+specifying stage (the `specifier` row of `packages/harness/src/rolePolicy.ts`; the planner is the planning stage since D10): `openSession` composes the
 rule into the session's `ToolTask` hook from the run's column and role, and `write`, `edit` and
 `verify` are refused, as is any `bash` command that is not on an allowlist of read commands (a read
 command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
@@ -193,7 +193,7 @@ may do — `readOnly` (and the stage it names), `writesSpec`, `writesPlan` — r
 `specifier` or `planner` fails the boot, because the default pipeline's exits are checked against them.
 A review run stays read-only because it is a review, not by a row.
 
-Built (LOB-238): the specifier's writer. A run whose role is in `SPEC_ROLES`
+Built (LOB-238): the specifier's writer. A run whose role `writesSpec` (since D10 a row of `rolePolicy.ts`; it was `SPEC_ROLES`)
 (`packages/harness/src/specify.ts`, `resolveRole().writesSpec`) is offered the `spec` tool, and no
 other run is. The tool validates with LOB-72's `decodeSpec`, so a spec with no `gaps` is refused in
 words the model reads, and the run retries. It commits the `factory.spec` document to the run's log,

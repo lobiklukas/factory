@@ -122,7 +122,8 @@ try {
       section: section !== null,
       sessionId: plan?.getAttribute("data-plan") ?? null,
       revision: Number(plan?.getAttribute("data-plan-revision")),
-      summary: section?.querySelector("[data-plan-summary]")?.textContent ?? null,
+      summary:
+        section?.querySelector("[data-plan-summary]")?.textContent ?? null,
       steps: list("steps"),
       surfaces: list("surfaces"),
       risks: list("risks"),

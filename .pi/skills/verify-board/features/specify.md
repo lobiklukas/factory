@@ -113,7 +113,7 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
 - the `spec` tool's `gaps` parameter made required in its TypeBox schema (LOB-238), so pi-ai's
   argument validation, not LOB-72's validator, refuses the first attempt: "a spec missing gaps was
   refused, naming the field" and the spec probe fail;
-- `READ_ONLY_ROLES` keyed by a role `specifying` does not declare (the stage no longer applies, and
+- The role policy table (`DEFAULT_ROLE_POLICIES`) keyed by a role `specifying` does not declare (the stage no longer applies, and
   the read still runs): "the run's column is the read-only specifying stage" and the parked check
   fail, while "the run's read was not refused" still passes — which is why the two are separate.
 

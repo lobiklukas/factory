@@ -124,7 +124,7 @@ export const DEFAULT_BOARD_CAPS: BoardCaps = { board: 2, task: 1, repo: 2 };
  * - `docs` — documentation only, the docs rule (`DOCS_WRITE_ALLOWLIST`, LOB-195) a column that holds
  *   the `docs` skill already runs under;
  * - `none` — nothing: the run is a read-only stage named after its column, as a column whose role is
- *   read-only (`READ_ONLY_ROLES`, LOB-74) already is.
+ *   read-only (a `readOnly` row of the role policy table, LOB-74, D10) already is.
  */
 export const ColumnWriteScope = Schema.Literals(["worktree", "docs", "none"]);
 export type ColumnWriteScope = typeof ColumnWriteScope.Type;
