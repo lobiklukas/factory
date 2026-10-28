@@ -29,7 +29,7 @@ const exit = (column: string): TaskExit =>
     column,
     revision: 3,
     requirements: [
-      { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+      { key: "human_move", description: "a human move", status: "unchecked" },
       {
         key: "spec_doc",
         description: "a spec",
@@ -58,7 +58,7 @@ describe("currentExit", () => {
 });
 
 describe("moveWarning", () => {
-  /** Mutation: warn on unchecked keys too — `plan_doc` would hold every move out of planning. */
+  /** Mutation: warn on unchecked keys too — `human_move` would hold every move out of planning. */
   it("names each unmet key with the server's reason, and passes unchecked and met ones", () => {
     expect(moveWarning(exit("specifying"), "planning")).toEqual([
       { key: "spec_doc", reason: "the card has no spec" },

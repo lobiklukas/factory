@@ -1,10 +1,13 @@
 // The loopback GitHub fake the issues/labels adapter is driven against (LOB-190).
 //
-// Exactly one route, because the write-back calls exactly one:
+// Two routes, because the API calls exactly two:
 // `GET|POST /repos/:owner/:repo/issues/:number/comments` — `GET` answers the issue's comments (the
 // read the write-back makes before it posts, so a retry whose comment already landed posts nothing)
-// and `POST` creates one. Any other path is a 404 on purpose: a fake that answers more than the
-// client calls would hide a wrong URL instead of failing on it (the `github-fake.ts` rule).
+// and `POST` creates one — and `GET /repos/:owner/:repo/collaborators/:username/permission`, the
+// trust gate's role lookup (S-trigger-trust-gating), answered from `GITHUB_ISSUES_FAKE_ROLES` the way
+// GitHub answers it (`permission` the legacy base role, `role_name` the role) and `404` for a user
+// it does not list. Any other path is a 404 on purpose: a fake that answers more than the client
+// calls would hide a wrong URL instead of failing on it (the `github-fake.ts` rule).
 //
 // The ledger is a file rather than memory so "one comment, not two" survives across the driver's
 // phases, and so the evidence is something a later reader can open: every request the write-back
@@ -18,6 +21,8 @@
 //                                        instead of 201 — the window where GitHub has the comment
 //                                        and the caller never learned it, which a retry must not
 //                                        turn into a second comment
+//   GITHUB_ISSUES_FAKE_ROLES             `login=role,…` (`writer=write,reader=read`): each login's
+//                                        role on every repo; a login not listed is a 404
 import { readFileSync, writeFileSync } from "node:fs";
 
 type Comment = {
@@ -40,6 +45,15 @@ type Ledger = {
 const port = Number(process.env["GITHUB_ISSUES_FAKE_PORT"] ?? "9413");
 const failAfterWrite = process.env["GITHUB_ISSUES_FAKE_FAIL_AFTER_WRITE"] ?? "";
 const ledgerPath = process.env["GITHUB_ISSUES_FAKE_LEDGER"];
+const roles = new Map(
+  (process.env["GITHUB_ISSUES_FAKE_ROLES"] ?? "")
+    .split(",")
+    .map((entry) => entry.trim().split("="))
+    .filter((pair): pair is [string, string] => pair.length === 2),
+);
+/** GitHub's legacy `permission` for a role: `maintain` reads as `write`, `triage` as `read`. */
+const legacyPermission = (role: string): string =>
+  role === "maintain" ? "write" : role === "triage" ? "read" : role;
 
 if (ledgerPath === undefined || ledgerPath === "") {
   console.error(
@@ -72,6 +86,8 @@ const json = (status: number, body: unknown): Response =>
   });
 
 const commentsRoute = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/comments$/;
+const permissionRoute =
+  /^\/repos\/([^/]+)\/([^/]+)\/collaborators\/([^/]+)\/permission$/;
 
 const server = Bun.serve({
   port,
@@ -94,6 +110,19 @@ const server = Bun.serve({
       ],
     };
     write(ledger);
+
+    const permission = permissionRoute.exec(url.pathname);
+    if (permission !== null && request.method === "GET") {
+      const login = decodeURIComponent(permission[3] ?? "");
+      const role = roles.get(login);
+      return role === undefined
+        ? json(404, { message: "Not Found" })
+        : json(200, {
+            permission: legacyPermission(role),
+            role_name: role,
+            user: { login, type: "User" },
+          });
+    }
 
     const match = commentsRoute.exec(url.pathname);
     if (match === null) {

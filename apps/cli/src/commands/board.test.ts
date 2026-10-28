@@ -24,7 +24,9 @@ import {
   TaskComment,
   TaskRun,
   TaskExit,
+  TaskId,
   TaskSpec,
+  TaskPlan,
 } from "@repo/domain/Task";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reportFailures } from "../errors";
@@ -40,7 +42,12 @@ import {
   createdLines,
   runsLines,
   specLines,
+  planLines,
   exitLines,
+  laneLines,
+  commentCard,
+  StartNeedsAnswer,
+  StartNotStarted,
   startCard,
   type StartClient,
   updateCard,
@@ -191,6 +198,41 @@ describe("specLines (LOB-238)", () => {
   });
 });
 
+describe("planLines (D10)", () => {
+  const plan = (risks: ReadonlyArray<string>): TaskPlan =>
+    Schema.decodeSync(TaskPlan)({
+      taskId: `tsk_${"0".repeat(26)}`,
+      sessionId: `ses_${"1".repeat(26)}`,
+      column: "planning",
+      summary: "Export the card count",
+      steps: ["add apps/web/src/card.ts", "verify web"],
+      surfaces: ["web"],
+      risks,
+      revision: 5,
+      createdAt: "2026-10-28T00:00:00.000Z",
+    });
+
+  /** Mutation: print the spec's labels — `goal` where the plan has a summary. */
+  it("names the run and the revision, then the summary and each step, surface and risk", () => {
+    expect(planLines(plan(["the count is read early"]))).toEqual([
+      `plan      ses_${"1".repeat(26)} from planning (revision 5)`,
+      "  summary: Export the card count",
+      "  steps: 2",
+      "    - add apps/web/src/card.ts",
+      "    - verify web",
+      "  surfaces: 1",
+      "    - web",
+      "  risks: 1",
+      "    - the count is read early",
+    ]);
+  });
+
+  it("prints no risks as none, and a card with no plan as a dash", () => {
+    expect(planLines(plan([]))).toContain("  risks: none");
+    expect(planLines(null)).toEqual(["plan      -"]);
+  });
+});
+
 describe("exitLines (D9)", () => {
   const exit = (
     requirements: TaskExit["requirements"],
@@ -218,7 +260,11 @@ describe("exitLines (D9)", () => {
             status: "unmet",
             reason: "the latest run's branch changes no file",
           },
-          { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+          {
+            key: "human_move",
+            description: "a human move",
+            status: "unchecked",
+          },
         ]),
       ),
     ).toEqual([
@@ -226,7 +272,7 @@ describe("exitLines (D9)", () => {
       "  run_completed: met (the run finished)",
       "  non_empty_diff: unmet (the branch changes a file)",
       "    the latest run's branch changes no file",
-      "  plan_doc: not checked (a plan doc)",
+      "  human_move: not checked (a human move)",
     ]);
   });
 
@@ -254,6 +300,43 @@ const card = (over: Partial<Task> = {}): Task =>
     updatedAt: "2026-10-27T00:00:00.000Z",
     ...over,
   });
+
+describe("laneLines (D5)", () => {
+  /**
+   * Mutation: list only the cards of a declared lane — a card left on v1's `doing` after the board
+   * moved to v2, which renames it `review`, is in no lane and missing from the listing.
+   */
+  it("lists every lane of the board's version, then the cards in a column it does not declare with their pin", () => {
+    const old = card({
+      id: TaskId.make(`tsk_${"2".repeat(26)}`),
+      title: "left on v1",
+      column: "doing",
+      definitionVersion: 1,
+    });
+    const fresh = card({
+      id: TaskId.make(`tsk_${"3".repeat(26)}`),
+      title: "made on v2",
+      column: "todo",
+      definitionVersion: 2,
+    });
+    const columns = [
+      { name: "todo", kind: "resting" },
+      { name: "review", kind: "working" },
+    ];
+    expect(laneLines(columns, [old, fresh])).toEqual([
+      "todo  resting  1",
+      `  ${fresh.id}  normal  made on v2`,
+      "review  working  0",
+      "elsewhere  1 in a column the board's version does not declare",
+      `  ${old.id}  normal  left on v1  doing  v1`,
+    ]);
+    expect(laneLines(columns, [fresh])).toEqual([
+      "todo  resting  1",
+      `  ${fresh.id}  normal  made on v2`,
+      "review  working  0",
+    ]);
+  });
+});
 
 /**
  * A board holding one card, enforcing what the server enforces on these two writes: the revision
@@ -502,6 +585,25 @@ describe("attentionLines (LOB-264)", () => {
     );
     expect(lines[1]).toBe(
       `  plan approval: ${SESSION_B} is idle; planning → building is a person's`,
+    );
+  });
+
+  /** D10: a planning run that posted no plan — the approval would be refused naming plan_doc. */
+  it("says what a gate's exit still needs before it is a person's move", () => {
+    const lines = attentionLines(
+      item(
+        {
+          _tag: "gate",
+          gate: "plan approval",
+          to: "building",
+          sessionId: SESSION_B,
+          unmet: ["plan_doc"],
+        },
+        { column: "planning" },
+      ),
+    );
+    expect(lines[1]).toBe(
+      `  plan approval: ${SESSION_B} is idle; planning → building needs plan_doc first (start or prompt a run), then is a person's`,
     );
   });
 
@@ -968,7 +1070,11 @@ describe("startCard (C6)", () => {
   ) => {
     const calls: Array<string> = [];
     const sent: Array<string> = [];
-    const opened: Array<{ taskColumn: string; actor: string }> = [];
+    const opened: Array<{
+      taskColumn: string;
+      actor: string;
+      budget: number | undefined;
+    }> = [];
     const client = {
       getTask: () => Effect.succeed(over.card ?? card()),
       getBoard: () =>
@@ -989,9 +1095,17 @@ describe("startCard (C6)", () => {
           ],
         });
       },
-      createSession: (input: { taskColumn: string; actor: string }) => {
+      createSession: (input: {
+        taskColumn: string;
+        actor: string;
+        budget?: number;
+      }) => {
         calls.push("createSession");
-        opened.push({ taskColumn: input.taskColumn, actor: input.actor });
+        opened.push({
+          taskColumn: input.taskColumn,
+          actor: input.actor,
+          budget: input.budget,
+        });
         return Effect.succeed({ id: SESSION });
       },
       getSession: () =>
@@ -1034,6 +1148,32 @@ describe("startCard (C6)", () => {
     idle: false,
     actor: "cli",
     ...over,
+  });
+
+  /**
+   * C23: `--budget` is the run's spend cap, sent on the `createSession` that opens it and printed,
+   * so the operator sees what the run was held to; without it nothing is sent, so the server's
+   * default cap applies. Mutation: drop the field from the session input, or send it always.
+   */
+  it("opens the run with the budget it was given, and says so", async () => {
+    const s = server();
+    const { lines, run } = startLines(s.client, input({ budget: 2.5 }));
+    await Effect.runPromise(run);
+    expect(s.opened).toEqual([
+      { taskColumn: "building", actor: "cli", budget: 2.5 },
+    ]);
+    expect(lines).toContain("budget  $2.5000");
+    expect(lines.indexOf("budget  $2.5000")).toBeGreaterThan(
+      lines.indexOf(`task    ${TASK} in building`),
+    );
+  });
+
+  it("sends no budget when none was asked for", async () => {
+    const s = server();
+    const { lines, run } = startLines(s.client, input());
+    await Effect.runPromise(run);
+    expect(s.opened[0]?.budget).toBeUndefined();
+    expect(lines.some((line) => line.startsWith("budget"))).toBe(false);
   });
 
   /**
@@ -1133,6 +1273,163 @@ describe("startCard (C6)", () => {
       "warning no checkout",
     ]);
     expect(lines.some((line) => line.startsWith("sent"))).toBe(false);
+  });
+});
+
+describe("commentCard --start (C24)", () => {
+  const SESSION = Schema.decodeSync(SessionId)(SESSION_A);
+  const ANSWER = "Postgres 16.\n  Keep port 5442 — it is shared.";
+  const blocked = {
+    reason: "needs_input",
+    column: "building",
+    since: "2026-10-27T00:00:00.000Z",
+  } as const;
+
+  /**
+   * A server with one card that is `before` the comment and `after` it, every call recorded in order
+   * so a case reads what the command did and when: the comment must precede the session.
+   */
+  const server = (before: Task, after: Task) => {
+    const calls: Array<string> = [];
+    const sent: Array<string> = [];
+    const client = {
+      getTask: () =>
+        Effect.succeed(calls.includes("commentTask") ? after : before),
+      commentTask: (input: { expectedRevision: number }) => {
+        calls.push(`commentTask r${input.expectedRevision}`);
+        calls.push("commentTask");
+        return Effect.succeed(after);
+      },
+      getBoard: () =>
+        Effect.succeed({
+          instance: { definitionId: "default" as never },
+          definition: {
+            version: 1,
+            columns: [{ name: "building", requires: [] }],
+          },
+        }),
+      getDefinition: () => Effect.succeed({ columns: [] }),
+      createSession: (input: { taskColumn: string; actor: string }) => {
+        calls.push(`createSession ${input.taskColumn} ${input.actor}`);
+        return Effect.succeed({ id: SESSION });
+      },
+      getSession: () => Effect.succeed({ workspace: {} }),
+      sendMessage: (input: { content: string }) => {
+        calls.push("sendMessage");
+        sent.push(input.content);
+        return Effect.succeed({});
+      },
+    };
+    return { client, calls, sent };
+  };
+  const run = <E>(
+    client: Parameters<typeof commentCard<E, E>>[0],
+    start: string | undefined,
+  ) => {
+    const lines: Array<string> = [];
+    const effect = commentCard(
+      client,
+      {
+        taskId: TASK as never,
+        expectedRevision: 3,
+        body: ANSWER,
+        actor: "person:ana",
+        start,
+      },
+      (line) =>
+        Effect.sync(() => {
+          lines.push(line);
+        }),
+    );
+    return { lines, effect };
+  };
+  const asked = card({ blocked, revision: 3 });
+  const answered = card({ revision: 5 });
+
+  /**
+   * The acceptance: an answer with --start opens the next run on the card, after the comment, in the
+   * card's column, attributed to the one who answered, and sends it the card's default prompt.
+   * Mutation: start before the comment, ignore the flag, drop the actor, or send no prompt.
+   */
+  it("answers, then opens and prompts the next run on the card", async () => {
+    const s = server(asked, answered);
+    const { lines, effect } = run(s.client, "person:ana");
+    await Effect.runPromise(effect);
+    expect(s.calls).toEqual([
+      "commentTask r3",
+      "commentTask",
+      "createSession building person:ana",
+      "sendMessage",
+    ]);
+    expect(s.sent).toHaveLength(1);
+    expect(s.sent[0]).toContain("Pin the Postgres major");
+    expect(lines).toEqual([
+      `commented on ${TASK} (revision 5)`,
+      `answered: ${TASK} is no longer blocked (needs_input from building)`,
+      `session ${SESSION_A}`,
+      `task    ${TASK} in building`,
+      "sent    Pin the Postgres major (the card's default prompt)",
+    ]);
+  });
+
+  it("starts nothing without --start: the answer alone, as before", async () => {
+    const s = server(asked, answered);
+    const { lines, effect } = run(s.client, undefined);
+    await Effect.runPromise(effect);
+    expect(s.calls).toEqual(["commentTask r3", "commentTask"]);
+    expect(lines).toEqual([
+      `commented on ${TASK} (revision 5)`,
+      `answered: ${TASK} is no longer blocked (needs_input from building)`,
+    ]);
+  });
+
+  /** Mutation: check after the write, or start anyway — a note would leave a run nobody asked for. */
+  it("refuses --start on a card that is not blocked needs_input, before writing anything", async () => {
+    for (const given of [
+      card({ revision: 3 }),
+      card({ blocked: { ...blocked, reason: "dependency" }, revision: 3 }),
+    ]) {
+      const s = server(given, given);
+      const { effect } = run(s.client, "cli");
+      const error = await Effect.runPromise(Effect.flip(effect));
+      expect(error).toBeInstanceOf(StartNeedsAnswer);
+      expect(error.message).toContain("nothing was commented");
+      expect(s.calls).toEqual([]);
+    }
+  });
+
+  it("reports a comment that left the card blocked and starts no run", async () => {
+    const stillBlocked = card({ blocked, revision: 4 });
+    const s = server(asked, stillBlocked);
+    const { lines, effect } = run(s.client, "cli");
+    const error = await Effect.runPromise(Effect.flip(effect));
+    expect(error).toBeInstanceOf(StartNotStarted);
+    expect(s.calls).not.toContain("sendMessage");
+    expect(lines.at(-1)).toContain("not started");
+  });
+
+  /** A run's comment is a note on the server; --start must be refused before it is written. */
+  it("refuses --start with a run's actor, before writing anything", async () => {
+    const s = server(asked, asked);
+    const lines: Array<string> = [];
+    const error = await Effect.runPromise(
+      Effect.flip(
+        commentCard(
+          s.client,
+          {
+            taskId: TASK as never,
+            expectedRevision: 3,
+            body: ANSWER,
+            actor: SESSION_A,
+            start: "cli",
+          },
+          (line) => Effect.sync(() => void lines.push(line)),
+        ),
+      ),
+    );
+    expect(error).toBeInstanceOf(StartNeedsAnswer);
+    expect(error.message).toContain("nothing was commented");
+    expect(s.calls).toEqual([]);
   });
 });
 

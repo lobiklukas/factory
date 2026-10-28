@@ -10,7 +10,7 @@
 //             (the oracle, read over the RPC from this process, never the page)
 //   facts     on the default pipeline's newest version: planning → building is the human gate "plan
 //             approval", specifying's role is `specifier` on the role's model, an unchecked
-//             requirement (plan_doc where the version declares it) is labelled "not yet checked",
+//             requirement (human_move where the version declares it) is labelled "not yet checked",
 //             and the page says the version is the newest
 //   pinned    a board pinned to v2 says v3 exists, and its columns are v2's, not the newest's
 //   autonomy  (C22) a definition authored with `defineBoard` whose `careful` column gates `sleep` and
@@ -21,7 +21,9 @@
 //             runs unasked
 //   lanes     each lane header's disclosure is closed until pressed, then shows its column's facts,
 //             equal to the same `getDefinition` column; its link opens the settings page
-//   read-only the page holds no form, input or button, and every RPC it sends is a read
+//   read-only the page holds no form, input or button outside the Upgrade action (D5), which a board
+//             with a newer version is offered and a board on the newest is not; and every RPC it
+//             sends while nobody presses Upgrade is a read
 //   refused   a malformed board id is refused in the page, and a board that does not exist says so
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR.
@@ -139,6 +141,14 @@ page.on("pageerror", (error) =>
  * makes. A write that a later change puts on the page shows up here as an unexpected tag.
  */
 const SETTINGS_READS = new Set(["getBoardConfig", "listDefinitions"]);
+// The board's cards (D5, `boardAtom`, once the definitions list has landed, so a capture can end
+// before them): the Upgrade action offers the pin itself, and a row per column, for the cards an
+// earlier upgrade left on an older version — `getDefinition` when a card pins another version.
+const SETTINGS_READS_SOMETIMES = new Set([
+  "getBoard",
+  "listBoardCards",
+  "getDefinition",
+]);
 const SHELL_READS = new Set([
   // The rail's "Needs a person" count (LOB-271) and the faux banner (LOB-272), on every page.
   "listAttention",
@@ -166,12 +176,25 @@ page.on("request", (request) => {
   }
 });
 
-/** The controls inside a settings page that could change something: none, on a read-only page. */
+/**
+ * The controls inside a settings page that could change something, outside its Upgrade action (D5):
+ * none. The Upgrade action is the page's one write, offered only when a newer version exists, and
+ * `.pi/skills/verify-board/upgrade.mjs` drives it.
+ */
 const writeControls = (boardId) =>
   page.$$eval(
     `[data-board-settings-page='${boardId}'] :is(form, input, textarea, select, button, [contenteditable='true'], [role='button'])`,
-    (nodes) => nodes.map((node) => node.outerHTML.slice(0, 120)),
+    (nodes) =>
+      nodes
+        .filter((node) => node.closest("[data-board-upgrade]") === null)
+        .map((node) => node.outerHTML.slice(0, 120)),
   );
+
+/** Whether the settings page offers the Upgrade action (D5). */
+const upgradeOffered = (boardId) =>
+  page
+    .locator(`[data-board-settings-page='${boardId}'] [data-board-upgrade]`)
+    .count();
 
 /** Every column's facts under `scope`, read from what the page renders. */
 const readColumns = (scope) =>
@@ -374,7 +397,7 @@ try {
       .map((requirement) => ({ column: column.name, key: requirement.key })),
   );
   const named =
-    unchecked.find((entry) => entry.key === "plan_doc") ?? unchecked[0];
+    unchecked.find((entry) => entry.key === "human_move") ?? unchecked[0];
   const namedState =
     named === undefined
       ? null
@@ -384,7 +407,7 @@ try {
           )
           .textContent();
   assert(
-    "an unchecked requirement (plan_doc where declared) is labelled 'not yet checked'",
+    "an unchecked requirement (human_move where declared) is labelled 'not yet checked'",
     named !== undefined && namedState?.trim() === "not yet checked",
     `${named?.column}.${named?.key}: ${namedState}`,
   );
@@ -406,10 +429,15 @@ try {
     checked[0] !== undefined && checkedState?.trim() === "checked",
     `${checked[0]?.column}.${checked[0]?.key}: ${checkedState}`,
   );
+  const newestOffered = await upgradeOffered(newestBoard.id);
   assert(
-    "a board on the newest version says it is the newest, and claims no newer one",
-    header.newest && header.newer === null,
-    JSON.stringify({ newest: header.newest, newer: header.newer }),
+    "a board on the newest version says it is the newest, claims no newer one, and offers no upgrade",
+    header.newest && header.newer === null && newestOffered === 0,
+    JSON.stringify({
+      newest: header.newest,
+      newer: header.newer,
+      upgrade: newestOffered,
+    }),
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "board-settings-newest.png"),
@@ -452,11 +480,12 @@ try {
   const pinnedPageShown = await page
     .locator(`[data-board-settings-page='${pinnedBoard.id}']`)
     .count();
+  const offered = await upgradeOffered(pinnedBoard.id);
   assert(
-    "the settings page holds no form, input or button",
-    pinnedPageShown === 1 && controls.length === 0,
+    "the settings page holds no form, input or button outside the Upgrade action, which a board on v2 is offered",
+    pinnedPageShown === 1 && controls.length === 0 && offered === 1,
     controls.length === 0
-      ? `page found=${pinnedPageShown}`
+      ? `page found=${pinnedPageShown}; upgrade offered=${offered}`
       : JSON.stringify(controls),
   );
 
@@ -704,13 +733,16 @@ try {
   const unexpectedTags = [
     ...new Set(
       settingsRpcTags.filter(
-        (tag) => !SETTINGS_READS.has(tag) && !SHELL_READS.has(tag),
+        (tag) =>
+          !SETTINGS_READS.has(tag) &&
+          !SETTINGS_READS_SOMETIMES.has(tag) &&
+          !SHELL_READS.has(tag),
       ),
     ),
   ];
   observed.settingsRpcTags = [...new Set(settingsRpcTags)];
   assert(
-    "the settings page sends only reads: getBoardConfig, listDefinitions and the shell's own",
+    "the settings page sends only reads: getBoardConfig, listDefinitions, the board's cards and the shell's own",
     [...SETTINGS_READS].every((tag) => settingsRpcTags.includes(tag)) &&
       unexpectedTags.length === 0,
     unexpectedTags.length === 0

@@ -133,6 +133,9 @@ import {
   readPromptSections,
   readSkillPins,
   readSessionLog,
+  readOfferedTools,
+  FAUX_MODEL_ID,
+  parseFauxModelScripts,
   readVerifyRecords,
   resolveDefaultModel,
   resolveRoleModels,
@@ -150,6 +153,8 @@ import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { AskWriteBack } from "./AskWriteBack";
+import { LinearAskWriteBack } from "./LinearElicitation";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import {
   sessionRequestIdOf,
@@ -12613,6 +12618,134 @@ describe("the ask on the task", () => {
 });
 
 /**
+ * The ask carried to Linear (T5): a run asking on a card filed from a Linear issue also posts its
+ * question into Linear as an `elicitation`, through the session layer's own `AskWriteBack` — the real
+ * Linear port over the in-process fake, so what is proved is the wiring the `ask` tool reaches.
+ *
+ * The claims: the question is on the card and the card parked whatever Linear does; exactly one
+ * activity of type `elicitation` was posted for the one ask; and a port that breaks its contract —
+ * dies — does not fail the ask.
+ */
+describe("the ask carried to Linear", () => {
+  const carryRoot = mkdtempSync(join(tmpdir(), "factory-core-ask-linear-"));
+  const QUESTION = "Which Postgres major does this target?";
+
+  const runtimeWith = <E>(
+    askWriteBack: Layer.Layer<never, E>,
+    faux: ReturnType<typeof createFauxModelAccess>,
+  ) =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: faux.access, sessionRoot: carryRoot }).pipe(
+          Layer.provide(askWriteBack),
+        ),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A card in `specifying` filed from the Linear issue `issueId`, on a board of its own. */
+  const cardFiledFrom = (issueId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      const card = yield* tasks.create({
+        boardId,
+        title: "a thin card",
+        actor: "person:lukas",
+        externalRef: `linear:${issueId}`,
+      });
+      return yield* tasks.move({
+        taskId: card.id,
+        expectedRevision: card.revision,
+        to: "specifying",
+        actor: "person:lukas",
+      });
+    });
+
+  const askAndPark = (issueId: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const tasks = yield* TaskService;
+      const card = yield* cardFiledFrom(issueId);
+      const run = yield* sessions.create({
+        title: card.title,
+        taskId: card.id,
+        taskColumn: card.column,
+      });
+      yield* sessions.send({ sessionId: run.id, content: "specify it" });
+      yield* waitUntil(
+        Effect.map(tasks.get(card.id), (task) => task.blocked !== undefined),
+        "the run to ask",
+      );
+      return {
+        card: yield* tasks.get(card.id),
+        thread: yield* tasks.comments(card.id),
+        runId: run.id,
+      };
+    });
+
+  it("posts the run's one question into Linear as one elicitation, and the card is parked on it", async () => {
+    const fake = makeLinear({
+      identifier: `ENG-${randomBytes(3).toString("hex")}`,
+    });
+    const sync = LinearIssueSyncLive({
+      apiUrl: "http://linear.test/graphql",
+      apiKey: Redacted.make("lin_api_test"),
+      states: DEFAULT_LINEAR_STATES,
+    }).pipe(Layer.provide(fake.layer));
+    const runtime = runtimeWith(
+      LinearAskWriteBack.pipe(
+        Layer.provide(Layer.mergeAll(sync, DatabaseLayer)),
+      ),
+      createFauxModelAccess({ fauxAsk: QUESTION }),
+    );
+    const outcome = await runtime
+      .runPromise(askAndPark(fake.issue.id))
+      .finally(() => runtime.dispose());
+
+    expect(outcome.card.blocked?.reason).toBe("needs_input");
+    expect(outcome.thread).toEqual([
+      expect.objectContaining({ kind: "question", body: QUESTION }),
+    ]);
+    expect(fake.activities).toEqual([
+      {
+        agentSessionId: fake.agentSessions[0]?.id,
+        content: { type: "elicitation", body: QUESTION },
+      },
+    ]);
+    expect(fake.agentSessions).toHaveLength(1);
+  }, 120_000);
+
+  it("an ask whose tracker port dies still parks the card on its question", async () => {
+    const calls: string[] = [];
+    const runtime = runtimeWith(
+      Layer.succeed(AskWriteBack, {
+        asked: (input) =>
+          Effect.suspend(() => {
+            calls.push(input.question);
+            return Effect.die("the tracker port broke its contract");
+          }),
+      }),
+      createFauxModelAccess({ fauxAsk: QUESTION }),
+    );
+    const outcome = await runtime
+      .runPromise(askAndPark("iss-no-matter"))
+      .finally(() => runtime.dispose());
+    // The port was asked once, with the question; it died, and the card is parked all the same.
+    expect(calls).toEqual([QUESTION]);
+    expect(outcome.card.blocked?.reason).toBe("needs_input");
+    expect(outcome.thread).toEqual([
+      expect.objectContaining({ kind: "question", body: QUESTION }),
+    ]);
+  }, 120_000);
+});
+
+/**
  * The specifying run's spec (LOB-238): a run in `specifying` — the column that declares the
  * `specifier` role — is offered the `spec` tool, and what it declares is committed to its log and
  * recorded on its card, readable through `TaskService.spec` (the `getTaskSpec` RPC's answer).
@@ -12857,6 +12990,208 @@ describe("the specifying run's spec", () => {
     expect(outcome.seeded).toBeDefined();
     expect(outcome.spec).toEqual(outcome.seeded);
     expect(outcome.stored).toBeUndefined();
+  }, 120_000);
+});
+
+/**
+ * The planning run's plan (D10): a run in `planning` — the column that declares the `planner` role —
+ * is a read-only stage offered the `plan` tool and none of `write`, `edit` or `verify`, and what it
+ * declares is committed to its log and recorded on its card, readable through `TaskService.plan`
+ * (the `getTaskPlan` RPC's answer) and what `plan_doc` is checked against.
+ *
+ * The faux model's script comes from a `FAUX_MODEL_SCRIPTS` row, as the board drive's does: it reads
+ * (`ls`), sends a plan without `risks`, reads the refusal, and retries with the field.
+ */
+describe("the planning run's plan", () => {
+  const planRoot = mkdtempSync(join(tmpdir(), "factory-core-plan-"));
+  const PERSON = "person:lukas";
+  const PLAN = {
+    summary: "Export the card count",
+    steps: ["add apps/web/src/card.ts exporting the count", "verify web"],
+    surfaces: ["web"],
+    risks: ["the count is read before the board loads"],
+  };
+  const { risks: _risks, ...WITHOUT_RISKS } = PLAN;
+
+  const planRuntime = () =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({
+          model: createFauxModelAccess({
+            fauxModelScripts: Effect.runSync(
+              parseFauxModelScripts(
+                JSON.stringify({
+                  [FAUX_MODEL_ID]: {
+                    command: "ls",
+                    plan: [WITHOUT_RISKS, PLAN],
+                  },
+                }),
+                [FAUX_MODEL_ID],
+              ),
+            ),
+          }).access,
+          sessionRoot: planRoot,
+        }),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A card walked by a person into `column`, its spec declared on the way out of specifying. */
+  const cardIn = (column: "specifying" | "planning") =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      let card = yield* tasks.create({
+        boardId,
+        title: "a card",
+        actor: PERSON,
+      });
+      for (const to of ["specifying", "planning"]) {
+        if (to === "planning") {
+          if (column === "specifying") break;
+          card = yield* tasks.declareSpec({
+            taskId: card.id,
+            actor: `ses_${"0".repeat(26)}`,
+            goal: "walk the card on",
+            acceptance: ["it reaches planning"],
+            gaps: [],
+            openQuestions: [],
+          });
+        }
+        card = yield* tasks.move({
+          taskId: card.id,
+          expectedRevision: card.revision,
+          to,
+          actor: PERSON,
+        });
+      }
+      return card;
+    });
+
+  /** Start a run on `card` and wait for its turn to settle. */
+  const runOn = (card: {
+    readonly id: string;
+    readonly title: string;
+    readonly column: string;
+  }) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const run = yield* sessions.create({
+        title: card.title,
+        taskId: card.id,
+        taskColumn: card.column,
+      });
+      yield* sessions.send({ sessionId: run.id, content: "plan it" });
+      yield* waitUntil(
+        Effect.map(
+          sessions.get(run.id),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.at(-1)?.kind === "assistant" &&
+            snapshot.entries.at(-1)?.toolCalls.length === 0,
+        ),
+        "the run to settle on its own answer",
+      );
+      const sql = yield* SqlClient;
+      const offered = yield* Effect.acquireUseRelease(
+        Effect.promise(() => PostgresStorage.reader(sql, run.id)),
+        (storage) => readOfferedTools(storage),
+        (storage) => Effect.promise(() => storage.dispose()),
+      );
+      return { runId: run.id, snapshot: yield* sessions.get(run.id), offered };
+    });
+
+  it("is offered plan and no write tool, commits the plan to the card after a refusal naming `risks`, and opens the plan approval", async () => {
+    const runtime = planRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("planning");
+          // Before the plan, the person's approval is refused naming `plan_doc`.
+          const refused = yield* Effect.flip(
+            tasks.move({
+              taskId: card.id,
+              expectedRevision: card.revision,
+              to: "building",
+              actor: PERSON,
+            }),
+          );
+          const ran = yield* runOn(card);
+          const planned = yield* tasks.get(card.id);
+          const moved = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: planned.revision,
+            to: "building",
+            actor: PERSON,
+          });
+          return {
+            card,
+            refused,
+            ...ran,
+            plan: yield* tasks.plan(card.id),
+            planned,
+            moved,
+          };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "plan_doc",
+    });
+    expect(outcome.offered).toContain("plan");
+    for (const tool of ["write", "edit", "verify"]) {
+      expect(outcome.offered).not.toContain(tool);
+    }
+    const results = outcome.snapshot.entries.filter(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "plan",
+    );
+    expect(results.map((entry) => entry.isError === true)).toEqual([
+      true,
+      false,
+    ]);
+    expect(results[0]?.text).toContain(
+      "plan refused: `risks` is missing — declare the risks, `[]` when there are none",
+    );
+    expect(outcome.plan).toEqual({
+      taskId: outcome.card.id,
+      sessionId: outcome.runId,
+      column: "planning",
+      ...PLAN,
+      revision: outcome.card.revision,
+      createdAt: outcome.plan?.createdAt,
+    });
+    // The plan moved the card one revision, and the run did not move it on: a person did.
+    expect(outcome.planned.revision).toBe(outcome.card.revision + 1);
+    expect(outcome.planned.column).toBe("planning");
+    expect(outcome.moved.column).toBe("building");
+  }, 120_000);
+
+  it("offers no plan tool to a run outside the planning role", async () => {
+    const runtime = planRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying");
+          const ran = yield* runOn(card);
+          return { ...ran, plan: yield* tasks.plan(card.id) };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.offered).not.toContain("plan");
+    expect(
+      outcome.snapshot.entries.some((entry) => entry.toolName === "plan"),
+    ).toBe(false);
+    expect(outcome.plan).toBeUndefined();
   }, 120_000);
 });
 
@@ -14495,6 +14830,67 @@ describe("board caps and WIP limits (LOB-71)", () => {
     expect(codes.filter((code) => code === "ok")).toHaveLength(2);
     expect(codes.filter((code) => code === "at_capacity")).toHaveLength(3);
     expect(outcome.runs).toBe(2);
+  }, 60_000);
+
+  /**
+   * A start that resolved its column from the card's old pin and then waited on the repository lock
+   * held by an upgrade migrating the card (D5): the upgrade is written here as `upgradeBoard` writes
+   * a re-pin, under the same lock, so the start is held until it commits.
+   *
+   * Mutation: drop the re-resolve under the lock in `withRunAdmitted` — the run is written in
+   * `intake`, a column resolved from v1, on a card that pins v2 in `review`.
+   */
+  it("refuses a start whose card was re-pinned while it waited on the lock, and writes no run", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const definitionId = yield* newDefinition([{}, {}]);
+        const board = yield* newBoard(definitionId, 1);
+        const card = yield* newCard(board.id, "re-pinned mid-start");
+        const locked = Deferred.makeUnsafe<void>();
+        const release = Deferred.makeUnsafe<void>();
+        const upgrade = yield* Effect.forkChild(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`SELECT pg_advisory_xact_lock(hashtext(${`task_runs:${board.repo}`}))`;
+              yield* sql`
+                UPDATE tasks SET definition_version = 2, "column" = 'review',
+                                 revision = revision + 1
+                WHERE id = ${card.id}
+              `;
+              yield* Deferred.succeed(locked, undefined);
+              yield* Deferred.await(release);
+            }),
+          ),
+        );
+        yield* Deferred.await(locked);
+        // No taskColumn: the run starts in the card's own column, read from v1 as `intake`.
+        const starting = yield* Effect.forkChild(
+          Effect.exit(sessions.create({ taskId: card.id })),
+        );
+        // Released once the start waits on the lock, past the read of the card's column.
+        for (let waited = 0; waited < 200; waited++) {
+          const waiting = yield* sql<{ n: number }>`
+            SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted
+          `;
+          if ((waiting[0]?.n ?? 0) > 0) break;
+          yield* Effect.sleep("25 millis");
+        }
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(upgrade);
+        const started = yield* Fiber.join(starting);
+        const runs = yield* sql<{ count: number }>`
+          SELECT count(*)::int AS count FROM task_runs WHERE task_id = ${card.id}
+        `;
+        return { started, runs: runs[0]?.count };
+      }),
+    );
+    const refused = refusalOf(outcome.started);
+    expect(refused?.code).toBe("busy");
+    expect(refused?.message).toContain("re-pinned");
+    expect(outcome.runs).toBe(0);
   }, 60_000);
 
   /**

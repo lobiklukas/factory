@@ -7,14 +7,16 @@ the server would refuse says why before it is clicked (D9; docs/board.md B5, B8)
 `requires[]` under the card's pinned definition version, in declaration order, `status` `met`,
 `unmet` (with `reason`) or `unchecked`. `TaskService.exit` judges each checked key with the same
 `requirementVerdict` `move` refuses on (`packages/core/src/requirements.ts`), so a reason listed here
-is the sentence a refusal carries, word for word. Keys nothing checks (`plan_doc`, `human_move`) are
+is the sentence a refusal carries, word for word. Keys nothing checks (`human_move`) are
 `unchecked`, never `met`. `human_merge` is checked since C20, on a move into `done` only: met when a
 run of the card recorded GitHub's merge of the card's PR (or the card has no PR on record), unmet
 while the PR is open, so the pane shows it `met` or `unmet` in `review`, and a move back to
-`building` is never warned on it. Two keys are checked since D9:
+`building` is never warned on it. Two keys are checked since D9, and one since D10:
 
 - `spec_doc` is met when the card holds a `specified` event (a specifying run's `spec` tool wrote one,
   LOB-238), whatever the spec's gaps.
+- `plan_doc` (D10) is met when the card holds a `planned` event (a planning run's `plan` tool wrote
+  one): what the person crossing the plan approval gate reads in the pane's Plan section.
 - `run_completed` is met when the card's _latest_ run's newest turn ended on its own: not still
   working or parked, not a failed or aborted model answer, not interrupted (C8), not stopped by its
   budget (`runTurnOf`, the same log window `runEndingOf` reads for the PR step).
@@ -30,14 +32,16 @@ re-read when a move or a run start from the page lands.
 
 **How the skill drives it.** `./exit-checklist.sh` (own API and dashboard, default `:9561` / `:3561`).
 `exit-checklist.mjs` creates a board and a card over the RPC, walks it with `moveTask` as a person, and
-declares the spec with `lib/seed-spec.ts` (what a `spec` tool call does, in-process, since no RPC posts
-one). The oracle is `getTaskExit`, asked from the drive, never the page.
+declares the spec with `lib/seed-spec.ts` and the plan with `lib/seed-plan.ts` (what a `spec` or a
+`plan` tool call does, in-process, since no RPC posts one). The oracle is `getTaskExit`, asked from the drive, never the page.
 
 **What proves it.** In `specifying` with no spec the pane's items (key, status, reason) equal
 `getTaskExit`'s; the move to `planning` names `spec_doc` before the click and `canceled` says nothing;
 the click's refusal contains the checklist's reason verbatim and the card did not move. After the spec is
 declared `spec_doc` turns met within one poll interval, the warning goes, and the same click moves
-the card. In `planning` every item reads `not checked` and no move is warned. In `building` with no run
+the card. In `planning` with no plan `plan_doc` is unmet with the server's reason, `human_move` reads `not
+checked`, and the move to `building` names `plan_doc`; after the plan is declared `plan_doc` turns met
+within one poll, the warning goes, and the pane's Plan section shows `getTaskPlan`'s plan. In `building` with no run
 `run_completed`, `non_empty_diff` and `pr_link` are all unmet, equal to the server's, and the move to
 `review` names all three.
 
@@ -49,4 +53,5 @@ the card. In `planning` every item reads `not checked` and no move is warned. In
   is the no-run case; `verify-board/requires.sh` proves a completed run lets the move through.
 - **The checklist is the card's column, not the destination's.** A read of another column than the
   card's is hidden rather than shown stale (`currentExit`).
-- **`plan_doc` is still unchecked.** Nothing records a plan document yet.
+- **`plan_doc` is checked since D10.** A real planner run declaring the plan is `verify-board/drive.sh`'s
+  (`features/plan.md`); this drive seeds it in-process.

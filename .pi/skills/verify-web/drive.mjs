@@ -2004,6 +2004,8 @@ const BOARD_READS = new Set([
   // The card pane's spec document (LOB-238): a read the pane makes on opening a card, so the
   // write check below would otherwise count it as a write nobody clicked.
   "getTaskSpec",
+  // The card pane's plan (D10): read beside the spec on opening a card and on every board poll.
+  "getTaskPlan",
   // The card pane's exit checklist (D9): a read it makes on opening a card and on every poll.
   "getTaskExit",
   "getSession",

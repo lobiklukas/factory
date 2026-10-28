@@ -146,6 +146,19 @@ export const checkRunCaps = (
 > =>
   Effect.gen(function* () {
     const sql = yield* SqlClient;
+    // The repository first, which a board never changes, so the lock is taken before the card's
+    // pinned version is read: an upgrade (D5) re-pins cards under this same lock, and the version
+    // read after it is the one the card pins once any such upgrade has committed.
+    const repos = yield* sql<{ repo: string }>`
+      SELECT bi.repo FROM tasks t
+      JOIN board_instances bi ON bi.id = t.board_id
+      WHERE t.id = ${taskId}
+    `;
+    const repo = repos[0]?.repo;
+    if (repo === undefined) return undefined;
+    // Taken whether or not this version caps anything: a start on an uncapped card is still a run
+    // in flight in the repository, and a capped card's count must not miss it mid-write.
+    yield* sql`SELECT pg_advisory_xact_lock(hashtext(${`task_runs:${repo}`}))`;
     const cards = yield* sql<{
       boardId: string;
       repo: string;
@@ -164,9 +177,6 @@ export const checkRunCaps = (
     `;
     const card = cards[0];
     if (card === undefined) return undefined;
-    // Taken whether or not this version caps anything: a start on an uncapped card is still a run
-    // in flight in the repository, and a capped card's count must not miss it mid-write.
-    yield* sql`SELECT pg_advisory_xact_lock(hashtext(${`task_runs:${card.repo}`}))`;
     const what = `board definition ${card.definitionId} v${card.definitionVersion}`;
     const storageFault = (field: string) => (cause: unknown) =>
       new BoardCapsStorageError({

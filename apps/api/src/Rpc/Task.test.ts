@@ -247,7 +247,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     model: deployment,
     skills: [],
     requires: [
-      { key: "plan_doc", description: "a plan doc", checked: false },
+      { key: "plan_doc", description: "a plan doc", checked: true },
       {
         key: "human_move",
         description: "a human move (B5's plan approval gate)",
@@ -255,7 +255,8 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       },
     ],
     exits: [{ to: "building", humanGate: "plan approval" }, { to: "canceled" }],
-    autonomy: unasked,
+    // The planner only reads (D10), as the specifier does.
+    autonomy: readOnly,
   },
   {
     name: "building",
@@ -446,6 +447,17 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     );
     expect(v5.caps).toEqual({ board: 2, task: 1, repo: 2 });
     expect(v5.columns).toEqual(DEFAULT_V3);
+
+    // Version 6 (D10) is version 5 with the `plan` skill bound to `planning`, and nothing else.
+    const v6 = await call((client) =>
+      client.getDefinition({ definitionId: DEFAULT, version: 6 }),
+    );
+    expect(v6.caps).toEqual(v5.caps);
+    expect(v6.columns).toEqual(
+      DEFAULT_V3.map((column) =>
+        column.name === "planning" ? { ...column, skills: ["plan"] } : column,
+      ),
+    );
 
     // Version 1 is its own row: no skills bound, and `review` does not declare `verified` yet.
     const v1 = await call((client) =>
@@ -897,5 +909,79 @@ describe("the definition vocabulary over RPC (D6)", () => {
       }),
     );
     expect(defined.outcome).toBe("created");
+  });
+});
+
+describe("upgrading a board over RPC (D5)", () => {
+  /**
+   * `upgradeBoard` over the wire: the pin moves and the answer names it, a stale expected version is
+   * the typed `StaleBoardVersion`, and a refused migration arrives as `CardMigrationRefused` with each
+   * card it names. Mutation: drop either error from the RPC's error schema — the client decodes a
+   * defect, not the tag.
+   */
+  it("moves the pin, and answers a stale version and a refused migration as typed refusals", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`acme/rpc-board-upgrade-${run}`),
+          definitionId: DEFAULT,
+          definitionVersion: 2,
+        });
+        const old = yield* client.createTask({
+          boardId: board.id,
+          title: "made on v2",
+          actor: "person:lukas",
+        });
+        const upgraded = yield* client.upgradeBoard({
+          boardId: board.id,
+          toVersion: 3,
+          expectedVersion: 2,
+          actor: "person:lukas",
+        });
+        const stale = yield* failureOf(
+          client.upgradeBoard({
+            boardId: board.id,
+            toVersion: 3,
+            expectedVersion: 2,
+            migrateCards: { intake: "intake" },
+            actor: "person:lukas",
+          }),
+        );
+        const refused = yield* failureOf(
+          client.upgradeBoard({
+            boardId: board.id,
+            toVersion: 3,
+            expectedVersion: 3,
+            migrateCards: { review: "review" },
+            actor: "person:lukas",
+          }),
+        );
+        const fresh = yield* client.createTask({
+          boardId: board.id,
+          title: "made on v3",
+          actor: "person:lukas",
+        });
+        return { old, upgraded, stale, refused, fresh };
+      }),
+    );
+    expect(outcome.upgraded).toMatchObject({
+      instance: { definitionVersion: 3 },
+      fromVersion: 2,
+      repinned: [],
+      unmigrated: 1,
+    });
+    expect(outcome.stale).toMatchObject({
+      _tag: "StaleBoardVersion",
+      expected: 2,
+      actual: 3,
+    });
+    expect(outcome.refused).toMatchObject({
+      _tag: "CardMigrationRefused",
+      cards: [
+        { taskId: outcome.old.id, column: "intake", reason: "unmapped_column" },
+      ],
+    });
+    expect(outcome.old.definitionVersion).toBe(2);
+    expect(outcome.fresh.definitionVersion).toBe(3);
   });
 });

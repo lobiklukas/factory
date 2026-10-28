@@ -121,7 +121,7 @@ const parked = Effect.gen(function* () {
   );
   // Two facts, kept apart because neither implies the other. First, the run's column — the one its
   // `task_runs` row names, the row `SessionService` resolves the run's profile from — is the
-  // read-only stage: the definition's role for it resolves through `READ_ONLY_ROLES`
+  // read-only stage: the definition's role for it resolves through the role policy table (`DEFAULT_ROLE_POLICIES`)
   // (`readOnlyStageOf`, LOB-74). A pipeline whose `specifying` stopped declaring `specifier` fails
   // here. That `openSession` then refuses the stage's writes is not observable from a run that only
   // reads; `SessionService.test.ts` and `verify-policy`'s `stage` case prove it.

@@ -87,6 +87,12 @@ import {
   type PrEvidence,
   type Verification,
 } from "@repo/domain/Session";
+import {
+  maskSecrets,
+  secretMasker,
+  secretVariables,
+  type InjectedSecrets,
+} from "./secrets";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const VERIFY_TOOL = "verify";
@@ -258,6 +264,17 @@ export type VerifyOptions = {
    * database (the module doc's "Isolation").
    */
   readonly databaseUrl?: string | undefined;
+  /**
+   * The secrets the repo declares for `verify` (S-agent-secrets), read from the control plane's store
+   * when the session opened: each verification command gets them as variables, and its output is
+   * masked before the tool streams or records it. Absent or empty: none.
+   */
+  readonly secrets?: InjectedSecrets | undefined;
+  /**
+   * Names the repo declares for `verify` that the store holds no value for: said in the output, so
+   * a command that fails without one says why. Absent: none missing.
+   */
+  readonly missingSecrets?: readonly string[] | undefined;
 };
 
 const SURFACE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -371,6 +388,11 @@ export type ExecInput = {
   readonly command: string | readonly string[];
   readonly cwd: string;
   readonly variables?: Record<string, string>;
+  /**
+   * The secrets this command is given (S-agent-secrets, `./secrets`): each one more variable of this
+   * command's environment, and masked in everything it prints before `onOutput` sees it.
+   */
+  readonly secrets?: InjectedSecrets;
   readonly timeoutSeconds?: number;
   readonly onOutput: (text: string, stream: "stdout" | "stderr") => void;
   readonly context: Context;
@@ -386,36 +408,59 @@ export type ExecInput = {
  */
 export const execToExit = (
   input: ExecInput,
-): Effect.Effect<number, ExecFailure> =>
-  Effect.tryPromise({
+): Effect.Effect<number, ExecFailure> => {
+  const secrets = input.secrets ?? [];
+  // One masker per stream (S-agent-secrets): a value split across two of one stream's chunks is
+  // masked whole, and the end each holds back is passed on once the command has ended.
+  const maskers = {
+    stdout: secretMasker(secrets),
+    stderr: secretMasker(secrets),
+  };
+  const flush = Effect.sync(() => {
+    for (const stream of ["stdout", "stderr"] as const) {
+      const rest = maskers[stream].flush();
+      if (rest !== "") input.onOutput(rest, stream);
+    }
+  });
+  return Effect.tryPromise({
     try: (signal) =>
       input.env.exec(
         input.command,
         {
           cwd: input.cwd,
-          env: input.variables ?? {},
+          // The command's own variables win: a secret named `DATABASE_URL` does not undo the
+          // isolation a verification and a setup are given (the module doc's "Isolation").
+          env: { ...secretVariables(secrets), ...input.variables },
           inheritEnv: true,
           ...(input.timeoutSeconds === undefined
             ? {}
             : { timeout: input.timeoutSeconds }),
-          onOutput: (text, _context, info) => input.onOutput(text, info.stream),
+          onOutput: (text, _context, info) => {
+            const masked = maskers[info.stream].push(text);
+            if (masked !== "") input.onOutput(masked, info.stream);
+          },
         },
         withAbortSignal(signal, input.context),
       ),
     catch: (cause) =>
-      new ExecFailure({ code: "unknown", message: describe(cause) }),
+      new ExecFailure({
+        code: "unknown",
+        message: maskSecrets(describe(cause), secrets),
+      }),
   }).pipe(
+    Effect.ensuring(flush),
     Effect.flatMap((result) =>
       result.ok
         ? Effect.succeed(result.value.exitCode)
         : Effect.fail(
             new ExecFailure({
               code: result.error.code,
-              message: result.error.message,
+              message: maskSecrets(result.error.message, secrets),
             }),
           ),
     ),
   );
+};
 
 /** Whether a path exists in the environment; an unreadable path is one that does not. */
 const exists = (
@@ -623,6 +668,8 @@ const verifySurface = (input: {
     }
     const { source, directory, command, down } = plan.value;
     input.onOutput(`== verify ${surface} (${source}): ${command}\n`);
+    const secrets = input.options.secrets ?? [];
+    const missing = input.options.missingSecrets ?? [];
     const tail = runningTail();
     const cwd = directory === "." ? env.cwd : `${env.cwd}/${directory}`;
     // Never the control plane's own database (the module doc's "Isolation").
@@ -635,12 +682,19 @@ const verifySurface = (input: {
       tail.push(text);
       input.onOutput(text);
     };
+    if (secrets.length > 0 || missing.length > 0) {
+      // Names only: the value is the command's variable and nothing else's.
+      onOutput(
+        `== secrets: ${[...secrets.map((secret) => secret.name), ...missing.map((name) => `${name} (declared, not stored)`)].join(", ")}\n`,
+      );
+    }
     const ran = yield* Effect.result(
       execToExit({
         env,
         command,
         cwd,
         variables,
+        secrets,
         timeoutSeconds: input.options.timeoutSeconds ?? VERIFY_TIMEOUT_SECONDS,
         onOutput,
         context,
@@ -657,6 +711,7 @@ const verifySurface = (input: {
           command: "bash down.sh",
           cwd,
           variables,
+          secrets,
           timeoutSeconds: VERIFY_CLEANUP_TIMEOUT_SECONDS,
           onOutput,
           context: BACKGROUND_CONTEXT,

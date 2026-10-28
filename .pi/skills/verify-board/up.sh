@@ -49,6 +49,17 @@
 # Only a review run is offered the `review` tool, so no other run makes that call. All fixed, like
 # FAUX_COMMAND.
 #
+# The planning phase (D10) needs a fourth: `ROLE_MODELS`' `planner=faux/planner` row is the planner's
+# model, and its `FAUX_MODEL_SCRIPTS` row reads the checkout (`ls`, a read the read-only planning
+# stage lets through) and then calls the `plan` tool — first without `risks`, which the tool refuses
+# naming the field, then the whole plan. Only a run whose role writes the plan (the `planner`) is
+# offered the tool. The accepted plan is recorded in .verify/run/faux-plan, which drive.sh matches
+# `factory board show` and the card pane against. Fixed, like FAUX_COMMAND.
+#
+# FAUX_COST, when the caller sets it, prices every faux answer (a cent a request is the usual): the
+# one thing `budget.sh` needs from this instance, a spend a cap can be reached by. Unset, the
+# instance's model reports no cost, as it always did.
+#
 # The PR goes to a loopback GitHub fake (`.pi/skills/verify-api/github-fake.ts`, LOB-179) on
 # GITHUB_PORT (9403 by default), its ledger on disk in .verify/run/github-ledger.json — the oracle
 # the drive reads the PR's link and body back from. The API gets `GITHUB_API_URL` pointing at it and
@@ -73,8 +84,10 @@ FAUX_ASK="${FAUX_ASK:-Which Postgres major does this card target?}"
 # The builder's change: one file in the web surface, committed on the run's own branch, so the
 # branch differs from `main` and the fixture's verify-web skill is the one `verify` runs.
 BUILD_CHANGE="mkdir -p apps/web/src && echo 'export const card = 1;' > apps/web/src/card.ts && git add apps/web/src/card.ts && git -c user.email=builder@localhost -c user.name=builder commit -q -m 'build the card' && echo built"
-ROLE_MODELS="builder=faux/builder,reviewer=faux/reviewer"
-FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" bun -e 'console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: true }, reviewer: { command: "git diff --stat main...HEAD" } }))')"
+ROLE_MODELS="builder=faux/builder,reviewer=faux/reviewer,planner=faux/planner"
+# The planner's plan (D10): its first attempt leaves out `risks`, its retry is FAUX_PLAN_ACCEPTED.
+FAUX_PLAN_ACCEPTED='{"summary":"Export the card from the web app","steps":["add apps/web/src/card.ts exporting the card","verify the web surface"],"surfaces":["web"],"risks":["the export is read before the board loads"]}'
+FAUX_MODEL_SCRIPTS="$(BUILD_CHANGE="$BUILD_CHANGE" PLAN="$FAUX_PLAN_ACCEPTED" bun -e 'const plan = JSON.parse(process.env.PLAN); const { risks, ...withoutRisks } = plan; console.log(JSON.stringify({ builder: { command: process.env.BUILD_CHANGE, verify: true }, reviewer: { command: "git diff --stat main...HEAD" }, planner: { command: "ls", plan: [withoutRisks, plan] } }))')"
 FAUX_REVIEW='[{"summary":"Adds the card export.","dimensions":{"correctness":{"verdict":"pass","findings":[]},"security":{"verdict":"pass","findings":[]},"tests":{"verdict":"pass","findings":[]},"performance":{"verdict":"pass","findings":[]}}}]'
 WEBHOOK_SECRET="verify-board-webhook-$(date +%s)$$"
 SPEC_GOAL='"goal":"Pin the Postgres major this card targets"'
@@ -186,6 +199,7 @@ echo "$BOARD_GITHUB" > "$RUN_DIR/github-mode"
     ALLOWED_ORIGINS="http://localhost:$API_PORT,http://localhost:$WEB_PORT" \
     MODEL_BACKEND=faux \
     FAUX_COMMAND="$FAUX_COMMAND" \
+    ${FAUX_COST:+FAUX_COST="$FAUX_COST"} \
     FAUX_ASK="$FAUX_ASK" \
     ROLE_MODELS="$ROLE_MODELS" \
     FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \
@@ -199,6 +213,7 @@ echo $! > "$RUN_DIR/api.pid"
 echo "$WEB_PORT" > "$RUN_DIR/web-port"
 printf '%s\n' "$FAUX_ASK" > "$RUN_DIR/faux-ask"
 printf '%s\n' "$FAUX_SPEC_ACCEPTED" > "$RUN_DIR/faux-spec"
+printf '%s\n' "$FAUX_PLAN_ACCEPTED" > "$RUN_DIR/faux-plan"
 printf '%s\n' "$WEBHOOK_SECRET" > "$RUN_DIR/webhook-secret"
 
 # The dashboard, pointed at this API. ALLOWED_ORIGINS above names its origin, or the browser's RPC

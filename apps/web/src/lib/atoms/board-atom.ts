@@ -1,3 +1,4 @@
+import { DefinitionId } from "@repo/domain/Task";
 import type {
   BoardDefinition,
   BoardInstanceId,
@@ -10,10 +11,11 @@ import type {
   TaskId,
   UnblockTaskInput,
   UpdateTaskInput,
+  UpgradeBoardInput,
 } from "@repo/domain/Task";
 import type { DecideApprovalInput } from "@repo/domain/Approval";
 import type { SessionId } from "@repo/domain/Session";
-import { Cause, Duration, Effect, Option } from "effect";
+import { Cause, Duration, Effect, Option, Schema } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { definitionOfConfig } from "../board-view";
@@ -243,6 +245,21 @@ export const taskSpecAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
+ * A card's plan (D10): what its newest planning run declared with the `plan` tool, or `null`. Polled
+ * with the board, as the spec is: the run that declares it is not this pane's doing.
+ */
+export const taskPlanAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getTaskPlan({ taskId });
+      }),
+    )
+    .pipe(Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
  * What a card needs to leave its column (D9): `getTaskExit`, each of the column's requirements met,
  * unmet with the reason a move would be refused with, or not checked.
  *
@@ -280,11 +297,15 @@ export const taskExitAtom = Atom.family((taskId: TaskId) =>
  * run and says so, leaving the person to type into it. Only a failed `createSession` fails the atom.
  */
 export const startRunAtom = runtime.fn(
-  (input: { readonly task: Task; readonly prompt: string }) =>
+  (input: {
+    readonly task: Task;
+    readonly prompt: string;
+    readonly budget?: number | undefined;
+  }) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
       const session = yield* rpc.client.createSession(
-        startRunSession(input.task),
+        startRunSession(input.task, input.budget),
       );
       const sendFailure = yield* rpc.client
         .sendMessage({ sessionId: session.id, content: input.prompt })
@@ -391,23 +412,64 @@ export const definitionsAtom = runtime
   )
   .pipe(Atom.withReactivity([DEFINITIONS_KEY]));
 
+/** The reactivity key an upgrade invalidates (D5): the board's configuration re-reads its new pin. */
+export const BOARD_PIN_KEY = "board-pin";
+
 /**
  * A board's configuration (LOB-245): `getBoardConfig`, the instance with the definition version it pins
  * described exactly as `getDefinition` describes that version — each column's kind, role and the
  * model it resolves to, skills, requirements marked checked or not, exits and human gates. What the
  * settings page and a lane header's disclosure render, and nothing else.
  *
- * Read once per opening, not polled: a version is never edited in place (B2) and a board's pin does
- * not move under it, so a poll would re-ask a fixed answer. One read rather than `getBoard` and then
- * `getDefinition`, so the version described is the one the instance pins, never a later one.
+ * Read once per opening, not polled: a version is never edited in place (B2), and a board's pin
+ * moves only by an upgrade (D5), which re-reads it here (`BOARD_PIN_KEY`) — one made elsewhere is
+ * rare enough that a poll would mostly re-ask a fixed answer. One read rather than `getBoard` and
+ * then `getDefinition`, so the version described is the one the instance pins, never a later one.
  */
 export const boardConfigAtom = Atom.family((boardId: BoardInstanceId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getBoardConfig({ boardId });
+      }),
+    )
+    .pipe(Atom.withReactivity([BOARD_PIN_KEY])),
+);
+
+/**
+ * One version of a definition described (D5), keyed `<id>@<version>`: the columns the Upgrade
+ * action maps a board's cards onto. Read once per version the form names.
+ */
+export const definitionVersionAtom = Atom.family((key: string) =>
   runtime.atom(
     Effect.gen(function* () {
+      const at = key.lastIndexOf("@");
+      const definitionId = yield* Schema.decodeEffect(DefinitionId)(
+        key.slice(0, at),
+      );
       const rpc = yield* RpcClient;
-      return yield* rpc.client.getBoardConfig({ boardId });
+      return yield* rpc.client.getDefinition({
+        definitionId,
+        version: Number(key.slice(at + 1)),
+      });
     }),
   ),
+);
+
+/**
+ * Moves a board to a newer definition version from the settings page (D5): `upgradeBoard`, exactly
+ * as `factory board upgrade` calls it, at the version the page read the board at, with a mapping only
+ * when the person chose to migrate the cards. The settings page re-reads its pin and the board its
+ * cards once it lands; a refusal (`StaleBoardVersion`, `CardMigrationRefused`) is the page's to show.
+ */
+export const upgradeBoardAtom = runtime.fn(
+  (input: UpgradeBoardInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.upgradeBoard(input);
+    }),
+  { reactivityKeys: [BOARD_KEY, BOARD_PIN_KEY] },
 );
 
 /**

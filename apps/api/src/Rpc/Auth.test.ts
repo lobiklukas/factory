@@ -138,6 +138,29 @@ const declareSpec = (taskId: string, run: string) =>
     ),
   );
 
+/** The card's plan as a planning run's `plan` tool posts it (D10): the exit from planning needs one. */
+const declarePlan = (taskId: string, run: string) =>
+  Effect.gen(function* () {
+    const tasks = yield* TaskService;
+    const task = yield* tasks.declarePlan({
+      taskId,
+      actor: run,
+      summary: "walk the card on",
+      steps: ["reach building"],
+      surfaces: ["api"],
+      risks: [],
+    });
+    return task.revision;
+  }).pipe(
+    Effect.orDie,
+    Effect.provide(
+      TaskServiceLive.pipe(
+        Layer.provide(PostgresLive),
+        Layer.provide(ScratchConfig),
+      ),
+    ),
+  );
+
 /** Nothing here opens a PR. */
 const credentials = CredentialProvider.of({
   source: "static-token",
@@ -704,16 +727,18 @@ describe("the actor every write records is the credential's, not the body's (LOB
         // The run's own spec (its actor is the run, as the tool records it): the exit from
         // specifying needs one.
         const specRevision = yield* declareSpec(created.id, started.id);
-        const planning = yield* client.moveTask({
+        yield* client.moveTask({
           taskId: created.id,
           expectedRevision: specRevision,
           to: "planning",
           actor: MALLORY,
         });
+        // The run's own plan, as its tool records it: the exit from planning needs one (D10).
+        const planRevision = yield* declarePlan(created.id, started.id);
         // A body naming a run cannot make amy one: the plan-approval gate is hers to cross (B5).
         const building = yield* client.moveTask({
           taskId: created.id,
-          expectedRevision: planning.revision,
+          expectedRevision: planRevision,
           to: "building",
           actor: started.id,
         });
@@ -741,13 +766,19 @@ describe("the actor every write records is the credential's, not the body's (LOB
       "commented",
       "specified",
       "moved",
+      "planned",
       "moved",
     ]);
-    // Every write the credential made is amy's; the spec is the run's own, as its tool records it.
+    // Every write the credential made is amy's; the spec and the plan are the run's own, as its
+    // tools record them.
+    const runs = new Set(["specified", "planned"]);
     expect(
-      events.filter((event) => event.kind !== "specified").map((e) => e.actor),
-    ).toEqual(Array(events.length - 1).fill("amy"));
+      events.filter((event) => !runs.has(event.kind)).map((e) => e.actor),
+    ).toEqual(Array(events.length - 2).fill("amy"));
     expect(events.find((event) => event.kind === "specified")?.actor).toBe(
+      outcome.started.id,
+    );
+    expect(events.find((event) => event.kind === "planned")?.actor).toBe(
       outcome.started.id,
     );
     expect(outcome.thread.map((comment) => comment.actor)).toEqual(["amy"]);

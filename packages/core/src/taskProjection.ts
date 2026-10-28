@@ -15,7 +15,8 @@
  * opposite: two events (`retitled`, `priorityChanged`) at one revision, because the call is one write.
  *
  * What the fold cannot give is what the events never carried: the definition version and the repo
- * (both the board's when the card was made), a block's note, and the row's timestamps.
+ * (both the board's when the card was made; a `repinned` event, D5, names the version it moved to,
+ * but a card never repinned has none in its history), a block's note, and the row's timestamps.
  */
 import type { BlockReason, TaskEvent, TaskPriority } from "@repo/domain/Task";
 
@@ -86,8 +87,28 @@ export const projectTask = (
       case "retitled":
         card = { ...card, title: event.to, revision };
         break;
+      case "repinned": {
+        // A migration (D5) re-pins the card in the column its mapping names, and a block keeps its
+        // place: the blocked column is mapped the same way.
+        const blocked =
+          card.blocked === undefined
+            ? undefined
+            : {
+                ...card.blocked,
+                column:
+                  event.mapping[card.blocked.column] ?? card.blocked.column,
+              };
+        card = {
+          ...card,
+          column: event.to,
+          revision,
+          ...(blocked === undefined ? {} : { blocked }),
+        };
+        break;
+      }
       case "commented":
       case "specified":
+      case "planned":
         card = { ...card, revision };
         break;
     }

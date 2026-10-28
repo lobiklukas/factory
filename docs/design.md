@@ -336,6 +336,34 @@ refresh is a first-class operation on a long session.
 _Rejected:_ a shared service-account PAT (one prompt injection becomes the whole org's source);
 forwarding each user's own key (makes CI-delegated and Slack-delegated sessions unreasoning).
 
+_Refined (S-agent-secrets):_ a repository's own secrets — a registry token for `install`, a test key
+for `verify` — are a second kind of credential, and the same rule holds: never in the session's
+shell. They are stored write-only in Postgres, encrypted under the control plane's
+`FACTORY_SECRETS_KEY` (a KMS later), declared per step in `.factory/config` at the session's base,
+injected only into the declared setup and verify commands, and masked in everything those commands
+print before it is committed. The declaration is read at the base commit the session's first open
+pinned (`session_secret_bases`), not at a ref re-resolved later: a local checkout's refs are shared
+with the agent's shell, which could otherwise move the base onto a commit that declares every name.
+The PR step scans every line the branch's commits add, and every commit's message, author and
+paths, for a stored value or a credential's shape before it pushes, and refuses `secret-found`. The
+scan stops at the base's tip as the control plane fetches it from the forge just before its push
+(and at an adopted card PR's published commit), never at a local ref; it reads every file as text
+whatever its attributes, and a merge as a dense combined diff, with every `git log` setting the
+agent could write into the checkout's shared `.git/config` pinned on its command line. The
+credential patterns apply to every repo, with or without a store; a line opts out of them with
+`factory-secret-scan:allow` only in a file that carries the marker at that base, so a marker the
+branch writes, or one in a commit message, exempts nothing.
+_Limits:_ masking is literal, so a command that prints a value encoded leaks it, and the scan is
+literal too, so a value committed encoded passes it; a line added to a file the base already marks
+is exempt from the patterns (never from a stored value); a repo the factory
+does not push (no forge URL) is scanned from its local base, which a local agent can move; and a
+session's first open trusts the checkout's base as it then stands, which in a local checkout every
+other session's agent shares.
+_Rejected:_ injecting them into the agent's shell (the shell's output and the model's context are
+the log); reading the declaration from the run's branch (the agent could grant itself any stored
+value); a proxy that keeps the value out of the sandbox entirely (the right end state, but a network
+component this local-first build does not have yet).
+
 ### D15 — Enforcement: policy in hooks, boundary at GitHub
 
 Pi Durable's hooks (`hook(ToolTask, { beforeTool, afterTool })`, plus `beforeRequest` /
@@ -559,6 +587,12 @@ most one request. A stop the log refuses to commit fails closed: the request is 
 fork keeps its parent's cap and carries its spend; a replay keeps its source's cap at no spend; a fork
 or a replay of an uncapped session gets `SESSION_BUDGET`, as a create does. The full stop semantics
 are that module's header.
+_As built (C23)._ A cap can be set after the fact. `setSessionBudget({ sessionId, budget })` commits
+the new ceiling on `factory.budget` and clears the stop fields in the same commit (`commitBudget`), so
+a session the cap stopped runs again on its next message; the stop's transcript entry stays as
+history. `factory budget <session> --cap` and the dashboard's **Raise cap** (under the stop in the
+transcript) call it. A board run takes a cap when it is started: `factory board start --budget` and the
+card pane's Start run (a Budget field) put `budget` on the `createSession` that opens it.
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.

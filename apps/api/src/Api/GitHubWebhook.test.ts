@@ -207,6 +207,10 @@ const failingSync = LinearIssueSync.of({
   // The webhook never creates issues (LOB-202's children are the session layer's).
   createChild: () => Effect.die("the webhook does not create issues"),
   blocks: () => Effect.die("the webhook does not relate issues"),
+  // Nor asks anything in Linear's agent threads (T5).
+  openBlockers: () => Effect.die("the webhook does not read blockers"),
+  openAgentSession: () => Effect.die("the webhook does not open sessions"),
+  elicit: () => Effect.die("the webhook does not ask questions"),
   // Nor reads or changes a plan (LOB-45's pass is off by default, and writes no tracker when on).
   children: () => Effect.die("the webhook does not read a plan"),
   rescope: () => Effect.die("the webhook does not re-scope issues"),

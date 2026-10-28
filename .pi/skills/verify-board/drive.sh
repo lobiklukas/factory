@@ -112,6 +112,14 @@ if [ -z "$EXPECT_SPEC" ] || [ -z "$SPEC_GAP" ]; then
   exit 1
 fi
 
+# The plan ./up.sh's planner script declares once its `risks`-less first attempt is refused (D10).
+EXPECT_PLAN="$(cat "$RUN_DIR/faux-plan" 2>/dev/null)"
+PLAN_RISK="$(printf '%s' "$EXPECT_PLAN" | sed -n 's/.*"risks":\["\([^"]*\)"\].*/\1/p')"
+if [ -z "$EXPECT_PLAN" ] || [ -z "$PLAN_RISK" ]; then
+  echo "no faux plan in $RUN_DIR/faux-plan — run ./down.sh and ./up.sh again" >&2
+  exit 1
+fi
+
 failed=0
 rows=()
 check() { # name, pass-condition (0 = pass), detail
@@ -200,6 +208,8 @@ rm -f "$EVIDENCE_DIR/add.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,settled,pr}.json \
   "$EVIDENCE_DIR/pr-body.md" "$EVIDENCE_DIR/review-drive.json" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
+  "$EVIDENCE_DIR/plan-declared.json" "$EVIDENCE_DIR"/plan-pane.{json,png} \
+  "$EVIDENCE_DIR"/{move-unplanned,start-plan,show-planned}.txt \
   "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png \
   "$EVIDENCE_DIR"/pr-browser.{json,png,txt} "$EVIDENCE_DIR/pr.txt" "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
   "$EVIDENCE_DIR"/{runs,block,block-stale,block-again,unblock,unblock-stale}.txt \
@@ -546,12 +556,61 @@ check "the terminal's move reaches the open page without a reload" \
   "$([ "$BOTH_FOLLOWED" = "pass" ] && echo 0 || echo 1)" \
   "page: ${BOTH_FOLLOWED:-no answer}, see both-ways.json"
 
+# --- plan: no plan is refused naming plan_doc; the planner run declares one (D10) ------------------
+# A person's plan approval with nothing to approve is refused naming `plan_doc`, and writes nothing.
+# Then a run in `planning` — the `planner` role, a read-only stage — reads the checkout and calls the
+# `plan` tool: its first attempt leaves out `risks` and is refused naming the field, its retry is
+# committed to its log and recorded on the card, a revision on. `plan.ts` reads the log, the tools
+# the run was offered (no write, edit or verify) and `getTaskPlan`; `board show` prints the plan, and
+# `plan-pane.mjs` reads it in the card pane. The open both-ways page keeps polling meanwhile.
+fresh
+run_cmd unplanned "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor person:verify-board --api $API_URL" || true
+capture move-unplanned.txt
+UNPLANNED_MESSAGE='requirement_unmet: the move planning → building needs "plan_doc" (a plan doc), which is not met: the card has no plan'
+check "with no plan, a person's planning → building is refused naming plan_doc" \
+  "$([ "$(exit_code unplanned)" != "0" ] && [ -n "$(exit_code unplanned)" ] && grep -qF "$UNPLANNED_MESSAGE" "$EVIDENCE_DIR/move-unplanned.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code unplanned), message verbatim"
+fresh
+run_cmd plan "$FACTORY board start --task $TASK_ID --prompt 'plan this card' --api $API_URL" || true
+capture start-plan.txt
+PLAN_SESSION_ID="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/start-plan.txt" | head -1)"
+check "board start opens the planner run on the card, in planning" \
+  "$([ "$(exit_code plan)" = "0" ] && [ -n "$PLAN_SESSION_ID" ] && grep -q "task    $TASK_ID in planning" "$EVIDENCE_DIR/start-plan.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code plan), session=${PLAN_SESSION_ID:-none}"
+env API_URL="$API_URL" SESSION_ID="${PLAN_SESSION_ID:-}" TASK_ID="$TASK_ID" EXPECT_PLAN="$EXPECT_PLAN" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$SKILL/plan.ts" > "$RUN_DIR/plan-declared.log" 2>&1
+PLAN_RC=$?
+cat "$RUN_DIR/plan-declared.log"
+check "the planner run, offered plan and no write tool, declared the plan after a refusal naming risks" \
+  "$([ "$PLAN_RC" = "0" ] && echo 0 || echo 1)" "see plan-declared.json"
+fresh
+run_cmd planned "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-planned.txt
+PLANNED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-planned.txt")"
+check "show prints the run's plan, its steps and risk, one revision on, still in planning" \
+  "$([ "$(exit_code planned)" = "0" ] && grep -qxF "plan      ${PLAN_SESSION_ID:-ses_missing} from planning (revision ${PLANNING_REVISION:-?})" "$EVIDENCE_DIR/show-planned.txt" && grep -qx '  steps: 2' "$EVIDENCE_DIR/show-planned.txt" && grep -qxF "    - $PLAN_RISK" "$EVIDENCE_DIR/show-planned.txt" && grep -qx 'column    planning' "$EVIDENCE_DIR/show-planned.txt" && [ "${PLANNED_REVISION:-0}" = "$((${PLANNING_REVISION:-0} + 1))" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code planned), revision ${PLANNING_REVISION:-?} → ${PLANNED_REVISION:-?}"
+check "the exit checklist now reads plan_doc met" \
+  "$(grep -qF '  plan_doc: met (a plan doc)' "$EVIDENCE_DIR/show-planned.txt" && echo 0 || echo 1)" \
+  "$(grep -F 'plan_doc' "$EVIDENCE_DIR/show-planned.txt" | head -1)"
+WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" \
+  EXPECT_SESSION="${PLAN_SESSION_ID:-}" EVIDENCE_DIR="$EVIDENCE_DIR" \
+  node "$SKILL/plan-pane.mjs" > "$RUN_DIR/plan-pane.log" 2>&1
+PLAN_PANE_RC=$?
+cat "$RUN_DIR/plan-pane.log"
+check "the card pane shows the card's plan (plan-pane.mjs)" \
+  "$([ "$PLAN_PANE_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$PLAN_PANE_RC, see plan-pane.json"
+# Everything after this is at the plan's revision; with no plan it stays the planning one, and the
+# phases below fail on their own checks rather than on a revision this one made up.
+PLANNED_REVISION="${PLANNED_REVISION:-$PLANNING_REVISION}"
+
 # --- move: the run crossing a human gate is refused, naming the gate -------------------------------
 # The actor is the session `board start` opened, so the drive does not invent an id. The service
 # only checks that the actor is a well-formed session id (TaskService's `isRunActor`), not that the
 # session exists. `planning → building` is B5's plan approval gate.
 fresh
-run_cmd gate "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor ${SESSION_ID:-ses_missing} --api $API_URL" || true
+run_cmd gate "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNED_REVISION:-0} --actor ${SESSION_ID:-ses_missing} --api $API_URL" || true
 capture move-gate.txt
 GATE_MESSAGE="human_gate_required: the move planning → building crosses the plan approval gate, which only a person can make"
 check "a run crossing the plan approval gate is refused, naming the gate" \
@@ -566,14 +625,14 @@ fresh
 run_cmd after "$FACTORY board show --task $TASK_ID --api $API_URL" || true
 capture show-after.txt
 check "after the refusals the card is where the last accepted move put it" \
-  "$([ "$(exit_code after)" = "0" ] && grep -qx "column    planning" "$EVIDENCE_DIR/show-after.txt" && grep -qx "revision  ${PLANNING_REVISION:-none}" "$EVIDENCE_DIR/show-after.txt" && echo 0 || echo 1)" \
-  "planning at revision ${PLANNING_REVISION:-none}"
+  "$([ "$(exit_code after)" = "0" ] && grep -qx "column    planning" "$EVIDENCE_DIR/show-after.txt" && grep -qx "revision  ${PLANNED_REVISION:-none}" "$EVIDENCE_DIR/show-after.txt" && echo 0 || echo 1)" \
+  "planning at revision ${PLANNED_REVISION:-none}"
 
 # --- web: the dashboard reads the same card -------------------------------------------------------
 # EXPECT_REVISION is the revision the last accepted move returned, so a refusal that bumped the
 # revision reddens the web phase too, not only the `show` above.
 WEB_URL="$WEB_URL" API_URL="$API_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" EXPECT_COLUMN=planning \
-  EXPECT_REVISION="${PLANNING_REVISION:-}" EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/web.mjs" > "$RUN_DIR/web-phase.log" 2>&1
+  EXPECT_REVISION="${PLANNED_REVISION:-}" EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/web.mjs" > "$RUN_DIR/web-phase.log" 2>&1
 WEB_RC=$?
 cat "$RUN_DIR/web-phase.log"
 check "the dashboard agrees with the server after the refusals (web.mjs)" \
@@ -583,7 +642,7 @@ check "the dashboard agrees with the server after the refusals (web.mjs)" \
 # --- build: a person approves the plan, and a run in `building` makes the change (LOB-86) ---------
 # The approval is the both-ways phase's browser half: the page that followed the terminal makes it,
 # and the terminal reads it back (LOB-87).
-both_signal browser-move "${PLANNING_REVISION:-0}"
+both_signal browser-move "${PLANNED_REVISION:-0}"
 BROWSER_MOVED="$(both_await browser-moved 60)"
 both_reap 15
 BOTH_RC=$?
@@ -594,7 +653,7 @@ run_cmd building "$FACTORY board show --task $TASK_ID --api $API_URL" || true
 capture show-building.txt
 BUILDING_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-building.txt")"
 check "a person approves the plan in the browser, and factory board show prints it" \
-  "$([ "$(exit_code building)" = "0" ] && grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt" && [ -n "$PLANNING_REVISION" ] && [ "${BUILDING_REVISION:-}" = "$((PLANNING_REVISION + 1))" ] && [ "${BROWSER_MOVED:-}" = "building $BUILDING_REVISION" ] && echo 0 || echo 1)" \
+  "$([ "$(exit_code building)" = "0" ] && grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt" && [ -n "$PLANNED_REVISION" ] && [ "${BUILDING_REVISION:-}" = "$((PLANNED_REVISION + 1))" ] && [ "${BROWSER_MOVED:-}" = "building $BUILDING_REVISION" ] && echo 0 || echo 1)" \
   "page: ${BROWSER_MOVED:-no answer}; show: $(grep -m1 '^column' "$EVIDENCE_DIR/show-building.txt" 2>/dev/null), revision ${BUILDING_REVISION:-none}"
 check "the both-ways phase's browser checks pass (both-ways.mjs)" \
   "$([ "$BOTH_RC" = "0" ] && echo 0 || echo 1)" \
@@ -604,7 +663,7 @@ check "the both-ways phase's browser checks pass (both-ways.mjs)" \
 if ! grep -qx "column    building" "$EVIDENCE_DIR/show-building.txt"; then
   echo "drive: the browser did not approve the plan — approving it from the terminal" >&2
   fresh
-  run_cmd building-cli "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNING_REVISION:-0} --actor person:verify-board --api $API_URL" || true
+  run_cmd building-cli "$FACTORY board move --task $TASK_ID --to building --expect-revision ${PLANNED_REVISION:-0} --actor person:verify-board --api $API_URL" || true
   capture move-building.txt
   BUILDING_REVISION="$(sed -n "s/^moved $TASK_ID to building (revision \([0-9]*\))$/\1/p" "$EVIDENCE_DIR/move-building.txt")"
 fi
@@ -707,19 +766,22 @@ check "factory ls shows the build run's PR link" \
   "row for ${BUILD_SESSION_ID:-none}"
 
 # --- runs: the card's runs, each with its session, column, status and PR (LOB-264) ----------------
-# Newest run first: the build run (with the PR the browser opened), then the specifying runs — the
-# second one `board start` opened after the answer, then the one that asked — each with `-` for a PR
-# it never had. The status is the session's own, read through `getSession`: every run here is idle.
+# Newest run first: the build run (with the PR the browser opened), then the planner run (D10), then
+# the specifying runs — the second one `board start` opened after the answer, then the one that
+# asked — each with `-` for a PR it never had. The status is the session's own, read through `getSession`: every run here is idle.
 fresh
 run_cmd runs "$FACTORY board runs --task $TASK_ID --api $API_URL" || true
 capture runs.txt
 run_row() { grep "^$1  " "$EVIDENCE_DIR/runs.txt" | head -1; }
 check "board runs prints the header and one row per run, newest first" \
-  "$([ "$(exit_code runs)" = "0" ] && grep -qx 'session  column  status  pr  started' "$EVIDENCE_DIR/runs.txt" && [ "$(grep -c '^ses_' "$EVIDENCE_DIR/runs.txt")" = "3" ] && [ "$(grep '^ses_' "$EVIDENCE_DIR/runs.txt" | awk '{print $1}' | tr '\n' ' ')" = "${BUILD_SESSION_ID:-none} ${NEXT_SESSION_ID:-none} ${SESSION_ID:-none} " ] && echo 0 || echo 1)" \
+  "$([ "$(exit_code runs)" = "0" ] && grep -qx 'session  column  status  pr  started' "$EVIDENCE_DIR/runs.txt" && [ "$(grep -c '^ses_' "$EVIDENCE_DIR/runs.txt")" = "4" ] && [ "$(grep '^ses_' "$EVIDENCE_DIR/runs.txt" | awk '{print $1}' | tr '\n' ' ')" = "${BUILD_SESSION_ID:-none} ${PLAN_SESSION_ID:-none} ${NEXT_SESSION_ID:-none} ${SESSION_ID:-none} " ] && echo 0 || echo 1)" \
   "exit=$(exit_code runs), rows: $(grep '^ses_' "$EVIDENCE_DIR/runs.txt" | awk '{print $1}' | tr '\n' ' ')"
 check "the build run's row names its column, status and the PR the forge opened" \
   "$([ -n "$PR_URL" ] && run_row "${BUILD_SESSION_ID:-none}" | grep -qE "^${BUILD_SESSION_ID:-none}  building  idle  $PR_URL  [0-9T:.Z-]+$" && echo 0 || echo 1)" \
   "$(run_row "${BUILD_SESSION_ID:-none}")"
+check "the planner run's row is in planning, idle, with no PR" \
+  "$(run_row "${PLAN_SESSION_ID:-none}" | grep -qE "^${PLAN_SESSION_ID:-none}  planning  idle  -  [0-9T:.Z-]+$" && echo 0 || echo 1)" \
+  "$(run_row "${PLAN_SESSION_ID:-none}")"
 check "a specifying run's row has no PR" \
   "$(run_row "${SESSION_ID:-none}" | grep -qE "^${SESSION_ID:-none}  specifying  idle  -  [0-9T:.Z-]+$" && echo 0 || echo 1)" \
   "$(run_row "${SESSION_ID:-none}")"
@@ -888,6 +950,7 @@ check "the card is done" \
   printf '  "taskId": "%s",\n' "$TASK_ID"
   printf '  "sessionId": "%s",\n' "${SESSION_ID:-}"
   printf '  "nextSessionId": "%s",\n' "${NEXT_SESSION_ID:-}"
+  printf '  "planSessionId": "%s",\n' "${PLAN_SESSION_ID:-}"
   printf '  "buildSessionId": "%s",\n' "${BUILD_SESSION_ID:-}"
   printf '  "prUrl": "%s",\n' "${PR_URL:-}"
   printf '  "reviewerSessionId": "%s",\n' "${REVIEWER_SESSION_ID:-}"

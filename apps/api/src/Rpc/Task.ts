@@ -3,6 +3,7 @@ import {
   describeDefinition,
   PullRequestStates,
   refreshCardPullRequest,
+  HARNESS_ROLES,
   releaseFinishedCard,
   SessionService,
   SkillService,
@@ -68,19 +69,36 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       defineBoard: (input) =>
         skillNames.pipe(
           Effect.flatMap((names) =>
-            tasks.defineBoard(input, { skills: names, roles: sessions.roles }),
+            tasks.defineBoard(input, {
+              skills: names,
+              roles: sessions.roles,
+              // The harness's roles and the deployment's own role policy rows (D10, `ROLE_POLICIES`).
+              knownRoles: new Set([
+                ...HARNESS_ROLES,
+                ...sessions.rolePolicies.keys(),
+              ]),
+            }),
           ),
           Effect.map(({ outcome, definition }) => ({
             outcome,
             definition: describeDefinition(definition, deployment),
           })),
         ),
+      // The repinned events are the credential's actor's (LOB-20), as every other board write's.
+      upgradeBoard: (input) =>
+        attributed(input).pipe(Effect.flatMap(tasks.upgradeBoard)),
       // The editor's pickers (D6): the keys and roles the rules `defineBoard` runs accept, against the
       // same role table and the same held definitions, read afresh for every call.
       getDefinitionVocabulary: () =>
         tasks.declaredRoles.pipe(
           Effect.map((declared) =>
-            definitionVocabulary({ table: sessions.roles, declared }),
+            definitionVocabulary({
+              table: new Set([
+                ...sessions.roles,
+                ...sessions.rolePolicies.keys(),
+              ]),
+              declared,
+            }),
           ),
         ),
       // One read: `getBoard`'s join of the instance and its pinned version, so the two cannot disagree.
@@ -132,6 +150,8 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       listTaskComments: (input) => tasks.comments(input.taskId),
       getTaskSpec: (input) =>
         tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
+      getTaskPlan: (input) =>
+        tasks.plan(input.taskId).pipe(Effect.map((plan) => plan ?? null)),
       // Opening the card reads its PR (C20): a merge moves it to done and a close blocks it, as the
       // webhook would, and the checklist is judged on the card that read leaves.
       getTaskExit: (input) =>

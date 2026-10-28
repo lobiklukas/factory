@@ -13,6 +13,7 @@ import {
   selectReviewerCredentialProvider,
   runDocsSchedule,
   SessionService,
+  SecretServiceLive,
   SessionServiceLive,
 } from "@repo/core";
 import { Api } from "@repo/domain/Api";
@@ -29,6 +30,8 @@ import {
   modelKey,
   parseFauxModelScripts,
   parseRoleModels,
+  parseRolePolicies,
+  extendRolePolicies,
   resolveRoleModels,
   resolveDefaultModel,
   REVIEW_ROLES,
@@ -60,6 +63,7 @@ import {
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
+  AskWriteBackLive,
   linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
@@ -281,6 +285,16 @@ const ModelConfig = Config.all({
  * so under faux a row dropped while a run is pinned to it strands that run (docs/board.md B6).
  */
 const RoleModelsConfig = Config.String("ROLE_MODELS").pipe(
+  Config.withDefault(""),
+);
+
+/**
+ * What the deployment's own board roles may do (D10): extra rows for the role policy table, as
+ * `role=flag+flag` with flags `read-only`, `spec` and `plan` — `auditor=read-only,architect=read-only+plan`.
+ * The factory's own rows (`specifier`, `planner`) are built in and cannot be redefined; a malformed
+ * row or one that redefines them fails the boot (`parseRolePolicies`). Blank: the factory's table.
+ */
+const RolePoliciesConfig = Config.String("ROLE_POLICIES").pipe(
   Config.withDefault(""),
 );
 
@@ -680,6 +694,13 @@ const HttpLive = Effect.gen(function* () {
       : `default model: ${modelKey(modelAccess)} (DEFAULT_MODEL)`,
   );
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
+  const declaredPolicies = yield* parseRolePolicies(yield* RolePoliciesConfig);
+  const rolePolicies = extendRolePolicies(declaredPolicies);
+  if (declaredPolicies.size > 0) {
+    yield* Effect.logInfo(
+      `role policies: ${[...declaredPolicies.keys()].join(", ")} added to the factory's (ROLE_POLICIES)`,
+    );
+  }
   yield* Effect.logInfo(
     `role models: ${[...roleModels]
       .map(([role, access]) => `${role} → ${modelKey(access)}`)
@@ -785,6 +806,7 @@ const HttpLive = Effect.gen(function* () {
           repoRemote,
           model: modelAccess,
           roleModels,
+          rolePolicies,
           sessionRoot: model.sessionRoot,
           sandbox,
           idleTimeoutMs: model.idleTimeoutMs,
@@ -805,7 +827,11 @@ const HttpLive = Effect.gen(function* () {
       Layer.mergeAll(
         SessionWriteBacksLive,
         ProposalTrackerLive,
+        AskWriteBackLive,
         PullRequestStepDeps,
+        // The repos' secrets (S-agent-secrets): what the session's commands are given, and what
+        // the push's scan looks for.
+        SecretServiceLive,
       ),
     ),
   );

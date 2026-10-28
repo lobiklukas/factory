@@ -3,6 +3,7 @@ import { Command, Flag } from "effect/cli";
 import {
   RepoSlug,
   SessionActor,
+  SessionBudgetCap,
   SessionError,
   SessionId,
 } from "@repo/domain/Session";
@@ -14,6 +15,7 @@ import {
   DefinitionId,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
+  pinnedVersionsNotice,
   runPrompt,
   TaskId,
   TaskPriority,
@@ -28,12 +30,15 @@ import type {
   TaskExit,
   TaskRun,
   TaskSpec,
+  TaskPlan,
 } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { NO_PR } from "./ls";
 import { BoardClient } from "../rpc";
+import { formatDollars } from "../transcript";
 import { boardConfigCommands } from "./boardConfig";
+import { boardUpgradeCommands } from "./boardUpgrade";
 
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
@@ -205,6 +210,40 @@ const laneCard = (task: Task): string =>
   ["", task.id, task.priority, task.title].join("  ");
 
 /**
+ * What `factory board ls` prints under the board's line: one line per column of the board's version
+ * with that lane's cards under it, then — for a board upgraded without migrating its cards (D5) —
+ * the cards in a column that version does not declare, each with the version it pins, so a card
+ * left on a renamed or dropped column is listed rather than missing from every lane (as the
+ * dashboard's strays are, `boardLanes`).
+ */
+export const laneLines = (
+  columns: ReadonlyArray<{ readonly name: string; readonly kind: string }>,
+  cards: ReadonlyArray<Task>,
+): ReadonlyArray<string> => {
+  const declared = new Set(columns.map((column) => column.name));
+  const strays = cards.filter((card) => !declared.has(card.column));
+  return [
+    ...columns.flatMap((column) => {
+      const lane = cards.filter((card) => card.column === column.name);
+      return [
+        [column.name, column.kind, String(lane.length)].join("  "),
+        ...lane.map(laneCard),
+      ];
+    }),
+    ...(strays.length === 0
+      ? []
+      : [
+          `elsewhere  ${strays.length} in a column the board's version does not declare`,
+          ...strays.map((card) =>
+            [laneCard(card), card.column, `v${card.definitionVersion}`].join(
+              "  ",
+            ),
+          ),
+        ]),
+  ];
+};
+
+/**
  * `factory board ls` — one line per column, in the order the pinned definition declares them, with
  * that lane's cards under it.
  *
@@ -241,14 +280,12 @@ const lsCommand = Command.make(
       for (const line of warningLines(view.warning, "warning  ")) {
         yield* Console.log(line);
       }
-      for (const column of view.definition.columns) {
-        const lane = cards.filter((card) => card.column === column.name);
-        yield* Console.log(
-          [column.name, column.kind, String(lane.length)].join("  "),
-        );
-        for (const card of lane) {
-          yield* Console.log(laneCard(card));
-        }
+      // A board upgraded without migrating its cards (D5): its lanes are the new version's, and the
+      // cards still on an older one move by that one's moves.
+      const mixed = pinnedVersionsNotice(view.definition.version, cards);
+      if (mixed !== null) yield* Console.log(`pinned   ${mixed}`);
+      for (const line of laneLines(view.definition.columns, cards)) {
+        yield* Console.log(line);
       }
     });
 
@@ -544,6 +581,22 @@ export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
       ];
 
 /**
+ * The card's plan (D10), printed as its spec is: the run that declared it, the column and revision it
+ * was declared at, its summary, then its steps, surfaces and risks. `risks: none` is a plan that
+ * declares none; a card no run has planned prints `plan      -`.
+ */
+export const planLines = (plan: TaskPlan | null): ReadonlyArray<string> =>
+  plan === null
+    ? ["plan      -"]
+    : [
+        `plan      ${plan.sessionId} from ${plan.column} (revision ${plan.revision})`,
+        `  summary: ${plan.summary}`,
+        ...specList("steps", plan.steps),
+        ...specList("surfaces", plan.surfaces),
+        ...specList("risks", plan.risks),
+      ];
+
+/**
  * What the card needs to leave its column (D9): a `leaves <column> when` header, then each of the
  * column's requirements — `met`, `unmet` with the reason the move would be refused with, or `not
  * checked` for a key nothing checks — in declaration order. A column that declares none says so.
@@ -586,7 +639,8 @@ export const bodyLines = (card: Task): ReadonlyArray<string> => {
 };
 
 /**
- * `factory board show <task>` — one card, as the server has it, its spec (LOB-238), and its thread
+ * `factory board show <task>` — one card, as the server has it, its spec (LOB-238) and plan (D10),
+ * and its thread
  * (B7): the question a parked run asked and the answer a person gave are read here, on the task, not
  * in a transcript.
  */
@@ -611,12 +665,16 @@ const showCommand = Command.make(
       const card = yield* client.getTask({ taskId });
       const thread = yield* client.listTaskComments({ taskId });
       const spec = yield* client.getTaskSpec({ taskId });
+      const plan = yield* client.getTaskPlan({ taskId });
       const exit = yield* client.getTaskExit({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
       yield* Console.log(`board     ${card.boardId}`);
       yield* Console.log(`column    ${card.column}`);
       yield* Console.log(`revision  ${card.revision}`);
+      // The version whose moves and exits the card meets (B2): the board's, unless the board was
+      // upgraded after the card was made and the card was not migrated with it (D5).
+      yield* Console.log(`pinned    v${card.definitionVersion}`);
       yield* Console.log(`priority  ${card.priority}`);
       yield* Console.log(`repo      ${card.repo ?? "-"}`);
       yield* Console.log(
@@ -638,6 +696,7 @@ const showCommand = Command.make(
       yield* Console.log(`title     ${card.title}`);
       for (const line of bodyLines(card)) yield* Console.log(line);
       for (const line of specLines(spec)) yield* Console.log(line);
+      for (const line of planLines(plan)) yield* Console.log(line);
       for (const line of exitLines(exit)) yield* Console.log(line);
       yield* Console.log(`thread    ${thread.length}`);
       for (const comment of thread) {
@@ -707,71 +766,6 @@ const moveCommand = Command.make(
 );
 
 /**
- * `factory board comment` — add to a card's thread (B7, LOB-73).
- *
- * From a person on a card blocked `needs_input`, the comment is the answer: it lifts the block in the
- * same transaction, and the next run started on the card reads it in its prompt. Anywhere else it is
- * a note. `--expect-revision` is required for the reason it is on `move`: an answer typed against a
- * card someone else already answered must be refused, not silently appended.
- */
-const commentCommand = Command.make(
-  "comment",
-  {
-    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
-    body: Flag.String("body").pipe(
-      Flag.withDescription("The comment, verbatim — the answer to a question"),
-    ),
-    expectRevision: Flag.Int("expect-revision").pipe(
-      Flag.withDescription("The revision this comment expects"),
-    ),
-    actor: actorFlag,
-    api: apiFlag,
-  },
-  Effect.fnUntraced(function* ({ task, body, expectRevision, actor, api }) {
-    const apiUrl = yield* resolveApiUrl(api);
-
-    const program = Effect.gen(function* () {
-      const taskId = decodeId(TaskId, task);
-      if (taskId === undefined) {
-        return yield* reportFailure(
-          "invalid_input",
-          `--task "${task}" is not a task id (tsk_…)`,
-        );
-      }
-      const { client } = yield* BoardClient;
-      const before = yield* client.getTask({ taskId });
-      const after = yield* client.commentTask({
-        taskId,
-        expectedRevision: expectRevision,
-        body,
-        actor,
-      });
-      yield* Console.log(
-        `commented on ${after.id} (revision ${after.revision})`,
-      );
-      if (before.blocked !== undefined && after.blocked === undefined) {
-        yield* Console.log(
-          `answered: ${after.id} is no longer blocked (${before.blocked.reason} from ${before.blocked.column})`,
-        );
-      }
-    });
-
-    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
-  }),
-).pipe(
-  Command.withDescription(
-    "Comment on a card; on a card blocked needs_input, the answer",
-  ),
-  Command.withExamples([
-    {
-      command:
-        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16."',
-      description: "Answer the question a parked run asked",
-    },
-  ]),
-);
-
-/**
  * What `factory board start` needs of the client, as slices a test can fake: the card, the definition
  * version the card pinned (for the column's instruction), the session it opens and the message it sends.
  */
@@ -801,6 +795,7 @@ export interface StartClient<B, S> {
     readonly taskColumn: string;
     readonly actor: string;
     readonly repo?: RepoSlug;
+    readonly budget?: number;
   }) => Effect.Effect<{ readonly id: SessionId }, S>;
   readonly getSession: (input: {
     readonly sessionId: SessionId;
@@ -861,6 +856,8 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     readonly prompt: string | undefined;
     readonly idle: boolean;
     readonly actor: string;
+    /** The run's spend ceiling in US dollars (C23); absent: the server's default cap, if any. */
+    readonly budget?: number | undefined;
   },
   emit: (line: string) => Effect.Effect<void>,
 ) {
@@ -872,9 +869,13 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     taskColumn,
     actor: input.actor,
     ...(card.repo === undefined ? {} : { repo: card.repo }),
+    ...(input.budget === undefined ? {} : { budget: input.budget }),
   });
   yield* emit(`session ${session.id}`);
   yield* emit(`task    ${card.id} in ${taskColumn}`);
+  if (input.budget !== undefined) {
+    yield* emit(`budget  ${formatDollars(input.budget)}`);
+  }
   // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
   // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
   // Advisory: the run has started, so a failed read skips the warning and never fails the command.
@@ -925,10 +926,25 @@ const startCommand = Command.make(
       ),
       Flag.withDefault(false),
     ),
+    budget: Flag.Finite("budget").pipe(
+      Flag.withDescription(
+        "Spend ceiling for the run, in US dollars: it stops before a model request once the session's spend reaches it (raise it with `factory budget`)",
+      ),
+      Flag.withSchema(SessionBudgetCap),
+      Flag.optional,
+    ),
     actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, idle, actor, api }) {
+  Effect.fnUntraced(function* ({
+    task,
+    column,
+    prompt,
+    idle,
+    budget,
+    actor,
+    api,
+  }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -953,6 +969,7 @@ const startCommand = Command.make(
           column: Option.getOrUndefined(column),
           prompt: Option.getOrUndefined(prompt),
           idle,
+          budget: Option.getOrUndefined(budget),
           actor,
         },
         Console.log,
@@ -970,8 +987,209 @@ const startCommand = Command.make(
         "A session bound to the card, in the card's own column, sent the card's default prompt",
     },
     {
+      command: "factory board start --task tsk_… --budget 2.50",
+      description: "The same run, capped at $2.50 of spend",
+    },
+    {
       command: "factory board start --task tsk_… --idle",
       description: "The same session, opened and left waiting",
+    },
+  ]),
+);
+
+/**
+ * `--start` on a card that is not waiting for an answer: there is no answer to start a run for, so
+ * nothing is written. Reported as `error: start_needs_answer`.
+ */
+export class StartNeedsAnswer extends Schema.TaggedError<StartNeedsAnswer>()(
+  "StartNeedsAnswer",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * `--start` on a comment that landed but answered nothing: the card is still blocked, so no run is
+ * waiting on it and none was opened. Reported as `error: start_not_started` with a non-zero exit, so
+ * a script that asked for a run can tell that it got none; the comment itself is already written.
+ */
+export class StartNotStarted extends Schema.TaggedError<StartNotStarted>()(
+  "StartNotStarted",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+/** What `factory board comment` needs of the client: the card, and the write of a comment to it. */
+export interface CommentClient<E> {
+  readonly getTask: (input: {
+    readonly taskId: TaskId;
+  }) => Effect.Effect<Task, E>;
+  readonly commentTask: (input: {
+    readonly taskId: TaskId;
+    readonly expectedRevision: number;
+    readonly body: string;
+    readonly actor: string;
+  }) => Effect.Effect<Task, E>;
+}
+
+/**
+ * Add a comment to a card and say what it did; when it answered a question and `start` names the run's
+ * actor (C24), open the next run on the card.
+ *
+ * The run is `startCard` with nothing but the card: its column, the default prompt (C6). The answer is
+ * not pasted into that prompt — every run on the card is told the whole thread, the answer included
+ * (B7, the `task_thread` prompt section) — so what is started is the run that reads it. `--start` on a
+ * card that is not blocked `needs_input` is refused before the comment is written: a comment that is
+ * only a note has no run waiting on it, and starting one anyway would be the surprise. If the
+ * comment lands and the card is nevertheless still blocked, no run is started and the command fails
+ * (`StartNotStarted`, exit 1) after saying so. A run's actor is refused up front like a card that is not blocked.
+ */
+export const commentCard = Effect.fnUntraced(function* <B, S>(
+  client: CommentClient<B> & StartClient<B, S>,
+  input: {
+    readonly taskId: TaskId;
+    readonly expectedRevision: number;
+    readonly body: string;
+    readonly actor: string;
+    /** The actor the next run is attributed to; `undefined` for a comment that starts nothing. */
+    readonly start: string | undefined;
+  },
+  emit: (line: string) => Effect.Effect<void>,
+) {
+  const before = yield* client.getTask({ taskId: input.taskId });
+  if (input.start !== undefined && before.blocked?.reason !== "needs_input") {
+    return yield* new StartNeedsAnswer({
+      taskId: input.taskId,
+      message: `--start follows an answer, and ${before.id} is not blocked needs_input (${
+        before.blocked === undefined
+          ? "it is not blocked"
+          : `it is blocked ${before.blocked.reason}`
+      }): nothing was commented`,
+    });
+  }
+  // Only a person answers: a run's comment on its own parked card is a note and leaves the block.
+  if (input.start !== undefined && Schema.is(SessionId)(input.actor)) {
+    return yield* new StartNeedsAnswer({
+      taskId: input.taskId,
+      message: `--start follows an answer, and --actor ${input.actor} is a run: a run's comment is a note and does not lift the block: nothing was commented`,
+    });
+  }
+  const after = yield* client.commentTask({
+    taskId: input.taskId,
+    expectedRevision: input.expectedRevision,
+    body: input.body,
+    actor: input.actor,
+  });
+  yield* emit(`commented on ${after.id} (revision ${after.revision})`);
+  const lifted = after.blocked === undefined ? before.blocked : undefined;
+  if (lifted !== undefined) {
+    yield* emit(
+      `answered: ${after.id} is no longer blocked (${lifted.reason} from ${lifted.column})`,
+    );
+  }
+  if (input.start === undefined) return;
+  if (lifted === undefined) {
+    const message = `${after.id} is still blocked, so no run is waiting on this comment`;
+    yield* emit(`not started: ${message}`);
+    return yield* new StartNotStarted({ taskId: input.taskId, message });
+  }
+  yield* startCard(
+    client,
+    {
+      taskId: input.taskId,
+      column: undefined,
+      prompt: undefined,
+      idle: false,
+      actor: input.start,
+    },
+    emit,
+  );
+});
+
+/**
+ * `factory board comment` — add to a card's thread (B7, LOB-73).
+ *
+ * From a person on a card blocked `needs_input`, the comment is the answer: it lifts the block in the
+ * same transaction, and the next run started on the card reads it in its prompt. Anywhere else it is
+ * a note. `--expect-revision` is required for the reason it is on `move`: an answer typed against a
+ * card someone else already answered must be refused, not silently appended.
+ *
+ * `--start` is the next step of an answer (C24): it opens that run, as `board start` with no flags
+ * does, so an answered card is not left with an answer and no run to read it.
+ */
+const commentCommand = Command.make(
+  "comment",
+  {
+    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
+    body: Flag.String("body").pipe(
+      Flag.withDescription("The comment, verbatim — the answer to a question"),
+    ),
+    expectRevision: Flag.Int("expect-revision").pipe(
+      Flag.withDescription("The revision this comment expects"),
+    ),
+    start: Flag.Boolean("start").pipe(
+      Flag.withDescription(
+        "After an answer lifts the block, start the next run on the card (its default prompt; the run reads the answer in the card's thread). Refused, before anything is written, on a card that is not blocked needs_input",
+      ),
+      Flag.withDefault(false),
+    ),
+    actor: actorFlag,
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({
+    task,
+    body,
+    expectRevision,
+    start,
+    actor,
+    api,
+  }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
+      const runActor = start
+        ? Option.getOrUndefined(Schema.decodeOption(SessionActor)(actor))
+        : undefined;
+      if (start && runActor === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--actor "${actor}" cannot own a run: --start attributes the run to the one who answered`,
+        );
+      }
+      const { client } = yield* BoardClient;
+      yield* commentCard(
+        client,
+        {
+          taskId,
+          expectedRevision: expectRevision,
+          body,
+          actor,
+          start: runActor,
+        },
+        Console.log,
+      );
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "Comment on a card; on a card blocked needs_input, the answer",
+  ),
+  Command.withExamples([
+    {
+      command:
+        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16."',
+      description: "Answer the question a parked run asked",
+    },
+    {
+      command:
+        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16." --start',
+      description: "Answer it and start the next run, which reads the answer",
     },
   ]),
 );
@@ -1351,7 +1569,9 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     case "gate":
       return [
         head,
-        `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`,
+        reason.unmet === undefined || reason.unmet.length === 0
+          ? `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`
+          : `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} needs ${reason.unmet.join(", ")} first (start or prompt a run), then is a person's`,
       ];
   }
 };
@@ -1528,7 +1748,7 @@ const runsCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Create a board, read its configuration, add cards, then read and move them: lanes, one card, a move, a comment, a run, a block, what needs a person",
+    "Create a board, read its configuration, upgrade it to a newer definition version, add cards, then read and move them: lanes, one card, a move, a comment, a run, a block, what needs a person",
   ),
   Command.withSubcommands([
     createCommand,
@@ -1540,6 +1760,8 @@ export const boardCommand = Command.make("board").pipe(
     startCommand,
     // Read-only: which boards and definitions exist, and what each does (LOB-270).
     ...boardConfigCommands,
+    // The one write that moves a board's pin, and its cards' with it when asked (D5).
+    ...boardUpgradeCommands,
     blockCommand,
     unblockCommand,
     updateCommand,

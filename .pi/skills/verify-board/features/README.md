@@ -3,7 +3,12 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the PR opened when the build run settles (C18, 2026-10-28,
+Status reflects the last verified runs: the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
+planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
+`./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
+`./definitions.sh` exit 0 (**31**), its golden now reading `plan_doc (checked)`, `faux/planner (role)`
+and C22's autonomy lines; `./board-create.sh`, `./define.sh` and `./triage.sh` green. Before it, the PR opened when the build run settles (C18, 2026-10-28,
 `agent/C18`), API on `:9500`, web on `:3500`, the GitHub fake on `:9503`: `./drive.sh` exit 0
 (**150** PASS) with no `factory pr` and nothing pressed — `build.ts MODE=settled` read the link, the
 card pane showed it with no control (`pr-browser.mjs` `PR_MODE=recorded`) — and exit 1 under
@@ -39,7 +44,7 @@ and **8/8** (`build-pr.json`) folded in, twice against one `./up.sh` instance, a
 (`observed.json` beside the raw panes), with `create.ts`'s **2/2** (`create.json`), the specify
 phase's probes' **11/11** (`specify-busy.json`, `specify-parked.json`, `specify-told.json`) and
 `web.mjs`'s **3/3** (`web.json`, `web-board.png`) folded in, twice against one `./up.sh` instance;
-`./ask.sh`, API on `:9501` across two processes, **14/14** drive checks and **11/11** probe checks
+`./ask.sh`, API on `:9501` across two processes, **16/16** drive checks and **11/11** probe checks
 passed (`ask-observed.json`; the probes' `ask-busy.json`, `ask-parked.json`, `ask-told.json`).
 The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`, web on `:3520`:
 `./drive.sh` **35/35** required checks, with `spec.ts`'s **9/9** (`spec-declared.json`, `spec-closed.json`) and
@@ -77,12 +82,14 @@ Evidence: `.verify/evidence/latest/board/`.
 | specify, ask, answer (the card)         | passing | [specify.md](specify.md)         |
 | build, PR + evidence, merge             | passing | [build.md](build.md)             |
 | the specifying run's spec               | passing | [specify.md](specify.md)         |
+| the planning run's plan (D10)           | passing | [plan.md](plan.md)               |
 | the ask on the task                     | passing | [ask.md](ask.md)                 |
 | `requires[]` on exit                    | passing | [requires.md](requires.md)       |
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
 | a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |
 | `factory board define` (D4)             | passing | [define.md](define.md)           |
+| `factory board upgrade` + Upgrade (D5)  | passing | [upgrade.md](upgrade.md)         |
 
 ## Deliberately absent
 
@@ -101,4 +108,4 @@ Evidence: `.verify/evidence/latest/board/`.
   runs.
 - **Definition editing in place.** A definition version is a new row, never an update (B2):
   `factory board define` writes the next version ([define.md](define.md)), and nothing edits or
-  deletes one. Reading one is [definitions.md](definitions.md).
+  deletes one; a board moves to it by an upgrade ([upgrade.md](upgrade.md)). Reading one is [definitions.md](definitions.md).

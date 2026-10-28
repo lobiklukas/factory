@@ -27,6 +27,7 @@ import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import {
   type CredentialProvider,
+  GitHubAuthorPermissions,
   GitHubWriteBack,
   jiraConfigFromEnv,
   JiraWriteBack,
@@ -103,6 +104,15 @@ export const TriggerWriteBacksLive = TriggerWriteBackBySource<
     githubSessionUrlBase ? { sessionUrlBase: githubSessionUrlBase } : {},
   ).pipe(Layer.provide(FetchHttpClient.layer)),
 });
+
+/**
+ * The trust gate's permission port (S-trigger-trust-gating): a GitHub author's role on the repo, read
+ * with the same credential and API root (`GITHUB_API_URL`) the comment uses. Asked only for a rule
+ * whose `trust.githubPermission` is set and an author its allowlist does not name.
+ */
+export const TriggerAuthorPermissionsLive = GitHubAuthorPermissions().pipe(
+  Layer.provide(FetchHttpClient.layer),
+);
 
 /**
  * The session layer's write-back: Linear's mirror of the PR step, and Slack's reply with the PR's

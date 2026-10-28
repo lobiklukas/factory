@@ -7,6 +7,7 @@ import {
   denyCommand,
 } from "./commands/approve";
 import { boardCommand } from "./commands/board";
+import { budgetCommand } from "./commands/budget";
 import { costCommand } from "./commands/cost";
 import { discardCommand } from "./commands/discard";
 import { doctorCommand } from "./commands/doctor";
@@ -25,6 +26,7 @@ import {
   resetCommand,
 } from "./commands/sessionControl";
 import { spendCommand } from "./commands/spend";
+import { secretCommand } from "./commands/secret";
 import { skillCommand } from "./commands/skill";
 import { statusCommand } from "./commands/status";
 import { triggersCommand } from "./commands/triggers";
@@ -45,6 +47,7 @@ const root = Command.make("factory").pipe(
     sendCommand,
     withdrawCommand,
     interruptCommand,
+    budgetCommand,
     discardCommand,
     forkCommand,
     resetCommand,
@@ -54,6 +57,7 @@ const root = Command.make("factory").pipe(
     boardCommand,
     repoCommand,
     skillCommand,
+    secretCommand,
     triggersCommand,
     replayCommand,
     costCommand,

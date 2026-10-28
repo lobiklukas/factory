@@ -113,6 +113,8 @@ import {
   ReviewDoc,
   ReplayDoc,
   PLAN_REVISIONS_DOC_KIND,
+  POLICY_DOC_KIND,
+  PolicyDoc,
   REPO_PROMPT_DOC_KIND,
   RepoPromptDoc,
   SKILLS_DOC_KIND,
@@ -121,8 +123,10 @@ import {
   PROPOSED_ISSUES_DOC_KIND,
   ProposedIssuesDoc,
   SpecDoc,
+  PlanDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
+import { projectPlan, type Plan } from "./plan";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   assembleRepoPrompt,
@@ -147,6 +151,11 @@ import {
   type VerifyOptions,
   type VerifyRecord,
 } from "./verify";
+import {
+  maskingEnv,
+  secretMaskExtension,
+  type InjectedSecrets,
+} from "./secrets";
 import { bodyExtension, renderBody } from "./body";
 import {
   askExtension,
@@ -155,6 +164,8 @@ import {
   type ThreadReader,
 } from "./ask";
 import { commitSpec, specExtension, type SpecOptions } from "./specify";
+import { planExtension, type PlanOptions } from "./planning";
+import type { RolePolicies } from "./rolePolicy";
 import {
   REVIEW_DIMENSIONS,
   reviewExtension,
@@ -170,6 +181,8 @@ import {
   policyExtension,
   readOnlyStagePolicy,
   type ApprovalAsker,
+  type AutonomyRules,
+  type RepoPolicy,
   type SessionPolicy,
 } from "./policy";
 import {
@@ -199,6 +212,7 @@ import {
   ACTOR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
+  PLAN_DOC_KIND,
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
   MERGE_DOC_KIND,
@@ -383,6 +397,13 @@ export type OpenSessionOptions = {
    */
   readonly policy?: SessionPolicy;
   /**
+   * Where the repository's half of `policy` came from and what it declared (S-factory-config-as-code,
+   * `PolicyDoc`): committed in the open's one commit beside the rules `policy` resolved, so the log
+   * says what the run was allowed to do. Absent: nothing is recorded — a caller that is not the
+   * control plane, which has no repository policy to tell.
+   */
+  readonly policyRecord?: PolicyRecordInput;
+  /**
    * How a gated call asks a person (D15, LOB-52). The recorder is the control plane's approvals
    * service, so it is handed in here rather than imported. A session with no asker still gates: a
    * gated call is blocked with a sentence saying there is nobody to ask, never run ungated.
@@ -428,6 +449,13 @@ export type OpenSessionOptions = {
    */
   readonly verify?: VerifyOptions;
   /**
+   * Every secret value the control plane injects into this session's commands (S-agent-secrets,
+   * `./secrets`): the setup's and the `verify` tool's. Each is masked in every tool's settled result
+   * before it is committed (`secretMaskExtension`), beside the masking at the commands' own output.
+   * Absent or empty: nothing is installed.
+   */
+  readonly secrets?: InjectedSecrets;
+  /**
    * How this run asks a person (LOB-73, `./ask`): the control plane's callback that records the
    * question on the run's card and blocks it `needs_input`. Absent: a session with no card, which
    * has nobody to ask on, so it gets no `ask` tool at all.
@@ -449,10 +477,21 @@ export type OpenSessionOptions = {
   /**
    * How a specifying run posts its spec on its card (LOB-238, `./specify`): the control plane's
    * callback that records the spec as a `specified` event. The `spec` tool is installed only when
-   * this is given *and* the run's role writes the spec (`SPEC_ROLES`); any other run — a planner on
+   * this is given *and* the run's role writes the spec (`./rolePolicy`'s `writesSpec`); any other run — a planner on
    * the same card, a scratch session — is not offered it.
    */
   readonly spec?: SpecOptions;
+  /**
+   * How a planning run posts its plan on its card (D10, `./planning`): the control plane's callback
+   * that records the plan as a `planned` event. The `plan` tool is installed only when this is given
+   * *and* the run's role writes the plan (`./rolePolicy`'s `writesPlan`).
+   */
+  readonly plan?: PlanOptions;
+  /**
+   * What each role may do (`./rolePolicy`): the factory's table, extended by the deployment's
+   * `ROLE_POLICIES`. Absent is the factory's own (`DEFAULT_ROLE_POLICIES`).
+   */
+  readonly rolePolicies?: RolePolicies;
   /**
    * How a review run posts its review on the pull request (LOB-36, `./review`): the control plane's
    * callback that posts one comment under the reviewer's own identity. The `review` tool is installed
@@ -583,7 +622,12 @@ const openSessionIn = (
     const registry = createRegistry();
     // What the run's role is (B6, LOB-207): its model, the tools it is not offered, and the
     // read-only stage it makes the run, all from one resolution of the column's role.
-    const role = resolveRole(options.run, options.model, options.roles);
+    const role = resolveRole(
+      options.run,
+      options.model,
+      options.roles,
+      options.rolePolicies,
+    );
     // The agent is pinned when the root is created, and only then (`harness.root` below writes it
     // into a root that does not exist yet), so a reopened run keeps talking to the model it started
     // on. Its compaction thresholds have to follow that same model rather than whatever the role
@@ -648,6 +692,11 @@ const openSessionIn = (
     // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
     // its own surface rather than prose about it.
     registry.install(verifyExtension(options.verify));
+    // The values the session's commands are given never reach a committed tool result
+    // (S-agent-secrets): the agent's shell does not hold them, and this masks what it came to hold.
+    if (options.secrets !== undefined && options.secrets.length > 0) {
+      registry.install(secretMaskExtension(options.secrets));
+    }
     // The ask on the task (B7, LOB-73): only a run bound to a card can ask, because the question is
     // recorded on the card — a scratch session has nobody to ask on and no tool to ask with.
     if (options.ask !== undefined) registry.install(askExtension(options.ask));
@@ -655,6 +704,11 @@ const openSessionIn = (
     // than a file so the read-only stage can make it. Only the role that writes the spec gets it.
     if (options.spec !== undefined && role.writesSpec) {
       registry.install(specExtension(options.spec));
+    }
+    // The planner's plan (D10): the same shape as the spec, for the read-only planning stage — what
+    // the person at the plan approval gate reads. Only the role that writes the plan gets it.
+    if (options.plan !== undefined && role.writesPlan) {
+      registry.install(planExtension(options.plan));
     }
     // The reviewer's review (LOB-36): committed to the log and posted on the PR, the one thing the
     // read-only reviewing stage may say outside its log. Only a review run gets it.
@@ -679,11 +733,14 @@ const openSessionIn = (
     // `none` holds it too, as the subset it is, and is refused every write first by the read-only
     // stage below (`readOnlyStageOf`). Composed here, where a policy becomes hooks, so a session
     // cannot be opened with the skill or the declaration and without the rule.
-    const writeScope = columnWriteScope({
-      role: options.run?.role,
-      skills: skills.map((skill) => skill.name),
-      autonomy: options.run?.autonomy,
-    });
+    const writeScope = columnWriteScope(
+      {
+        role: options.run?.role,
+        skills: skills.map((skill) => skill.name),
+        autonomy: options.run?.autonomy,
+      },
+      options.rolePolicies,
+    );
     const columnPolicy =
       writeScope === "worktree" ? policy : docsPolicy(policy);
     // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
@@ -708,6 +765,12 @@ const openSessionIn = (
     // before then, so the hook reads it late rather than taking it here.
     let opened: BudgetSession | undefined;
     registry.install(budgetExtension(() => opened));
+    // Every command the session runs, its tools' and the control plane's setup alike, has the values
+    // it was given masked in its output before anything sees it (S-agent-secrets).
+    const sessionEnv = (cwd: string): Promise<ExecutionEnv> =>
+      environment
+        .env(cwd)
+        .then((env) => maskingEnv(env, options.secrets ?? []));
 
     const harness = yield* attempt("open harness", () =>
       HarnessRuntime.open(
@@ -715,7 +778,7 @@ const openSessionIn = (
         {
           models: model.models,
           registry,
-          env: (target) => environment.env(target.cwd ?? options.cwd),
+          env: (target) => sessionEnv(target.cwd ?? options.cwd),
           settings: {
             progress: SESSION_PROGRESS,
             // Long sessions compact (B4). The thresholds follow the model's context window
@@ -781,6 +844,11 @@ const openSessionIn = (
           : recordedRepo !== undefined
             ? null
             : undefined,
+        // The rules the hooks above were built from, which are the column's narrowing of `policy`
+        // only where the hooks narrow writes: the record says what the run may run and reach.
+        options.policyRecord === undefined
+          ? undefined
+          : policyRecordOf(options.policyRecord, policy.rules),
       );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
@@ -793,7 +861,7 @@ const openSessionIn = (
         root,
         model,
         releaseEnvironment: environment.release,
-        env: environment.env,
+        env: sessionEnv,
         resumed,
       };
     }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));
@@ -882,6 +950,8 @@ export const writePagePrompt = (
    * did, so the record never names sections the prompt no longer carries; absent leaves it alone.
    */
   repoPrompt?: RepoPromptRecord | null,
+  /** The policy the run meets (S-factory-config-as-code, `PolicyDoc`); absent leaves it alone. */
+  policyRecord?: PolicyRecord,
 ): Effect.Effect<void, SessionError> =>
   attempt("write page prompt", () =>
     conversation.commit(
@@ -942,6 +1012,32 @@ export const writePagePrompt = (
                       shadowed: [...repoPrompt.skills.shadowed],
                     };
                   }),
+            policyRecord === undefined
+              ? Promise.resolve()
+              : tx.doc(PolicyDoc, conversation.id).then((doc) => {
+                  doc.source =
+                    policyRecord.source === null
+                      ? null
+                      : { ...policyRecord.source };
+                  doc.repo = {
+                    approvalRequired: [...policyRecord.repo.approvalRequired],
+                    denied: [...policyRecord.repo.denied],
+                    allowedHosts:
+                      policyRecord.repo.allowedHosts === null
+                        ? null
+                        : [...policyRecord.repo.allowedHosts],
+                  };
+                  doc.effective = {
+                    approvalRequired: [
+                      ...policyRecord.effective.approvalRequired,
+                    ],
+                    denied: [...policyRecord.effective.denied],
+                    allowedHosts: [...policyRecord.effective.allowedHosts],
+                    pushRefPrefixes: [
+                      ...policyRecord.effective.pushRefPrefixes,
+                    ],
+                  };
+                }),
           ]).then(() => undefined),
         ),
       BACKGROUND_CONTEXT,
@@ -999,6 +1095,103 @@ export const readSkillPins = (
       }
     }
     return pins;
+  });
+
+/** Where a repository's policy was read (`PolicyDoc.source`). */
+export type RepoPolicySource = {
+  /** The ref the base was read at: the session's base, or the fetched tip it was cut from. */
+  readonly ref: string;
+  /** The commit `ref` named when it was read. */
+  readonly commit: string;
+  /** The config's path in that commit: `.factory/config`, under a subdirectory checkout's prefix. */
+  readonly path: string;
+  /** Whether the commit holds a config at all: `false` is a repository that declares nothing. */
+  readonly found: boolean;
+};
+
+/** What the control plane tells an open about the repository's policy (`policyRecord`). */
+export type PolicyRecordInput = {
+  /** `null`: no repository, or a base that did not resolve, so nothing was read. */
+  readonly source: RepoPolicySource | null;
+  readonly repo: RepoPolicy;
+};
+
+/** The policy a run meets, as the log records it (`PolicyDoc`). */
+export type PolicyRecord = {
+  readonly source: RepoPolicySource | null;
+  readonly repo: {
+    readonly approvalRequired: readonly string[];
+    readonly denied: readonly string[];
+    /** `null`: the repository does not narrow the deployment's allowlist. */
+    readonly allowedHosts: readonly string[] | null;
+  };
+  readonly effective: {
+    readonly approvalRequired: readonly string[];
+    readonly denied: readonly string[];
+    readonly allowedHosts: readonly string[];
+    readonly pushRefPrefixes: readonly string[];
+  };
+};
+
+/** The record of an open: the repository's half as given, the effective half from the rules. */
+export const policyRecordOf = (
+  input: PolicyRecordInput,
+  rules: AutonomyRules,
+): PolicyRecord => ({
+  source: input.source,
+  repo: {
+    approvalRequired: input.repo.approvalRequired,
+    denied: input.repo.denied,
+    allowedHosts: input.repo.allowedHosts ?? null,
+  },
+  effective: {
+    approvalRequired: rules.approvalRequired,
+    denied: rules.denied,
+    allowedHosts: rules.allowedHosts,
+    pushRefPrefixes: rules.pushRefPrefixes,
+  },
+});
+
+const Strings = Schema.Array(Schema.String);
+
+/** The record's shape, as a reader of the log checks it (`readPolicyRecord`). */
+const PolicyRecordSchema = Schema.Struct({
+  source: Schema.NullOr(
+    Schema.Struct({
+      ref: Schema.String,
+      commit: Schema.String,
+      path: Schema.String,
+      found: Schema.Boolean,
+    }),
+  ),
+  repo: Schema.Struct({
+    approvalRequired: Strings,
+    denied: Strings,
+    allowedHosts: Schema.NullOr(Strings),
+  }),
+  effective: Schema.Struct({
+    approvalRequired: Strings,
+    denied: Strings,
+    allowedHosts: Strings,
+    pushRefPrefixes: Strings,
+  }),
+});
+
+/**
+ * The policy a session's last open recorded (S-factory-config-as-code), read without owning the
+ * log: what the control plane pins the repository's half from on a reopen, and what a reader checks
+ * to learn what a run was allowed. `undefined` for a log no open recorded one in — a log older than
+ * the record, or one only a caller other than the control plane opened — and for a value that is not
+ * the record's shape, which is never trusted half-read.
+ */
+export const readPolicyRecord = (
+  storage: Storage,
+): Effect.Effect<PolicyRecord | undefined, SessionError> =>
+  Effect.map(readDocument(storage, POLICY_DOC_KIND), (value) => {
+    if (value === undefined) return undefined;
+    return Option.getOrUndefined(
+      Schema.decodeUnknownOption(PolicyRecordSchema)(value),
+    );
   });
 
 /**
@@ -1562,6 +1755,18 @@ export const readSpec = (
   attempt("read spec", () =>
     harness.snapshot(SpecDoc, conversation.id, BACKGROUND_CONTEXT),
   ).pipe(Effect.map(projectSpec));
+
+/**
+ * The session's plan (D10), read from the committed document. `undefined` when it never committed
+ * one: the document's seed has no steps, which is not a plan (`projectPlan`).
+ */
+export const readPlan = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<Plan | undefined, SessionError> =>
+  attempt("read plan", () =>
+    harness.snapshot(PlanDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectPlan));
 
 /**
  * A run that found nothing to publish, announced in the transcript (LOB-196).
@@ -2643,6 +2848,8 @@ export type ForkSessionOptions = {
   readonly repo?: RepoContext;
   /** What the fork's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /** The values the fork's commands are given, masked in its log, as `OpenSessionOptions.secrets`. */
+  readonly secrets?: InjectedSecrets;
   /**
    * The cap a fork of an uncapped parent gets (LOB-163): the server's default, as a create gets it.
    * A capped parent's fork keeps the parent's cap and carries its spend (`inheritBudget`), so a fork
@@ -2687,6 +2894,7 @@ export const forkSession = (
       ...(options.pages === undefined ? {} : { pages: options.pages }),
       ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",
@@ -2725,6 +2933,8 @@ export type SessionLog = {
    * validator `writeSpec` applies, so a value the stage would refuse never folds back as a spec.
    */
   readonly spec?: Spec;
+  /** The plan committed to the log (D10), when the session planned one: `factory.plan`, read as `projectPlan`. */
+  readonly plan?: Plan;
   /**
    * The legacy `factory.criteria` string, when a log holds one. Nothing writes it; `spec.acceptance`
    * is the source of truth for acceptance criteria (see `CriteriaDoc`).
@@ -2896,6 +3106,7 @@ export const readSessionLog = (
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
+    const planDoc = yield* readDocument(storage, PLAN_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const pr = yield* readRecordedPullRequest(storage);
     const merge = yield* readRecordedMerge(storage);
@@ -2908,6 +3119,7 @@ export const readSessionLog = (
     const replayDoc = projectReplayDoc(replayValue);
     const taskId = bindingString(taskDoc, "taskId");
     const spec = projectSpec(specDoc);
+    const plan = projectPlan(planDoc);
     const criteria = bindingString(criteriaDoc, "criteria");
     const forkedFrom = bindingString(forkDoc, "parent");
     const forkedAt = bindingString(forkDoc, "at");
@@ -2928,6 +3140,7 @@ export const readSessionLog = (
       ...(pr === undefined ? {} : { pr }),
       ...(merge === undefined ? {} : { merge }),
       ...(spec === undefined ? {} : { spec }),
+      ...(plan === undefined ? {} : { plan }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
       ...(forkedFrom === "" || forkedAt === "" ? {} : { forkedAt }),

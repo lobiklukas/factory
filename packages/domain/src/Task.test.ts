@@ -19,6 +19,8 @@ import { Effect, Exit, Schema } from "effect";
 import { SessionId } from "./Session";
 import {
   Actor,
+  cardsByVersion,
+  pinnedVersionsNotice,
   BoardColumn,
   BoardDefinition,
   BoardInstance,
@@ -417,16 +419,16 @@ describe("a card, a run and an event", () => {
   });
 
   /**
-   * `TaskEvent`'s eight tags, and the two fields B5 says every move carries.
+   * `TaskEvent`'s nine tags, and the two fields B5 says every move carries.
    *
    * B5: "Every move carries an **actor** and an expected **revision**". This is the case that proves
-   * all eight variants declare both, rather than the four that read as moves — a block and a comment
+   * all nine variants declare both, rather than the four that read as moves — a block and a comment
    * are moves too, and an event without an actor would break the audit trail `Task.ts:186` claims.
    *
    * The `task_events` table's `kind` column is what a writer would store, and it is unconstrained
-   * `TEXT`: nothing in the database ties a row's `kind` to these eight. That gap is recorded by the
+   * `TEXT`: nothing in the database ties a row's `kind` to these nine. That gap is recorded by the
    * case in `PostgresStorage.test.ts` that stores a column set the contract rejects; here the claim
-   * is only that the *contract* has eight and every one carries both fields.
+   * is only that the *contract* has nine and every one carries both fields.
    *
    * Mutation: drop `revision` from the `commented` variant — that variant's refusal goes.
    */
@@ -458,12 +460,30 @@ describe("a card, a run and an event", () => {
         openQuestions: [],
       },
       {
+        _tag: "planned",
+        taskId: A_TASK_ID,
+        column: "planning",
+        summary: "export the card count",
+        steps: ["add the export"],
+        surfaces: ["web"],
+        risks: [],
+      },
+      {
         _tag: "priorityChanged",
         taskId: A_TASK_ID,
         from: "normal",
         to: "urgent",
       },
       { _tag: "retitled", taskId: A_TASK_ID, from: "old", to: "new" },
+      {
+        _tag: "repinned",
+        taskId: A_TASK_ID,
+        fromVersion: 2,
+        toVersion: 3,
+        from: "review",
+        to: "review",
+        mapping: { review: "review" },
+      },
     ] as const;
     for (const variant of variants) {
       expect(
@@ -473,7 +493,7 @@ describe("a card, a run and an event", () => {
       expect(refuses(TaskEvent, { ...variant, revision: 2 })).toBe(true);
       expect(refuses(TaskEvent, { ...variant, actor: "person:1" })).toBe(true);
     }
-    // A ninth tag is refused, so the set is closed at eight.
+    // A tenth tag is refused, so the set is closed at nine.
     expect(
       refuses(TaskEvent, {
         _tag: "renamed",
@@ -1025,5 +1045,37 @@ describe("runPrompt (C6)", () => {
 
   it("names no column the definition does not have", () => {
     expect(runPrompt({ title: "T", body: "B" }, undefined)).toBe("T\n\nB");
+  });
+});
+
+describe("cards pinned to more than one version (D5)", () => {
+  /** Mutation: count distinct versions against 1 instead of 2 — a board on one version gets a notice. */
+  it("says nothing when every card pins one version, and names each version and its cards otherwise", () => {
+    expect(pinnedVersionsNotice(3, [])).toBeNull();
+    expect(
+      pinnedVersionsNotice(3, [
+        { definitionVersion: 2 },
+        { definitionVersion: 2 },
+      ]),
+    ).toBeNull();
+    expect(
+      cardsByVersion([
+        { definitionVersion: 3 },
+        { definitionVersion: 2 },
+        { definitionVersion: 3 },
+      ]),
+    ).toEqual([
+      { version: 2, cards: 1 },
+      { version: 3, cards: 2 },
+    ]);
+    expect(
+      pinnedVersionsNotice(3, [
+        { definitionVersion: 3 },
+        { definitionVersion: 2 },
+        { definitionVersion: 3 },
+      ]),
+    ).toBe(
+      "This board's cards pin more than one version: 1 on v2, 2 on v3 (the board's). Each card moves by the version it pins.",
+    );
   });
 });

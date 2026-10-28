@@ -38,7 +38,8 @@ factory board runs --task tsk_…
   is `already_blocked`, a stale `unblock` is `stale_revision`, and `unblock` restores the card to
   `building`, two revisions on, at which the review move is then made.
 - `triage.sh`, plain subprocesses: a card blocked `needs_input` by hand and a card with an idle run at
-  the plan approval gate are the `question` and `gate` rows, in that order; `unblock` takes the card
+  the plan approval gate are the `question` and `gate` rows, in that order — the gate row naming
+  `plan_doc` as needed first, since the idle run posted no plan (D10); `unblock` takes the card
   off the list; an unknown `--reason`, a malformed `--task`, `unblock` on a card that is not blocked,
   and `runs` on a card with no run.
 - `apps/cli/src/commands/board.test.ts`: the revision each write expects (named or read), the stale

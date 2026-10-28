@@ -118,15 +118,65 @@ export const NonFastForwardPullRequest = Schema.Struct({
 });
 export type NonFastForwardPullRequest = typeof NonFastForwardPullRequest.Type;
 
+/**
+ * One line a branch adds that the secret scan refused (S-agent-secrets): where it is — the commit
+ * that adds it, the path and the line in that commit's version of the file — and what it matched,
+ * by name only. `stored` is a value the factory stores for the repo (`name` is the secret's name);
+ * `pattern` is the shape of a well-known credential (`name` is the pattern's, `github-token`). The
+ * matched text is never here: a refusal that quoted it would publish what the scan kept back.
+ */
+export const SecretFinding = Schema.Struct({
+  commit: Schema.String,
+  path: Schema.String,
+  line: Schema.Int,
+  kind: Schema.Literals(["stored", "pattern"]),
+  name: Schema.String,
+});
+export type SecretFinding = typeof SecretFinding.Type;
+
+/**
+ * The answer for a branch whose commits add a secret (S-agent-secrets): the scan ran over every
+ * line the branch's commits add — not only the net diff, because a push publishes the history —
+ * before the push, and found a stored value or a credential's shape. No push, no PR, no
+ * `factory.pr` document, no `pr_url` row.
+ *
+ * A value rather than a `PrError` for the reason a cap refusal is one: the step ran and decided, and
+ * the same branch scans the same. The fix is the run's — take the value out of the branch's history —
+ * so the outcome names where each finding is. `findings` holds at most `SECRET_FINDINGS_LIMIT`;
+ * `count` is how many there were.
+ */
+export const SecretFoundPullRequest = Schema.Struct({
+  outcome: Schema.Literal("secret-found"),
+  findings: Schema.Array(SecretFinding),
+  count: Schema.Int,
+});
+export type SecretFoundPullRequest = typeof SecretFoundPullRequest.Type;
+
+/** The most findings a `secret-found` answer lists; `count` says how many the scan made. */
+export const SECRET_FINDINGS_LIMIT = 20;
+
+/** One finding as a person reads it: what matched, and where. Never the matched text. */
+export const describeSecretFinding = (finding: SecretFinding): string =>
+  `${finding.kind === "stored" ? `the stored secret ${finding.name}` : `a ${finding.name}`} at ${finding.path}:${finding.line} (${finding.commit.slice(0, 12)})`;
+
 /** What the PR step answers: the link and the path that produced it, the cap that refused it, the
- * empty branch that had nothing to open, or the branch the forge would not take without a force. */
+ * empty branch that had nothing to open, the branch the forge would not take without a force, or
+ * the branch whose commits add a secret. */
 export const PullRequestStep = Schema.Union([
   OpenedPullRequest,
   OverCapPullRequest,
   NoChangePullRequest,
   NonFastForwardPullRequest,
+  SecretFoundPullRequest,
 ]);
 export type PullRequestStep = typeof PullRequestStep.Type;
+
+/** The findings of a `secret-found` answer in one phrase, with how many more there were. */
+export const secretFindingsText = (step: SecretFoundPullRequest): string => {
+  const listed = step.findings.map(describeSecretFinding).join("; ");
+  const more = step.count - step.findings.length;
+  return more > 0 ? `${listed}; and ${more} more` : listed;
+};
 
 /**
  * The sentence for an answer that opened no PR: the diff over the cap, or the branch with nothing
@@ -134,9 +184,15 @@ export type PullRequestStep = typeof PullRequestStep.Type;
  * control (C7) — so the two cannot word the same answer differently.
  */
 export const pullRequestRefusal = (
-  step: OverCapPullRequest | NoChangePullRequest | NonFastForwardPullRequest,
+  step:
+    | OverCapPullRequest
+    | NoChangePullRequest
+    | NonFastForwardPullRequest
+    | SecretFoundPullRequest,
 ): string => {
   switch (step.outcome) {
+    case "secret-found":
+      return `the branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed and no pull request was opened; take it out of the branch's history`;
     case "over-cap":
       return `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`;
     case "no-change":

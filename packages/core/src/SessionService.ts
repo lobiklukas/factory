@@ -63,6 +63,8 @@ import type {
   ForkSessionInput,
   GetRepoInput,
   InterruptSessionResult,
+  SetSessionBudgetInput,
+  SetSessionBudgetResult,
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -73,6 +75,7 @@ import type {
   ReplaySessionInput,
   RepoSummary,
   ResetSessionInput,
+  ReviewTargetInput,
   SendMessageInput,
   SendMessageResult,
   SessionError,
@@ -125,7 +128,9 @@ import type {
   Harness,
   ModelAccess,
   OpenSession,
+  PlanOptions,
   RoleModels,
+  RolePolicies,
   RunColumn,
   RepoContext,
   ReviewOptions,
@@ -135,6 +140,7 @@ import type {
   ThreadReader,
 } from "@repo/harness";
 import {
+  DEFAULT_ROLE_POLICIES,
   EMPTY_RUN_PROFILE,
   isMissionTask,
   loadRun,
@@ -142,8 +148,10 @@ import {
   MISSION_TASKS,
   missionInFlight,
   NO_ROLE_MODELS,
+  NO_REPO_POLICY,
   Policy,
   PolicyLive,
+  repoPolicyWidening,
   resolveRole,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
@@ -157,7 +165,11 @@ import {
   type MergeRecord,
   type PullRequestRecord,
   type ApprovalAsker,
+  type PolicyRecord,
+  type PolicyRecordInput,
+  type RepoPolicy,
   type SessionPolicy,
+  type InjectedSecrets,
   type VerifyOptions,
 } from "@repo/harness";
 import {
@@ -188,6 +200,7 @@ import {
   readPinnedModelKey,
   readRecordedReview,
   readSetupRecord,
+  readPolicyRecord,
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
@@ -221,6 +234,8 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  commitBudget,
+  formatDollars,
   writeBudget,
   writeCurationUsage,
   PLAN_FRESHNESS_SKILL,
@@ -290,6 +305,7 @@ import type { RepoMirror } from "./RepoMirror";
 import { forgeUrlFor, measureBaseOf, type RepoRemote } from "./RepoRemote";
 import { mintSessionId } from "./ids";
 import { readRepoContext } from "./repoContext";
+import { readRepoPolicy } from "./repoPolicy";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
@@ -322,6 +338,7 @@ import {
   type CostHistoryRow,
 } from "./costPrediction";
 import { TITLE_MAX, titleFrom } from "./sessionTitle";
+import { AskWriteBack } from "./AskWriteBack";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -332,6 +349,13 @@ import {
   proposalIssueBody,
 } from "./ProposalTracker";
 import { SkillService, SkillServiceLive } from "./SkillService";
+import { SecretService } from "./SecretService";
+import {
+  grantSecrets,
+  NO_SECRETS,
+  secretNeedsAt,
+  type GrantedSecrets,
+} from "./secretNeeds";
 import {
   checkoutDefaultBranch,
   inspectCheckout,
@@ -343,6 +367,7 @@ import {
   removeWorkspace,
   resolveWorkspace,
   sessionDirectory,
+  workTreePrefix,
   type WorkspaceInput,
 } from "./workspace";
 
@@ -421,6 +446,15 @@ export type SessionServiceShape = {
   readonly interrupt: (
     sessionId: SessionId,
   ) => Effect.Effect<InterruptSessionResult, SessionError>;
+  /**
+   * Set the session's spend cap (C23): commit the new ceiling on its log and clear the stop the old
+   * one made, so a session the cap stopped runs again on its next message. Works on an idle session,
+   * one that was stopped, and one with a run in flight (its next request is checked against the new
+   * cap); on a session created without a cap it sets one.
+   */
+  readonly setBudget: (
+    input: SetSessionBudgetInput,
+  ) => Effect.Effect<SetSessionBudgetResult, SessionError>;
   /**
    * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
    * message a run already took, or one already over, is an outcome rather than a failure.
@@ -743,6 +777,12 @@ export type SessionServiceShape = {
    */
   readonly roles: ReadonlySet<string>;
   /**
+   * What each role may do (D10, `@repo/harness`'s `./rolePolicy`): the factory's table, extended by
+   * this layer's `rolePolicies`. What every run's tools and read-only stage are resolved from, and
+   * the roles an authored definition may always name.
+   */
+  readonly rolePolicies: RolePolicies;
+  /**
    * Reopen every session that had a mission in flight when the last process stopped, and schedule
    * its log again (LOB-231): the boot's half of "a mission resumes in the phase it died in".
    *
@@ -811,6 +851,11 @@ export type SessionServiceOptions = {
    * fails the boot rather than a run. Absent: every run talks to `model`.
    */
   readonly roleModels?: RoleModels;
+  /**
+   * What each role may do (D10): the factory's role policy table with the deployment's rows added
+   * (`@repo/harness`'s `extendRolePolicies` over `ROLE_POLICIES`). Absent: the factory's own.
+   */
+  readonly rolePolicies?: RolePolicies;
   /** Where a session's working directory is created, one directory per session. */
   readonly sessionRoot: string;
   /**
@@ -1123,6 +1168,11 @@ type LiveOwner = {
    * it — a run a dead process left behind. Empty for an owner whose log held none.
    */
   readonly resumed: readonly string[];
+  /**
+   * The secrets this owner's commands are given (S-agent-secrets, `./secretNeeds`): read when it was
+   * opened, from the declaration at the session's base and the store. Its setup takes `setup`.
+   */
+  readonly secrets: GrantedSecrets;
   readonly lastUsedAt: number;
 };
 
@@ -1210,11 +1260,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const policy = yield* Policy;
       const skills = yield* SkillService;
       const tasks = yield* TaskService;
+      /**
+       * The repos' secrets (S-agent-secrets): optional, so a deployment or a test with no store runs
+       * every command with none, as before there was one. The PR step's secret scan runs either way:
+       * with no store it checks the credential patterns alone, so a branch that adds a token's shape
+       * is refused `secret-found` in every deployment.
+       */
+      const secretStore = Option.getOrUndefined(
+        yield* Effect.serviceOption(SecretService),
+      );
       // The services this layer was built with, for the one callback a harness calls back into from a
       // Promise (the `ask` tool, LOB-73): it runs with the same SQL client the rest of the service uses.
       const context = yield* Effect.context<never>();
       /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
       const writeBack = yield* SessionWriteBack;
+      /** Where a run's question is also asked, for a card filed from a tracker issue; a no-op unless wired (T5). */
+      const askWriteBack = yield* AskWriteBack;
       /** Where approved proposals become issues; refuses unless a deployment wires a tracker (LOB-202). */
       const tracker = yield* ProposalTracker;
       const writeBackBudget = Duration.fromInputUnsafe(
@@ -1702,12 +1763,42 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const askFor = (sessionId: SessionId, taskId: string): AskOptions => ({
         ask: ({ question, callId }) =>
           forHarness(
-            tasks.ask({
-              taskId,
-              question,
-              actor: sessionId,
-              askId: `${sessionId}:${callId}`,
-            }),
+            tasks
+              .ask({
+                taskId,
+                question,
+                actor: sessionId,
+                askId: `${sessionId}:${callId}`,
+              })
+              .pipe(
+                // The question is on the card; carrying it to the tracker its card came from is a
+                // mirror (`AskWriteBack`), so it is bounded and a failure is logged, never the ask's.
+                // Run for a replay too: the port is idempotent on the ask id, and a post that failed
+                // the first time is the one a replay heals.
+                Effect.tap(() =>
+                  askWriteBack
+                    .asked({
+                      sessionId,
+                      taskId,
+                      askId: `${sessionId}:${callId}`,
+                      question,
+                    })
+                    .pipe(
+                      Effect.timeoutOrElse({
+                        duration: writeBackBudget,
+                        orElse: () =>
+                          Effect.logWarning(
+                            `session ${sessionId}: carrying the question to its tracker did not finish within ${Duration.toMillis(writeBackBudget)}ms; the ask answers without it`,
+                          ),
+                      }),
+                      Effect.catchCause((cause) =>
+                        Effect.logError(
+                          `session ${sessionId}: carrying the question to its tracker failed; the ask answers without it: ${Cause.pretty(cause)}`,
+                        ),
+                      ),
+                    ),
+                ),
+              ),
           ).then((card) => ({
             taskId: card.id,
             column: card.blocked?.column ?? card.column,
@@ -1738,6 +1829,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               gaps: spec.gaps,
               openQuestions: spec.openQuestions,
               specId: `${sessionId}:${callId}`,
+            }),
+          ).then((card) => ({ taskId: card.id, revision: card.revision })),
+      });
+
+      /**
+       * How a planning run posts its plan (D10): a `planned` event on its card, by the run itself,
+       * keyed by the session and the tool call so a replayed call posts nothing twice — `specFor`'s
+       * shape. Handed to every run of a card and used by the planner's alone (the harness offers the
+       * tool only to a role that writes the plan); the plan records the run's own column.
+       */
+      const planFor = (
+        sessionId: SessionId,
+        taskId: string,
+        column: string | undefined,
+      ): PlanOptions => ({
+        post: ({ plan, callId }) =>
+          forHarness(
+            tasks.declarePlan({
+              taskId,
+              actor: sessionId,
+              ...(column === undefined ? {} : { column }),
+              summary: plan.summary,
+              steps: plan.steps,
+              surfaces: plan.surfaces,
+              risks: plan.risks,
+              planId: `${sessionId}:${callId}`,
             }),
           ).then((card) => ({ taskId: card.id, revision: card.revision })),
       });
@@ -2149,6 +2266,54 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Fetch the branch a reviewer's pull request merges into (LOB-36), before a review run's first
+       * open reads the repository's policy there (S-factory-config-as-code), outside the owners' gate
+       * for the reason `mirrorStartFor` is, and answer the ref the fetch updated. The worktree's own
+       * fetch is of the PR's head, so without this the base is read as the checkout or the mirror
+       * last saw it — or not at all, for a branch neither holds. Into the mirror for a URL-only repo,
+       * into `refs/remotes/factory/<base>` of a checkout whose repo has a forge URL (C17); nothing for
+       * a repo with neither, a base that is no safe branch name, or a released session. A failed
+       * fetch is logged and the base is read where the checkout already holds it.
+       */
+      const reviewBaseStartFor = (
+        row: SessionRow,
+        base: string,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (row.repo === null) return undefined;
+          if (isCommitId(base) || !isSafeBranchName(base)) return undefined;
+          if ((yield* releaseOf(row)) !== undefined) return undefined;
+          const repo = yield* toRepoSlug(row.repo);
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          if (registered === undefined) return undefined;
+          const warn = (message: string) =>
+            Effect.logWarning(
+              `session ${row.id}: could not fetch its pull request's base ${base} from ${repo}'s forge, so its policy is read at the ${base} it already holds: ${message}`,
+            ).pipe(Effect.as(undefined));
+          const checkout = registered.localPath ?? undefined;
+          if (checkout === undefined) {
+            const found = mirrorOf(registered);
+            if (found === undefined) return undefined;
+            return yield* found.mirror
+              .sync({ repo, url: found.url, baseRef: base })
+              .pipe(
+                Effect.map((tip) => tip.ref),
+                Effect.catch((error) => warn(error.message)),
+              );
+          }
+          const remote = options.repoRemote;
+          if (remote === undefined) return undefined;
+          const url = yield* forgeUrlFor(repo, registered.url, checkout);
+          if (url === undefined) return undefined;
+          return yield* remote
+            .fetchBase({ repo, url, checkout, branch: base })
+            .pipe(
+              Effect.map((fetched) => fetched.ref),
+              Effect.catch((error) => warn(error.message)),
+            );
+        });
+
+      /**
        * The ref a session's `verify` tool measures its branch against (C17): `measureBaseOf` from the
        * session's own checkout, the answer the PR step and the board get. A directory that is not
        * its own checkout, or a session with no base, keeps the workspace's base as it was.
@@ -2214,6 +2379,236 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           return context;
         });
+
+      /**
+       * The commit a session's secret grant is read at (S-agent-secrets): the one
+       * `session_secret_bases` pinned for it, else `base` resolved now and pinned. The first open of a
+       * session pins it, before its agent has run, so a ref the agent's shell moves afterwards — the
+       * worktree shares the checkout's refs — never changes what a later open grants. `undefined`
+       * when the base does not resolve or the table cannot answer, which grants nothing.
+       */
+      const secretsBaseFor = (
+        id: SessionId,
+        directory: string,
+        base: string,
+      ): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const read = sql<{ baseCommit: string }>`
+            SELECT base_commit FROM session_secret_bases WHERE session_id = ${id}
+          `.pipe(Effect.map((rows) => rows[0]?.baseCommit));
+          const pinned = yield* read;
+          if (pinned !== undefined) return pinned;
+          const resolved = yield* resolveCommit(directory, base);
+          if (resolved === undefined) return undefined;
+          yield* sql`
+            INSERT INTO session_secret_bases (session_id, base_commit)
+            VALUES (${id}, ${resolved})
+            ON CONFLICT (session_id) DO NOTHING
+          `;
+          return yield* read;
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${id}: the commit its secrets are granted at could not be read or pinned (${String(error)}), so its commands get none`,
+            ).pipe(Effect.as(undefined)),
+          ),
+        );
+
+      /**
+       * What a session's commands are given (S-agent-secrets, `./secretNeeds`): the secrets the repo's
+       * `.factory/config` declares at the session's pinned base (`secretsBaseFor`) — `base`, the ref
+       * its `verify` measures against, as it resolved when the session first opened; so never the
+       * run's own branch — and the store's values for them. Only for a repository's own checkout
+       * that is still there; anything else is given none.
+       */
+      const secretsFor = (
+        id: SessionId,
+        workspace: SessionWorkspace,
+        base: string | undefined,
+      ): Effect.Effect<GrantedSecrets> =>
+        Effect.gen(function* () {
+          if (
+            secretStore === undefined ||
+            workspace.repo === undefined ||
+            workspace.released !== undefined ||
+            base === undefined ||
+            base === ""
+          )
+            return NO_SECRETS;
+          const checkout = yield* fs
+            .exists(path.join(workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) return NO_SECRETS;
+          const pinned = yield* secretsBaseFor(id, workspace.path, base);
+          if (pinned === undefined) return NO_SECRETS;
+          const registered = yield* readRepo(workspace.repo).pipe(
+            Effect.map((rows) => rows[0]),
+            Effect.orElseSucceed(() => undefined),
+          );
+          const needs = yield* secretNeedsAt(
+            {
+              directory: workspace.path,
+              ref: pinned,
+              localPath: registered?.localPath ?? undefined,
+            },
+            { fs, path },
+          );
+          return yield* grantSecrets(secretStore, workspace.repo, needs);
+        });
+
+      /**
+       * The repository's policy a session's open runs under (S-factory-config-as-code,
+       * `./repoPolicy`), and where it came from.
+       *
+       * Pinned per session: a log whose record says it read the base (`source` set) keeps what it
+       * read, so neither an edit to `.factory/config` on the run's branch nor a base that moved under
+       * the session changes the rules of a run in flight — the next session reads the base again.
+       * A pinned host the deployment has since dropped is dropped from the run too (`withRepoPolicy`
+       * keeps only hosts both allow), with a warning: the session still opens, because its record
+       * cannot be changed and refusing would strand its approvals and its close.
+       *
+       * Otherwise the base is read in the registered checkout, or the factory's clone of a URL-only
+       * repo: a git object read, never the worktree's files. Where is `policyRefFor`'s: the branch
+       * the session's work merges into, never a commit the run was cut at, which may be the very
+       * change under review. A scratch session, a repo with no checkout yet, and a base that names
+       * no commit there have no repository policy, and record none, so a later open reads it then.
+       * A config that cannot be loaded is `policy_rejected`; a base git could not read (a failed or
+       * timed-out lookup, listing or read) is `policy_unreadable`, transient — never "no policy".
+       * A released session's open runs no work, so either is a warning there instead.
+       */
+      const repoPolicyFor = (
+        row: SessionRow,
+        recorded: PolicyRecord | undefined,
+        at: {
+          /** The tip the worktree is about to be cut at (`fetchedStartFor`), when it was fetched. */
+          readonly fetchedStart?: string | undefined;
+          /** The base a reviewer's pull request merges into (LOB-36), for a review run. */
+          readonly reviewBase?: string | undefined;
+          /** The ref `reviewBaseStartFor` fetched `reviewBase` into, when it fetched it. */
+          readonly fetchedReviewBase?: string | undefined;
+          /**
+           * The session was released (LOB-268): its open runs no work, only takes approvals, pages
+           * and its close. A config that cannot be loaded is then a warning and no repository policy
+           * rather than a refusal, which would strand all three until the base was fixed.
+           */
+          readonly released?: boolean;
+          /**
+           * Refuse, rather than warn, when the base names no commit to read: for what is held to
+           * the policy without a run of its own to read it later (a mission's checks).
+           */
+          readonly strict?: boolean;
+        },
+      ): Effect.Effect<PolicyRecordInput, SessionError> =>
+        Effect.gen(function* () {
+          const none: PolicyRecordInput = {
+            source: null,
+            repo: NO_REPO_POLICY,
+          };
+          if (row.repo === null) return none;
+          const repo = yield* toRepoSlug(row.repo);
+          if (recorded?.source != null) {
+            const pinned: RepoPolicy = {
+              approvalRequired: recorded.repo.approvalRequired,
+              denied: recorded.repo.denied,
+              ...(recorded.repo.allowedHosts === null
+                ? {}
+                : { allowedHosts: recorded.repo.allowedHosts }),
+            };
+            const widening = repoPolicyWidening(policy.config, pinned);
+            if (widening.length > 0)
+              yield* Effect.logWarning(
+                `session ${row.id}: the policy it pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) names hosts this deployment no longer allows, so the run reaches none of them: ${widening.join("; ")}`,
+              );
+            return { source: recorded.source, repo: pinned };
+          }
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          if (registered === undefined) return none;
+          const localPath = registered.localPath ?? undefined;
+          const checkout = localPath ?? (yield* mirrorClonedAt(registered));
+          if (checkout === undefined) return none;
+          const prefix =
+            localPath === undefined
+              ? ""
+              : yield* workTreePrefix(localPath, { fs, path });
+          const ref = policyRefFor(row, registered, {
+            ...at,
+            mirrored: localPath === undefined,
+          });
+          const read = yield* readRepoPolicy(
+            { repo, checkout, prefix, ref },
+            policy.config,
+          ).pipe(
+            Effect.catchTags({
+              RepoPolicyRejected: (error) =>
+                at.released === true
+                  ? Effect.logWarning(
+                      `session ${row.id} is released, so it opens under the deployment's policy alone: ${error.message}`,
+                    ).pipe(Effect.as(undefined))
+                  : Effect.fail(
+                      new SessionErrorClass({
+                        code: "policy_rejected",
+                        message: error.message,
+                      }),
+                    ),
+              RepoPolicyUnavailable: (error) =>
+                at.released === true
+                  ? Effect.logWarning(
+                      `session ${row.id} is released, so it opens under the deployment's policy alone: ${error.message}`,
+                    ).pipe(Effect.as(undefined))
+                  : Effect.fail(
+                      new SessionErrorClass({
+                        code: "policy_unreadable",
+                        message: error.message,
+                      }),
+                    ),
+            }),
+          );
+          if (read === undefined) return none;
+          if (read._tag === "unread") {
+            if (at.strict === true)
+              return yield* new SessionErrorClass({
+                code: "policy_rejected",
+                message: `repo ${repo}: its policy cannot be read for session ${row.id}: ${read.problem}`,
+              });
+            yield* Effect.logWarning(
+              `session ${row.id}: ${read.problem}, so it runs under the deployment's policy alone until an open can read ${repo}'s .factory/config`,
+            );
+            return none;
+          }
+          return { source: read.source, repo: read.policy };
+        });
+
+      /**
+       * The ref a session's repository policy is read at (S-factory-config-as-code): the branch its
+       * work is measured against, as the checkout names it.
+       *
+       * A review run's is its pull request's base, not its own `baseRef`: that is the PR's head, the
+       * code under review, and a PR that edits `.factory/config` would otherwise set the rules of the
+       * run that reviews it. A session based at any other commit id is read at the repo's default
+       * base for the same reason. A branch base is read at the tip the worktree is cut from when it
+       * was fetched, and otherwise at the branch itself — in a URL-only repo's bare mirror, its
+       * `refs/remotes/origin/<base>`, which is the only ref a fetch there updates.
+       */
+      const policyRefFor = (
+        row: SessionRow,
+        registered: RepoRow,
+        at: {
+          readonly fetchedStart?: string | undefined;
+          readonly reviewBase?: string | undefined;
+          readonly fetchedReviewBase?: string | undefined;
+          readonly mirrored: boolean;
+        },
+      ): string => {
+        const branch = (base: string) =>
+          at.mirrored && !isCommitId(base)
+            ? `refs/remotes/origin/${base}`
+            : base;
+        if (at.reviewBase !== undefined)
+          return at.fetchedReviewBase ?? branch(at.reviewBase);
+        const baseRef = row.baseRef ?? registered.defaultBaseRef;
+        if (isCommitId(baseRef)) return branch(registered.defaultBaseRef);
+        return at.fetchedStart ?? branch(baseRef);
+      };
 
       /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
       const fetchedStartFor = (
@@ -2673,6 +3068,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly storage: PostgresStorage;
         readonly cwd: string;
         readonly policy: SessionPolicy;
+        /**
+         * The repository's half of `policy` and where it was read (S-factory-config-as-code), for
+         * the open to commit beside the rules (`PolicyDoc`).
+         */
+        readonly policyRecord: PolicyRecordInput;
         readonly run: RunProfile;
         /** The cited pages the session's prompt carries (LOB-205), read at every acquisition. */
         readonly pages: readonly Page[];
@@ -2687,6 +3087,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * its changes are measured against, from the workspace resolved for this acquisition.
          */
         readonly verify: VerifyOptions;
+        /** Every secret value the session's commands are given, masked in its log (S-agent-secrets). */
+        readonly secrets: InjectedSecrets;
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
@@ -2695,6 +3097,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly body?: string;
         /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
         readonly spec?: SpecOptions;
+        /** How a planning run posts its plan (D10); absent for a session with no card. */
+        readonly plan?: PlanOptions;
         /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
         readonly review?: ReviewOptions;
         /**
@@ -2707,6 +3111,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /** What an owner acquisition is for (`acquireOwnerWith`). */
       type OwnerAcquisition = {
         readonly reviewing?: boolean;
+        /**
+         * The pull request a reviewer is being created for (LOB-36), before its log records it:
+         * the open reads the repository's policy at its base, not at the head under review.
+         */
+        readonly review?: ReviewTargetInput;
         readonly starts?: boolean;
         /**
          * `false` for a caller that takes the owner only to stop or withdraw work (`interrupt`,
@@ -2748,6 +3157,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         open: OwnerOpening,
         acquisition: OwnerAcquisition,
         fetchedStart: string | undefined,
+        fetchedReviewBase: string | undefined,
       ): Effect.Effect<LiveOwner, SessionError> => {
         /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
         let claimed: number | undefined;
@@ -2793,22 +3203,54 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             claimed = claim.fence;
             const fence = claim.fence;
             yield* Ref.update(opening, HashMap.set(id, fence));
-            const workspace = yield* workspaceFor(row, {
-              cut: released === undefined,
-              released,
-              fetchedStart,
-            });
-            if (released === undefined) {
-              yield* Effect.mapError(
-                fs.makeDirectory(workspace.path, { recursive: true }),
-                (cause) =>
-                  new SessionErrorClass({
-                    code: "harness",
-                    message: `create ${workspace.path}: ${String(cause)}`,
+            const storage = yield* openStorage(id, "owner");
+            const disposeOnError = <A, E>(effect: Effect.Effect<A, E>) =>
+              effect.pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
+              );
+            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool. Its
+            // target is in the log once the create wrote it, and in the acquisition before then.
+            const recordedReview = yield* disposeOnError(
+              readRecordedReview(storage),
+            );
+            const reviews =
+              acquisition.reviewing === true || recordedReview !== undefined;
+            // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
+            // base's, read in the checkout the worktree is cut from — never the worktree, so a run
+            // cannot relax its own rules. Read before the worktree is cut: a config that would widen
+            // the deployment refuses the open, and leaves no worktree or branch behind it.
+            const repoPolicy = yield* disposeOnError(
+              readPolicyRecord(storage).pipe(
+                Effect.flatMap((recorded) =>
+                  repoPolicyFor(row, recorded, {
+                    fetchedStart,
+                    reviewBase:
+                      recordedReview?.target.base ?? acquisition.review?.base,
+                    fetchedReviewBase,
+                    released: released !== undefined,
                   }),
+                ),
+              ),
+            );
+            const workspace = yield* disposeOnError(
+              workspaceFor(row, {
+                cut: released === undefined,
+                released,
+                fetchedStart,
+              }),
+            );
+            if (released === undefined) {
+              yield* disposeOnError(
+                Effect.mapError(
+                  fs.makeDirectory(workspace.path, { recursive: true }),
+                  (cause) =>
+                    new SessionErrorClass({
+                      code: "harness",
+                      message: `create ${workspace.path}: ${String(cause)}`,
+                    }),
+                ),
               );
             }
-            const storage = yield* openStorage(id, "owner");
             // The run's prompt comes from its column (B6), read on every owner acquisition, at the
             // versions the log pinned when the run first opened (D7, B2): a skill put since then
             // reaches the next run, and a reopened one is told what it was told before. The open
@@ -2820,12 +3262,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const column = yield* runProfileFor(id, pins).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
-            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
-            const reviews =
-              acquisition.reviewing === true ||
-              (yield* readRecordedReview(storage).pipe(
-                Effect.tapError(() => Effect.promise(() => storage.dispose())),
-              )) !== undefined;
             const run: RunProfile = reviews
               ? { ...column, reviewing: true }
               : column;
@@ -2842,6 +3278,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
             // ran reaches its next run, and an edit the run made on its own branch does not.
             const repoContext = yield* repoContextFor(workspace, verifyBase);
+            // What the session's commands are given (S-agent-secrets): the names the repo's config
+            // declares at that same base as the session first resolved it — never the branch's, and
+            // never a ref moved since — and the store's values for them.
+            const granted = yield* secretsFor(id, workspace, verifyBase);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -2854,18 +3294,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // The deployment's policy, narrowed by what the run's column declares (C22): its
               // gates added, its push scope applied. The same `run` the prompt came from, so the
               // column a run is told about is the column whose autonomy it runs under.
+              // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
+              // rules tightened by what the base's `.factory/config` declares, then by the column.
               policy: policy.forWorktree(
                 workspace.path,
                 branchOwnerOf(id, workspace.branch),
                 run.autonomy,
+                repoPolicy.repo,
               ),
+              policyRecord: repoPolicy,
               run,
               pages,
               ...(repoContext === undefined ? {} : { repo: repoContext }),
               verify: {
                 command: workspace.commands.verify,
                 baseRef: verifyBase,
+                secrets: granted.verify.values,
+                missingSecrets: granted.verify.missing,
               },
+              secrets: granted.all,
               ...(card === undefined
                 ? {}
                 : {
@@ -2873,6 +3320,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     thread: threadFor(card),
                     ...(body === undefined ? {} : { body }),
                     spec: specFor(id, card, run.column),
+                    plan: planFor(id, card, run.column),
                   }),
               ...(reviews ? { review: reviewFor() } : {}),
             }).pipe(
@@ -2925,6 +3373,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               workspace,
               model,
               resumed: opened.resumed,
+              secrets: granted,
               lastUsedAt: now,
             };
             // The reservation becomes this owner in the same step, so the slot is counted once.
@@ -2987,12 +3436,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const fetchedStart = alreadyOpen
             ? undefined
             : yield* fetchedStartFor(row);
+          // A reviewer's first open reads the policy at its pull request's base, fetched here for
+          // the same reason; a later open reads the policy its log pinned, and fetches nothing.
+          const reviewBase = acquisition.review?.base;
+          const fetchedReviewBase =
+            alreadyOpen || reviewBase === undefined
+              ? undefined
+              : yield* reviewBaseStartFor(row, reviewBase);
           return yield* acquireUnderGate(
             id,
             row,
             open,
             acquisition,
             fetchedStart,
+            fetchedReviewBase,
           );
         });
 
@@ -3008,14 +3465,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             storage,
             cwd,
             policy: sessionPolicy,
+            policyRecord,
             run,
             pages,
             repo,
             verify,
+            secrets,
             ask,
             thread,
             body,
             spec,
+            plan,
             review,
             resume,
           }) =>
@@ -3031,6 +3491,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(options.roleModels === undefined
                 ? {}
                 : { roles: options.roleModels }),
+              // What the run's role may do (D10): the factory's table, with the deployment's rows.
+              ...(options.rolePolicies === undefined
+                ? {}
+                : { rolePolicies: options.rolePolicies }),
               // A session created on a model runs it, whatever its role's row says (LOB-274).
               ...(acquisition.model === undefined
                 ? {}
@@ -3039,6 +3503,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               pages,
               ...(repo === undefined ? {} : { repo }),
               verify,
+              secrets,
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
               approvalAsker: askerFor(id),
@@ -3046,6 +3511,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(thread === undefined ? {} : { thread }),
               ...(body === undefined ? {} : { body }),
               ...(spec === undefined ? {} : { spec }),
+              ...(plan === undefined ? {} : { plan }),
               ...(review === undefined ? {} : { review }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230). Its
@@ -3054,6 +3520,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
               policy: sessionPolicy,
+              policyRecord,
               run,
             }),
           acquisition,
@@ -3168,9 +3635,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * retry of the same create read nothing before the first attempt committed, and would
        * otherwise count that attempt's run against itself and be refused naming its own session.
        * It is answered with that session instead (`existing`), as the read outside the lock would.
+       *
+       * The run's column (`column`, resolved by `startColumnFor` from `requested` before the lock)
+       * is resolved again under it: an upgrade that migrates the board's cards (D5) re-pins them
+       * under the same lock, and a start that waited on it would otherwise write a run in a column
+       * resolved from the version the card no longer pins — one the new version may not declare, so
+       * the run would be told no column and run ungated. A column that no longer resolves the same
+       * refuses the start (`busy`, or `invalid_input` when the card's version lacks the one asked
+       * for); nothing is written, and a retry resolves it afresh.
        */
       const withRunAdmitted = <A>(
         taskId: string | undefined,
+        requested: string | undefined,
         column: string | undefined,
         reviewing: boolean,
         requestId: string | undefined,
@@ -3202,6 +3678,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     );
                     const existing = raced[0];
                     if (existing !== undefined) return { existing };
+                  }
+                  const settled = yield* startColumnFor(taskId, requested);
+                  if (settled !== column) {
+                    return yield* new SessionErrorClass({
+                      code: "busy",
+                      message: `task ${taskId} was moved or re-pinned while its run started: the run would start in ${column}, and the card's pinned definition now puts it in ${settled}; start it again`,
+                    });
                   }
                   if (hit !== undefined && !reviewing) {
                     yield* countRefusal("at_capacity");
@@ -3311,6 +3794,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // re-derives the truth from the log rather than trusting the row.
           const admittedRun = yield* withRunAdmitted(
             input.taskId,
+            input.taskColumn,
             column,
             input.review !== undefined,
             input.requestId,
@@ -3366,6 +3850,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const opened = Effect.gen(function* () {
             const owner = yield* acquireOwner(id, row, {
               reviewing: input.review !== undefined,
+              ...(input.review === undefined ? {} : { review: input.review }),
               ...(model === undefined ? {} : { model }),
               slot,
             }).pipe(
@@ -3871,6 +4356,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const record = yield* runSetup({
             env,
             commands: workspace.commands,
+            secrets: owner.secrets.setup.values,
+            missingSecrets: owner.secrets.setup.missing,
             ...(options.setupTimeoutSeconds === undefined
               ? {}
               : { timeoutSeconds: options.setupTimeoutSeconds }),
@@ -3969,6 +4456,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
         });
 
+      const setBudget = (
+        input: SetSessionBudgetInput,
+      ): Effect.Effect<SetSessionBudgetResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Paused (LOB-25): the cap lands before anything a dead process left is continued, so a
+          // run that was stopped by the old cap is not resumed under it.
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            resume: false,
+          });
+          yield* commitBudget(owner.root, input.budget);
+          yield* continueRemaining(input.sessionId, owner);
+          yield* touchActivity(input.sessionId);
+          const snapshot = yield* get(input.sessionId);
+          const budget = snapshot.budget;
+          if (budget === undefined) {
+            return yield* new SessionErrorClass({
+              code: "harness",
+              message: `session ${input.sessionId}: the cap was committed but the log reports none`,
+            });
+          }
+          const reached = budget.spent >= budget.cap;
+          return {
+            session: yield* describe(input.sessionId, row),
+            budget,
+            message: reached
+              ? `session ${input.sessionId} is capped at ${formatDollars(budget.cap)}, which its ${formatDollars(budget.spent)} of spend already reaches: its next run stops before its first request`
+              : `session ${input.sessionId} is capped at ${formatDollars(budget.cap)} (${formatDollars(budget.spent)} spent): its next run is let through until the cap is reached`,
+          };
+        });
+
       const withdraw = (
         input: WithdrawMessageInput,
       ): Effect.Effect<WithdrawMessageResult, SessionError> =>
@@ -4037,7 +4555,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         head: string,
         base: string,
       ): Effect.Effect<
-        Pick<OpenPullRequestInput, "push" | "measureBase">,
+        Pick<OpenPullRequestInput, "push" | "measureBase" | "forgeBase">,
         SessionError
       > =>
         Effect.gen(function* () {
@@ -4069,6 +4587,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...measureBase,
             push: (commit: string | undefined) =>
               remote.push({ repo, url, worktree, branch: head, commit }),
+            // What the secret scan stops at (S-agent-secrets): the forge's base, fetched by the control
+            // plane when the step is about to push, so no ref the agent's shell can move bounds it. The
+            // registered checkout's fetch gate serializes it with a create's fetch of the same base.
+            // A base that is a commit is its own bound: nothing can move it.
+            forgeBase: isCommitId(base)
+              ? Effect.succeed(base)
+              : remote
+                  .fetchBase({
+                    repo,
+                    url,
+                    checkout: registered?.localPath ?? worktree,
+                    branch: base,
+                  })
+                  .pipe(Effect.map((fetched) => fetched.sha)),
           };
         });
 
@@ -4188,11 +4720,34 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : costliest,
             undefined,
           );
+          // Every value the store holds for the repo, for the scan the branch passes before it is
+          // pushed (S-agent-secrets): a store that cannot answer refuses the step rather than
+          // letting a branch through unscanned.
+          const stored =
+            secretStore === undefined
+              ? undefined
+              : yield* secretStore.reveal(repo).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new SessionErrorClass({
+                        code: "storage",
+                        message: `session ${input.sessionId}: repo ${repo}'s secrets could not be read for the push's secret scan, so nothing was pushed: ${error.message}`,
+                      }),
+                  ),
+                );
           const stepped = yield* openPullRequest({
             harness: owner.harness,
             conversation: owner.root,
             sessionId: input.sessionId,
             repo,
+            ...(stored === undefined
+              ? {}
+              : {
+                  secrets: {
+                    known: stored.values,
+                    unreadable: stored.unreadable,
+                  },
+                }),
             title: input.title,
             head,
             base,
@@ -4612,6 +5167,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               pages,
               repo,
               verify,
+              secrets,
             }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
@@ -4625,6 +5181,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     pages,
                     ...(repo === undefined ? {} : { repo }),
                     verify,
+                    secrets,
                     approvalAsker: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
@@ -4724,7 +5281,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, repo, verify }) =>
+            ({
+              storage,
+              cwd,
+              policy: sessionPolicy,
+              run,
+              repo,
+              verify,
+              secrets,
+            }) =>
               replaySession({
                 source: origin,
                 sourceId: input.sessionId,
@@ -4742,6 +5307,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 run,
                 ...(repo === undefined ? {} : { repo }),
                 verify,
+                secrets,
                 approvalAsker: askerFor(id),
                 // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
                 // the default a create would (LOB-163).
@@ -4939,15 +5505,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         worktree: string,
         workers: readonly MissionWorker[],
         runSession: SessionId,
+        row: SessionRow,
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
-          // The session's column narrows its checks as it narrows its agent (C22): a check is held to
-          // the policy the session's own `bash` calls meet, gates and push scope included.
+          // The session's column narrows its checks as it narrows its agent (C22), and so does its
+          // repository's policy (S-factory-config-as-code): a check is held to the policy the
+          // session's own `bash` calls meet, gates, denials and push scope included.
           const column = yield* runColumnFor(runSession);
+          // Strict: a check runs without a run of its own to read the repo's policy later, so a
+          // base that names no commit to read it at refuses the mission rather than waiving it.
+          const { recorded, review } = yield* withReader(
+            runSession,
+            (storage) =>
+              Effect.all({
+                recorded: readPolicyRecord(storage),
+                review: readRecordedReview(storage),
+              }),
+          );
+          const repoPolicy = yield* repoPolicyFor(row, recorded, {
+            reviewBase: review?.target.base,
+            strict: true,
+          });
           const sessionPolicy = policy.forWorktree(
             worktree,
             sessionId,
             column?.autonomy,
+            repoPolicy.repo,
           );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
@@ -5030,6 +5613,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             planned.path,
             workers,
             input.sessionId,
+            row,
           );
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
@@ -7401,6 +7985,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         sendDeferringSetup,
         interrupt,
+        setBudget,
         withdraw,
         fork,
         replay,
@@ -7434,8 +8019,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         outcomes: (input) =>
           readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
-        columnAutonomy: (column) => columnAutonomy(policy.config, column),
+        columnAutonomy: (column) =>
+          columnAutonomy(
+            policy.config,
+            column,
+            options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
+          ),
         roles: new Set((options.roleModels ?? NO_ROLE_MODELS).keys()),
+        rolePolicies: options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
         resumeMissions,
         resumeRuns,
         close: closeAll,

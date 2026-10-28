@@ -64,6 +64,19 @@ also edit moves and gates. A diff against the pinned version shows before Save, 
 and leaves the board on its pin (`.pi/skills/verify-web/features/definition-edit.md`). The draft
 carries each column as stored, so a field the editor has no control for is kept.
 
+Built (D5): a board moves to a newer version of its definition — `upgradeBoard`, `factory board
+upgrade`, and **Upgrade this board** on the settings page — at the version the caller read it at
+(`StaleBoardVersion` otherwise). Only the pin moves: a new card pins the new version, and every card
+already on the board keeps the one it pinned, its moves and exits unchanged, so a card's pin still
+never changes under work in flight. Cards move only by an explicit migration (`migrateCards`, a column
+mapping): each card is re-pinned in the column its own maps to, with a `repinned` event and a new
+revision, or — when one has an unfinished run, sits in a column the mapping leaves out, or would land
+in a column of another kind — none is and the pin stays (`CardMigrationRefused`, naming every such
+card). A migration re-pins, it does not move: a column the new version still declares keeps its
+cards, and only one it renamed or dropped may be mapped elsewhere, so no card is carried past an exit
+it would have to meet in a move. Only a person upgrades a board; a run's actor is refused. The board page and `factory board ls` say when the cards pin more than one version
+(`.pi/skills/verify-board/features/upgrade.md`).
+
 **Seed migrations and authored versions share one id space.** The default pipeline's seeds write
 `default` at a fixed version with `ON CONFLICT (id, version) DO NOTHING` (0026 v4, 0038 v5). Since D4
 an operator may author `default` v6, and a later seed that writes `default` v6 would then do nothing,
@@ -145,7 +158,7 @@ alongside the role's tool policy. The stored shape mirrors `.pi/skills/<name>/SK
 repository skills later is a copy rather than a translation.
 
 Built (LOB-74): the first role → tool-policy row. A column whose role is `specifier` is the read-only
-specifying stage (`READ_ONLY_ROLES` in `packages/harness/src/policy.ts`): `openSession` composes the
+specifying stage (the `specifier` row of `packages/harness/src/rolePolicy.ts`; the planner is the planning stage since D10): `openSession` composes the
 rule into the session's `ToolTask` hook from the run's column and role, and `write`, `edit` and
 `verify` are refused, as is any `bash` command that is not on an allowlist of read commands (a read
 command with a writing flag, `sed -i` or `find -delete`, included), with a reason naming the stage
@@ -202,10 +215,17 @@ is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for
 `write` and `edit` on a root whose tool list still offers them: one pinned before the filter existed (a
-run in flight across the deploy that brought it), or one configured since. `READ_ONLY_ROLES` stays
-the one table of which roles read only.
+run in flight across the deploy that brought it), or one configured since. Since D10 the role policy
+table (`packages/harness/src/rolePolicy.ts`, `DEFAULT_ROLE_POLICIES`) is the one table of what a role
+may do — `readOnly` (and the stage it names), `writesSpec`, `writesPlan` — replacing the per-feature
+`READ_ONLY_ROLES` and `SPEC_ROLES` sets. A deployment extends it with rows for its own roles
+(`ROLE_POLICIES=auditor=read-only,architect=read-only+plan`); a row redefining the factory's own
+`specifier` or `planner` fails the boot, because the default pipeline's exits are checked against them,
+and so does a `spec` or `plan` row without `read-only` (`architect=plan`): a declaration that meets a
+checked exit comes only from a run that only reads.
+A review run stays read-only because it is a review, not by a row.
 
-Built (LOB-238): the specifier's writer. A run whose role is in `SPEC_ROLES`
+Built (LOB-238): the specifier's writer. A run whose role `writesSpec` (since D10 a row of `rolePolicy.ts`; it was `SPEC_ROLES`)
 (`packages/harness/src/specify.ts`, `resolveRole().writesSpec`) is offered the `spec` tool, and no
 other run is. The tool validates with LOB-72's `decodeSpec`, so a spec with no `gaps` is refused in
 words the model reads, and the run retries. It commits the `factory.spec` document to the run's log,
@@ -217,6 +237,20 @@ folding every run's log. The event records the run's own column, the one its rol
 specifier resumed after a person moved the card on still declares its spec from `specifying`. A spec
 is not an ask: a gap still parks the card through `ask`; the `spec_doc` exit requirement is met by
 the event's existence (D9, below).
+
+Built (D10): the planner. `planning` is a read-only stage like `specifying`: the `planner` row says
+`readOnly` (stage `planning`) and `writesPlan`, so its runs are offered no `write`, `edit` or `verify`,
+their `bash` may only read, and they are offered the `plan` tool (`packages/harness/src/planning.ts`).
+The tool validates a typed plan — `summary`, `steps` and `surfaces` (at least one each), `risks`
+(required, `[]` when there are none) — commits `factory.plan` to the run's log and posts it on the
+card as a `planned` task event, idempotent by `<session id>:<tool call id>`, as the spec's is. The card's
+plan is its newest `planned` event (`getTaskPlan`, `factory board show`, the card pane's Plan section):
+what the person crossing the plan approval gate reads. The run does not move the card on.
+`0044_seed_plan_skill.ts` binds the seeded `plan` skill to `planning` on a new version of `default`:
+the id's newest version + 1, read under `defineBoard`'s advisory lock (v6 over the seeded v5; over an
+operator's authored `default`, that version with the skill added), per the seed rule above. Earlier
+versions keep a planning column with no skill, and their planners are still read-only and offered the
+tool, because both follow the role.
 
 Built (LOB-36): the reviewer. A **review run** — a session opened for one pull request's head, which
 its log records as `factory.review`'s target — is the read-only `reviewing` stage whatever its
@@ -284,6 +318,26 @@ it is, and both scopes), which the settings view, the lane disclosures and `fact
 show` print. An absent `autonomy` — every version written before the field — is the deployment's
 policy unchanged.
 
+Built (S-factory-config-as-code): **a repository's policy**, between the deployment's and the
+column's. A repo's `.factory/config` may carry a `policy` block — `approvalRequired[]` (gates added
+to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is) and
+`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows).
+It is read at the session's base ref in the registered checkout or the factory's mirror
+(`packages/core/src/repoPolicy.ts`, `git cat-file`), never from the worktree, and pinned in the log
+by the first open (`factory.policy`, which also records the effective rules the run met), so an
+agent that edits `.factory/config` on its branch — or a base that moves under a running session —
+changes nothing for that run; the next session reads the base again. The order is deployment, then
+repository (`withRepoPolicy`), then column (`withColumnAutonomy`), each tighten-only. A block that
+tries to allow something the deployment denies (a host off its allowlist), has a key the policy does
+not know, or a config that is not JSON, is refused at load (`RepoPolicyRejected`), and the session
+does not open (`policy_rejected`) and leaves no worktree behind; a base git could not read (failed or
+timed out) is never read as no policy, and refuses the open as transient (`policy_unreadable`). A
+review run is read at its pull request's base, fetched from the forge first, not at the head under
+review. For a repo with no remote, the base is the checkout's
+local branch, whose refs every session worktree shares, so it holds only as long as no run writes
+that ref (`.pi/skills/verify-api/features/repo-policy.md`). Per-repo `roles` model overrides and
+trigger rules in the same file are not built.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a
@@ -301,6 +355,20 @@ Built (LOB-73): the thread is `task_events` itself — a comment is a `commented
 one transaction over one table, and B3's "cards are rows" holds for the thread too. The run asks with
 the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
 card carries the thread as its `task_thread` prompt section.
+
+Built (C24): an answer offers the run that reads it. After an answer lifts a `needs_input` block the
+card pane offers **Start the next run** (the column the question was asked in, the card's default
+prompt), and `factory board comment --start` does the same from the CLI. The offer is spent by the
+first run that starts on the card afterwards, however it was started, and `--start` is refused before
+anything is written on a card that is not blocked `needs_input` or when `--actor` is a run (its
+comment would be a note); a comment that lands but leaves the card blocked fails with
+`start_not_started`.
+
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
 
 ## B8 — Evidence gates, not evidence prose
 
@@ -331,7 +399,9 @@ which stay the ask's to raise. `run_completed` (`building`, first among its keys
 _newest run started in the column being left_ (a planner's run is not the builder's), and is met when
 that run's newest turn ended on its own (`runTurnOf`): a run still working or parked, one ending on a
 failed or aborted model answer or one cut off at the output limit, one interrupted (C8) or one its
-budget stopped has not completed, and a card with no run started there has completed nothing. `plan_doc` and `human_move` stay unchecked (`human_merge` is checked since C20, above). The same verdicts feed `getTaskExit`,
+budget stopped has not completed, and a card with no run started there has completed nothing. Since
+D10 `plan_doc` (`planning`) is checked the same way as `spec_doc`, by a `planned` event: `planning →
+building` with no plan is refused naming it. The `human_move` label stays unchecked (`human_merge` is checked since C20, above). The same verdicts feed `getTaskExit`,
 which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
 own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
 clickable, because the server's answer is the decision. `factory board show` prints the same list
@@ -459,8 +529,10 @@ customization, decomposition, and board metrics.
 
 1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, claiming under the caps/WIP
    limits (enforced on every start since LOB-71), TTL reclaim, priority
-   bands, trusted-actor and created-after-enable rules. Trigger: the first run you want started without
-   you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
+   bands, trusted-actor and created-after-enable rules (built for trigger intake, S-trigger-trust-gating:
+   a rule's `trust` gate — an author allowlist, a GitHub role, created after the rule was enabled — so
+   the dispatcher reuses it rather than inventing its own). Trigger: the first run you want started
+   without you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
 2. **Questions as durable objects** — dedup by question id, aging, resume after death, wake policy.
    Trigger: the first question asked while you are not watching. Linear's `elicitation` supplies the
    outward half, so this is smaller than it looks.

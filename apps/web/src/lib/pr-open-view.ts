@@ -42,6 +42,7 @@ export const attemptOfStep = (step: PullRequestStep): PrAttempt => {
     case "over-cap":
     case "no-change":
     case "non-fast-forward":
+    case "secret-found":
       return { _tag: "refused", reason: pullRequestRefusal(step) };
   }
 };

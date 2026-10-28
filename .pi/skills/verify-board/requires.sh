@@ -12,6 +12,9 @@
 #   a. specifying      with no spec, `board move --to planning` is refused naming "spec_doc" and
 #                      writes nothing; once the spec is declared (`lib/seed-spec.ts`, the `spec`
 #                      tool's own service call) the same move goes through
+#   a2. planning       with no plan, `board move --to building` is refused naming "plan_doc" and
+#                      writes nothing; once the plan is declared (`lib/seed-plan.ts`, the `plan`
+#                      tool's own service call) the same move goes through (D10)
 #   0. building        with no run, `board move --to review` is refused naming "run_completed"; a
 #                      builder run commits a change on its branch and settles, and its PR is opened
 #                      on a loopback GitHub fake with no call (C18) — `factory pr` answers it
@@ -273,8 +276,25 @@ move_to planning
 check "with the spec, specifying → planning goes through" \
   "$(grep -q "moved $TASK_ID to planning" "$EVIDENCE_DIR/requires-move-planning.txt" && echo 0 || echo 1)" \
   "revision=$REVISION"
+
+# --- a2. planning: no plan, then the plan (D10) ------------------------------------------------------
+rc="$(cli requires-planning-none.txt board move --task "$TASK_ID" --to building --expect-revision "$REVISION")"
+check "with no plan, planning → building is refused naming plan_doc" \
+  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move planning → building needs "plan_doc" (a plan doc), which is not met: the card has no plan: no run has declared one with its plan tool' "$EVIDENCE_DIR/requires-planning-none.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-planning-none.txt" | cut -c1-100)"
+rc="$(cli requires-show-planning.txt board show --task "$TASK_ID")"
+check "the refused card is still in planning at the same revision, with no plan" \
+  "$([ "$rc" = "0" ] && grep -qx "column    planning" "$EVIDENCE_DIR/requires-show-planning.txt" && grep -qx "revision  $REVISION" "$EVIDENCE_DIR/requires-show-planning.txt" && grep -qx "plan      -" "$EVIDENCE_DIR/requires-show-planning.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+TASK_ID="$TASK_ID" bun "$ROOT/.pi/skills/lib/seed-plan.ts" > "$EVIDENCE_DIR/requires-plan.json" 2>"$RUN_DIR/plan.err"
+plan_rc=$?
+PLAN_REVISION="$(sed -n 's/.*"revision":\([0-9]*\).*/\1/p' "$EVIDENCE_DIR/requires-plan.json")"
+check "a plan is declared on the card, a revision on" \
+  "$([ "$plan_rc" = "0" ] && [ "$PLAN_REVISION" = "$((REVISION + 1))" ] && echo 0 || echo 1)" \
+  "exit=$plan_rc revision=${PLAN_REVISION:-none}"
+REVISION="${PLAN_REVISION:-$REVISION}"
 move_to building
-check "a person walks the card into building" "$([ "$REVISION" = "5" ] && echo 0 || echo 1)" "revision=$REVISION"
+check "with the plan, a person walks the card into building" "$([ "$REVISION" = "6" ] && echo 0 || echo 1)" "revision=$REVISION"
 
 # --- 0. building: no change, then no PR, then the PR (LOB-240) ---------------------------------------
 rc="$(cli requires-building-none.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION")"
@@ -370,7 +390,7 @@ if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to review (revision $((REVISION + 
   REVISION=$((REVISION + 1))
 fi
 check "with a completed run, the card's change and its PR, the run's building → review goes through" \
-  "$([ "$REVISION" = "6" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
+  "$([ "$REVISION" = "7" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
 
 # --- 1. no evidence: refused, naming the requirement -------------------------------------------------
 rc="$(cli requires-refused-none.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"

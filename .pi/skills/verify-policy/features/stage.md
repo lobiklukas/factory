@@ -5,7 +5,7 @@
 A run whose column declares the `specifier` role is the **specifying stage**, and it writes nothing:
 the refusal is a policy in the session's `ToolTask` hook, not a sentence in the `specify` skill. The
 rule is `readOnlyStagePolicy` in `packages/harness/src/policy.ts`, keyed by role in
-`READ_ONLY_ROLES` (B6: "a role resolves to … tool policy in one place"), and `openSession` composes it
+the role policy table (`DEFAULT_ROLE_POLICIES` in `packages/harness/src/rolePolicy.ts`, D10; B6: "a role resolves to … tool policy in one place"), and `openSession` composes it
 from the run profile `SessionService` resolves from the card's pinned board definition — the column
 the run started in and the role that column declares. No caller sets a flag.
 
@@ -84,7 +84,7 @@ refused`, `read-only specifying stage` and `column "specifying"`;
 
 Mutation, observed on 2026-10-27: forcing `openSession` to skip the composition makes seven checks of
 the specifying half fail (the call runs, the file lands), and the building half still passes — which
-is the half that fails if the rule is made global instead (`READ_ONLY_ROLES.get(role) ?? "specifying"`
+is the half that fails if the rule is made global instead (`rolePolicyOf(role)?.stage ?? "specifying"`
 fails `packages/harness` and `packages/core` rows the same way).
 
 Below the drive: `packages/harness/src/policy.stage.test.ts` is the table (the refusals with their

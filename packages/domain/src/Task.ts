@@ -124,7 +124,7 @@ export const DEFAULT_BOARD_CAPS: BoardCaps = { board: 2, task: 1, repo: 2 };
  * - `docs` — documentation only, the docs rule (`DOCS_WRITE_ALLOWLIST`, LOB-195) a column that holds
  *   the `docs` skill already runs under;
  * - `none` — nothing: the run is a read-only stage named after its column, as a column whose role is
- *   read-only (`READ_ONLY_ROLES`, LOB-74) already is.
+ *   read-only (a `readOnly` row of the role policy table, LOB-74, D10) already is.
  */
 export const ColumnWriteScope = Schema.Literals(["worktree", "docs", "none"]);
 export type ColumnWriteScope = typeof ColumnWriteScope.Type;
@@ -272,6 +272,13 @@ export const REVIEW_VERDICT_REQUIREMENT = "review_verdict";
  * `specifying` declares it from version 1.
  */
 export const SPEC_DOC_REQUIREMENT = "spec_doc";
+
+/**
+ * The requirement a column declares when leaving it takes a plan: the card holds a `planned` event,
+ * which a planning run's `plan` tool writes (D10). The default pipeline's `planning` declares it from
+ * version 1, beside the plan approval gate's label: the plan is what the person approves.
+ */
+export const PLAN_DOC_REQUIREMENT = "plan_doc";
 
 /**
  * The requirement a column declares when leaving it takes a run that finished: the card's latest
@@ -516,6 +523,40 @@ export const LIST_BOARDS_LIMIT = 100;
 /** The definition the default pipeline ships under (0007, versioned by 0010 and 0018). */
 export const DEFAULT_DEFINITION_ID = "default";
 
+/** How many of a board's cards pin each definition version (D5), oldest version first. */
+export const cardsByVersion = (
+  tasks: ReadonlyArray<{ readonly definitionVersion: number }>,
+): ReadonlyArray<{ readonly version: number; readonly cards: number }> => {
+  const counts = new Map<number, number>();
+  for (const task of tasks)
+    counts.set(
+      task.definitionVersion,
+      (counts.get(task.definitionVersion) ?? 0) + 1,
+    );
+  return [...counts.entries()]
+    .toSorted(([a], [b]) => a - b)
+    .map(([version, cards]) => ({ version, cards }));
+};
+
+/**
+ * What a board says when its cards pin more than one version (D5) — after an upgrade that migrated
+ * none of them, say — or `null` when they all pin one: each version and how many cards pin it, the
+ * board's own marked, because a card moves by the version it pins, not the board's. One sentence for
+ * `factory board ls` and the board page alike.
+ */
+export const pinnedVersionsNotice = (
+  boardVersion: number,
+  tasks: ReadonlyArray<{ readonly definitionVersion: number }>,
+): string | null => {
+  const versions = cardsByVersion(tasks);
+  if (versions.length < 2) return null;
+  const counts = versions.map(
+    ({ version, cards }) =>
+      `${cards} on v${version}${version === boardVersion ? " (the board's)" : ""}`,
+  );
+  return `This board's cards pin more than one version: ${counts.join(", ")}. Each card moves by the version it pins.`;
+};
+
 /**
  * One version of a definition as the list names it (LOB-270): enough to pick one for `createBoard`
  * without reading every version's columns.
@@ -665,7 +706,8 @@ export type BoardConfig = typeof BoardConfig.Type;
  *
  * `definitionVersion` is optional and defaults to the definition's **newest** version, read when the
  * board is created and pinned from then on — a board made today gets today's pipeline, and a version
- * a later migration adds reaches the next board, never this one. Naming a version is for a caller
+ * a later migration adds reaches this board only when a person upgrades it (`upgradeBoard`, D5).
+ * Naming a version is for a caller
  * that needs an older pipeline on purpose (a drive pinned to version 1's exits, say). A repository
  * gets one board: a second `createBoard` for it is `BoardExists`, naming the board it already has —
  * more than one board per repository is deferred board customization (docs/board.md, item 8).
@@ -688,6 +730,63 @@ export const CreatedBoard = Schema.Struct({
   warning: Schema.optional(Schema.String),
 });
 export type CreatedBoard = typeof CreatedBoard.Type;
+
+/**
+ * A column mapping for a card migration (D5): each key a column a card sits in under the version it
+ * pins, each value the column of the version it moves to that the card sits in afterwards.
+ */
+export const ColumnMapping = Schema.Record(Schema.String, Schema.String);
+export type ColumnMapping = typeof ColumnMapping.Type;
+
+/**
+ * Move a board to a newer version of its definition (D5): the instance's pin moves to `toVersion`,
+ * so a card made afterwards pins it, and every card already on the board keeps the version it pinned
+ * — its moves and exit requirements do not change under it (B2).
+ *
+ * `expectedVersion` is the version the caller read the board at, as a card's `expectedRevision` is:
+ * a board another upgrade moved first is refused as `StaleBoardVersion`. `toVersion` is newer than the
+ * pin, or equal to it when `migrateCards` is given, which re-pins the cards an earlier upgrade left
+ * behind.
+ *
+ * `migrateCards` is the explicit migration: every card not already on `toVersion` is re-pinned to it,
+ * in the column the mapping names for its own, with a `repinned` event and a new revision each. The
+ * batch is all or nothing — a card with an unfinished run, in a column the mapping does not name, or
+ * mapped to a column of another kind refuses the whole upgrade as `CardMigrationRefused`, naming every
+ * such card, and nothing is written. A mapping onto a column `toVersion` does not declare, or one that
+ * sends a column `toVersion` still declares to another (a move past its exit, not a re-pin), is
+ * `InvalidTaskInput`, as is a run's `actor`: only a person upgrades a board.
+ */
+export const UpgradeBoardInput = Schema.Struct({
+  boardId: BoardInstanceId,
+  toVersion: Schema.Int,
+  expectedVersion: Schema.Int,
+  migrateCards: Schema.optional(ColumnMapping),
+  actor: Schema.String,
+});
+export type UpgradeBoardInput = typeof UpgradeBoardInput.Type;
+
+/** One card an upgrade migrated (D5): the version and column it left, the column it is in now. */
+export const RepinnedCard = Schema.Struct({
+  taskId: TaskId,
+  fromVersion: Schema.Int,
+  from: Schema.String,
+  to: Schema.String,
+  revision: Schema.Int,
+});
+export type RepinnedCard = typeof RepinnedCard.Type;
+
+/**
+ * What `upgradeBoard` did (D5): the instance at its new pin, the version it left, the cards it
+ * migrated (none without `migrateCards`), and how many of the board's cards still pin another
+ * version — the cards whose moves are not the new version's.
+ */
+export const UpgradedBoard = Schema.Struct({
+  instance: BoardInstance,
+  fromVersion: Schema.Int,
+  repinned: Schema.Array(RepinnedCard),
+  unmigrated: Schema.Int,
+});
+export type UpgradedBoard = typeof UpgradedBoard.Type;
 
 /**
  * A new version of a definition, authored (D4): what `defineBoard` and `factory board define --file`
@@ -856,6 +955,33 @@ export const TaskSpec = Schema.Struct({
 export type TaskSpec = typeof TaskSpec.Type;
 
 /**
+ * The plan a card's planning run declared (D10), the card half of the run's `factory.plan`: shaped as
+ * `TaskSpec` is, for the same reason — the card's plan is one read over `task_events`, the newest
+ * `planned` event, rather than a fold of every run's log. A later planning run replaces an earlier
+ * one's plan without erasing it from the history.
+ *
+ * The fields are the harness's `Plan` as its validator accepted it (`@repo/harness`'s `./plan`: at
+ * least one step and one surface, `risks` declared), so this shape only carries the result.
+ * `sessionId` is the run that declared it, and `column` the column that run was started in.
+ */
+export const TaskPlanFields = {
+  summary: Schema.String,
+  steps: Schema.Array(Schema.String),
+  surfaces: Schema.Array(Schema.String),
+  risks: Schema.Array(Schema.String),
+} as const;
+
+export const TaskPlan = Schema.Struct({
+  taskId: TaskId,
+  sessionId: SessionId,
+  column: Schema.String,
+  ...TaskPlanFields,
+  revision: Schema.Int,
+  createdAt: Timestamp,
+});
+export type TaskPlan = typeof TaskPlan.Type;
+
+/**
  * The column a move abandons a card into: it checks no exit requirement, because a card nobody will
  * finish cannot be asked to prove the work it is abandoning (`exitRequirements`).
  */
@@ -927,6 +1053,10 @@ export const unmetFor = (
 export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });
 export type GetTaskSpecInput = typeof GetTaskSpecInput.Type;
 
+/** The plan a card holds, or `null` when no run on it has declared one (D10). */
+export const GetTaskPlanInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskPlanInput = typeof GetTaskPlanInput.Type;
+
 /**
  * One card on a board (B1, B3).
  *
@@ -968,7 +1098,10 @@ export const Task = Schema.Struct({
    * Absent when whoever filed the card gave none.
    */
   externalUrl: Schema.optional(Schema.String),
-  /** The definition version this task started under (B2). */
+  /**
+   * The definition version the card is pinned to (B2): the one it started under, until a person
+   * migrates it to a newer one with `upgradeBoard`'s `migrateCards` (D5, a `repinned` event).
+   */
   definitionVersion: Schema.Int,
   revision: Schema.Int,
   priority: TaskPriority,
@@ -1006,8 +1139,9 @@ export type Actor = typeof Actor.Type;
  *
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
  * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), the spec a
- * specifying run declared (B4's `specifying` exit, LOB-238), a priority change (B9, "priority
- * changes are recorded as events") and a retitle (C11). A run starting or finishing is a later
+ * specifying run declared (B4's `specifying` exit, LOB-238), the plan a planning run declared
+ * (B4's `planning` exit, D10), a priority change (B9, "priority
+ * changes are recorded as events"), a retitle (C11) and a repin to a newer definition version (D5). A run starting or finishing is a later
  * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
  * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
  * because B1 makes a run a first-class thing a task owns.
@@ -1075,6 +1209,18 @@ export const TaskEvent = Schema.TaggedUnion({
     ...TaskSpecFields,
     specId: Schema.optional(Schema.String),
   },
+  /**
+   * A planning run declared the card's plan (D10). `actor` is the run's session id; `planId` is
+   * `<session id>:<tool call id>`, so a `plan` call replayed after a crash posts nothing twice.
+   */
+  planned: {
+    taskId: TaskId,
+    actor: Actor,
+    revision: Schema.Int,
+    column: Schema.String,
+    ...TaskPlanFields,
+    planId: Schema.optional(Schema.String),
+  },
   priorityChanged: {
     taskId: TaskId,
     from: TaskPriority,
@@ -1089,6 +1235,22 @@ export const TaskEvent = Schema.TaggedUnion({
     to: Schema.String,
     actor: Actor,
     revision: Schema.Int,
+  },
+  /**
+   * The card was moved to a newer version of its board's definition (D5): `upgradeBoard`'s
+   * `migrateCards`, one event per card. `from` and `to` are the card's column before and after —
+   * the same name unless the mapping renamed it — and `mapping` the whole column mapping the person
+   * gave, so the history says what the migration was asked to do as well as what it did to this card.
+   */
+  repinned: {
+    taskId: TaskId,
+    actor: Actor,
+    revision: Schema.Int,
+    fromVersion: Schema.Int,
+    toVersion: Schema.Int,
+    from: Schema.String,
+    to: Schema.String,
+    mapping: Schema.Record(Schema.String, Schema.String),
   },
 });
 export type TaskEvent = typeof TaskEvent.Type;
@@ -1216,6 +1378,49 @@ export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   },
 ) {}
 
+/**
+ * An upgrade expected the board at a version it is no longer pinned to (D5): another upgrade moved it
+ * first. `actual` is the version it is pinned to now.
+ */
+export class StaleBoardVersion extends Schema.TaggedError<StaleBoardVersion>()(
+  "StaleBoardVersion",
+  {
+    boardId: Schema.String,
+    expected: Schema.Int,
+    actual: Schema.Int,
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * Why one card cannot be migrated (D5): a run on it has not finished (`unfinished_run`) — its column,
+ * prompt and policy were resolved from the version it pins — its column is not a key of the mapping
+ * (`unmapped_column`), or the mapping sends it to a column of another kind (`kind_changed`). A
+ * migration re-pins a card, it does not move it: a mapping that sends a column the target still
+ * declares to another is refused before any card is read (`InvalidTaskInput`), so only a renamed or
+ * dropped column's cards land somewhere new.
+ */
+export const CardMigrationProblem = Schema.Struct({
+  taskId: TaskId,
+  column: Schema.String,
+  reason: Schema.Literals([
+    "unfinished_run",
+    "unmapped_column",
+    "kind_changed",
+  ]),
+});
+export type CardMigrationProblem = typeof CardMigrationProblem.Type;
+
+/** A card migration refused whole (D5): every card that cannot move, and why; nothing was written. */
+export class CardMigrationRefused extends Schema.TaggedError<CardMigrationRefused>()(
+  "CardMigrationRefused",
+  {
+    boardId: Schema.String,
+    cards: Schema.Array(CardMigrationProblem),
+    message: Schema.String,
+  },
+) {}
+
 export class UndeclaredTransition extends Schema.TaggedError<UndeclaredTransition>()(
   "UndeclaredTransition",
   { from: Schema.String, to: Schema.String, message: Schema.String },
@@ -1300,6 +1505,8 @@ export type TaskError =
   | BoardExists
   | BoardRepoMismatch
   | StaleRevision
+  | StaleBoardVersion
+  | CardMigrationRefused
   | UndeclaredTransition
   | HumanGateRequired
   | RequirementUnmet
@@ -1517,7 +1724,11 @@ export const gatedColumns = (
  * - `gate` — the card is not blocked, it sits in a column whose exit crosses a human gate (B5), it has
  *   a run started in that column, and none of its runs is busy or holds an undecided approval: the
  *   run is idle, and the next move is the one only a person can make. `sessionId` is the newest
- *   run in the column.
+ *   run in the column. `unmet` names the documents the exit requires that the card does not hold yet
+ *   (`spec_doc`, `plan_doc`), in declaration order (D10: a planning run that settled without a plan
+ *   leaves `plan_doc`): the gate's move would be refused naming them, so what the person must do
+ *   first is get them written. Absent when the card holds them. The log-judged keys are not judged
+ *   here; the card's exit checklist (`getTaskExit`) shows those.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
@@ -1538,6 +1749,7 @@ export const AttentionReason = Schema.TaggedUnion({
     gate: Schema.String,
     to: Schema.String,
     sessionId: SessionId,
+    unmet: Schema.optional(Schema.Array(Schema.String)),
   },
 });
 export type AttentionReason = typeof AttentionReason.Type;

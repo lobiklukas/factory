@@ -423,6 +423,38 @@ describe("projectTask (LOB-260)", () => {
     ).toBeUndefined();
     expect(projectTask([created, created])).toBeUndefined();
   });
+
+  /** Mutation: ignore `repinned` — the fold leaves the card in the column the mapping renamed. */
+  it("folds a repin (D5): the mapped column, the block's column mapped with it, the next revision", () => {
+    expect(
+      projectTask([
+        created,
+        {
+          _tag: "blocked",
+          taskId: TASK,
+          reason: "dependency",
+          column: "intake",
+          actor: LUKAS,
+          revision: 1,
+        },
+        {
+          _tag: "repinned",
+          taskId: TASK,
+          actor: LUKAS,
+          revision: 2,
+          fromVersion: 1,
+          toVersion: 2,
+          from: "intake",
+          to: "inbox",
+          mapping: { intake: "inbox" },
+        },
+      ]),
+    ).toMatchObject({
+      column: "inbox",
+      revision: 3,
+      blocked: { reason: "dependency", column: "inbox" },
+    });
+  });
 });
 
 /**

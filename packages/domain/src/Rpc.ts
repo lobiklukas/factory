@@ -2,6 +2,13 @@ import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import { ControlPlaneAuth } from "@repo/domain/Auth";
 import {
+  DeleteSecretInput,
+  ListSecretsInput,
+  SecretErrorSchema,
+  SecretSummary,
+  SetSecretInput,
+} from "@repo/domain/Secret";
+import {
   DecideApprovalInput,
   DecideApprovalOutput,
   ListApprovalsOutput,
@@ -21,6 +28,7 @@ import {
   BoardNotFound,
   BoardRepoMismatch,
   BoardView,
+  CardMigrationRefused,
   CommentTaskInput,
   CreateBoardInput,
   CreatedBoard,
@@ -39,6 +47,7 @@ import {
   GetTaskInput,
   GetTaskExitInput,
   GetTaskSpecInput,
+  GetTaskPlanInput,
   HumanGateRequired,
   InvalidDefinition,
   InvalidTaskInput,
@@ -51,6 +60,7 @@ import {
   MoveTaskInput,
   NotBlocked,
   RequirementUnmet,
+  StaleBoardVersion,
   StaleRevision,
   Task,
   TaskComment,
@@ -58,10 +68,13 @@ import {
   TaskRun,
   TaskExit,
   TaskSpec,
+  TaskPlan,
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
   UpdateTaskInput,
+  UpgradeBoardInput,
+  UpgradedBoard,
 } from "@repo/domain/Task";
 import {
   CurateSessionInput,
@@ -134,6 +147,8 @@ import {
   ForkSessionInput,
   GetRepoInput,
   InterruptSessionResult,
+  SetSessionBudgetInput,
+  SetSessionBudgetResult,
   ListReposInput,
   ListReposOutput,
   ListSessionsInput,
@@ -207,6 +222,14 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("interruptSession", {
     payload: SessionIdInput,
     success: InterruptSessionResult,
+    error: SessionError,
+  }),
+  // Setting a cap commits it on the session's log and clears the stop the old cap made, so a session
+  // the cap stopped runs again on its next message (C23). It is a cap raise in the usual case, and
+  // sets one on a session that had none.
+  Rpc.make("setSessionBudget", {
+    payload: SetSessionBudgetInput,
+    success: SetSessionBudgetResult,
     error: SessionError,
   }),
   Rpc.make("forkSession", {
@@ -407,6 +430,8 @@ const TaskErrorSchema = Schema.Union([
   BoardExists,
   BoardRepoMismatch,
   StaleRevision,
+  StaleBoardVersion,
+  CardMigrationRefused,
   UndeclaredTransition,
   HumanGateRequired,
   RequirementUnmet,
@@ -462,6 +487,15 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("defineBoard", {
     payload: DefineBoardInput,
     success: DefinedBoard,
+    error: TaskErrorSchema,
+  }),
+  // Move a board to a newer version of its definition (D5), at the version the caller read it at:
+  // new cards pin the new version and existing cards keep theirs, unless `migrateCards` maps their
+  // columns — then every card is re-pinned with a `repinned` event, or, when one cannot be (an
+  // unfinished run, an unmapped column), none is and the pin does not move (`CardMigrationRefused`).
+  Rpc.make("upgradeBoard", {
+    payload: UpgradeBoardInput,
+    success: UpgradedBoard,
     error: TaskErrorSchema,
   }),
   // What an authored version may name besides skills (D6): every requirement key the factory knows
@@ -539,6 +573,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getTaskSpec", {
     payload: GetTaskSpecInput,
     success: Schema.NullOr(TaskSpec),
+    error: TaskErrorSchema,
+  }),
+  // The card's plan (D10): what its newest planning run declared with the `plan` tool, or `null`
+  // when none has. Written in-process by the run, like the spec, so this group only reads it.
+  Rpc.make("getTaskPlan", {
+    payload: GetTaskPlanInput,
+    success: Schema.NullOr(TaskPlan),
     error: TaskErrorSchema,
   }),
   // What the card needs to leave its column (D9): each exit requirement met, unmet with the reason
@@ -665,6 +706,34 @@ export class SkillsRpc extends RpcGroup.make(
   }),
 ).middleware(ControlPlaneAuth) {}
 
+/**
+ * A repository's secrets (S-agent-secrets): write-only. `setSecret` takes a value and answers its
+ * summary; nothing in this group — or any other — answers a value back. Its own group: a secret is a
+ * repository's, injected by the control plane into the commands its config declares it for.
+ */
+export class SecretsRpc extends RpcGroup.make(
+  // Encrypted and stored, replacing any value the name held. A value under `SECRET_MIN_LENGTH` is
+  // `InvalidSecret`, a repo the registry does not hold `RepoNotFound`, and a control plane with no
+  // `FACTORY_SECRETS_KEY` `SecretsUnconfigured`; nothing is written for any of them.
+  Rpc.make("setSecret", {
+    payload: SetSecretInput,
+    success: SecretSummary,
+    error: SecretErrorSchema,
+  }),
+  // Every secret's summary, or one repo's, ordered by repo and name. Never a value.
+  Rpc.make("listSecrets", {
+    payload: ListSecretsInput,
+    success: Schema.Array(SecretSummary),
+    error: SecretErrorSchema,
+  }),
+  // Removed for good: no later command gets it. A name the repo does not hold is `SecretNotFound`.
+  Rpc.make("deleteSecret", {
+    payload: DeleteSecretInput,
+    success: SecretSummary,
+    error: SecretErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
 // Every group carries `ControlPlaneAuth` (LOB-20), so every member — `watchSession`'s stream too —
 // is refused as `Unauthenticated` without a credential the server knows, and a handler that records
 // an actor reads it from the `Caller` the middleware provides, not from the body.
@@ -674,4 +743,5 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TriggerRoutesRpc)
   .merge(ServerRpc)
   .merge(DoctorRpc)
-  .merge(SkillsRpc);
+  .merge(SkillsRpc)
+  .merge(SecretsRpc);
