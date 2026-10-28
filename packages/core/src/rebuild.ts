@@ -127,13 +127,15 @@ export const rebuildIndexes: Effect.Effect<
   // several sequential round trips for every log, which is what made the fold grow with the log
   // table rather than with the number of commits in it. The fold below is unchanged — the stores
   // `readers` returns are Pi Durable's own `MemoryStorage`, so a session reads here exactly as it
-  // read through `PostgresStorage.reader`.
+  // read through `PostgresStorage.reader`. From the first commit, never from a checkpoint: this is
+  // the recovery path, and a checkpoint is itself a derived row (LOB-186, LOB-243).
   const sessionLogs = logs.filter((log) => Schema.is(SessionId)(log.logId));
   const folds = yield* Effect.tryPromise({
     try: () =>
       PostgresStorage.readers(
         sql,
         sessionLogs.map((log) => log.logId),
+        { checkpoints: false },
       ),
     catch: (cause) => storageError("read the session logs", cause),
   });

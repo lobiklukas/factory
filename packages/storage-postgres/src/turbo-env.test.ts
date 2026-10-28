@@ -744,7 +744,7 @@ describe("the API's environment reads (LOB-257)", () => {
     ]);
   });
 
-  it("lists the trigger, Linear and Sentry variables under @repo/api#dev", () => {
+  it("lists the trigger, Linear, Sentry, Jira, Slack and GitHub variables under @repo/api#dev", () => {
     const dryRun = resolveScript(
       "dev",
       "@repo/api",
@@ -771,6 +771,19 @@ describe("the API's environment reads (LOB-257)", () => {
       "SENTRY_RATE_LIMIT",
       "SENTRY_RATE_WINDOW_SECONDS",
       "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+      "GITHUB_MENTION",
+      "GITHUB_SESSION_URL_BASE",
+      "JIRA_WEBHOOK_SECRET",
+      "JIRA_BASE_URL",
+      "JIRA_EMAIL",
+      "JIRA_API_TOKEN",
+      "JIRA_SESSION_URL_BASE",
+      "SLACK_SIGNING_SECRET",
+      "SLACK_BOT_TOKEN",
+      "SLACK_API_URL",
+      "SLACK_CHANNELS",
+      "SLACK_TEXT",
+      "SLACK_SESSION_URL_BASE",
     ]) {
       expect(known).toContain(name);
     }
@@ -790,6 +803,10 @@ describe("the API's environment reads (LOB-257)", () => {
       "SENTRY_CLIENT_SECRET",
       "LINEAR_API_KEY",
       "GITHUB_WEBHOOK_SECRET",
+      "JIRA_WEBHOOK_SECRET",
+      "JIRA_API_TOKEN",
+      "SLACK_SIGNING_SECRET",
+      "SLACK_BOT_TOKEN",
       "ANTHROPIC_API_KEY",
       "ANTHROPIC_OAUTH_TOKEN",
       "ANTHROPIC_AUTH_TOKEN",
