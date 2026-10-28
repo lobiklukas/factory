@@ -326,6 +326,7 @@ import {
   type CostHistoryRow,
 } from "./costPrediction";
 import { TITLE_MAX, titleFrom } from "./sessionTitle";
+import { AskWriteBack } from "./AskWriteBack";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -1228,6 +1229,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const context = yield* Effect.context<never>();
       /** Where the PR step reports its exit; a no-op unless a deployment wires a tracker (LOB-15). */
       const writeBack = yield* SessionWriteBack;
+      /** Where a run's question is also asked, for a card filed from a tracker issue; a no-op unless wired (T5). */
+      const askWriteBack = yield* AskWriteBack;
       /** Where approved proposals become issues; refuses unless a deployment wires a tracker (LOB-202). */
       const tracker = yield* ProposalTracker;
       const writeBackBudget = Duration.fromInputUnsafe(
@@ -1715,12 +1718,42 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const askFor = (sessionId: SessionId, taskId: string): AskOptions => ({
         ask: ({ question, callId }) =>
           forHarness(
-            tasks.ask({
-              taskId,
-              question,
-              actor: sessionId,
-              askId: `${sessionId}:${callId}`,
-            }),
+            tasks
+              .ask({
+                taskId,
+                question,
+                actor: sessionId,
+                askId: `${sessionId}:${callId}`,
+              })
+              .pipe(
+                // The question is on the card; carrying it to the tracker its card came from is a
+                // mirror (`AskWriteBack`), so it is bounded and a failure is logged, never the ask's.
+                // Run for a replay too: the port is idempotent on the ask id, and a post that failed
+                // the first time is the one a replay heals.
+                Effect.tap(() =>
+                  askWriteBack
+                    .asked({
+                      sessionId,
+                      taskId,
+                      askId: `${sessionId}:${callId}`,
+                      question,
+                    })
+                    .pipe(
+                      Effect.timeoutOrElse({
+                        duration: writeBackBudget,
+                        orElse: () =>
+                          Effect.logWarning(
+                            `session ${sessionId}: carrying the question to its tracker did not finish within ${Duration.toMillis(writeBackBudget)}ms; the ask answers without it`,
+                          ),
+                      }),
+                      Effect.catchCause((cause) =>
+                        Effect.logError(
+                          `session ${sessionId}: carrying the question to its tracker failed; the ask answers without it: ${Cause.pretty(cause)}`,
+                        ),
+                      ),
+                    ),
+                ),
+              ),
           ).then((card) => ({
             taskId: card.id,
             column: card.blocked?.column ?? card.column,

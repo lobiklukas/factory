@@ -96,6 +96,22 @@ export const TriggerEvent = Schema.Struct({
    * vocabulary of its own. A rule that writes a prompt always gets its own.
    */
   defaultPrompt: Schema.optional(Schema.String),
+  /**
+   * The event is a person's answer to a question the factory asked in the source, not work to start
+   * (T5): a Linear agent session's `prompted` event, whose activity carries the reply's text. The
+   * seam routes it to the card the question parked rather than through the rules, and `key` is the
+   * issue it was left on.
+   */
+  reply: Schema.optional(
+    Schema.Struct({
+      /** The agent session the question was posted in; replies arrive on it. */
+      agentSessionId: Schema.String,
+      /** The reply's own id, which is what makes a redelivered reply one answer. */
+      activityId: Schema.String,
+      /** What the person wrote. The event is the record: nothing re-reads it from the source. */
+      body: Schema.String,
+    }),
+  ),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
 
@@ -269,6 +285,8 @@ export type TriggerOutcome = typeof TriggerOutcome.Type;
  * `setup-failed` (S-env-setup) is the session layer's `setup_failed` from the seam's `send`: the
  * session's worktree setup failed, so its prompt was not sent. The seam records that as the
  * delivery's processed outcome rather than failing it, so a delivery never answers it.
+ * `tracker-read` (T5) is a source's own read the seam needed before it could decide — whether the
+ * issue's blockers are done — failing: the delivery is retried rather than started blind.
  */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
@@ -277,6 +295,7 @@ export const TriggerErrorCode = Schema.Literals([
   "write-back",
   "at-capacity",
   "setup-failed",
+  "tracker-read",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 
