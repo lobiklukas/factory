@@ -67,6 +67,12 @@ run failing it (`mutation-key-by-request-id/`). `./webhook.sh` (17/17) and `./li
 re-run there too, because the route they drive gained the refusal log and the shared signature
 verdict. See `sentry.md`.
 
+The Sentry mapping checks (LOB-82: the filter, the title, the issue bound to its session, the default
+prompt) were run from the `agent/LOB-82` worktree on 2026-10-28 (API on `:9530`, faux, the worktree's
+own database on 5442): `./sentry.sh` **33/33** (23 checks on the first process, 6 on the restarted
+one, 4 shell checks), evidence `.verify/evidence/lob-82/`, with a mutation run that skips the
+fingerprint claim failing it (`mutation-no-binding/`). See `sentry.md`.
+
 The Jira, Slack and GitHub-issues adapters are served over HTTP (LOB-259) and their drives were run
 from the `agent/LOB-259` worktree on 2026-10-28 (faux, Postgres on 5442, the worktree's own database):
 `./jira.sh` **16/16 + 2/2**, `./slack.sh` **19/19 + 2/2** and `./github-issues.sh` **15/15 + 2/2**,
