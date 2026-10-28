@@ -426,7 +426,7 @@ export const definitionVersionAtom = Atom.family((key: string) =>
   runtime.atom(
     Effect.gen(function* () {
       const at = key.lastIndexOf("@");
-      const definitionId = yield* Schema.decodeUnknownEffect(DefinitionId)(
+      const definitionId = yield* Schema.decodeEffect(DefinitionId)(
         key.slice(0, at),
       );
       const rpc = yield* RpcClient;

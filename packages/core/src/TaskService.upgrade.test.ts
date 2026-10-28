@@ -212,7 +212,7 @@ const withRuns = <A, E>(
             yield* sql`
               INSERT INTO task_runs (id, task_id, session_id, "column", finished_at)
               VALUES (${session}, ${run.taskId}, ${session}, 'doing',
-                      ${run.finished ? new Date() : null})
+                      CASE WHEN ${run.finished} THEN now() END)
             `;
           }
           return yield* f(service);

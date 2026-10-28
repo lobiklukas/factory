@@ -59,7 +59,7 @@ describe("upgradedLines", () => {
   };
 
   it("prints the move, each card re-pinned, and the cards left on another version", () => {
-    const upgraded = Schema.decodeUnknownSync(UpgradedBoard)({
+    const upgraded = Schema.decodeSync(UpgradedBoard)({
       instance,
       fromVersion: 2,
       repinned: [
@@ -81,7 +81,7 @@ describe("upgradedLines", () => {
   });
 
   it("says the board stayed when a migration ran at the pin, and when every card is on it", () => {
-    const upgraded = Schema.decodeUnknownSync(UpgradedBoard)({
+    const upgraded = Schema.decodeSync(UpgradedBoard)({
       instance,
       fromVersion: 3,
       repinned: [],

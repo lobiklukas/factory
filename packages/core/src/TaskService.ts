@@ -378,7 +378,7 @@ export type UpgradeBoardInput = {
   readonly boardId: string;
   readonly toVersion: number;
   readonly expectedVersion: number;
-  readonly migrateCards?: Readonly<Record<string, string>>;
+  readonly migrateCards?: Readonly<Record<string, string>> | undefined;
   readonly actor: Actor;
 };
 
