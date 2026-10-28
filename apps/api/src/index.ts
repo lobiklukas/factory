@@ -40,8 +40,11 @@ import {
   linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
-  SessionWriteBackLive,
 } from "./Api/LinearSync";
+import {
+  SessionWriteBacksLive,
+  TriggerAdaptersLog,
+} from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { ServerFacts } from "./ServerInfo";
@@ -568,7 +571,7 @@ const HttpLive = Effect.gen(function* () {
       onNone: () => ({}),
       onSome: (budget) => ({ defaultBudget: budget }),
     }),
-  }).pipe(Layer.provide(SessionWriteBackLive));
+  }).pipe(Layer.provide(SessionWriteBacksLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
   // — and the server binds — even when Postgres is unreachable. Migrations run in the background so
@@ -601,6 +604,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
     ServerFactsLive,

@@ -1006,6 +1006,62 @@ describe("PostgresStorage checkpoints", () => {
   );
 
   it(
+    "starts a batched read of each log from its checkpoint, when asked to (LOB-243)",
+    { timeout: 30_000 },
+    async () => {
+      // `rewritten` holds `good`'s commits with commit 5 replaced by one that does not fold (a second
+      // root), and `good`'s checkpoint at 20 — still valid, since commit 20 is the same commit. A
+      // read that starts from the checkpoint never meets commit 5; a read from the start fails on it.
+      // So `rewritten` folding at all is the proof that commits 1–20 were not read.
+      const good = await seedLog(25, 10);
+      const rewritten = nextLogId();
+      await Effect.runPromise(sql`
+        INSERT INTO commits (log_id, seq, writes)
+        SELECT ${rewritten}, seq,
+               CASE WHEN seq = 5 THEN ${JSON.stringify([root])}::json ELSE writes END
+        FROM commits WHERE log_id = ${good.logId}
+      `);
+      await Effect.runPromise(sql`
+        INSERT INTO log_checkpoints (log_id, seq, shape, commit_hash, fold)
+        SELECT ${rewritten}, seq, shape, commit_hash, fold
+        FROM log_checkpoints WHERE log_id = ${good.logId}
+      `);
+      // A stale checkpoint is not served here either: `stale` folds whole and still answers.
+      const stale = await seedLog(12, 5);
+      await Effect.runPromise(sql`
+        UPDATE log_checkpoints SET shape = 'memory-fold/0 pi-durable@0.0.0'
+        WHERE log_id = ${stale.logId}
+      `);
+
+      const batched = await PostgresStorage.readers(
+        sql,
+        [good.logId, rewritten, stale.logId],
+        { checkpoints: true },
+      );
+      const expected = Array.from({ length: 25 }, (_, at) => ({
+        text: `message ${at}`,
+      }));
+      expect(await texts(batched.get(good.logId)!)).toEqual(expected);
+      expect(await texts(batched.get(rewritten)!)).toEqual(expected);
+      expect(await texts(batched.get(stale.logId)!)).toEqual(
+        Array.from({ length: 12 }, (_, at) => ({ text: `message ${at}` })),
+      );
+      // The fold a checkpoint start leaves is the full fold's, not only the same transcript.
+      const fromStart = await PostgresStorage.readers(sql, [good.logId], {
+        checkpoints: false,
+      });
+      const encoded = (storage: Storage | undefined) =>
+        storage instanceof MemoryStorage ? encodeFold(storage) : undefined;
+      expect(encoded(batched.get(good.logId))).toBe(good.fold);
+      expect(encoded(fromStart.get(good.logId))).toBe(good.fold);
+
+      await expect(
+        PostgresStorage.readers(sql, [rewritten], { checkpoints: false }),
+      ).rejects.toThrow(`commit 5 of log ${rewritten} does not fold`);
+    },
+  );
+
+  it(
     "round-trips U+0000 and lone surrogates through the checkpoint",
     { timeout: 30_000 },
     async () => {
@@ -1062,218 +1118,232 @@ describe("PostgresStorage checkpoints", () => {
  * because the claim being made is that batching changed the cost and not the answer — a hand-written
  * expected transcript would only say the two implementations agree with each other's bug.
  */
-describe("PostgresStorage.readers", () => {
-  const root = {
-    type: "conversation",
-    value: { id: ROOT_CONVERSATION_ID },
-  } as const;
-  const entryWrite = (id: EntryId, text: string): StorageWrite => ({
-    type: "entry",
-    value: {
-      id,
-      conversationId: ROOT_CONVERSATION_ID,
-      kind: "user",
-      data: { text },
-    },
-  });
+describe.each([false, true])(
+  "PostgresStorage.readers, checkpoints: %s",
+  (checkpoints) => {
+    const modes = { checkpoints } as const;
+    const root = {
+      type: "conversation",
+      value: { id: ROOT_CONVERSATION_ID },
+    } as const;
+    const entryWrite = (id: EntryId, text: string): StorageWrite => ({
+      type: "entry",
+      value: {
+        id,
+        conversationId: ROOT_CONVERSATION_ID,
+        kind: "user",
+        data: { text },
+      },
+    });
 
-  /** Write a log of `entries` user messages and hand back its id and the entry ids, in order. */
-  const seedLog = async (entries: number) => {
-    const logId = nextLogId();
-    const owner = await PostgresStorage.open(sql, { logId }, context);
-    await owner.commit([root], context);
-    const ids: EntryId[] = [];
-    for (let at = 0; at < entries; at += 1) {
-      const id = await owner.mintId<EntryId>();
-      ids.push(id);
-      await owner.commit([entryWrite(id, `message ${at}`)], context);
-    }
-    await owner.close(context);
-    return { logId, ids };
-  };
-
-  /**
-   * Everything the fold reads of one log, as one comparable value.
-   *
-   * Paged and reversed the way `readAllEntries` pages and reverses (`ENTRY_PAGE` in
-   * `@repo/harness`), because a scan answers newest first and a limit that fits only the first page
-   * would make a long log look like a short one — the batched read's whole risk is reading a page
-   * and believing it was the log.
-   */
-  const transcript = async (storage: Storage) => {
-    const items: { id: EntryId; data: unknown }[] = [];
-    let cursor: Cursor | undefined;
-    for (;;) {
-      const page = await storage.scanEntries(
-        { conversationId: ROOT_CONVERSATION_ID },
-        500,
-        cursor,
-        context,
-      );
-      items.push(
-        ...page.items.map((entry) => ({ id: entry.id, data: entry.data })),
-      );
-      cursor = page.next;
-      if (cursor === undefined) break;
-    }
-    return {
-      conversation: await storage.conversation(ROOT_CONVERSATION_ID, context),
-      entries: items.reverse(),
+    /** Write a log of `entries` user messages and hand back its id and the entry ids, in order. */
+    const seedLog = async (entries: number) => {
+      const logId = nextLogId();
+      const owner = await PostgresStorage.open(sql, { logId }, context);
+      await owner.commit([root], context);
+      const ids: EntryId[] = [];
+      for (let at = 0; at < entries; at += 1) {
+        const id = await owner.mintId<EntryId>();
+        ids.push(id);
+        await owner.commit([entryWrite(id, `message ${at}`)], context);
+      }
+      await owner.close(context);
+      return { logId, ids };
     };
-  };
 
-  /** The store a batched read returned for `logId`, or a thrown error as a comparable value. */
-  const folded = async (store: Storage | undefined) => {
-    if (store === undefined) return "no store";
-    try {
-      return await transcript(store);
-    } catch (cause) {
-      return `threw: ${(cause as Error).message}`;
-    }
-  };
-
-  it(
-    "answers each requested log exactly as the single-log reader answers it",
-    { timeout: 30_000 },
-    async () => {
-      const a = await seedLog(3);
-      const b = await seedLog(1);
-      const c = await seedLog(7);
-
-      const batched = await PostgresStorage.readers(sql, [
-        a.logId,
-        b.logId,
-        c.logId,
-      ]);
-      expect([...batched.keys()].sort()).toEqual(
-        [a.logId, b.logId, c.logId].sort(),
-      );
-
-      for (const { logId, ids } of [a, b, c]) {
-        const reader = await PostgresStorage.reader(sql, logId);
-        expect(await folded(batched.get(logId))).toEqual(await folded(reader));
-        const fromBatch = await transcript(batched.get(logId)!);
-        expect(fromBatch.entries.map((entry) => entry.id)).toEqual([...ids]);
-        await reader.close(context);
+    /**
+     * Everything the fold reads of one log, as one comparable value.
+     *
+     * Paged and reversed the way `readAllEntries` pages and reverses (`ENTRY_PAGE` in
+     * `@repo/harness`), because a scan answers newest first and a limit that fits only the first page
+     * would make a long log look like a short one — the batched read's whole risk is reading a page
+     * and believing it was the log.
+     */
+    const transcript = async (storage: Storage) => {
+      const items: { id: EntryId; data: unknown }[] = [];
+      let cursor: Cursor | undefined;
+      for (;;) {
+        const page = await storage.scanEntries(
+          { conversationId: ROOT_CONVERSATION_ID },
+          500,
+          cursor,
+          context,
+        );
+        items.push(
+          ...page.items.map((entry) => ({ id: entry.id, data: entry.data })),
+        );
+        cursor = page.next;
+        if (cursor === undefined) break;
       }
-    },
-  );
+      return {
+        conversation: await storage.conversation(ROOT_CONVERSATION_ID, context),
+        entries: items.reverse(),
+      };
+    };
 
-  it(
-    "gives a log with no commits a store that reads as empty, not a missing key",
-    { timeout: 30_000 },
-    async () => {
-      const present = await seedLog(2);
-      const absent = nextLogId();
-
-      const batched = await PostgresStorage.readers(sql, [
-        present.logId,
-        absent,
-      ]);
-      expect(batched.has(absent)).toBe(true);
-
-      // The comparison is the whole claim: a log with no commits has no conversation in it, so
-      // `MemoryStorage` refuses to scan it — and it refuses the same way through both paths. What
-      // would be new here is the *missing key*, which is what a `continue` in the caller would read.
-      const reader = await PostgresStorage.reader(sql, absent);
-      expect(await folded(batched.get(absent))).toEqual(await folded(reader));
-      expect(
-        await batched.get(absent)!.conversation(ROOT_CONVERSATION_ID, context),
-      ).toBeUndefined();
-      await reader.close(context);
-    },
-  );
-
-  it(
-    "folds a log whose commits span more than one page",
-    { timeout: 30_000 },
-    async () => {
-      // One row over the page size, so the log is split across two queries and the second starts
-      // mid-log: the case `(log_id, seq)` paging exists for, and the one that would silently drop
-      // the tail if a page were keyed on the log id alone.
-      const fat = await seedLog(READER_PAGE_ROWS + 1);
-
-      const batched = await PostgresStorage.readers(sql, [fat.logId]);
-      const reader = await PostgresStorage.reader(sql, fat.logId);
-      const fromReader = await transcript(reader);
-      const fromBatch = await transcript(batched.get(fat.logId)!);
-      expect(fromBatch).toEqual(fromReader);
-      expect(fromBatch.entries).toHaveLength(READER_PAGE_ROWS + 1);
-      expect(fromBatch.entries.map((entry) => entry.id)).toEqual(fat.ids);
-      await reader.close(context);
-    },
-  );
-
-  it(
-    "keeps logs separate when a fat log pages beside a thin one",
-    { timeout: 30_000 },
-    async () => {
-      // Both in one `ANY(…)`, ordered by `(log_id, seq)`: the thin log's rows can straddle a page
-      // boundary the fat one forced. Comparing each against its own single-log reader is what says
-      // the pages did not cross-contaminate.
-      const fat = await seedLog(READER_PAGE_ROWS + 1);
-      const thin = await seedLog(3);
-      const batched = await PostgresStorage.readers(sql, [
-        fat.logId,
-        thin.logId,
-      ]);
-      for (const { logId, ids } of [fat, thin]) {
-        const reader = await PostgresStorage.reader(sql, logId);
-        expect(await folded(batched.get(logId))).toEqual(await folded(reader));
-        const fromBatch = await transcript(batched.get(logId)!);
-        expect(fromBatch.entries.map((entry) => entry.id)).toEqual([...ids]);
-        await reader.close(context);
+    /** The store a batched read returned for `logId`, or a thrown error as a comparable value. */
+    const folded = async (store: Storage | undefined) => {
+      if (store === undefined) return "no store";
+      try {
+        return await transcript(store);
+      } catch (cause) {
+        return `threw: ${(cause as Error).message}`;
       }
-    },
-  );
+    };
 
-  it(
-    "answers an empty request with an empty map and no query",
-    { timeout: 30_000 },
-    async () => {
-      expect([...(await PostgresStorage.readers(sql, []))]).toEqual([]);
-    },
-  );
+    it(
+      "answers each requested log exactly as the single-log reader answers it",
+      { timeout: 30_000 },
+      async () => {
+        const a = await seedLog(3);
+        const b = await seedLog(1);
+        const c = await seedLog(7);
 
-  it(
-    "names the log whose commit does not fold, and refuses the whole batch",
-    { timeout: 30_000 },
-    async () => {
-      const good = await seedLog(2);
-      const broken = nextLogId();
-      // A `writes` array Pi Durable will not accept: the conversation already belongs to another log,
-      // so folding it raises rather than skipping. Written through SQL because `commit` validates
-      // before it persists, which is the property the adapter relies on elsewhere.
-      await Effect.runPromise(
-        sql`
+        const batched = await PostgresStorage.readers(
+          sql,
+          [a.logId, b.logId, c.logId],
+          modes,
+        );
+        expect([...batched.keys()].sort()).toEqual(
+          [a.logId, b.logId, c.logId].sort(),
+        );
+
+        for (const { logId, ids } of [a, b, c]) {
+          const reader = await PostgresStorage.reader(sql, logId);
+          expect(await folded(batched.get(logId))).toEqual(
+            await folded(reader),
+          );
+          const fromBatch = await transcript(batched.get(logId)!);
+          expect(fromBatch.entries.map((entry) => entry.id)).toEqual([...ids]);
+          await reader.close(context);
+        }
+      },
+    );
+
+    it(
+      "gives a log with no commits a store that reads as empty, not a missing key",
+      { timeout: 30_000 },
+      async () => {
+        const present = await seedLog(2);
+        const absent = nextLogId();
+
+        const batched = await PostgresStorage.readers(
+          sql,
+          [present.logId, absent],
+          modes,
+        );
+        expect(batched.has(absent)).toBe(true);
+
+        // The comparison is the whole claim: a log with no commits has no conversation in it, so
+        // `MemoryStorage` refuses to scan it — and it refuses the same way through both paths. What
+        // would be new here is the *missing key*, which is what a `continue` in the caller would read.
+        const reader = await PostgresStorage.reader(sql, absent);
+        expect(await folded(batched.get(absent))).toEqual(await folded(reader));
+        expect(
+          await batched
+            .get(absent)!
+            .conversation(ROOT_CONVERSATION_ID, context),
+        ).toBeUndefined();
+        await reader.close(context);
+      },
+    );
+
+    it(
+      "folds a log whose commits span more than one page",
+      { timeout: 30_000 },
+      async () => {
+        // One row over the page size, so the log is split across two queries and the second starts
+        // mid-log: the case `(log_id, seq)` paging exists for, and the one that would silently drop
+        // the tail if a page were keyed on the log id alone.
+        const fat = await seedLog(READER_PAGE_ROWS + 1);
+
+        const batched = await PostgresStorage.readers(sql, [fat.logId], modes);
+        const reader = await PostgresStorage.reader(sql, fat.logId);
+        const fromReader = await transcript(reader);
+        const fromBatch = await transcript(batched.get(fat.logId)!);
+        expect(fromBatch).toEqual(fromReader);
+        expect(fromBatch.entries).toHaveLength(READER_PAGE_ROWS + 1);
+        expect(fromBatch.entries.map((entry) => entry.id)).toEqual(fat.ids);
+        await reader.close(context);
+      },
+    );
+
+    it(
+      "keeps logs separate when a fat log pages beside a thin one",
+      { timeout: 30_000 },
+      async () => {
+        // Both in one `ANY(…)`, ordered by `(log_id, seq)`: the thin log's rows can straddle a page
+        // boundary the fat one forced. Comparing each against its own single-log reader is what says
+        // the pages did not cross-contaminate.
+        const fat = await seedLog(READER_PAGE_ROWS + 1);
+        const thin = await seedLog(3);
+        const batched = await PostgresStorage.readers(
+          sql,
+          [fat.logId, thin.logId],
+          modes,
+        );
+        for (const { logId, ids } of [fat, thin]) {
+          const reader = await PostgresStorage.reader(sql, logId);
+          expect(await folded(batched.get(logId))).toEqual(
+            await folded(reader),
+          );
+          const fromBatch = await transcript(batched.get(logId)!);
+          expect(fromBatch.entries.map((entry) => entry.id)).toEqual([...ids]);
+          await reader.close(context);
+        }
+      },
+    );
+
+    it(
+      "answers an empty request with an empty map and no query",
+      { timeout: 30_000 },
+      async () => {
+        expect([...(await PostgresStorage.readers(sql, [], modes))]).toEqual(
+          [],
+        );
+      },
+    );
+
+    it(
+      "names the log whose commit does not fold, and refuses the whole batch",
+      { timeout: 30_000 },
+      async () => {
+        const good = await seedLog(2);
+        const broken = nextLogId();
+        // A `writes` array Pi Durable will not accept: the conversation already belongs to another log,
+        // so folding it raises rather than skipping. Written through SQL because `commit` validates
+        // before it persists, which is the property the adapter relies on elsewhere.
+        await Effect.runPromise(
+          sql`
         INSERT INTO commits (log_id, seq, writes)
         VALUES (${broken}, 1, ${`[{"type":"conversation","value":{"id":${JSON.stringify(ROOT_CONVERSATION_ID)}}}]`}::json),
                (${broken}, 2, ${JSON.stringify([{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }])}::json)
       `,
-      );
+        );
 
-      await expect(
-        PostgresStorage.readers(sql, [good.logId, broken]),
-      ).rejects.toThrow(`of log ${broken} does not fold`);
-      // The log that was fine is not the casualty of the one that was not: a batched read fails whole.
-      expect(await PostgresStorage.reader(sql, good.logId)).toBeTruthy();
-    },
-  );
+        await expect(
+          PostgresStorage.readers(sql, [good.logId, broken], modes),
+        ).rejects.toThrow(`of log ${broken} does not fold`);
+        // The log that was fine is not the casualty of the one that was not: a batched read fails whole.
+        expect(await PostgresStorage.reader(sql, good.logId)).toBeTruthy();
+      },
+    );
 
-  it(
-    "names the log whose commit is not a write array",
-    { timeout: 30_000 },
-    async () => {
-      const broken = nextLogId();
-      await Effect.runPromise(
-        sql`INSERT INTO commits (log_id, seq, writes) VALUES (${broken}, 1, '{"not":"an array"}'::json)`,
-      );
-      await expect(PostgresStorage.readers(sql, [broken])).rejects.toThrow(
-        `of log ${broken} is not a write array`,
-      );
-    },
-  );
-});
+    it(
+      "names the log whose commit is not a write array",
+      { timeout: 30_000 },
+      async () => {
+        const broken = nextLogId();
+        await Effect.runPromise(
+          sql`INSERT INTO commits (log_id, seq, writes) VALUES (${broken}, 1, '{"not":"an array"}'::json)`,
+        );
+        await expect(
+          PostgresStorage.readers(sql, [broken], modes),
+        ).rejects.toThrow(`of log ${broken} is not a write array`);
+      },
+    );
+  },
+);
 
 /**
  * The board's tables and the default pipeline seed (docs/board.md B1–B6, migration 0007).

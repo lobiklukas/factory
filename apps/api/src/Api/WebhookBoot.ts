@@ -87,6 +87,8 @@ export const WEBHOOK_ROUTES: ReadonlyArray<{
   { route: "/webhooks/generic", variable: "TRIGGER_SECRET" },
   { route: "/webhooks/sentry", variable: "SENTRY_CLIENT_SECRET" },
   { route: "/webhooks/github", variable: "GITHUB_WEBHOOK_SECRET" },
+  { route: "/webhooks/jira", variable: "JIRA_WEBHOOK_SECRET" },
+  { route: "/webhooks/slack", variable: "SLACK_SIGNING_SECRET" },
 ];
 
 /** One line per route: `webhook /webhooks/linear: armed` or `…: unarmed: LINEAR_WEBHOOK_SECRET unset`. */
@@ -131,6 +133,8 @@ export const bootEnvFromProcess = (): Env => ({
   TRIGGER_SECRET: process.env["TRIGGER_SECRET"],
   SENTRY_CLIENT_SECRET: process.env["SENTRY_CLIENT_SECRET"],
   GITHUB_WEBHOOK_SECRET: process.env["GITHUB_WEBHOOK_SECRET"],
+  JIRA_WEBHOOK_SECRET: process.env["JIRA_WEBHOOK_SECRET"],
+  SLACK_SIGNING_SECRET: process.env["SLACK_SIGNING_SECRET"],
 });
 
 export const logTriggerBootFromProcess = Effect.suspend(() =>

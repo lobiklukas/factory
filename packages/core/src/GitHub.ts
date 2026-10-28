@@ -29,6 +29,12 @@
  * session is a replay (where GitHub's own delivery id would make it new), and two rules cannot both
  * start work on one issue.
  *
+ * **The route is `POST /webhooks/github` (LOB-259), and it also reads comments.** `githubIssueIntake`
+ * decides which `issues` and `issue_comment` payloads ask for work — a label added, or a comment
+ * mentioning `@factory`, which is the same ask and so carries the handle as one more label — and
+ * `handleGitHubIssueWebhook` is the route's whole answer, signature to seam, so the unit tests and
+ * the drive run what the route runs.
+ *
  * **The write-back is one injected client.** `TriggerWriteBack` is the seam's port; this layer
  * fills it with `POST /repos/{owner}/{repo}/issues/{number}/comments` over the same credential seam
  * and Effect `HttpClient` the PR client uses (`pr.ts`), so a loopback fake needs no interception
@@ -47,8 +53,9 @@ import {
   type TriggerRule,
 } from "@repo/domain/Trigger";
 import { CredentialProvider } from "./credentials";
+import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { githubApiUrl } from "./pr";
-import { TriggerWriteBack } from "./TriggerService";
+import { TriggerService, TriggerWriteBack } from "./TriggerService";
 
 /** GitHub's two actions that start work; every other `action` is the seam's to refuse. */
 const GITHUB_STARTING_ACTIONS: ReadonlyArray<string> = ["opened", "labeled"];
@@ -167,8 +174,23 @@ export const githubDelivery = (
 ): TriggerDelivery | undefined => {
   const event = githubEvent(payload);
   if (event === undefined) return undefined;
-  return { requestId: githubRequestId(event, rules), event };
+  return githubDeliveryOf(event, rules);
 };
+
+/**
+ * An event as the seam takes it, named by its derived delivery id. A mapped one is also
+ * `keyedByWork`: its key is the issue, so GitHub has no fresh delivery of it to offer, and a skip
+ * recorded for a repo nobody registered must be reclaimable by the next delivery under the same
+ * key once the operator registers it — the same mark Linear's adapter puts on a mapped issue.
+ */
+const githubDeliveryOf = (
+  event: TriggerEvent,
+  rules: ReadonlyArray<TriggerRule>,
+): TriggerDelivery => ({
+  requestId: githubRequestId(event, rules),
+  event,
+  ...(resolveMapping(rules, event) === undefined ? {} : { keyedByWork: true }),
+});
 
 /**
  * The adapter's delivery function, bound to one rule set.
@@ -182,6 +204,246 @@ export const githubDeliveryFor =
   (rules: ReadonlyArray<TriggerRule>) =>
   (payload: unknown): TriggerDelivery | undefined =>
     githubDelivery(payload, rules);
+
+/** What an `@mention` is called when the deployment names none: `@factory` is the `factory` label. */
+export const DEFAULT_GITHUB_MENTION = "@factory";
+
+/**
+ * `author_association` values that may ask for work by commenting: a person with a standing on the
+ * repository. GitHub sets it on every comment; a value outside the list, or none, asks for nothing.
+ */
+export const GITHUB_TRUSTED_ASSOCIATIONS: ReadonlyArray<string> = [
+  "OWNER",
+  "MEMBER",
+  "COLLABORATOR",
+];
+
+/** A handle always starts with `@`, so the bare word `factory` in a comment is not a mention. */
+export const normalizeGitHubMention = (mention: string): string => {
+  const handle = mention.trim().replace(/^@+/, "");
+  return handle === "" ? DEFAULT_GITHUB_MENTION : `@${handle}`;
+};
+
+/** A mention as a pattern: the handle, not part of a longer word, an e-mail or a hyphenated name. */
+const mentionPattern = (mention: string): RegExp =>
+  new RegExp(
+    `(?<![\\w@])${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`,
+    "i",
+  );
+
+/** What the route does with one `issues` or `issue_comment` payload. */
+export type GitHubIssueIntake =
+  /** Start work: hand the seam this delivery. */
+  | { readonly _tag: "delivery"; readonly delivery: TriggerDelivery }
+  /** A well-formed event that asks for nothing; the route answers `202` and records nothing. */
+  | { readonly _tag: "ignored"; readonly reason: string }
+  /** A payload this adapter cannot address; the route answers `400`. */
+  | { readonly _tag: "refused"; readonly reason: string };
+
+/**
+ * An `issues` or `issue_comment` payload, read for what it asks of the factory (LOB-259). Two things
+ * start work, and the rest is `ignored` before the seam so a busy repository's edits, closes and
+ * chatter record no delivery:
+ *
+ * - **a `factory` label**: an issue `opened` or `labeled` — `githubDelivery`'s two starting actions;
+ *   the rule's label picks the repo's work, as it does for every adapter;
+ * - **an `@factory` mention**: a comment *created* on an issue whose text mentions `mention`. The
+ *   mention is the same ask as the label, so the event carries the handle (`factory`) as one more
+ *   label, and a rule on `factory` claims it. Its key is the issue's, as the label's is, so asking
+ *   twice — or labelling and then mentioning — is one issue, one delivery, one session.
+ *
+ * Why an action the seam would only skip is ignored here instead: an `edited` delivery for an issue
+ * a rule claims shares its idempotency key (`githubRequestId`), so the skip it records would answer
+ * the label added next as a replay.
+ *
+ * A pull request is no issue to delegate, whether its comment or its event; a bot's comment never
+ * asks (the factory's own is posted as one, and a loop is the cost of getting that wrong). A comment
+ * is trusted only from an owner, member or collaborator (`author_association`), as a label needs
+ * triage permission: the comment's text becomes the session's prompt, and on a public repository
+ * anyone may comment. The full trust gate (S:trigger-trust-gating) is planned; this is its interim.
+ */
+export const githubIssueIntake = (input: {
+  readonly event: "issues" | "issue_comment";
+  readonly payload: unknown;
+  readonly rules: ReadonlyArray<TriggerRule>;
+  readonly mention?: string | undefined;
+}): GitHubIssueIntake => {
+  const body = asRecord(input.payload);
+  const action = stringField(body, "action");
+  const ignored = (reason: string): GitHubIssueIntake => ({
+    _tag: "ignored",
+    reason,
+  });
+  const refused = (reason: string): GitHubIssueIntake => ({
+    _tag: "refused",
+    reason,
+  });
+
+  if (input.event === "issues") {
+    if (action !== undefined && !GITHUB_STARTING_ACTIONS.includes(action)) {
+      return ignored(
+        `an issue "${action}" event starts no work; only ${GITHUB_STARTING_ACTIONS.map((a) => `"${a}"`).join(" and ")} do`,
+      );
+    }
+    const delivery = githubDeliveryFor(input.rules)(input.payload);
+    return delivery === undefined
+      ? refused(
+          "the payload is not an issue event: it names no issue, repository or action, or it is a pull request",
+        )
+      : { _tag: "delivery", delivery };
+  }
+
+  const issue = asRecord(body?.["issue"]);
+  if (issue?.["pull_request"] !== undefined) {
+    return ignored("a comment on a pull request is not an issue to delegate");
+  }
+  if (action !== "created") {
+    return ignored(
+      `a comment "${action ?? ""}" event asks for nothing; only a created comment can mention the factory`,
+    );
+  }
+  const comment = asRecord(body?.["comment"]);
+  const commenter = asRecord(comment?.["user"]);
+  if (
+    stringField(commenter, "type") === "Bot" ||
+    stringField(asRecord(body?.["sender"]), "type") === "Bot"
+  ) {
+    return ignored("a bot's comment never asks for work");
+  }
+  const association = stringField(comment, "author_association");
+  if (
+    association === undefined ||
+    !GITHUB_TRUSTED_ASSOCIATIONS.includes(association)
+  ) {
+    return ignored(
+      `a comment from ${association === undefined ? "an author with no association" : `a ${association}`} never asks for work; only ${GITHUB_TRUSTED_ASSOCIATIONS.join(", ")} do`,
+    );
+  }
+  const handle = normalizeGitHubMention(
+    input.mention ?? DEFAULT_GITHUB_MENTION,
+  );
+  const text = stringField(comment, "body") ?? "";
+  if (!mentionPattern(handle).test(text)) {
+    return ignored(`the comment does not mention ${handle}`);
+  }
+  // `githubEvent` reads the issue and the repository; only the action and the words differ.
+  const base = githubEvent({ ...body, action: "opened" });
+  if (base === undefined) {
+    return refused(
+      "the payload is not an issue comment: it names no issue, repository or issue number",
+    );
+  }
+  const label = handle.replace(/^@/, "");
+  const who = stringField(commenter, "login") ?? "a user";
+  const event: TriggerEvent = {
+    ...base,
+    labels: [...new Set([...base.labels, label])],
+    body: [base.body, `Comment from ${who}:\n${text}`]
+      .filter((part) => part !== "")
+      .join("\n\n"),
+  };
+  return { _tag: "delivery", delivery: githubDeliveryOf(event, input.rules) };
+};
+
+/**
+ * One `issues` or `issue_comment` delivery, taken to the seam. This is what `POST /webhooks/github`
+ * runs for those two events (`apps/api`), kept here so a test and the drive run the code the route
+ * does.
+ *
+ * In the order each step refuses more, as the other GitHub handlers do: no secret is `503`, a wrong
+ * signature `401` (`refuseGitHubDelivery`), a body that is not JSON `400`, an event that asks for
+ * nothing `202` and ignored. A delivery is the seam's: `{status, replayed, sessionId}` the first
+ * time and `replayed: true` after, `skipped` with its reason for an unmapped label or an
+ * unregistered repo, `503 in-progress` for a replay of a claim with no outcome yet, and `500` for a
+ * real failure (a write-back that could not comment included), so GitHub's delivery log shows it.
+ */
+export const handleGitHubIssueWebhook = (input: {
+  readonly secret: string | undefined;
+  readonly raw: string;
+  readonly signature: string | undefined;
+  readonly event: "issues" | "issue_comment";
+  readonly rules: ReadonlyArray<TriggerRule>;
+  readonly mention?: string | undefined;
+}): Effect.Effect<GitHubWebhookAnswer, never, TriggerService> =>
+  Effect.gen(function* () {
+    const refused = refuseGitHubDelivery(input);
+    if (refused !== undefined) return refused;
+    const payload = yield* Schema.decodeEffect(
+      Schema.fromJsonString(Schema.Unknown),
+    )(input.raw).pipe(Effect.orElseSucceed(() => undefined));
+    if (asRecord(payload) === undefined) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          error: "the body is not a JSON object",
+          code: "bad-json",
+        },
+      } satisfies GitHubWebhookAnswer;
+    }
+    const intake = githubIssueIntake({
+      event: input.event,
+      payload,
+      rules: input.rules,
+      mention: input.mention,
+    });
+    if (intake._tag === "refused") {
+      return {
+        status: 400,
+        body: { ok: false, error: intake.reason, code: "bad-payload" },
+      } satisfies GitHubWebhookAnswer;
+    }
+    if (intake._tag === "ignored") {
+      return {
+        status: 202,
+        body: { ok: true, ignored: intake.reason },
+      } satisfies GitHubWebhookAnswer;
+    }
+    const triggers = yield* TriggerService;
+    return yield* triggers.deliver(intake.delivery).pipe(
+      Effect.map((delivered): GitHubWebhookAnswer => {
+        if (delivered.replayed && delivered.status === "received") {
+          // A claim with no outcome yet is not an answer a retry may stop on (LOB-216).
+          return {
+            status: 503,
+            body: {
+              ok: false,
+              status: delivered.status,
+              replayed: true,
+              code: "in-progress",
+              error:
+                "this delivery is claimed and has no outcome yet; retry later",
+            },
+          };
+        }
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            status: delivered.status,
+            replayed: delivered.replayed,
+            ...(delivered.sessionId === undefined
+              ? {}
+              : { sessionId: delivered.sessionId }),
+            ...(delivered.reason === undefined
+              ? {}
+              : { reason: delivered.reason }),
+          },
+        };
+      }),
+      // A refusal is an answer (`skipped`), so only a real failure reaches here.
+      Effect.catchTag("TriggerError", (cause) =>
+        Effect.logError(
+          `github issue: delivery ${intake.delivery.requestId} failed: ${cause.message}`,
+        ).pipe(
+          Effect.as<GitHubWebhookAnswer>({
+            status: 500,
+            body: { ok: false, error: cause.message, code: cause.code },
+          }),
+        ),
+      ),
+    );
+  });
 
 /** Where the write-back posts, and where a reader finds the session. */
 export type GitHubConfig = {

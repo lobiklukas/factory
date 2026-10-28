@@ -8,10 +8,15 @@
  * filtered message records why, the reply lands in the thread) is
  * `.pi/skills/verify-api/slack.ts` against the real session layer and a loopback Slack.
  */
-import { Effect, Layer, Redacted, Schema } from "effect";
+import { randomBytes } from "node:crypto";
+import { Effect, Exit, Layer, ManagedRuntime, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
-import { describe, expect, it } from "vitest";
-import type { SessionId } from "@repo/domain/Session";
+import { SqlClient } from "effect/sql/SqlClient";
+import { afterAll, describe, expect, it } from "vitest";
+import { SessionError, type SessionId } from "@repo/domain/Session";
+import { DatabaseLive } from "@repo/storage-postgres";
+import { PrError } from "./pr";
+import { SessionWriteBack, type PullRequestStepExit } from "./SessionWriteBack";
 import {
   parseSlackAddress,
   SLACK_REPLAY_WINDOW_SECONDS,
@@ -20,11 +25,15 @@ import {
   slackDelivery,
   slackDeliveryFor,
   slackEvent,
+  slackFilterFromEnv,
+  slackPullRequestReply,
   slackReply,
   slackRequestId,
   slackSignature,
+  slackUrlVerification,
   verifySlackSignature,
   type SlackFilter,
+  SlackSessionWriteBack,
   SlackWriteBack,
 } from "./Slack";
 import { TriggerWriteBack } from "./TriggerService";
@@ -342,6 +351,41 @@ describe("slackEvent", () => {
     ).toBe("reaction_added");
   });
 
+  it("reads an @mention as the same ask as a message, through the same filter", () => {
+    const mention = (over: Record<string, unknown>) => ({
+      ...payload({}),
+      event: {
+        type: "app_mention",
+        channel: "C0ENG",
+        user: "U0ALICE",
+        text: "<@U0FACTORY> fix the widget",
+        ts: "1699999999.000100",
+        ...over,
+      },
+    });
+    expect(slackEvent(mention({}), filter)).toEqual({
+      source: "slack",
+      key: "C0ENG:1699999999.000100:1699999999.000100",
+      action: "create",
+      title: "<@U0FACTORY> fix the widget",
+      body: "<@U0FACTORY> fix the widget",
+      labels: ["C0ENG"],
+    });
+    // A mention in a channel nobody watches is filtered, not a way around the allow-list.
+    expect(slackEvent(mention({ channel: "C0RANDOM" }), filter)?.action).toBe(
+      "filtered:channel",
+    );
+    // A mention in a thread is addressed by the thread's root, so the reply lands there.
+    expect(
+      slackEvent(mention({ thread_ts: "1699999999.000000" }), filter)?.key,
+    ).toBe("C0ENG:1699999999.000000:1699999999.000100");
+    // Slack delivers a mention in a watched channel as a message *and* a mention: one message
+    // address, so one delivery.
+    expect(slackRequestId(slackEvent(mention({}), filter)!)).toBe(
+      slackRequestId(slackEvent(payload({}), filter)!),
+    );
+  });
+
   it("answers undefined for the url_verification handshake and for a non-event payload", () => {
     expect(
       slackEvent({ type: "url_verification", challenge: "abc" }, filter),
@@ -406,6 +450,43 @@ describe("slackRequestId", () => {
     expect(event === undefined ? undefined : slackRequestId(event)).toBe(
       "slack:C0ENG:1699999999.000100:1699999999.000100",
     );
+  });
+});
+
+describe("slackUrlVerification", () => {
+  it("echoes the challenge of Slack's handshake", () => {
+    expect(
+      slackUrlVerification({
+        token: "Jhj5dZrVaK7ZwHHjRyZWjbDl",
+        challenge: "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P",
+        type: "url_verification",
+      }),
+    ).toEqual({
+      challenge: "3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P",
+    });
+  });
+
+  it("is undefined for an event, and for a handshake with no challenge to echo", () => {
+    expect(slackUrlVerification(payload({}))).toBeUndefined();
+    expect(slackUrlVerification({ type: "url_verification" })).toBeUndefined();
+    expect(slackUrlVerification("nope")).toBeUndefined();
+  });
+});
+
+describe("slackFilterFromEnv", () => {
+  it("splits and trims the channels, and carries the phrase only when it says something", () => {
+    expect(
+      slackFilterFromEnv({ channels: " C0ENG, ,C0OPS ", text: " deploy " }),
+    ).toEqual({ channels: ["C0ENG", "C0OPS"], text: "deploy" });
+    expect(slackFilterFromEnv({ channels: "C0ENG", text: " " })).toEqual({
+      channels: ["C0ENG"],
+    });
+  });
+
+  it("watches nothing when nothing is configured, which is a filter and not an absence", () => {
+    expect(
+      slackFilterFromEnv({ channels: undefined, text: undefined }),
+    ).toEqual({ channels: [] });
   });
 });
 
@@ -600,5 +681,148 @@ describe("slackAddress", () => {
     expect(parseSlackAddress("C0ENG")).toBeUndefined();
     expect(parseSlackAddress("a:b:c:d")).toBeUndefined();
     expect(parseSlackAddress("::")).toBeUndefined();
+  });
+});
+
+describe("SlackSessionWriteBack", () => {
+  const runId = randomBytes(4).toString("hex");
+  const runtime = ManagedRuntime.make(DatabaseLive);
+  const pr = {
+    number: 7,
+    url: `https://github.com/acme/widget/pull/7-${runId}`,
+    outcome: "opened" as const,
+  };
+  const address = "C0ENG:1699999999.000000:1699999999.000100";
+
+  // The rows have no log behind them, so they leave with the suite rather than waiting for a
+  // rebuild in another suite to find them.
+  afterAll(async () => {
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM sessions WHERE id LIKE ${`ses_sswb_%_${runId}`}`;
+      }),
+    );
+    await runtime.dispose();
+  });
+
+  /**
+   * One report of the PR step for a session row with `requestId`, over a fake Slack. The row is
+   * upserted in the transaction the body runs in, as `LinearSync.test` does: another suite's rebuild
+   * test empties `sessions`, and an upsert in the transaction holds the row until the body is done.
+   */
+  const report = (
+    requestId: string | null,
+    result: PullRequestStepExit,
+    over: Parameters<typeof makeFakeHttp>[0] = {},
+    fake = makeFakeHttp(over),
+  ) => {
+    const id = `ses_sswb_${randomBytes(4).toString("hex")}_${runId}`;
+    // `sessions.request_id` is unique and a row from an earlier run is still there, so the id ends in
+    // a nonce: digits, so a Slack address stays one (its last part is the message's `ts`).
+    const nonce = Number.parseInt(randomBytes(3).toString("hex"), 16);
+    const exit = runtime.runPromiseExit(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              INSERT INTO sessions (id, title, request_id)
+              VALUES (${id}, 'slack session write-back case', ${requestId === null ? null : `${requestId}${nonce}`})
+              ON CONFLICT (id) DO UPDATE SET request_id = EXCLUDED.request_id
+            `;
+            const port = yield* SessionWriteBack;
+            yield* port.pullRequest({
+              sessionId: id as SessionId,
+              result,
+              evidence: Effect.succeed([]),
+            });
+          }),
+        );
+      }).pipe(
+        Effect.provide(
+          SlackSessionWriteBack({
+            apiUrl: "http://127.0.0.1:9414",
+            botToken: Redacted.make("xoxb-test-token"),
+          }).pipe(Layer.provide(fake.layer)),
+        ),
+      ),
+    );
+    return { fake, exit };
+  };
+
+  it("posts the PR's link in the thread of the message that started the session", async () => {
+    const { fake, exit } = report(`trigger:slack:${address}`, Exit.succeed(pr));
+    expect(Exit.isSuccess(await exit)).toBe(true);
+    expect(fake.requests.map((request) => request.method)).toEqual([
+      "GET",
+      "POST",
+    ]);
+    expect(fake.requests[0]?.query).toContain("ts=1699999999.000000");
+    expect(fake.requests[1]?.path).toBe("/api/chat.postMessage");
+    expect(fake.requests[1]?.authorization).toBe("Bearer xoxb-test-token");
+    expect(fake.requests[1]?.body).toEqual({
+      channel: "C0ENG",
+      thread_ts: "1699999999.000000",
+      text: slackPullRequestReply(pr),
+    });
+    expect(slackPullRequestReply(pr)).toContain(pr.url);
+  });
+
+  it("posts nothing when the thread already carries this PR's link, so the step's retry is one reply", async () => {
+    const { fake, exit } = report(
+      `trigger:slack:${address}`,
+      Exit.succeed({ ...pr, outcome: "already-open" as const }),
+      { existing: [{ text: slackPullRequestReply(pr) }] },
+    );
+    expect(Exit.isSuccess(await exit)).toBe(true);
+    expect(fake.requests.map((request) => request.method)).toEqual(["GET"]);
+  });
+
+  it("reports nothing for a session no Slack message opened, or one whose step opened no PR", async () => {
+    const other = report("client-request", Exit.succeed(pr));
+    const refused = report(
+      `trigger:slack:${address}`,
+      Exit.succeed({ outcome: "no-change" as const }),
+    );
+    const failed = report(
+      `trigger:slack:${address}`,
+      Exit.fail(new SessionError({ code: "storage", message: "disk full" })),
+    );
+    const noRequest = report(null, Exit.succeed(pr));
+    for (const { exit } of [other, refused, failed, noRequest]) {
+      expect(Exit.isSuccess(await exit)).toBe(true);
+    }
+    expect(
+      [other, refused, failed, noRequest].map((r) => r.fake.requests.length),
+    ).toEqual([0, 0, 0, 0]);
+  });
+
+  it("does not fail the PR step when Slack refuses: the report is logged, not raised", async () => {
+    const { fake, exit } = report(
+      `trigger:slack:${address}`,
+      Exit.succeed(pr),
+      { status: 500 },
+    );
+    expect(Exit.isSuccess(await exit)).toBe(true);
+    expect(fake.requests.map((request) => request.method)).toEqual([
+      "GET",
+      "POST",
+    ]);
+  });
+
+  it("does not report a typed PR error either, since a failed step has no link to give", async () => {
+    const { fake, exit } = report(
+      `trigger:slack:${address}`,
+      Exit.fail(
+        new PrError({
+          operation: "createPullRequest",
+          ref: "factory/x",
+          message: "forge down",
+        }),
+      ),
+    );
+    expect(Exit.isSuccess(await exit)).toBe(true);
+    expect(fake.requests).toEqual([]);
   });
 });

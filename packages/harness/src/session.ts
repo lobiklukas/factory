@@ -86,6 +86,8 @@ import {
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
 // the shapes they promise have a single writer and a single reader.
 import {
+  APPROVALS_DOC_KIND,
+  ApprovalsDoc,
   MISSION_BINDING_DOC_KIND,
   MISSION_DOC_KIND,
   MissionBindingDoc,
@@ -172,6 +174,7 @@ import {
   APPROVAL_DECIDED_KIND,
   APPROVAL_USED_KIND,
   APPROVAL_REQUESTED_KIND,
+  APPROVAL_ENTRY_KINDS,
   BUDGET_DOC_KIND,
   FORK_DOC_KIND,
   REPLAY_DOC_KIND,
@@ -693,13 +696,18 @@ export const writePagePrompt = (
   attempt("write page prompt", () =>
     conversation.commit(
       (tx) =>
-        tx.doc(PagePromptDoc, conversation.id).then((doc) => {
-          doc.cap = record.cap;
-          doc.tokens = record.tokens;
-          doc.held = record.held;
-          doc.included = [...record.included];
-          doc.dropped = [...record.dropped];
-        }),
+        // The open's one commit also opens the approval ledger (LOB-243), before anything in this
+        // session can append an approval entry: a no-op once it is seeded, and the one-time seed of
+        // a log written before the ledger existed. No open pays a commit of its own for it.
+        approvalLedger(tx, conversation.id).then(() =>
+          tx.doc(PagePromptDoc, conversation.id).then((doc) => {
+            doc.cap = record.cap;
+            doc.tokens = record.tokens;
+            doc.held = record.held;
+            doc.included = [...record.included];
+            doc.dropped = [...record.dropped];
+          }),
+        ),
       BACKGROUND_CONTEXT,
     ),
   );
@@ -725,8 +733,12 @@ export const readPagePrompt = (
 /**
  * An approval request, committed to the log the moment the session asks (D11). Like the title it
  * carries no model content, so the agent never sees it.
+ *
+ * The three approval entry definitions are module-private on purpose (LOB-243): an approval entry
+ * appended without its copy in the approval ledger is one a historical read cannot see, so the only
+ * way to append one is `writeApprovalRequested`, `writeApprovalDecided` or `writeApprovalUsed`.
  */
-export const ApprovalRequestedEntry = defineEntry<{
+const ApprovalRequestedEntry = defineEntry<{
   readonly requestId: string;
   readonly action: string;
   readonly detail: string;
@@ -734,12 +746,109 @@ export const ApprovalRequestedEntry = defineEntry<{
 }>(APPROVAL_REQUESTED_KIND);
 
 /** The answer to one approval request, committed beside it. */
-export const ApprovalDecidedEntry = defineEntry<{
+const ApprovalDecidedEntry = defineEntry<{
   readonly requestId: string;
   readonly decision: ApprovalVerdict;
   readonly actor: string;
   readonly decidedAt: string;
 }>(APPROVAL_DECIDED_KIND);
+
+/** Entries per transaction scan while seeding or catching up an approval ledger. */
+const LEDGER_SEED_PAGE = 500;
+
+/**
+ * The conversation's approval ledger (`ApprovalsDoc`, LOB-243), opened for writing in `tx` and
+ * complete through the log's newest entry.
+ *
+ * A ledger that is not seeded yet is rebuilt from every approval entry the conversation holds,
+ * oldest first. With `catchUp`, a seeded ledger is also given the approval entries appended after
+ * `through` without a copy — what a build from before the ledger writes into a log this build
+ * already seeded (a rollback, a mixed-version deploy, two worktrees on one database). Either way
+ * `through` moves to the newest entry scanned, so each entry is scanned at most once over the life
+ * of the log. Every write that appends an approval entry opens the ledger here first and then copies
+ * its entry in, so a seeded ledger holds exactly the conversation's approval entries up to `through`
+ * — the property a reader relies on when it folds the ledger instead of the transcript.
+ *
+ * The seed walks the transcript once per log: a new log has nothing to walk, and a log written
+ * before the ledger existed pays it the first time it is opened (`writePagePrompt`, the open's own
+ * commit). An open does not catch up — it would cost every open the entries of the run before it —
+ * and an approval write does, which is human-paced and rare.
+ */
+const approvalLedger = (
+  tx: Tx,
+  conversationId: ConversationId,
+  options: { readonly catchUp: boolean } = { catchUp: false },
+) => {
+  /** Every approval entry from `cursor` on, newest first, appended to `held`. */
+  const scan = (
+    from: number,
+    held: { kind: string; data: JsonValue }[],
+    newest: { id: number },
+    cursor: Cursor | undefined,
+  ): Promise<{ kind: string; data: JsonValue }[]> =>
+    tx
+      .scanEntries(
+        from > 0
+          ? { conversationId, minEntryId: (from + 1) as EntryId }
+          : { conversationId },
+        LEDGER_SEED_PAGE,
+        cursor,
+      )
+      .then((page) => {
+        for (const entry of page.items) {
+          newest.id = Math.max(newest.id, Number(entry.id));
+          if (APPROVAL_ENTRY_KINDS.has(entry.kind))
+            held.push({ kind: entry.kind, data: entry.data ?? null });
+        }
+        return page.next === undefined
+          ? held
+          : scan(from, held, newest, page.next);
+      });
+  return tx.doc(ApprovalsDoc, conversationId).then((ledger) => {
+    // A ledger without a numeric `through` predates it and is rebuilt like an unseeded one.
+    const through =
+      ledger.seeded && typeof ledger.through === "number"
+        ? ledger.through
+        : undefined;
+    if (through !== undefined && !options.catchUp) return ledger;
+    const newest = { id: through ?? 0 };
+    return scan(through ?? 0, [], newest, undefined).then((held) => {
+      if (through === undefined) ledger.entries.splice(0);
+      // Scans are newest first; the ledger is in log order, which is the order the fold reads.
+      for (const entry of held.reverse()) ledger.entries.push(entry);
+      ledger.seeded = true;
+      ledger.through = newest.id;
+      return ledger;
+    });
+  });
+};
+
+/**
+ * Commit one approval entry and its copy in the conversation's ledger, in one commit: the entry is
+ * what the transcript and a rebuild fold, the copy what a historical read folds (LOB-243).
+ */
+const commitApprovalEntry = (
+  conversation: Conversation,
+  entry: {
+    readonly kind: string;
+    readonly data: JsonValue;
+    readonly append: (tx: Tx) => Promise<{ readonly id: EntryId }>;
+  },
+  label: string,
+): Effect.Effect<EntryId, SessionError> =>
+  attempt(label, () =>
+    conversation.commit(
+      (tx) =>
+        approvalLedger(tx, conversation.id, { catchUp: true }).then((ledger) =>
+          entry.append(tx).then((appended) => {
+            ledger.entries.push({ kind: entry.kind, data: entry.data });
+            ledger.through = Math.max(ledger.through, Number(appended.id));
+            return appended.id;
+          }),
+        ),
+      BACKGROUND_CONTEXT,
+    ),
+  );
 
 /** Commit an approval request. Appends to the log; the pending set is the caller's to update. */
 export const writeApprovalRequested = (
@@ -751,14 +860,15 @@ export const writeApprovalRequested = (
     readonly requestedAt: string;
   },
 ): Effect.Effect<EntryId, SessionError> =>
-  attempt("write approval request", () =>
-    conversation
-      .commit(
-        (tx) =>
-          tx.appendEntry(ApprovalRequestedEntry, conversation.id, { data }),
-        BACKGROUND_CONTEXT,
-      )
-      .then((entry) => entry.id),
+  commitApprovalEntry(
+    conversation,
+    {
+      kind: ApprovalRequestedEntry.kind,
+      data,
+      append: (tx) =>
+        tx.appendEntry(ApprovalRequestedEntry, conversation.id, { data }),
+    },
+    "write approval request",
   );
 
 /** Commit an approval decision. Appends to the log; the pending set is the caller's to update. */
@@ -771,17 +881,19 @@ export const writeApprovalDecided = (
     readonly decidedAt: string;
   },
 ): Effect.Effect<EntryId, SessionError> =>
-  attempt("write approval decision", () =>
-    conversation
-      .commit(
-        (tx) => tx.appendEntry(ApprovalDecidedEntry, conversation.id, { data }),
-        BACKGROUND_CONTEXT,
-      )
-      .then((entry) => entry.id),
+  commitApprovalEntry(
+    conversation,
+    {
+      kind: ApprovalDecidedEntry.kind,
+      data,
+      append: (tx) =>
+        tx.appendEntry(ApprovalDecidedEntry, conversation.id, { data }),
+    },
+    "write approval decision",
   );
 
 /** An approval spent: a gated call ran on it (LOB-52). Committed before the call runs. */
-export const ApprovalUsedEntry = defineEntry<{
+const ApprovalUsedEntry = defineEntry<{
   readonly requestId: string;
   readonly usedAt: string;
 }>(APPROVAL_USED_KIND);
@@ -791,13 +903,15 @@ export const writeApprovalUsed = (
   conversation: Conversation,
   data: { readonly requestId: string; readonly usedAt: string },
 ): Effect.Effect<EntryId, SessionError> =>
-  attempt("write approval use", () =>
-    conversation
-      .commit(
-        (tx) => tx.appendEntry(ApprovalUsedEntry, conversation.id, { data }),
-        BACKGROUND_CONTEXT,
-      )
-      .then((entry) => entry.id),
+  commitApprovalEntry(
+    conversation,
+    {
+      kind: ApprovalUsedEntry.kind,
+      data,
+      append: (tx) =>
+        tx.appendEntry(ApprovalUsedEntry, conversation.id, { data }),
+    },
+    "write approval use",
   );
 
 /** Commit a title. Appends to the log; the `sessions` index is the caller's to update. */
@@ -1782,18 +1896,29 @@ const copyEntries = (
 ): Promise<ForkLineage> => {
   const copied = new Map<EntryId, EntryId>();
   let at = "";
-  return source
-    .reduce<Promise<void>>(
-      (previous, entry) =>
-        previous.then(() =>
-          tx
-            .appendEntry(conversationId, draftOf(entry, copied))
-            .then((record) => {
-              copied.set(entry.id, record.id);
-              at = String(record.id);
-            }),
-        ),
-      Promise.resolve(),
+  // The fork's approval ledger takes the copies of the parent's approval entries, as every other
+  // approval entry's commit does (LOB-243), so a historical read of the fork reports what its
+  // transcript would.
+  return approvalLedger(tx, conversationId)
+    .then((ledger) =>
+      source.reduce<Promise<void>>(
+        (previous, entry) =>
+          previous.then(() =>
+            tx
+              .appendEntry(conversationId, draftOf(entry, copied))
+              .then((record) => {
+                copied.set(entry.id, record.id);
+                at = String(record.id);
+                ledger.through = Math.max(ledger.through, Number(record.id));
+                if (APPROVAL_ENTRY_KINDS.has(record.kind))
+                  ledger.entries.push({
+                    kind: record.kind,
+                    data: record.data ?? null,
+                  });
+              }),
+          ),
+        Promise.resolve(),
+      ),
     )
     .then(() =>
       tx.doc(ForkDoc, conversationId).then((doc) => {
@@ -2554,17 +2679,179 @@ export const liveSessionEvents = (
   );
 
 /**
- * A session nobody owns: fold the log once through a reader-mode `Storage`.
+ * Transcript entries a historical read serves before anyone asks for earlier ones (LOB-243): the
+ * newest this many, so what a read of a long session costs is what it shows, not the log's length.
+ */
+export const HISTORY_WINDOW = 200;
+
+/** The most entries one page of earlier history serves (`readTranscriptPage`). */
+export const HISTORY_PAGE_MAX = 500;
+
+/** One page of a transcript, oldest first, and where the page before it starts. */
+export type TranscriptPage = {
+  readonly entries: readonly TranscriptEntry[];
+  /**
+   * The id of the oldest entry in `entries` when the transcript holds entries before it — what a
+   * caller passes as `before` for the page before this one. Absent when `entries` starts the
+   * transcript.
+   */
+  readonly earlier?: string;
+};
+
+/**
+ * An entry id as the transcript names it (`TranscriptEntry.id`), or `undefined` for anything that
+ * is not one. Pi Durable mints entry ids as positive integers, and a transcript prints them as
+ * decimal strings; the brand is the one thing this adds.
+ */
+const entryIdOf = (text: string): EntryId | undefined => {
+  if (!/^[1-9][0-9]*$/.test(text)) return undefined;
+  const id = Number(text);
+  return Number.isSafeInteger(id) ? (id as EntryId) : undefined;
+};
+
+/**
+ * The newest `limit` entries of the root's transcript before entry `before` (all of them when it
+ * is absent), oldest first — one storage scan of one page, whatever the log's length, because Pi
+ * Durable scans a conversation newest first from an id bound (LOB-243).
+ */
+const readTranscriptRecords = (
+  storage: Storage,
+  options: { readonly before?: EntryId; readonly limit: number },
+): Effect.Effect<
+  { readonly records: readonly EntryRecord[]; readonly earlier?: string },
+  SessionError
+> =>
+  Effect.gen(function* () {
+    const page = yield* attempt("scan entries", () =>
+      storage.scanEntries(
+        options.before === undefined
+          ? { conversationId: ROOT_CONVERSATION_ID }
+          : {
+              conversationId: ROOT_CONVERSATION_ID,
+              maxEntryId: (options.before - 1) as EntryId,
+            },
+        options.limit,
+        undefined,
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    // Storage scans newest first; a transcript reads oldest first.
+    const records = [...page.items].reverse();
+    const oldest = records[0];
+    return page.next === undefined || oldest === undefined
+      ? { records }
+      : { records, earlier: String(oldest.id) };
+  });
+
+/**
+ * The page of a session's transcript before entry `before`, read without owning the log: what a
+ * client asks for when it wants more of a long session than a historical snapshot carried
+ * (`SessionSnapshot.earlier`, LOB-243). `limit` is clamped to `1..HISTORY_PAGE_MAX`; a `before` that
+ * is not an entry id is refused as `invalid_input`.
+ */
+export const readTranscriptPage = (
+  storage: Storage,
+  options: { readonly before: string; readonly limit?: number },
+): Effect.Effect<TranscriptPage, SessionError> =>
+  Effect.gen(function* () {
+    const before = entryIdOf(options.before);
+    if (before === undefined) {
+      return yield* new SessionErrorClass({
+        code: "invalid_input",
+        message: `before "${options.before}" is not an entry id`,
+      });
+    }
+    const limit = Math.min(
+      HISTORY_PAGE_MAX,
+      Math.max(1, Math.trunc(options.limit ?? HISTORY_WINDOW)),
+    );
+    const page = yield* readTranscriptRecords(storage, { before, limit });
+    return {
+      entries: page.records.map(projectEntry),
+      ...(page.earlier === undefined ? {} : { earlier: page.earlier }),
+    };
+  });
+
+/**
+ * Every approval the root records, folded from its approval ledger (`ApprovalsDoc`, LOB-243) — a
+ * document bounded by the approvals asked for — when the ledger is seeded, and from the whole
+ * transcript when it is not: a log written before the ledger existed and not opened since. Either
+ * way it is `projectApprovals` over the same approval entries, so both answer alike.
+ *
+ * `recent` is entries the caller already read (a historical read's window). One of approval kind
+ * newer than the ledger's `through` was appended without its copy — by a build that predates the
+ * ledger — so the ledger is stale and the transcript is folded instead. The check costs no read.
+ */
+export const readApprovalRecords = (
+  storage: Storage,
+  recent: readonly EntryRecord[] = [],
+): Effect.Effect<readonly ApprovalLogRecord[], SessionError> =>
+  Effect.gen(function* () {
+    const ledger = yield* readDocument(storage, APPROVALS_DOC_KIND);
+    const entries = ledger?.["entries"];
+    const through = ledger?.["through"];
+    const trusted =
+      ledger?.["seeded"] === true &&
+      Array.isArray(entries) &&
+      typeof through === "number" &&
+      !recent.some(
+        (record) =>
+          Number(record.id) > through && APPROVAL_ENTRY_KINDS.has(record.kind),
+      );
+    if (trusted) {
+      return projectApprovals(
+        entries.flatMap((value) => {
+          const entry = asLedgerEntry(value);
+          return entry === undefined ? [] : [entry];
+        }),
+      );
+    }
+    return projectApprovals(yield* readAllEntries(storage));
+  });
+
+/** One ledger entry read defensively: a value that is not `{ kind, data }` folds to nothing. */
+const asLedgerEntry = (
+  value: JsonValue,
+): { readonly kind: string; readonly data: JsonValue } | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  const kind = value["kind"];
+  return typeof kind === "string"
+    ? { kind, data: value["data"] ?? null }
+    : undefined;
+};
+
+/**
+ * A session nobody owns, read through a reader-mode `Storage`.
  *
  * No `Harness` is opened, because Pi Durable allows exactly one owner, and this is the read-only
  * path D7 asks for — the control plane must be able to read a session without owning it.
+ *
+ * Bounded by what it shows (LOB-243, R6): the storage open restores the log's checkpoint and folds
+ * only the commits after it (LOB-186), and this reads documents — the approval ledger, usage, budget,
+ * mission, replay, proposals — and the newest `HISTORY_WINDOW` transcript entries, never the whole
+ * transcript. `earlier` says there is more; `readTranscriptPage` pages back through it on request.
+ * The full fold (`readSessionLog`) is still what a rebuild, a fork and a replay read.
  */
 export const readHistoricalSnapshot = (
   storage: Storage,
   ref: SessionRef,
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
-    const log = yield* readSessionLog(storage);
+    const transcript = yield* readTranscriptRecords(storage, {
+      limit: HISTORY_WINDOW,
+    });
+    const usage = yield* readLogUsage(storage);
+    const approvals = yield* readApprovalRecords(storage, transcript.records);
+    const replayComparisons = projectReplayComparisons(
+      yield* readDocument(storage, REPLAY_DOC_KIND),
+    );
+    const log = {
+      entries: transcript.records.map(projectEntry),
+      usage,
+      approvals,
+      replayComparisons,
+    };
     const mission = yield* readFoldedMission(storage);
     const proposedIssues = projectProposedIssues(
       yield* readDocument(storage, PROPOSED_ISSUES_DOC_KIND),
@@ -2573,6 +2860,10 @@ export const readHistoricalSnapshot = (
       yield* readDocument(storage, BUDGET_DOC_KIND),
       log.usage,
     );
+    // The index's value when it has one, otherwise the log's own `pi.agent` — one document read, so
+    // the bounded fold stays bounded — and a row written before the column existed still answers
+    // its model (LOB-269).
+    const model = ref.model ?? (yield* readPinnedModelKey(storage));
     return {
       session: {
         id: ref.id,
@@ -2589,14 +2880,13 @@ export const readHistoricalSnapshot = (
           : { baseRef: ref.workspace.baseRef }),
         ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
         ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
-        // The index's value when it has one, otherwise the log's own: a fold reads the log anyway,
-        // so a row written before the column existed still answers its model (LOB-269).
-        ...((ref.model ?? log.model) === undefined
-          ? {}
-          : { model: ref.model ?? log.model }),
+        ...(model === undefined ? {} : { model }),
       },
       workspace: ref.workspace,
       entries: log.entries,
+      ...(transcript.earlier === undefined
+        ? {}
+        : { earlier: transcript.earlier }),
       live: { busy: false, tools: [] },
       usage: log.usage,
       queued: [],

@@ -60,6 +60,7 @@ import type {
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
+  ReadSessionHistoryInput,
   RegisterRepoInput,
   ReleaseWorkspaceResult,
   ReplayComparison,
@@ -70,6 +71,7 @@ import type {
   SendMessageResult,
   SessionError,
   SessionEvent,
+  SessionHistoryPage,
   SessionId,
   SessionListEntry,
   SessionMode,
@@ -149,6 +151,7 @@ import {
   readHistoricalSnapshot,
   readLiveSnapshot,
   readRecordedReview,
+  readTranscriptPage,
   readVerifyRecords,
   readCurationUsage,
   compareReplay,
@@ -259,6 +262,13 @@ export type SessionServiceShape = {
   readonly get: (
     sessionId: SessionId,
   ) => Effect.Effect<SessionSnapshot, SessionError>;
+  /**
+   * The page of a session's transcript before an entry (LOB-243): what a client reads when a
+   * historical snapshot's `earlier` says there is more. Read from the log, owned or not.
+   */
+  readonly history: (
+    input: ReadSessionHistoryInput,
+  ) => Effect.Effect<SessionHistoryPage, SessionError>;
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
@@ -1854,6 +1864,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* armComparison(sessionId);
           return yield* withReader(sessionId, (storage) =>
             readHistoricalSnapshot(storage, refOf(sessionId, row, workspace)),
+          );
+        });
+
+      /**
+       * Earlier transcript, read through a reader whether or not this process owns the session: the
+       * reader opens from the log's checkpoint (LOB-186) and catches up on what the owner committed,
+       * so the page is the log's, and a page costs one scan of its own length (LOB-243).
+       */
+      const history = (
+        input: ReadSessionHistoryInput,
+      ): Effect.Effect<SessionHistoryPage, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(input.sessionId);
+          return yield* withReader(input.sessionId, (storage) =>
+            readTranscriptPage(storage, {
+              before: input.before,
+              ...(input.limit === undefined ? {} : { limit: input.limit }),
+            }),
           );
         });
 
@@ -3914,6 +3942,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       return SessionService.of({
         create,
         get,
+        history,
         send,
         interrupt,
         withdraw,

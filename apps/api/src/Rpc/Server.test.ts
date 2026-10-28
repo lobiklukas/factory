@@ -227,6 +227,16 @@ describe("getServerInfo over RPC (LOB-269)", () => {
         armed: true,
         variable: "GITHUB_WEBHOOK_SECRET",
       },
+      {
+        route: "/webhooks/jira",
+        armed: false,
+        variable: "JIRA_WEBHOOK_SECRET",
+      },
+      {
+        route: "/webhooks/slack",
+        armed: false,
+        variable: "SLACK_SIGNING_SECRET",
+      },
     ]);
     expect(info.linearWriteBack).toEqual({
       enabled: true,
