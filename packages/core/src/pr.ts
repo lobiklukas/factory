@@ -1,4 +1,4 @@
-import { Effect, Redacted, Schema } from "effect";
+import { Effect, Option, Redacted, Schema } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
@@ -482,26 +482,102 @@ export const createPullRequest = (
       });
       if (existing !== undefined) return existing;
     }
-    return yield* HttpClientResponse.filterStatusOk(response).pipe(
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(GitHubPullRequest)),
+    if (response.status < 200 || response.status >= 300) {
+      // The forge's own words travel with the status (C7b): a 422 says *why*, and what it names (a PR
+      // already open for this head) is what a person acts on. A body that is not JSON says nothing.
+      const body = yield* response.json.pipe(
+        Effect.orElseSucceed((): unknown => undefined),
+      );
+      const detail = forgeDetail(body);
+      const existing = existingPullRequestUrl(body);
+      const rateLimited = isRateLimited(response, body);
+      return yield* new PrError({
+        operation: "createPullRequest",
+        ref,
+        message:
+          detail === undefined
+            ? `GitHub answered HTTP ${response.status}`
+            : `GitHub answered HTTP ${response.status}: ${detail}`,
+        status: response.status,
+        ...(existing === undefined ? {} : { existing }),
+        ...(rateLimited ? { rateLimited } : {}),
+      });
+    }
+    return yield* HttpClientResponse.schemaBodyJson(GitHubPullRequest)(
+      response,
+    ).pipe(
       Effect.map(fromGitHub),
-      Effect.mapError((error) => {
-        const status =
-          error._tag === "HttpClientError" &&
-          error.reason._tag === "StatusCodeError"
-            ? error.reason.response.status
-            : undefined;
-        return new PrError({
-          operation: "createPullRequest",
-          ref,
-          message:
-            status === undefined
-              ? "GitHub's response could not be read"
-              : `GitHub answered HTTP ${status}`,
-        });
-      }),
+      Effect.mapError(
+        () =>
+          new PrError({
+            operation: "createPullRequest",
+            ref,
+            message: "GitHub's response could not be read",
+          }),
+      ),
     );
   });
+
+/** The slice of a GitHub refusal body this module reads: the top-level `message` and each error's. */
+const GitHubRefusal = Schema.Struct({
+  message: Schema.optional(Schema.String),
+  errors: Schema.optional(
+    Schema.Array(Schema.Struct({ message: Schema.optional(Schema.String) })),
+  ),
+});
+
+const decodeRefusal = Schema.decodeUnknownOption(GitHubRefusal);
+
+/**
+ * What a forge refusal says, from its JSON body: the `message` of each entry in `errors`, which is
+ * where GitHub puts the reason of a 422 (`A pull request already exists for o:b.`). The top-level
+ * `message` is left out — `Validation Failed` says nothing the status does not; whether it says
+ * "rate limit" is `isRateLimited`'s to read. `undefined` when the body names no reason.
+ */
+const forgeDetail = (body: unknown): string | undefined => {
+  const refusal = decodeRefusal(body);
+  if (Option.isNone(refusal)) return undefined;
+  const reasons = (refusal.value.errors ?? []).flatMap((error) =>
+    error.message !== undefined && error.message.trim() !== ""
+      ? [error.message.trim()]
+      : [],
+  );
+  return reasons.length === 0 ? undefined : reasons.join("; ");
+};
+
+/**
+ * Whether the forge refused because of a rate limit (C7b): GitHub answers a primary limit with
+ * `x-ratelimit-remaining: 0`, a secondary one with `retry-after`, and both with a top-level
+ * `message` ("API rate limit exceeded", "You have exceeded a secondary rate limit"). Only a 403 or
+ * a 429 can be one. It clears with time, so it is the one 4xx a client keeps the retry for.
+ */
+const isRateLimited = (
+  response: HttpClientResponse.HttpClientResponse,
+  body: unknown,
+): boolean => {
+  if (response.status !== 403 && response.status !== 429) return false;
+  if (
+    response.headers["x-ratelimit-remaining"] === "0" ||
+    response.headers["retry-after"] !== undefined
+  )
+    return true;
+  const message = Option.match(decodeRefusal(body), {
+    onNone: () => "",
+    onSome: (refusal) => refusal.message ?? "",
+  });
+  return /rate limit|abuse/i.test(message);
+};
+
+/**
+ * The page of a pull request the forge's refusal names, if it names one: an `http(s)` URL ending
+ * `/pull/<number>` in the body's messages. GitHub's duplicate refusal names the head, not the PR, so
+ * usually there is none and the step's own lookup (`findPullRequest`) is what finds it; a forge or
+ * a proxy that does name it is believed, and only a link that is a PR page is kept.
+ */
+const existingPullRequestUrl = (body: unknown): string | undefined => {
+  const text = JSON.stringify(body) ?? "";
+  return /https?:\/\/[^\s"\\]+\/pull\/\d+/.exec(text)?.[0];
+};
 
 /**
  * The PR that already exists for one head and base, if GitHub has one.

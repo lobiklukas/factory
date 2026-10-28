@@ -108,6 +108,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Model backend and model      | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
 | New session form             | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
 | New session model picker     | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
+| Model no longer served       | passing | [model-unavailable.md](model-unavailable.md) (`model-unavailable.sh`)         |
 | Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |
