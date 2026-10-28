@@ -437,6 +437,10 @@ export type SessionServiceShape = {
    * it, and refused as `ProposalsRefused`, storing nothing, when it does not. It creates no tracker
    * issue and opens no session: the log is what it writes. The call's spend is charged to the
    * session's own ledger, as a curation's is.
+   *
+   * The answer is reconciled into the proposals the session already holds, by title (LOB-203): the
+   * same spec twice is the same proposals with the same recorded tracker ids, and the result's
+   * `diff` names what a changed spec added, updated and removed (removed ones are kept, marked).
    */
   readonly proposeDecomposition: (
     input: ProposeDecompositionInput,

@@ -10,7 +10,8 @@
  * The answer passes through one validator, `decodeProposedIssues` (`@repo/domain/Decomposition`),
  * on its way to the one writer, `commitProposedIssues`. A refused answer commits nothing: the log
  * keeps whatever proposals it held before, so a bad second decomposition cannot erase a good first
- * one.
+ * one — and a *good* second one reconciles into the first by title (LOB-203) rather than replacing
+ * it: the same spec decomposed twice is the same proposals with the same recorded tracker issues.
  */
 import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -19,12 +20,21 @@ import { Clock, Effect, Option, Schema } from "effect";
 import {
   type CreatedIssue,
   decodeProposedIssues,
+  projectProposedIssues,
   type ProposalsRefused,
+  type ProposedIssue,
   type ProposedIssues,
+  type ProposeDecompositionResult,
+  reconcileProposals,
+  type RemovedProposal,
   titleKey,
 } from "@repo/domain/Decomposition";
 import { SessionError } from "@repo/domain/Session";
-import { ProposedIssuesDoc } from "./docs";
+import {
+  ProposedIssuesDoc,
+  type StoredProposal,
+  type StoredRemoved,
+} from "./docs";
 import {
   DECOMPOSITION_ACCEPTANCE_HEADING,
   DECOMPOSITION_GOAL_HEADING,
@@ -209,61 +219,143 @@ export const decompositionProposals = (
     : decodeProposedIssues(answerValue(answerText(request.answer)));
 
 /**
- * Commit `issues` as the conversation's `factory.proposedIssues` inside `tx`, replacing what was
- * there. Takes a value the validator accepted; `writeProposedIssues` is the writer that decodes.
+ * Reconcile `issues` into the conversation's `factory.proposedIssues` inside `tx` (LOB-203), and
+ * answer what that did. Takes a value the validator accepted; `writeProposedIssues` is the writer
+ * that decodes.
  *
- * A proposal the previous set had already created (LOB-202) keeps its `created` when the new set
- * has a proposal with the same normalized title: that title is the tracker's marker, so it is the
- * same child, and dropping the record would make the next approval look for it by marker alone.
- * A proposal whose title changed is a new proposal; the issue made for the old title stays in the
- * tracker, unrecorded.
+ * The draft does not replace the set: `reconcileProposals` folds it in by normalized title. A
+ * proposal the previous set had already created (LOB-202) keeps its `created` — that title is the
+ * tracker's marker, so it is the same child — and one the draft no longer proposes is marked
+ * removed with its `created`, not dropped. A rerun that changes nothing commits nothing.
  */
 export const commitProposedIssues = (
   tx: Tx,
   conversationId: ConversationId,
   issues: ProposedIssues,
-): Promise<void> =>
+): Promise<ProposeDecompositionResult> =>
   tx.doc(ProposedIssuesDoc, conversationId).then((doc) => {
-    const createdByTitle = new Map(
-      doc.proposals.flatMap((proposal) =>
-        proposal.created === undefined
-          ? []
-          : [[titleKey(proposal.title), proposal.created] as const],
-      ),
-    );
-    doc.proposals = issues.proposals.map((proposal) => {
-      const created = createdByTitle.get(titleKey(proposal.title));
-      return {
-        title: proposal.title,
-        goal: proposal.goal,
-        change: proposal.change,
-        acceptance: [...proposal.acceptance],
-        blockedBy: [...proposal.blockedBy],
-        ...(created === undefined
-          ? {}
-          : { created: { id: created.id, identifier: created.identifier } }),
-      };
-    });
+    // Read through the same projection the snapshot uses; a stored value the rules refuse (a rule
+    // tightened after it was written, one bad entry) must not take the recorded tracker ids with it,
+    // so the commit then falls back to what the raw document still names.
+    const previous =
+      projectProposedIssues({
+        proposals: doc.proposals,
+        ...(doc.removed === undefined ? {} : { removed: doc.removed }),
+      }) ?? salvageStored(doc);
+    const result = reconcileProposals(previous, issues);
+    // Assigned unconditionally: Pi Durable commits only what differs from the stored value, so a
+    // set the session already holds is no commit at all.
+    doc.proposals = result.proposals.map(storedProposal);
+    if (result.removed.length > 0 || doc.removed !== undefined) {
+      doc.removed = result.removed.map(storedRemoved);
+    }
+    return {
+      proposals: result.proposals,
+      ...(result.removed.length === 0 ? {} : { removed: result.removed }),
+      diff: result.diff,
+    };
   });
 
 /**
- * Commit the session's proposed issues after `decodeProposedIssues` accepts them. The input is
- * `unknown` on purpose, as `writeSpec`'s is: the validator is the only thing that may say it is a
- * proposal set. A refusal commits nothing. Answers the set as committed — the decoded value.
+ * The previous set read from the raw document when the validator refuses it: every entry with a
+ * title, kept with its `created` and nothing else the rules would have to vouch for. Reconciling
+ * against it keeps each recorded tracker id by title; a seed document salvages to nothing.
+ */
+const salvageStored = (doc: {
+  readonly proposals: unknown;
+  readonly removed?: unknown;
+}): ProposedIssues | undefined => {
+  const entries = (value: unknown): readonly Record<string, unknown>[] =>
+    Array.isArray(value)
+      ? value.filter(
+          (entry): entry is Record<string, unknown> =>
+            typeof entry === "object" &&
+            entry !== null &&
+            typeof (entry as { title?: unknown }).title === "string",
+        )
+      : [];
+  const text = (value: unknown): string =>
+    typeof value === "string" ? value : "";
+  const lines = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((line): line is string => typeof line === "string")
+      : [];
+  const created = (value: unknown) => {
+    const record = value as { id?: unknown; identifier?: unknown } | null;
+    return typeof record?.id === "string" &&
+      typeof record.identifier === "string"
+      ? { created: { id: record.id, identifier: record.identifier } }
+      : {};
+  };
+  const proposals = entries(doc.proposals).map((entry) => ({
+    title: text(entry["title"]),
+    goal: text(entry["goal"]),
+    change: text(entry["change"]),
+    acceptance: lines(entry["acceptance"]),
+    blockedBy: [] as number[],
+    ...created(entry["created"]),
+  }));
+  const removed = entries(doc.removed).map((entry) => ({
+    title: text(entry["title"]),
+    goal: text(entry["goal"]),
+    change: text(entry["change"]),
+    acceptance: lines(entry["acceptance"]),
+    ...created(entry["created"]),
+  }));
+  return proposals.length === 0 && removed.length === 0
+    ? undefined
+    : { proposals, removed };
+};
+
+const storedProposal = (proposal: ProposedIssue): StoredProposal => ({
+  title: proposal.title,
+  goal: proposal.goal,
+  change: proposal.change,
+  acceptance: [...proposal.acceptance],
+  blockedBy: [...proposal.blockedBy],
+  ...(proposal.created === undefined
+    ? {}
+    : {
+        created: {
+          id: proposal.created.id,
+          identifier: proposal.created.identifier,
+        },
+      }),
+});
+
+const storedRemoved = (proposal: RemovedProposal): StoredRemoved => ({
+  title: proposal.title,
+  goal: proposal.goal,
+  change: proposal.change,
+  acceptance: [...proposal.acceptance],
+  ...(proposal.created === undefined
+    ? {}
+    : {
+        created: {
+          id: proposal.created.id,
+          identifier: proposal.created.identifier,
+        },
+      }),
+});
+
+/**
+ * Commit the session's proposed issues after `decodeProposedIssues` accepts them, reconciled into
+ * what the session already holds. The input is `unknown` on purpose, as `writeSpec`'s is: the
+ * validator is the only thing that may say it is a proposal set. A refusal commits nothing. Answers
+ * the set as stored and the diff against the one before it.
  */
 export const writeProposedIssues = (
   conversation: Conversation,
   input: unknown,
-): Effect.Effect<ProposedIssues, ProposalsRefused | SessionError> =>
+): Effect.Effect<ProposeDecompositionResult, ProposalsRefused | SessionError> =>
   Effect.gen(function* () {
     const issues = yield* decodeProposedIssues(input);
-    yield* attempt("write proposed issues", () =>
+    return yield* attempt("write proposed issues", () =>
       conversation.commit(
         (tx) => commitProposedIssues(tx, conversation.id, issues),
         BACKGROUND_CONTEXT,
       ),
     );
-    return issues;
   });
 
 /**

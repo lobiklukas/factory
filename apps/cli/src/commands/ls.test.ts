@@ -10,7 +10,7 @@
 import { Schema } from "effect";
 import { SessionListEntry } from "@repo/domain/Session";
 import { describe, expect, it } from "vitest";
-import { LS_HEADER, NO_PR, lsRow } from "./ls";
+import { LS_HEADER, NO_MODEL, NO_PR, lsRow } from "./ls";
 
 const PR_URL = "https://github.com/lobiklukas/factory/pull/7";
 
@@ -62,13 +62,38 @@ describe("lsRow", () => {
       "2026-10-27T10:05:00.000Z",
       "0.25",
     ];
-    expect(fields(withPr).slice(0, header.length - 1)).toEqual([
+    expect(fields(withPr).slice(0, header.indexOf("pr") + 1)).toEqual([
       ...before,
       PR_URL,
     ]);
-    expect(fields(withoutPr).slice(0, header.length - 1)).toEqual([
+    expect(fields(withoutPr).slice(0, header.indexOf("pr") + 1)).toEqual([
       ...before,
       NO_PR,
     ]);
+  });
+});
+
+describe("lsRow, the model column (LOB-272)", () => {
+  const header = fields(LS_HEADER);
+
+  /** Mutation: print the status or the repo in the model column, or drop the column. */
+  it("prints the session's provider/model in the model column, before the title", () => {
+    const row = lsRow(entry({ model: "faux/faux-1" }));
+    expect(fields(row)[header.indexOf("model")]).toBe("faux/faux-1");
+    expect(header.indexOf("model")).toBe(header.length - 2);
+    expect(row.endsWith("  faux/faux-1  fix the flaky test")).toBe(true);
+  });
+
+  /** Mutation: an empty cell for a session with no model shifts the title into the model column. */
+  it("prints a placeholder, not an empty cell, for a session whose row names no model", () => {
+    const row = lsRow(entry());
+    expect(NO_MODEL).not.toBe("");
+    expect(fields(row)[header.indexOf("model")]).toBe(NO_MODEL);
+    expect(row).not.toContain("    ");
+  });
+
+  /** Mutation: put the new column before the pr column, which moves the link off the sixth field. */
+  it("leaves the pr column where scripts read it, as the sixth field", () => {
+    expect(header.indexOf("pr")).toBe(5);
   });
 });
