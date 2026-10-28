@@ -13,16 +13,8 @@
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { BunServices } from "@effect/platform-bun";
-import {
-  Effect,
-  Exit,
-  Layer,
-  ManagedRuntime,
-  Option,
-  Redacted,
-  Schema,
-} from "effect";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { Effect, Exit, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import { HttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";

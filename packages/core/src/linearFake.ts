@@ -177,7 +177,10 @@ export const makeLinear = (options: FakeOptions = {}) => {
           teamId: String(input["teamId"]),
           parentId: String(input["parentId"]),
           title: String(input["title"]),
-          description: String(input["description"] ?? ""),
+          description:
+            typeof input["description"] === "string"
+              ? input["description"]
+              : "",
         };
         children.push(made);
         return {
