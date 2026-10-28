@@ -78,6 +78,17 @@
  * measurement, cap and push, so this run's commits reach the PR under the same guards — and records
  * the card's PR in this session's log, answering `already-open`. The guard is still keyed by the
  * session: only the caller decides that two sessions are one card's.
+ *
+ * A session whose own log records its PR and whose branch has since moved past the commit it was
+ * published at pushes the new tip onto that PR (F14): the same measurement, cap, scan and push as an
+ * open, then the record's commit moves to the new tip and the answer is `updated`. Before this the
+ * recorded PR was the answer whatever the branch had grown to, so a session that settled again with
+ * more commits left them unpublished, and nothing but a later run of its card ever pushed them. A
+ * refusal (`over-cap`, `non-fast-forward`, `secret-found`) is answered as an open's is, naming the PR
+ * it left as it was (`pullRequest`), and writes nothing, so the record stays at the commit the forge
+ * holds; a branch still at that commit is the retry it always was, answered from the log without
+ * measuring, pushing or reaching any forge. A step with no push updates nothing: it answers the PR as
+ * it stands, because a record moved without a push would name a commit the forge does not have.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -97,6 +108,7 @@ import {
   readPullRequestDoc,
   writeNoChange,
   writePullRequestDoc,
+  writePullRequestUpdate,
   type InjectedSecrets,
   type PullRequestRecord,
 } from "@repo/harness";
@@ -192,46 +204,80 @@ export const openPullRequest = (
       input.harness,
       input.conversation,
     );
+    // The head is resolved to one commit first, and that commit is what is measured, listed and
+    // pushed (C17): a commit the agent lands on the branch while the step runs is then neither
+    // pushed past the cap unmeasured nor missing from the body. A head the checkout cannot resolve
+    // is measured by name, which fails on its own terms. A recorded PR's head is resolved too, when
+    // it is the head this call names (F14): it is how the step tells a branch the PR carries from
+    // one that moved past it.
+    const commit =
+      (recorded === undefined || recorded.head === input.head) &&
+      existsSync(join(input.worktree, ".git"))
+        ? yield* resolveCommit(input.worktree, `refs/heads/${input.head}`)
+        : undefined;
+    // A recorded PR whose branch has moved past the commit it was published at is updated (F14):
+    // the new tip takes every step an open takes but the GitHub call — measured, capped, scanned and
+    // pushed, never forced — and the record moves to it. A record that names no commit (one written
+    // before C19) is treated as moved, so its first update records one. A branch still at the
+    // published commit is the retry it always was: answered from the log, measuring and pushing
+    // nothing, reaching no forge.
+    //
+    // Only a step that can push updates: with no push (a repo with no forge URL a token may go to,
+    // a deployment with no remote) nothing would reach the PR, and no GitHub call catches it as an
+    // open's would — a record moved anyway would name a commit the forge does not have, and
+    // `pr_link` would be met for work that never reached the PR. Such a step answers the PR as it
+    // stands, as it did before F14, and leaves the record where it was.
+    const moved =
+      recorded !== undefined &&
+      commit !== undefined &&
+      recorded.commit !== commit;
+    const updating = moved && input.push !== undefined;
+    if (moved && !updating) {
+      yield* Effect.logInfo(
+        `session ${input.sessionId}: ${input.head} moved past the commit ${recorded.url} was published at, but this step has no push, so the PR is left where it was`,
+      );
+    }
+    const publishing = recorded === undefined || updating;
+    // A refusal of a recorded PR's update names the PR it left as it was (F14), so no reader tells
+    // an operator "no PR was opened" about a session whose PR is open.
+    const leftAsItWas = <A extends object>(
+      answer: A,
+    ): A | (A & { readonly pullRequest: string }) =>
+      recorded === undefined
+        ? answer
+        : { ...answer, pullRequest: recorded.url };
     // Read before the call, so the tag names the path this invocation took rather than what the
     // document ends the turn holding: a first open that lost its index row is still "opened".
     // A card's PR this run adopts (C19) is one already open, so it is not "opened" either.
     const outcome =
       recorded === undefined && input.adopt === undefined
         ? "opened"
-        : "already-open";
-    // Measured only when a PR would actually be opened: a recorded PR is the answer whatever the
-    // branch has grown to since, and re-measuring it would turn a retry into a refusal. The same
+        : updating
+          ? "updated"
+          : "already-open";
+    // Measured only when the step would publish: a recorded PR whose branch has not moved is the
+    // answer as it stands, and re-measuring it would turn a retry into a refusal. The same
     // measurement is what the body lists, so the cap and the changed-path list can never disagree
     // about what this PR carries.
-    //
-    // The head is resolved to one commit first, and that commit is what is measured, listed and
-    // pushed (C17): a commit the agent lands on the branch while the step runs is then neither
-    // pushed past the cap unmeasured nor missing from the body. A head the checkout cannot resolve
-    // is measured by name, which fails on its own terms.
-    const commit =
-      recorded === undefined && existsSync(join(input.worktree, ".git"))
-        ? yield* resolveCommit(input.worktree, `refs/heads/${input.head}`)
-        : undefined;
     const measuredHead = commit ?? input.head;
-    const measured =
-      recorded === undefined
-        ? yield* diffSize({
-            worktree: input.worktree,
-            base: input.measureBase ?? input.base,
-            head: measuredHead,
-          }).pipe(
-            // A failed measurement names the branch, as the caller does, not the commit it resolved.
-            Effect.mapError((error) =>
-              commit === undefined
-                ? error
-                : new PrError({
-                    operation: error.operation,
-                    ref: `${input.measureBase ?? input.base}...${input.head}`,
-                    message: error.message,
-                  }),
-            ),
-          )
-        : Option.none<DiffSize>();
+    const measured = publishing
+      ? yield* diffSize({
+          worktree: input.worktree,
+          base: input.measureBase ?? input.base,
+          head: measuredHead,
+        }).pipe(
+          // A failed measurement names the branch, as the caller does, not the commit it resolved.
+          Effect.mapError((error) =>
+            commit === undefined
+              ? error
+              : new PrError({
+                  operation: error.operation,
+                  ref: `${input.measureBase ?? input.base}...${input.head}`,
+                  message: error.message,
+                }),
+          ),
+        )
+      : Option.none<DiffSize>();
     const refused = Option.flatMap(measured, (size) =>
       capRefusal(size, input.cap ?? DEFAULT_DIFF_CAP),
     );
@@ -241,23 +287,30 @@ export const openPullRequest = (
     // edit is exactly this branch. Nothing is recorded about the answer: the measurement is taken
     // afresh on every call, so a run that *does* change a file afterwards opens its PR rather than
     // reading a sticky "nothing to do". `none` (a directory that is not its own checkout) is not
-    // this case: nothing was measured, so nothing can be said to be empty.
-    if (Option.isSome(measured) && measured.value.files === 0) {
-      yield* writeNoChange(input.conversation, input.base);
+    // this case: nothing was measured, so nothing can be said to be empty. Only an open asks it: a
+    // PR that exists takes a push that empties its diff as any other (F14), and says so on GitHub.
+    if (
+      recorded === undefined &&
+      Option.isSome(measured) &&
+      measured.value.files === 0
+    ) {
+      yield* writeNoChange(input.conversation, input.base, commit);
       return { outcome: "no-change" };
     }
     // Nothing is written on this path — no document, no row — so a session refused here has the
-    // same index and log it had before the step, and reads as a session with no PR.
-    if (Option.isSome(refused)) return refused.value;
+    // same index and log it had before the step, and reads as a session with no PR; a recorded PR
+    // refused an update (F14) keeps its record, at the commit it was published at.
+    if (Option.isSome(refused)) return leftAsItWas(refused.value);
     // The scan before the push (S-agent-secrets): every line the branch's commits add, for a stored
     // value or a credential's shape. Like the cap it writes nothing, so a refused session reads as
     // one with no PR; unlike the cap it reads the history, because that is what a push publishes.
     //
     // What it stops at is what the forge already holds: the base's tip there, fetched now, when the
     // step pushes — never a local ref name the agent's shell could have moved onto a commit it wants
-    // unscanned — and the commit an adopted card PR was published at (C19), which an earlier run's
-    // step scanned and pushed, so a later run is not refused for history the forge already has.
-    if (recorded === undefined && Option.isSome(measured)) {
+    // unscanned — and the commit the PR was last published at: an adopted card PR's (C19), or this
+    // session's own recorded PR's (F14), which an earlier step scanned and pushed, so a later push is
+    // not refused for history the forge already has.
+    if (publishing && Option.isSome(measured)) {
       const localBase = input.measureBase ?? input.base;
       const unreadable = input.secrets?.unreadable ?? [];
       if (unreadable.length > 0) {
@@ -280,11 +333,11 @@ export const openPullRequest = (
               ),
             )
           : localBase;
-      const adopted = input.adopt?.commit ?? "";
+      const previously = recorded?.commit ?? input.adopt?.commit ?? "";
       const published =
-        adopted === ""
+        previously === ""
           ? undefined
-          : yield* resolveCommit(input.worktree, adopted);
+          : yield* resolveCommit(input.worktree, previously);
       const found = yield* scanBranchForSecrets({
         checkout: input.worktree,
         base,
@@ -292,32 +345,31 @@ export const openPullRequest = (
         ...(published === undefined ? {} : { exclude: [published] }),
         known: input.secrets?.known ?? [],
       });
-      if (Option.isSome(found)) return found.value;
+      if (Option.isSome(found)) return leftAsItWas(found.value);
     }
-    // Published only when a PR is about to be asked for, and only a branch the step measured: a
-    // directory that is not its own checkout has no branch to push. A rejected push writes nothing,
-    // so the session reads as one with no PR, as a refusal above does.
-    if (
-      recorded === undefined &&
-      Option.isSome(measured) &&
-      input.push !== undefined
-    ) {
+    // Published only when the step publishes, and only a branch the step measured: a directory that
+    // is not its own checkout has no branch to push. A rejected push writes nothing, so the session
+    // reads as it did before the step — no PR, or its PR at the commit it was published at.
+    if (publishing && Option.isSome(measured) && input.push !== undefined) {
       const pushed = yield* publish(input.push(commit), input.head);
-      if (pushed !== undefined) return pushed;
+      if (pushed !== undefined) return leftAsItWas(pushed);
     }
     const pr =
-      recorded ??
-      (input.adopt === undefined
-        ? yield* open(
-            input,
-            Option.match(measured, {
-              onNone: () => [],
-              onSome: (s) => s.paths,
-            }),
-            measuredHead,
-            commit,
-          )
-        : yield* adoptCardPr(input.conversation, input.adopt, commit));
+      recorded !== undefined
+        ? updating && commit !== undefined
+          ? yield* updateRecordedPr(input.conversation, recorded, commit)
+          : recorded
+        : input.adopt === undefined
+          ? yield* open(
+              input,
+              Option.match(measured, {
+                onNone: () => [],
+                onSome: (s) => s.paths,
+              }),
+              measuredHead,
+              commit,
+            )
+          : yield* adoptCardPr(input.conversation, input.adopt, commit);
 
     const sql = yield* SqlClient;
     yield* sql`
@@ -333,6 +385,22 @@ export const openPullRequest = (
     );
 
     return { number: pr.number, url: pr.url, outcome };
+  });
+
+/**
+ * Move this session's recorded PR to the commit the step just pushed onto it (F14), announcing the
+ * push in the transcript. The PR is the same one — its number, page, base and body stand — so the
+ * only field that changes is the published commit, which is what `pr_link` compares with the
+ * branch's tip.
+ */
+const updateRecordedPr = (
+  conversation: Conversation,
+  recorded: PullRequestRecord,
+  commit: string,
+): Effect.Effect<PullRequestRecord, SessionError> =>
+  Effect.as(writePullRequestUpdate(conversation, recorded, commit), {
+    ...recorded,
+    commit,
   });
 
 /**

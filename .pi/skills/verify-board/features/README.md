@@ -3,7 +3,9 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: a PR's review and checks reaching its card (C21, 2026-10-28,
+Status reflects the last verified runs: a card run's PR across later settles and a killed process
+(F14, F16, 2026-10-28, `agent/F14-F16`), API on `:9510`, the GitHub fake on `:9511`, the git forge on
+`:9512`: `./pr-settle.sh` exit 0 (**21** PASS) ([pr-settle.md](pr-settle.md)). Before it, a PR's review and checks reaching its card (C21, 2026-10-28,
 `agent/C21`), API on `:9500`, the GitHub fake on `:9501`: `./feedback.sh` exit 0 (**23** PASS) — the
 signed `changes_requested` review blocked the card once, the failing check was one note, `board
 attention` listed a `review` row, and the next run was told the review verbatim, its start lifting the
@@ -94,6 +96,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | the ask on the task                     | passing | [ask.md](ask.md)                 |
 | `requires[]` on exit                    | passing | [requires.md](requires.md)       |
 | a PR's review and checks (C21)          | passing | [feedback.md](feedback.md)       |
+| later settles push; a boot settles      | passing | [pr-settle.md](pr-settle.md)     |
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
 | a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |

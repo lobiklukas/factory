@@ -68,6 +68,22 @@ describe("attemptOfStep", () => {
         "the branch changes 4100 lines, over the cap of 2000, so no pull request was opened",
     });
   });
+
+  it("names the open PR a refused update pushed nothing to (F14)", () => {
+    expect(
+      attemptOfStep({
+        outcome: "over-cap",
+        limit: "lines",
+        cap: 2000,
+        measured: 4100,
+        pullRequest: "https://github.com/acme/web/pull/7",
+      }),
+    ).toEqual({
+      _tag: "refused",
+      reason:
+        "the branch changes 4100 lines, over the cap of 2000, so nothing was pushed to https://github.com/acme/web/pull/7",
+    });
+  });
 });
 
 describe("attemptOfCause", () => {

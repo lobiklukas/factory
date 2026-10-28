@@ -224,6 +224,11 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (F14, F16):_ the PR follows its session's branch. A recorded PR whose branch moved past the
+commit it was published at is pushed onto — measured, capped and pushed as an open is, never forced,
+answered `updated` — by `factory pr` and by every later settle, so a session's later commits reach
+its PR; and a settle no process saw (a death between the settle and its step) is stepped at the next
+boot.
 _Refined (C19):_ a card's runs are one change, so they share one branch and one PR. The card's first
 run in a column that asks for the change (`pr_link` or `non_empty_diff`, B4's `building`) cuts
 `factory/<its session-id>`; every later run of the card — a second building run, a run in `review` —
