@@ -1136,6 +1136,12 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       readonly ago: number;
       readonly decided?: boolean;
     }>;
+    /** Sessions no card owns (no `task_runs` row), each seeded with the approvals named above. */
+    readonly scratch?: ReadonlyArray<{
+      readonly sessionId: string;
+      readonly title?: string;
+      readonly repo?: string;
+    }>;
   };
 
   /**
@@ -1166,6 +1172,12 @@ describe("TaskService — what needs a person (LOB-77)", () => {
                   INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
                   VALUES (${id}, ${run.taskId}, ${id}, ${run.column},
                           now() - make_interval(secs => ${run.ago}))
+                `;
+              }
+              for (const scratch of seed.scratch ?? []) {
+                yield* sql`
+                  INSERT INTO sessions (id, title, repo)
+                  VALUES (${scratch.sessionId}, ${scratch.title ?? ""}, ${scratch.repo ?? null})
                 `;
               }
               for (const approval of seed.approvals) {
@@ -1203,10 +1215,10 @@ describe("TaskService — what needs a person (LOB-77)", () => {
   /** `[reason, card title]` per row, in the order the service answered. */
   const rows = (
     items: ReadonlyArray<{
-      readonly task: { readonly title: string };
+      readonly task?: { readonly title: string } | undefined;
       readonly reason: { readonly _tag: string };
     }>,
-  ) => items.map((item) => [item.reason._tag, item.task.title]);
+  ) => items.map((item) => [item.reason._tag, item.task?.title]);
 
   it("lists approvals, then questions, then done runs at a human gate — and nothing else", async () => {
     const boardId = await newBoard();
@@ -1376,7 +1388,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       ["gate", "plan waits"],
       ["gate", "merge waits"],
     ]);
-    const listed = new Set((onBoard ?? []).map((item) => item.task.id));
+    const listed = new Set((onBoard ?? []).map((item) => item.task?.id));
     for (const absent of [resting, busy, noRun, waiting, building]) {
       expect(listed.has(absent.id)).toBe(false);
     }
@@ -1391,7 +1403,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     // The newest question in the thread, and the block's note when no run asked.
     // An idle planning run holding an undecided approval is the approval row only, never a gate.
     expect(
-      (onBoard ?? []).filter((item) => item.task.id === planAsks.id),
+      (onBoard ?? []).filter((item) => item.task?.id === planAsks.id),
     ).toHaveLength(1);
     expect(reasons[2]).toMatchObject({
       _tag: "approval",
@@ -1419,16 +1431,149 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     });
     expect(
       (onBoard ?? []).every(
-        (item) => item.task.boardId === boardId && item.repo.length > 0,
+        (item) =>
+          item.task?.boardId === boardId && (item.repo?.length ?? 0) > 0,
       ),
     ).toBe(true);
 
     // Every board: this board's rows are all there, in the same order.
     expect(
-      rows((everywhere ?? []).filter((item) => item.task.boardId === boardId)),
+      rows((everywhere ?? []).filter((item) => item.task?.boardId === boardId)),
     ).toEqual(rows(onBoard ?? []));
     // A board where nothing needs a person answers an empty list, not an error.
     expect(clean).toEqual([]);
+  });
+
+  it("lists a pending approval of a session no card owns, on the every-board read only (LOB-271)", async () => {
+    const boardId = await newBoard();
+    const card = await cardIn(boardId, "card approval", ["specifying"]);
+    const cardRun = newSession();
+    const titled = newSession();
+    const bare = newSession();
+    const settled = newSession();
+    const [onBoard, everywhere] = await attentionWith(
+      {
+        runs: [
+          {
+            taskId: card.id,
+            column: "specifying",
+            status: "idle",
+            ago: 5,
+            sessionId: cardRun,
+          },
+        ],
+        scratch: [
+          { sessionId: titled, title: "fix the flaky test", repo: "acme/api" },
+          { sessionId: bare },
+          { sessionId: settled, title: "already decided" },
+        ],
+        approvals: [
+          {
+            sessionId: titled,
+            requestId: "push",
+            action: "git push",
+            ago: 100,
+          },
+          {
+            sessionId: cardRun,
+            requestId: "card-push",
+            action: "git push origin card",
+            ago: 70,
+          },
+          { sessionId: bare, requestId: "pr", action: "open a PR", ago: 40 },
+          {
+            sessionId: settled,
+            requestId: "old",
+            action: "git push -f",
+            ago: 90,
+            decided: true,
+          },
+        ],
+      },
+      [boardId, undefined],
+    );
+
+    // This database is shared with other suites, so read only the rows this case seeded.
+    const mine = new Set([cardRun, titled, bare, settled]);
+    const seeded = (everywhere ?? []).filter(
+      (item) =>
+        item.reason._tag === "approval" && mine.has(item.reason.sessionId),
+    );
+    // One list, oldest request first: the card-less sessions interleave with the card's approval,
+    // and the session whose only request was decided is not there.
+    expect(
+      seeded.map((item) =>
+        item.reason._tag === "approval" ? item.reason.sessionId : undefined,
+      ),
+    ).toEqual([titled, cardRun, bare]);
+    expect(seeded.map((item) => item.task?.title)).toEqual([
+      undefined,
+      "card approval",
+      undefined,
+    ]);
+
+    const [scratchTitled, cardBound, scratchBare] = seeded;
+    expect(scratchTitled).toMatchObject({
+      sessionTitle: "fix the flaky test",
+      repo: "acme/api",
+      reason: {
+        _tag: "approval",
+        sessionId: titled,
+        requestId: "push",
+        action: "git push",
+      },
+    });
+    expect(scratchTitled).not.toHaveProperty("task");
+    // No title and no repo: the row says so by omission, not with a made-up value.
+    expect(scratchBare).toMatchObject({ sessionTitle: "" });
+    expect(scratchBare).not.toHaveProperty("repo");
+    // A card's approval is the row it always was: the card, its board's repo, and no session title.
+    expect(cardBound?.task?.id).toBe(card.id);
+    expect(cardBound?.repo?.length).toBeGreaterThan(0);
+    expect(cardBound).not.toHaveProperty("sessionTitle");
+
+    // A board's own view lists the board's cards only: the card's approval, nothing from scratch.
+    expect(rows(onBoard ?? [])).toEqual([["approval", "card approval"]]);
+  });
+
+  it("orders approvals by the request time the database keeps, below the millisecond (LOB-271)", async () => {
+    const boardId = await newBoard();
+    const card = await cardIn(boardId, "micro order", ["specifying"]);
+    const ids = [newSession(), newSession()].sort();
+    const low = `${ids[0]}`;
+    const high = `${ids[1]}`;
+    const scratch = newSession();
+    // The older request belongs to the session id that sorts last, 400 microseconds apart: a re-sort
+    // on the millisecond `requestedAt` and the session id would put the other one first.
+    const [everywhere] = await attentionWith(
+      {
+        runs: [low, high].map((sessionId) => ({
+          taskId: card.id,
+          column: "specifying" as const,
+          status: "idle" as const,
+          ago: 5,
+          sessionId,
+        })),
+        scratch: [{ sessionId: scratch }],
+        approvals: [
+          { sessionId: high, requestId: "a", action: "one", ago: 10.0008 },
+          { sessionId: low, requestId: "a", action: "two", ago: 10.0004 },
+          { sessionId: scratch, requestId: "a", action: "three", ago: 10.0006 },
+        ],
+      },
+      [undefined],
+    );
+    const mine = new Set([low, high, scratch]);
+    expect(
+      (everywhere ?? [])
+        .filter(
+          (item) =>
+            item.reason._tag === "approval" && mine.has(item.reason.sessionId),
+        )
+        .map((item) =>
+          item.reason._tag === "approval" ? item.reason.sessionId : undefined,
+        ),
+    ).toEqual([high, scratch, low]);
   });
 
   it("drops a question once a person answers it, and refuses a board that does not exist", async () => {
@@ -1495,7 +1640,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       }),
     );
     const bare = (await withService((s) => s.attention(boardId))).find(
-      (item) => item.task.id === other.id,
+      (item) => item.task?.id === other.id,
     );
     expect(bare?.reason).toMatchObject({ _tag: "question" });
     expect(bare?.reason).not.toHaveProperty("question");
