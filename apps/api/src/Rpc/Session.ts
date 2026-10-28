@@ -47,6 +47,8 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       // Proposals only (LOB-201): nothing is created in a tracker and no session is started.
       proposeDecomposition: (input) => sessions.proposeDecomposition(input),
       registerRepo: (input) => sessions.registerRepo(input),
+      listRepos: () => sessions.listRepos,
+      getRepo: (input) => sessions.getRepo(input),
       // Only the session and the title: the branches are the session's own, read server-side.
       openPullRequest: (input) =>
         sessions

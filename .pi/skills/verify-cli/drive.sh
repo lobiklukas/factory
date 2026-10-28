@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Drive `factory run` / `watch` / `ls` — and, through ./approve.sh, `approvals` / `approve` / `deny`
-# — in a real tmux terminal and capture the evidence.
+# Drive `factory run` / `watch` / `ls` — through ./repo.sh, `repo add` / `ls` / `show`, and through
+# ./approve.sh, `approvals` / `approve` / `deny` — in a real tmux terminal and capture the evidence.
 #
 # A command line is only proven by running it the way a person does: a real terminal, the real
 # control plane over HTTP, and the text it printed read back. Calling the RPC client from a test
@@ -213,6 +213,17 @@ check "an unknown session is refused with the typed code" \
 check "and the command exits non-zero" \
   "$([ "$(exit_code unknown)" != "0" ] && [ -n "$(exit_code unknown)" ] && echo 0 || echo 1)" \
   "exit=$(exit_code unknown)"
+
+# --- repo: the registry, added to, listed and shown (LOB-253) -------------------------------------
+# `./repo.sh` drives this same instance in a tmux server of its own; its checks are in repo.json, and
+# the drive fails when any of them does. It is handed the parent of `$EVIDENCE_DIR`, as approve.sh is.
+REPO_LOG="$RUN_DIR/cli-repo.log"
+API_URL="$API_URL" EVIDENCE_DIR="${EVIDENCE_DIR%/cli}" "$ROOT/.pi/skills/verify-cli/repo.sh" > "$REPO_LOG" 2>&1
+REPO_RC=$?
+cat "$REPO_LOG"
+check "repo.sh adds, lists and shows repos" \
+  "$([ "$REPO_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$REPO_RC; checks $(grep -c '^PASS' "$REPO_LOG") passed, $(grep -c '^FAIL' "$REPO_LOG") failed"
 
 # --- approvals: a gated call parked, decided from the CLI, and resumed (LOB-53) ---------------------
 # The gate is a deployment setting, so the approval block owns its own API with

@@ -15,7 +15,14 @@
  * the handler must pass *its* client and credential to the step, and the ledger below is the proof it
  * did.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -445,6 +452,96 @@ describe("proposeDecomposition over RPC (LOB-201)", () => {
     });
     // Refused is not stored: the session the client reads back holds no proposals.
     expect(outcome.after.proposedIssues).toBeUndefined();
+  }, 120_000);
+});
+
+describe("the repo registry over RPC (LOB-253)", () => {
+  it("registers, lists and reads a repo, and carries each refusal with its own tag", async () => {
+    const checkout = join(sessionRoot, "registry-checkout");
+    mkdirSync(join(checkout, ".factory"), { recursive: true });
+    execSync("git init -q -b main", { cwd: checkout, stdio: "ignore" });
+    writeFileSync(join(checkout, ".factory", "config"), "{}");
+    const plain = join(sessionRoot, "registry-plain");
+    mkdirSync(plain, { recursive: true });
+    const registeredSlug = RepoSlug.make(`acme/rpc-registry-${run}`);
+    const unknown = RepoSlug.make(`acme/rpc-registry-unknown-${run}`);
+    const auto = RepoSlug.make(`acme/rpc-registry-auto-${run}`);
+
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const registered = yield* client.registerRepo({
+          repo: registeredSlug,
+          defaultBaseRef: "main",
+          url: "https://example.invalid/registry.git",
+          localPath: checkout,
+        });
+        const rebased = yield* client.registerRepo({
+          repo: registeredSlug,
+          defaultBaseRef: "trunk",
+        });
+        yield* client.createSession({ repo: auto, title: "names a new repo" });
+        const listed = yield* client.listRepos({});
+        const got = yield* client.getRepo({ repo: registeredSlug });
+        const missing = yield* failureOf(client.getRepo({ repo: unknown }));
+        // The error itself, not `failureOf`'s spread: an error's `message` is not enumerable.
+        const notGit = yield* Effect.flip(
+          client.registerRepo({ repo: unknown, localPath: plain }),
+        );
+        const stillMissing = yield* failureOf(
+          client.getRepo({ repo: unknown }),
+        );
+        return {
+          registered,
+          rebased,
+          listed,
+          got,
+          missing,
+          notGit,
+          stillMissing,
+        };
+      }),
+    );
+
+    expect(outcome.registered).toMatchObject({
+      repo: registeredSlug,
+      localPath: checkout,
+      defaultBaseRef: "main",
+      localPathIsGit: true,
+      hasFactoryConfig: true,
+      // The work tree sessions are cut from crosses the wire, as git names it.
+      workTree: realpathSync(checkout),
+    });
+    // The second registration named only the base ref: the checkout and URL are kept.
+    expect(outcome.rebased).toMatchObject({
+      defaultBaseRef: "trunk",
+      localPath: checkout,
+      url: "https://example.invalid/registry.git",
+    });
+    expect(outcome.got).toEqual(outcome.rebased);
+    const listed = new Map(
+      outcome.listed.repos.map((repo) => [repo.repo, repo]),
+    );
+    expect(listed.get(registeredSlug)).toEqual(outcome.got);
+    // The row `createSession` wrote: no URL, no checkout, and so neither checkout fact.
+    expect(listed.get(auto)).toMatchObject({
+      url: "",
+      defaultBaseRef: "main",
+      localPathIsGit: false,
+      hasFactoryConfig: false,
+    });
+    expect(listed.get(auto)?.localPath).toBeUndefined();
+    expect(listed.has(unknown)).toBe(false);
+    expect(outcome.missing).toMatchObject({
+      _tag: "RepoNotFound",
+      repo: unknown,
+    });
+    expect(outcome.notGit).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    expect(outcome.notGit.message).toContain(plain);
+    // Refused is not written: the slug is still unknown.
+    expect(outcome.stillMissing).toMatchObject({ _tag: "RepoNotFound" });
   }, 120_000);
 });
 

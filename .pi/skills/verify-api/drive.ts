@@ -15,6 +15,7 @@
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
 // schema, a mis-declared stream, or a lost typed error all fail here. See
 // features/session-stream.md.
+import { realpathSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
@@ -229,6 +230,60 @@ const program = Effect.gen(function* () {
       registered.url === repoUrl &&
       registered.defaultBaseRef === "main",
     `repo=${registered.repo} url=${registered.url} base=${registered.defaultBaseRef}`,
+  );
+
+  // Feature: the registry read (LOB-253). `listRepos` holds the row `registerRepo` answered, each
+  // with what its checkout says about itself; `getRepo` answers the same row; an unknown slug is
+  // `RepoNotFound` with its own tag; and a checkout that is not a git work tree is refused
+  // `invalid_input` naming the path, with nothing written.
+  assert(
+    "registerRepo reads the checkout it was given",
+    registered.localPath === fixture &&
+      registered.localPathIsGit &&
+      registered.hasFactoryConfig &&
+      // The fixture is a directory inside this checkout: the work tree named is the enclosing one.
+      registered.workTree !== undefined &&
+      realpathSync(fixture).startsWith(`${registered.workTree}/`),
+    `localPath=${registered.localPath} git=${registered.localPathIsGit} config=${registered.hasFactoryConfig} workTree=${registered.workTree}`,
+  );
+  const repos = yield* client.listRepos({});
+  const listedRepo = repos.repos.find((row) => row.repo === repoSlug);
+  assert(
+    "listRepos holds the registered row as registerRepo answered it",
+    JSON.stringify(listedRepo) === JSON.stringify(registered),
+    `${repos.repos.length} repos, row=${JSON.stringify(listedRepo ?? null)}`,
+  );
+  const gotRepo = yield* client.getRepo({ repo: repoSlug });
+  assert(
+    "getRepo answers the same row",
+    JSON.stringify(gotRepo) === JSON.stringify(registered),
+    JSON.stringify(gotRepo),
+  );
+  const unknownRepo = RepoSlug.make(
+    `lobiklukas/verify-api-unknown-${Date.now()}`,
+  );
+  const missingRepo = yield* Effect.flip(client.getRepo({ repo: unknownRepo }));
+  assert(
+    "getRepo for an unknown slug is RepoNotFound",
+    missingRepo._tag === "RepoNotFound",
+    `${missingRepo._tag}: ${missingRepo.message}`,
+  );
+  const refusedCheckout = yield* Effect.flip(
+    client.registerRepo({
+      repo: unknownRepo,
+      localPath: path.parse(fixture).root,
+    }),
+  );
+  const stillMissing = yield* Effect.flip(
+    client.getRepo({ repo: unknownRepo }),
+  );
+  assert(
+    "registerRepo refuses a path that is not a git work tree, writing nothing",
+    refusedCheckout._tag === "SessionError" &&
+      refusedCheckout.code === "invalid_input" &&
+      refusedCheckout.message.includes("not a git work tree") &&
+      stillMissing._tag === "RepoNotFound",
+    `${refusedCheckout._tag}: ${refusedCheckout.message}; then ${stillMissing._tag}`,
   );
 
   const bound = yield* client.createSession({

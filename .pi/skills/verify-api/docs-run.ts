@@ -42,8 +42,10 @@ import type { CheckRecord } from "./harness.ts";
 const MODE = process.env["MODE"] ?? "docs";
 const SESSION_ROOT =
   process.env["SESSION_ROOT"] ?? ".verify/run/docs-run/sessions";
-const REPO_DIR =
-  process.env["DOCS_RUN_REPO_DIR"] ?? ".verify/run/docs-run/repo";
+// Absolute, because `registerRepo` refuses a relative checkout (LOB-253).
+const REPO_DIR = path.resolve(
+  process.env["DOCS_RUN_REPO_DIR"] ?? ".verify/run/docs-run/repo",
+);
 const REPO = RepoSlugSchema.make(
   process.env["DOCS_RUN_REPO"] ?? "lobiklukas/factory",
 );
