@@ -1566,6 +1566,12 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
             ? ""
             : `: ${oneLine(reason.question)}`),
       ];
+    case "review":
+      return [
+        head,
+        `  blocked changes_requested since ${reason.since}` +
+          (reason.review === undefined ? "" : `: ${oneLine(reason.review)}`),
+      ];
     case "gate":
       return [
         head,
@@ -1582,7 +1588,7 @@ export const NOTHING_NEEDS_A_PERSON = "nothing needs a person";
 /**
  * `factory board attention` — what needs a person (LOB-77), on one board or on every board.
  *
- * Printed in the order the server answered — approvals, then questions, then gates — because the
+ * Printed in the order the server answered — approvals, then questions, then reviews, then gates — because the
  * order is the service's priority and the terminal must not re-rank it.
  */
 const attentionCommand = Command.make(

@@ -251,9 +251,10 @@ const NOTHING: CardsSettled = { done: 0, blocked: 0 };
 
 /**
  * The cards whose current PR is `url` (or its API resource): the newest PR a run of each recorded
- * (module doc), oldest card id first.
+ * (module doc), oldest card id first. A PR a later run of the card replaced names no card. Shared
+ * with the review and check deliveries (C21, `./pullRequestFeedback`), which reach the same card.
  */
-const cardsOfPullRequest = (
+export const cardsOfPullRequest = (
   url: string,
   apiUrl: string | undefined,
 ): Effect.Effect<ReadonlyArray<string>, never, SqlClient> =>

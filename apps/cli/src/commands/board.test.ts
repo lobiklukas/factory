@@ -568,6 +568,20 @@ describe("attentionLines (LOB-264)", () => {
     ).toBe("  blocked needs_input since 2026-10-27T11:00:00.000Z");
   });
 
+  it("prints a review's block and its note on one line (C21)", () => {
+    const lines = attentionLines(
+      item({
+        _tag: "review",
+        review: "@alice requested changes on pull request #7:\nsplit it",
+        since: "2026-10-27T12:00:00.000Z",
+      }),
+    );
+    expect(lines[0]?.split("  ").slice(0, 2)).toEqual(["review", TASK]);
+    expect(lines[1]).toBe(
+      "  blocked changes_requested since 2026-10-27T12:00:00.000Z: @alice requested changes on pull request #7: split it",
+    );
+  });
+
   it("names a gate, the idle run and the column the person's move goes to", () => {
     const lines = attentionLines(
       item(
