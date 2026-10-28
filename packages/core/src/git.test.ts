@@ -24,7 +24,7 @@ import {
   Redacted,
   Schema,
 } from "effect";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -54,10 +54,12 @@ import {
   GitError,
   isSafeBranchName,
   pushBranch,
+  remoteDefaultBranch,
   resolveForgeUrl,
 } from "./git";
 import { mintSessionId } from "./ids";
 import { gitRepoMirror } from "./RepoMirror";
+import { startGitRemote } from "./git-remote.test-fake";
 import { resolveWorkspace } from "./workspace";
 
 const repo = RepoSlug.make("lobiklukas/factory");
@@ -91,94 +93,7 @@ const filesUnder = (root: string): ReadonlyArray<string> =>
     return statSync(full).isDirectory() ? filesUnder(full) : [full];
   });
 
-type Seen = { readonly user: string; readonly password: string };
-
-/**
- * The smart-HTTP remote: `git http-backend` as a CGI behind a Basic-auth gate. `seen` records the
- * credential of every request that carried one; `requests` counts every request at all, so a case
- * can prove a refused call never reached the remote.
- */
-const startRemote = async (
-  projectRoot: string,
-): Promise<{
-  readonly server: Server;
-  readonly url: string;
-  readonly seen: Array<Seen>;
-  readonly requests: { count: number };
-}> => {
-  const seen: Array<Seen> = [];
-  const requests = { count: 0 };
-  const server = createServer((req, res) => {
-    requests.count += 1;
-    const header = req.headers.authorization ?? "";
-    const decoded = header.startsWith("Basic ")
-      ? Buffer.from(header.slice(6), "base64").toString("utf8")
-      : undefined;
-    if (decoded !== undefined) {
-      const at = decoded.indexOf(":");
-      seen.push({
-        user: decoded.slice(0, at),
-        password: decoded.slice(at + 1),
-      });
-    }
-    if (decoded !== `x-access-token:${TOKEN}`) {
-      req.resume();
-      res.writeHead(401, { "WWW-Authenticate": 'Basic realm="factory-test"' });
-      res.end();
-      return;
-    }
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    const cgi = spawn("git", ["http-backend"], {
-      env: {
-        ...process.env,
-        GIT_PROJECT_ROOT: projectRoot,
-        GIT_HTTP_EXPORT_ALL: "1",
-        PATH_INFO: decodeURIComponent(url.pathname),
-        QUERY_STRING: url.search.slice(1),
-        REQUEST_METHOD: req.method ?? "GET",
-        CONTENT_TYPE: req.headers["content-type"] ?? "",
-        REMOTE_USER: "x-access-token",
-        REMOTE_ADDR: "127.0.0.1",
-        GIT_PROTOCOL: String(req.headers["git-protocol"] ?? ""),
-        HTTP_CONTENT_ENCODING: String(req.headers["content-encoding"] ?? ""),
-        ...(req.headers["content-length"] === undefined
-          ? {}
-          : { CONTENT_LENGTH: req.headers["content-length"] }),
-      },
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-    req.pipe(cgi.stdin);
-    const chunks: Array<Buffer> = [];
-    cgi.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    cgi.on("close", () => {
-      const out = Buffer.concat(chunks);
-      const crlf = out.indexOf("\r\n\r\n");
-      const lf = out.indexOf("\n\n");
-      const split = crlf !== -1 && (lf === -1 || crlf < lf) ? crlf : lf;
-      const sep = split === crlf ? 4 : 2;
-      const head = out.subarray(0, split).toString("utf8");
-      let status = 200;
-      const headers: Record<string, string> = {};
-      for (const line of head.split(/\r?\n/)) {
-        const colon = line.indexOf(":");
-        if (colon === -1) continue;
-        const name = line.slice(0, colon).trim();
-        const value = line.slice(colon + 1).trim();
-        if (name.toLowerCase() === "status")
-          status = Number(value.split(" ")[0]);
-        else headers[name] = value;
-      }
-      res.writeHead(status, headers);
-      res.end(out.subarray(split + sep));
-    });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  if (address === null || typeof address === "string")
-    throw new Error("the test remote did not bind a TCP port");
-  return { server, url: `http://127.0.0.1:${address.port}`, seen, requests };
-};
+const startRemote = (projectRoot: string) => startGitRemote(projectRoot, TOKEN);
 
 /** A listener that records every request it gets and answers none of them usefully. */
 const startDecoy = async (): Promise<{
@@ -378,6 +293,43 @@ describe(
         "updated",
       );
       expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(next);
+    });
+
+    /**
+     * Mutation: ignore `commit` and push the branch's tip — the commit landed after the measurement
+     * reaches the remote. Mutation: pass `commit` to git unchecked — an option-shaped value is argv.
+     */
+    it("pushes the commit it is handed rather than the branch's later tip, and refuses one that is no commit id (C17)", async () => {
+      const session = await openSession();
+      const measured = commitFile(session.worktree, "MEASURED.md", "seen\n");
+      commitFile(session.worktree, "LATER.md", "landed after the measure\n");
+      const pushed = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: session.branch,
+          commit: measured,
+        }),
+      );
+      expect(Exit.isSuccess(pushed) ? pushed.value.sha : undefined).toBe(
+        measured,
+      );
+      expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(
+        measured,
+      );
+      const before = remote.seen.length;
+      const refused = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: session.branch,
+          commit: "--force",
+        }),
+      );
+      expect(gitErrorOf(refused)?.reason).toBe("refused");
+      expect(remote.seen.length).toBe(before);
     });
 
     it("leaves the token in neither .git/config, the stored remote URL, nor any file on disk", async () => {
@@ -692,6 +644,46 @@ describe("what is refused before git runs", GIT_CASE, () => {
       ref: "refs/heads/factory/never-committed",
       reason: "missing-ref",
     });
+    expect(remote.requests.count).toBe(before);
+  });
+});
+
+describe("remoteDefaultBranch", GIT_CASE, () => {
+  /**
+   * Mutation: answer `main` without asking — the case that moves `HEAD` to `trunk` fails.
+   * Mutation: drop the credential — the remote answers 401 and the call is an `auth` error.
+   */
+  it("reads the branch the remote's HEAD names, with the token, and moves nothing", async () => {
+    const seenBefore = remote.seen.length;
+    const main = await runWith(remoteDefaultBranch({ repo, url: forgeUrl() }));
+    expect(main).toStrictEqual(Exit.succeed("main"));
+    expect(remote.seen.slice(seenBefore).at(-1)).toEqual({
+      user: "x-access-token",
+      password: TOKEN,
+    });
+    git(upstream, "push", "origin", "main:trunk");
+    git(bare, "symbolic-ref", "HEAD", "refs/heads/trunk");
+    try {
+      const trunk = await runWith(
+        remoteDefaultBranch({ repo, url: forgeUrl() }),
+      );
+      expect(trunk).toStrictEqual(Exit.succeed("trunk"));
+    } finally {
+      git(bare, "symbolic-ref", "HEAD", "refs/heads/main");
+    }
+  });
+
+  it("refuses a URL outside policy before any credential, and reaches no remote", async () => {
+    const before = remote.requests.count;
+    const error = gitErrorOf(
+      await runWith(
+        remoteDefaultBranch({
+          repo,
+          url: "https://example.invalid/lobiklukas/factory.git",
+        }),
+      ),
+    );
+    expect(error).toMatchObject({ operation: "fetch", reason: "refused" });
     expect(remote.requests.count).toBe(before);
   });
 });

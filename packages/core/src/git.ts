@@ -692,6 +692,92 @@ export const syncMirror = (
     return fetched;
   }).pipe(Effect.withSpan("git.syncMirror"));
 
+export type RemoteDefaultBranchInput = {
+  /** The repo the token is resolved for, and the only repo it is sent to. */
+  readonly repo: RepoSlug;
+  /** The repo's URL. Defaults to `https://github.com/<repo>.git`; see `resolveForgeUrl`. */
+  readonly url?: string;
+  /** How long the network call may run. Defaults to `DEFAULT_GIT_TIMEOUT`. */
+  readonly timeout?: Duration.Input;
+};
+
+/**
+ * The branch the remote's `HEAD` names — the repo's default branch, as the forge says it (C17) — read
+ * with `git ls-remote --symref <url> HEAD`. It runs in a scratch bare repository of its own, under the
+ * same credentialed configuration as a fetch, and moves nothing. A remote whose `HEAD` is detached or
+ * names a branch `isSafeBranchName` would not pass to git is a `GitError` with reason `missing-ref`:
+ * the caller then has no default to record, rather than a name it could not use.
+ */
+export const remoteDefaultBranch = (
+  input: RemoteDefaultBranchInput,
+): Effect.Effect<
+  string,
+  GitError | CredentialError,
+  | CredentialProvider
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+> =>
+  Effect.gen(function* () {
+    const call: RefCall = { operation: "fetch", repo: input.repo, ref: "HEAD" };
+    const forge = yield* forgeFor(input.repo, input.url, call);
+    const fs = yield* FileSystem.FileSystem;
+    const gitDir = yield* fs
+      .makeTempDirectoryScoped({
+        prefix: "factory-git-",
+      })
+      .pipe(
+        Effect.catchTag("PlatformError", (error) =>
+          Effect.fail(
+            new GitError({
+              ...call,
+              reason: "failed",
+              message: `${subject(call)} failed: could not prepare the scratch repository (${error.reason._tag})`,
+            }),
+          ),
+        ),
+      );
+    const isolated = {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    const init = yield* runGit(
+      gitDir,
+      [
+        "-c",
+        "init.defaultRefFormat=files",
+        "init",
+        "--bare",
+        "--quiet",
+        "--template=",
+        gitDir,
+      ],
+      isolated,
+    );
+    if (init.exitCode !== 0) return yield* failure(call, init);
+    const token = yield* (yield* CredentialProvider).tokenFor(input.repo);
+    const run = yield* runCredentialed(
+      { gitDir, env: isolated },
+      forge,
+      ["ls-remote", "--symref", forge.url, "HEAD"],
+      token,
+      call,
+      input.timeout ?? DEFAULT_GIT_TIMEOUT,
+    );
+    if (run.exitCode !== 0) return yield* failure(call, run, token);
+    // `ref: refs/heads/<branch>\tHEAD`, then the sha line; only the first names the branch.
+    const named = run.stdout
+      .split("\n")
+      .map((line) => /^ref: refs\/heads\/(\S+)\tHEAD$/.exec(line.trim()))
+      .find((match) => match !== null)?.[1];
+    if (named === undefined || !isSafeBranchName(named))
+      return yield* new GitError({
+        ...call,
+        reason: "missing-ref",
+        message: `${subject(call)} failed: the remote's HEAD names no plain branch`,
+      });
+    return named;
+  }).pipe(Effect.scoped, Effect.withSpan("git.remoteDefaultBranch"));
+
 export type PushBranchInput = {
   /** The session's checkout, where the branch was committed. */
   readonly worktree: string;
@@ -701,6 +787,13 @@ export type PushBranchInput = {
   readonly url?: string;
   /** The session's branch, under `factory/`. Pushed to the same name on the remote. */
   readonly branch: string;
+  /**
+   * The commit to push to `branch`, when the caller already measured one (C17): the PR step measures
+   * a sha and pushes that sha, so a commit landed on the branch between its measurement and the push
+   * is not published past the cap unmeasured. Absent: the branch's tip, resolved here. Either way it
+   * must name a commit in the checkout.
+   */
+  readonly commit?: string;
   /** How long the network call may run. Defaults to `DEFAULT_GIT_TIMEOUT`. */
   readonly timeout?: Duration.Input;
 };
@@ -762,17 +855,19 @@ export const pushBranch = (
         `only ${SESSION_BRANCH_PREFIX}** branches are pushed unattended`,
       );
     const forge = yield* forgeFor(input.repo, input.url, call);
+    if (input.commit !== undefined && !/^[0-9a-f]{40,64}$/.test(input.commit))
+      return yield* refused(call, "the commit is not a full commit id");
     const local = yield* runGit(input.worktree, [
       "rev-parse",
       "--verify",
       "--quiet",
-      `${ref}^{commit}`,
+      `${input.commit ?? ref}^{commit}`,
     ]);
     if (local.exitCode !== 0)
       return yield* new GitError({
         ...call,
         reason: "missing-ref",
-        message: `${subject(call)} failed: the checkout has no such branch`,
+        message: `${subject(call)} failed: ${input.commit === undefined ? "the checkout has no such branch" : "the checkout has no such commit"}`,
       });
     const sha = local.stdout.trim();
     const scratch = yield* makeScratch(input.worktree, call, false);

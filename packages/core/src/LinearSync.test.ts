@@ -232,6 +232,16 @@ describe("pullRequestReport", () => {
 
     const noChange = pullRequestReport(Exit.succeed({ outcome: "no-change" }));
     expect(noChange).toMatchObject({ _tag: "failed", step: "no-change" });
+
+    const rejected = pullRequestReport(
+      Exit.succeed({ outcome: "non-fast-forward", head: "factory/ses_x" }),
+    );
+    expect(rejected).toMatchObject({
+      _tag: "failed",
+      step: "non-fast-forward",
+    });
+    if (rejected._tag !== "failed") return;
+    expect(rejected.reason).toContain("factory/ses_x");
   });
 
   it("reads a typed error as a failed run that names it", () => {

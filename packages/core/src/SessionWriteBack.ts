@@ -101,7 +101,7 @@ export type PullRequestReport =
   | {
       readonly _tag: "failed";
       /** Which way the step failed; a tracker dedupes its explanation by it. */
-      readonly step: "over-cap" | "no-change" | "pr-error";
+      readonly step: "over-cap" | "no-change" | "non-fast-forward" | "pr-error";
       /** One sentence a person reading the issue can act on. */
       readonly reason: string;
     }
@@ -137,6 +137,12 @@ export const pullRequestReport = (
         return {
           _tag: "failed",
           step: "no-change",
+          reason: pullRequestRefusal(step),
+        };
+      case "non-fast-forward":
+        return {
+          _tag: "failed",
+          step: "non-fast-forward",
           reason: pullRequestRefusal(step),
         };
     }

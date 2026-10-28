@@ -23,6 +23,7 @@ export * from "./Sentry";
 export * from "./SentryWriteBack";
 export * from "./git";
 export * from "./RepoMirror";
+export * from "./RepoRemote";
 export * from "./Linear";
 export * from "./LinearSync";
 export * from "./ProposalTracker";

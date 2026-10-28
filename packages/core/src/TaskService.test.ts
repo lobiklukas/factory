@@ -31,6 +31,7 @@ import {
 import { createFauxModelAccess, type FauxSpecAttempt } from "@repo/harness";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { noCheckoutWarning } from "./workspace";
+import type { RepoRemote } from "./RepoRemote";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import {
   TaskService,
@@ -2168,13 +2169,24 @@ describe("TaskService — exit requirements", () => {
     readonly openPr?: boolean;
     /** The repository's registered `local_path`, when it is not `repoRoot` itself. */
     readonly localPath?: string;
+    /**
+     * The deployment's remote (C17): with one, the repo is registered with a loopback forge URL, so
+     * its base is fetched through it before the run's worktree is cut.
+     */
+    readonly repoRemote?: RepoRemote;
   }): Promise<string> => {
     const faux = createFauxModelAccess({
       fauxVerify: true,
       fauxCommand: input.command,
     });
     const sessions = ManagedRuntime.make(
-      SessionServiceLive({ model: faux.access, sessionRoot }).pipe(
+      SessionServiceLive({
+        model: faux.access,
+        sessionRoot,
+        ...(input.repoRemote === undefined
+          ? {}
+          : { repoRemote: input.repoRemote }),
+      }).pipe(
         Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
       ),
     );
@@ -2185,7 +2197,10 @@ describe("TaskService — exit requirements", () => {
           const service = yield* SessionService;
           yield* service.registerRepo({
             repo,
-            url: "https://example.invalid/requires.git",
+            url:
+              input.repoRemote === undefined
+                ? "https://example.invalid/requires.git"
+                : `http://127.0.0.1:9/${repo}.git`,
             localPath: input.localPath ?? input.repoRoot,
           });
           const created = yield* service.create({
@@ -2944,6 +2959,57 @@ describe("TaskService — exit requirements", () => {
     });
     expect(err.message).toContain(
       `run ${run}'s branch factory/${run} changes no file against main (git diff --numstat main...factory/${run} is empty)`,
+    );
+  }, 120_000);
+
+  /**
+   * Mutation: measure the board's diff against the checkout's local `main` (as it was before C17's
+   * review) — the forge's own new commit is counted as the run's change, and the empty run passes.
+   */
+  it("refuses building → review for an empty run cut from a forge base that moved past the checkout's (C17)", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    const git = (command: string) =>
+      execSync(command, { cwd: repoRoot, encoding: "utf8" }).trim();
+    // The forge's `main` has a commit the operator's `main` has not pulled: it lives only at the
+    // tracking ref the base's fetch writes.
+    git("git checkout -q -b forge-main");
+    writeFileSync(join(repoRoot, "UPSTREAM.md"), "the forge moved\n");
+    git("git add -A && git commit -q -m upstream");
+    const forgeTip = git("git rev-parse HEAD");
+    git("git checkout -q main && git branch -q -D forge-main");
+    const fetched: Array<string> = [];
+    const repoRemote: RepoRemote = {
+      fetchBase: (fetch) =>
+        Effect.sync(() => {
+          fetched.push(fetch.branch);
+          const ref = `refs/remotes/factory/${fetch.branch}`;
+          execSync(`git update-ref ${ref} ${forgeTip}`, {
+            cwd: fetch.checkout,
+            stdio: "ignore",
+          });
+          return { ref, sha: forgeTip };
+        }),
+      push: () => Effect.die(new Error("the board case pushes nothing")),
+      defaultBranch: () => Effect.succeed("main"),
+    };
+    const run = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "building",
+      command: "echo nothing to change",
+      repoRemote,
+    });
+    expect(fetched).toEqual(["main"]);
+    // The run was cut at the forge's tip and committed nothing.
+    expect(git(`git rev-parse factory/${run}`)).toBe(forgeTip);
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: NON_EMPTY_DIFF_REQUIREMENT,
+    });
+    expect(err.message).toContain(
+      `run ${run}'s branch factory/${run} changes no file against refs/remotes/factory/main`,
     );
   }, 120_000);
 
