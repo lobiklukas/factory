@@ -42,6 +42,7 @@
  */
 import {
   resolveMapping,
+  ruleClaims,
   startsWork,
   TRIGGER_ACTION,
   type TriggerDelivery,
@@ -120,6 +121,13 @@ const entityId = (entity: Record<string, unknown>): string | undefined =>
   stringField(entity, "id") ?? stringField(entity, "identifier");
 
 /**
+ * The team an issue belongs to, by its key (`ENG`): Linear's `data.team.key`, or a relay's bare
+ * `team` string. A team rule (LOB-266) claims by this value; an issue naming none is in no team.
+ */
+const teamKey = (entity: Record<string, unknown>): string | undefined =>
+  stringField(entity, "team") ?? stringField(asRecord(entity["team"]), "key");
+
+/**
  * Whether an `update` added a label a rule claims. `updatedFrom` carries only the properties that
  * changed, so a `labelIds` there is the issue's label set *before* this update; a label the issue
  * carries now that is not in it was added. Only an added label whose name a rule names counts: an
@@ -135,7 +143,7 @@ const addedAClaimedLabel = (
   const before = asRecord(body["updatedFrom"])?.["labelIds"];
   if (!Array.isArray(before)) return false;
   const previous = new Set(strings(before));
-  const claimed = new Set(rules.map((rule) => rule.label));
+  const claimed = new Set(rules.flatMap((rule) => rule.label ?? []));
   const added = new Set(labelIds(issue).filter((id) => !previous.has(id)));
   if (added.size === 0) return false;
   const labels = Array.isArray(issue["labels"]) ? issue["labels"] : [];
@@ -195,6 +203,7 @@ export const linearEvent = (
   const starts =
     action === TRIGGER_ACTION ||
     (action === "update" && addedAClaimedLabel(body, entity, rules));
+  const team = teamKey(entity);
   return {
     source: "linear",
     key: id,
@@ -204,6 +213,7 @@ export const linearEvent = (
     title: stringField(entity, "title") ?? "",
     body: stringField(entity, "description") ?? "",
     labels: labelNames(entity["labels"]),
+    ...(team === undefined ? {} : { team }),
   };
 };
 
@@ -222,7 +232,7 @@ const canStartWork = (
   event: TriggerEvent,
   rules: ReadonlyArray<TriggerRule>,
 ): boolean => {
-  const routing = rules.find((rule) => event.labels.includes(rule.label));
+  const routing = rules.find((rule) => ruleClaims(rule, event));
   const asked =
     routing?.startsWorkFor === undefined ? [] : [routing.startsWorkFor];
   return startsWork(event.action, asked);

@@ -5,11 +5,15 @@
  * and what text the session is actually told — so they live in the domain next to the shapes and
  * are tested with no database and no route.
  */
+import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import type { RepoSlug } from "@repo/domain/Session";
 import {
   renderPrompt,
   resolveMapping,
+  ruleClaims,
+  ruleName,
+  TriggerRule as TriggerRuleSchema,
   type TriggerEvent,
   type TriggerRule,
 } from "./Trigger";
@@ -99,5 +103,66 @@ describe("renderPrompt", () => {
     expect(renderPrompt("just do the thing", event())).toBe(
       "just do the thing",
     );
+  });
+});
+
+describe("a rule that names a team (LOB-266)", () => {
+  const team: TriggerRule = { team: "ENG", repo, prompt: "team" };
+  const both: TriggerRule = {
+    label: "factory",
+    team: "ENG",
+    repo: otherRepo,
+    prompt: "both",
+  };
+
+  it("claims an event only from its team, whatever labels it carries", () => {
+    expect(ruleClaims(team, event({ labels: [], team: "ENG" }))).toBe(true);
+    expect(ruleClaims(team, event({ labels: ["factory"], team: "OPS" }))).toBe(
+      false,
+    );
+    // An event with no team is in no team, so a team rule does not claim it.
+    expect(ruleClaims(team, event({ labels: ["factory"] }))).toBe(false);
+  });
+
+  it("claims a label and a team together only when both match", () => {
+    expect(ruleClaims(both, event({ team: "ENG" }))).toBe(true);
+    expect(ruleClaims(both, event({ team: "OPS" }))).toBe(false);
+    expect(ruleClaims(both, event({ labels: ["other"], team: "ENG" }))).toBe(
+      false,
+    );
+  });
+
+  it("names itself in a reason: a label alone as it always did, a team and both as what they claim", () => {
+    expect(ruleName({ label: "factory", repo, prompt: "" })).toBe("factory");
+    expect(ruleName(team)).toBe("team ENG");
+    expect(ruleName(both)).toBe("factory in team ENG");
+    expect(resolveMapping([team], event({ team: "ENG" }))?.label).toBe(
+      "team ENG",
+    );
+  });
+
+  it("refuses to decode a rule that names neither, so a typo cannot be a rule that claims nothing", () => {
+    const decode = Schema.decodeUnknownSync(TriggerRuleSchema);
+    expect(() => decode({ repo: "acme/widgets", prompt: "x" })).toThrow(
+      /label, a team, or both/,
+    );
+    expect(decode({ team: "ENG", repo: "acme/widgets", prompt: "x" })).toEqual({
+      team: "ENG",
+      repo: "acme/widgets",
+      prompt: "x",
+    });
+  });
+
+  it("refuses an empty label or team, which would claim nothing just as a missing one does", () => {
+    const decode = Schema.decodeUnknownSync(TriggerRuleSchema);
+    expect(() =>
+      decode({ label: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
+    expect(() =>
+      decode({ team: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
+    expect(() =>
+      decode({ label: "docs", team: "", repo: "acme/widgets", prompt: "x" }),
+    ).toThrow();
   });
 });
