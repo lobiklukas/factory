@@ -270,10 +270,13 @@ customization, decomposition, and board metrics.
 8. **Board customization** — edit columns in the UI, more than one board per repository. Trigger: after
    the default has been used for real work.
 9. **Decomposition** (LOB-43) into child cards. Trigger: after dependency links and once the specifier
-   has proven itself. Built (LOB-201): the proposing half only. `proposeDecomposition` reads a
+   has proven itself. Built: the proposing half (LOB-201) — `proposeDecomposition` reads a
    session's spec and commits proposed child issues (`factory.proposedIssues`, read back through
-   `getSession`); it creates no card, no tracker issue and no session. Approving proposals into
-   issues (LOB-202) and idempotent re-runs (LOB-203) are still to come.
+   `getSession`); it creates no card, no tracker issue and no session — and the approving half
+   (LOB-202) — `approveProposals` creates the approved ones as Linear issues, children of the issue
+   the session was delegated from, in its team, with the `blockedBy` edges whose ends exist, and
+   records each created id in the document. Still not built: child cards and `task_links` (wave 2)
+   and idempotent re-runs of the same spec (LOB-203).
 10. **Board metrics** — cycle time, aging, WIP over time, cost per task (LOB-17, LOB-28, LOB-44).
     Trigger: once real cards exist to measure.
 

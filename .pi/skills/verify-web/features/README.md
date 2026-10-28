@@ -69,7 +69,8 @@ under Known gaps.
   ([pages.md](../../verify-api/features/pages.md)), so nothing here proves how a page renders.
 - **Proposed child issues have no pane.** Nothing in the dashboard calls `proposeDecomposition` or
   renders a snapshot's `proposedIssues` yet (LOB-201); the surface is driven over RPC by verify-api's
-  `./decompose.sh` ([decompose.md](../../verify-api/features/decompose.md)).
+  `./decompose.sh` ([decompose.md](../../verify-api/features/decompose.md)), and approving them by
+  `./approve-proposals.sh` ([approve-proposals.md](../../verify-api/features/approve-proposals.md), LOB-202).
 - `drive.mjs` has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the one historical read the dashboard is driven through is a long
   session's earlier history, by `history.sh` on an instance of its own

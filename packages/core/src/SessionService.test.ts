@@ -142,7 +142,13 @@ import {
   TriggerSessions,
   TriggerSessionsFromSessionService,
 } from "./TriggerService";
-import { DEFAULT_LINEAR_STATES, linearPullRequestComment } from "./LinearSync";
+import {
+  DEFAULT_LINEAR_STATES,
+  LinearIssueSyncLive,
+  LinearProposalTracker,
+  linearPullRequestComment,
+} from "./LinearSync";
+import { type FakeOptions, makeLinear } from "./linearFake";
 import {
   releaseFinishedCard,
   releaseMergedPullRequest,
@@ -6386,6 +6392,592 @@ describe("proposing child issues from a spec", () => {
       ).toMatch(/^busy: .*is running/);
       expect(outcome.calls).toBe(0);
       expect(outcome.snapshot.proposedIssues).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * Approving proposals into tracker issues (LOB-202, part 2 of LOB-43).
+ *
+ * A specifier's spec is decomposed into three proposals whose edges are chosen so one approval
+ * exercises every rule about them: `B` is blocked by `A`, and `C` by `A` and `B`. Approving `A` and
+ * `C` therefore has one edge with both ends created (`A → C`), one whose blocker is unapproved
+ * (`B → C`) and one whose blocked end is unapproved (`A → B`).
+ *
+ * Linear is the in-process fake (`./linearFake`), wired as the process wires it: `LinearIssueSyncLive`
+ * over the fake's `HttpClient`, `LinearProposalTracker` over that, provided to the real
+ * `SessionServiceLive` on Postgres. Its ledger is what the cases count — an `issueCreate` is a request
+ * the fake saw, not a call the test made. The session's delegating issue is the one its request id
+ * names (`trigger:linear:<issue>:mapped`), written the way the trigger seam writes it.
+ */
+describe("approving proposals into tracker issues (LOB-202)", () => {
+  const approveRoot = mkdtempSync(join(tmpdir(), "factory-core-approve-"));
+  const PERSON = "person:lukas";
+  const SPEC = {
+    goal: "Approve proposals into tracker issues",
+    acceptance: ["only approved proposals become issues"],
+    gaps: [] as string[],
+    openQuestions: [] as string[],
+  };
+  const PROPOSALS = [
+    { title: "A: the schema", blockedBy: [] as number[] },
+    { title: "B: the service", blockedBy: [0] },
+    { title: "C: the RPC", blockedBy: [0, 1] },
+  ].map((proposal) => ({
+    ...proposal,
+    goal: "the goal",
+    change: "the change",
+    acceptance: [`${proposal.title} works`],
+  }));
+
+  type Approval = SessionService["Service"]["approveProposals"];
+
+  /**
+   * A service whose faux specs `SPEC` and answers a decomposition with `PROPOSALS`, with Linear's
+   * fake behind the tracker, or with no tracker at all (`linear: false`).
+   */
+  const withApproval = (
+    options: { readonly linear?: false } & FakeOptions = {},
+  ) => {
+    const key = `ENG-${randomBytes(3).toString("hex")}`;
+    const fake = makeLinear({ ...options, identifier: key });
+    const faux = createFauxModelAccess({
+      fauxSpec: [SPEC],
+      fauxDecomposition: JSON.stringify({ proposals: PROPOSALS }),
+    });
+    const outbound: string[] = [];
+    const ledger = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request, url) => {
+        outbound.push(`${request.method} ${url.toString()}`);
+        return fake.client.execute(request);
+      }),
+    );
+    const linearConfig = {
+      apiUrl: "http://linear.test/graphql",
+      apiKey: Redacted.make("lin_api_test"),
+      states: DEFAULT_LINEAR_STATES,
+    };
+    const tracker =
+      options.linear === false
+        ? Layer.empty
+        : LinearProposalTracker.pipe(
+            Layer.provide(LinearIssueSyncLive(linearConfig)),
+          );
+    const runtime = ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({ model: faux.access, sessionRoot: approveRoot }),
+        TaskServiceLive,
+      ).pipe(
+        Layer.provide(tracker),
+        Layer.provideMerge(options.linear === false ? ledger : fake.layer),
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    return { fake, key, outbound, runtime };
+  };
+
+  /**
+   * A settled specifier run, decomposed into `PROPOSALS`, delegated from Linear issue `key` — or
+   * from none (`delegated: false`), which is every session no Linear delivery opened.
+   */
+  const decomposed = (key: string, delegated = true) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const sessions = yield* SessionService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      const created = yield* tasks.create({
+        boardId,
+        title: "a card to approve",
+        actor: PERSON,
+      });
+      const card = yield* tasks.move({
+        taskId: created.id,
+        expectedRevision: created.revision,
+        to: "specifying",
+        actor: PERSON,
+      });
+      const run = yield* sessions.create({
+        title: card.title,
+        taskId: card.id,
+        taskColumn: card.column,
+      });
+      yield* sessions.send({ sessionId: run.id, content: "specify it" });
+      yield* waitUntil(
+        Effect.map(
+          sessions.get(run.id),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.some(
+              (entry) =>
+                entry.kind === "toolResult" &&
+                entry.toolName === "spec" &&
+                entry.isError !== true,
+            ),
+        ),
+        "the specifying run to declare its spec and settle",
+      );
+      yield* sessions.proposeDecomposition({ sessionId: run.id });
+      if (delegated) {
+        const requestId = sessionRequestIdOf(`linear:${key}:mapped`);
+        yield* sql`UPDATE sessions SET request_id = ${requestId} WHERE id = ${run.id}`;
+      }
+      return run.id;
+    });
+
+  /** What an approval answered, as the error it failed with or the value it returned. */
+  const outcomeOf = (exit: Exit.Exit<unknown, unknown>) =>
+    Exit.isSuccess(exit)
+      ? exit.value
+      : Option.getOrThrow(Exit.findErrorOption(exit));
+
+  const approve = (
+    sessions: SessionService["Service"],
+    sessionId: SessionId,
+    approved: readonly number[],
+  ): ReturnType<Approval> => sessions.approveProposals({ sessionId, approved });
+
+  it("creates exactly the approved proposals under the delegating issue, in its team, and nothing for the rest", async () => {
+    const { fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const first = yield* approve(sessions, sessionId, [0, 2]);
+          const afterFirst = yield* sessions.get(sessionId);
+          const requestsAfterFirst = fake.writes().length;
+          // The same set again, and the unapproved proposal still untouched by it.
+          const second = yield* approve(sessions, sessionId, [0, 2]);
+          const afterSecond = yield* sessions.get(sessionId);
+          return {
+            first,
+            second,
+            afterFirst,
+            afterSecond,
+            requestsAfterFirst,
+            requestsAfterSecond: fake.writes().length,
+          };
+        }),
+      );
+
+      // Two of three: exactly two `issueCreate`, one per approved proposal, each carrying the
+      // delegating issue's team and its id as the parent.
+      const creates = fake.writes("issueCreate");
+      expect(creates).toHaveLength(2);
+      expect(
+        creates.map((request) => request.variables["input"]),
+      ).toMatchObject([
+        {
+          teamId: fake.teamId,
+          parentId: fake.issue.id,
+          title: PROPOSALS[0]?.title,
+        },
+        {
+          teamId: fake.teamId,
+          parentId: fake.issue.id,
+          title: PROPOSALS[2]?.title,
+        },
+      ]);
+      expect(fake.children.map((child) => child.title)).toEqual([
+        PROPOSALS[0]?.title,
+        PROPOSALS[2]?.title,
+      ]);
+      // The body is the proposal's: goal, change, acceptance as a checklist, and the retry marker.
+      expect(fake.children[0]?.description).toContain(
+        `- [ ] ${PROPOSALS[0]?.acceptance[0]}`,
+      );
+      expect(fake.children[0]?.description).toContain("factory:ses_");
+
+      // Each created id is in the document, read back through `getSession`; B has none.
+      const [a, b, c] = outcome.afterFirst.proposedIssues?.proposals ?? [];
+      expect(a?.created).toEqual({
+        id: fake.children[0]?.id,
+        identifier: fake.children[0]?.identifier,
+      });
+      expect(c?.created).toEqual({
+        id: fake.children[1]?.id,
+        identifier: fake.children[1]?.identifier,
+      });
+      expect(b?.created).toBeUndefined();
+      expect(outcome.first.created).toEqual([0, 2]);
+      expect(outcome.first.proposals).toEqual(
+        outcome.afterFirst.proposedIssues?.proposals,
+      );
+
+      // Approving the same set again sends no `issueCreate` and no write at all, answers that it
+      // created nothing, and leaves the unapproved proposal uncreated.
+      expect(fake.writes("issueCreate")).toHaveLength(2);
+      expect(outcome.requestsAfterSecond).toBe(outcome.requestsAfterFirst);
+      expect(outcome.second.created).toEqual([]);
+      expect(outcome.second.related).toBe(0);
+      expect(outcome.afterSecond.proposedIssues).toEqual(
+        outcome.afterFirst.proposedIssues,
+      );
+      expect(
+        outcome.afterSecond.proposedIssues?.proposals[1]?.created,
+      ).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("relates only the edges whose two ends exist, and creates the rest when the blocker is approved later", async () => {
+    const { fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const first = yield* approve(sessions, sessionId, [0, 2]);
+          const writesAfterFirst = fake.writes("issueRelationCreate").length;
+          const second = yield* approve(sessions, sessionId, [1]);
+          const third = yield* approve(sessions, sessionId, [0, 1, 2]);
+          return { first, second, third, writesAfterFirst };
+        }),
+      );
+      // Creation order is A, C, B (the second approval made B), so the children are found by title.
+      const child = (index: number) =>
+        fake.children.find((made) => made.title === PROPOSALS[index]?.title);
+      const [a, b, c] = [child(0), child(1), child(2)];
+
+      // A → C is the one edge whose ends are both approved; B → C waits for B, A → B for B as well.
+      expect(outcome.writesAfterFirst).toBe(1);
+      expect(outcome.first.related).toBe(1);
+      expect(fake.writes("issueRelationCreate")[0]?.variables["input"]).toEqual(
+        {
+          issueId: a?.id,
+          relatedIssueId: c?.id,
+          type: "blocks",
+        },
+      );
+      // Approving B makes the two edges that were waiting, and sends nothing for A → C again.
+      expect(outcome.second.created).toEqual([1]);
+      expect(outcome.second.related).toBe(2);
+      expect(fake.writes("issueRelationCreate")).toHaveLength(3);
+      expect(
+        fake.relations.map((relation) => [
+          relation.issueId,
+          relation.relatedIssueId,
+        ]),
+      ).toEqual([
+        [a?.id, c?.id],
+        [a?.id, b?.id],
+        [b?.id, c?.id],
+      ]);
+      // Everything approved and related: a further approval writes nothing.
+      expect(outcome.third.created).toEqual([]);
+      expect(outcome.third.related).toBe(0);
+      expect(fake.writes()).toHaveLength(3 + 3);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("records each created id before it sends the next request, so a failure halfway is finished by the retry and never repeated", async () => {
+    // The second `issueCreate` is refused (GraphQL `errors`, HTTP 200); the third is never sent.
+    const { fake, key, runtime } = withApproval({
+      refuseNth: { operation: "issueCreate", nth: 2 },
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const failed = yield* Effect.exit(
+            approve(sessions, sessionId, [0, 1, 2]),
+          );
+          const afterFailure = yield* sessions.get(sessionId);
+          const requestsAtFailure = fake.writes("issueCreate").length;
+          const retried = yield* approve(sessions, sessionId, [0, 1, 2]);
+          return {
+            failed,
+            afterFailure,
+            requestsAtFailure,
+            retried,
+            afterRetry: yield* sessions.get(sessionId),
+          };
+        }),
+      );
+
+      expect(outcomeOf(outcome.failed)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "tracker_failed",
+        message: expect.stringContaining("Team is archived"),
+        // The first was created and recorded before the second request was sent.
+        created: [0],
+      });
+      expect(outcome.requestsAtFailure).toBe(2);
+      expect(
+        outcome.afterFailure.proposedIssues?.proposals.map(
+          (proposal) => proposal.created !== undefined,
+        ),
+      ).toEqual([true, false, false]);
+      // The retry creates the two that were missing and not the one that was not.
+      expect(outcome.retried.created).toEqual([1, 2]);
+      expect(fake.writes("issueCreate")).toHaveLength(2 + 2);
+      expect(fake.children.map((child) => child.title)).toEqual(
+        PROPOSALS.map((proposal) => proposal.title),
+      );
+      expect(
+        outcome.afterRetry.proposedIssues?.proposals.every(
+          (proposal) => proposal.created !== undefined,
+        ),
+      ).toBe(true);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses success: false as a typed error that records nothing, and a retry then creates the issue once", async () => {
+    const { fake, key, runtime } = withApproval({
+      unsuccessfulOnce: "issueCreate",
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const failed = yield* Effect.exit(approve(sessions, sessionId, [0]));
+          const after = yield* sessions.get(sessionId);
+          const requestsAtFailure = fake.writes("issueCreate").length;
+          const retried = yield* approve(sessions, sessionId, [0]);
+          return { failed, after, requestsAtFailure, retried };
+        }),
+      );
+      expect(outcomeOf(outcome.failed)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "tracker_failed",
+        message: expect.stringContaining("success: false"),
+        created: [],
+      });
+      expect(
+        outcome.after.proposedIssues?.proposals.some(
+          (proposal) => proposal.created !== undefined,
+        ),
+      ).toBe(false);
+      expect(outcome.requestsAtFailure).toBe(1);
+      // The retry creates the one issue: two `issueCreate` requests in all, one child in Linear.
+      expect(outcome.retried.created).toEqual([0]);
+      expect(fake.writes("issueCreate")).toHaveLength(2);
+      expect(fake.children).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("never makes a second copy when an acknowledgement is lost: the sync's retry finds the issue its first request made", async () => {
+    const { fake, key, runtime } = withApproval({ loseAckOnce: "issueCreate" });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          return {
+            approved: yield* approve(sessions, sessionId, [0]),
+            after: yield* sessions.get(sessionId),
+          };
+        }),
+      );
+      // One request was applied and answered 500; the retry read the parent, found the child by its
+      // marker and adopted it. One issue in Linear, one `issueCreate`, and its id recorded.
+      expect(fake.children).toHaveLength(1);
+      expect(fake.writes("issueCreate")).toHaveLength(1);
+      expect(outcome.approved.created).toEqual([0]);
+      expect(outcome.after.proposedIssues?.proposals[0]?.created?.id).toBe(
+        fake.children[0]?.id,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("surfaces a lost acknowledgement the retry could not heal as a typed error, and the next approval adopts the issue instead of creating it again", async () => {
+    // The first `issueCreate` is applied and answered 500; the sync's retry re-reads the parent, and
+    // that read (the second `issueChildren`) is refused. So Linear has the issue, the factory does
+    // not know its id, and the caller is told.
+    const { fake, key, runtime } = withApproval({
+      loseAckOnce: "issueCreate",
+      refuseNth: { operation: "issueChildren", nth: 2 },
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const failed = yield* Effect.exit(approve(sessions, sessionId, [0]));
+          const childrenAtFailure = fake.children.length;
+          const retried = yield* approve(sessions, sessionId, [0]);
+          return {
+            failed,
+            childrenAtFailure,
+            retried,
+            after: yield* sessions.get(sessionId),
+          };
+        }),
+      );
+      expect(outcomeOf(outcome.failed)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "tracker_failed",
+        created: [],
+      });
+      expect(outcome.childrenAtFailure).toBe(1);
+      // The retry creates nothing: the marker finds the child the lost answer left behind.
+      expect(fake.children).toHaveLength(1);
+      expect(fake.writes("issueCreate")).toHaveLength(1);
+      expect(outcome.retried.created).toEqual([0]);
+      expect(outcome.after.proposedIssues?.proposals[0]?.created?.id).toBe(
+        fake.children[0]?.id,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("keeps an edge that failed to relate for the retry, which sends only that relation", async () => {
+    const { fake, key, runtime } = withApproval({
+      refuseNth: { operation: "issueRelationCreate", nth: 1 },
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const failed = yield* Effect.exit(
+            approve(sessions, sessionId, [0, 2]),
+          );
+          const issuesAtFailure = fake.writes("issueCreate").length;
+          const retried = yield* approve(sessions, sessionId, [0, 2]);
+          return { failed, issuesAtFailure, retried };
+        }),
+      );
+      expect(outcomeOf(outcome.failed)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "tracker_failed",
+        // Both issues exist and are recorded; only the edge is missing.
+        created: [0, 2],
+      });
+      expect(outcome.issuesAtFailure).toBe(2);
+      expect(outcome.retried.created).toEqual([]);
+      expect(outcome.retried.related).toBe(1);
+      expect(fake.writes("issueCreate")).toHaveLength(2);
+      expect(fake.relations).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("never makes a second relation when its acknowledgement is lost", async () => {
+    const { fake, key, runtime } = withApproval({
+      loseAckOnce: "issueRelationCreate",
+    });
+    try {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          yield* approve(sessions, sessionId, [0, 2]);
+        }),
+      );
+      // The 500 was answered after the relation was made; the retry read it back and sent nothing.
+      expect(fake.relations).toHaveLength(1);
+      expect(fake.writes("issueRelationCreate")).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a session no Linear issue opened, sending no request and leaving the document as it was", async () => {
+    const { fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key, false);
+          const before = yield* sessions.get(sessionId);
+          const refused = yield* Effect.exit(
+            approve(sessions, sessionId, [0, 1]),
+          );
+          return { refused, before, after: yield* sessions.get(sessionId) };
+        }),
+      );
+      expect(outcomeOf(outcome.refused)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "no_delegating_issue",
+        created: [],
+      });
+      expect(fake.seen).toEqual([]);
+      expect(outcome.after.proposedIssues).toEqual(
+        outcome.before.proposedIssues,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a process with no tracker, sending no request at all", async () => {
+    const { key, outbound, runtime } = withApproval({ linear: false });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const before = yield* sessions.get(sessionId);
+          const refused = yield* Effect.exit(approve(sessions, sessionId, [0]));
+          return { refused, before, after: yield* sessions.get(sessionId) };
+        }),
+      );
+      expect(outcomeOf(outcome.refused)).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "no_tracker",
+        created: [],
+      });
+      expect(outbound).toEqual([]);
+      expect(outcome.after.proposedIssues).toEqual(
+        outcome.before.proposedIssues,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("refuses an index no proposal has, and a session that never decomposed, before any request", async () => {
+    const { fake, key, runtime } = withApproval();
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const sessionId = yield* decomposed(key);
+          const scratch = yield* sessions.create({ title: "never decomposed" });
+          return {
+            unknown: yield* Effect.exit(approve(sessions, sessionId, [0, 3])),
+            negative: yield* Effect.exit(approve(sessions, sessionId, [-1])),
+            none: yield* Effect.exit(approve(sessions, scratch.id, [0])),
+            after: yield* sessions.get(sessionId),
+          };
+        }),
+      );
+      expect(outcomeOf(outcome.unknown)).toMatchObject({
+        reason: "unknown_proposal",
+      });
+      expect(outcomeOf(outcome.negative)).toMatchObject({
+        reason: "unknown_proposal",
+      });
+      expect(outcomeOf(outcome.none)).toMatchObject({ reason: "no_proposals" });
+      // The valid half of `[0, 3]` was not approved either: a refused request creates nothing.
+      expect(fake.seen).toEqual([]);
+      expect(
+        outcome.after.proposedIssues?.proposals.some(
+          (proposal) => proposal.created !== undefined,
+        ),
+      ).toBe(false);
     } finally {
       await runtime.dispose();
     }
