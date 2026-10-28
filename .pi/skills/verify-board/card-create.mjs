@@ -64,8 +64,10 @@ const RPC_TIMEOUT_MS = 10_000;
 const INTAKE = "intake";
 
 /** One RPC call from this process — the oracle, never the page — as its exit envelope. */
+let rpcCalls = 0;
 const rpcExit = async (tag, payload) => {
-  const requestId = `card-create-${tag}-${Date.now()}-${Math.random()}`;
+  rpcCalls += 1;
+  const requestId = `card-create-${tag}-${Date.now()}-${rpcCalls}`;
   try {
     const response = await fetch(`${API_URL}/rpc`, {
       method: "POST",
