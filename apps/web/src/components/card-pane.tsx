@@ -61,13 +61,15 @@ import {
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { currentExit, exitStatusLabel, moveWarning } from "@/lib/exit-view";
 import { specLists } from "@/lib/spec-view";
-import { startPrompt, startSendable } from "@/lib/run-start-view";
+import { startBudget, startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
 import { BlockControl, CardHeading } from "@/components/card-state";
 import { PrControl } from "@/components/open-pull-request";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -707,20 +709,25 @@ const Runs = ({
   const draft = open === null ? null : open.text;
   const setDraft = (text: string) =>
     setOpen((current) => (current === null ? null : { ...current, text }));
+  // The run's spend ceiling as typed (C23); blank is the server's default cap, or none.
+  const [budgetText, setBudgetText] = useState("");
+  const budget = startBudget(budgetText);
   const allowed = runStart(task, definition);
   const moved = open !== null && open.column !== task.column;
   const ready = startSendable(draft ?? "");
-  const sendable = ready.ok && allowed.allowed && !moved;
+  const sendable = ready.ok && budget.ok && allowed.allowed && !moved;
   // The last answer stays on screen through a failed refresh; only a first read that fails says so.
   const listed = Option.getOrUndefined(AsyncResult.value(runs));
 
   const send = () => {
     if (draft === null || !sendable || starting) return;
     setStarting(true);
-    void start({ task, prompt: draft })
+    if (!budget.ok) return;
+    void start({ task, prompt: draft, budget: budget.budget })
       .then((exit) => {
         if (Exit.isSuccess(exit)) {
           setOpen(null);
+          setBudgetText("");
           if (exit.value.sendFailure !== undefined) {
             toast.warning("The run opened, but its first message was refused", {
               description: exit.value.sendFailure,
@@ -796,6 +803,36 @@ const Runs = ({
             }}
             className="max-h-64 font-mono"
           />
+          <div className="flex items-center gap-2">
+            <Label
+              htmlFor="run-start-budget"
+              className="text-[11px] text-muted-foreground"
+            >
+              Budget, US$ (optional)
+            </Label>
+            <Input
+              id="run-start-budget"
+              name="budget"
+              data-start-budget
+              inputMode="decimal"
+              value={budgetText}
+              onChange={(event) => setBudgetText(event.currentTarget.value)}
+              placeholder="none"
+              autoComplete="off"
+              aria-invalid={!budget.ok}
+              aria-describedby={budget.ok ? undefined : "run-start-budget-bad"}
+              className="h-7 w-24 font-mono text-xs"
+            />
+          </div>
+          {budget.ok ? null : (
+            <p
+              id="run-start-budget-bad"
+              data-start-budget-invalid
+              className="text-[11px] text-destructive"
+            >
+              {budget.reason}.
+            </p>
+          )}
           <div className="flex items-start gap-2">
             <p
               id="run-start-hint"
@@ -821,7 +858,10 @@ const Runs = ({
               variant="ghost"
               data-start-cancel
               disabled={starting}
-              onClick={() => setOpen(null)}
+              onClick={() => {
+                setOpen(null);
+                setBudgetText("");
+              }}
             >
               Cancel
             </Button>

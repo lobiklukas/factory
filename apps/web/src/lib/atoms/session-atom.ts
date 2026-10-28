@@ -3,6 +3,7 @@ import type {
   CreateSessionInput,
   ReadSessionHistoryInput,
   SessionEvent,
+  SessionBudget,
   SessionId,
   SessionLive,
   QueuedMessage,
@@ -44,6 +45,12 @@ export type SessionView = {
    * that is checked out.
    */
   readonly workspaceWarning?: string;
+  /**
+   * The session's cap as the snapshot reported it (C23), absent for a session with none. It is what
+   * the "Raise cap" field's suggestion is made from; the stream does not update it, so it is the
+   * cap at attach, and a stop's own cap is what the transcript's line says.
+   */
+  readonly budget?: SessionBudget;
 };
 
 const emptyView = (summary: SessionSummary): SessionView => ({
@@ -80,6 +87,7 @@ export const foldSessionEvent = (
         ...(event.workspace.warning === undefined
           ? {}
           : { workspaceWarning: event.workspace.warning }),
+        ...(event.budget === undefined ? {} : { budget: event.budget }),
       };
     case "entry":
       return { ...state, entries: [...state.entries, event.entry] };
@@ -239,6 +247,20 @@ export const interruptSessionAtom = runtime.fn(
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
       return yield* rpc.client.interruptSession({ sessionId });
+    }),
+  { reactivityKeys: [SESSIONS_KEY] },
+);
+
+/**
+ * Sets the session's spend cap (C23): the "Raise cap" action on a budget stop. The answer carries
+ * the budget as the log now holds it, with the stop cleared, and the server's sentence for it; the
+ * session runs again on its next message. `SESSIONS_KEY` re-reads the sidebar's list.
+ */
+export const setSessionBudgetAtom = runtime.fn(
+  (input: { readonly sessionId: SessionId; readonly budget: number }) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.setSessionBudget(input);
     }),
   { reactivityKeys: [SESSIONS_KEY] },
 );

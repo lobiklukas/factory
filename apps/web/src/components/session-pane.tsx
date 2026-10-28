@@ -22,6 +22,7 @@ import {
   compactSessionAtom,
   forkSessionAtom,
   interruptSessionAtom,
+  setSessionBudgetAtom,
   readSessionHistoryAtom,
   sendMessageAtom,
   sessionAtom,
@@ -34,10 +35,12 @@ import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { CompactButton } from "@/components/compact-button";
 import { InterruptButton } from "@/components/interrupt-button";
+import { RaiseCap } from "@/components/raise-cap";
 import { PrControl, PrReason } from "@/components/open-pull-request";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { visibleEntries } from "@/lib/transcript-view";
+import { raiseCapOffer, suggestedCap } from "@/lib/budget-view";
 import { interruptNotice } from "@/lib/interrupt-view";
 import {
   currentHistory,
@@ -142,6 +145,7 @@ export const SessionPane = ({
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const withdraw = useAtomSet(withdrawMessageAtom, { mode: "promise" });
   const interrupt = useAtomSet(interruptSessionAtom, { mode: "promise" });
+  const setBudget = useAtomSet(setSessionBudgetAtom, { mode: "promise" });
   const readHistory = useAtomSet(readSessionHistoryAtom, { mode: "promise" });
   /** Earlier transcript read on request (LOB-243), above what the view carries. */
   const [history, setHistory] = useState<EarlierHistory | null>(null);
@@ -151,6 +155,17 @@ export const SessionPane = ({
   const [draft, setDraft] = useState("");
   const [forking, setForking] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
+  /**
+   * The budget stops this pane raised the cap for in one session, and the cap it set (C23). Entry ids
+   * are per session, so what is kept says whose they are and is ignored once the pane shows another.
+   */
+  const [raised, setRaised] = useState<{
+    readonly sessionId: SessionId;
+    readonly stops: ReadonlySet<string>;
+    readonly cap: number;
+  } | null>(null);
+  const [raising, setRaising] = useState(false);
+  const raisedHere = raised?.sessionId === sessionId ? raised : null;
   const [compacting, setCompacting] = useState(false);
   const [compactionWindow, setCompactionWindow] =
     useState<CompactionWindow | null>(null);
@@ -206,6 +221,49 @@ export const SessionPane = ({
    * bookkeeping; `index` keeps each row's place in the full log for the compaction lookup below.
    */
   const rows = view === null ? [] : visibleEntries(view.entries);
+
+  /**
+   * The stop "Raise cap" sits on (C23): the newest row, when it is a budget stop this pane has not
+   * raised the cap for. The field opens at twice the cap the stop was held to — the cap this pane
+   * last set, else the one the snapshot reported — and the spend floor is the live usage total.
+   */
+  const raiseStop =
+    view === null
+      ? undefined
+      : raiseCapOffer(view.entries, raisedHere?.stops ?? new Set());
+  const raiseControl =
+    view === null || raiseStop === undefined ? undefined : (
+      <RaiseCap
+        key={raiseStop}
+        initial={suggestedCap(
+          raisedHere === null ? view.budget?.cap : raisedHere.cap,
+        )}
+        spent={spendOf(view.usage).costTotal}
+        calling={raising}
+        onRaise={(budget) => {
+          setRaising(true);
+          void setBudget({ sessionId, budget })
+            .then((answer) => {
+              setRaised((previous) => ({
+                sessionId,
+                stops: new Set([
+                  ...(previous?.sessionId === sessionId ? previous.stops : []),
+                  raiseStop,
+                ]),
+                cap: answer.budget.cap,
+              }));
+              toast.success("Cap raised", { description: answer.message });
+            })
+            .catch((cause: unknown) => {
+              toast.error("The cap was not raised", {
+                description:
+                  cause instanceof Error ? cause.message : String(cause),
+              });
+            })
+            .finally(() => setRaising(false));
+        }}
+      />
+    );
 
   /**
    * The earlier pages that sit above `rows` (LOB-243), and where the next press reads before. Kept
@@ -568,6 +626,7 @@ export const SessionPane = ({
                   >
                     <TranscriptRow
                       entry={entry}
+                      action={entry.id === raiseStop ? raiseControl : undefined}
                       spend={
                         view !== null &&
                         compactionSummaryRow === index &&
