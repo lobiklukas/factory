@@ -1,6 +1,6 @@
 /**
  * Secrets: the named values a registered repository's commands need (S-agent-secrets), stored in
- * the `secrets` table encrypted under the control plane's own key (`0042_create_secrets.ts`).
+ * the `secrets` table encrypted under the control plane's own key (`0044_create_secrets.ts`).
  *
  * **Write-only.** `set` takes a value and answers its summary; `list` and `remove` answer summaries.
  * Only `reveal` decrypts, and it is the control plane's alone: no RPC handler calls it, so no client
