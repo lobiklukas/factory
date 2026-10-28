@@ -70,19 +70,23 @@ const NewerVersions = ({
   }
   const newer = newerVersions(result.value, definition.id, definition.version);
   const notice = newerVersionsNotice(definition.id, definition.version, newer);
-  return notice === null ? (
-    <p data-newest-version className="text-[11px] text-muted-foreground">
-      v{definition.version} is the newest version of {definition.id}.
-    </p>
-  ) : (
+  // The Upgrade action stays mounted across the re-read its own upgrade causes, so what it did is
+  // still on screen once the board pins the newest version and no newer one is offered.
+  return (
     <>
-      <p
-        role="status"
-        data-newer-versions={newer.join(",")}
-        className="border border-border bg-muted/40 px-3 py-2 text-xs"
-      >
-        {notice}
-      </p>
+      {notice === null ? (
+        <p data-newest-version className="text-[11px] text-muted-foreground">
+          v{definition.version} is the newest version of {definition.id}.
+        </p>
+      ) : (
+        <p
+          role="status"
+          data-newer-versions={newer.join(",")}
+          className="border border-border bg-muted/40 px-3 py-2 text-xs"
+        >
+          {notice}
+        </p>
+      )}
       <BoardUpgrade boardId={boardId} definition={definition} newer={newer} />
     </>
   );

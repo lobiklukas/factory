@@ -52,9 +52,10 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                                             | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden                            | an operator sees what a board will do before trusting it             |
 | authoring a definition (D4)      | `define.sh`: `--dry-run` writes nothing; v1 then v2 as new rows only; 8 refusals by field                            | the pipeline changes without a migration, and never in place         |
+| upgrading a board (D5)           | `upgrade.sh`: v2 → v3 moves the pin only; a new card meets `verified`; refused batch writes nothing; Upgrade in page | a board picks up a newer pipeline, and its cards move only when asked |
 | caps and WIP limits (LOB-71)     | `caps.sh`: task, board, repo and column caps refused by name, nothing written; v2's threshold                        | a definition's caps bound the runs in flight, per pinned version     |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `define.sh`, `triage.sh`, `start-body.sh`,
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `define.sh`, `triage.sh`, `start-body.sh`, `upgrade.sh`,
 `start-prompt.sh`, `caps.sh`, `card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
@@ -142,6 +143,7 @@ runs the real script against a closed port and an answering one.
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./define.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: authoring a definition version (D4)
+./upgrade.sh       # requires the instance from ./up.sh (API and web), and DATABASE_URL naming its database: upgrading a board (D5)
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./start-body.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database: a card's body and base ref in its run
 ./caps.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: board caps and WIP limits (LOB-71)
@@ -181,6 +183,16 @@ are `up.sh`'s `ROLE_MODELS`. See `features/definitions.md`.
 spec's eight refusals, each `invalid_definition` naming its field and writing nothing, and the CLI's
 own `invalid_input` for a file that is not JSON, carries an unknown key, or cannot be read. See
 `features/define.md`.
+
+`upgrade.sh` (D5) creates a board of its own on `default` v2 and upgrades it with `factory board
+upgrade`: a stale `--expect-version` is refused and writes nothing; `--to 3` moves the pin and only
+the pin (the old card's row and history read back unchanged by `upgrade.ts`); a card made after it
+pins v3, and `board ls` and the board page (`upgrade.mjs MODE=notice`) say the cards pin two
+versions; seated in `review`, the new card's `review → done` is refused naming `verified` and the
+old card's naming `review_verdict`; a mapping that leaves `review` out is `card_migration_refused`
+naming both cards and writes nothing; `--same-columns` to v4 re-pins both with `repinned` events;
+and the settings page's Upgrade action (`upgrade.mjs MODE=upgrade`) migrates them to the newest
+version as the dashboard. See `features/upgrade.md`.
 
 `caps.sh` (LOB-71) proves the board caps and WIP limits from the terminal on boards of its own, over
 a definition `caps.ts` writes with two versions (v1 caps 2/1/2 and gives `review` a WIP limit of 1;
@@ -301,6 +313,8 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   description, and the tmux pane
 - `define.json`, `define-*.txt`, `define-v1.json` — `define.sh`'s checks, each command with its
   output, and the definition file it defined
+- `upgrade.json`, `upgrade-*.txt`, `upgrade-web-{notice,upgrade}.json`, `upgrade-*.png` —
+  `upgrade.sh`'s checks, each command with its output, and the pages' checks and screenshots
 - `../equivalence/observed.json`, `../equivalence/<step>.log` — `equivalence.sh`'s steps and their
   exit codes; the drives it runs write `../cli/`, `../web/` and this directory
 

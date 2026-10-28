@@ -70,7 +70,7 @@ const MappingRows = ({
       target,
     );
   return (
-    <table className="text-xs" data-upgrade-mapping>
+    <table className="self-start text-xs" data-upgrade-mapping>
       <tbody>
         {shown.map((row, index) => (
           <tr key={row.from} data-upgrade-row={row.from}>
@@ -137,7 +137,9 @@ export const BoardUpgrade = ({
   > | null>(null);
 
   const target = toVersion ?? newer.at(-1);
-  if (target === undefined) return null;
+  // No newer version: nothing to offer, but an upgrade this page just made still says what it did.
+  if (target === undefined)
+    return done === null ? null : <UpgradeDone upgraded={done} />;
   const targetKey = `${definition.id}@${target}`;
 
   const submit = (shown: ReadonlyArray<MappingRow>) => {
@@ -224,20 +226,27 @@ export const BoardUpgrade = ({
           onChange={setRows}
         />
       ) : null}
-      <MigrateButton
-        pending={pending}
-        target={target}
-        definition={definition}
-        targetKey={targetKey}
-        migrate={migrate}
-        rows={rows}
-        onSubmit={submit}
-      />
-      {done === null ? null : (
-        <p role="status" data-upgrade-done className="text-[11px]">
-          {upgradedSummary(done)}
-        </p>
+      {migrate ? (
+        <MigrateButton
+          pending={pending}
+          target={target}
+          definition={definition}
+          targetKey={targetKey}
+          rows={rows}
+          onSubmit={submit}
+        />
+      ) : (
+        <Button
+          size="sm"
+          data-upgrade-submit
+          disabled={pending}
+          onClick={() => submit([])}
+          className="self-start"
+        >
+          {pending ? "Upgrading…" : `Upgrade to v${target}`}
+        </Button>
       )}
+      {done === null ? null : <UpgradeDone upgraded={done} />}
       {refused === null ? null : (
         <div role="alert" data-upgrade-refused className="text-[11px] text-destructive">
           <p>{refused.message}</p>
@@ -256,16 +265,23 @@ export const BoardUpgrade = ({
   );
 };
 
+/** What an upgrade this page made did, from its answer (`upgradedSummary`). */
+const UpgradeDone = ({ upgraded }: { readonly upgraded: UpgradedBoard }) => (
+  <p role="status" data-upgrade-done className="max-w-3xl text-[11px]">
+    {upgradedSummary(upgraded)}
+  </p>
+);
+
 /**
- * The submit button: with a migration, the rows it sends are the ones on screen — the preset when
- * the person changed none, which needs the target's columns, so it reads the same atom the rows do.
+ * The submit button of a migration: the rows it sends are the ones on screen — the preset when the
+ * person changed none, which needs the target's columns, so it reads the same atom the rows do. Only
+ * mounted once the person asks to migrate, so a page nobody touches sends no read for the target.
  */
 const MigrateButton = ({
   pending,
   target,
   definition,
   targetKey,
-  migrate,
   rows,
   onSubmit,
 }: {
@@ -273,7 +289,6 @@ const MigrateButton = ({
   readonly target: number;
   readonly definition: DefinitionConfig;
   readonly targetKey: string;
-  readonly migrate: boolean;
   readonly rows: ReadonlyArray<MappingRow> | undefined;
   readonly onSubmit: (rows: ReadonlyArray<MappingRow>) => void;
 }) => {
@@ -285,20 +300,17 @@ const MigrateButton = ({
       )
     : undefined;
   const shown = rows ?? preset;
-  const ready = !migrate || shown !== undefined;
   return (
     <Button
       size="sm"
       data-upgrade-submit
-      disabled={pending || !ready}
-      onClick={() => onSubmit(shown ?? [])}
+      disabled={pending || shown === undefined}
+      onClick={() => {
+        if (shown !== undefined) onSubmit(shown);
+      }}
       className="self-start"
     >
-      {pending
-        ? "Upgrading…"
-        : migrate
-          ? `Upgrade to v${target} and migrate cards`
-          : `Upgrade to v${target}`}
+      {pending ? "Upgrading…" : `Upgrade to v${target} and migrate cards`}
     </Button>
   );
 };

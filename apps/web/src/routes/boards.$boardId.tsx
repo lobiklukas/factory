@@ -92,7 +92,7 @@ const PinnedVersions = ({
       ]
         .toSorted((a, b) => a - b)
         .join(",")}
-      className="mx-4 mt-3 max-w-3xl border border-border bg-muted/40 px-3 py-2 text-xs"
+      className="mx-4 my-3 max-w-3xl border border-border bg-muted/40 px-3 py-2 text-xs"
     >
       {notice}
     </p>
