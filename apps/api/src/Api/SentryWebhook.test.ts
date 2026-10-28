@@ -29,7 +29,7 @@ import type {
 import { Effect, Layer, Logger } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebhookRateLimiterLive, webhookRoutesFor } from "./Webhook";
+import { WebhookRateLimiterLive, WebhookRoutes } from "./Webhook";
 
 const VARIABLES = [
   "SENTRY_CLIENT_SECRET",
@@ -65,12 +65,13 @@ const recordingLogger = Logger.make(({ message }) => {
 /** The routes over the recording seam, a fresh rate-cap window and the recording logger. */
 const serve = (rules: ReadonlyArray<TriggerRule> = []) =>
   HttpRouter.toWebHandler(
-    webhookRoutesFor(rules).pipe(
+    WebhookRoutes.pipe(
       HttpRouter.provideRequest(
         Layer.mergeAll(
           Layer.succeed(
             TriggerService,
             TriggerService.of({
+              rules: Effect.succeed(rules),
               deliver: (delivery) =>
                 Effect.sync(() => {
                   delivered.push(delivery);

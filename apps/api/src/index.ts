@@ -30,7 +30,8 @@ import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
-import { WebhookLive } from "./Api/Webhook";
+import { webhookLiveFor } from "./Api/Webhook";
+import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
   LinearIssueSyncLayer,
@@ -380,7 +381,6 @@ const AllRouters = Layer.mergeAll(
   ApiRouter,
   SessionRpcLive,
   ProbesLive,
-  WebhookLive,
   GitHubWebhookLive,
 );
 
@@ -407,6 +407,9 @@ const HttpLive = Effect.gen(function* () {
     });
   }
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
+  // `TRIGGER_RULES` and the webhook secrets, said once at boot (LOB-266); a malformed rule list
+  // refuses the boot here rather than answering every delivery `skipped`.
+  const triggerRules = yield* logTriggerBootFromProcess;
 
   const backend: ModelBackend = Option.getOrElse(model.backend, () =>
     Option.isSome(model.apiKey) ? "anthropic" : "faux",
@@ -584,7 +587,10 @@ const HttpLive = Effect.gen(function* () {
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
   );
 
-  const CorsRouters = AllRouters.pipe(
+  const CorsRouters = Layer.mergeAll(
+    AllRouters,
+    webhookLiveFor(triggerRules),
+  ).pipe(
     Layer.provide(
       HttpRouter.cors({
         allowedOrigins,

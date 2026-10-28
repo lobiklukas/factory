@@ -42,6 +42,12 @@ import {
 } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
+import { linearDeliveryFor } from "./Linear";
+import {
+  TriggerRoutes,
+  TriggerRoutesLive,
+  type TriggerRoutesShape,
+} from "./TriggerRoutes";
 import {
   sessionRequestIdOf,
   TriggerService,
@@ -114,6 +120,8 @@ type Harness = {
     effect: Effect.Effect<A, TriggerError, never>,
   ) => Promise<A>;
   readonly trigger: TriggerServiceShape;
+  /** The stored routes (LOB-266), on the same database the seam reads them from. */
+  readonly routes: TriggerRoutesShape;
   readonly created: Array<Created>;
   /** The session id of every write-back the seam attempted, failed ones included. */
   readonly writeBacks: Array<SessionId>;
@@ -123,6 +131,12 @@ const withRuntime = async <A>(
   body: (harness: Harness) => Promise<A>,
   options: {
     readonly registerRepo?: ReadonlyArray<RepoSlug>;
+    /** The seam's fallback rules, when a case needs other than `rules` (the env's, in production). */
+    readonly rules?: ReadonlyArray<TriggerRule>;
+    /** Read the stored routes per delivery, as the API's seam does (LOB-266). */
+    readonly storedRoutes?: boolean;
+    /** What the fallback rules are called in a reason (`env:TRIGGER_RULES`, in production). */
+    readonly rulesOrigin?: string;
     /** The seam's reclaim window, when a case needs one other than the default. */
     readonly reclaimAfter?: Duration.Input;
     /** Fail the first `create` this many times, as a session layer under stress would. */
@@ -227,24 +241,31 @@ const withRuntime = async <A>(
   };
 
   const runtime = ManagedRuntime.make(
-    TriggerServiceLive({
-      rules,
-      ...(options.reclaimAfter === undefined
-        ? {}
-        : { reclaimAfter: options.reclaimAfter }),
-    }).pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
-          Layer.succeed(TriggerWriteBack, TriggerWriteBack.of(writeBack)),
+    Layer.mergeAll(
+      TriggerServiceLive({
+        rules: options.rules ?? rules,
+        ...(options.storedRoutes === true ? { storedRoutes: true } : {}),
+        ...(options.rulesOrigin === undefined
+          ? {}
+          : { rulesOrigin: options.rulesOrigin }),
+        ...(options.reclaimAfter === undefined
+          ? {}
+          : { reclaimAfter: options.reclaimAfter }),
+      }).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
+            Layer.succeed(TriggerWriteBack, TriggerWriteBack.of(writeBack)),
+          ),
         ),
       ),
-      Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)),
-    ),
+      TriggerRoutesLive,
+    ).pipe(Layer.provide(Layer.mergeAll(DatabaseLive, BunServices.layer))),
   );
 
   try {
     const trigger = await runtime.runPromise(TriggerService);
+    const routes = await runtime.runPromise(TriggerRoutes);
     // The registry is a real row: `unregistered-repo` is the seam's refusal, and a case that
     // asserts it has to be able to register the repo and watch a later delivery succeed.
     if (options.registerRepo !== undefined) {
@@ -263,7 +284,7 @@ const withRuntime = async <A>(
       );
     }
     const run: Harness["run"] = (effect) => runtime.runPromise(effect);
-    return await body({ run, trigger, created, writeBacks });
+    return await body({ run, trigger, routes, created, writeBacks });
   } finally {
     await runtime.dispose();
   }
@@ -931,4 +952,394 @@ describe("the trigger seam", () => {
     expect(triggerActorOf("linear")).toBe("trigger:linear");
     expect(triggerActorOf("github")).toBe("trigger:github");
   });
+});
+
+/**
+ * Stored trigger routes (LOB-266): rows on the repo registry the seam reads per delivery, with
+ * `TRIGGER_RULES` as the fallback. Every label and team below is per-run, because the table is the
+ * database's and a route another run left must not claim this run's events; each case removes the
+ * routes it added.
+ *
+ * Mutations these cases catch: reading the table once at boot (the first case adds a route to a
+ * running seam and the very next delivery uses it); consulting the rules before the table (the
+ * precedence case); dropping the origin from the reason; reading the table when `storedRoutes` is off
+ * (the docs and review seams); ordering by insertion alone (the specificity case adds the catch-all
+ * first).
+ */
+describe("stored trigger routes", () => {
+  const routeLabel = `route-${runId}`;
+  const routeTeam = `T${runId.toUpperCase()}`;
+  const routeRepo = "acme/routed" as RepoSlug;
+  const envRepo = "acme/env-routed" as RepoSlug;
+  const envRule: TriggerRule = {
+    label: routeLabel,
+    repo: envRepo,
+    prompt: "env: {{key}}",
+  };
+  const origin = "env:TRIGGER_RULES";
+
+  const asRoutes = (routes: TriggerRoutesShape) => ({
+    add: (input: Parameters<TriggerRoutesShape["add"]>[0]) =>
+      Effect.runPromise(routes.add(input)),
+    remove: (id: Parameters<TriggerRoutesShape["remove"]>[0]) =>
+      Effect.runPromise(routes.remove(id)),
+    list: () => Effect.runPromise(routes.list),
+  });
+
+  const withStored = (
+    body: (
+      harness: Harness & { readonly stored: ReturnType<typeof asRoutes> },
+    ) => Promise<void>,
+    options: { readonly rules?: ReadonlyArray<TriggerRule> } = {},
+  ) =>
+    withRuntime(
+      async (harness) => {
+        const stored = asRoutes(harness.routes);
+        const added: Array<Parameters<TriggerRoutesShape["remove"]>[0]> = [];
+        const tracked = {
+          ...stored,
+          add: async (input: Parameters<TriggerRoutesShape["add"]>[0]) => {
+            const route = await stored.add(input);
+            added.push(route.id);
+            return route;
+          },
+        };
+        try {
+          await body({ ...harness, stored: tracked });
+        } finally {
+          for (const id of added) {
+            await stored.remove(id).catch(() => undefined);
+          }
+        }
+      },
+      {
+        registerRepo: [routeRepo, envRepo],
+        storedRoutes: true,
+        rulesOrigin: origin,
+        rules: options.rules ?? [],
+      },
+    );
+
+  it("routes the next delivery through a route added after the seam started, and the reason names it", async () => {
+    await withStored(async ({ run, trigger, created, stored }) => {
+      const before = await run(
+        trigger.deliver(
+          deliver(`${runId}-stored-before`, {
+            source: "linear",
+            labels: [routeLabel],
+          }),
+        ),
+      );
+      expect(before.status).toBe("skipped");
+      expect(created).toHaveLength(0);
+
+      const route = await stored.add({
+        label: routeLabel,
+        repo: routeRepo,
+        baseRef: "develop",
+        prompt: "stored: {{key}}",
+      });
+      // No restart and no new seam: the same running instance, the next delivery.
+      const after = await run(
+        trigger.deliver(
+          deliver(`${runId}-stored-after`, {
+            source: "linear",
+            labels: [routeLabel],
+          }),
+        ),
+      );
+      expect(after.status).toBe("processed");
+      expect(after.reason).toBe(
+        `rule "${routeLabel}" (route ${route.id}) mapped it to ${routeRepo}`,
+      );
+      expect(created).toHaveLength(1);
+      expect(created[0]?.repo).toBe(routeRepo);
+      expect(created[0]?.baseRef).toBe("develop");
+      expect(created[0]?.messages).toEqual([`stored: ${runId}-issue`]);
+    });
+  }, 60_000);
+
+  it("takes a Linear label add and a Linear team's new issue as work once a route claims them, with no env rule", async () => {
+    // The adapter normalizes against the seam's own rules, so what counts as work (an added label,
+    // the issue's team) changes with the table too: a route stored after boot is not skipped by the
+    // adapter's key before the seam ever sees it.
+    await withStored(async ({ run, trigger, created, stored }) => {
+      const labelAdded = {
+        type: "Issue",
+        action: "update",
+        updatedFrom: { labelIds: [] },
+        data: {
+          id: `${runId}-linear-label`,
+          title: "Add a label",
+          labelIds: ["lbl-1"],
+          labels: [{ id: "lbl-1", name: routeLabel }],
+        },
+      };
+      const teamIssue = {
+        type: "Issue",
+        action: "create",
+        data: {
+          id: `${runId}-linear-team`,
+          title: "A team's issue",
+          labels: [],
+          team: { id: "team-1", key: routeTeam },
+        },
+      };
+      const viaSeam = async (payload: unknown) => {
+        const rules = await run(trigger.rules);
+        const delivery = linearDeliveryFor(rules)(payload);
+        if (delivery === undefined) throw new Error("not a Linear issue");
+        return { delivery, outcome: await run(trigger.deliver(delivery)) };
+      };
+
+      expect((await viaSeam(labelAdded)).outcome.status).toBe("skipped");
+      expect((await viaSeam(teamIssue)).outcome.status).toBe("skipped");
+
+      const labelRoute = await stored.add({
+        label: routeLabel,
+        repo: routeRepo,
+        prompt: "label {{key}}",
+      });
+      const teamRoute = await stored.add({
+        team: routeTeam,
+        repo: envRepo,
+        prompt: "team {{key}}",
+      });
+
+      const label = await viaSeam({
+        ...labelAdded,
+        data: { ...labelAdded.data, id: `${runId}-linear-label-2` },
+      });
+      expect(label.delivery.keyedByWork).toBe(true);
+      expect(label.outcome.reason).toContain(`route ${labelRoute.id}`);
+      const team = await viaSeam({
+        ...teamIssue,
+        data: { ...teamIssue.data, id: `${runId}-linear-team-2` },
+      });
+      expect(team.outcome.reason).toBe(
+        `rule "team ${routeTeam}" (route ${teamRoute.id}) mapped it to ${envRepo}`,
+      );
+      expect(created.map((session) => session.repo)).toEqual([
+        routeRepo,
+        envRepo,
+      ]);
+    });
+  }, 60_000);
+
+  it("still routes through a TRIGGER_RULES rule when no stored route claims the event, and names the env rule", async () => {
+    await withStored(
+      async ({ run, trigger, created }) => {
+        const outcome = await run(
+          trigger.deliver(
+            deliver(`${runId}-env-fallback`, { labels: [routeLabel] }),
+          ),
+        );
+        expect(outcome.status).toBe("processed");
+        // Index 1: the position in the variable, not the number of rules that came before it.
+        expect(outcome.reason).toBe(
+          `rule "${routeLabel}" (${origin}[1]) mapped it to ${envRepo}`,
+        );
+        expect(created[0]?.repo).toBe(envRepo);
+      },
+      {
+        rules: [
+          { label: `unrelated-${runId}`, repo: envRepo, prompt: "x" },
+          envRule,
+        ],
+      },
+    );
+  }, 60_000);
+
+  it("consults a stored route before the env rule for the same label, and falls back when it is removed", async () => {
+    await withStored(
+      async ({ run, trigger, created, stored }) => {
+        const route = await stored.add({
+          label: routeLabel,
+          repo: routeRepo,
+          prompt: "stored",
+        });
+        const won = await run(
+          trigger.deliver(
+            deliver(`${runId}-precedence-1`, { labels: [routeLabel] }),
+          ),
+        );
+        expect(won.reason).toContain(`route ${route.id}`);
+        expect(created[0]?.repo).toBe(routeRepo);
+
+        // The same seam, a row fewer: the fallback answers, with no restart either way.
+        await stored.remove(route.id);
+        const fell = await run(
+          trigger.deliver(
+            deliver(`${runId}-precedence-2`, { labels: [routeLabel] }),
+          ),
+        );
+        expect(fell.reason).toBe(
+          `rule "${routeLabel}" (${origin}[0]) mapped it to ${envRepo}`,
+        );
+        expect(created[1]?.repo).toBe(envRepo);
+      },
+      { rules: [envRule] },
+    );
+  }, 60_000);
+
+  it("leaves the stored routes alone when the seam is not told to read them", async () => {
+    // The docs and review seams carry rules of their own; a route an operator stored for a label
+    // must not hijack theirs.
+    await withRuntime(
+      async ({ run, trigger, routes, created }) => {
+        const stored = asRoutes(routes);
+        const route = await stored.add({
+          label: routeLabel,
+          repo: routeRepo,
+          prompt: "stored",
+        });
+        try {
+          const outcome = await run(
+            trigger.deliver(
+              deliver(`${runId}-not-read`, { labels: [routeLabel] }),
+            ),
+          );
+          expect(outcome.reason).toBe(
+            `rule "${routeLabel}" mapped it to ${envRepo}`,
+          );
+          expect(created[0]?.repo).toBe(envRepo);
+        } finally {
+          await stored.remove(route.id);
+        }
+      },
+      { registerRepo: [routeRepo, envRepo], rules: [envRule] },
+    );
+  }, 60_000);
+
+  it("claims a team's events by its key, and a team route is not claimed by another team", async () => {
+    await withStored(async ({ run, trigger, created, stored }) => {
+      const route = await stored.add({
+        team: routeTeam,
+        repo: routeRepo,
+        prompt: "team",
+      });
+      const other = await run(
+        trigger.deliver(
+          deliver(`${runId}-team-other`, { labels: [], team: "ELSEWHERE" }),
+        ),
+      );
+      expect(other.status).toBe("skipped");
+      const none = await run(
+        trigger.deliver(deliver(`${runId}-team-none`, { labels: [] })),
+      );
+      expect(none.status).toBe("skipped");
+
+      const mine = await run(
+        trigger.deliver(
+          deliver(`${runId}-team-mine`, { labels: [], team: routeTeam }),
+        ),
+      );
+      expect(mine.status).toBe("processed");
+      expect(mine.reason).toBe(
+        `rule "team ${routeTeam}" (route ${route.id}) mapped it to ${routeRepo}`,
+      );
+      expect(created).toHaveLength(1);
+    });
+  }, 60_000);
+
+  it("orders routes by what they name, not by when they were added", async () => {
+    await withStored(async ({ run, trigger, stored }) => {
+      // The catch-all goes in first: insertion order alone would put it first.
+      const teamOnly = await stored.add({
+        team: routeTeam,
+        repo: envRepo,
+        prompt: "team",
+      });
+      const labelOnly = await stored.add({
+        label: routeLabel,
+        repo: envRepo,
+        prompt: "label",
+      });
+      const both = await stored.add({
+        label: routeLabel,
+        team: routeTeam,
+        repo: routeRepo,
+        prompt: "both",
+      });
+
+      const mine = (await stored.list())
+        .map((route) => route.id)
+        .filter((id) => [teamOnly.id, labelOnly.id, both.id].includes(id));
+      expect(mine).toEqual([both.id, labelOnly.id, teamOnly.id]);
+
+      const seen = await run(trigger.rules);
+      expect(seen.slice(0, 3).map((rule) => rule.prompt)).toEqual([
+        "both",
+        "label",
+        "team",
+      ]);
+
+      const delivered = await run(
+        trigger.deliver(
+          deliver(`${runId}-specific`, {
+            labels: [routeLabel],
+            team: routeTeam,
+          }),
+        ),
+      );
+      expect(delivered.reason).toContain(`route ${both.id}`);
+    });
+  }, 60_000);
+
+  it("admits the actions a stored route lists, and reads them back", async () => {
+    await withStored(async ({ run, trigger, stored }) => {
+      const route = await stored.add({
+        label: routeLabel,
+        repo: routeRepo,
+        prompt: "push",
+        startsWorkFor: ["push"],
+      });
+      expect(route.startsWorkFor).toEqual(["push"]);
+      const pushed = await run(
+        trigger.deliver(
+          deliver(`${runId}-stored-push`, {
+            labels: [routeLabel],
+            action: "push",
+          }),
+        ),
+      );
+      expect(pushed.status).toBe("processed");
+      const edited = await run(
+        trigger.deliver(
+          deliver(`${runId}-stored-edit`, {
+            labels: [routeLabel],
+            action: "update",
+          }),
+        ),
+      );
+      expect(edited.status).toBe("skipped");
+      expect(edited.reason).toBe(`action "update" is not "create", "push"`);
+    });
+  }, 60_000);
+
+  it("refuses a route to a repo nobody registered, and a removal of an id it has no row for", async () => {
+    await withStored(async ({ stored }) => {
+      // Its own slug: `unregisteredRepo` is registered by an earlier case on purpose.
+      const never = `acme/never-registered-${runId}` as RepoSlug;
+      const refused = await stored
+        .add({ label: routeLabel, repo: never, prompt: "x" })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(refused).toMatchObject({
+        _tag: "TriggerRouteError",
+        code: "invalid_input",
+      });
+      expect(String((refused as { message: string }).message)).toContain(never);
+
+      const missing = await stored
+        .remove("trr_00000000000000000000000000" as never)
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(missing).toMatchObject({ _tag: "TriggerRouteNotFound" });
+    });
+  }, 60_000);
 });

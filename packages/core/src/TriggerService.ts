@@ -36,6 +36,7 @@ import type {
 } from "@repo/domain/Session";
 import {
   resolveMapping,
+  ruleClaims,
   startsWork,
   TRIGGER_ACTION,
   TriggerError,
@@ -46,6 +47,7 @@ import {
   type TriggerSource,
 } from "@repo/domain/Trigger";
 import { SessionService } from "./SessionService";
+import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
 
 export type TriggerServiceShape = {
   /**
@@ -57,6 +59,13 @@ export type TriggerServiceShape = {
   readonly deliver: (
     delivery: TriggerDelivery,
   ) => Effect.Effect<TriggerOutcome, TriggerError>;
+  /**
+   * The rules a delivery is routed with *now*: the stored routes, then the `TRIGGER_RULES` fallback
+   * (LOB-266). Read per call, so a route added a moment ago is in it. An adapter normalizes against
+   * this — which labels count as work, which key a delivery gets — so the key, the filter and the
+   * mapping agree on which payloads a rule claims; it is the same set `deliver` maps with.
+   */
+  readonly rules: Effect.Effect<ReadonlyArray<TriggerRule>, TriggerError>;
 };
 
 export class TriggerService extends Context.Service<
@@ -193,6 +202,18 @@ export type TriggerServiceOptions = {
    */
   readonly rules: ReadonlyArray<TriggerRule>;
   /**
+   * Read the stored routes (`trigger_routes`, LOB-266) per delivery and consult them *before*
+   * `rules`, which then are the fallback. Off by default: the docs and review seams carry rules of
+   * their own, and a route an operator stored for a label must not hijack theirs.
+   */
+  readonly storedRoutes?: boolean;
+  /**
+   * What `rules` are called in a recorded reason: `<origin>[i]` after the rule's name, so an
+   * operator can tell which of several rules routed a delivery (`env:TRIGGER_RULES[0]`). Absent, the
+   * reason names the rule only, as it did before there were stored routes.
+   */
+  readonly rulesOrigin?: string;
+  /**
    * How old a claim with no recorded outcome must be before another delivery of the same id may
    * take it (default `TRIGGER_RECLAIM_AFTER`). Inside the window a replay answers `received`,
    * because the first process may still be working; past it, that process is presumed dead.
@@ -246,6 +267,14 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
       );
       const sessions = yield* TriggerSessions;
       const writeBack = yield* TriggerWriteBack;
+      const fallback = envRoutedRules(options.rules, options.rulesOrigin);
+      /** The rule set one delivery is routed with, stored routes first (LOB-266). */
+      const routed =
+        options.storedRoutes === true
+          ? readRoutedRules(sql, fallback).pipe(
+              Effect.mapError(toTriggerError("read trigger routes")),
+            )
+          : Effect.succeed(fallback);
 
       const storage = <A>(
         what: string,
@@ -370,9 +399,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // labels — not "any claiming rule": an event labelled `["ticket", "docs"]` routes to
               // the `ticket` rule, so the `docs` rule's `startsWorkFor` must not admit an action
               // that lands on the ticket rule's repo and prompt.
-              const routing = options.rules.find((rule) =>
-                event.labels.includes(rule.label),
+              const matched = (yield* routed).find((candidate) =>
+                ruleClaims(candidate.rule, event),
               );
+              const routing = matched?.rule;
               const asked =
                 routing?.startsWorkFor === undefined
                   ? []
@@ -390,8 +420,13 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 );
               }
 
-              const mapping = resolveMapping(options.rules, event);
-              if (mapping === undefined) {
+              // The rule the filter consulted is the one that maps, and its origin comes from the same
+              // list, so the reason cannot name a rule other than the one that chose the repo.
+              const mapping =
+                matched === undefined
+                  ? undefined
+                  : resolveMapping([matched.rule], event);
+              if (matched === undefined || mapping === undefined) {
                 return yield* skip(
                   requestId,
                   event.labels.length === 0
@@ -446,7 +481,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 status: "processed",
                 replayed: false,
                 sessionId: session.id,
-                reason: `rule "${mapping.label}" mapped it to ${mapping.repo}`,
+                reason: `rule "${mapping.label}"${
+                  matched.origin === undefined ? "" : ` (${matched.origin})`
+                } mapped it to ${mapping.repo}`,
               } as const;
             });
 
@@ -491,6 +528,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           return yield* settled;
         });
 
-      return TriggerService.of({ deliver });
+      return TriggerService.of({
+        deliver,
+        rules: routed.pipe(
+          Effect.map((candidates) => candidates.map(({ rule }) => rule)),
+        ),
+      });
     }),
   );

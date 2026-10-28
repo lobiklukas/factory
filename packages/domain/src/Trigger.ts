@@ -8,9 +8,10 @@
  * - `TriggerEvent` is what an adapter normalizes its payload into. The adapter owns the wire
  *   format (a Linear HMAC and its `data.issue`, a generic JSON body) and nothing else; everything
  *   after the normalization is shared, so a new adapter is one extractor and one fake.
- * - `TriggerRule` is the mapping, `label -> {repo, baseRef, prompt}`. A rule is operator config,
- *   not a row, because which label means which repo is a deployment's opinion and not a fact the
- *   log should carry.
+ * - `TriggerRule` is the mapping, `label -> {repo, baseRef, prompt}`. A rule comes from two places
+ *   (LOB-266): `TRIGGER_RULES`, the deployment's fallback, and a stored route (`TriggerRoute`), a row
+ *   on the repo registry an operator changes without a restart. The seam reads the stored ones per
+ *   delivery and the env ones as the fallback, and the recorded reason names which rule matched.
  *
  * A rule's `repo` is the fallback, not the answer: a source that knows its own repository —
  * GitHub's `repository.full_name` (LOB-190), where the same label means a different repo per
@@ -21,7 +22,7 @@
  * and the service half (dedupe, create) is the only part that needs one.
  */
 import { Schema } from "effect";
-import { RepoSlug, SessionId } from "@repo/domain/Session";
+import { RepoSlug, SessionId, Timestamp } from "@repo/domain/Session";
 
 /**
  * Where a delivery came from. `generic` is the plain inbound webhook: the caller names the label
@@ -57,18 +58,31 @@ export const TriggerEvent = Schema.Struct({
    * The repository the payload names, when the source names one. Absent means "the rule decides".
    */
   repo: Schema.optional(RepoSlug),
+  /**
+   * The team the payload belongs to, when the source has teams: a Linear issue's team key. A rule
+   * that names a `team` claims only events from it (LOB-266).
+   */
+  team: Schema.optional(Schema.String),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
 
 /**
- * One mapping rule: an event carrying `label` works on `repo`, at `baseRef`, with `prompt`.
+ * One mapping rule: an event carrying `label` and/or belonging to `team` works on `repo`, at
+ * `baseRef`, with `prompt`.
+ *
+ * A rule names a label, a team, or both (LOB-266): a label alone claims any event carrying it, a team
+ * alone claims every event from that team, and both claim only that label's events from that team —
+ * the same label can mean a different repo per team. A rule naming neither would claim nothing and is
+ * refused when it is decoded, so a typo cannot become a rule that quietly matches nothing.
  *
  * `prompt` is a template; `renderPrompt` substitutes `{{key}}`, `{{source}}`, `{{title}}`,
  * `{{body}}` and `{{labels}}`, so one rule can carry the payload's own words into the session's
  * first message without a rule per issue.
  */
-export const TriggerRule = Schema.Struct({
-  label: Schema.String,
+const triggerRuleFields = {
+  label: Schema.optional(Schema.String),
+  /** A source's team key (`TriggerEvent.team`); absent means "any team". */
+  team: Schema.optional(Schema.String),
   repo: RepoSlug,
   baseRef: Schema.optional(Schema.String),
   prompt: Schema.String,
@@ -91,7 +105,21 @@ export const TriggerRule = Schema.Struct({
    * (`@repo/core/DocsTrigger`) — deliver one.
    */
   startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
-});
+};
+
+/** A rule claims something: it names a label, a team, or both. */
+const namesALabelOrATeam = Schema.makeFilter(
+  (rule: {
+    readonly label?: string | undefined;
+    readonly team?: string | undefined;
+  }) =>
+    rule.label === undefined && rule.team === undefined
+      ? "a rule names a label, a team, or both"
+      : undefined,
+);
+
+export const TriggerRule =
+  Schema.Struct(triggerRuleFields).check(namesALabelOrATeam);
 export type TriggerRule = typeof TriggerRule.Type;
 
 export const TriggerRules = Schema.Array(TriggerRule);
@@ -102,7 +130,7 @@ export const TriggerMapping = Schema.Struct({
   repo: RepoSlug,
   baseRef: Schema.optional(Schema.String),
   prompt: Schema.String,
-  /** The rule's label, so a recorded outcome says which rule chose this repo. */
+  /** The rule's name (`ruleName`), so a recorded outcome says which rule chose this repo. */
   label: Schema.String,
 });
 export type TriggerMapping = typeof TriggerMapping.Type;
@@ -200,25 +228,45 @@ export const renderPrompt = (template: string, event: TriggerEvent): string => {
   });
 };
 
+/** Whether `rule` claims `event`: every field the rule names has to match, and a field it omits is open. */
+export const ruleClaims = (rule: TriggerRule, event: TriggerEvent): boolean =>
+  (rule.label === undefined || event.labels.includes(rule.label)) &&
+  (rule.team === undefined || rule.team === event.team);
+
+/** The first rule that claims the event, in the order given: a specific rule goes before a catch-all. */
+export const findRule = (
+  rules: ReadonlyArray<TriggerRule>,
+  event: TriggerEvent,
+): TriggerRule | undefined => rules.find((rule) => ruleClaims(rule, event));
+
 /**
- * The first rule whose label the event carries, as the mapping it implies. `undefined` is
- * `unmappable`: the seam has no opinion about this event, so it starts nothing and says so.
+ * What a recorded reason calls a rule: its label, `team ENG` for a team rule, `label in team ENG`
+ * for both. A label-only rule reads as it always has (`rule "docs"`).
+ */
+export const ruleName = (rule: TriggerRule): string =>
+  rule.team === undefined
+    ? (rule.label ?? "")
+    : rule.label === undefined
+      ? `team ${rule.team}`
+      : `${rule.label} in team ${rule.team}`;
+
+/**
+ * The mapping the first claiming rule implies. `undefined` is `unmappable`: the seam has no opinion
+ * about this event, so it starts nothing and says so.
  *
- * The event's own repo wins over the rule's when it names one: a rule says *which label starts
+ * The event's own repo wins over the rule's when it names one: a rule says *which events start
  * work*, and for GitHub the answer to *which repo* is in the payload.
  */
 export const resolveMapping = (
   rules: ReadonlyArray<TriggerRule>,
   event: TriggerEvent,
 ): TriggerMapping | undefined => {
-  const rule = rules.find((candidate) =>
-    event.labels.includes(candidate.label),
-  );
+  const rule = findRule(rules, event);
   if (rule === undefined) return undefined;
   return {
     repo: event.repo ?? rule.repo,
     prompt: renderPrompt(rule.prompt, event),
-    label: rule.label,
+    label: ruleName(rule),
     ...(rule.baseRef === undefined ? {} : { baseRef: rule.baseRef }),
   };
 };
@@ -259,3 +307,64 @@ export const startsWork = (
   claimed: ReadonlyArray<ReadonlyArray<string>> = [],
 ): boolean =>
   action === TRIGGER_ACTION || claimed.some((asked) => asked.includes(action));
+
+/**
+ * A stored route's id: `trr_` and twenty-six Crockford base32 characters, the shape of a session's
+ * and a card's (`mintTriggerRouteId`). It is what a recorded reason names (`route trr_…`), so it is
+ * readable in a log and sortable by when the route was added.
+ */
+export const TriggerRouteId = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^trr_[0-9abcdefghjkmnpqrstvwxyz]{26}$/)),
+  Schema.brand("TriggerRouteId"),
+);
+export type TriggerRouteId = typeof TriggerRouteId.Type;
+
+/**
+ * A route as the repo registry stores it (LOB-266): one `TriggerRule` with an id and the instant it
+ * was added. Read per delivery, so adding or removing one changes where the next delivery goes with
+ * no env edit and no restart. The rule's `repo` is a registered repo (the row references it).
+ *
+ * Precedence is deterministic: a route naming a label *and* a team first, then a label alone, then
+ * a team alone, and the older route first within each; the `TRIGGER_RULES` entries follow, in their
+ * own order, as the fallback when no stored route claims the event.
+ */
+export const TriggerRoute = Schema.Struct({
+  id: TriggerRouteId,
+  ...triggerRuleFields,
+  createdAt: Timestamp,
+}).check(namesALabelOrATeam);
+export type TriggerRoute = typeof TriggerRoute.Type;
+
+/** What `addTriggerRoute` takes: a rule. The id and the time are the server's. */
+export const AddTriggerRouteInput = TriggerRule;
+export type AddTriggerRouteInput = typeof AddTriggerRouteInput.Type;
+
+export const ListTriggerRoutesInput = Schema.Struct({});
+export type ListTriggerRoutesInput = typeof ListTriggerRoutesInput.Type;
+
+export const ListTriggerRoutesOutput = Schema.Struct({
+  /** In the order the seam consults them (`TriggerRoute`'s precedence). */
+  routes: Schema.Array(TriggerRoute),
+});
+export type ListTriggerRoutesOutput = typeof ListTriggerRoutesOutput.Type;
+
+export const RemoveTriggerRouteInput = Schema.Struct({ id: TriggerRouteId });
+export type RemoveTriggerRouteInput = typeof RemoveTriggerRouteInput.Type;
+
+/** `removeTriggerRoute` was asked for an id with no row: a typed answer, so a repeat is not a failure. */
+export class TriggerRouteNotFound extends Schema.TaggedError<TriggerRouteNotFound>()(
+  "TriggerRouteNotFound",
+  { id: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * A stored route the registry refused: the repo is not registered, or the database did not answer.
+ * `invalid_input` is the caller's to fix; `storage` is retryable.
+ */
+export class TriggerRouteError extends Schema.TaggedError<TriggerRouteError>()(
+  "TriggerRouteError",
+  {
+    code: Schema.Literals(["invalid_input", "storage"]),
+    message: Schema.String,
+  },
+) {}

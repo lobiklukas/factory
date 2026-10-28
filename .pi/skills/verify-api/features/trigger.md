@@ -7,7 +7,7 @@ steps are authenticate (`hmac-sha256`, header name from config), dedupe (`webhoo
 `request_id` primary key), filter (`create` always starts work; a lifecycle action — a `push` or a
 `schedule`, LOB-197 — only when a rule that claims the event sets `startsWorkFor`; the generic
 adapter, whose caller types its own `action`, refuses both before the seam so it cannot name a push
-no push produced, LOB-235), map (`TRIGGER_RULES`: label → repo, base
+no push produced, LOB-235), map (a stored route, else `TRIGGER_RULES`: label → repo, base
 ref, prompt template), create (a session, with the rendered prompt as its first message). An
 adapter's session port also sees the delivery id, which is what lets
 [docs-trigger.md](docs-trigger.md) cut `factory/doc-<delivery id>`.
@@ -51,7 +51,7 @@ the way Linear signs a delivery:
     `release` rule's `startsWorkFor: ["release"]` is operator config of any string, and the
     adapter refuses every action a rule admits, not a fixed list (LOB-235 review).
 14. The same caller's `{action: "create", label: "docs"}` still starts a docs session, answered
-    `rule "docs" mapped it to <repo>`, whose first message is the docs rule's template.
+    `rule "docs" (env:TRIGGER_RULES[1]) mapped it to <repo>`, whose first message is the docs rule's template.
 
 Every check is required: `webhook.sh` exits non-zero when one fails.
 
@@ -141,5 +141,31 @@ be 'received'` without the guard), and the work-keyed claim's own conflict claus
 
 **Deliberately absent.** Write-back: `TriggerWriteBack` is an injected port with a no-op default,
 because no adapter in part 1 has anywhere to write (the candidate is LOB-190's GitHub issue
-comment). Per-request rule reloading: `TRIGGER_RULES` is read once when the routes are built, so
-changing a mapping means restarting the API.
+comment).
+
+## Stored routes and boot validation (LOB-266)
+
+`TRIGGER_RULES` is the _fallback_ now, not the only mapping. A route is a row in `trigger_routes`
+(migration `0024`; a label, a team, or both → a registered repo, a base ref, a prompt, optional
+`startsWorkFor`), added and removed over RPC (`addTriggerRoute`, `listTriggerRoutes`,
+`removeTriggerRoute`, the `TriggerRoutesRpc` group), and **read per delivery** by the API's seam
+(`TriggerServiceLive({ storedRoutes: true })`, `packages/core/src/TriggerRoutes.ts`): a route added
+while the API runs routes the next delivery. The adapters normalize against the seam's own rule set
+(`TriggerService.rules`), so what counts as work (a Linear label add, the issue's team key) follows
+the table too. Precedence is deterministic: label+team routes, then label-only, then team-only, older
+first within each, then the `TRIGGER_RULES` entries in their order. A route's repo must be
+registered (the RPC refuses it by name). The docs and review seams do not read the table.
+
+The recorded reason names the rule that matched: `rule "factory" (route trr_…) mapped it to
+acme/widgets`, or `rule "factory" (env:TRIGGER_RULES[0]) mapped it to …`. A Linear issue's team key
+(`data.team.key`) is what a team route claims; other adapters name none, so a team route claims only
+Linear's.
+
+At boot the API logs `trigger rules: N (label→repo, …)` and one line per webhook route (`webhook
+/webhooks/linear: armed`, or `…: unarmed: LINEAR_WEBHOOK_SECRET unset` — a warning, because the route
+answers every delivery `503`). A `TRIGGER_RULES` value that does not decode **refuses the boot**,
+after an error line naming the variable and every decode fault. `WEBHOOK_ROUTES` in
+`apps/api/src/Api/WebhookBoot.ts` is the table a new route adds a row to; a test fails for a mounted
+`/webhooks/…` path with no row. Proof: `WebhookBoot.test.ts` (the log lines, captured),
+`TriggerService.test.ts` ("stored trigger routes", on Postgres), `Rpc/TriggerRoutes.test.ts` (the
+RPC), and `./linear.sh`, which adds and removes a stored route mid-run and greps the boot log.
