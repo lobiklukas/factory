@@ -964,6 +964,8 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   malformed repo slug, an unreadable list cursor.
  * - `storage` — the log could not be read or appended.
  * - `harness` — Pi Durable rejected the operation (bad input, closed harness, failed submit).
+ * - `repo_clone_failed` — a session's worktree could not be cut because the factory's clone of its
+ *   repo could not be made or brought up to date (LOB-265); the message names the repo and the reason.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -971,6 +973,7 @@ export const SessionErrorCode = Schema.Literals([
   "invalid_input",
   "storage",
   "harness",
+  "repo_clone_failed",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

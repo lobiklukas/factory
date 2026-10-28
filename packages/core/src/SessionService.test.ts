@@ -8802,11 +8802,15 @@ describe("a repo registered with only a URL (LOB-265)", () => {
     readonly baseRef: string;
   }> = [];
   const failing = { next: false };
+  /** A repo whose sync waits for this effect: a forge that is slow to answer. */
+  const holds = new Map<string, Effect.Effect<void>>();
   const fakeMirror: RepoMirror = {
     directory: (repo) => join(mirrors, `${repo.replace("/", "__")}.git`),
     sync: (input) =>
       Effect.gen(function* () {
         calls.push(input);
+        const hold = holds.get(input.repo);
+        if (hold !== undefined) yield* hold;
         if (failing.next)
           return yield* new RepoCloneFailed({
             repo: input.repo,
@@ -9030,6 +9034,176 @@ describe("a repo registered with only a URL (LOB-265)", () => {
     } finally {
       await runtime.dispose();
       await bare.dispose();
+    }
+  }, 120_000);
+
+  it("registers an ssh URL whose username is the login, with or without a checkout", async () => {
+    const withPath = RepoSlugSchema.make(
+      `factory-test/ssh-path-${randomBytes(4).toString("hex")}`,
+    );
+    const sshUrl = "ssh://git@github.com/factory-test/ssh-path.git";
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const registered = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          return yield* sessions.registerRepo({
+            repo: withPath,
+            url: sshUrl,
+            localPath: upstream,
+          });
+        }),
+      );
+      expect(registered.url).toBe(sshUrl);
+      expect(registered.localPath).toBe(upstream);
+      // A token placed as the username of an https URL is still refused.
+      const refused = await runtime.runPromise(
+        Effect.flip(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            return yield* sessions.registerRepo({
+              repo: withPath,
+              url: "https://ghp_secret@github.com/factory-test/ssh-path.git",
+            });
+          }),
+        ),
+      );
+      expect(refused).toMatchObject({ code: "invalid_input" });
+      expect(refused.message).not.toContain("ghp_secret");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("reports a clone that fails while a session is created as repo_clone_failed, naming the reason", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/create-fails-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const error = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          failing.next = true;
+          return yield* Effect.flip(sessions.create({ repo: slug }));
+        }),
+      );
+      expect(error).toMatchObject({
+        _tag: "SessionError",
+        code: "repo_clone_failed",
+      });
+      expect(error.message).toContain(slug);
+      expect(error.message).toContain("auth");
+    } finally {
+      failing.next = false;
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("fetches the clone outside the owners' gate: a slow forge on one repo does not hold up a session on another", async () => {
+    const slow = RepoSlugSchema.make(
+      `factory-test/slow-forge-${randomBytes(4).toString("hex")}`,
+    );
+    const quick = RepoSlugSchema.make(
+      `factory-test/quick-forge-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    const forge = Deferred.makeUnsafe<void>();
+    const release = () => Deferred.doneUnsafe(forge, Effect.void);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slow, url });
+          yield* sessions.registerRepo({ repo: quick, url });
+          holds.set(slow, Deferred.await(forge));
+          const stalled = yield* Effect.forkChild(
+            sessions.create({ repo: slow }),
+          );
+          // Let the slow create reach its fetch, then open a session on the other repo.
+          yield* Effect.sleep("200 millis");
+          const other = yield* sessions
+            .create({ repo: quick })
+            .pipe(Effect.timeout("20 seconds"));
+          const slowStillWaiting = stalled.pollUnsafe() === undefined;
+          release();
+          const slowCreated = yield* Fiber.join(stalled);
+          return { other, slowStillWaiting, slowCreated };
+        }),
+      );
+      expect(result.slowStillWaiting).toBe(true);
+      expect(result.other.id).toBeDefined();
+      expect(result.slowCreated.id).toBeDefined();
+    } finally {
+      release();
+      holds.delete(slow);
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("tears a worktree down from the clone it was cut from after the repo is given a checkout of its own", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-then-path-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          const created = yield* sessions.create({ repo: slug });
+          const snapshot = yield* sessions.get(created.id);
+          yield* sessions.registerRepo({ repo: slug, localPath: upstream });
+          const released = yield* sessions.releaseWorkspace({
+            sessionId: created.id,
+            reason: "discarded",
+          });
+          return { created, snapshot, released };
+        }),
+      );
+      const mirror = fakeMirror.directory(slug);
+      expect(result.released.first).toBe(true);
+      expect(existsSync(result.snapshot.workspace.path)).toBe(false);
+      expect(
+        git(mirror, "branch", "--list", `factory/${result.created.id}`),
+      ).toBe("");
+      expect(git(mirror, "worktree", "list", "--porcelain")).not.toContain(
+        result.snapshot.workspace.path,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("does not fetch a branch for a session based at a commit id, as a review run is", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/review-sha-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      calls.length = 0;
+      const view = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          const afterRegister = calls.length;
+          const created = yield* sessions.create({
+            repo: slug,
+            baseRef: git(upstream, "rev-parse", "HEAD"),
+          });
+          return {
+            afterRegister,
+            afterCreate: calls.length,
+            snapshot: yield* sessions.get(created.id),
+          };
+        }),
+      );
+      // The same as before the clone existed: no fetch of `refs/heads/<sha>`, an empty directory.
+      expect(view.afterCreate).toBe(view.afterRegister);
+      expect(view.snapshot.workspace.warning).toBeDefined();
+    } finally {
+      await runtime.dispose();
     }
   }, 120_000);
 

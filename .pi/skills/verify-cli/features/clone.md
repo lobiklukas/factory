@@ -13,7 +13,8 @@ the fetched ref, on `factory/<session-id>`. The answer carries `cache <path>` an
   command that fixes it. It exits non-zero when any repo it checked cannot run.
 - A clone that fails is `repo_clone_failed`, naming the repo and a reason (`auth`, `credential`,
   `missing-ref`, `refused`, `timeout`, `failed`). `repo add` keeps the row registered, so `repo sync`
-  can retry it; a half-made clone is removed.
+  can retry it; a clone is made beside the cache and renamed into place, so a failed or killed one leaves
+  nothing a later call mistakes for a clone. A `factory run` whose clone fails is `repo_clone_failed` too.
 
 **How a user reaches it.** `factory repo add lobiklukas/factory --url https://github.com/lobiklukas/factory.git`,
 then `factory run … --repo lobiklukas/factory`. A URL must be on GitHub (or a loopback host, which is
@@ -49,4 +50,6 @@ CLI printed. `packages/core/src/git.test.ts` proves the same against a loopback 
 `SessionService.test.ts` the wiring (clone on register, fetch per session, teardown from the cache).
 
 **What it does not prove.** A forge other than GitHub: `git.ts` only sends a token to GitHub or a
-loopback host. The PR step on a URL-only repo (push from the cache) is not part of this change.
+loopback host. The PR step on a URL-only repo (push from the cache) is not part of this change, and neither is a review
+run: its base is the PR's head commit, no branch to fetch, so a URL-only repo's review session still opens
+in an empty directory with the no-checkout warning.

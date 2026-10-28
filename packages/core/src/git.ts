@@ -43,7 +43,15 @@
  * `GitError` naming the operation, the repo and the ref, with a `reason` a caller can switch on;
  * git's stderr is classified, never quoted wholesale.
  */
-import { Duration, Effect, FileSystem, Redacted, Schema, Stream } from "effect";
+import {
+  Duration,
+  Effect,
+  FileSystem,
+  type PlatformError,
+  Redacted,
+  Schema,
+  Stream,
+} from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import type { RepoSlug } from "@repo/domain/Session";
 import type { CredentialError } from "./credentials";
@@ -579,9 +587,9 @@ export type SyncMirrorInput = {
  * token is resolved at the call, handed to one process, and written nowhere. Creating the mirror
  * is `git init --bare` and nothing else — no `remote` is configured, no URL is stored in its
  * config, so the mirror holds neither a credential nor anything to redirect one — and the objects
- * arrive by the fetch. A mirror this call created is removed again when its first fetch fails, so
- * a bad URL or a refused token leaves no half-made repository for the next call to mistake for a
- * clone.
+ * arrive by the fetch. A first clone is made beside the mirror (`<mirror>.partial`) and renamed into
+ * place once its fetch has landed, so a bad URL, a refused token, an `init` that fails or a process
+ * killed part-way leaves no half-made repository for the next call to mistake for a clone.
  */
 export const syncMirror = (
   input: SyncMirrorInput,
@@ -602,63 +610,85 @@ export const syncMirror = (
     const exists = yield* fs
       .exists(`${input.mirror}/HEAD`)
       .pipe(Effect.orElseSucceed(() => false));
-    if (!exists) {
-      yield* fs.makeDirectory(input.mirror, { recursive: true }).pipe(
-        Effect.catchTag("PlatformError", (error) =>
-          Effect.fail(
+    // A first clone is built in a sibling directory and renamed into place once its first fetch has
+    // landed, so `<mirror>/HEAD` means a mirror with the base in it: a crash, a kill or a failure
+    // part-way leaves only the `.partial` directory, which the next call clears and starts over.
+    const target = exists ? input.mirror : `${input.mirror}.partial`;
+    const platformFailure =
+      (action: string) =>
+      <A>(
+        effect: Effect.Effect<A, PlatformError.PlatformError>,
+      ): Effect.Effect<A, GitError> =>
+        Effect.mapError(
+          effect,
+          (error) =>
             new GitError({
               ...call,
               reason: "failed",
-              message: `${subject(call)} failed: could not create the mirror (${error.reason._tag})`,
+              message: `${subject(call)} failed: could not ${action} the mirror (${error.reason._tag})`,
             }),
-          ),
-        ),
-      );
-      const init = yield* runGit(
-        input.mirror,
-        [
-          "-c",
-          "init.defaultRefFormat=files",
-          "init",
-          "--bare",
-          "--quiet",
-          "--template=",
-          input.mirror,
-        ],
-        { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-      );
-      if (init.exitCode !== 0) return yield* failure(call, init);
-    }
-    const fetched = yield* fetchBranch({
-      worktree: input.mirror,
-      repo: input.repo,
-      ...(input.url === undefined ? {} : { url: input.url }),
-      branch: input.branch,
-      ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
-    }).pipe(
-      Effect.tapError(() =>
-        exists
-          ? Effect.void
-          : fs
-              .remove(input.mirror, { recursive: true, force: true })
+        );
+    const build = Effect.gen(function* () {
+      if (!exists) {
+        yield* fs
+          .remove(target, { recursive: true, force: true })
+          .pipe(platformFailure("clear"));
+        yield* fs
+          .makeDirectory(target, { recursive: true })
+          .pipe(platformFailure("create"));
+        const init = yield* runGit(
+          target,
+          [
+            "-c",
+            "init.defaultRefFormat=files",
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            target,
+          ],
+          { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        );
+        if (init.exitCode !== 0) return yield* failure(call, init);
+      }
+      const fetched = yield* fetchBranch({
+        worktree: target,
+        repo: input.repo,
+        ...(input.url === undefined ? {} : { url: input.url }),
+        branch: input.branch,
+        ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+      });
+      // The base is also the mirror's own `refs/heads/<branch>`, so `<base>...factory/<id>` — the range
+      // the PR step measures in the session's worktree, which shares these refs — names a ref that
+      // exists. Nothing is ever committed on it: sessions work on `factory/*`, so the mirror's branch
+      // only ever follows the remote. A `factory/*` base is a session's branch, which a worktree may
+      // have checked out, so it is left alone.
+      if (!input.branch.startsWith(SESSION_BRANCH_PREFIX)) {
+        const head = yield* runGit(target, [
+          "update-ref",
+          "-m",
+          `factory: mirror ${call.ref}`,
+          call.ref,
+          fetched.sha,
+        ]);
+        if (head.exitCode !== 0) return yield* failure(call, head);
+      }
+      if (!exists) {
+        yield* fs.rename(target, input.mirror).pipe(platformFailure("place"));
+      }
+      return fetched;
+    });
+    const fetched = yield* exists
+      ? build
+      : build.pipe(
+          // Failure or interruption alike: nothing half-made is left for the next call to mistake for
+          // a clone, and the init step is covered as well as the fetch.
+          Effect.onError(() =>
+            fs
+              .remove(target, { recursive: true, force: true })
               .pipe(Effect.ignore),
-      ),
-    );
-    // The base is also the mirror's own `refs/heads/<branch>`, so `<base>...factory/<id>` — the range
-    // the PR step measures in the session's worktree, which shares these refs — names a ref that
-    // exists. Nothing is ever committed on it: sessions work on `factory/*`, so the mirror's branch
-    // only ever follows the remote. A `factory/*` base is a session's branch, which a worktree may
-    // have checked out, so it is left alone.
-    if (!input.branch.startsWith(SESSION_BRANCH_PREFIX)) {
-      const head = yield* runGit(input.mirror, [
-        "update-ref",
-        "-m",
-        `factory: mirror ${call.ref}`,
-        call.ref,
-        fetched.sha,
-      ]);
-      if (head.exitCode !== 0) return yield* failure(call, head);
-    }
+          ),
+        );
     return fetched;
   }).pipe(Effect.withSpan("git.syncMirror"));
 

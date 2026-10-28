@@ -1067,6 +1067,31 @@ describe(
       expect(error?.message).toContain("lobiklukas/refused-clone");
       expect(error?.message).not.toContain(wrong);
       expect(existsSync(made.value.directory(ghost))).toBe(false);
+      expect(existsSync(`${made.value.directory(ghost)}.partial`)).toBe(false);
+    });
+
+    it("finishes a clone a killed process left half-made, and never reports the half as a mirror", async () => {
+      const slug = repo;
+      const made = await runWith(
+        gitRepoMirror({ root: join(root, "mirror-killed") }),
+      );
+      if (!Exit.isSuccess(made)) throw new Error("the mirror did not build");
+      const directory = made.value.directory(slug);
+      // What a process killed after `git init` and before the first fetch landed leaves behind.
+      mkdirSync(`${directory}.partial`, { recursive: true });
+      writeFileSync(
+        join(`${directory}.partial`, "HEAD"),
+        "ref: refs/heads/main\n",
+      );
+      expect(existsSync(join(directory, "HEAD"))).toBe(false);
+      const exit = await runWith(
+        made.value.sync({ repo: slug, url: forgeUrl(), baseRef: "main" }),
+      );
+      expect(Exit.isSuccess(exit)).toBe(true);
+      expect(existsSync(`${directory}.partial`)).toBe(false);
+      expect(git(directory, "rev-parse", "refs/remotes/origin/main")).toMatch(
+        /^[0-9a-f]{40}$/,
+      );
     });
 
     it("names the reason for a ref the remote lacks, a repo it does not serve and no token at all", async () => {

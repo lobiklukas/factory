@@ -222,6 +222,7 @@ import { inspectCheckout, workTreeRoot } from "./repos";
 import {
   removeWorkspace,
   resolveWorkspace,
+  sessionDirectory,
   type WorkspaceInput,
 } from "./workspace";
 
@@ -568,15 +569,34 @@ export type SessionServiceOptions = {
   readonly reviewPoster?: ReviewPoster;
 };
 
-/** Whether a clone URL has userinfo: a password, or a token placed as the username. */
+/**
+ * Whether a clone URL carries a credential: a password anywhere, or a username on http(s), where it
+ * is the token's place (`https://<token>@host/...`). `ssh://git@host/...` is the ordinary form of an
+ * ssh URL — its username is the login, not a secret — and is registered as given.
+ */
 const urlCarriesCredential = (url: string): boolean => {
   try {
     const parsed = new URL(url);
-    return parsed.username.length > 0 || parsed.password.length > 0;
+    if (parsed.password.length > 0) return true;
+    return (
+      parsed.username.length > 0 &&
+      (parsed.protocol === "https:" || parsed.protocol === "http:")
+    );
   } catch {
     return false;
   }
 };
+
+/** A full commit id: a review run's base is the PR's head, which no `refs/heads/<sha>` names. */
+const isCommitId = (ref: string): boolean =>
+  /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref);
+
+/** A clone failure as the session error a create or send reports, naming the reason (LOB-265). */
+const cloneFailure = (error: RepoCloneFailed): SessionError =>
+  new SessionErrorClass({
+    code: "repo_clone_failed",
+    message: `${error.message} (${error.reason})`,
+  });
 
 type SessionRow = {
   readonly id: string;
@@ -1203,6 +1223,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         resolution: {
           readonly cut: boolean;
           readonly released?: WorkspaceRelease | undefined;
+          /** The mirror's tip, fetched before the owners' gate was taken (`mirrorStartFor`). */
+          readonly mirrorStart?: string | undefined;
         },
       ): Effect.Effect<SessionWorkspace, SessionError> =>
         Effect.gen(function* () {
@@ -1224,17 +1246,23 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: row.baseRef ?? undefined,
               ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
-              ...mirrorSource(repo, registered, row.baseRef ?? "main"),
+              ...mirrorSource(
+                repo,
+                registered,
+                row.baseRef ?? "main",
+                resolution.mirrorStart,
+              ),
               cut: resolution.cut && release === undefined,
             },
             { fs, path },
           ).pipe(
-            Effect.mapError(
-              (e) =>
-                new SessionErrorClass({
-                  code: "storage",
-                  message: e.message,
-                }),
+            Effect.mapError((e) =>
+              "_tag" in e && e._tag === "RepoCloneFailed"
+                ? cloneFailure(e)
+                : new SessionErrorClass({
+                    code: "storage",
+                    message: e.message,
+                  }),
             ),
           );
           return release === undefined
@@ -1280,23 +1308,62 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           ? undefined
           : { mirror: options.repoMirror, url: row.url };
 
-      /** What `resolveWorkspace` is given to cut a URL-only repo's worktree from its mirror. */
+      /**
+       * What `resolveWorkspace` is given to cut a URL-only repo's worktree from its mirror. `start`
+       * is the tip a caller already fetched, outside the owners' gate, so the cut under it is local.
+       * A base that is a commit id is no branch to fetch (a review run is based at the PR's head):
+       * such a session is cut as it was before the mirror, in an empty directory with a warning.
+       */
       const mirrorSource = (
         repo: RepoSlug | undefined,
         row: RepoRow | undefined,
         baseRef: string,
+        start?: string,
       ): { readonly mirror?: WorkspaceInput["mirror"] } => {
         const found = mirrorOf(row);
-        if (found === undefined || repo === undefined) return {};
+        if (found === undefined || repo === undefined || isCommitId(baseRef))
+          return {};
         return {
           mirror: {
             path: found.mirror.directory(repo),
-            sync: found.mirror
-              .sync({ repo, url: found.url, baseRef })
-              .pipe(Effect.map((tip) => tip.ref)),
+            sync:
+              start !== undefined
+                ? Effect.succeed(start)
+                : found.mirror
+                    .sync({ repo, url: found.url, baseRef })
+                    .pipe(Effect.map((tip) => tip.ref)),
           },
         };
       };
+
+      /**
+       * Fetch the mirror's tip for a session whose worktree is about to be cut, before the owners'
+       * gate is taken (LOB-265). The gate is every session's, and a clone or fetch is the network, up
+       * to its timeout: held under it, one repo's slow forge would stop every other session opening.
+       * Nothing to fetch for a session that has an owner, a released one, a repo with a checkout, or a
+       * directory that already holds its worktree; the cut under the gate then only runs local git.
+       */
+      const mirrorStartFor = (
+        row: SessionRow,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (row.repo === null) return undefined;
+          if ((yield* releaseOf(row)) !== undefined) return undefined;
+          const repo = yield* toRepoSlug(row.repo);
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          const source = mirrorSource(repo, registered, row.baseRef ?? "main");
+          if (source.mirror === undefined) return undefined;
+          const occupied = yield* fs
+            .readDirectory(
+              sessionDirectory(path, options.sessionRoot, row.id, repo),
+            )
+            .pipe(
+              Effect.map((entries) => entries.length > 0),
+              Effect.orElseSucceed(() => false),
+            );
+          if (occupied) return undefined;
+          return yield* source.mirror.sync.pipe(Effect.mapError(cloneFailure));
+        });
 
       /** Whether the factory's mirror of the repo has been cloned: read from the disk, never stored. */
       const mirrorClonedAt = (
@@ -1313,17 +1380,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         }).pipe(Effect.orElseSucceed(() => undefined));
 
       /**
-       * The checkout a session's worktree was cut from, for tearing it down: the registered path, or
-       * the mirror of a URL-only repo once it has been cloned (LOB-265).
+       * The checkouts a session's worktree may have been cut from, for tearing it down: the registered
+       * path, and the factory's mirror when it has been cloned (LOB-265). Both, because a repo
+       * registered with a URL and later given a path still has sessions whose worktrees are the
+       * mirror's, and `removeWorkspace` is a no-op in the checkout that does not hold the worktree.
        */
-      const localPathFor = (
+      const checkoutsFor = (
         repo: RepoSlug | undefined,
-      ): Effect.Effect<string | undefined, SessionError> =>
+      ): Effect.Effect<ReadonlyArray<string>, SessionError> =>
         Effect.gen(function* () {
-          if (repo === undefined) return undefined;
+          if (repo === undefined) return [];
           const row = (yield* paper("read repo", readRepo(repo)))[0];
-          if (row === undefined) return undefined;
-          return row.localPath ?? (yield* mirrorClonedAt(row));
+          if (row === undefined) return [];
+          const directory = options.repoMirror?.directory(repo);
+          const mirrored =
+            directory !== undefined &&
+            (yield* fs
+              .exists(path.join(directory, "HEAD"))
+              .pipe(Effect.orElseSucceed(() => false)));
+          return [
+            ...(row.localPath === null ? [] : [row.localPath]),
+            ...(mirrored ? [directory] : []),
+          ];
         });
 
       /**
@@ -1594,26 +1672,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly starts?: boolean;
       };
 
-      /**
-       * Open this process's owner of one session, or return the one already open.
-       *
-       * Opening means: resolve the workspace, create its directory, take the single-writer log, and
-       * start the activity projection that keeps the list index current from the log. `open` is how
-       * a fork opens the log it has just created rather than an empty one.
-       *
-       * `reviewing` says the session is a review run before its log can (LOB-36): `create` opens the
-       * owner before it commits the review target, and the run's read-only stage and tool filter are
-       * pinned at that first open. Every later acquisition reads it from the log's `factory.review`.
-       *
-       * `starts` says the caller is about to start work (`send`, `reset`, `startMission`): on a
-       * session whose workspace was released (LOB-268) it is refused, from the release read under
-       * the gate, rather than handed a directory-less owner to prompt.
-       */
-      const acquireOwnerWith = (
+      /** The part of an acquisition that is serialized: everything but the network (below). */
+      const acquireUnderGate = (
         id: SessionId,
         row: SessionRow,
         open: OwnerOpening,
-        acquisition: OwnerAcquisition = {},
+        acquisition: OwnerAcquisition,
+        mirrorStart: string | undefined,
       ): Effect.Effect<LiveOwner, SessionError> =>
         gate.withPermits(1)(
           Effect.gen(function* () {
@@ -1637,6 +1702,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const workspace = yield* workspaceFor(row, {
               cut: released === undefined,
               released,
+              mirrorStart,
             });
             if (released === undefined) {
               yield* Effect.mapError(
@@ -1724,6 +1790,44 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return owner;
           }),
         );
+
+      /**
+       * Open this process's owner of one session, or return the one already open.
+       *
+       * Opening means: resolve the workspace, create its directory, take the single-writer log, and
+       * start the activity projection that keeps the list index current from the log. `open` is how
+       * a fork opens the log it has just created rather than an empty one.
+       *
+       * `reviewing` says the session is a review run before its log can (LOB-36): `create` opens the
+       * owner before it commits the review target, and the run's read-only stage and tool filter are
+       * pinned at that first open. Every later acquisition reads it from the log's `factory.review`.
+       *
+       * `starts` says the caller is about to start work (`send`, `reset`, `startMission`): on a
+       * session whose workspace was released (LOB-268) it is refused, from the release read under
+       * the gate, rather than handed a directory-less owner to prompt.
+       *
+       * A URL-only repo's mirror is fetched first, outside the gate (`mirrorStartFor`).
+       */
+      const acquireOwnerWith = (
+        id: SessionId,
+        row: SessionRow,
+        open: OwnerOpening,
+        acquisition: OwnerAcquisition = {},
+      ): Effect.Effect<LiveOwner, SessionError> =>
+        Effect.gen(function* () {
+          // The network part of opening a URL-only repo's session, outside the gate (see
+          // `mirrorStartFor`); an owner that is already open needs none of it.
+          const mirrorStart = HashMap.has(yield* Ref.get(live), id)
+            ? undefined
+            : yield* mirrorStartFor(row);
+          return yield* acquireUnderGate(
+            id,
+            row,
+            open,
+            acquisition,
+            mirrorStart,
+          );
+        });
 
       const acquireOwner = (
         id: SessionId,
@@ -3932,16 +4036,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           });
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
-          yield* removeWorkspace(
-            {
-              directory: workspace.path,
-              ...(workspace.branch === undefined
-                ? {}
-                : { branch: workspace.branch }),
-              localPath: yield* localPathFor(repo),
-            },
-            { fs, path },
-          );
+          const checkouts = yield* checkoutsFor(repo);
+          // Once with no checkout when there is none, so a plain session directory is still removed.
+          for (const localPath of checkouts.length === 0
+            ? [undefined]
+            : checkouts) {
+            yield* removeWorkspace(
+              {
+                directory: workspace.path,
+                ...(workspace.branch === undefined
+                  ? {}
+                  : { branch: workspace.branch }),
+                ...(localPath === undefined ? {} : { localPath }),
+              },
+              { fs, path },
+            );
+          }
           if (marked.first) {
             yield* Effect.logInfo(
               `session ${input.sessionId}: workspace released (${release.reason}); removed ${workspace.path}${workspace.branch === undefined ? "" : ` and ${workspace.branch}`}`,

@@ -32,6 +32,15 @@ export const runnability = (repo: RepoSummary): Runnability => {
   if (repo.localPath === undefined && repo.mirrorPath !== undefined) {
     return { runnable: true };
   }
+  if (repo.localPath === undefined && repo.url !== "") {
+    return {
+      runnable: false,
+      cause: "no_checkout",
+      reason:
+        "The factory has not cloned this repository yet (the clone has not run, or it failed), so a session opens in an empty directory and no worktree is cut.",
+      fix: "Run `factory repo sync` for this repo to clone it now, or save the row again here to retry the clone; check the URL and the API's read credential if it keeps failing.",
+    };
+  }
   if (repo.localPath === undefined) {
     return {
       runnable: false,

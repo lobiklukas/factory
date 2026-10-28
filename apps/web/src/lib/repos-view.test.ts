@@ -56,6 +56,10 @@ describe("runnability", () => {
   it("does not take a clone URL alone for a checkout: the factory has not cloned it yet", () => {
     const state = runnability(row({ url: "https://github.com/acme/widgets" }));
     expect(state).toMatchObject({ runnable: false, cause: "no_checkout" });
+    if (state.runnable) return;
+    // The row already has a URL, so the fix is to retry the clone, not to register a URL.
+    expect(state.fix).toContain("factory repo sync");
+    expect(state.fix).not.toContain("Register a clone URL");
   });
 
   it("is runnable once the factory has cloned a URL-only repo into its cache (LOB-265)", () => {
