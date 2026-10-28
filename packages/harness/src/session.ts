@@ -642,6 +642,17 @@ const readPinnedModel = (
   });
 
 /**
+ * The model the session's root conversation is pinned to, as `provider/modelId` (LOB-269): what the
+ * session summary and the index's `model` column report. Absent for a log whose root does not exist.
+ */
+export const readPinnedModelKey = (
+  storage: Storage,
+): Effect.Effect<string | undefined, SessionError> =>
+  Effect.map(readPinnedModel(storage), (pinned) =>
+    pinned === undefined ? undefined : `${pinned.provider}/${pinned.modelId}`,
+  );
+
+/**
  * The access for the model a root is pinned to, from the catalog `access` was built with. A model
  * the catalog no longer serves keeps its name — the request fails with Pi Durable's "no model"
  * rather than silently going to another one — and gets the package's own compaction defaults,
@@ -2100,6 +2111,11 @@ export type SessionLog = {
   /** Who the session's spend is attributed to (LOB-162), when anyone was. */
   readonly actor?: string;
   /**
+   * The model the root conversation is pinned to, `provider/modelId` (LOB-269), from its committed
+   * `pi.agent`: what the index's `model` column is refolded from. Absent for a log with no root.
+   */
+  readonly model?: string;
+  /**
    * Every approval the log records, requested order (LOB-147). Pending ones are what a snapshot
    * reports; the settled ones are here because the index rows a rebuild derives cover both.
    */
@@ -2235,6 +2251,7 @@ export const readSessionLog = (
     const criteria = bindingString(criteriaDoc, "criteria");
     const forkedFrom = bindingString(forkDoc, "parent");
     const forkedAt = bindingString(forkDoc, "at");
+    const model = yield* readPinnedModelKey(storage);
     return {
       entries: records.map(projectEntry),
       pages,
@@ -2254,6 +2271,7 @@ export const readSessionLog = (
       ...(forkedFrom === "" ? {} : { forkedFrom }),
       ...(forkedFrom === "" || forkedAt === "" ? {} : { forkedAt }),
       ...(actor === "" ? {} : { actor }),
+      ...(model === undefined ? {} : { model }),
       ...(replayDoc.source === ""
         ? {}
         : {
@@ -2352,6 +2370,11 @@ export type SessionRef = {
   readonly prUrl?: string;
   /** The session this one was forked from, when the index row says so (LOB-180). */
   readonly forkedFrom?: SessionId;
+  /**
+   * The model the session is pinned to, `provider/modelId` (LOB-269): the owner's, or the index
+   * row's. Absent, a fold reads it from the log's `pi.agent` instead.
+   */
+  readonly model?: string;
 };
 
 const pendingOf = (
@@ -2394,6 +2417,7 @@ const snapshotOf = (
         : { baseRef: ref.workspace.baseRef }),
       ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
       ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
+      ...(ref.model === undefined ? {} : { model: ref.model }),
     },
     workspace: ref.workspace,
     entries: projection.entries,
@@ -2861,6 +2885,10 @@ export const readHistoricalSnapshot = (
       yield* readDocument(storage, BUDGET_DOC_KIND),
       log.usage,
     );
+    // The index's value when it has one, otherwise the log's own `pi.agent` — one document read, so
+    // the bounded fold stays bounded — and a row written before the column existed still answers
+    // its model (LOB-269).
+    const model = ref.model ?? (yield* readPinnedModelKey(storage));
     return {
       session: {
         id: ref.id,
@@ -2877,6 +2905,7 @@ export const readHistoricalSnapshot = (
           : { baseRef: ref.workspace.baseRef }),
         ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
         ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
+        ...(model === undefined ? {} : { model }),
       },
       workspace: ref.workspace,
       entries: log.entries,

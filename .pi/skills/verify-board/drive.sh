@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Drive the board: create a card, then `factory board ls|show|move|start` in a real tmux terminal —
+# Drive the board: add a card with `factory board add`, then `ls|show|move|start` in a real tmux terminal —
 # the moves and the three refusals — then read the board back in the dashboard, capturing evidence.
 #
 # A command line is only proven by running it the way a person does: a real terminal, a real control
 # plane, and the text it printed read back. Calling the RPC client from a test process would prove
 # the client and nothing about the command — argument parsing, the lane ordering the human reads, the
 # refusal message on stderr, and the exit code a script branches on all live outside the client.
+#
+# The card is made in the terminal (LOB-261): `board add` prints its id, revision 1 and the intake
+# column; an unknown board is refused with the server's words and an empty title as `invalid_input`
+# before any request, each with a non-zero exit.
 #
 # The three refusals (LOB-84) are the three ways a move is supposed to fail, each matched by the
 # service's own words and a non-zero exit: an undeclared transition, a stale expected revision, and a
@@ -44,7 +48,8 @@
 # verify-web's own, so the cross-check here does not repeat them.
 #
 # Requires the instance from ./up.sh (API on :9400, web on :3400, a seeded board in
-# .verify/run/board.json). The card is the drive's own, created through `createTask` (create.ts), so
+# .verify/run/board.json). The card is the drive's own, added with `factory board add` in the pane
+# (LOB-261; `add.ts` reads it back and compares a second one with what the dashboard's form sends), so
 # the drive can run twice against one instance — after a failed drive too: the checks find this
 # drive's card by id, not by being the only card in its lane.
 set -uo pipefail
@@ -160,16 +165,22 @@ run_cmd() { # marker, command
 
 exit_code() { pane | grep -o "__done_$1:[0-9]*" | tail -1 | cut -d: -f2; }
 
+# How many cards the board lists, over the same command a person reads them with.
+cards_on_board() {
+  $FACTORY board ls --board "$BOARD_ID" --api "$API_URL" 2>/dev/null | grep -c '^  tsk_'
+}
+
 if ! curl -sf -m 2 "$API_URL/readyz" >/dev/null 2>&1; then
   echo "no ready API at $API_URL — run ./up.sh first" >&2
   exit 1
 fi
 
-# --- create: a card through `createTask`, the door a trigger uses ---------------------------------
+# --- add: the drive's card, through `factory board add` (LOB-261) --------------------------------
 # A phase that dies before it writes its evidence must not leave an earlier run's passing file
 # beside this run's failing `observed.json`.
-rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" \
+rm -f "$EVIDENCE_DIR/add.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
+  "$EVIDENCE_DIR"/add{,-pair,-unknown,-empty}.txt \
   "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
   "$EVIDENCE_DIR/pr-body.md" "$EVIDENCE_DIR/review-drive.json" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
@@ -177,24 +188,81 @@ rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" 
   "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
   "$EVIDENCE_DIR"/{runs,block,block-stale,block-again,unblock,unblock-stale}.txt \
   "$EVIDENCE_DIR"/show-{blocked,unblocked}.txt
-API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
-  bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
-CREATE_RC=$?
-cat "$RUN_DIR/create.log"
-check "createTask creates the drive's card (create.ts)" \
-  "$([ "$CREATE_RC" = "0" ] && [ -s "$RUN_DIR/card.json" ] && echo 0 || echo 1)" \
-  "exit=$CREATE_RC, see create.json"
-if [ ! -s "$RUN_DIR/card.json" ]; then
-  echo "drive: no card to drive — see $EVIDENCE_DIR/create.json and $RUN_DIR/create.log" >&2
-  exit 1
-fi
-TASK_ID="$(json taskId "$RUN_DIR/card.json")"
-TASK_TITLE="$(json title "$RUN_DIR/card.json")"
-REVISION="$(sed -n 's/.*"revision":\([0-9]*\).*/\1/p' "$RUN_DIR/card.json")"
 
 t kill-server 2>/dev/null || true
 rm -f "$SOCK"
 t new-session -d -s "$TERM_SESSION" -x 200 -y 60 -c "$ROOT"
+
+# The drive's card names no repository and no priority: it inherits the board's repo (LOB-255) and
+# opens `normal`. Its body is two lines, the second indented, typed as a `$'…'` word so the CLI is
+# handed one argument with the newline in it; `show` prints it back. The title is unique per drive,
+# so a second drive against one instance finds its own card by id.
+TASK_TITLE="verify-board card $RANDOM$RANDOM"
+CARD_BODY="$(printf 'Pin the Postgres major.\n  Keep port 5442.')"
+CARD_BODY_WORD="\$'Pin the Postgres major.\\n  Keep port 5442.'"
+fresh
+run_cmd add "$FACTORY board add --board $BOARD_ID --title '$TASK_TITLE' --body $CARD_BODY_WORD --api $API_URL" || true
+capture add.txt
+ADD_LINE="$(grep -E '^task tsk_[0-9a-z]{26} revision [0-9]+ column [a-z]+$' "$EVIDENCE_DIR/add.txt" | tail -1)"
+TASK_ID="$(echo "$ADD_LINE" | awk '{print $2}')"
+REVISION="$(echo "$ADD_LINE" | awk '{print $4}')"
+ADD_COLUMN="$(echo "$ADD_LINE" | awk '{print $6}')"
+check "board add exits 0" "$([ "$(exit_code add)" = "0" ] && echo 0 || echo 1)" "exit=$(exit_code add)"
+check "board add prints the id, revision 1 and the intake column" \
+  "$([ -n "$TASK_ID" ] && [ "$REVISION" = "1" ] && [ "$ADD_COLUMN" = "intake" ] && echo 0 || echo 1)" \
+  "${ADD_LINE:-no line}"
+if [ -z "$TASK_ID" ]; then
+  echo "drive: no card to drive — see $EVIDENCE_DIR/add.txt" >&2
+  exit 1
+fi
+
+# A second card with every flag the command takes, the body from a file. It is compared in
+# `add.ts` with one `createTask` makes from the same inputs — what the dashboard's form sends.
+PAIR_TITLE="verify-board pair $RANDOM$RANDOM"
+PAIR_BODY="$(printf '## Goal\n  keep 5442')"
+PAIR_BASE_REF="main"
+printf '%s' "$PAIR_BODY" > "$RUN_DIR/pair-body.md"
+fresh
+run_cmd pair "$FACTORY board add --board $BOARD_ID --title '$PAIR_TITLE' --body-file $RUN_DIR/pair-body.md --repo $BOARD_REPO_SLUG --priority urgent --base-ref $PAIR_BASE_REF --api $API_URL" || true
+capture add-pair.txt
+PAIR_ID="$(grep -oE '^task tsk_[0-9a-z]{26}' "$EVIDENCE_DIR/add-pair.txt" | tail -1 | awk '{print $2}')"
+check "board add with every flag exits 0 and prints a card" \
+  "$([ "$(exit_code pair)" = "0" ] && [ -n "$PAIR_ID" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code pair), card=${PAIR_ID:-none}"
+
+# The two refusals. The unknown board is the server's, printed verbatim; the empty title is the
+# CLI's own, and is refused before any request — the command is pointed at a port nothing listens
+# on, so a request would end as a connection error, not as `invalid_input`.
+CARDS_BEFORE="$(cards_on_board)"
+UNKNOWN_BOARD="brd_00000000000000000000000000"
+fresh
+run_cmd unknown "$FACTORY board add --board $UNKNOWN_BOARD --title nothing --api $API_URL" || true
+capture add-unknown.txt
+check "an unknown board is refused with the server's own words" \
+  "$(grep -qxF "error: board_not_found: no board $UNKNOWN_BOARD" "$EVIDENCE_DIR/add-unknown.txt" && echo 0 || echo 1)" \
+  "message verbatim"
+check "and the unknown-board refusal exits non-zero" \
+  "$([ "$(exit_code unknown)" != "0" ] && [ -n "$(exit_code unknown)" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code unknown)"
+fresh
+run_cmd empty "$FACTORY board add --board $BOARD_ID --title '  ' --api http://127.0.0.1:1" || true
+capture add-empty.txt
+check "an empty title is refused as invalid_input before any request" \
+  "$(grep -q '^error: invalid_input: ' "$EVIDENCE_DIR/add-empty.txt" && echo 0 || echo 1)" \
+  "$(grep '^error:' "$EVIDENCE_DIR/add-empty.txt" | head -1)"
+check "and the empty-title refusal exits non-zero" \
+  "$([ "$(exit_code empty)" != "0" ] && [ -n "$(exit_code empty)" ] && echo 0 || echo 1)" \
+  "exit=$(exit_code empty)"
+
+API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" \
+  TASK_ID="$TASK_ID" TITLE="$TASK_TITLE" BODY="$CARD_BODY" PAIR_ID="$PAIR_ID" \
+  PAIR_TITLE="$PAIR_TITLE" PAIR_BODY="$PAIR_BODY" PAIR_PRIORITY=urgent PAIR_BASE_REF="$PAIR_BASE_REF" \
+  CARDS_BEFORE="$CARDS_BEFORE" bun "$SKILL/add.ts" > "$RUN_DIR/add.log" 2>&1
+ADD_RC=$?
+cat "$RUN_DIR/add.log"
+check "the cards read back as made (add.ts)" \
+  "$([ "$ADD_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$ADD_RC, see add.json"
 
 # --- ls: lanes in definition order, the card in its lane ------------------------------------------
 fresh
@@ -234,6 +302,9 @@ check "show prints the card's revision" \
 check "show prints the card's title" \
   "$(grep -qxF "title     $TASK_TITLE" "$EVIDENCE_DIR/show.txt" && echo 0 || echo 1)" \
   "title=$TASK_TITLE"
+check "show prints the body board add was given, line by line" \
+  "$(grep -qx 'body      2 lines' "$EVIDENCE_DIR/show.txt" && grep -qxF '    Pin the Postgres major.' "$EVIDENCE_DIR/show.txt" && grep -qxF '      Keep port 5442.' "$EVIDENCE_DIR/show.txt" && echo 0 || echo 1)" \
+  "body of 2 lines"
 
 # --- move: a declared transition, at the revision read ---------------------------------------------
 fresh

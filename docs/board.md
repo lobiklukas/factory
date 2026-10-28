@@ -162,7 +162,7 @@ at the **head that PR was last reported at** recorded `pass`. The head is not "t
 run": the review trigger opens one run per head, so a push back to a head the PR had before (a
 force-push undoing one) replays that head's old run, and another head's run stays the newest. Every
 review delivery on a card's PR, a replay included, records its head in `review_heads` before its run
-is opened (`ReviewTrigger.recordReviewHead`), and that row picks the run (migration 0027). No review
+is opened (`ReviewTrigger.recordReviewHead`), and that row picks the run (migration 0028). No review
 run ("no review ran"), only another PR's review, a reported head with no review run yet (still being
 opened, or skipped as unfetchable), a run with no verdict yet (naming the head under review), a
 `fail` (naming the failing dimensions) and a pass its post found `stale` are each refused naming the
@@ -292,10 +292,13 @@ customization, decomposition, and board metrics.
 8. **Board customization** — edit columns in the UI, more than one board per repository. Trigger: after
    the default has been used for real work.
 9. **Decomposition** (LOB-43) into child cards. Trigger: after dependency links and once the specifier
-   has proven itself. Built (LOB-201): the proposing half only. `proposeDecomposition` reads a
+   has proven itself. Built: the proposing half (LOB-201) — `proposeDecomposition` reads a
    session's spec and commits proposed child issues (`factory.proposedIssues`, read back through
-   `getSession`); it creates no card, no tracker issue and no session. Approving proposals into
-   issues (LOB-202) and idempotent re-runs (LOB-203) are still to come.
+   `getSession`); it creates no card, no tracker issue and no session — and the approving half
+   (LOB-202) — `approveProposals` creates the approved ones as Linear issues, children of the issue
+   the session was delegated from, in its team, with the `blockedBy` edges whose ends exist, and
+   records each created id in the document. Still not built: child cards and `task_links` (wave 2)
+   and idempotent re-runs of the same spec (LOB-203).
 10. **Board metrics** — cycle time, aging, WIP over time, cost per task (LOB-17, LOB-28, LOB-44).
     Trigger: once real cards exist to measure.
 

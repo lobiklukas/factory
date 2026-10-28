@@ -9,6 +9,7 @@ import { Effect, Layer } from "effect";
 import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
+import { ServerRpcHandlers } from "./Server";
 import { TaskRpcHandlers } from "./Task";
 import { TriggerRoutesRpcHandlers } from "./TriggerRoutes";
 
@@ -49,6 +50,8 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       curateSession: (input) => sessions.curate(input),
       // Proposals only (LOB-201): nothing is created in a tracker and no session is started.
       proposeDecomposition: (input) => sessions.proposeDecomposition(input),
+      // Creates the approved proposals in the tracker (LOB-202), behind the session layer's port.
+      approveProposals: (input) => sessions.approveProposals(input),
       registerRepo: (input) => sessions.registerRepo(input),
       listRepos: () => sessions.listRepos,
       getRepo: (input) => sessions.getRepo(input),
@@ -81,6 +84,7 @@ export const SessionRpcLive = RpcServer.layerHttp({
       ApprovalsRpcHandlers,
       TaskRpcHandlers,
       TriggerRoutesRpcHandlers,
+      ServerRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),

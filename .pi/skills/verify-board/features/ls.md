@@ -31,7 +31,7 @@ planning  working  0
 - it exits 0;
 - the lane lines' names, concatenated, are exactly `intake specifying planning building review done
 canceled` — the seeded definition's order;
-- the drive's card (created by `create.ts` a moment before) is the line directly under
+- the drive's card (made by `factory board add` a moment before) is the line directly under
   `intake  resting  1`, so the card is in its own lane.
 
 ## What it does not prove

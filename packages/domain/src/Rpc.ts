@@ -60,6 +60,7 @@ import {
   ListPagesOutput,
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
+import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
 import {
   AddTriggerRouteInput,
   ListTriggerRoutesInput,
@@ -70,6 +71,9 @@ import {
   TriggerRouteNotFound,
 } from "@repo/domain/Trigger";
 import {
+  ApproveProposalsError,
+  ApproveProposalsInput,
+  ApproveProposalsResult,
   ProposalsRefused,
   ProposeDecompositionInput,
   ProposeDecompositionResult,
@@ -218,6 +222,15 @@ export class SessionRpc extends RpcGroup.make(
     payload: ProposeDecompositionInput,
     success: ProposeDecompositionResult,
     error: Schema.Union([SessionError, ProposalsRefused]),
+  }),
+  // Approving a subset of those proposals (LOB-202): each approved one becomes a child of the issue
+  // the session was delegated from, and its id is recorded in the document. A process with no
+  // tracker, or a session with no delegating issue, is refused as `ApproveProposalsError` with
+  // nothing sent; a tracker failure is the same error naming what was already created.
+  Rpc.make("approveProposals", {
+    payload: ApproveProposalsInput,
+    success: ApproveProposalsResult,
+    error: Schema.Union([SessionError, ApproveProposalsError]),
   }),
   Rpc.make("registerRepo", {
     payload: RegisterRepoInput,
@@ -452,7 +465,22 @@ export class TriggerRoutesRpc extends RpcGroup.make(
   }),
 ) {}
 
+/**
+ * What the control plane is running (LOB-269): the model backend and what chose it, the default and
+ * role models, and the rest of the non-secret configuration the boot resolved. Its own group, not
+ * `SessionRpc`'s: the answer is the process's, and reading it touches no session and no database,
+ * so it answers while Postgres is down. It cannot fail — every value was resolved before the server
+ * bound — and it never carries a credential's value (`@repo/domain/Server`).
+ */
+export class ServerRpc extends RpcGroup.make(
+  Rpc.make("getServerInfo", {
+    payload: GetServerInfoInput,
+    success: ServerInfo,
+  }),
+) {}
+
 // NOTE: The sandbox and sandbox-status groups merge in here next.
 export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
-  .merge(TriggerRoutesRpc);
+  .merge(TriggerRoutesRpc)
+  .merge(ServerRpc);

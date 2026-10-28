@@ -29,7 +29,8 @@ else: no tracker issue, no session, no card, no event (LOB-201, part 1 of LOB-43
 ## How a user reaches it
 
 `SessionRpc.proposeDecomposition`, on the same `/rpc` endpoint as the rest of the session surface.
-No CLI or dashboard surface yet: approving proposals into tracker issues is LOB-202.
+No CLI or dashboard surface yet. Approving proposals into tracker issues is `approveProposals`
+([approve-proposals.md](approve-proposals.md), LOB-202).
 
 ## What proves it
 
