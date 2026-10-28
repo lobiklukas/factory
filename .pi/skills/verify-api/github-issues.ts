@@ -33,6 +33,8 @@
 //      issue labelled by a user whose role on the repo is read opens nothing, and the reason names
 //      them and their role; one labelled by a writer opens its session. Both roles were asked of
 //      the fake's collaborator-permission endpoint, with the token
+//  14. on that route, a writer adding `bug` to an issue a reader labelled is 202 ignored: the added
+//      label is not the trigger label, so it cannot reclaim the reader's refusal and open a session
 //
 // `unconfigured`: a delivery signed with the empty key — what an unset secret degrades to — is 503
 // naming `GITHUB_WEBHOOK_SECRET`, and opens nothing.
@@ -144,8 +146,11 @@ const issuePayload = (over: {
   readonly pullRequest?: boolean;
   /** Who opened or labelled it (GitHub's `sender`); absent leaves it out, as the older checks do. */
   readonly sender?: string;
+  /** The label a `labeled` delivery just added (GitHub's `label`); absent leaves it out. */
+  readonly added?: string;
 }): Record<string, unknown> => ({
   action: over.action ?? "opened",
+  ...(over.added === undefined ? {} : { label: { name: over.added } }),
   ...(over.sender === undefined
     ? {}
     : {
@@ -584,6 +589,46 @@ const program = Effect.gen(function* () {
         (request) => request.authorization === "Bearer ghs-drive-token",
       ),
     `reader=${JSON.stringify(byReader.body)} writer=${JSON.stringify(byWriter.body)} asked=${JSON.stringify(asked)}`,
+  );
+
+  // 14: a writer's unrelated label does not reclaim a reader's refused trigger label.
+  const readerLabel = yield* Effect.promise(() =>
+    post(
+      "trigger label added by a reader",
+      "issues",
+      issuePayload({
+        action: "labeled",
+        number: 22,
+        labels: [trustedLabel],
+        added: trustedLabel,
+        sender: "verify-reader",
+      }),
+    ),
+  );
+  const writerTriage = yield* Effect.promise(() =>
+    post(
+      "unrelated label added by a writer",
+      "issues",
+      issuePayload({
+        action: "labeled",
+        number: 22,
+        labels: [trustedLabel, "bug"],
+        added: "bug",
+        sender: "verify-writer",
+      }),
+    ),
+  );
+  const askedAfter = ledger().requests.filter((request) =>
+    request.path.endsWith("/permission"),
+  );
+  assert(
+    "a writer adding an unrelated label to an issue a reader labelled is 202 ignored: no session, and the writer's role is not asked",
+    readerLabel.status === 200 &&
+      field(readerLabel, "status") === "skipped" &&
+      writerTriage.status === 202 &&
+      (yield* sessionCount) === beforeTrust + 1 &&
+      askedAfter.length === asked.length + 1,
+    `reader=${JSON.stringify(readerLabel.body)} writer=${writerTriage.status} ${JSON.stringify(writerTriage.body)} asked=${askedAfter.length - asked.length}`,
   );
   yield* routes.removeTriggerRoute({ id: trustRoute.id });
 

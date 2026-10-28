@@ -46,6 +46,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import {
   resolveMapping,
+  ruleClaims,
   TRIGGER_ACTION,
   type TriggerAuthor,
   TriggerError,
@@ -259,6 +260,19 @@ const mentionPattern = (mention: string): RegExp =>
     "i",
   );
 
+/**
+ * The label a `labeled` delivery reports as just added (`payload.label.name`, or a bare string in a
+ * hand-written payload), as opposed to every label the issue now carries.
+ */
+const labelAdded = (
+  body: Record<string, unknown> | undefined,
+): string | undefined => {
+  const label = body?.["label"];
+  return typeof label === "string"
+    ? label
+    : stringField(asRecord(label), "name");
+};
+
 /** What the route does with one `issues` or `issue_comment` payload. */
 export type GitHubIssueIntake =
   /** Start work: hand the seam this delivery. */
@@ -274,7 +288,8 @@ export type GitHubIssueIntake =
  * chatter record no delivery:
  *
  * - **a `factory` label**: an issue `opened` or `labeled` — `githubDelivery`'s two starting actions;
- *   the rule's label picks the repo's work, as it does for every adapter;
+ *   the rule's label picks the repo's work, as it does for every adapter. A `labeled` delivery asks
+ *   only when the label it added (`payload.label`) is one a rule claims;
  * - **an `@factory` mention**: a comment *created* on an issue whose text mentions `mention`. The
  *   mention is the same ask as the label, so the event carries the handle (`factory`) as one more
  *   label, and a rule on `factory` claims it. Its key is the issue's, as the label's is, so asking
@@ -316,11 +331,29 @@ export const githubIssueIntake = (input: {
       );
     }
     const delivery = githubDeliveryFor(input.rules)(input.payload);
-    return delivery === undefined
-      ? refused(
-          "the payload is not an issue event: it names no issue, repository or action, or it is a pull request",
-        )
-      : { _tag: "delivery", delivery };
+    if (delivery === undefined) {
+      return refused(
+        "the payload is not an issue event: it names no issue, repository or action, or it is a pull request",
+      );
+    }
+    // A `labeled` delivery's sender applied `payload.label`, not every label the issue carries: only
+    // a label a rule claims is their ask. Otherwise a writer adding `bug` to an issue a stranger
+    // labelled `factory` would reclaim the stranger's untrusted-author skip under the issue's key and
+    // be judged as if they had asked (S-trigger-trust-gating), as Linear's `addedAClaimedLabel` keeps
+    // an added `P1` from counting.
+    const added = labelAdded(body);
+    if (
+      action === "labeled" &&
+      added !== undefined &&
+      !input.rules.some((rule) =>
+        ruleClaims(rule, { ...delivery.event, labels: [added] }),
+      )
+    ) {
+      return ignored(
+        `the label added, "${added}", is not one a rule claims; adding it to an issue asks for nothing, whatever labels the issue already carries`,
+      );
+    }
+    return { _tag: "delivery", delivery };
   }
 
   const issue = asRecord(body?.["issue"]);
@@ -632,8 +665,10 @@ const GitHubPermissionAnswer = Schema.Struct({
  * GitHub answers `200` with the legacy `permission` (`admin`, `write`, `read`, `none`) and the
  * `role_name` (`maintain` and `triage` included), which `githubRoleOf` reads. A `404` — GitHub
  * knows no such user, or the token cannot see the repo — is `none`, a refusal the reason names; any
- * other answer, or none, is `author-check`, which fails the delivery so the sender retries: an
- * outage must neither admit a stranger nor record a trusted author's issue as refused for good.
+ * other answer, or none, is `author-check`, which fails the delivery (`500`) and gives its claim
+ * back: an outage must neither admit a stranger nor record a trusted author's issue as refused for
+ * good. GitHub does not redeliver a failed webhook by itself, so the issue starts when an admin
+ * redelivers it or the label is removed and added again, each judged afresh.
  */
 export const GitHubAuthorPermissions = (
   config: Pick<GitHubConfig, "apiUrl"> = {},

@@ -20,7 +20,10 @@
  * the item's age. Each starts with a fixed phrase (`UNTRUSTED_AUTHOR_PATTERN`,
  * `CREATED_BEFORE_PATTERN`), so a delivery keyed by its work reclaims it: a stranger who labels an
  * issue first must not stop the trusted person who labels it next. A lookup that cannot answer is a
- * `TriggerError` (`author-check`) the sender retries — never an admission.
+ * `TriggerError` (`author-check`) that fails the delivery and gives its claim back — never an
+ * admission. Linear retries a failed delivery by itself; GitHub does not, so there the next
+ * delivery under the issue's key (a manual redelivery, or the label removed and added again) is
+ * judged afresh.
  */
 import { Context, Effect, Option } from "effect";
 import type { RepoSlug } from "@repo/domain/Session";
@@ -78,7 +81,11 @@ export const githubRoleOf = (answer: {
 
 /** What the gate needs of a source to judge an author it does not list: GitHub's role, today. */
 export type TriggerAuthorPermissionsShape = {
-  /** The role `login` holds on `repo`; a failure is `author-check`, which the sender retries. */
+  /**
+   * The role `login` holds on `repo`; a failure is `author-check`, which fails the delivery and gives
+   * its claim back (GitHub does not redeliver by itself: a manual redelivery or a relabel is judged
+   * afresh).
+   */
   readonly githubRole: (input: {
     readonly repo: RepoSlug;
     readonly login: string;
@@ -124,7 +131,16 @@ export const authorText = (author: TriggerAuthor): string => {
   return handle === "" || handle === id ? id : `${handle} (${id})`;
 };
 
-/** Whether the allowlist names the author: by id exactly, or by login without regard to case. */
+/** An entry of digits alone: a numeric id, which never names a login. */
+const NUMERIC_ENTRY = /^\d+$/;
+
+/**
+ * Whether the allowlist names the author: by id exactly, or by login without regard to case. An
+ * entry of digits alone names an id only, never a login: a GitHub user's numeric id is the stable
+ * way to list them (a login can be renamed and re-registered), and GitHub logins may be all digits,
+ * so `583231` must not also admit whoever registers the login `583231`. A numeric login is listed by
+ * its account's id instead.
+ */
 export const authorListed = (
   authors: ReadonlyArray<string>,
   author: TriggerAuthor,
@@ -132,7 +148,8 @@ export const authorListed = (
   authors.some(
     (entry) =>
       entry === author.id ||
-      (author.login !== undefined &&
+      (!NUMERIC_ENTRY.test(entry) &&
+        author.login !== undefined &&
         author.login !== "" &&
         entry.toLowerCase() === author.login.toLowerCase()),
   );

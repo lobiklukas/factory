@@ -32,7 +32,7 @@ import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Exit, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
-import { githubDeliveryFor } from "./GitHub";
+import { githubDeliveryFor, githubIssueIntake } from "./GitHub";
 import { linearDeliveryFor } from "./Linear";
 import { TriggerRoutes, TriggerRoutesLive } from "./TriggerRoutes";
 import {
@@ -459,6 +459,80 @@ describe("the trust gate on GitHub", () => {
         expect(harness.asked).toEqual(["reader", "writer"]);
       },
       { roles: { reader: "read", writer: "write" } },
+    );
+  }, 60_000);
+
+  it("does not let a writer adding an unrelated label reclaim a stranger's refused trigger label", async () => {
+    await withSeam(
+      async (harness) => {
+        const name = `gh-relabel-${runId}`;
+        await harness.addRoute({
+          label: name,
+          repo: ghRepo,
+          prompt: "{{title}}",
+          trust: { githubPermission: "write" },
+        });
+        const intake = async (body: Record<string, unknown>) =>
+          githubIssueIntake({
+            event: "issues",
+            payload: body,
+            rules: await harness.rules(),
+          });
+        const issue = (labels: ReadonlyArray<string>) => ({
+          number: 5,
+          title: "GitHub issue 5",
+          body: "A stranger's words.",
+          labels: labels.map((label) => ({ name: label })),
+          created_at: "2026-10-28T09:00:00Z",
+        });
+
+        // A stranger's `factory` label (or an issue form that applied it) is refused.
+        const stranger = await intake({
+          action: "labeled",
+          label: { name },
+          issue: issue([name]),
+          sender: { login: "stranger", id: 51, type: "User" },
+          repository: { full_name: ghRepo },
+        });
+        if (stranger._tag !== "delivery") throw new Error(stranger._tag);
+        const refused = await harness.deliver(stranger.delivery);
+        expect(refused.status).toBe("skipped");
+        expect(refused.reason).toMatch(/^untrusted author stranger \(51\)/);
+
+        // A writer triaging it with `bug` asked for nothing: the intake ignores the delivery, so the
+        // stranger's skip is never reclaimed under the issue's key.
+        const triage = await intake({
+          action: "labeled",
+          label: { name: "bug" },
+          issue: issue([name, "bug"]),
+          sender: { login: "writer", id: 52, type: "User" },
+          repository: { full_name: ghRepo },
+        });
+        expect(triage._tag).toBe("ignored");
+        expect(harness.created).toHaveLength(0);
+        expect((await recorded(stranger.delivery.requestId))?.status).toBe(
+          "skipped",
+        );
+
+        // The writer applying the trigger label themselves is their ask, and reclaims the skip.
+        const relabel = await intake({
+          action: "labeled",
+          label: { name },
+          issue: issue([name, "bug"]),
+          sender: { login: "writer", id: 52, type: "User" },
+          repository: { full_name: ghRepo },
+        });
+        if (relabel._tag !== "delivery") throw new Error(relabel._tag);
+        expect(relabel.delivery.requestId).toBe(stranger.delivery.requestId);
+        const admitted = await harness.deliver(relabel.delivery);
+        expect(admitted).toMatchObject({
+          status: "processed",
+          replayed: false,
+        });
+        expect(harness.created).toHaveLength(1);
+        expect(harness.asked).toEqual(["stranger", "writer"]);
+      },
+      { roles: { stranger: "triage", writer: "write" } },
     );
   }, 60_000);
 

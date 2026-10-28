@@ -81,6 +81,18 @@ describe("the allowlist", () => {
     expect(authorListed(["user-a"], { id: "USER-A" })).toBe(false);
   });
 
+  it("reads an entry of digits alone as an id, never as a login", () => {
+    // Listing octocat by id must not admit someone who registered the login `583231`.
+    expect(authorListed(["583231"], { id: "999", login: "583231" })).toBe(
+      false,
+    );
+    // Nor does a numeric login, listed, admit the account whose id it is.
+    expect(authorListed(["583231"], { id: "583231", login: "octocat" })).toBe(
+      true,
+    );
+    expect(authorListed(["42"], { id: "583231", login: "42" })).toBe(false);
+  });
+
   it("names an author in a reason by handle and id, or by id alone", () => {
     expect(authorText({ id: "583231", login: "octocat" })).toBe(
       "octocat (583231)",

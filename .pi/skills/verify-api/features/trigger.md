@@ -190,15 +190,24 @@ stored as one `jsonb` column, migration `0042`); a rule with none admits what it
 
 - `authors` — the delivery's author (`TriggerEvent.author`: Linear's `actor` id, or its e-mail as the
   login; GitHub's `sender` or a comment's `user`, by numeric id or login; the generic body's `author`)
-  must be listed. An event that names no author is refused.
+  must be listed. An entry of digits alone names an id, never a login (a GitHub login may be all
+  digits). An event that names no author is refused.
 - `githubPermission` — or, for a GitHub event, the author's role on the repo must be at least this
   (`triage`, `write`, `maintain`, `admin`), read per delivery from
   `GET /repos/{owner}/{repo}/collaborators/{username}/permission` (`GitHubAuthorPermissions`). Asked
   only for an author the list does not name. A lookup that cannot answer fails the delivery
   `author-check` (`500`, the claim given back); a seam with no permission port fails the same way.
+  Linear retries a failed delivery by itself; GitHub does not, so there the issue starts on a manual
+  redelivery or when the label is removed and added again.
 - `createdAfter` — the item (`TriggerEvent.createdAt`: a Linear issue's `data.createdAt`, a GitHub
-  issue's `created_at`) must be at least this old: an instant, or `enabled`, a stored route's own
-  creation. An env rule naming `enabled` refuses the boot. An undated item is refused.
+  issue's `created_at`) must have been created at or after this instant: an ISO-8601 instant with an
+  explicit offset (`Z` or `±hh:mm`), or `enabled`, a stored route's own creation. An env rule naming
+  `enabled` refuses the boot. An undated item is refused.
+
+A GitHub `labeled` delivery asks for work only when the label it added (`payload.label`) is one a
+rule claims: adding `bug` to an issue that already carries `factory` is `202` ignored, so a writer's
+triage cannot reclaim a stranger's untrusted-author skip and be judged as if they had applied the
+trigger label.
 
 The gate runs after the mapping (it is the mapped rule's) and before the registry, the board and
 the session — a card rule included. A refusal is a recorded skip whose reason names the author

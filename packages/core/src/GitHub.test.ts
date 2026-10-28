@@ -494,6 +494,27 @@ describe("githubIssueIntake", () => {
     }
   });
 
+  it("delivers a labeled event only when the label it added is one a rule claims", () => {
+    const claimed = issues({
+      ...payload({ action: "labeled" }),
+      label: { name: "factory" },
+    });
+    expect(claimed._tag).toBe("delivery");
+    // The issue already carries `factory`; adding `bug` is someone else's triage, not an ask.
+    const unrelated = issues({
+      ...payload({ action: "labeled" }),
+      label: { name: "bug" },
+    });
+    expect(unrelated._tag).toBe("ignored");
+    if (unrelated._tag === "ignored") {
+      expect(unrelated.reason).toContain('"bug"');
+    }
+    // `opened` carries no added label; it is judged on every label the issue was opened with.
+    expect(
+      issues({ ...payload({ action: "opened" }), label: { name: "bug" } })._tag,
+    ).toBe("delivery");
+  });
+
   it("ignores an issue event that starts no work, so an edit cannot claim the issue's key", () => {
     for (const action of ["edited", "closed", "unlabeled", "assigned"]) {
       const intake = issues(payload({ action }));

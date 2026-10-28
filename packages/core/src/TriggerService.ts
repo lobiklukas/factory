@@ -1030,6 +1030,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 hidden: title.hidden + body.hidden + (prompt?.hidden ?? 0),
                 comments:
                   title.comments + body.comments + (prompt?.comments ?? 0),
+                markup: title.markup + body.markup + (prompt?.markup ?? 0),
               });
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
@@ -1044,7 +1045,8 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
               // The rule's trust gate: who may start work through it, and which items. A refusal is a
               // recorded skip naming the author or the item's age; a lookup that cannot answer fails
-              // the delivery (`author-check`), so the claim is given back and the sender retries.
+              // the delivery (`author-check`), so the claim is given back for the next delivery
+              // (Linear's retry; on GitHub, a manual redelivery or a relabel).
               const untrusted = yield* trustRefusal(
                 matched,
                 event,

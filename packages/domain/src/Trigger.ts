@@ -139,12 +139,20 @@ export const GitHubPermission = Schema.Literals([
 ]);
 export type GitHubPermission = typeof GitHubPermission.Type;
 
-/** An ISO-8601 instant `Date.parse` reads: what `TriggerTrust.createdAfter` names when it is not `enabled`. */
+/**
+ * An ISO-8601 date-time with an explicit offset (`Z` or `±hh:mm`): what `TriggerTrust.createdAfter`
+ * names when it is not `enabled`. The offset is required, because `Date.parse` reads an offset-less
+ * or free-form string (`October 28, 2026`) in the host's own time zone, and one configured rule must
+ * gate the same instant on every host.
+ */
+const TRUST_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i;
+
 const TrustInstant = Schema.String.check(
   Schema.makeFilter((value: string) =>
-    Number.isFinite(Date.parse(value))
+    TRUST_INSTANT.test(value) && Number.isFinite(Date.parse(value))
       ? undefined
-      : "an ISO-8601 instant, like 2026-10-28T00:00:00Z",
+      : "an ISO-8601 instant with an offset, like 2026-10-28T00:00:00Z",
   ),
 );
 
