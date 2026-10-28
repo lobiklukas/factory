@@ -4521,6 +4521,7 @@ describe("TaskService — a card settled by its PR (C20)", () => {
             let task = yield* s.create({ boardId, title: "c20", actor: LUKAS });
             for (const to of ["specifying", "planning", "building"]) {
               if (to === "planning") task = yield* specified(s, task);
+              if (to === "building") task = yield* planned(s, task);
               task = yield* s.move({
                 taskId: task.id,
                 expectedRevision: task.revision,
