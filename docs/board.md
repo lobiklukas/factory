@@ -436,13 +436,19 @@ base other than that one, starts afresh as before. Git checks a branch out in on
 at a time, so the newest run's worktree takes it over and the earlier run's is left on a detached
 HEAD at the commit it was on, its files and uncommitted edits untouched. So that nothing commits on
 that detached HEAD, a start is refused (`busy`, naming the run) while a run on the card's branch is
-still busy in this process, and a message to a run whose worktree was handed over is refused, naming
+still busy — in this process, or in another API process on the same database, which its presence
+lease and the activity index it writes say (F13) — and a message to a run whose worktree was handed over is refused, naming
 the later run that took the branch. A run of any column that continues the branch while the card has
 an unmerged PR from it takes the PR step on settle (a fix run in `review` included), so its commits
 reach the PR. A later run's PR step, finding no PR in its own log, adopts the PR an earlier run of
-the card recorded on the same head and base (unmerged): it is measured, capped and pushed as an open
-is — so its commits reach the PR — but GitHub is asked for nothing, the card's PR is recorded in its
-log, and the answer is `already-open`. A workspace release keeps a branch another unreleased session
+the card recorded on the same head and base (neither merged nor closed): it is measured, capped and
+pushed as an open is — so its commits reach the PR — but GitHub is asked for nothing, the card's PR is
+recorded in its log, and the answer is `already-open`. A PR closed without merging is recorded on its
+sessions (`sessions.pr_closed_at`, F12, from the signed delivery or the PR-state read) and is not
+adopted: the next run opens a fresh PR from the card's branch. The card's PR steps are serialized per
+card by a Postgres advisory lock as well as in-process (F13), so two API processes stepping the same
+card's PR open one PR and the second adopts it. The agent's own `git push` may publish the branch its
+worktree is bound to — the card's — and no other `refs/heads/factory/*` (F15). A workspace release keeps a branch another unreleased session
 is bound to, so discarding one run never deletes the branch the others work on.
 
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
