@@ -423,8 +423,16 @@ failed opens none and says so. A settled run whose step opened nothing — stopp
 diff over the cap, a remote branch the push may not overwrite, a failure — says so in its transcript
 (no-change's line, or `factory.pr.not-opened`) and as a note by the run on its card, which the card's
 next run is told; a later settle at the same commit an even branch was found at is not stepped again.
-The PR opens at the first settle that finds a change: commits a later run of the same session makes
-are not pushed by a later settle yet (the step answers `already-open` without pushing), a follow-up.
+The PR opens at the first settle that finds a change, and every later settle of the same session
+pushes the commits it made since onto that PR (F14): the step measures, caps, scans and pushes the
+new tip fast-forward only, moves the record's commit to it and answers `updated`; a settle with no
+new commit is answered from the log and reaches no forge, and a refused push (`over-cap`,
+`non-fast-forward`) is said in the same words as for an open, naming the PR, which keeps its record.
+`pr_link` on the latest run's own PR is met only at the commit it was published at. A settle no
+process saw — the process died between the run settling and its step, or inside the step — is
+stepped at the next boot (F16, `settlePullRequestsAtBoot`), for the sessions the same rule declares
+that record no PR, unless the step already answered no-change or not-opened at the branch's current
+tip.
 
 Built (C19): a card's runs share one branch and one PR (`packages/core/src/cardBranch.ts`). The card's
 branch is its first change run's — a run started in a column that requires `pr_link` or

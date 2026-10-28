@@ -3,7 +3,9 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+Status reflects the last verified runs: a card run's PR across later settles and a killed process
+(F14, F16, 2026-10-28, `agent/F14-F16`), API on `:9510`, the GitHub fake on `:9511`, the git forge on
+`:9512`: `./pr-settle.sh` exit 0 (**21** PASS) ([pr-settle.md](pr-settle.md)). Before it, the planning run's plan (D10, 2026-10-28, `agent/D10`), API
 on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
 planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
 `./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
@@ -90,6 +92,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | definitions and board config            | passing | [definitions.md](definitions.md) |
 | `factory board define` (D4)             | passing | [define.md](define.md)           |
 | `factory board upgrade` + Upgrade (D5)  | passing | [upgrade.md](upgrade.md)         |
+| later settles push; a boot settles      | passing | [pr-settle.md](pr-settle.md)     |
 
 ## Deliberately absent
 

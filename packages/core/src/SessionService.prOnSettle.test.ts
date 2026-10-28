@@ -154,7 +154,10 @@ const repos = {
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-c18-sessions-"));
 
 const sessions = SessionServiceLive({
-  model: createFauxModelAccess({ fauxCommand: COMMAND }).access,
+  // Every run's turn, not only the session's first (LOB-52): a session sent on runs its command
+  // again, which is what commits once more on a `c18-again` repository (F14).
+  model: createFauxModelAccess({ fauxCommand: COMMAND, fauxEveryTurn: true })
+    .access,
   sessionRoot,
   prCap: { maxFiles: 2, maxLines: 1_000 },
   pullRequestOnSettle,
