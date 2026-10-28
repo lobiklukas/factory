@@ -93,6 +93,9 @@ and four concurrent defines taking v1–v4; `apps/api/src/Rpc/Task.test.ts` call
 NDJSON against the real skill table (a skill refused until `putSkill` puts it) and a role table;
 `apps/cli/src/commands/boardConfig.test.ts` the file decoding and the printed lines.
 
+A board created before the define keeps its pin; moving it to the new version, and its cards with it,
+is `factory board upgrade` ([upgrade.md](upgrade.md), D5).
+
 ## What it does not prove
 
 There is no dashboard editor (D6 builds on this RPC); a definition is authored from a file. Nothing

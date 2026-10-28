@@ -38,10 +38,16 @@ board-configuration umbrella).
 - A lane's disclosure (`[data-lane-settings-toggle=<column>]`, panel `[data-lane-settings=<column>]`)
   is closed by default and mounts its read only when opened, so a board nobody inspects never reads
   its config. It renders the same `ColumnSettings` and links to the page.
-- Read-only. Nothing on the page writes. **Edit as new version** (`[data-settings-edit]`, a link)
-  opens the editor on its own page ([definition-edit.md](definition-edit.md), D6). The drive
-  proves it: the page (`[data-board-settings-page]`) holds no form, input or button, and every RPC
-  the browser sends while on it is `getBoardConfig`, `listDefinitions` or one of the shell's own
+- Read-only but for one action. **Edit as new version** (`[data-settings-edit]`, a link) opens the
+  editor on its own page ([definition-edit.md](definition-edit.md), D6). **Upgrade this board**
+  (`[data-board-upgrade]`, D5) is offered only while a newer version exists, and is the page's one
+  write: `upgradeBoard`, which `.pi/skills/verify-board/upgrade.sh` drives
+  (`.pi/skills/verify-board/features/upgrade.md`). The drive proves the rest: the page
+  (`[data-board-settings-page]`) holds no form, input or button outside the Upgrade action, a board on
+  the newest version is offered no upgrade, and every RPC the browser sends while nobody presses it
+  is `getBoardConfig`, `listDefinitions`, the board's cards (`getBoard`, `listBoardCards`, and
+  `getDefinition` for a version a card pins other than the board's: the Upgrade action re-pins
+  cards left behind, D5) or one of the shell's own
   reads (the board page's getting-started checklist, C9, among them, as its poll can land after
   the click). Each skill name is a link (`[data-column-skill-link=<name>]`) to its skill page (D8,
   [skills.md](skills.md)).

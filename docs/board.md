@@ -64,6 +64,19 @@ also edit moves and gates. A diff against the pinned version shows before Save, 
 and leaves the board on its pin (`.pi/skills/verify-web/features/definition-edit.md`). The draft
 carries each column as stored, so a field the editor has no control for is kept.
 
+Built (D5): a board moves to a newer version of its definition — `upgradeBoard`, `factory board
+upgrade`, and **Upgrade this board** on the settings page — at the version the caller read it at
+(`StaleBoardVersion` otherwise). Only the pin moves: a new card pins the new version, and every card
+already on the board keeps the one it pinned, its moves and exits unchanged, so a card's pin still
+never changes under work in flight. Cards move only by an explicit migration (`migrateCards`, a column
+mapping): each card is re-pinned in the column its own maps to, with a `repinned` event and a new
+revision, or — when one has an unfinished run, sits in a column the mapping leaves out, or would land
+in a column of another kind — none is and the pin stays (`CardMigrationRefused`, naming every such
+card). A migration re-pins, it does not move: a column the new version still declares keeps its
+cards, and only one it renamed or dropped may be mapped elsewhere, so no card is carried past an exit
+it would have to meet in a move. Only a person upgrades a board; a run's actor is refused. The board page and `factory board ls` say when the cards pin more than one version
+(`.pi/skills/verify-board/features/upgrade.md`).
+
 **Seed migrations and authored versions share one id space.** The default pipeline's seeds write
 `default` at a fixed version with `ON CONFLICT (id, version) DO NOTHING` (0026 v4, 0038 v5). Since D4
 an operator may author `default` v6, and a later seed that writes `default` v6 would then do nothing,

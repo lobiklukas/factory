@@ -3635,9 +3635,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * retry of the same create read nothing before the first attempt committed, and would
        * otherwise count that attempt's run against itself and be refused naming its own session.
        * It is answered with that session instead (`existing`), as the read outside the lock would.
+       *
+       * The run's column (`column`, resolved by `startColumnFor` from `requested` before the lock)
+       * is resolved again under it: an upgrade that migrates the board's cards (D5) re-pins them
+       * under the same lock, and a start that waited on it would otherwise write a run in a column
+       * resolved from the version the card no longer pins — one the new version may not declare, so
+       * the run would be told no column and run ungated. A column that no longer resolves the same
+       * refuses the start (`busy`, or `invalid_input` when the card's version lacks the one asked
+       * for); nothing is written, and a retry resolves it afresh.
        */
       const withRunAdmitted = <A>(
         taskId: string | undefined,
+        requested: string | undefined,
         column: string | undefined,
         reviewing: boolean,
         requestId: string | undefined,
@@ -3669,6 +3678,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     );
                     const existing = raced[0];
                     if (existing !== undefined) return { existing };
+                  }
+                  const settled = yield* startColumnFor(taskId, requested);
+                  if (settled !== column) {
+                    return yield* new SessionErrorClass({
+                      code: "busy",
+                      message: `task ${taskId} was moved or re-pinned while its run started: the run would start in ${column}, and the card's pinned definition now puts it in ${settled}; start it again`,
+                    });
                   }
                   if (hit !== undefined && !reviewing) {
                     yield* countRefusal("at_capacity");
@@ -3778,6 +3794,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // re-derives the truth from the log rather than trusting the row.
           const admittedRun = yield* withRunAdmitted(
             input.taskId,
+            input.taskColumn,
             column,
             input.review !== undefined,
             input.requestId,
