@@ -56,6 +56,8 @@ type RouteRow = {
   readonly baseRef: string | null;
   readonly prompt: string;
   readonly startsWorkFor: ReadonlyArray<string> | null;
+  /** `NULL` is `session`, what every route meant before there was a card mode (LOB-254). */
+  readonly mode: string | null;
   readonly createdAt: string;
 };
 
@@ -63,7 +65,7 @@ type RouteRow = {
 const toRoute = (
   row: RouteRow,
 ): Effect.Effect<TriggerRoute, Schema.SchemaError> =>
-  Schema.decodeEffect(TriggerRoute)({
+  Schema.decodeUnknownEffect(TriggerRoute)({
     id: row.id,
     repo: row.repo,
     prompt: row.prompt,
@@ -72,6 +74,7 @@ const toRoute = (
     ...(row.team === null ? {} : { team: row.team }),
     ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
     ...(row.startsWorkFor === null ? {} : { startsWorkFor: row.startsWorkFor }),
+    ...(row.mode === null ? {} : { mode: row.mode }),
   });
 
 /**
@@ -84,7 +87,7 @@ export const readStoredRoutes = (
 ): Effect.Effect<ReadonlyArray<TriggerRoute>, SqlError | Schema.SchemaError> =>
   Effect.gen(function* () {
     const rows = yield* sql<RouteRow>`
-    SELECT id, label, team, repo, base_ref, prompt, starts_work_for,
+    SELECT id, label, team, repo, base_ref, prompt, starts_work_for, mode,
       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
     FROM trigger_routes
     ORDER BY CASE WHEN label IS NOT NULL AND team IS NOT NULL THEN 0
@@ -182,13 +185,15 @@ export const TriggerRoutesLive = Layer.effect(
       }
       const id = yield* mintTriggerRouteId;
       const rows = yield* sql<RouteRow>`
-        INSERT INTO trigger_routes (id, label, team, repo, base_ref, prompt, starts_work_for)
+        INSERT INTO trigger_routes (
+          id, label, team, repo, base_ref, prompt, starts_work_for, mode
+        )
         VALUES (
           ${id}, ${input.label ?? null}, ${input.team ?? null}, ${input.repo},
           ${input.baseRef ?? null}, ${input.prompt},
-          ${input.startsWorkFor ?? null}::text[]
+          ${input.startsWorkFor ?? null}::text[], ${input.mode ?? null}
         )
-        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for,
+        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for, mode,
           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
       `.pipe(Effect.mapError(storage("store trigger route")));
       return yield* storedRow(rows, id, "store trigger route");
@@ -201,7 +206,7 @@ export const TriggerRoutesLive = Layer.effect(
       // removed it and the other is told the route is gone.
       const rows = yield* sql<RouteRow>`
         DELETE FROM trigger_routes WHERE id = ${id}
-        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for,
+        RETURNING id, label, team, repo, base_ref, prompt, starts_work_for, mode,
           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
       `.pipe(Effect.mapError(storage("delete trigger route")));
       if (rows.length === 0) {

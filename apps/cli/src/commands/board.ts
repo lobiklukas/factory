@@ -545,6 +545,11 @@ export const bodyLines = (card: Task): ReadonlyArray<string> => {
   return [
     `base      ${card.baseRef ?? "-"}`,
     `external  ${card.externalRef ?? "-"}`,
+    // The issue's own link, when the card carries one (LOB-254): only then, so a card with none
+    // prints exactly what it did.
+    ...(card.externalUrl === undefined
+      ? []
+      : [`link      ${card.externalUrl}`]),
     ...(lines === undefined
       ? ["body      -"]
       : [

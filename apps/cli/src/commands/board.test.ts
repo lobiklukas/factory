@@ -126,6 +126,20 @@ describe("bodyLines (LOB-260)", () => {
     ]);
   });
 
+  it("prints the issue's link under its ref when the card carries one (LOB-254)", () => {
+    expect(
+      bodyLines(
+        card({
+          externalRef: "linear:iss-7",
+          externalUrl: "https://linear.app/acme/issue/ENG-7",
+        }),
+      ).slice(1, 3),
+    ).toEqual([
+      "external  linear:iss-7",
+      "link      https://linear.app/acme/issue/ENG-7",
+    ]);
+  });
+
   it("prints a dash for each a card does not have", () => {
     expect(bodyLines(card({}))).toEqual([
       "base      -",

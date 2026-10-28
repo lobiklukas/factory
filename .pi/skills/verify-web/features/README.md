@@ -3,9 +3,11 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-28, `chrome`, headless, API `:9510` / web `:3510` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 111/111 required checks
-passed, from the `agent/LOB-267` worktree against its own database on 5442, which adds LOB-267's
+Status reflects the last verified run (2026-10-28, `chrome`, headless, API `:9613` / web `:3610` —
+an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 112/112 required checks
+passed, from the `agent/LOB-254` worktree against its own database on 5442, which adds LOB-254's
+card-pane link to the issue a card was filed from (evidence `card-pane-external-link.png`,
+[card-pane.md](card-pane.md)). The run before it (`agent/LOB-267`, 111/111) added LOB-267's
 card-pane checks over a synthetic definition (todo → doing → done, gated; evidence
 `card-pane-synthetic-todo.png`, `card-pane-synthetic-doing.png`, [card-pane.md](card-pane.md)) and
 reads the default card's expected moves from its pinned definition over the API. The run before it

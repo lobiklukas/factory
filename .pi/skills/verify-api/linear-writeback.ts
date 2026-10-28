@@ -33,6 +33,17 @@
 // wrong signature is refused without a write.
 //  11. every request carried the configured key, verbatim
 //
+// The card path (LOB-254): a rule in `card` mode puts the issue on the repo's board instead of
+// opening a session, and the write-back follows the card's run.
+//
+//  12. a mapped Linear issue create files exactly one card in intake — external ref `linear:<id>`,
+//      the description as its body, the issue's link — opens no session, and writes nothing to
+//      Linear yet (the issue moves when the card's run opens its PR)
+//  13. a replay of that delivery and a second, distinct delivery for the same issue file no second
+//      card
+//  14. starting a run on the card and opening its PR moves the issue to In Review, with the PR as
+//      an attachment and exactly one comment carrying the PR link — and a retried PR step adds none
+//
 // Env: DATABASE_URL (via DatabaseLive), SESSION_ROOT, REPO_DIR, LINEAR_FAKE_URL, LINEAR_FAKE_LEDGER,
 // LINEAR_RUN_STAMP, LINEAR_LOSE_ACK_ISSUE, GITHUB_API_URL (read by the PR client), EVIDENCE_DIR.
 import { execSync } from "node:child_process";
@@ -43,6 +54,7 @@ import path from "node:path";
 import { BunServices } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Option, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { SqlClient } from "effect/sql/SqlClient";
 import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
 import type { SessionId } from "@repo/domain/Session";
 import type { TriggerRule } from "@repo/domain/Trigger";
@@ -57,10 +69,14 @@ import {
   SessionService,
   SessionServiceLive,
   staticTokenProvider,
+  TaskService,
+  TaskServiceLive,
+  TriggerCardsFromTaskService,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
 } from "@repo/core";
+import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { makeChecker, waitUntil } from "./harness.ts";
@@ -85,6 +101,10 @@ const LOSE_ACK_ISSUE = process.env["LINEAR_LOSE_ACK_ISSUE"] ?? `LOSE-${STAMP}`;
 
 const DELIVERED = `ENG-${STAMP}`;
 const NO_CHANGE = `NOP-${STAMP}`;
+/** The issue the card path files (LOB-254): its own label, so only the card rule claims it. */
+const CARDED = `CRD-${STAMP}`;
+const CARD_DESCRIPTION =
+  "## Goal\n\nFiled onto the board by the LOB-254 drive — **verbatim**.\n";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
@@ -95,13 +115,22 @@ const rules: ReadonlyArray<TriggerRule> = [
     baseRef: "main",
     prompt: "Linear issue {{key}}: {{title}}",
   },
+  // The card path (LOB-254): the issue lands on the repo's board, and no session opens.
+  {
+    label: "factory-card",
+    repo: REPO,
+    baseRef: "main",
+    prompt: "",
+    mode: "card",
+  },
 ];
 
 const observed: {
   sessions: Record<string, SessionId | null>;
+  card: unknown;
   pr: { number: number; url: string } | null;
   checks: Record<string, CheckRecord>;
-} = { sessions: {}, pr: null, checks: {} };
+} = { sessions: {}, card: null, pr: null, checks: {} };
 const assert = makeChecker(observed);
 
 /** One sync, shared by both write-backs, as `apps/api` wires it. */
@@ -122,17 +151,23 @@ const sessions = SessionServiceLive({
   Layer.provideMerge(database),
 );
 
+// The card port and the drive's own board reads: `TaskService` over the same database, which the
+// session layer below provides (`provideMerge`).
+const tasks = TaskServiceLive;
+
 const runtime = ManagedRuntime.make(
   Layer.mergeAll(
     TriggerServiceLive({ rules }).pipe(
       Layer.provide(
         Layer.mergeAll(
           TriggerSessionsFromSessionService,
+          TriggerCardsFromTaskService.pipe(Layer.provide(tasks)),
           LinearTriggerWriteBack.pipe(Layer.provide(sync)),
         ),
       ),
     ),
     sync,
+    tasks,
   ).pipe(Layer.provideMerge(sessions)),
 );
 
@@ -174,23 +209,38 @@ const writesTo = (key: string): number => {
 };
 
 /** Linear's `Issue` `create` webhook body for a labelled issue, as the adapter reads it. */
-const issuePayload = (key: string, title: string) => ({
+const issuePayload = (
+  key: string,
+  title: string,
+  label = "factory",
+  description = "Delegated from Linear in the LOB-15 drive.",
+) => ({
   action: "create",
   type: "Issue",
   webhookTimestamp: Date.now(),
+  url: `https://linear.app/acme/issue/${key}`,
   data: {
     id: key,
     identifier: key,
     title,
-    description: "Delegated from Linear in the LOB-15 drive.",
-    labels: [{ id: "label-factory", name: "factory" }],
-    labelIds: ["label-factory"],
+    description,
+    url: `https://linear.app/acme/issue/${key}/drive`,
+    labels: [{ id: `label-${label}`, name: label }],
+    labelIds: [`label-${label}`],
   },
 });
 
-const deliver = (key: string, title: string) =>
+const deliver = (
+  key: string,
+  title: string,
+  label?: string,
+  description?: string,
+) =>
   Effect.gen(function* () {
-    const delivery = linearDelivery(issuePayload(key, title), rules);
+    const delivery = linearDelivery(
+      issuePayload(key, title, label, description),
+      rules,
+    );
     if (delivery === undefined) {
       return yield* Effect.die(
         new Error(`the ${key} payload did not normalize`),
@@ -409,6 +459,105 @@ const run = Effect.gen(function* () {
       merged.body["synced"] === 1 &&
       issue(DELIVERED)?.state.name === "Done",
     `forged=${forged.status} merged=${JSON.stringify(merged)} state=${String(issue(DELIVERED)?.state.name)}`,
+  );
+
+  // 12–14: the card path (LOB-254). The board is the repo's one board, made as an operator would.
+  const board = yield* (yield* TaskService).createBoard({
+    repo: REPO,
+    definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+  });
+  /** Sessions any delivery about the carded issue opened: the card path must open none. */
+  const triggerSessions = Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{ count: number }>`
+      SELECT count(*)::int AS count FROM sessions
+      WHERE request_id LIKE ${`trigger:%${CARDED}%`}
+    `;
+    return rows[0]?.count ?? -1;
+  });
+  const carded = yield* deliver(
+    CARDED,
+    "File me on the board",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  const onBoard = yield* (yield* TaskService).list({ boardId: board.id });
+  const card = onBoard[0];
+  observed.card = card ?? null;
+  assert(
+    "a mapped Linear issue create files exactly one card in intake, with its ref, body and link, and opens no session",
+    carded.status === "processed" &&
+      carded.sessionId === undefined &&
+      carded.taskId === card?.id &&
+      onBoard.length === 1 &&
+      card?.column === "intake" &&
+      card.externalRef === `linear:${CARDED}` &&
+      card.body === CARD_DESCRIPTION &&
+      card.externalUrl === `https://linear.app/acme/issue/${CARDED}/drive` &&
+      (yield* triggerSessions) === 0,
+    `outcome=${JSON.stringify(carded)} cards=${JSON.stringify(onBoard)}`,
+  );
+  assert(
+    "filing the card writes nothing to Linear: the issue moves when the card's run opens its PR",
+    issue(CARDED) === undefined,
+    `issue=${JSON.stringify(issue(CARDED))}`,
+  );
+  if (card === undefined) {
+    return yield* Effect.die(new Error("no card: the rest proves nothing"));
+  }
+
+  const replayedCard = yield* deliver(
+    CARDED,
+    "File me on the board",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  const cardDelivery = linearDelivery(
+    issuePayload(CARDED, "File me on the board", "factory-card"),
+    rules,
+  );
+  // A second, distinct delivery for the same issue: a key the claim has never seen.
+  const distinctCard = yield* (yield* TriggerService).deliver({
+    requestId: `linear-writeback-distinct-${STAMP}`,
+    event: cardDelivery!.event,
+  });
+  const stillOne = yield* (yield* TaskService).list({ boardId: board.id });
+  assert(
+    "a replayed delivery and a second, distinct delivery for the same issue file no second card",
+    replayedCard.replayed &&
+      !distinctCard.replayed &&
+      distinctCard.taskId === card.id &&
+      stillOne.length === 1 &&
+      (yield* triggerSessions) === 0,
+    `replay=${JSON.stringify(replayedCard)} distinct=${JSON.stringify(distinctCard)} cards=${stillOne.length}`,
+  );
+
+  // The run starts from the card, as `factory board start --task` starts it.
+  const cardRun = yield* service.create({
+    title: card.title,
+    taskId: card.id,
+    taskColumn: card.column,
+    repo: REPO,
+    actor: "person:linear-writeback-drive",
+  });
+  observed.sessions[CARDED] = cardRun.id;
+  const cardSnapshot = yield* settled(cardRun.id);
+  commitChange(cardSnapshot.workspace.path);
+  const cardPr = yield* openPr(cardRun.id);
+  yield* openPr(cardRun.id);
+  const afterCardPr = issue(CARDED);
+  const cardPrUrl = cardPr.outcome === "opened" ? cardPr.url : "(no PR)";
+  assert(
+    "starting a run on the card and opening its PR moves the issue to In Review, with one PR comment",
+    cardPr.outcome === "opened" &&
+      cardSnapshot.workspace.baseRef === "main" &&
+      afterCardPr?.state.name === "In Review" &&
+      afterCardPr.attachments.length === 1 &&
+      afterCardPr.attachments[0]?.url === cardPrUrl &&
+      afterCardPr.comments.length === 1 &&
+      (afterCardPr.comments[0] ?? "").includes(cardPrUrl) &&
+      (afterCardPr.comments[0] ?? "").includes(`factory:${cardRun.id}:pr`),
+    `outcome=${cardPr.outcome} issue=${JSON.stringify(afterCardPr)}`,
   );
 
   // 11
