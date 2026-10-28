@@ -401,6 +401,26 @@ describe("attentionLines (LOB-264)", () => {
     expect(rows).toEqual([TASK, TASK, TASK]);
   });
 
+  it("prints a card-less approval with dashes for the card fields and the session's title (LOB-271)", () => {
+    const lines = attentionLines(
+      Schema.decodeSync(AttentionItem)({
+        sessionTitle: "Scratch\n  session",
+        reason: {
+          _tag: "approval",
+          sessionId: SESSION_A,
+          requestId: "ask-1",
+          action: "npm publish",
+          detail: "",
+          requestedAt: "2026-10-27T10:00:00.000Z",
+        },
+      }),
+    );
+    expect(lines).toEqual([
+      "approval  -  -  -  -  Scratch session",
+      `  ${SESSION_A} asks npm publish (request ask-1, since 2026-10-27T10:00:00.000Z)`,
+    ]);
+  });
+
   it("has a sentence for nothing, not a blank", () => {
     expect(NOTHING_NEEDS_A_PERSON).toBe("nothing needs a person");
   });

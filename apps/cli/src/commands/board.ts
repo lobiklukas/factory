@@ -722,13 +722,15 @@ const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
  */
 export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
   const { task, reason } = item;
+  // A card-less approval (LOB-271) belongs to a session no card owns: there is no card id, column
+  // or revision, so those fields read `-` and the session's title stands where the card's would.
   const head = [
     reason._tag,
-    task.id,
-    item.repo,
-    task.column,
-    `r${task.revision}`,
-    oneLine(task.title),
+    task?.id ?? "-",
+    item.repo ?? "-",
+    task?.column ?? "-",
+    task === undefined ? "-" : `r${task.revision}`,
+    oneLine(task?.title ?? item.sessionTitle ?? ""),
   ].join("  ");
   switch (reason._tag) {
     case "approval":
@@ -748,7 +750,7 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     case "gate":
       return [
         head,
-        `  ${reason.gate}: ${reason.sessionId} is idle; ${task.column} → ${reason.to} is a person's`,
+        `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`,
       ];
   }
 };
