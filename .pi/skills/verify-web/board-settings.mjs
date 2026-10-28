@@ -141,6 +141,14 @@ page.on("pageerror", (error) =>
  * makes. A write that a later change puts on the page shows up here as an unexpected tag.
  */
 const SETTINGS_READS = new Set(["getBoardConfig", "listDefinitions"]);
+// The board's cards (D5, `boardAtom`, once the definitions list has landed, so a capture can end
+// before them): the Upgrade action offers the pin itself, and a row per column, for the cards an
+// earlier upgrade left on an older version — `getDefinition` when a card pins another version.
+const SETTINGS_READS_SOMETIMES = new Set([
+  "getBoard",
+  "listBoardCards",
+  "getDefinition",
+]);
 const SHELL_READS = new Set([
   // The rail's "Needs a person" count (LOB-271) and the faux banner (LOB-272), on every page.
   "listAttention",
@@ -725,13 +733,16 @@ try {
   const unexpectedTags = [
     ...new Set(
       settingsRpcTags.filter(
-        (tag) => !SETTINGS_READS.has(tag) && !SHELL_READS.has(tag),
+        (tag) =>
+          !SETTINGS_READS.has(tag) &&
+          !SETTINGS_READS_SOMETIMES.has(tag) &&
+          !SHELL_READS.has(tag),
       ),
     ),
   ];
   observed.settingsRpcTags = [...new Set(settingsRpcTags)];
   assert(
-    "the settings page sends only reads: getBoardConfig, listDefinitions and the shell's own",
+    "the settings page sends only reads: getBoardConfig, listDefinitions, the board's cards and the shell's own",
     [...SETTINGS_READS].every((tag) => settingsRpcTags.includes(tag)) &&
       unexpectedTags.length === 0,
     unexpectedTags.length === 0

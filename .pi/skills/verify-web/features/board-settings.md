@@ -45,7 +45,9 @@ board-configuration umbrella).
   (`.pi/skills/verify-board/features/upgrade.md`). The drive proves the rest: the page
   (`[data-board-settings-page]`) holds no form, input or button outside the Upgrade action, a board on
   the newest version is offered no upgrade, and every RPC the browser sends while nobody presses it
-  is `getBoardConfig`, `listDefinitions` or one of the shell's own
+  is `getBoardConfig`, `listDefinitions`, the board's cards (`getBoard`, `listBoardCards`, and
+  `getDefinition` for a version a card pins other than the board's: the Upgrade action re-pins
+  cards left behind, D5) or one of the shell's own
   reads (the board page's getting-started checklist, C9, among them, as its poll can land after
   the click). Each skill name is a link (`[data-column-skill-link=<name>]`) to its skill page (D8,
   [skills.md](skills.md)).
