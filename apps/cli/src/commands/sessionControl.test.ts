@@ -11,11 +11,11 @@ import { SessionId } from "@repo/domain/Session";
 import { Effect, Result, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  anchorOf,
   awaitCompaction,
   compactionVerdict,
-  entryIds,
+  firstEntryAfter,
   forkLine,
-  newestEntryOf,
   resetLines,
 } from "./sessionControl";
 
@@ -50,6 +50,9 @@ describe("forkLine", () => {
   });
 });
 
+const idle = { busy: false } as const;
+const busy = { busy: true } as const;
+
 describe("the reset marker", () => {
   const entries = [
     entry("1", "user", "hello"),
@@ -58,21 +61,35 @@ describe("the reset marker", () => {
     entry("4", "reset", "second handoff"),
   ];
 
-  it("is the reset entry the session did not have before, not an older one", () => {
-    const before = entryIds(entries.slice(0, 3), "reset");
-    expect(newestEntryOf(entries, "reset", before)?.id).toBe("4");
+  it("is the reset entry written after the transcript's end, not an older one", () => {
+    const anchor = anchorOf(entries.slice(0, 3));
+    expect(firstEntryAfter(entries, "reset", anchor)?.id).toBe("4");
+  });
+
+  it("is the first reset after the anchor, not a later one", () => {
+    const more = [...entries, entry("5", "assistant"), entry("6", "reset")];
+    expect(
+      firstEntryAfter(more, "reset", anchorOf(entries.slice(0, 3)))?.id,
+    ).toBe("4");
   });
 
   it("is absent when nothing new was written", () => {
     expect(
-      newestEntryOf(entries, "reset", entryIds(entries, "reset")),
+      firstEntryAfter(entries, "reset", anchorOf(entries)),
     ).toBeUndefined();
   });
 
   it("is only ever of the kind asked for", () => {
     expect(
-      newestEntryOf(entries, "compaction", new Set<string>()),
+      firstEntryAfter(entries, "compaction", anchorOf([])),
     ).toBeUndefined();
+  });
+
+  it("is not an older entry that a truncated first read did not carry", () => {
+    // The first read held only the newest window (entries 3 and 4); the live read holds everything,
+    // including the reset at 2 that was always there.
+    const window = entries.slice(2);
+    expect(firstEntryAfter(entries, "reset", anchorOf(window))).toBeUndefined();
   });
 
   it("prints its id and the handoff as the transcript shows it", () => {
@@ -96,13 +113,17 @@ describe("the reset marker", () => {
 });
 
 describe("compactionVerdict", () => {
-  const none = new Set<string>();
+  const none = anchorOf([]);
 
   it("is the summary the task wrote, even while it is still listed", () => {
     const summary = entry("9", "compaction", "the summary");
     expect(
       compactionVerdict(
-        { entries: [entry("1", "user"), summary], tasks: [task("t1")] },
+        {
+          entries: [entry("1", "user"), summary],
+          tasks: [task("t1")],
+          live: idle,
+        },
         none,
         "t1",
       ),
@@ -112,8 +133,8 @@ describe("compactionVerdict", () => {
   it("is not the summary of an earlier compaction", () => {
     expect(
       compactionVerdict(
-        { entries: [entry("2", "compaction", "old")], tasks: [] },
-        new Set(["2"]),
+        { entries: [entry("2", "compaction", "old")], tasks: [], live: idle },
+        anchorOf([entry("2", "compaction", "old")]),
         "t1",
       ),
     ).toEqual({ state: "nothing" });
@@ -122,7 +143,53 @@ describe("compactionVerdict", () => {
   it("is running while the task is live and wrote nothing yet", () => {
     expect(
       compactionVerdict(
-        { entries: [entry("1", "user")], tasks: [task("t1")] },
+        { entries: [entry("1", "user")], tasks: [task("t1")], live: idle },
+        none,
+        "t1",
+      ),
+    ).toEqual({ state: "running" });
+  });
+
+  it("is not the summary of an older compaction that a truncated first read did not carry", () => {
+    // The first read was the newest window (2, 3); the live read has the compaction at 0 as well.
+    const live = [
+      entry("0", "compaction", "old"),
+      entry("1", "user"),
+      entry("2", "assistant"),
+      entry("3", "user"),
+    ];
+    expect(
+      compactionVerdict(
+        { entries: live, tasks: [task("t1")], live: idle },
+        anchorOf(live.slice(2)),
+        "t1",
+      ),
+    ).toEqual({ state: "running" });
+  });
+
+  it("is the first summary after the anchor, not a later automatic one", () => {
+    const first = entry("5", "compaction", "this press");
+    expect(
+      compactionVerdict(
+        {
+          entries: [
+            entry("1", "user"),
+            first,
+            entry("6", "compaction", "later"),
+          ],
+          tasks: [],
+          live: idle,
+        },
+        anchorOf([entry("1", "user")]),
+        "t1",
+      ),
+    ).toEqual({ state: "compacted", summary: first });
+  });
+
+  it("is still running when the task left the list but the session is busy", () => {
+    expect(
+      compactionVerdict(
+        { entries: [entry("1", "user")], tasks: [], live: busy },
         none,
         "t1",
       ),
@@ -132,7 +199,7 @@ describe("compactionVerdict", () => {
   it("is nothing when the task has left the list and wrote no summary", () => {
     expect(
       compactionVerdict(
-        { entries: [entry("1", "user")], tasks: [task("t2")] },
+        { entries: [entry("1", "user")], tasks: [task("t2")], live: idle },
         none,
         "t1",
       ),
@@ -142,10 +209,11 @@ describe("compactionVerdict", () => {
 
 describe("awaitCompaction", () => {
   const poll = { poll: "1 millis" } as const;
-  const input = { sessionId: PARENT, taskId: "t1", before: new Set<string>() };
+  const input = { sessionId: PARENT, taskId: "t1", anchor: anchorOf([]) };
   type Reading = {
     readonly entries: readonly TranscriptEntry[];
     readonly tasks: readonly SessionTask[];
+    readonly live?: { readonly busy: boolean };
   };
   const sequence = (readings: readonly Reading[]) => {
     const state = { reads: 0 };
@@ -154,7 +222,7 @@ describe("awaitCompaction", () => {
         readings[Math.min(state.reads, readings.length - 1)] ??
         ({ entries: [], tasks: [] } satisfies Reading);
       state.reads += 1;
-      return reading;
+      return { ...reading, live: reading.live ?? idle };
     });
     return { read, state };
   };
@@ -191,6 +259,35 @@ describe("awaitCompaction", () => {
       awaitCompaction(read, input, { ...poll, wait: "5 seconds" }),
     );
     expect(found).toEqual(summary);
+  });
+
+  it("does not answer nothing while the session is busy, and answers the summary that lands at the boundary", async () => {
+    const { read, state } = sequence([
+      { entries: [], tasks: [], live: busy },
+      { entries: [], tasks: [], live: busy },
+      { entries: [], tasks: [], live: busy },
+      { entries: [], tasks: [], live: busy },
+      { entries: [summary], tasks: [] },
+    ]);
+    const found = await Effect.runPromise(
+      awaitCompaction(read, input, { ...poll, wait: "5 seconds" }),
+    );
+    expect(found).toEqual(summary);
+    expect(state.reads).toBe(5);
+  });
+
+  it("needs the two nothing reads to be consecutive, a busy read in between starts over", async () => {
+    const { read, state } = sequence([
+      { entries: [], tasks: [] },
+      { entries: [], tasks: [], live: busy },
+      { entries: [], tasks: [] },
+      { entries: [], tasks: [] },
+    ]);
+    const found = await Effect.runPromise(
+      awaitCompaction(read, input, { ...poll, wait: "5 seconds" }),
+    );
+    expect(found).toBeUndefined();
+    expect(state.reads).toBe(4);
   });
 
   it("is a typed pending error naming the session and the task when the task never settles", async () => {

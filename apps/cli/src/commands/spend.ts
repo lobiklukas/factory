@@ -22,7 +22,11 @@ export const SPEND_HEADER = "repo  actor  sessions  cost";
 const sessionsWord = (n: number): string =>
   `${n} ${n === 1 ? "session" : "sessions"}`;
 
-/** One (repo, actor) pair as a row; the cost is last and `$`-prefixed, so a row splits on whitespace. */
+/**
+ * One (repo, actor) pair as a row, columns two spaces apart. A repo slug has no whitespace, but an
+ * actor may (`Alice Smith`), so a script reads a row from both ends: the repo is the first field, the
+ * cost the last (`$`-prefixed), the session count the one before it, and the actor what is between.
+ */
 export const spendRow = (row: SpendRow): string =>
   [
     row.repo ?? NO_VALUE,

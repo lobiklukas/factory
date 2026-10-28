@@ -34,6 +34,21 @@ describe("spendRow", () => {
     ).toBe("acme/web  alice  3  $0.3000");
     expect(spendRow({ sessions: 4, costTotal: 0 })).toBe("-  -  4  $0.0000");
   });
+
+  it("keeps an actor with spaces whole, readable from the row's two ends", () => {
+    const line = spendRow({
+      repo: slug("acme/web"),
+      actor: "Alice Smith",
+      sessions: 2,
+      costTotal: 0.5,
+    });
+    expect(line).toBe("acme/web  Alice Smith  2  $0.5000");
+    const fields = line.split(/\s+/);
+    expect(fields[0]).toBe("acme/web");
+    expect(fields.at(-1)).toBe("$0.5000");
+    expect(fields.at(-2)).toBe("2");
+    expect(fields.slice(1, -2).join(" ")).toBe("Alice Smith");
+  });
 });
 
 describe("filterSpend", () => {

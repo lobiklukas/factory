@@ -292,9 +292,19 @@ check "the cost is a real number, not zero (FAUX_COST)" \
   "$(echo "$TOTAL_LINE" | grep -q '\$0.0000$' && echo 1 || echo 0)" "$TOTAL_LINE"
 # The database outlives a run (and a page of `ls` is at most 100 sessions), so the rows are checked
 # against their own total here and against `ls` only for the repo this run made.
-check "the rows add up to the total" \
-  "$(awk '/^total/ { exit } /^[^ ]+  [^ ]+  [0-9]+  \$/ { sum += $3 } END { print sum }' "$EVIDENCE_DIR/session-spend.txt" | grep -qx "$TOTAL_SESSIONS" && echo 0 || echo 1)" \
-  "rows sum to $TOTAL_SESSIONS"
+TOTAL_COST="$(echo "$TOTAL_LINE" | awk '{ print $NF }' | tr -d '$')"
+# Each row's cost is rounded to four places and so is the total, so the sum may differ by a rounding
+# step per row; anything more is a total that disagrees with its rows.
+ROW_SUMS="$(awk -v total="$TOTAL_COST" '
+  /^total/ { exit }
+  /^[^ ]+  [^ ]+  [0-9]+  \$/ { sessions += $3; cost += substr($4, 2); rows += 1 }
+  END {
+    diff = cost - total; if (diff < 0) diff = -diff
+    printf "%d %.4f %d\n", sessions, cost, (diff <= rows * 0.0001 + 0.00005) ? 1 : 0
+  }' "$EVIDENCE_DIR/session-spend.txt")"
+check "the rows add up to the total, sessions and cost" \
+  "$([ "${ROW_SUMS%% *}" = "$TOTAL_SESSIONS" ] && [ "${ROW_SUMS##* }" = "1" ] && echo 0 || echo 1)" \
+  "rows sum to ${ROW_SUMS% *} against $TOTAL_SESSIONS sessions \$$TOTAL_COST"
 
 run_cmd "$W" spendrepo "$FACTORY spend --repo $REPO --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/session-spend-repo.txt"

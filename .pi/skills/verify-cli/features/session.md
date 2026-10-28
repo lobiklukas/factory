@@ -18,13 +18,17 @@ task, because the task exists and `factory watch` will show its summary.
 
 **Design notes.**
 
-- `--note` is the RPC's `handoff`. The marker is read back as the `reset` entry the session did not
-  have before the call, so the line names the entry the transcript shows. A reset admitted into a
+- `--note` is the RPC's `handoff`. The marker is read back as the first `reset` entry after the
+  transcript's last entry before the call (by position, because a session no process owns is first
+  read as its newest 200 entries only), so the line names the entry the transcript shows. A reset admitted into a
   running session has no marker yet (Pi Durable places it at the run's next boundary), and says so.
 - `compactSession` answers a task id only, and a transcript with no cut settles the task without a
-  summary. The command therefore waits on the same two signals the dashboard does: a new
-  `compaction` entry, or the task leaving the live task list. "Nothing" must hold on two reads in a
-  row, because a busy session's summary can trail the task.
+  summary. The command therefore waits on the same signals the dashboard does: a `compaction` entry
+  after the anchor, or the task leaving the live task list. "Nothing" is answered only for an idle
+  session and must hold on two reads in a row, because a busy session places its summary at the end
+  of its turn, which can trail the task. A busy session therefore waits (up to the two minutes).
+- `spend` rows put two spaces between columns; an actor may contain spaces, so read a row from both
+  ends (repo first, cost last, sessions before it).
 - `listSpend` takes no filter, so `--repo` and `--actor` choose rows of its answer client-side and the
   total line is those rows added. With no filter it is the server's own total. An absent repo or actor
   prints as `-`, as in `factory ls`.
@@ -43,6 +47,6 @@ and the spend total equals the session count and cost `factory ls` lists, narrow
 filter.
 
 **What it does not prove.** A reset or compaction admitted into a _running_ session (the marker and
-summary land at the next boundary): `resetLines` and `compactionVerdict` are unit-tested in
+summary land at the next boundary): `resetLines`, `firstEntryAfter` and `compactionVerdict` (busy, truncated first read) are unit-tested in
 `apps/cli/src/commands/sessionControl.test.ts`, and the RPC side is `verify-api`'s reset and compact
 features.
