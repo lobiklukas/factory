@@ -12,8 +12,10 @@ import { followSession, formatDollars } from "../transcript";
  *
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
- * `factory approve` decides as `cli`). The workspace line is the server's own answer for where the work will
- * live, so the run proves the read path as well as the write.
+ * `factory approve` decides as `cli`), and `--model` the model it runs on (LOB-274; one of
+ * `getServerInfo`'s models, otherwise the server's default or the column role's). The workspace and
+ * model lines are the server's own answers for where the work will live and what it runs on, so the
+ * run proves the read path as well as the write.
  */
 export const runCommand = Command.make(
   "run",
@@ -37,6 +39,12 @@ export const runCommand = Command.make(
       Flag.withSchema(SessionBudgetCap),
       Flag.optional,
     ),
+    model: Flag.String("model").pipe(
+      Flag.withDescription(
+        "Model the session runs on, as provider/modelId (one the server serves); defaults to the server's",
+      ),
+      Flag.optional,
+    ),
     actor: Flag.String("actor").pipe(
       Flag.withDescription("Who the session's spend is attributed to"),
       Flag.withSchema(SessionActor),
@@ -47,7 +55,15 @@ export const runCommand = Command.make(
       Flag.optional,
     ),
   },
-  Effect.fnUntraced(function* ({ task, repo, baseRef, budget, actor, api }) {
+  Effect.fnUntraced(function* ({
+    task,
+    repo,
+    baseRef,
+    budget,
+    model,
+    actor,
+    api,
+  }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -57,14 +73,20 @@ export const runCommand = Command.make(
         repo?: RepoSlug;
         baseRef?: string;
         budget?: number;
+        model?: string;
         actor: string;
       } = { actor };
       if (Option.isSome(repo)) input.repo = repo.value;
       if (Option.isSome(baseRef)) input.baseRef = baseRef.value;
       if (Option.isSome(budget)) input.budget = budget.value;
+      if (Option.isSome(model)) input.model = model.value;
 
       const session = yield* client.createSession(input);
       yield* Console.log(`session ${session.id}`);
+      // The model the server pinned the session to, not the flag echoed back (LOB-274).
+      if (session.model !== undefined) {
+        yield* Console.log(`model ${session.model}`);
+      }
       if (Option.isSome(budget)) {
         yield* Console.log(`budget ${formatDollars(budget.value)}`);
       }
@@ -112,6 +134,11 @@ export const runCommand = Command.make(
     {
       command: 'factory run "fix the flaky test" --budget 2',
       description: "Run a task that stops once it has spent $2",
+    },
+    {
+      command:
+        'factory run "rename the flag" --model anthropic/claude-haiku-4-5',
+      description: "Run a task on a cheaper model than the server's default",
     },
     {
       command: 'factory run "tighten the parser" --repo lobiklukas/factory',

@@ -3,6 +3,10 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory run --model` and `DEFAULT_MODEL` were verified **2026-10-28** from the `agent/LOB-274`
+worktree with `./model.sh` (API on `:9500`, the refused boot on `:9501`) — **12/12** checks — and
+`./drive.sh` (API on `:9502`, approve on `:9503`) at **23/23**, which adds the `model` line.
+
 `factory repo add --url` / `repo sync` / `factory doctor` (a URL-only repo cloned into the factory's cache)
 were verified **2026-10-28** from the `agent/LOB-265` worktree with `./clone.sh` (API on `:9660`, the
 loopback git forge on `:9661`) — **21/21** checks.
@@ -38,6 +42,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | Feature                                         | Status  | File                                                            |
 | ----------------------------------------------- | ------- | --------------------------------------------------------------- |
 | `factory run`                                   | passing | [run.md](run.md)                                                |
+| `factory run --model`, `DEFAULT_MODEL`          | passing | [model.md](model.md) (`model.sh`)                               |
 | `factory ls`                                    | passing | [ls.md](ls.md)                                                  |
 | `factory watch`                                 | passing | [watch.md](watch.md)                                            |
 | Typed errors                                    | passing | [errors.md](errors.md)                                          |
@@ -50,6 +55,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | Feature                                         | Status  | File                                                            |
 | ----------------------------------------------- | ------- | --------------------------------------------------------------- |
 | `factory run`                                   | passing | [run.md](run.md)                                                |
+| `factory run --model`, `DEFAULT_MODEL`          | passing | [model.md](model.md) (`model.sh`)                               |
 | `factory ls`                                    | passing | [ls.md](ls.md)                                                  |
 | `factory watch`                                 | passing | [watch.md](watch.md)                                            |
 | Typed errors                                    | passing | [errors.md](errors.md)                                          |

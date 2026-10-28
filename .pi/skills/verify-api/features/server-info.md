@@ -31,8 +31,14 @@ through `./up.sh` with `MODEL_BACKEND=faux`, `ROLE_MODELS=specifier=faux/faux-sp
 `getServerInfo` with the real RPC client and checks backend, selection, default model, role rows,
 catalog, gate, budget, the absent model credential mode, the two armed routes and the faux warning;
 creates a session and checks `faux/faux-1` on `createSession`, `getSession` and its `listSessions`
-row; and sends the same request as raw NDJSON, checking that no dummy's value is in the body. The
-shell checks the API's log for the same dummies.
+row; creates one with `model: faux/faux-spec` and checks it names that (LOB-274), and one with
+`model: faux/faux-unserved`, which must be `SessionError` `invalid_input` naming it with the session
+list unchanged; and sends the same request as raw NDJSON, checking that no dummy's value is in the
+body. The shell checks the API's log for the same dummies.
+
+`defaultModel` is `DEFAULT_MODEL` when the deployment sets it (LOB-274), resolved against the catalog
+at boot; one outside it fails the boot. `apps/api/src/boot.test.ts` boots both backends with a valid
+one and three invalid ones, and `.pi/skills/verify-cli/model.sh` drives it through `factory run`.
 
 The gate runs the rest: `apps/api/src/boot.test.ts` boots the real `index.ts` under
 `MODEL_BACKEND=faux` with a role table, with no forge credential (`forge: "none"`), and under an

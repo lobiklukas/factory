@@ -138,6 +138,19 @@ the flagged repo turned runnable in place, a session on the registered repo cut 
 behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
 `.verify/evidence/latest/repos/`.
 
+### The New session model picker
+
+```sh
+MODEL_API_PORT=9451 MODEL_WEB_PORT=3451 ./model.sh   # its own instance with DEFAULT_MODEL and a role model; leaves nothing running
+```
+
+The models a server serves are deployment settings, so `model.sh` starts its own API and dashboard
+with `DEFAULT_MODEL=faux/faux-cheap` and `ROLE_MODELS=specifier=faux/faux-spec`. `model.mjs` requires
+the sidebar's **Model** picker to offer the server's default and then exactly `getServerInfo.models`,
+a session started on `faux/faux-spec` to name it and to have sent every request to it (its
+`usage.models`, read over the API), and one started on the server's default to run `faux/faux-cheap`
+(`features/model-picker.md`). Evidence goes to `.verify/evidence/latest/model/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -182,19 +195,20 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                                 |
-| ------------------- | ----------------------------------------------------------------------- |
-| `up.sh`             | Launch isolated API + web, wait for readiness                           |
-| `down.sh`           | Stop only what `up.sh` started                                          |
-| `doctor.sh`         | Read-only health check of the instance                                  |
-| `drive.mjs`         | Browser drive + evidence capture                                        |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask                    |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)        |
-| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)      |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from           |
-| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`) |
-| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)  |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it       |
+| File                | Purpose                                                                   |
+| ------------------- | ------------------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                             |
+| `down.sh`           | Stop only what `up.sh` started                                            |
+| `doctor.sh`         | Read-only health check of the instance                                    |
+| `drive.mjs`         | Browser drive + evidence capture                                          |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask                      |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)          |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)        |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from             |
+| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)   |
+| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)    |
+| `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`) |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it         |
 
 ## Feature map
 

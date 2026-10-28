@@ -18,6 +18,9 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
+`model.sh` (the New session model picker, LOB-274) last passed **11/11** on 2026-10-28 from the
+`agent/LOB-274` worktree, API `:9505` / web `:3505`.
+
 | Feature                  | Status  | File                                                               |
 | ------------------------ | ------- | ------------------------------------------------------------------ |
 | Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)                           |
@@ -38,6 +41,7 @@ under Known gaps.
 | Repositories             | passing | [repos.md](repos.md) (`repos.sh`)                                  |
 | New card (board page)    | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`) |
 | Earlier history          | passing | [history.md](history.md) (`history.sh`)                            |
+| New session model picker | passing | [model-picker.md](model-picker.md) (`model.sh`)                    |
 
 ## Known gaps
 

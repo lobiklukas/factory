@@ -320,6 +320,13 @@ export type OpenSessionOptions = {
    * against the catalog `model` holds. Absent: every run talks to `model`.
    */
   readonly roles?: RoleModels;
+  /**
+   * The model the session was created on (LOB-274), already resolved against `model`'s catalog
+   * (`modelAccessFor`): it wins over the role's row and the deployment's model. Like either of them
+   * it only decides the open that creates the root; a later open keeps the model the root was pinned
+   * to. Absent: the role's model, else `model`.
+   */
+  readonly sessionModel?: ModelAccess;
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
   /**
@@ -469,12 +476,15 @@ const openSessionIn = (
     // The agent is pinned when the root is created, and only then (`harness.root` below writes it
     // into a root that does not exist yet), so a reopened run keeps talking to the model it started
     // on. Its compaction thresholds have to follow that same model rather than whatever the role
-    // table — or a replay's target — resolves to today, so the pinned one is read first.
+    // table — or a replay's target — resolves to today, so the pinned one is read first. A root that
+    // does not exist yet is pinned to the session's own model when it was created on one (LOB-274),
+    // ahead of the role's row, which is ahead of the deployment's model.
     const pinned = yield* readPinnedModel(options.storage);
+    const chosen = options.sessionModel ?? role.model;
     const model =
       pinned === undefined
-        ? role.model
-        : pinnedAccess(role.model, pinned.provider, pinned.modelId);
+        ? chosen
+        : pinnedAccess(chosen, pinned.provider, pinned.modelId);
     // The column's skills, as prompt sections beside the tools (B6). Installed before the tools so
     // the whole code extension — tools and sections — renders after the run's own instructions.
     const skills = options.run?.skills ?? [];
