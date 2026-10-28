@@ -29,7 +29,12 @@ export type PrAttempt =
   | { readonly _tag: "none" }
   | { readonly _tag: "opening" }
   | { readonly _tag: "opened"; readonly url: string }
-  | { readonly _tag: "refused"; readonly reason: string }
+  | {
+      readonly _tag: "refused";
+      readonly reason: string;
+      /** The page of the PR the forge named as already open for this branch, when it named one. */
+      readonly existing?: string;
+    }
   | { readonly _tag: "failed"; readonly reason: string };
 
 /** What an outcome-shaped step answer comes to: the link, or the reason there is none. */
@@ -59,8 +64,15 @@ export const attemptOfStep = (step: PullRequestStep): PrAttempt => {
 const isDeterminate = (error: {
   readonly _tag: string;
   readonly code?: unknown;
+  readonly status?: unknown;
+  readonly message: string;
 }): boolean => {
   switch (error._tag) {
+    case "PrError":
+      return forgeRefusalRepeats(
+        typeof error.status === "number" ? error.status : undefined,
+        error.message,
+      );
     case "CredentialError":
       return error.code === "missing" || error.code === "unsupported";
     case "SessionError":
@@ -68,6 +80,25 @@ const isDeterminate = (error: {
     default:
       return false;
   }
+};
+
+/**
+ * Whether a forge's HTTP refusal is one the same request would meet again (C7b). A 4xx is the forge's
+ * verdict on the request: a 422 (`A pull request already exists for o:b`, a head it does not have),
+ * a 401 or a 403 (a credential it will not take), a 404 (a repository it does not show this token).
+ * None of them changes by asking again, so "Retry pull request" would be a dead end offered forever.
+ *
+ * What does pass is not a verdict: no status at all (the forge was not reached), a 5xx, a 408, and a
+ * 429 or a 403 that says it is a rate limit, which clears with time.
+ */
+export const forgeRefusalRepeats = (
+  status: number | undefined,
+  message: string,
+): boolean => {
+  if (status === undefined || status < 400 || status >= 500) return false;
+  if (status === 408 || status === 425 || status === 429) return false;
+  if (status === 403 && /rate limit|abuse/i.test(message)) return false;
+  return true;
 };
 
 /**
@@ -81,19 +112,32 @@ export const attemptOfCause = (cause: Cause.Cause<unknown>): PrAttempt => {
     | {
         readonly _tag?: unknown;
         readonly code?: unknown;
+        readonly status?: unknown;
+        readonly existing?: unknown;
         readonly message?: unknown;
       }
     | undefined;
-  return typeof error?._tag === "string" &&
-    typeof error.message === "string" &&
-    error.message.length > 0
-    ? {
-        _tag: isDeterminate({ _tag: error._tag, code: error.code })
-          ? "refused"
-          : "failed",
-        reason: error.message,
-      }
-    : { _tag: "failed", reason: Cause.pretty(cause) };
+  if (
+    typeof error?._tag !== "string" ||
+    typeof error.message !== "string" ||
+    error.message.length === 0
+  ) {
+    return { _tag: "failed", reason: Cause.pretty(cause) };
+  }
+  const reason = error.message;
+  if (
+    !isDeterminate({
+      _tag: error._tag,
+      code: error.code,
+      status: error.status,
+      message: reason,
+    })
+  ) {
+    return { _tag: "failed", reason };
+  }
+  return typeof error.existing === "string" && error.existing !== ""
+    ? { _tag: "refused", reason, existing: error.existing }
+    : { _tag: "refused", reason };
 };
 
 /** The attempt a settled `openPullRequest` call comes to, as an atom's `AsyncResult` holds it. */
@@ -115,7 +159,12 @@ export type PrOffer =
   | { readonly _tag: "hidden" }
   | { readonly _tag: "available"; readonly retry?: string }
   | { readonly _tag: "opening" }
-  | { readonly _tag: "blocked"; readonly reason: string };
+  | {
+      readonly _tag: "blocked";
+      readonly reason: string;
+      /** The existing PR the forge named, to link beside the reason. */
+      readonly existing?: string;
+    };
 
 /**
  * Whether the control is offered, and in what state.
@@ -144,7 +193,11 @@ export const prOffer = (
   if (attempt._tag === "opening") return { _tag: "opening" };
   if (session.status !== "idle") return { _tag: "hidden" };
   if (attempt._tag === "refused")
-    return { _tag: "blocked", reason: attempt.reason };
+    return {
+      _tag: "blocked",
+      reason: attempt.reason,
+      ...(attempt.existing === undefined ? {} : { existing: attempt.existing }),
+    };
   if (attempt._tag === "failed")
     return { _tag: "available", retry: attempt.reason };
   return { _tag: "available" };
@@ -170,6 +223,22 @@ export const staleRefusal = (
   previous !== undefined &&
   previous !== "busy" &&
   status === "busy";
+
+/**
+ * Whether the server reports that the session has moved on since a refusal was made (C7b): its
+ * `lastActivityAt` now is not the one read right after the press settled. Any write to the session
+ * — a message, a run settling, a compaction, a fork's reset — advances it, so a run that happened
+ * with no pane watching (the CLI, another browser, a run that began and ended between two polls)
+ * still drops the refusal, which `staleRefusal` cannot see because it needs a status transition on
+ * this pane.
+ *
+ * `undefined` on either side means "not read": a mark that never landed, or an index with no row for
+ * the session, is no evidence of anything, so the refusal stays.
+ */
+export const activityMoved = (
+  mark: string | undefined,
+  current: string | undefined,
+): boolean => mark !== undefined && current !== undefined && mark !== current;
 
 /**
  * The title the PR is opened with: the session's own, as `factory pr` does by default. A session

@@ -1875,6 +1875,86 @@ describe("the model a session runs on", () => {
     expect(result.unchosenLog).toBe(`anthropic/${DEFAULT_ANTHROPIC_MODEL}`);
   }, 120_000);
 
+  /**
+   * A pin outlives the backend that chose it (E9): a session created under faux is pinned to
+   * `faux/faux-1`, and after the API restarts on anthropic that model is one this process does not
+   * serve. Its next send is refused as `model_unavailable` naming it, before anything is submitted;
+   * the summary and the list say `modelAvailable: false`, and a session on a served model says true.
+   * The same database is read by a second service built over a different catalog, which is exactly
+   * what a restart onto another backend is.
+   */
+  it("refuses a send to a session pinned to a model this process no longer serves, naming it, and starts no run (E9)", async () => {
+    const created = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const session = yield* sessions.create({ title: "pinned to faux" });
+        yield* sessions.send({
+          sessionId: session.id,
+          content: "say something under faux",
+        });
+        yield* waitUntil(
+          sessions.get(session.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the faux run to settle",
+        );
+        const served = (yield* sessions.get(session.id)).session;
+        const listed = find(
+          (yield* sessions.list({ limit: 100 })).sessions,
+          session.id,
+        );
+        yield* sessions.close;
+        return { id: session.id, served, listed };
+      }),
+    );
+    expect(created.served.model).toBe("faux/faux-1");
+    expect(created.served.modelAvailable).toBe(true);
+    expect(created.listed?.modelAvailable).toBe(true);
+
+    const after = await anthropicRuntime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const before = yield* sessions.get(created.id);
+        const exit = yield* Effect.exit(
+          sessions.send({ sessionId: created.id, content: "and now?" }),
+        );
+        const deferred = yield* Effect.exit(
+          sessions.sendDeferringSetup({
+            sessionId: created.id,
+            content: "and now, deferred?",
+          }),
+        );
+        const settled = yield* sessions.get(created.id);
+        const listed = find(
+          (yield* sessions.list({ limit: 100 })).sessions,
+          created.id,
+        );
+        const status = yield* sql<{ status: string }>`
+          SELECT status FROM session_activity WHERE session_id = ${created.id}
+        `;
+        yield* sessions.close;
+        return { before, exit, deferred, settled, listed, status };
+      }),
+    );
+
+    const expectRefused = (error: SessionError | undefined) => {
+      if (error === undefined) throw new Error("the send was not refused");
+      expect(error._tag).toBe("SessionError");
+      expect(error.code).toBe("model_unavailable");
+      expect(error.message).toContain("faux/faux-1");
+      expect(error.message).toContain(created.id);
+    };
+    expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.exit)));
+    expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.deferred)));
+    // No run: the transcript is the one the refused sends found, the session is idle, and it is not
+    // a busy turn about to fail inside pi-ai with "Unknown provider".
+    expect(after.settled.entries).toEqual(after.before.entries);
+    expect(after.settled.live.busy).toBe(false);
+    expect(after.status[0]?.status).toBe("idle");
+    expect(after.settled.session.modelAvailable).toBe(false);
+    expect(after.settled.session.model).toBe("faux/faux-1");
+    expect(after.listed?.modelAvailable).toBe(false);
+  }, 120_000);
+
   it("refuses a model the deployment does not serve as invalid_input naming it, and writes nothing", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -7707,6 +7787,73 @@ describe("a run's prompt comes from its column", () => {
       );
       return created.id;
     });
+
+  /**
+   * `listSessions` can be asked for one card's runs and for one session (C7b): what the card pane's
+   * run rows and the open-PR control's moved-on check read, instead of the newest page of every
+   * session. A card's older run is found however many sessions came after it, and a session filter
+   * answers that session's own index row.
+   */
+  it("lists one card's runs, and one session, when asked (C7b)", async () => {
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const board = yield* createBoard(2);
+        const card = yield* newCard(board.id, "building");
+        const other = yield* newCard(board.id, "building");
+        const first = yield* sessions.create({
+          taskId: card,
+          taskColumn: "building",
+        });
+        const second = yield* sessions.create({
+          taskId: card,
+          taskColumn: "building",
+        });
+        const otherRun = yield* sessions.create({
+          taskId: other,
+          taskColumn: "building",
+        });
+        // Newer than every run above, so the newest-first page puts them ahead.
+        const scratch = [];
+        for (let n = 0; n < 3; n += 1) {
+          scratch.push(yield* sessions.create({ title: `scratch ${n}` }));
+        }
+        const unfiltered = (yield* sessions.list({ limit: 2 })).sessions;
+        const forCard = (yield* sessions.list({ taskId: card, limit: 100 }))
+          .sessions;
+        const forOther = (yield* sessions.list({ taskId: other })).sessions;
+        const forNone = (yield* sessions.list({
+          taskId: `tsk_${randomBytes(13).toString("hex")}`,
+        })).sessions;
+        const one = (yield* sessions.list({ sessionId: first.id })).sessions;
+        const oneOfCard = (yield* sessions.list({
+          sessionId: otherRun.id,
+          taskId: card,
+        })).sessions;
+        return {
+          first: first.id,
+          second: second.id,
+          otherRun: otherRun.id,
+          unfiltered: unfiltered.map((entry) => entry.id),
+          forCard: forCard.map((entry) => entry.id),
+          forOther: forOther.map((entry) => entry.id),
+          forNone: forNone.map((entry) => entry.id),
+          one: one.map((entry) => entry.id),
+          oneOfCard: oneOfCard.map((entry) => entry.id),
+        };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+    // The newest page is all scratch: the card's runs are behind it, which is the case C7b fixes.
+    expect(result.unfiltered).not.toContain(result.first);
+    expect(new Set(result.forCard)).toEqual(
+      new Set([result.first, result.second]),
+    );
+    expect(result.forOther).toEqual([result.otherRun]);
+    expect(result.forNone).toEqual([]);
+    expect(result.one).toEqual([result.first]);
+    // The filters compose: that session is not that card's.
+    expect(result.oneOfCard).toEqual([]);
+  }, 120_000);
 
   /** The prompt sections the run's own log leaves in effect. */
   const promptSections = (

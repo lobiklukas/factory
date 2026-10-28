@@ -12,11 +12,20 @@
 import { Schema } from "effect";
 import { SessionId } from "@repo/domain/Ids";
 
-/** A PR could not be created. Typed, so callers handle it instead of dumping stderr. */
+/**
+ * A PR could not be created. Typed, so callers handle it instead of dumping stderr.
+ *
+ * `status` is the HTTP status the forge answered, when it answered at all (C7b): a client reads it
+ * to tell a refusal the same call would meet again (a 422, a 401, a 404) from a condition that
+ * passes (a 502, a rate limit, a dropped connection, which carry none). `existing` is the page of
+ * the PR the forge's own answer named as already open for this head, when it named one.
+ */
 export class PrError extends Schema.TaggedError<PrError>()("PrError", {
   operation: Schema.String,
   ref: Schema.String,
   message: Schema.String,
+  status: Schema.optional(Schema.Int),
+  existing: Schema.optional(Schema.String),
 }) {}
 
 /** A credential could not be resolved. Typed, so callers handle it instead of crashing. */

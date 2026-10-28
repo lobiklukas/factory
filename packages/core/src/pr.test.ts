@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Layer, Option, Redacted, Schema } from "effect";
+import { Cause, Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { SessionId, RepoSlug, type PrEvidence } from "@repo/domain/Session";
@@ -19,6 +19,7 @@ import {
   evidenceSection,
   PR_BODY_MAX_CHARS,
   PR_CHANGED_LIST_MAX,
+  PrError,
 } from "./pr";
 import { diffCapRefusal, parseDiffSize } from "./prStep";
 
@@ -580,6 +581,109 @@ describe("createPullRequest", () => {
     expect(error?.operation).toBe("createPullRequest");
     expect(error?.message).toBe("GitHub answered HTTP 422");
     expect(requests).toHaveLength(2);
+  });
+
+  /** The `PrError` a `createPullRequest` over a forge that answers `answer` fails with. */
+  const refusedBy = async (
+    answer: (request: { method: string }) => {
+      status: number;
+      body: unknown;
+    },
+  ) => {
+    const { client } = makeRoutedFake(answer);
+    const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
+    const result = await Effect.runPromiseExit(
+      createPullRequest({
+        repo: "o/r" as RepoSlug,
+        base: "main",
+        head: "factory/s-1",
+        title: "PR",
+        body: "b",
+        apiUrl: "http://127.0.0.1:9411",
+      }).pipe(
+        Effect.provide(
+          Layer.merge(Layer.succeed(CredentialProvider, provider), client),
+        ),
+      ),
+    );
+    if (result._tag !== "Failure")
+      throw new Error("the create was not refused");
+    const error = Cause.findErrorOption(result.cause);
+    if (Option.isNone(error) || !Schema.is(PrError)(error.value))
+      throw new Error("no typed PrError");
+    return error.value;
+  };
+
+  // C7b: a refusal that will repeat has to be told from one that will not, by the status the forge
+  // answered, and carry the forge's own reason.
+  it("carries the status and the forge's reason on a refusal, so a client can tell a repeat from a blip", async () => {
+    const duplicate = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              errors: [
+                { message: "A pull request already exists for o:factory/s-1." },
+              ],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(duplicate.status).toBe(422);
+    expect(duplicate.message).toBe(
+      "GitHub answered HTTP 422: A pull request already exists for o:factory/s-1.",
+    );
+    expect(duplicate.existing).toBeUndefined();
+
+    const blip = await refusedBy(() => ({
+      status: 502,
+      body: { message: "Bad Gateway" },
+    }));
+    expect(blip.status).toBe(502);
+    expect(blip.message).toBe("GitHub answered HTTP 502");
+
+    // A body with no reason in it still answers with its status.
+    const mute = await refusedBy(() => ({ status: 401, body: "nope" }));
+    expect(mute.status).toBe(401);
+    expect(mute.message).toBe("GitHub answered HTTP 401");
+  });
+
+  it("links the existing PR when the forge's refusal names its page, and no other URL", async () => {
+    const named = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              documentation_url:
+                "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+              errors: [
+                {
+                  message:
+                    "A pull request already exists: https://github.com/o/r/pull/41",
+                },
+              ],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(named.existing).toBe("https://github.com/o/r/pull/41");
+
+    const unnamed = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              documentation_url:
+                "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+              errors: [{ message: "head is invalid" }],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(unnamed.existing).toBeUndefined();
   });
 
   it("calls GITHUB_API_URL when the caller names no root", async () => {

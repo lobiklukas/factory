@@ -1,8 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useAtom, useAtomRefresh, useAtomSet } from "@effect/atom-react";
+import {
+  useAtom,
+  useAtomRefresh,
+  useAtomSet,
+  useAtomValue,
+} from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
-import { Cause } from "effect";
+import { Cause, Option } from "effect";
 import { GitForkIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
@@ -21,6 +26,7 @@ import {
 import {
   compactSessionAtom,
   forkSessionAtom,
+  replaySessionAtom,
   interruptSessionAtom,
   setSessionBudgetAtom,
   readSessionHistoryAtom,
@@ -30,6 +36,11 @@ import {
   type SessionView,
 } from "@/lib/atoms/session-atom";
 import { sessionListAtom } from "@/lib/atoms/session-list";
+import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
+import {
+  modelUnavailableNotice,
+  unservedModel,
+} from "@/lib/model-unavailable-view";
 import { sessionModel } from "@/lib/server-info-view";
 import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CheckoutWarning } from "@/components/checkout-warning";
@@ -142,6 +153,8 @@ export const SessionPane = ({
   const [result, attach] = useAtom(sessionAtom);
   const send = useAtomSet(sendMessageAtom);
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
+  const replay = useAtomSet(replaySessionAtom, { mode: "promise" });
+  const serverInfo = useAtomValue(serverInfoAtom);
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const withdraw = useAtomSet(withdrawMessageAtom, { mode: "promise" });
   const interrupt = useAtomSet(interruptSessionAtom, { mode: "promise" });
@@ -154,6 +167,7 @@ export const SessionPane = ({
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [forking, setForking] = useState(false);
+  const [replaying, setReplaying] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   /**
    * The budget stops this pane raised the cap for in one session, and the cap it set (C23). Entry ids
@@ -363,6 +377,19 @@ export const SessionPane = ({
     settleNow,
     view !== null && view.live.busy,
   );
+
+  /**
+   * A session pinned to a model this server does not serve (E9): the server refuses a send to it,
+   * so the composer is disabled with the reason and a Replay that runs its task on the default.
+   */
+  const pinnedElsewhere = view === null ? null : unservedModel(view.summary);
+  const unavailable =
+    pinnedElsewhere === null
+      ? null
+      : modelUnavailableNotice(
+          pinnedElsewhere,
+          Option.getOrUndefined(AsyncResult.value(serverInfo))?.defaultModel,
+        );
 
   /** What the PR control reads (C7): shared by the header's button and the line under it. */
   const prSession = {
@@ -772,10 +799,52 @@ export const SessionPane = ({
         </div>
       ) : null}
       <div className="shrink-0 border-t border-border px-6 py-3">
+        {unavailable === null ? null : (
+          <div
+            role="status"
+            data-model-unavailable={pinnedElsewhere ?? undefined}
+            className="mx-auto mb-3 flex max-w-[68ch] flex-wrap items-center gap-x-4 gap-y-2 border border-border bg-muted/40 px-3 py-2"
+          >
+            <p className="min-w-0 flex-1 basis-64 text-xs leading-5 text-muted-foreground">
+              {unavailable.explanation}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-replay-session
+              aria-busy={replaying}
+              disabled={replaying}
+              onClick={() => {
+                setReplaying(true);
+                void replay(sessionId)
+                  .then((summary) => {
+                    void navigate({
+                      to: "/sessions/$sessionId",
+                      params: { sessionId: summary.id },
+                    });
+                  })
+                  .catch((cause: unknown) => {
+                    toast.error("No replay was created", {
+                      description:
+                        cause instanceof Error ? cause.message : String(cause),
+                    });
+                  })
+                  .finally(() => setReplaying(false));
+              }}
+            >
+              {replaying ? (
+                <Spinner className="size-3.5 text-muted-foreground" />
+              ) : null}
+              {unavailable.replayLabel}
+            </Button>
+          </div>
+        )}
         <form
           className="mx-auto flex max-w-[68ch] flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
+            if (unavailable !== null) return;
             if (draft.trim().length === 0) return;
             send({ sessionId, content: draft });
             setDraft("");
@@ -793,7 +862,12 @@ export const SessionPane = ({
             <Textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder="Send a message to this session"
+              placeholder={
+                unavailable === null
+                  ? "Send a message to this session"
+                  : unavailable.placeholder
+              }
+              disabled={unavailable !== null}
               rows={1}
               className="min-h-9 resize-none"
               onKeyDown={(event) => {
@@ -829,7 +903,10 @@ export const SessionPane = ({
                 }}
               />
             ) : null}
-            <Button type="submit" disabled={draft.trim().length === 0}>
+            <Button
+              type="submit"
+              disabled={unavailable !== null || draft.trim().length === 0}
+            >
               Send
             </Button>
           </div>
