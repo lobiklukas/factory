@@ -4,6 +4,7 @@ import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import { CircleCheckIcon, CircleIcon } from "lucide-react";
 import { cn } from "cn";
+import type { BoardInstanceId } from "@repo/domain/Task";
 import { firstRunAtom } from "@/lib/atoms/first-run-atom";
 import {
   firstRunComplete,
@@ -81,21 +82,24 @@ const StepAction = ({ step }: { readonly step: FirstRunStep }) => {
  * `listTaskRuns` answer with something, so the list is the control plane's own state, never a
  * browser's memory of what a person pressed (a reload, another browser and the CLI all agree).
  *
- * Shown while any step is unticked, and nothing once all four are: a control plane in use has no use
- * for it. Nothing is shown before a first read lands, or when a read fails, because a step ticked or
+ * Shown while any step is unticked, and nothing once all four are (a run ticks them all): a control
+ * plane in use has no use for it, and the atom reads nothing more once a run exists. Nothing is shown before a first read lands, or when a read fails, because a step ticked or
  * unticked on a guess is worse than no list; the page around it carries its own error.
  */
 export const GettingStarted = ({
   className,
+  boardId,
 }: {
   readonly className?: string;
+  /** The board this is shown on, so "Add a card" opens that board's form, not the newest's. */
+  readonly boardId?: BoardInstanceId;
 }) => {
   const result = useAtomValue(firstRunAtom);
   // A failed poll keeps the last answer, as the other views do; only a first read that fails
   // leaves the list out.
   const facts = Option.getOrUndefined(AsyncResult.value(result));
   if (facts === undefined || firstRunComplete(facts)) return null;
-  const steps = firstRunSteps(facts);
+  const steps = firstRunSteps(facts, boardId);
   const next = steps.find((step) => !step.done);
 
   return (

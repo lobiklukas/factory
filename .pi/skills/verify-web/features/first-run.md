@@ -22,9 +22,14 @@ surface ([board.md](board.md)), so the dashboard now opens on it.
   `Once a board exists` / `Once a card exists` instead of linking to a form that cannot work.
 - **Where it is shown:** `/boards` with no board (under the empty state, which keeps its **New board**
   action), `/boards` above the list while any step is unticked, and a board's page while it has no card.
-  With all four ticked it is not shown. Nothing is shown before the first read lands or when a read fails:
-  a step ticked on a guess is worse than no list. A board made over a slug nobody registered leaves step 1
-  honestly unticked (`createBoard` does not register the repository).
+  With all four ticked it is not shown, and a run ticks all four (a run implies the card, the board and the
+  repository it runs from), so a control plane whose boards were made over a slug nobody registered is not
+  nagged once it runs. Nothing is shown before the first read lands or when a read fails: a step ticked on a
+  guess is worse than no list. Until a run exists a board made over an unregistered slug leaves step 1 honestly
+  unticked (`createBoard` does not register the repository). The reads stop at the first run found (every card
+  is asked about, in batches, so a run on any card counts) and a refresh after that reads nothing, so an open
+  /boards tab on a control plane in use costs no requests. On a board's own page "Add a card" opens that board's
+  form (`unit: first-run-view.test.ts`, `first-run-read.test.ts`).
 - **Every empty state names a press.** `/attention`, `/approvals`, `/sandboxes` link to the boards
   (`[data-empty-action]`), `/spend` to the sessions, `/sessions`' empty pane to the boards beside the
   sidebar's **New session**. `apps/web/src/empty-states.test.ts` fails on a `factory <command>` in any route

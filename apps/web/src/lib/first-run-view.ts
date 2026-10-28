@@ -62,18 +62,31 @@ export type FirstRunStep = {
   readonly action: FirstRunAction;
 };
 
-/** The four steps in order, each ticked when the control plane holds the thing it makes. */
+/**
+ * The four steps in order, each ticked when the control plane holds the thing it makes. A run
+ * started from a card implies the card, the board and a repository to cut its worktree from, so a
+ * run ticks every step: a control plane whose boards were made over a slug nobody registered (`factory
+ * board create --repo`, or a board older than the registry) is in use, and is never nagged for the
+ * repository it already runs from.
+ *
+ * `currentBoard` is the board the checklist is shown on, when it is shown on one: the card step
+ * links to that board's form, and to the newest board's only when it is shown elsewhere.
+ */
 export const firstRunSteps = (
   facts: FirstRunFacts,
+  currentBoard?: BoardInstanceId,
 ): ReadonlyArray<FirstRunStep> => {
-  const board = facts.boards[0];
+  const board =
+    currentBoard !== undefined && facts.boards.includes(currentBoard)
+      ? currentBoard
+      : facts.boards[0];
   return [
     {
       id: "repo",
       title: "Register a repository",
       detail: "The checkout a run is cut a worktree from.",
       actionLabel: "Register a repository",
-      done: facts.repos > 0,
+      done: facts.repos > 0 || facts.hasRun,
       action: { kind: "repos" },
     },
     {
@@ -81,7 +94,7 @@ export const firstRunSteps = (
       title: "Create a board",
       detail: "One board binds a repository to a definition version.",
       actionLabel: "Create a board",
-      done: facts.boards.length > 0,
+      done: facts.boards.length > 0 || facts.hasRun,
       action: { kind: "new-board" },
     },
     {
@@ -89,7 +102,7 @@ export const firstRunSteps = (
       title: "Add a card",
       detail: "A card is a unit of work: what a run is for.",
       actionLabel: "Add a card",
-      done: facts.card !== undefined,
+      done: facts.card !== undefined || facts.hasRun,
       action:
         board === undefined
           ? { kind: "blocked", until: "a board exists" }
@@ -115,5 +128,8 @@ export const firstRunComplete = (facts: FirstRunFacts): boolean =>
   firstRunSteps(facts).every((step) => step.done);
 
 /** The step the person does next: the first unticked one. */
-export const nextStep = (facts: FirstRunFacts): FirstRunStep | undefined =>
-  firstRunSteps(facts).find((step) => !step.done);
+export const nextStep = (
+  facts: FirstRunFacts,
+  currentBoard?: BoardInstanceId,
+): FirstRunStep | undefined =>
+  firstRunSteps(facts, currentBoard).find((step) => !step.done);

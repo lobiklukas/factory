@@ -205,7 +205,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
         <CheckoutWarning warning={last.warning} />
         {/* A board with no card is the next step of the checklist (C9); it leaves once a card exists. */}
         {tasks.length === 0 ? (
-          <GettingStarted className="mx-4 mt-3 max-w-xl" />
+          <GettingStarted className="mx-4 mt-3 max-w-xl" boardId={boardId} />
         ) : null}
         <BoardLanesView
           boardId={boardId}

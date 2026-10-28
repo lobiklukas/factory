@@ -76,13 +76,21 @@ describe("firstRunSteps", () => {
   });
 
   it("ticks the board step on a board made over a slug nobody registered", () => {
-    // createBoard does not register the repository, so the first step honestly stays unticked.
+    // createBoard does not register the repository, so the first step honestly stays unticked
+    // until something runs.
     expect(done({ ...EMPTY, boards: [A] })).toEqual([
       false,
       true,
       false,
       false,
     ]);
+  });
+
+  it("is complete once a run exists, whatever else was never registered", () => {
+    // A board over an unregistered slug with a run on it is a control plane in use.
+    const inUse = { ...EMPTY, boards: [A], hasRun: true };
+    expect(done(inUse)).toEqual([true, true, true, true]);
+    expect(firstRunComplete(inUse)).toBe(true);
   });
 
   it("opens the card form on the first board, and names the wait while there is none", () => {
@@ -94,6 +102,25 @@ describe("firstRunSteps", () => {
       kind: "new-card",
       boardId: B,
     });
+  });
+
+  it("opens the card form on the board the checklist is shown on", () => {
+    const facts = { ...EMPTY, boards: [B, A] };
+    expect(firstRunSteps(facts, A)[2]?.action).toEqual({
+      kind: "new-card",
+      boardId: A,
+    });
+    expect(nextStep({ ...facts, repos: 1 }, A)?.action).toEqual({
+      kind: "new-card",
+      boardId: A,
+    });
+  });
+
+  it("falls back to the newest board when the current one is not in the list", () => {
+    const stranger = board("brd_00000000000000000000000009");
+    expect(
+      firstRunSteps({ ...EMPTY, boards: [B, A] }, stranger)[2]?.action,
+    ).toEqual({ kind: "new-card", boardId: B });
   });
 
   it("opens the card a run starts from, on the board that card is on", () => {
