@@ -201,7 +201,7 @@ CARD_BODY_WORD="\$'Pin the Postgres major.\\n  Keep port 5442.'"
 fresh
 run_cmd add "$FACTORY board add --board $BOARD_ID --title '$TASK_TITLE' --body $CARD_BODY_WORD --api $API_URL" || true
 capture add.txt
-ADD_LINE="$(grep -E '^task tsk_[0-9a-z]{26} revision [0-9]+ column [a-z]+$' "$EVIDENCE_DIR/add.txt" | head -1)"
+ADD_LINE="$(grep -E '^task tsk_[0-9a-z]{26} revision [0-9]+ column [a-z]+$' "$EVIDENCE_DIR/add.txt" | tail -1)"
 TASK_ID="$(echo "$ADD_LINE" | awk '{print $2}')"
 REVISION="$(echo "$ADD_LINE" | awk '{print $4}')"
 ADD_COLUMN="$(echo "$ADD_LINE" | awk '{print $6}')"
@@ -223,7 +223,7 @@ printf '%s' "$PAIR_BODY" > "$RUN_DIR/pair-body.md"
 fresh
 run_cmd pair "$FACTORY board add --board $BOARD_ID --title '$PAIR_TITLE' --body-file $RUN_DIR/pair-body.md --repo $BOARD_REPO_SLUG --priority urgent --base-ref $PAIR_BASE_REF --api $API_URL" || true
 capture add-pair.txt
-PAIR_ID="$(grep -oE '^task tsk_[0-9a-z]{26}' "$EVIDENCE_DIR/add-pair.txt" | head -1 | awk '{print $2}')"
+PAIR_ID="$(grep -oE '^task tsk_[0-9a-z]{26}' "$EVIDENCE_DIR/add-pair.txt" | tail -1 | awk '{print $2}')"
 check "board add with every flag exits 0 and prints a card" \
   "$([ "$(exit_code pair)" = "0" ] && [ -n "$PAIR_ID" ] && echo 0 || echo 1)" \
   "exit=$(exit_code pair), card=${PAIR_ID:-none}"
