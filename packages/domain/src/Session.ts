@@ -633,7 +633,10 @@ export const CreateSessionInput = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Deduplicates a retried create: the same request id returns the same session. */
   requestId: Schema.optional(Schema.String),
-  /** The repo the session works on. Absent means a scratch session, which is what tests use. */
+  /**
+   * The repo the session works on. Absent with a `taskId`, the card's repository, which is its
+   * board's (LOB-255); absent without one, a scratch session, which is what tests use.
+   */
   repo: Schema.optional(RepoSlug),
   /** The ref the session starts from. Defaults to the repo registry's default base ref. */
   baseRef: Schema.optional(Schema.String),

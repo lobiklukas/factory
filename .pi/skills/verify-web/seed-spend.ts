@@ -38,8 +38,8 @@ const program = Effect.gen(function* () {
     const task = yield* tasks.create({
       boardId,
       title: `spend: a run started by ${key}`,
-      // The card names its repo: a run started from it binds to the card's own repo, not the
-      // board's, so a card without one would run on scratch.
+      // The board's repo, which the card would inherit unnamed too (LOB-255): every run started
+      // from it is bound to that repo.
       repo: REPO,
       actor: ACTOR,
     });

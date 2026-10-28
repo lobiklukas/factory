@@ -537,7 +537,7 @@ build_probe() { # mode, extra env...
   cat "$RUN_DIR/build-$mode.log"
   return "$rc"
 }
-build_probe built
+build_probe built REPO="$BOARD_REPO_SLUG"
 BUILT_RC=$?
 check "the build run committed a change and verified it (build.ts)" "$BUILT_RC" "see build-built.json"
 

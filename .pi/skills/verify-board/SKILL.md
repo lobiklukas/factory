@@ -22,6 +22,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | -------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals        | a board is a real operation, not a row a test inserts                |
 | create a card (B2, LOB-84)       | `create.ts`: `createTask` opens it in `intake` at r1, `getTask` reads it                    | a trigger's card is a real row the board reads back                  |
+| a card's repo (B2, LOB-255)      | `create.ts`: no repo named, the board's inherited; another refused; `build.ts`: run bound   | a card made without a repo still gets a branch and reaches review    |
 | `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                             | the lane order is the definition's, not the DB's                     |
 | a card in its lane               | the created card is the row under `intake`                                                  | lanes and cards come from one read, so they agree                    |
 | `board show`                     | revision and title printed, exit 0                                                          | one card as the server has it                                        |
@@ -69,8 +70,10 @@ create` reaches — over the seeded `default` definition at its newest version
 (`SEED_DEFINITION_VERSION=newest`, so `review` declares `verified`; `SEED_CARD=0`, so no card), over a
 repository it registers through the API's `registerRepo` with `.verify/run/board-repo` as its checkout
 (`SEED_REPO_ROOT`): a fixture with a passing `verify-web` skill, so a run on the board is a git
-worktree with a branch the PR step can publish. `create.ts` names that repository on the card, as a
-trigger's card does. It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
+worktree with a branch the PR step can publish. `create.ts` names no repository on the card: it
+inherits the board's (LOB-255), so the drive's build run is a worktree of the fixture with no repo
+seeded on the card, and a second create naming another repository is refused as
+`BoardRepoMismatch`. It prints one JSON line into `.verify/run/board.json`, which `doctor.sh`
 and `drive.sh` read. The drive's card is its own, created by `create.ts` over the API at the start of
 every drive, so the drive can run twice against one instance — even after a drive that failed
 part-way, because the checks find the drive's card by id in its lane rather than as the lane's only

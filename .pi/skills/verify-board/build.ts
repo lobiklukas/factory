@@ -2,7 +2,11 @@
 // The facts `drive.sh`'s build phase (LOB-86) cannot read from a terminal: what the build run's log
 // recorded, and what the forge was actually sent.
 //
-//   MODE=built SESSION_ID=…   the build run answered and is idle, and its log holds one `verify`
+//   MODE=built SESSION_ID=… REPO=…
+//                             the build run — started by `factory board start` on a card created
+//                             with no repo — is bound to the board's repository REPO, on its own
+//                             `factory/<session-id>` branch in a real worktree (LOB-255); and it
+//                             answered and is idle, and its log holds one `verify`
 //                             record over a change: the changed path the builder's script writes,
 //                             verified by `verify-web`, exit 0 — the evidence the PR body and the
 //                             `review` column's `verified` requirement both read
@@ -21,6 +25,7 @@
 // Env: API_URL, MODE, SESSION_ID, PR_URL, LEDGER, REPO, CHANGED (the path the builder writes),
 // DATABASE_URL (for `built`'s log read), EVIDENCE_DIR. Writes `build-<mode>.json` (and, for `pr`,
 // `pr-body.md`, the body as sent) and exits non-zero when a check fails.
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -65,6 +70,28 @@ const built = Effect.gen(function* () {
     yield* Effect.sleep(100);
     snapshot = yield* client.getSession({ sessionId: SESSION });
   }
+  // The card named no repo; the run is bound to the board's anyway (LOB-255), so it has a branch.
+  const branch = `factory/${SESSION}`;
+  const worktreeHead = (() => {
+    try {
+      return execFileSync(
+        "git",
+        ["-C", snapshot.workspace.path, "rev-parse", "--abbrev-ref", "HEAD"],
+        { encoding: "utf8" },
+      ).trim();
+    } catch (error) {
+      return `no worktree: ${String(error)}`;
+    }
+  })();
+  observed.facts["workspace"] = snapshot.workspace;
+  check(
+    "the build run is bound to the board's repository, in a factory/<session-id> worktree",
+    REPO !== "" &&
+      snapshot.session.repo === REPO &&
+      snapshot.workspace.branch === branch &&
+      worktreeHead === branch,
+    `repo=${snapshot.session.repo ?? "none"} (board ${REPO || "unset"}), branch=${snapshot.workspace.branch ?? "none"}, HEAD=${worktreeHead}`,
+  );
   check(
     "the build run made its change, verified it and answered",
     answered(),
