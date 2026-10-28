@@ -413,7 +413,7 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
     setRefusal(null);
     setPending(true);
     void readNewest({ name, known: base.newest })
-      .then(async (read) => {
+      .then((read) => {
         if (Exit.isFailure(read)) {
           refuse(read.cause);
           return;
@@ -425,23 +425,26 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
           setRefusal(moved);
           return;
         }
-        const exit = await put(publishInput(base, form));
-        if (Exit.isSuccess(exit)) {
-          setForm(null);
-          setBase(null);
-          setCreated(exit.value);
-          // Show the version just written, which is the newest: the page's `?version=` names an
-          // older one if it was open on one.
-          void navigate({
-            to: "/skills/$name",
-            params: { name },
-            search: {},
-          });
-          return;
-        }
-        refuse(exit.cause);
+        return put(publishInput(base, form)).then(landed);
       })
       .finally(() => setPending(false));
+  };
+
+  const landed = (exit: Awaited<ReturnType<typeof put>>) => {
+    if (Exit.isSuccess(exit)) {
+      setForm(null);
+      setBase(null);
+      setCreated(exit.value);
+      // Show the version just written, which is the newest: the page's `?version=` names an
+      // older one if it was open on one.
+      void navigate({
+        to: "/skills/$name",
+        params: { name },
+        search: {},
+      });
+      return;
+    }
+    refuse(exit.cause);
   };
 
   return (
