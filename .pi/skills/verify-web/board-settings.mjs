@@ -560,11 +560,9 @@ try {
       (carefulText ?? "").includes("the PR step pushes"),
     JSON.stringify(carefulText),
   );
-  await page
-    .locator("[data-settings-column='careful']")
-    .screenshot({
-      path: path.join(EVIDENCE_DIR, "board-settings-autonomy.png"),
-    });
+  await page.locator("[data-settings-column='careful']").screenshot({
+    path: path.join(EVIDENCE_DIR, "board-settings-autonomy.png"),
+  });
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "board-settings-autonomy-page.png"),
     fullPage: true,
