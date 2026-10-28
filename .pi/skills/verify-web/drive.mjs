@@ -313,6 +313,7 @@ const transcriptItems = await page
       bubble: item.querySelector("[data-slot='bubble']") !== null,
     })),
   );
+// Keep in step with PROMPT in apps/web/src/components/session-sidebar.tsx, the sample the sidebar sends.
 const promptText = "Run echo faux-ok and tell me what it printed.";
 // Equal to, not containing: the agent's answer quotes the prompt ("faux-ok (re: ...)").
 const promptRows = transcriptItems.filter((item) => item.text === promptText);

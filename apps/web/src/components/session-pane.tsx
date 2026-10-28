@@ -503,10 +503,10 @@ export const SessionPane = ({
 
                 {view !== null && rows.length === 0 ? (
                   <Empty>
-                    <EmptyTitle>Nothing in this log yet</EmptyTitle>
+                    <EmptyTitle>No messages yet</EmptyTitle>
                     <EmptyDescription>
-                      The run has opened and committed nothing. Send it
-                      something and the first entry lands here.
+                      Nothing has been said in this run. Send it a message and
+                      it lands here.
                     </EmptyDescription>
                   </Empty>
                 ) : null}
