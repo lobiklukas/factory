@@ -84,6 +84,7 @@ export const describeDefinition = (
     name: definition.name,
     ...(initialColumn === undefined ? {} : { initialColumn }),
     ...(definition.caps === undefined ? {} : { caps: definition.caps }),
+    ...(definition.author === undefined ? {} : { author: definition.author }),
     columns: definition.columns.map((column) =>
       describeColumn(definition, column, deployment),
     ),

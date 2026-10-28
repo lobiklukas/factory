@@ -37,6 +37,9 @@ generic trigger rule and its signing secret. `identity.ts` then:
   (`factory board move --actor mallory`, `FACTORY_API_TOKEN` = amy's), then reads `sessions.actor`,
   `session_approvals.actor` and `task_events.actor` from Postgres: all `amy`;
 - runs `factory ls` with the variable empty: refused, naming `FACTORY_API_TOKEN`;
+- (F7) calls `defineBoard` as amy with a body actor `mallory`: the version's `author` is `amy`, read
+  back through `getDefinition`, `board definitions` and `board_definitions.author`; an unchanged answer
+  and a dry run write no row; the operator's token authors its own version;
 - creates a session with the shared token (`verify-operator`), and checks `listSpend` for the repo
   holds exactly `amy:1` and `verify-operator:1`;
 - posts a signed generic delivery with no credential: `200`, a session attributed

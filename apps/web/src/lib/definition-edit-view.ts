@@ -13,8 +13,9 @@ import type {
   DefinitionVocabulary,
   RequirementOption,
 } from "@repo/domain/Task";
-import { RunCap, columnTransitions, initialColumnOf } from "@repo/domain/Task";
+import { RunCap, materializeDefinition } from "@repo/domain/Task";
 import { Result, Schema } from "effect";
+import { DASHBOARD_ACTOR } from "./approvals-view";
 import { NONE } from "./board-settings-view";
 
 /**
@@ -71,17 +72,6 @@ export type DefinitionDraft = {
  * (they are read through the default pipeline's table), and an authored version must declare both,
  * so a draft of one starts from what its cards meet — and the diff does not call that a change.
  */
-export const materialize = (definition: BoardDefinition): BoardDefinition => {
-  const initial = initialColumnOf(definition);
-  return {
-    ...definition,
-    ...(initial === undefined ? {} : { initialColumn: initial }),
-    columns: definition.columns.map((column) => ({
-      ...column,
-      transitions: columnTransitions(definition, column.name),
-    })),
-  };
-};
 
 /** The key of the first column of the draft named `name`, or `undefined` when none is. */
 const keyNamed = (
@@ -95,7 +85,7 @@ const keyNamed = (
 
 /** The draft a pinned version opens as: its own columns, keyed in order, moves and initial spelled out. */
 export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
-  const base = materialize(definition);
+  const base = materializeDefinition(definition);
   const keyed = base.columns.map((column, index) => ({
     key: `c${index}`,
     origin: column.name,
@@ -143,10 +133,13 @@ export const defineInputOf = (
     version: _version,
     initialColumn: _initial,
     caps: _caps,
+    author: _author,
     ...kept
   } = pinned;
   return {
     ...kept,
+    // Who wrote the version (F7), as a dashboard card write's actor is; a credential overrides it.
+    actor: DASHBOARD_ACTOR,
     name: draft.name,
     columns: draft.columns.map((entry) => trimmedRole(entry.column)),
     ...(draft.initialColumn === ""
@@ -906,7 +899,7 @@ export const definitionDiff = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
 ): ReadonlyArray<DiffLine> => {
-  const base = materialize(pinned);
+  const base = materializeDefinition(pinned);
   const lines: Array<DiffLine> = [];
   if (base.name !== draft.name)
     lines.push({

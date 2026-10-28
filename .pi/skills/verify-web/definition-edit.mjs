@@ -645,6 +645,11 @@ try {
       .filter((line) => /caps|wip/.test(line))
       .join(" | "),
   );
+  assert(
+    "v2 names the dashboard as its author (F7); v1, written over the RPC with no actor, has none",
+    v2.author === "dashboard" && seeded.definition?.author === undefined,
+    JSON.stringify({ v2: v2.author, v1: seeded.definition?.author }),
+  );
   const after = await rpc("getBoard", { boardId: board.id });
   assert(
     "the board keeps its pin: still v1",

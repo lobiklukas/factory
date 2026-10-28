@@ -1775,6 +1775,71 @@ describe("the board's tables and seed", () => {
   );
 
   /**
+   * 0048 (F7): `board_definitions.author`, nullable, with every version that existed before it (the
+   * seeds) left NULL, which a reader shows as absent. Idempotent: a second run keeps the column and
+   * a row's author. Driven on an id of its own, so the shared `default` is never touched.
+   *
+   * Mutation: `NOT NULL DEFAULT ''` as `skills.author` is — a seeded row reads as an empty author.
+   * Mutation: backfill a name onto the seeds — `default` v1 has an author. Mutation: drop
+   * `IF NOT EXISTS` — the second run fails.
+   */
+  it(
+    "adds a nullable board_definitions.author that leaves existing rows NULL, and runs twice",
+    { timeout: 30_000 },
+    async () => {
+      const column = await Effect.runPromise(
+        sql<{
+          isNullable: string;
+          dataType: string;
+          columnDefault: string | null;
+        }>`
+          SELECT is_nullable AS "isNullable", data_type AS "dataType", column_default AS "columnDefault"
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'board_definitions' AND column_name = 'author'
+        `,
+      );
+      expect(column).toEqual([
+        { isNullable: "YES", dataType: "text", columnDefault: null },
+      ]);
+      const seeded = await Effect.runPromise(
+        sql<{ author: string | null }>`
+          SELECT author FROM board_definitions WHERE id = 'default'
+        `,
+      );
+      expect(seeded.length).toBeGreaterThanOrEqual(5);
+      expect(seeded.every((row) => row.author === null)).toBe(true);
+
+      const id = `f7_author_${randomBytes(6).toString("hex")}`;
+      await Effect.runPromise(
+        sql`
+          INSERT INTO board_definitions (id, version, name, columns, author)
+          SELECT ${id}, 1, name, columns, 'alice' FROM board_definitions
+          WHERE id = 'default' AND version = 1
+        `,
+      );
+      const migration = (
+        await import("./migrations/0048_board_definition_author")
+      ).default;
+      try {
+        await Effect.runPromise(
+          migration.pipe(Effect.provideService(SqlClient, sql)),
+        );
+        const [row] = await Effect.runPromise(
+          sql<{ author: string | null }>`
+            SELECT author FROM board_definitions WHERE id = ${id}
+          `,
+        );
+        expect(row?.author).toBe("alice");
+      } finally {
+        await Effect.runPromise(
+          sql`DELETE FROM board_definitions WHERE id = ${id}`,
+        );
+      }
+    },
+  );
+
+  /**
    * 0044 (D10) against an id an operator already authored past the seeds (docs/board.md: seed
    * migrations and authored versions share one id space). Driven on an id of its own, so the shared
    * `default` is never touched: a seeded version 1, then an authored version 2 with its own name and
