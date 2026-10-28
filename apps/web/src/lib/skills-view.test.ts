@@ -50,15 +50,15 @@ describe("the Edit form", () => {
    * refusal would never be reached), or send another actor.
    */
   it("publishes the form under the skill's name, keeping the newest's attachments, as the dashboard", () => {
-    expect(
-      publishInput(specify, { description: "New", body: "  \n" }),
-    ).toEqual({
-      name: "specify",
-      description: "New",
-      body: "  \n",
-      attachments: ["docs/board.md"],
-      actor: DASHBOARD_ACTOR,
-    });
+    expect(publishInput(specify, { description: "New", body: "  \n" })).toEqual(
+      {
+        name: "specify",
+        description: "New",
+        body: "  \n",
+        attachments: ["docs/board.md"],
+        actor: DASHBOARD_ACTOR,
+      },
+    );
   });
 
   it("names the version a publish writes, and the one it created, from the server's numbers", () => {
@@ -72,7 +72,8 @@ describe("the Edit form", () => {
       skillRefusal(
         {
           _tag: "InvalidSkill",
-          message: 'skill "specify" has an empty body: a run would be told nothing',
+          message:
+            'skill "specify" has an empty body: a run would be told nothing',
         },
         "cause",
       ),
@@ -112,7 +113,17 @@ describe("the page", () => {
   it("reads ?version= as a positive integer, and anything else as the newest", () => {
     expect(versionSearch("2")).toBe(2);
     expect(versionSearch(2)).toBe(2);
-    for (const value of ["0", "-1", "1.5", "two", "", 0, 1.5, undefined, null]) {
+    for (const value of [
+      "0",
+      "-1",
+      "1.5",
+      "two",
+      "",
+      0,
+      1.5,
+      undefined,
+      null,
+    ]) {
       expect(versionSearch(value)).toBeUndefined();
     }
   });

@@ -226,7 +226,10 @@ const UsedBy = ({ name }: { readonly name: string }) => {
           No column of the default definition binds it.
         </p>
       ) : (
-        <ul data-skill-used-by={columns.join(",")} className="flex flex-wrap gap-1">
+        <ul
+          data-skill-used-by={columns.join(",")}
+          className="flex flex-wrap gap-1"
+        >
           {columns.map((column) => (
             <li key={column}>
               <Badge
@@ -427,14 +430,15 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
               onInput={edit("body")}
               spellCheck={false}
               aria-invalid={refusal === null ? undefined : true}
-              aria-describedby={
-                refusal === null ? undefined : "skill-refusal"
-              }
+              aria-describedby={refusal === null ? undefined : "skill-refusal"}
               className="min-h-64 font-mono text-[11px] leading-relaxed"
             />
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Publishing writes {record === undefined ? "the next version" : versionLabel(nextVersion(record))}
+            Publishing writes{" "}
+            {record === undefined
+              ? "the next version"
+              : versionLabel(nextVersion(record))}
             . No version is rewritten: a run already open keeps the one it
             opened with, and the next run in a column that binds {name} is told
             this one.

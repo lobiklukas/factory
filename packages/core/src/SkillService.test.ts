@@ -238,7 +238,11 @@ describe("SkillService", () => {
       );
       const history = await withService((s) => s.versions(skill.name));
       expect(
-        history.map((entry) => [entry.version, entry.description, entry.author]),
+        history.map((entry) => [
+          entry.version,
+          entry.description,
+          entry.author,
+        ]),
       ).toEqual([
         [3, skill.description, ""],
         [2, "the second", "person:ana"],
