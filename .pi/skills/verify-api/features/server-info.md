@@ -32,8 +32,9 @@ through `./up.sh` with `MODEL_BACKEND=faux`, `ROLE_MODELS=specifier=faux/faux-sp
 catalog, gate, budget, the absent model credential mode, the two armed routes and the faux warning;
 creates a session and checks `faux/faux-1` on `createSession`, `getSession` and its `listSessions`
 row; creates one with `model: faux/faux-spec` and checks it names that (LOB-274), and one with
-`model: faux/faux-unserved`, which must be `SessionError` `invalid_input` naming it with the session
-list unchanged; and sends the same request as raw NDJSON, checking that no dummy's value is in the
+`model: faux/faux-unserved` and a fresh request id, which must be `SessionError` `invalid_input`
+naming it, with no listed session carrying its title and a later create under the same request id
+answered with that create's own title rather than by a row the refusal left behind; and sends the same request as raw NDJSON, checking that no dummy's value is in the
 body. The shell checks the API's log for the same dummies.
 
 `defaultModel` is `DEFAULT_MODEL` when the deployment sets it (LOB-274), resolved against the catalog

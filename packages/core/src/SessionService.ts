@@ -155,6 +155,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readPinnedModelKey,
   readRecordedReview,
   readTranscriptPage,
   readVerifyRecords,
@@ -2088,6 +2089,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return access;
         });
 
+      /**
+       * A retried create (LOB-274) that names a model finds its session by request id; if the first
+       * attempt died between the index row and the owner's open (a URL-only repo's mirror fetch
+       * fails there, LOB-265), no root was pinned, and the next open — a send's — would pin the
+       * role's model or the deployment's instead of the one asked for. The retry opens the owner on
+       * the model it names, so that open is the one that pins it. A session that is live or whose
+       * root is already pinned keeps the model it runs: a root's model is never changed afterwards.
+       */
+      const ensureSessionModel = (
+        id: SessionId,
+        row: SessionRow,
+        model: ModelAccess,
+        acquisition: { readonly reviewing: boolean },
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (HashMap.has(yield* Ref.get(live), id)) return;
+          const pinned = yield* withReader(id, readPinnedModelKey);
+          if (pinned !== undefined) return;
+          yield* acquireOwner(id, row, { ...acquisition, model });
+        });
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -2102,6 +2124,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const already = requested?.[0];
           if (already !== undefined) {
             const sessionId = yield* toSessionId(already.id);
+            const model = yield* sessionModelFor(input.model);
+            if (model !== undefined)
+              yield* ensureSessionModel(sessionId, already, model, {
+                reviewing: input.review !== undefined && already.repo !== null,
+              });
             if (input.review !== undefined)
               yield* ensureReviewTarget(sessionId, already, input.review);
             return yield* describe(sessionId, already);

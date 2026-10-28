@@ -156,19 +156,28 @@ await Effect.runPromise(
           chosenSnapshot.session.model === "faux/faux-spec",
         `${String(chosen.model)} / ${String(chosenSnapshot.session.model)}`,
       );
-      const before = (yield* client.listSessions({ limit: 200 })).sessions
-        .length;
+      // The refused create carries a request id no other create has used. Had it written a row, a
+      // later create with that id would be answered by that row (the request-id dedupe) and come back
+      // with the refused create's title; a page length would prove nothing once 200 sessions exist.
+      const probe = `server-info-unserved-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const refusedTitle = `server-info unserved model ${probe}`;
       const refused = yield* Effect.flip(
         client.createSession({
-          title: "server-info unserved model",
+          title: refusedTitle,
+          requestId: probe,
           model: "faux/faux-unserved",
         }),
       );
-      const after = (yield* client.listSessions({ limit: 200 })).sessions
-        .length;
+      const listed = (yield* client.listSessions({ limit: 200 })).sessions;
+      const followUp = yield* client.createSession({
+        title: `server-info after the refusal ${probe}`,
+        requestId: probe,
+      });
       observed.session["refused"] = {
         tag: refused._tag,
         message: refused.message,
+        requestId: probe,
+        followUp: { id: followUp.id, title: followUp.title },
       };
       assert(
         "model: an unserved model is SessionError invalid_input naming it",
@@ -181,8 +190,9 @@ await Effect.runPromise(
       );
       assert(
         "model: and creates no session",
-        before === after,
-        `${before} listed before, ${after} after`,
+        !listed.some((entry) => entry.title === refusedTitle) &&
+          followUp.title === `server-info after the refusal ${probe}`,
+        `listed with its title: ${listed.some((entry) => entry.title === refusedTitle)}; a later create with its request id answered "${followUp.title}"`,
       );
     }),
   ).pipe(Effect.provide(protocolFor(API_URL))),

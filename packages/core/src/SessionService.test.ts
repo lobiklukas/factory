@@ -1863,20 +1863,12 @@ describe("the model a session runs on", () => {
         const sql = yield* SqlClient;
         const tag = randomBytes(4).toString("hex");
         const repo = RepoSlugSchema.make(`factory-test/unserved-${tag}`);
-        // The index, counted whole: a refusal mints no id, so it adds no row and opens no log.
-        const counts = Effect.gen(function* () {
-          const rows = yield* sql<{ sessions: number }>`
-            SELECT count(*)::int AS sessions FROM sessions
-          `;
-          return rows[0]?.sessions;
-        });
-        const before = yield* counts;
         const refused = (model: string) =>
           Effect.gen(function* () {
             const requestId = `unserved-${tag}-${model}`;
             const exit = yield* Effect.exit(
               sessions.create({
-                title: `unserved ${model}`,
+                title: `unserved ${tag} ${model}`,
                 requestId,
                 repo,
                 model,
@@ -1897,7 +1889,11 @@ describe("the model a session runs on", () => {
         const repos = yield* sql<{ slug: string }>`
           SELECT slug FROM repos WHERE slug = ${repo}
         `;
-        return { results, repos: repos.length, before, after: yield* counts };
+        // Scoped to this case's titles rather than the whole table, which other suites write to.
+        const titled = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE title LIKE ${`unserved ${tag} %`}
+        `;
+        return { results, repos: repos.length, titled: titled.length };
       }),
     );
 
@@ -1916,8 +1912,61 @@ describe("the model a session runs on", () => {
       );
     }
     expect(result.repos).toBe(0);
-    expect(result.before).toBeDefined();
-    expect(result.after).toEqual(result.before);
+    expect(result.titled).toBe(0);
+  }, 120_000);
+
+  it("pins the model a retried create names when the first attempt died before the root was opened", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const tag = randomBytes(4).toString("hex");
+        // What a create that died between its index row and the owner's open leaves behind (a
+        // URL-only repo's mirror fetch fails there): the row with its request id, and no root.
+        const requestId = `model-retry-${tag}`;
+        const id = yield* mintSessionId;
+        yield* sql`
+          INSERT INTO sessions (id, title, request_id)
+          VALUES (${id}, ${`model retry ${tag}`}, ${requestId})
+        `;
+        const retried = yield* sessions.create({
+          title: `model retry ${tag}`,
+          requestId,
+          model: "faux/faux-2",
+        });
+        // A second retry, once the root is pinned, changes nothing.
+        const again = yield* sessions.create({
+          title: `model retry ${tag}`,
+          requestId,
+          model: "faux/faux-2",
+        });
+        yield* sessions.send({ sessionId: retried.id, content: "go" });
+        yield* waitUntil(
+          sessions.get(retried.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the retried session's turn to settle",
+        );
+        const snapshot = yield* sessions.get(retried.id);
+        const pinned = yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, retried.id)),
+          (storage) => readPinnedModelKey(storage),
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+        return {
+          id,
+          retried: retried.id,
+          again: again.id,
+          model: retried.model,
+          pinned,
+          usage: snapshot.usage.models.map((entry) => entry.key),
+        };
+      }),
+    );
+
+    expect(result.retried).toBe(result.id);
+    expect(result.again).toBe(result.id);
+    expect(result.model).toBe("faux/faux-2");
+    expect(result.pinned).toBe("faux/faux-2");
+    expect(result.usage).toEqual(["faux/faux-2"]);
   }, 120_000);
 
   it("runs a faux session created on another published faux model offline, every request on it", async () => {
