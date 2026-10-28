@@ -36,6 +36,7 @@ import {
   missionKey,
   type MissionResult,
 } from "./mission";
+import { MissionWorkerTask } from "./mission-worker";
 import { createFauxModelAccess } from "./models";
 import { usageCostTotal } from "./projection";
 import {
@@ -235,7 +236,7 @@ describe("a mission's per-worker cost", () => {
       { id: "b", prompt: "do part b" },
     ]);
     session.harness.resume();
-    for (let waited = 0; ; waited += 5) {
+    for (let waited = 0; ; waited += 25) {
       const workers = (await live(session)).mission?.workers ?? [];
       if (
         workers.length === 2 &&
@@ -243,7 +244,7 @@ describe("a mission's per-worker cost", () => {
       )
         break;
       if (waited > 10_000) throw new Error("the workers never opened");
-      await Effect.runPromise(Effect.sleep("5 millis"));
+      await Effect.runPromise(Effect.sleep("25 millis"));
     }
     await session.root.abort(BACKGROUND_CONTEXT);
     const settled = await session.harness.waitForTask(
@@ -269,7 +270,7 @@ describe("a mission's per-worker cost", () => {
     // Their requests were interrupted mid-nap, and an interrupted request is never charged.
     expect(usageCostTotal(after.usage)).toBe(0);
     await Effect.runPromise(closeHarness(session.harness));
-  });
+  }, 20_000);
 
   it("lists a worker that has no conversation yet, with zero spend and no conversation id", async () => {
     // The roster is written by the fan-out before a worker's first commit creates its conversation;
@@ -350,6 +351,54 @@ describe("a mission's per-worker cost", () => {
     const snapshot = await live(session);
     expect(snapshot.mission?.phase).toBe("verify");
     expect(snapshot.mission?.workers).toBeUndefined();
+    await Effect.runPromise(closeHarness(session.harness));
+  });
+
+  it("leaves a mission from before the roster at no workers rather than listing the late ones", async () => {
+    // A mission whose fan-out ran on a build without the roster has a document with no `workers`;
+    // a worker that opens after an upgrade must not add itself, or the snapshot would name only the
+    // workers that opened late and their costs would not reconcile with the session's.
+    const session = await open();
+    const worker = await session.root.commit(
+      (tx) =>
+        tx
+          .createTask(
+            MissionTask,
+            {
+              feature: "a feature",
+              workspace: {
+                path: session.ref.workspace.path,
+                commands: { verify: "true" },
+                commandsSource: "repo",
+              },
+            },
+            { ownership: { kind: "conversation" } },
+          )
+          .then(async (mission) => {
+            const binding = await tx.doc(MissionBindingDoc, session.root.id);
+            binding.taskId = missionKey(mission);
+            return tx.createTask(
+              MissionWorkerTask,
+              {
+                worker: { id: "late", prompt: "do the late part" },
+                workspace: { path: session.ref.workspace.path },
+              },
+              { ownership: { kind: "task", taskId: mission } },
+            );
+          }),
+      BACKGROUND_CONTEXT,
+    );
+    session.harness.resume();
+    const settled = await session.harness.waitForTask(
+      worker,
+      BACKGROUND_CONTEXT,
+    );
+    expect(settled.state.outcome.status).toBe("completed");
+    const snapshot = await live(session);
+    expect(snapshot.mission?.workers).toBeUndefined();
+    // The worker did spend: the session's total is not zero, which is the reason the roster must
+    // not be half-written.
+    expect(usageCostTotal(snapshot.usage)).toBeGreaterThan(0);
     await Effect.runPromise(closeHarness(session.harness));
   });
 });

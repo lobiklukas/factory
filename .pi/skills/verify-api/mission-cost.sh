@@ -19,7 +19,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${MISSION_COST_PORT:-9427}"
+PORT="${MISSION_COST_PORT:-9430}"
 API_URL="http://localhost:$PORT"
 RUN_DIR="$ROOT/.verify/run/mission-cost"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"

@@ -128,9 +128,15 @@ and `costTotal`) summed over both buckets, models and tools, of the conversation
   all read the same ledgers. A document written before the roster existed reads as no workers.
 - **Zero, not absent.** A worker that spent nothing — aborted mid-request, or read between the
   fan-out and its first commit, when it has no `conversationId` yet — is listed with zero counters.
-- **It reconciles.** The workers' `costTotal`s plus what the session's root conversation spent is
-  the session's `usage` total (the list's `costTotal`), because `Harness.usage()` and the fold sum
-  every conversation. A mission that fanned out to none has no `workers` field.
+- **It reconciles for a session's only mission.** The workers' `costTotal`s plus what the session's
+  root conversation spent is the session's `usage` total (the list's `costTotal`), because
+  `Harness.usage()` and the fold sum every conversation. A session that ran an earlier mission
+  keeps that mission's workers' spend in the total, but the snapshot lists only the bound (latest)
+  mission's workers, so the two no longer match; a per-mission remainder is a follow-up. A mission
+  that fanned out to none has no `workers` field.
+- **A mission from before the roster stays at no workers.** A worker adds nothing to a document that
+  has no entry for it, so a mission that fanned out on an older build is never half-listed after an
+  upgrade (the workers that open late would be the only ones named).
 - **Read when the snapshot is.** The stream's `usage` events carry the session total; a client that
   wants the breakdown re-reads the snapshot, as it does for a phase change.
 

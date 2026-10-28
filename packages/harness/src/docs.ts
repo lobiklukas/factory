@@ -183,7 +183,9 @@ export const PagePromptDoc = defineDoc({
  * conversation its first commit created, which is how a read finds the ledger a worker's spend is
  * in. The seed has none and a mission that fanned out to none never writes one, so — like
  * `factory.pr`'s `evidence` — a document written before the field existed reads as an empty roster
- * and its version did not change. Each entry is written in the commit that creates what it names.
+ * and its version did not change. Each entry is written in the commit that creates what it names; a
+ * worker only fills in an entry that exists, so a mission that fanned out before the roster stays at
+ * no workers instead of listing the ones that opened after an upgrade.
  */
 export const MissionDoc = defineDocFamily({
   kind: MISSION_DOC_KIND,

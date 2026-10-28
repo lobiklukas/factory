@@ -163,8 +163,10 @@ export const runCommand = (
 /**
  * Record the conversation a worker opened in its mission's roster (LOB-194), in the worker's own
  * commit. The fan-out wrote the worker's entry with no conversation; this fills it in. A mission
- * whose document has no entry for the worker (an owner the roster never named) gets one, so the
- * conversation is attributable either way. A worker with no owner has no mission to name it to.
+ * whose document has no entry for the worker — one that fanned out on a build before the roster
+ * existed — is left alone: adding the workers that open after an upgrade would list only some of
+ * them, a partial roster that neither reads as "no workers" nor reconciles. A worker with no owner
+ * has no mission to name it to.
  */
 const nameConversation = (
   tx: Tx,
@@ -183,9 +185,8 @@ const nameConversation = (
       taskId,
       conversationId: String(conversationId),
     };
-    doc.workers = roster.some((each) => each.taskId === taskId)
-      ? roster.map((each) => (each.taskId === taskId ? entry : each))
-      : [...roster, entry];
+    if (!roster.some((each) => each.taskId === taskId)) return;
+    doc.workers = roster.map((each) => (each.taskId === taskId ? entry : each));
   });
 };
 

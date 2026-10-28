@@ -83,8 +83,11 @@ export type MissionWorkerSpend = typeof MissionWorkerSpend.Type;
  * client handed an empty phase would have to guess which one it got.
  *
  * `workers` is each worker's own spend, in the order the mission's input named them (LOB-194);
- * absent for a mission that fanned out to none. The workers' costs added to what the session's root
- * conversation spent is the session's `usage` total, which is what lets a client reconcile the two.
+ * absent for a mission that fanned out to none, and for one whose fan-out predates the roster. For a
+ * session's only mission, the workers' costs added to what the session's root conversation spent is
+ * the session's `usage` total, which is what lets a client reconcile the two. A session that ran
+ * another mission before this one also carries that mission's workers' spend in its total: the
+ * snapshot reads only the bound (latest) mission's roster.
  * It is read when the snapshot is: a worker's spend after that is the next read's.
  */
 export const MissionSnapshot = Schema.Struct({

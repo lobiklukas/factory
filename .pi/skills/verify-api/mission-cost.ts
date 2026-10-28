@@ -25,7 +25,7 @@ import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const API_URL = process.env["API_URL"] ?? "http://localhost:9427";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9430";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api";
 const COST = Number(process.env["FAUX_COST"] ?? "0.01");
