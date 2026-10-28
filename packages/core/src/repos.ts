@@ -119,17 +119,24 @@ export type GitAnswerOptions = {
 };
 
 /**
- * One hook-free `git` in `directory` that answers its stdout (trimmed unless asked not to), or
- * `undefined` when git failed, could not run, printed more than `maxBuffer`, or outlived the
- * deadline. The probes below are read-only questions about a checkout, and "git could not say" is
- * an answer to each of them.
+ * How one hook-free `git` ended (`gitRun`): its stdout when it exited 0, or how it failed — the exit
+ * code when it exited with one, `undefined` when it could not run, was killed (the deadline, an
+ * overfull `maxBuffer`) or ended on a signal.
  */
-export const gitAnswer = (
+export type GitRun =
+  | { readonly _tag: "ok"; readonly stdout: string }
+  | { readonly _tag: "failed"; readonly exitCode: number | undefined };
+
+/**
+ * One hook-free `git` in `directory`, answering how it ended: what `gitAnswer` reads, for a caller
+ * that must tell "git said no" (an exit code the command documents) from "git could not say".
+ */
+export const gitRun = (
   directory: string,
   args: ReadonlyArray<string>,
   options: GitAnswerOptions = {},
-): Effect.Effect<string | undefined> =>
-  Effect.callback<string | undefined>((resume, signal) => {
+): Effect.Effect<GitRun> =>
+  Effect.callback<GitRun>((resume, signal) => {
     execFile(
       "git",
       [
@@ -149,18 +156,78 @@ export const gitAnswer = (
           ? {}
           : { maxBuffer: options.maxBuffer }),
       },
-      (error, stdout) =>
+      (error, stdout) => {
+        if (error === null) {
+          resume(
+            Effect.succeed({
+              _tag: "ok",
+              stdout: options.trim === false ? stdout : stdout.trim(),
+            }),
+          );
+          return;
+        }
+        // `code` is the exit status only for a git that exited on its own; a spawn failure carries
+        // a string (`ENOENT`), and a killed one (`killed`, a `signal`) has no answer to read.
+        const exited =
+          typeof error.code === "number" &&
+          error.killed !== true &&
+          (error.signal ?? null) === null;
         resume(
-          Effect.succeed(
-            error !== null
-              ? undefined
-              : options.trim === false
-                ? stdout
-                : stdout.trim(),
-          ),
-        ),
+          Effect.succeed({
+            _tag: "failed",
+            exitCode: exited ? (error.code as number) : undefined,
+          }),
+        );
+      },
     );
   });
+
+/**
+ * One hook-free `git` in `directory` that answers its stdout (trimmed unless asked not to), or
+ * `undefined` when git failed, could not run, printed more than `maxBuffer`, or outlived the
+ * deadline. The probes below are read-only questions about a checkout, and "git could not say" is
+ * an answer to each of them.
+ */
+export const gitAnswer = (
+  directory: string,
+  args: ReadonlyArray<string>,
+  options: GitAnswerOptions = {},
+): Effect.Effect<string | undefined> =>
+  gitRun(directory, args, options).pipe(
+    Effect.map((run) => (run._tag === "ok" ? run.stdout : undefined)),
+  );
+
+/**
+ * What `ref` names in the repository `directory` is in, told apart from git failing to say: a
+ * commit, `absent` when git answered that it names none (`rev-parse --verify --quiet` exits 1 and
+ * prints nothing), or `failed` for any other end — a directory that is no repository (exit 128), a
+ * git that could not run, or one that outlived `timeoutMs`. A caller that must not read "git could
+ * not say" as "there is nothing there" (a policy read, S-factory-config-as-code) reads this.
+ */
+export const lookupCommit = (
+  directory: string,
+  ref: string,
+  options: { readonly timeoutMs?: number } = {},
+): Effect.Effect<
+  | { readonly _tag: "commit"; readonly sha: string }
+  | { readonly _tag: "absent" }
+  | { readonly _tag: "failed" }
+> =>
+  gitRun(
+    directory,
+    ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`],
+    options,
+  ).pipe(
+    Effect.map((run) =>
+      run._tag === "ok"
+        ? run.stdout === ""
+          ? ({ _tag: "failed" } as const)
+          : ({ _tag: "commit", sha: run.stdout } as const)
+        : run.exitCode === 1
+          ? ({ _tag: "absent" } as const)
+          : ({ _tag: "failed" } as const),
+    ),
+  );
 
 /**
  * The commit `ref` names in the repository `directory` is in, or `undefined` when it names none.

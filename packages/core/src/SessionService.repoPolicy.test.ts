@@ -40,6 +40,7 @@ import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
+import type { RepoRemote } from "./RepoRemote";
 import { SessionService, SessionServiceLive } from "./SessionService";
 
 /** A run of this file's, so two runs on one database never share a slug. */
@@ -90,6 +91,20 @@ const write = (root: string, files: Record<string, string>) => {
 };
 
 const GATED = JSON.stringify({ policy: { approvalRequired: ["bun publish"] } });
+
+/** A checkout with `files` committed on `main`, unregistered. */
+const checkoutWith = (name: string, files: Record<string, string>) => {
+  const root = join(scratch, "repos", name);
+  mkdirSync(root, { recursive: true });
+  git(root, "git init -q -b main");
+  git(root, "git config user.email policy@localhost");
+  git(root, "git config user.name policy");
+  write(root, { ...files, "bin/bun": BUN_SHIM });
+  chmodSync(join(root, "bin/bun"), 0o755);
+  git(root, "git add -A");
+  git(root, "git commit -q -m base");
+  return root;
+};
 
 /** A checkout with `files` and the `bin/bun` shim committed on `main`, and no remote. */
 const register = (name: string, files: Record<string, string>) =>
@@ -485,5 +500,227 @@ describe("a repository's policy from .factory/config at the base", () => {
     expect(refused?.text).not.toContain(MARKER);
     expect(outcome.approvals.approvals).toEqual([]);
     expect(outcome.record?.effective.denied).toEqual(["bun publish"]);
+  }, 120_000);
+
+  /**
+   * Mutation: drop `repoPolicy.repo` from the mission's `policy.forWorktree` — a check the repo's
+   * base denies, or gates, passes and the worker would run it unattended.
+   */
+  it("refuses a mission worker's check the repo's config denies or gates", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const denying = yield* register("mission-deny", {
+          ".factory/config": JSON.stringify({
+            policy: { deny: ["bun publish"] },
+          }),
+        });
+        const gating = yield* register("mission-gate", {
+          ".factory/config": GATED,
+        });
+        const bare = yield* register("mission-bare", { "README.md": "hi\n" });
+        const attempt = (repo: RepoSlug) =>
+          Effect.gen(function* () {
+            const created = yield* sessions.create({ repo });
+            return yield* Effect.result(
+              sessions.startMission({
+                sessionId: created.id,
+                feature: "publish",
+                workers: [{ id: "w", prompt: "publish", check: COMMAND }],
+              }),
+            );
+          });
+        return {
+          denied: yield* attempt(denying.repo),
+          gated: yield* attempt(gating.repo),
+          bare: yield* attempt(bare.repo),
+        };
+      }),
+    );
+
+    const failure = (result: typeof outcome.denied) =>
+      result._tag === "Failure" ? result.failure : undefined;
+    expect(failure(outcome.denied)).toMatchObject({
+      code: "invalid_input",
+      message: expect.stringContaining("bun publish is refused"),
+    });
+    expect(failure(outcome.gated)).toMatchObject({ code: "invalid_input" });
+    expect(failure(outcome.gated)?.message).toContain('"w"');
+    // The same check on a repo with no policy is admitted.
+    expect(outcome.bare._tag).toBe("Success");
+  }, 180_000);
+
+  /**
+   * Mutation: drop `strict: true` from the mission's read — a base that names no commit waives the
+   * repository's policy for the mission's checks. Mutation: degrade a released session's rejected
+   * config to a warning for every open — the unreleased reopen runs under none of it.
+   */
+  it("refuses a mission whose base names no commit, and still opens a released session over a broken config", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        // Registered with no checkout first: the sessions' opens read and pin no policy.
+        const repo = RepoSlug.make(`repo-policy-${RUN}/late-checkout`);
+        yield* sessions.registerRepo({
+          repo,
+          url: "https://example.invalid/late-checkout.git",
+          defaultBaseRef: "main",
+        });
+        const onTopic = yield* sessions.create({ repo, baseRef: "topic" });
+        const toRelease = yield* sessions.create({ repo });
+        const toRefuse = yield* sessions.create({ repo });
+        yield* sessions.close;
+        // Now the checkout exists, without `topic`, and its base's config widens the deployment.
+        const localPath = checkoutWith("late-checkout", {
+          ".factory/config": JSON.stringify({
+            policy: { allowedHosts: ["evil.example"] },
+          }),
+        });
+        yield* sessions.registerRepo({
+          repo,
+          url: "https://example.invalid/late-checkout.git",
+          defaultBaseRef: "main",
+          localPath,
+        });
+        const mission = yield* Effect.result(
+          sessions.startMission({
+            sessionId: onTopic.id,
+            feature: "publish",
+            workers: [{ id: "w", prompt: "publish", check: "true" }],
+          }),
+        );
+        yield* sessions.releaseWorkspace({
+          sessionId: toRelease.id,
+          reason: "discarded",
+        });
+        const page = {
+          name: "a-page",
+          kind: "guide" as const,
+          content: "kept",
+          links: [],
+          sources: [],
+        };
+        const releasedPage = yield* Effect.result(
+          sessions.recordPage({ sessionId: toRelease.id, ...page }),
+        );
+        const refusedPage = yield* Effect.result(
+          sessions.recordPage({ sessionId: toRefuse.id, ...page }),
+        );
+        return { mission, releasedPage, refusedPage };
+      }),
+    );
+
+    expect(
+      outcome.mission._tag === "Failure" && outcome.mission.failure,
+    ).toMatchObject({
+      code: "policy_rejected",
+      message: expect.stringContaining("topic names no commit"),
+    });
+    expect(outcome.releasedPage._tag).toBe("Success");
+    expect(
+      outcome.refusedPage._tag === "Failure" && outcome.refusedPage.failure,
+    ).toMatchObject({
+      code: "policy_rejected",
+      message: expect.stringContaining("evil.example"),
+    });
+  }, 180_000);
+});
+
+/**
+ * A reviewer's pull request into a branch the operator's checkout does not hold (LOB-36): the base
+ * is fetched from the forge before its policy is read, rather than read as no policy.
+ */
+describe("a reviewer's policy at a base fetched from the forge", () => {
+  const forge = checkoutWith("review-forge", { "README.md": "forge\n" });
+  git(forge, "git checkout -q -b release");
+  write(forge, { ".factory/config": GATED });
+  git(forge, "git add -A");
+  git(forge, "git commit -q -m gate-release");
+  git(forge, "git checkout -q main");
+
+  /** The forge is a local repository: a base "fetch" is a real `git fetch` from it. */
+  const repoRemote: RepoRemote = {
+    fetchBase: (input) =>
+      Effect.sync(() => {
+        const ref = `refs/remotes/factory/${input.branch}`;
+        git(input.checkout, `git fetch -q ${forge} ${input.branch}:${ref}`);
+        const sha = execSync(`git rev-parse ${ref}`, {
+          cwd: input.checkout,
+          encoding: "utf8",
+        }).trim();
+        return { ref, sha };
+      }),
+    push: () => Effect.die(new Error("this suite never pushes")),
+    defaultBranch: () => Effect.succeed("main"),
+  };
+  const withRemote = ManagedRuntime.make(
+    SessionServiceLive({
+      model: faux.access,
+      sessionRoot: join(scratch, "sessions-remote"),
+      repoRemote,
+    }).pipe(
+      Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+    ),
+  );
+  afterAll(() => withRemote.dispose());
+
+  /** Mutation: skip `reviewBaseStartFor` — `release` names no commit and the reviewer is ungated. */
+  it("fetches a pull request's base the checkout does not hold, and reads the policy there", async () => {
+    const outcome = await withRemote.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const repo = RepoSlug.make(`repo-policy-${RUN}/review-fetch`);
+        // The operator's checkout holds `main` only, and the PR's head.
+        const localPath = join(scratch, "repos", "review-fetch");
+        execSync(`git clone -q --single-branch -b main ${forge} ${localPath}`);
+        git(localPath, "git checkout -q -b contributor");
+        write(localPath, { "change.txt": "change\n" });
+        git(localPath, "git add -A");
+        git(
+          localPath,
+          "git -c user.email=p@localhost -c user.name=p commit -q -m change",
+        );
+        const head = execSync("git rev-parse HEAD", {
+          cwd: localPath,
+          encoding: "utf8",
+        }).trim();
+        git(localPath, "git checkout -q main");
+        yield* sessions.registerRepo({
+          repo,
+          url: `https://github.com/${repo}.git`,
+          defaultBaseRef: "main",
+          localPath,
+        });
+        const created = yield* sessions.create({
+          repo,
+          baseRef: head,
+          branch: BranchName.make(`factory/review-${RUN}-2`),
+          review: {
+            number: 2,
+            url: "https://example.invalid/pull/2",
+            base: "release",
+            head,
+          },
+        });
+        const read = yield* recorded(created.id);
+        yield* sessions.close;
+        return {
+          record: read,
+          release: execSync("git rev-parse release", {
+            cwd: forge,
+            encoding: "utf8",
+          }).trim(),
+        };
+      }),
+    );
+
+    expect(outcome.record).toMatchObject({
+      source: {
+        ref: "refs/remotes/factory/release",
+        commit: outcome.release,
+        found: true,
+      },
+      repo: { approvalRequired: ["bun publish"] },
+    });
   }, 120_000);
 });

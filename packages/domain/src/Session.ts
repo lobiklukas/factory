@@ -234,6 +234,25 @@ export class RepoPolicyRejected extends Schema.TaggedError<RepoPolicyRejected>()
   },
 ) {}
 
+/**
+ * A repository's `.factory/config` policy that git could not read at the session's base
+ * (S-factory-config-as-code): the lookup of the base, or the listing or read of the config at the
+ * commit it names, failed or outlived its deadline — a busy machine, a lock, a corrupt object — rather
+ * than answering. Not a verdict on the config: nothing ran, because a run under the deployment's policy
+ * alone would drop the repository's gates without a word, and the same request is worth retrying
+ * (`policy_unreadable`). `ref` is the base it was read at; `commit` is absent when the base itself
+ * could not be looked up.
+ */
+export class RepoPolicyUnavailable extends Schema.TaggedError<RepoPolicyUnavailable>()(
+  "RepoPolicyUnavailable",
+  {
+    repo: Schema.String,
+    ref: Schema.String,
+    commit: Schema.optional(Schema.String),
+    message: Schema.String,
+  },
+) {}
+
 export const SessionSummary = Schema.Struct({
   id: SessionId,
   title: Schema.String,
@@ -1110,6 +1129,10 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   that cannot be loaded (S-factory-config-as-code, `RepoPolicyRejected`): not JSON, not the
  *   policy's shape, or allowing something the deployment denies. Nothing ran; the message names the
  *   repo, the base, the commit and each problem. Fix the config on the base and try again.
+ * - `policy_unreadable` — git could not read the repository's `.factory/config` at the session's
+ *   base (S-factory-config-as-code, `RepoPolicyUnavailable`): the lookup or read failed or timed out
+ *   rather than answering, so the policy is unknown and nothing ran. Transient: not a fault in the
+ *   config, and the same request succeeds once git can read the base again.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1123,6 +1146,7 @@ export const SessionErrorCode = Schema.Literals([
   "setup_failed",
   "setup_running",
   "policy_rejected",
+  "policy_unreadable",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

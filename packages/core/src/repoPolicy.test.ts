@@ -144,7 +144,7 @@ describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
   /**
    * Mutation: answer a config git cannot read as `unread` or as no config — the session runs with
    * the repo's gates dropped. Once the base names a commit, a config listed there that git cannot
-   * read refuses the load.
+   * read refuses the load, as unavailable rather than as a fault in the config.
    */
   it("refuses a base whose config git cannot read, rather than reading it as no policy", async () => {
     const checkout = fixtureRepo({
@@ -161,10 +161,32 @@ describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
     const failure = exit.cause.reasons[0];
     if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
     expect(failure.error).toMatchObject({
-      _tag: "RepoPolicyRejected",
-      kind: "unreadable",
-      reasons: [expect.stringContaining(".factory/config")],
+      _tag: "RepoPolicyUnavailable",
+      repo: "acme/widgets",
+      ref: "main",
+      message: expect.stringContaining("git could not read .factory/config"),
     });
+  });
+
+  /**
+   * Mutation: answer every failed `rev-parse` as a ref that names no commit (`unread`) — a git that
+   * fails or times out looking the base up opens the run under the deployment's policy alone.
+   */
+  it("refuses a base git could not look up, rather than answering unread", async () => {
+    // Not a repository: `rev-parse` exits 128, not the 1 that says the ref names nothing.
+    const notARepo = join(scratch, `plain-${fixtures}`);
+    mkdirSync(notARepo, { recursive: true });
+    const exit = await read(notARepo);
+    if (Exit.isSuccess(exit)) throw new Error("expected a refusal");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    expect(failure.error).toMatchObject({
+      _tag: "RepoPolicyUnavailable",
+      repo: "acme/widgets",
+      ref: "main",
+      message: expect.stringContaining("git could not look up main"),
+    });
+    expect(failure.error).not.toHaveProperty("commit");
   });
 
   it("answers unread for a ref that names no commit", async () => {
@@ -211,8 +233,10 @@ describe(
       const error = await rejection({
         ".factory/config": config({ pushRefPrefixes: ["refs/heads/"] }),
       });
-      expect(error).toMatchObject({ kind: "invalid" });
-      expect(error.reasons[0]).toContain("pushRefPrefixes");
+      expect(error).toMatchObject({
+        kind: "invalid",
+        reasons: [expect.stringContaining("pushRefPrefixes")],
+      });
     });
 
     it("refuses a policy block of the wrong shape, and a config that is not JSON", async () => {

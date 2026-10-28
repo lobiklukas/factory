@@ -2158,6 +2158,54 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Fetch the branch a reviewer's pull request merges into (LOB-36), before a review run's first
+       * open reads the repository's policy there (S-factory-config-as-code), outside the owners' gate
+       * for the reason `mirrorStartFor` is, and answer the ref the fetch updated. The worktree's own
+       * fetch is of the PR's head, so without this the base is read as the checkout or the mirror
+       * last saw it — or not at all, for a branch neither holds. Into the mirror for a URL-only repo,
+       * into `refs/remotes/factory/<base>` of a checkout whose repo has a forge URL (C17); nothing for
+       * a repo with neither, a base that is no safe branch name, or a released session. A failed
+       * fetch is logged and the base is read where the checkout already holds it.
+       */
+      const reviewBaseStartFor = (
+        row: SessionRow,
+        base: string,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (row.repo === null) return undefined;
+          if (isCommitId(base) || !isSafeBranchName(base)) return undefined;
+          if ((yield* releaseOf(row)) !== undefined) return undefined;
+          const repo = yield* toRepoSlug(row.repo);
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          if (registered === undefined) return undefined;
+          const warn = (message: string) =>
+            Effect.logWarning(
+              `session ${row.id}: could not fetch its pull request's base ${base} from ${repo}'s forge, so its policy is read at the ${base} it already holds: ${message}`,
+            ).pipe(Effect.as(undefined));
+          const checkout = registered.localPath ?? undefined;
+          if (checkout === undefined) {
+            const found = mirrorOf(registered);
+            if (found === undefined) return undefined;
+            return yield* found.mirror
+              .sync({ repo, url: found.url, baseRef: base })
+              .pipe(
+                Effect.map((tip) => tip.ref),
+                Effect.catch((error) => warn(error.message)),
+              );
+          }
+          const remote = options.repoRemote;
+          if (remote === undefined) return undefined;
+          const url = yield* forgeUrlFor(repo, registered.url, checkout);
+          if (url === undefined) return undefined;
+          return yield* remote
+            .fetchBase({ repo, url, checkout, branch: base })
+            .pipe(
+              Effect.map((fetched) => fetched.ref),
+              Effect.catch((error) => warn(error.message)),
+            );
+        });
+
+      /**
        * The ref a session's `verify` tool measures its branch against (C17): `measureBaseOf` from the
        * session's own checkout, the answer the PR step and the board get. A directory that is not
        * its own checkout, or a session with no base, keeps the workspace's base as it was.
@@ -2240,7 +2288,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * the session's work merges into, never a commit the run was cut at, which may be the very
        * change under review. A scratch session, a repo with no checkout yet, and a base that names
        * no commit there have no repository policy, and record none, so a later open reads it then.
-       * A config that cannot be loaded, or read, is `policy_rejected`.
+       * A config that cannot be loaded is `policy_rejected`; a base git could not read (a failed or
+       * timed-out lookup, listing or read) is `policy_unreadable`, transient — never "no policy".
+       * A released session's open runs no work, so either is a warning there instead.
        */
       const repoPolicyFor = (
         row: SessionRow,
@@ -2250,6 +2300,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           readonly fetchedStart?: string | undefined;
           /** The base a reviewer's pull request merges into (LOB-36), for a review run. */
           readonly reviewBase?: string | undefined;
+          /** The ref `reviewBaseStartFor` fetched `reviewBase` into, when it fetched it. */
+          readonly fetchedReviewBase?: string | undefined;
+          /**
+           * The session was released (LOB-268): its open runs no work, only takes approvals, pages
+           * and its close. A config that cannot be loaded is then a warning and no repository policy
+           * rather than a refusal, which would strand all three until the base was fixed.
+           */
+          readonly released?: boolean;
           /**
            * Refuse, rather than warn, when the base names no commit to read: for what is held to
            * the policy without a run of its own to read it later (a mission's checks).
@@ -2296,14 +2354,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             { repo, checkout, prefix, ref },
             policy.config,
           ).pipe(
-            Effect.mapError(
-              (error) =>
-                new SessionErrorClass({
-                  code: "policy_rejected",
-                  message: error.message,
-                }),
-            ),
+            Effect.catchTags({
+              RepoPolicyRejected: (error) =>
+                at.released === true
+                  ? Effect.logWarning(
+                      `session ${row.id} is released, so it opens under the deployment's policy alone: ${error.message}`,
+                    ).pipe(Effect.as(undefined))
+                  : Effect.fail(
+                      new SessionErrorClass({
+                        code: "policy_rejected",
+                        message: error.message,
+                      }),
+                    ),
+              RepoPolicyUnavailable: (error) =>
+                at.released === true
+                  ? Effect.logWarning(
+                      `session ${row.id} is released, so it opens under the deployment's policy alone: ${error.message}`,
+                    ).pipe(Effect.as(undefined))
+                  : Effect.fail(
+                      new SessionErrorClass({
+                        code: "policy_unreadable",
+                        message: error.message,
+                      }),
+                    ),
+            }),
           );
+          if (read === undefined) return none;
           if (read._tag === "unread") {
             if (at.strict === true)
               return yield* new SessionErrorClass({
@@ -2335,6 +2411,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         at: {
           readonly fetchedStart?: string | undefined;
           readonly reviewBase?: string | undefined;
+          readonly fetchedReviewBase?: string | undefined;
           readonly mirrored: boolean;
         },
       ): string => {
@@ -2342,7 +2419,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           at.mirrored && !isCommitId(base)
             ? `refs/remotes/origin/${base}`
             : base;
-        if (at.reviewBase !== undefined) return branch(at.reviewBase);
+        if (at.reviewBase !== undefined)
+          return at.fetchedReviewBase ?? branch(at.reviewBase);
         const baseRef = row.baseRef ?? registered.defaultBaseRef;
         if (isCommitId(baseRef)) return branch(registered.defaultBaseRef);
         return at.fetchedStart ?? branch(baseRef);
@@ -2891,6 +2969,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         open: OwnerOpening,
         acquisition: OwnerAcquisition,
         fetchedStart: string | undefined,
+        fetchedReviewBase: string | undefined,
       ): Effect.Effect<LiveOwner, SessionError> => {
         /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
         let claimed: number | undefined;
@@ -2959,6 +3038,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     fetchedStart,
                     reviewBase:
                       recordedReview?.target.base ?? acquisition.review?.base,
+                    fetchedReviewBase,
+                    released: released !== undefined,
                   }),
                 ),
               ),
@@ -3158,12 +3239,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const fetchedStart = alreadyOpen
             ? undefined
             : yield* fetchedStartFor(row);
+          // A reviewer's first open reads the policy at its pull request's base, fetched here for
+          // the same reason; a later open reads the policy its log pinned, and fetches nothing.
+          const reviewBase = acquisition.review?.base;
+          const fetchedReviewBase =
+            alreadyOpen || reviewBase === undefined
+              ? undefined
+              : yield* reviewBaseStartFor(row, reviewBase);
           return yield* acquireUnderGate(
             id,
             row,
             open,
             acquisition,
             fetchedStart,
+            fetchedReviewBase,
           );
         });
 

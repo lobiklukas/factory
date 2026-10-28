@@ -21,20 +21,23 @@
  * left alone.
  */
 import { Effect, Schema } from "effect";
-import { RepoPolicyRejected } from "@repo/domain/Session";
+import {
+  RepoPolicyRejected,
+  RepoPolicyUnavailable,
+} from "@repo/domain/Session";
 import {
   repoPolicyWidening,
   type AutonomyConfig,
   type RepoPolicy,
   type RepoPolicySource,
 } from "@repo/harness";
-import { gitAnswer, resolveCommit } from "./repos";
+import { gitAnswer, lookupCommit } from "./repos";
 import { CONFIG_FILE } from "./workspace";
 
 /** The largest `.factory/config` read; a larger one is refused rather than read in part. */
 export const REPO_CONFIG_READ_BYTES = 64 * 1024;
 
-/** How long one git read may take. A read of a resolved base that times out is refused. */
+/** How long one git read may take. A read that times out is `RepoPolicyUnavailable`, never no policy. */
 const GIT_READ_TIMEOUT_MS = 15_000;
 
 /** One entry of a list the block declares: a command prefix or a host, never blank. */
@@ -56,8 +59,9 @@ export type RepoPolicyRead =
       readonly policy: RepoPolicy;
     }
   /**
-   * The base names no commit in the checkout (a branch deleted since, a mirror not fetched yet):
-   * nothing to pin, say why. Once the base names a commit, a failed read of it is a refusal.
+   * Git answered that the base names no commit in the checkout (a branch deleted since, a mirror not
+   * fetched yet): nothing to pin, say why. Git failing to answer — about the base, or about the
+   * config at the commit it names — is `RepoPolicyUnavailable` instead, never this.
    */
   | { readonly _tag: "unread"; readonly problem: string };
 
@@ -74,21 +78,32 @@ export type ReadRepoPolicyInput = {
 /**
  * The repository's policy at `ref`, checked against the deployment's `config`. A base with no
  * `.factory/config`, or a config with no `policy` block, is a read with no policy. Refused with
- * `RepoPolicyRejected` when the config is too large, not JSON or cannot be read at the commit the
- * base names (`unreadable`), when the block is not the policy's shape (`invalid`), and when it
- * widens the deployment (`widens`).
+ * `RepoPolicyRejected` when the config is too large, not JSON or not a file (`unreadable`), when the
+ * block is not the policy's shape (`invalid`), and when it widens the deployment (`widens`). Refused
+ * with `RepoPolicyUnavailable` when git could not look the base up, or list or read the config at
+ * the commit it names: a failed or timed-out git is no answer about the policy, so it is never read
+ * as "no policy", which would drop the repository's gates for the run without a word.
  */
 export const readRepoPolicy = (
   input: ReadRepoPolicyInput,
   config: AutonomyConfig,
-): Effect.Effect<RepoPolicyRead, RepoPolicyRejected> =>
+): Effect.Effect<RepoPolicyRead, RepoPolicyRejected | RepoPolicyUnavailable> =>
   Effect.gen(function* () {
-    const commit = yield* resolveCommit(input.checkout, input.ref);
-    if (commit === undefined)
+    const looked = yield* lookupCommit(input.checkout, input.ref, {
+      timeoutMs: GIT_READ_TIMEOUT_MS,
+    });
+    if (looked._tag === "failed")
+      return yield* new RepoPolicyUnavailable({
+        repo: input.repo,
+        ref: input.ref,
+        message: `repo ${input.repo}: git could not look up ${input.ref} in ${input.checkout} to read its policy`,
+      });
+    if (looked._tag === "absent")
       return {
         _tag: "unread",
         problem: `${input.ref} names no commit in ${input.checkout}`,
       } as const;
+    const commit = looked.sha;
     const path = [input.prefix, ...CONFIG_FILE]
       .filter((part) => part !== "")
       .join("/");
@@ -123,13 +138,16 @@ export const readRepoPolicy = (
       ],
       { timeoutMs: GIT_READ_TIMEOUT_MS },
     );
+    const unavailable = (what: string) =>
+      new RepoPolicyUnavailable({
+        repo: input.repo,
+        ref: input.ref,
+        commit,
+        message: `repo ${input.repo}: git could not ${what} ${path} at ${input.ref} (${commit.slice(0, 12)})`,
+      });
     // The base names a commit, so a git that cannot list or read it now (a timeout under load, a
-    // corrupt object) is no answer about the policy: refused, never read as "no policy", which
-    // would drop the repository's gates for the run without a word.
-    if (listed === undefined)
-      return yield* refuse("unreadable", [
-        `git could not list ${path} at ${commit.slice(0, 12)}`,
-      ]);
+    // lock, a corrupt object) is no answer about the policy: refused, never read as "no policy".
+    if (listed === undefined) return yield* unavailable("list");
     // `<mode> <type> <object> <size>\t<path>`; nothing listed is a base with no config.
     const [mode, type, object, size] =
       listed.split("\t")[0]?.trim().split(/\s+/) ?? [];
@@ -141,8 +159,12 @@ export const readRepoPolicy = (
       } as const;
     if (type !== "blob" || (mode !== "100644" && mode !== "100755"))
       return yield* refuse("unreadable", [`${path} is not a file`]);
+    // `ls-tree -l` prints no size (`BAD`) for a blob the store does not hold: a corrupt or partial
+    // store, which says nothing about the config.
+    if (size === undefined || !/^\d+$/.test(size))
+      return yield* unavailable("read");
     const bytes = Number(size);
-    if (!Number.isFinite(bytes) || bytes > REPO_CONFIG_READ_BYTES)
+    if (bytes > REPO_CONFIG_READ_BYTES)
       return yield* refuse("unreadable", [
         `${path} is ${size} bytes, over the ${REPO_CONFIG_READ_BYTES} read`,
       ]);
@@ -155,10 +177,7 @@ export const readRepoPolicy = (
         timeoutMs: GIT_READ_TIMEOUT_MS,
       },
     );
-    if (text === undefined)
-      return yield* refuse("unreadable", [
-        `git could not read ${path} at ${commit.slice(0, 12)}`,
-      ]);
+    if (text === undefined) return yield* unavailable("read");
     const policy = yield* decodePolicy(text).pipe(
       Effect.mapError(({ kind, reasons }) => refuse(kind, reasons)),
     );

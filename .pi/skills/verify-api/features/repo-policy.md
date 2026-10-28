@@ -24,9 +24,11 @@ block in its `.factory/config`, beside the commands `install`, `build`, `test` a
 The block is read once per session, by its first open and before its worktree is cut, **at the
 session's base ref** — in the registered checkout, or the factory's clone of a URL-only repo (at its
 `refs/remotes/origin/<base>`), with `git cat-file` (`packages/core/src/repoPolicy.ts`) — never from
-the worktree. A review run is read at its pull request's base, never at the head under review, and a
-session based at any other commit id at the repo's default base: the commit a run was cut at may be
-the change whose rules are in question. It is merged under the deployment's
+the worktree. A review run is read at its pull request's base, never at the head under review — fetched
+first into the mirror, or into the checkout's `refs/remotes/factory/<base>` when the repo has a forge
+URL (`reviewBaseStartFor`), because the worktree's own fetch is of the head — and a session based at
+any other commit id at the repo's default base: the commit a run was cut at may be the change whose
+rules are in question. It is merged under the deployment's
 policy and over the column's (`withRepoPolicy`, then `withColumnAutonomy`, in
 `packages/harness/src/policy.ts`), each tighten-only, and the open commits the result to the log as
 the `factory.policy` document (`readPolicyRecord`): where the repository's policy was read (ref,
@@ -38,12 +40,23 @@ session reads the base as it is then.
 A config that tries to allow something the deployment denies (a host off its allowlist), whose block
 has a key the policy does not know (`allow`, `pushRefPrefixes`) or the wrong shape, or that is not
 JSON, is refused at load with a typed `RepoPolicyRejected`; the session does not open and the call
-answers `policy_rejected`, naming the repo, the base, the commit and each problem. So is a config
-the base's commit lists that git cannot read (a timeout, a missing object): it is never read as "no
-policy". A refused create leaves no session, worktree or branch behind. A base that names no commit
-in the checkout at all is warned about and the run meets the deployment's policy alone, recording no
-source, so a later open reads it; a mission's checks are refused instead. A pinned policy whose hosts
-the deployment has since dropped still opens, with a warning, and reaches none of them.
+answers `policy_rejected`, naming the repo, the base, the commit and each problem. A base git cannot
+read — the lookup of the ref, or the listing or read of the config at its commit, failing or timing
+out (a loaded machine, a lock, a missing object) — is never read as "no policy" either: it is a typed
+`RepoPolicyUnavailable` and the call answers `policy_unreadable`, which is transient — retry once git
+answers. A refused create leaves no session, worktree or branch behind. Only a base git answers names
+no commit (`rev-parse --verify` exiting 1) is warned about, and the run meets the deployment's policy
+alone, recording no source, so a later open reads it; a mission's checks are refused instead. A
+released session's open runs no work (it takes approvals, pages and its close), so there a config
+that cannot be loaded or read is a warning and no repository policy rather than a refusal. A pinned
+policy whose hosts the deployment has since dropped still opens, with a warning, and reaches none of
+them.
+
+**A limit: a review base the forge fetch cannot reach.** A reviewer's base fetch that fails is logged
+and the base is read where the checkout or mirror already holds it — a stale tip reads that tip's
+policy, and a branch neither holds is warned about and the reviewer runs read-only under the
+deployment's policy and its column's alone. A session already in flight when this shipped has no
+`factory.policy` record, so its next open reads the base and is held to it like a new one.
 
 **A limit: a repo with no remote.** Its base is the registered checkout's local branch, and every
 session worktree shares that checkout's refs. D11 guards `git push`, `git remote` and remote config,
