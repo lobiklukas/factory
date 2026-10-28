@@ -594,6 +594,18 @@ export const usageCostTotal = (usage: SessionUsage): number =>
   );
 
 /**
+ * One ledger's spend as a single set of counters: every model bucket and every tool bucket added,
+ * the buckets `usageCostTotal` adds. A mission worker's share of the session's spend (LOB-194) is
+ * this over the conversation it owns, so `usageCostTotal` of the session's usage is the sum of its
+ * conversations' `costTotal` here.
+ */
+export const totalSpend = (usage: SessionUsage): ModelUsage =>
+  [...usage.models, ...usage.tools].reduce(
+    (total, bucket) => addModelUsage(total, bucket.usage),
+    ZERO_USAGE,
+  );
+
+/**
  * `Harness.taskGraph()` → the live tasks a session reports (LOB-183).
  *
  * Sorted by id so two projections of the same graph compare equal and a client's list does not

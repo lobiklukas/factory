@@ -19,7 +19,7 @@
  * would be a cycle. A caller that wants the session summary reads the session (`getSession`), which
  * is what the snapshot is for.
  */
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 import { SessionId } from "@repo/domain/Ids";
 
 /**
@@ -39,19 +39,89 @@ export const isMissionPhase = (value: unknown): value is MissionPhase =>
   (MISSION_PHASES as readonly string[]).includes(value);
 
 /**
+ * What a conversation spent: Pi Durable's `pi.usage` counters, for one model, one tool, or — here,
+ * on a mission's worker — everything one conversation's ledger holds.
+ *
+ * Defined here rather than in `Session.ts`, which re-exports it, because `Session.ts` imports this
+ * module for the snapshot's `mission` and a worker's spend is part of that field.
+ */
+export const ModelUsage = Schema.Struct({
+  input: Schema.Finite,
+  output: Schema.Finite,
+  cacheRead: Schema.Finite,
+  cacheWrite: Schema.Finite,
+  totalTokens: Schema.Finite,
+  costTotal: Schema.Finite,
+});
+export type ModelUsage = typeof ModelUsage.Type;
+
+/**
+ * What one worker of a mission spent (LOB-194): the sum of both `pi.usage` buckets, models and
+ * tools, of the conversation the worker owns — read from that ledger, so it is what the session's
+ * own total counted, not an estimate.
+ *
+ * `id` is the worker's id within its mission (`MissionWorker.id`), and `taskId` is its task. A
+ * worker that spent nothing is listed with zero counters rather than left out: "ran nothing" and
+ * "was never listed" are different facts, and a breakdown that drops the first would not add up to
+ * the workers the mission started. `conversationId` is absent until the worker opened its
+ * conversation, which is the one moment a worker has a task and nothing it could have spent in.
+ */
+export const MissionWorkerSpend = Schema.Struct({
+  id: Schema.String,
+  taskId: Schema.String,
+  conversationId: Schema.optional(Schema.String),
+  usage: ModelUsage,
+});
+export type MissionWorkerSpend = typeof MissionWorkerSpend.Type;
+
+/**
  * One session's mission, as its snapshot reports it: the mission's id, the phase it is in, and the
  * phases it has passed through in order.
  *
  * `phase` cannot be empty here: a mission that has entered no phase is not reported at all, which is
  * why the snapshot's field is optional. "No phase yet" and "no mission" are different facts, and a
  * client handed an empty phase would have to guess which one it got.
+ *
+ * `workers` is each worker's own spend, in the order the mission's input named them (LOB-194);
+ * absent for a mission that fanned out to none. The workers' costs added to what the session's root
+ * conversation spent is the session's `usage` total, which is what lets a client reconcile the two.
+ * It is read when the snapshot is: a worker's spend after that is the next read's.
  */
 export const MissionSnapshot = Schema.Struct({
   taskId: Schema.String,
   phase: MissionPhase,
   entered: Schema.Array(MissionPhase),
+  workers: Schema.optional(Schema.Array(MissionWorkerSpend)),
 });
 export type MissionSnapshot = typeof MissionSnapshot.Type;
+
+/**
+ * One worker a mission's document names (LOB-194): which worker, which task, and the conversation
+ * the task opened — empty until it did.
+ *
+ * Written by the fan-out (id and task) and by the worker's own first commit (the conversation), in
+ * the commit that creates each, so the log holds the attribution rather than a process's memory of
+ * it: a reopen, and a read of a session nobody owns, find the same roster.
+ */
+export const MissionWorkerEntry = Schema.Struct({
+  id: Schema.String,
+  taskId: Schema.String,
+  conversationId: Schema.String,
+});
+export type MissionWorkerEntry = typeof MissionWorkerEntry.Type;
+
+const decodeWorkerEntry = Schema.decodeUnknownOption(MissionWorkerEntry);
+
+/**
+ * The workers a mission's document names, read defensively: a document an older build wrote has no
+ * roster, and an entry that is not three strings is dropped rather than carried.
+ */
+export const readMissionWorkers = (doc: {
+  readonly workers?: unknown;
+}): readonly MissionWorkerEntry[] =>
+  (Array.isArray(doc.workers) ? doc.workers : []).flatMap((entry) =>
+    Option.toArray(decodeWorkerEntry(entry)),
+  );
 
 /**
  * The mission task's definition version (`packages/harness/src/mission.ts`), which every document
@@ -187,9 +257,13 @@ export const missionSnapshot = (
     readonly definitionVersion?: unknown;
   },
   checkpoint?: unknown,
+  /** Each worker's spend (`readMissionWorkers` names them); empty or absent: no `workers` field. */
+  workers: readonly MissionWorkerSpend[] = [],
 ): MissionSnapshot | undefined => {
   const record = readMissionDoc(doc, checkpoint);
-  return record === undefined ? undefined : { taskId, ...record };
+  return record === undefined
+    ? undefined
+    : { taskId, ...record, ...(workers.length === 0 ? {} : { workers }) };
 };
 
 /**

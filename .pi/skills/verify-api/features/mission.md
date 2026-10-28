@@ -53,7 +53,7 @@ read off the session's snapshot, not off a second call (LOB-230, part 2 of LOB-1
   the allowlist, a push to another branch is refused as `invalid_input` naming the rule, and so is a
   check that would need a person's approval — nobody is there to give it.
 - **Worker spend is the session's.** Each worker is charged in its own conversation's `pi.usage`
-  (which is what lets LOB-194 attribute it per worker). The session's spend is every
+  (which is what lets the snapshot attribute it per worker, below). The session's spend is every
   conversation's: the budget cap (LOB-163) is checked against `Harness.usage()` before every
   request, a worker's included, and a stop aborts the root, whose scope holds the mission and,
   bottom-up, its workers. The snapshot's `usage`, `budget.spent`, the list's `costTotal` (live
@@ -114,6 +114,34 @@ check ran once, and the row is cleared. The same story is in
 `packages/harness/src/mission.fanout.test.ts` (a close and a reopen of one log) and
 `packages/core/src/SessionService.test.ts` ("a mission across a restart": the boot's resume, a stale
 row, the sweep).
+
+## What each worker spent (LOB-194)
+
+The snapshot's `mission.workers` is each worker's own spend, in the order the mission's input named
+them: `{id, taskId, conversationId?, usage}`, where `usage` is the six `pi.usage` counters (tokens
+and `costTotal`) summed over both buckets, models and tools, of the conversation the worker owns.
+
+- **Read from the log.** The mission's document (`factory.mission`) holds a roster: the fan-out
+  writes each worker's id and task in the commit that creates it, and the worker's first commit
+  writes the conversation it created. The snapshot prices each entry from that conversation's
+  `pi.usage`, so the live read, the fold of a released session and a second process after a restart
+  all read the same ledgers. A document written before the roster existed reads as no workers.
+- **Zero, not absent.** A worker that spent nothing — aborted mid-request, or read between the
+  fan-out and its first commit, when it has no `conversationId` yet — is listed with zero counters.
+- **It reconciles.** The workers' `costTotal`s plus what the session's root conversation spent is
+  the session's `usage` total (the list's `costTotal`), because `Harness.usage()` and the fold sum
+  every conversation. A mission that fanned out to none has no `workers` field.
+- **Read when the snapshot is.** The stream's `usage` events carry the session total; a client that
+  wants the breakdown re-reads the snapshot, as it does for a phase change.
+
+`mission-cost.sh` proves it on the wire against a priced faux (a cent a request, two requests a
+worker): two workers at two cents each, summing to the session's `usage` and the list's `costTotal`
+(an index row the snapshot does not feed); the fold of the released session reports the identical
+breakdown; and a second API process, started after the first was stopped, reports it again. A
+worker-less mission reports none. That workers' costs _differ_, that a worker that ran nothing is
+listed at zero, and that a read between fan-out and open lists the worker without a conversation
+are proven in `packages/harness/src/mission.cost.test.ts`, against `pi.usage` read off the harness
+and the faux provider's own request count rather than against the snapshot.
 
 ## Why the phase is on the session and not on a group of its own
 
