@@ -31,6 +31,7 @@ import {
   ReplayComparison,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
+import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { ReplayDoc } from "./docs";
 import type { RunProfile } from "./loader";
 import type { ModelAccess } from "./models";
@@ -40,7 +41,7 @@ import { usageCostTotal } from "./projection";
 import {
   ActorDoc,
   attempt,
-  closeHarness,
+  closeSession,
   openSession,
   readBudgetSource,
   readPromptSubmission,
@@ -158,6 +159,8 @@ export type ReplaySessionOptions = {
    */
   readonly actor?: string;
   readonly cwd: string;
+  /** The runtime the replay's commands run through (LOB-244), as `OpenSessionOptions.sandbox`. */
+  readonly sandbox?: BindableSandboxRuntimeShape;
   readonly policy?: SessionPolicy;
   /** How the replay's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
   readonly approvalAsker?: ApprovalAsker;
@@ -195,6 +198,7 @@ export const replaySession = (
       storage: options.target,
       model: options.model,
       cwd: options.cwd,
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       ...(options.policy === undefined ? {} : { policy: options.policy }),
       ...(options.approvalAsker === undefined
         ? {}
@@ -246,14 +250,10 @@ export const replaySession = (
               ];
         return Promise.all([doc, binding, ...title, ...cap, ...actor]);
       }, BACKGROUND_CONTEXT),
-    ).pipe(
-      Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),
-    );
+    ).pipe(Effect.tapError(() => closeSession(opened).pipe(Effect.ignore)));
     const submission = yield* submitMessage(opened.root, {
       content: options.source.prompt,
-    }).pipe(
-      Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),
-    );
+    }).pipe(Effect.tapError(() => closeSession(opened).pipe(Effect.ignore)));
     return { ...opened, source: options.source, submission };
   });
 

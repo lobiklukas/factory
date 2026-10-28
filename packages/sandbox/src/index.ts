@@ -5,6 +5,7 @@ export {
   fileIn,
   readFileIn,
   SandboxExecutionEnv,
+  type SandboxExecutionEnvOptions,
   writeFileIn,
 } from "./env";
 export * as InProcess from "./InProcess";

@@ -4,6 +4,7 @@ export * from "./pages";
 export * from "./policy";
 export * from "./projection";
 export * from "./session";
+export * from "./environment";
 export * from "./spec";
 export * from "./specify";
 export * from "./review";
