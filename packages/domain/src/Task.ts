@@ -862,6 +862,12 @@ export type TaskSpec = typeof TaskSpec.Type;
 export const ABANDON_COLUMN = "canceled";
 
 /**
+ * The column a card's PR's merge completes it into (C20): a merge moves the card there
+ * (`TaskService.settlePullRequest`), and `human_merge` is checked on a move into it only.
+ */
+export const MERGED_COLUMN = "done";
+
+/**
  * Where one of a column's exit requirements stands for a card (D9): `met` or `unmet` for a key the
  * factory checks (`./requirements` in core), with `reason` saying what is missing when it is not,
  * and `unchecked` for a key it declares but nothing checks yet.

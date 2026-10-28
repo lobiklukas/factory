@@ -270,11 +270,43 @@ describe("the human_merge requirement (C20)", () => {
     return verdict.reason ?? "";
   };
 
-  /** Mutation: met with no PR on record — a card nobody opened a PR for would pass the merge gate. */
-  it("is unmet for a card with no PR on record", () => {
+  /**
+   * Mutation: unmet with no PR on record — a box with no forge, or a card whose work needed no PR,
+   * could never be completed, only canceled.
+   */
+  it("is met for a card with no PR on record: there is no merge to wait on", () => {
+    expect(humanMergeVerdict({ runs: [run("ses_a"), run("ses_b")] })).toEqual({
+      met: true,
+    });
+    expect(humanMergeVerdict({ runs: [] })).toEqual({ met: true });
+  });
+
+  /** Mutation: compare the URLs as strings — a legacy run's API-resource PR would never match its merge. */
+  it("matches the merge of the card's PR by page or by API resource", () => {
     expect(
-      unmet(humanMergeVerdict({ runs: [run("ses_a"), run("ses_b")] })),
-    ).toContain("the card has no PR on record");
+      humanMergeVerdict({
+        runs: [
+          {
+            ...run("ses_a"),
+            prUrl: "https://api.github.com/repos/o/r/pulls/7",
+            mergedPr: PR,
+          },
+        ],
+      }),
+    ).toEqual({ met: true });
+    expect(
+      unmet(
+        humanMergeVerdict({
+          runs: [
+            {
+              ...run("ses_a"),
+              prUrl: "https://api.github.com/repos/o/r/pulls/8",
+              mergedPr: PR,
+            },
+          ],
+        }),
+      ),
+    ).toContain("pulls/8");
   });
 
   /** Mutation: met on a recorded PR alone — an open PR would pass. */

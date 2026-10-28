@@ -94,6 +94,7 @@ import {
   isTerminalColumn,
   isWebLink,
   LIST_BOARDS_LIMIT,
+  MERGED_COLUMN,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
@@ -456,9 +457,6 @@ export const mergeActor = (prUrl: string): Actor => `merge:${prUrl}`;
 /** The actor an unmerged close's block records (C20), naming the PR by its page. */
 export const closeActor = (prUrl: string): Actor => `pr-closed:${prUrl}`;
 
-/** The column a merged card goes to (C20): the default pipeline's completion. */
-const MERGED_COLUMN = "done";
-
 export type CommentTaskInput = {
   readonly taskId: string;
   readonly expectedRevision: number;
@@ -555,9 +553,12 @@ export type TaskServiceShape = {
    * reported. A merge moves the card to `done` from whichever column it is in, recorded as a `moved`
    * event by `mergeActor`, and lifts any block it holds (an `unblocked` event first): the work is on
    * the base, so the merge is the completion the merge gate stands for, not a move the card's exit
-   * requirements could refuse. An unmerged close blocks the card `pr_closed`, its note naming the PR.
-   * A card already finished (`done`, `canceled`), a close on a card already blocked, and a merge on a
-   * card whose pinned definition declares no `done` column change nothing (`changed: false`).
+   * requirements could refuse. An unmerged close blocks the card `pr_closed`, its note naming the PR,
+   * once per PR: a close of a PR that already blocked the card once (its `blocked` event by
+   * `closeActor`) leaves it as it is, so a person's unblock stands against the PR-state read that
+   * reports the same close on every read. A card already finished (`done`, `canceled`), a close on a
+   * card already blocked, and a merge on a card whose pinned definition declares no `done` column
+   * change nothing (`changed: false`).
    */
   readonly settlePullRequest: (
     input: SettlePullRequestInput,
@@ -2409,10 +2410,19 @@ export const TaskServiceLive = Layer.effect(
             const taskId = TaskId.make(input.taskId);
             if (input.outcome === "closed") {
               if (row.blockedReason !== null) return yield* unchanged;
+              // One block per PR, not per report: the PR-state read reports the close on every read
+              // of the card, and a person who unblocked the card has answered it.
+              const reported = yield* sql<{ readonly one: number }>`
+                SELECT 1 AS one FROM task_events
+                WHERE task_id = ${input.taskId} AND kind = 'blocked'
+                  AND actor = ${closeActor(input.pr.url)}
+                LIMIT 1
+              `;
+              if (reported.length > 0) return yield* unchanged;
               const rows = yield* sql<TaskRow>`
                 UPDATE tasks
                 SET blocked_reason = 'pr_closed', blocked_column = ${row.column},
-                    blocked_note = ${`pull request #${input.pr.number} (${input.pr.url}) was closed without being merged: reopen it, or start a run that opens another`},
+                    blocked_note = ${`pull request #${input.pr.number} (${input.pr.url}) was closed without being merged: reopen and merge it in GitHub, which moves the card to done, or unblock the card to go on (its next run pushes to the same PR's branch, which stays closed until someone reopens it)`},
                     blocked_since = now(), revision = revision + 1, updated_at = now()
                 WHERE id = ${input.taskId}
                 RETURNING ${sql.literal(TASK_COLUMNS)}

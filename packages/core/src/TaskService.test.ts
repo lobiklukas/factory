@@ -2946,7 +2946,7 @@ describe("TaskService — exit requirements", () => {
       }),
     );
     expect(refused._tag).toBe("RequirementUnmet");
-    const changeRun = await recordRun({
+    await recordRun({
       taskId: task.id,
       repoRoot,
       command: change("apps/api/src/feature.ts"),
@@ -2967,22 +2967,7 @@ describe("TaskService — exit requirements", () => {
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
     await approve(task.id, repoRoot);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(
-      await refusal((s) =>
-        s.move({
-          taskId: task.id,
-          expectedRevision: task.revision,
-          to: "done",
-          actor: LUKAS,
-        }),
-      ),
-    ).toMatchObject(HELD_AT_MERGE);
-    // GitHub's merge recorded on the run (C20) is the last of them, and the person's move goes through.
-    await recordMergeOn(
-      changeRun,
-      "https://github.com/factory-test/requires/pull/7",
-    );
+    // No run of the card opened a PR, so `human_merge` has no merge to wait on (C20): the move goes.
     const done = await withService((s) =>
       s.move({
         taskId: task.id,
@@ -3013,17 +2998,15 @@ describe("TaskService — exit requirements", () => {
       command: change("apps/web/src/page.ts"),
     });
     await approve(control.id, repoRoot);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(
-      await refusal((s) =>
-        s.move({
-          taskId: control.id,
-          expectedRevision: control.revision,
-          to: "done",
-          actor: LUKAS,
-        }),
-      ),
-    ).toMatchObject(HELD_AT_MERGE);
+    const controlDone = await withService((s) =>
+      s.move({
+        taskId: control.id,
+        expectedRevision: control.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(controlDone.column).toBe("done");
 
     // The card's change then moves to `api`, which the fixture cannot verify.
     const apiRun = await recordRun({
@@ -3055,17 +3038,15 @@ describe("TaskService — exit requirements", () => {
     // at all leaves it. It does declare `review_verdict`, which every version is held to (LOB-241).
     const task = await inReview(1);
     await approve(task.id, fixtureRepo({}));
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(
-      await refusal((s) =>
-        s.move({
-          taskId: task.id,
-          expectedRevision: task.revision,
-          to: "done",
-          actor: LUKAS,
-        }),
-      ),
-    ).toMatchObject(HELD_AT_MERGE);
+    const done = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(done.column).toBe("done");
   }, 120_000);
 
   // --- human_merge (C20): the card's PR merged ------------------------------------------------------
@@ -3176,8 +3157,8 @@ describe("TaskService — exit requirements", () => {
     );
     // Once the same run settles on a pass, the same move goes through.
     await settleReview(reviewer, CLEAN);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(await refusal(merge(task))).toMatchObject(HELD_AT_MERGE);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
   }, 120_000);
 
   it("refuses on a fail verdict after an earlier head's pass, naming the failing dimensions, and never gates a move into canceled", async () => {
@@ -3240,8 +3221,8 @@ describe("TaskService — exit requirements", () => {
     expect(stale.message).not.toContain(headA.slice(0, 12));
     // B passes: the newest head's verdict is a pass, and the move goes through.
     await settleReview(reviewerB, CLEAN);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(await refusal(merge(task))).toMatchObject(HELD_AT_MERGE);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
   }, 180_000);
 
   /**
@@ -3298,8 +3279,8 @@ describe("TaskService — exit requirements", () => {
       `was last reported at ${headC.slice(0, 12)}, and no review run has recorded a target for that head`,
     );
     await reportHead(task.id, headB);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(await refusal(merge(task))).toMatchObject(HELD_AT_MERGE);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
   }, 240_000);
 
   it("lets the card leave when the PR is pushed back to a head that passed (A pass → B fail → A)", async () => {
@@ -3318,8 +3299,8 @@ describe("TaskService — exit requirements", () => {
     const failed = await refusal(merge(task));
     expect(failed.message).toContain(`at ${headB.slice(0, 12)} failed`);
     await reportHead(task.id, headA);
-    // Everything before the merge is met: the move is held on the merge itself (C20).
-    expect(await refusal(merge(task))).toMatchObject(HELD_AT_MERGE);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
   }, 240_000);
 
   /** A card on a board over `version`, walked by a person from intake into building. */
@@ -4480,6 +4461,38 @@ describe("TaskService — a card settled by its PR (C20)", () => {
       }),
     );
     expect(unblocked.blocked).toBeUndefined();
+  });
+
+  /**
+   * Mutation: block again on a close the card was already blocked by — the PR-state read reports the
+   * close on every read of the card, so a person's unblock would never stand.
+   */
+  it("blocks once per PR: after a person's unblock the same close changes nothing, another PR's blocks", async () => {
+    const task = await cardInReview();
+    const closed = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    const unblocked = await withService((s) =>
+      s.unblock({
+        taskId: task.id,
+        expectedRevision: closed.task.revision,
+        actor: LUKAS,
+      }),
+    );
+    const again = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    expect(again).toMatchObject({
+      changed: false,
+      task: { revision: unblocked.revision },
+    });
+    expect(again.task.blocked).toBeUndefined();
+    const other = { number: 8, url: "https://github.com/o/r/pull/8" };
+    const next = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: other }),
+    );
+    expect(next.changed).toBe(true);
+    expect(next.task.blocked?.note).toContain(`pull request #8 (${other.url})`);
   });
 
   /** Mutation: settle a finished card — a canceled card would be moved to done by a late merge. */

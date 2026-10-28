@@ -14,7 +14,8 @@
  *   moves the card to `done` (`TaskService.settlePullRequest`, recorded by `mergeActor`) and releases
  *   its runs' workspaces (`releaseFinishedCard`), as a person's move into `done` does; an unmerged
  *   close blocks it `pr_closed`, naming the PR. Both are idempotent under the card's row lock, so a
- *   redelivery — or two at once — changes the card exactly once.
+ *   redelivery — or two at once — changes the card exactly once; a close blocks the card once per PR,
+ *   so a person's unblock stands against every later report of the same close.
  * - **The card's PR is read from GitHub when the card is opened** (`refreshCardPullRequest`, run by
  *   `getTaskExit` — the card pane's checklist and `factory board show` — and before a move into
  *   `done`): a local box with no webhook has no other way to learn of the merge. A merge it finds is
@@ -23,7 +24,8 @@
  *   move only records, so the move that follows is the person's own. The read is `PullRequestStates`,
  *   which keeps each PR's answer for `STATE_TTL` so a pane open on a card does not ask GitHub on every
  *   poll — a move's read asks afresh, since the person may have merged a moment ago — and answers
- *   nothing, changing nothing, when GitHub cannot be read.
+ *   nothing, changing nothing, when GitHub cannot be read or does not answer within
+ *   `STATE_READ_TIMEOUT` (a failure is kept for `FAILED_STATE_TTL` and warned once).
  *
  * `human_merge` itself is `./requirements`' check: a person's move into `done` needs the card's PR's
  * merge on record, so a move while the PR is open, or closed unmerged, is refused naming it.
@@ -41,7 +43,7 @@ import {
 } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
-import { RepoSlug, SessionId } from "@repo/domain/Session";
+import { SessionId } from "@repo/domain/Session";
 import { isTerminalColumn } from "@repo/domain/Task";
 import { CredentialProvider } from "./credentials";
 import {
@@ -50,6 +52,7 @@ import {
   type PullRequestLifecycle,
 } from "./LinearSync";
 import { githubApiUrl, PrError } from "./pr";
+import { pullRequestOf } from "./pullRequestUrl";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 import { releaseFinishedCard } from "./WorkspaceRelease";
@@ -69,20 +72,25 @@ export type PullRequestState =
 
 /**
  * A PR's page as its owner, repository and number (`https://github.com/o/r/pull/7`, or the same path
- * on a GitHub Enterprise host), or `undefined` for a URL that is not one.
+ * on a GitHub Enterprise host) — or its API resource, which older sessions recorded — or `undefined`
+ * for a URL that is neither (`./pullRequestUrl`).
  */
-export const pullRequestOfPage = (
-  url: string,
-): { readonly repo: RepoSlug; readonly number: number } | undefined => {
-  if (!URL.canParse(url)) return undefined;
-  const match = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\/?$/.exec(
-    new URL(url).pathname,
-  );
-  const number = Number(match?.[3]);
-  if (match === null || !Number.isSafeInteger(number)) return undefined;
-  const slug = `${match[1]}/${match[2]}`;
-  return Schema.is(RepoSlug)(slug) ? { repo: slug, number } : undefined;
-};
+export const pullRequestOfPage = pullRequestOf;
+
+/** How long one PR's answer stands before GitHub is asked again. */
+export const STATE_TTL = Duration.seconds(30);
+
+/**
+ * How long a failure to read one PR stands (a box with no token, a link that is no PR, a forge that
+ * errors), so an open pane does not ask — and warn — on every poll. A move's fresh read asks anyway.
+ */
+export const FAILED_STATE_TTL = Duration.minutes(2);
+
+/**
+ * How long one read of a PR's state may take: it sits on a person's move into `done` and on the card
+ * pane's checklist, which answer on the recorded state rather than wait on a forge that hangs.
+ */
+export const STATE_READ_TIMEOUT = Duration.seconds(5);
 
 /** GitHub's pull request, as far as its state goes. */
 const GitHubPullRequestState = Schema.Struct({
@@ -126,11 +134,27 @@ export const readPullRequestState = (
       },
     );
     const pr = yield* http.execute(request).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(GitHubPullRequestState)),
-      Effect.mapError(() =>
-        fail("GitHub's answer for the PR could not be read"),
+      Effect.mapError(() => fail("GitHub could not be reached")),
+      Effect.flatMap((response) =>
+        response.status >= 200 && response.status < 300
+          ? HttpClientResponse.schemaBodyJson(GitHubPullRequestState)(
+              response,
+            ).pipe(
+              Effect.mapError(() =>
+                fail("GitHub's answer for the PR could not be read"),
+              ),
+            )
+          : Effect.fail(fail(`GitHub answered ${response.status}`)),
       ),
+      Effect.timeoutOrElse({
+        duration: STATE_READ_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            fail(
+              `GitHub did not answer within ${Duration.toSeconds(STATE_READ_TIMEOUT)}s`,
+            ),
+          ),
+      }),
     );
     if (pr.merged === true || (pr.merged_at ?? "") !== "") {
       return {
@@ -149,7 +173,8 @@ export const readPullRequestState = (
 /** The forge read the card follows its PR with when no webhook told it (module doc). */
 export type PullRequestStatesShape = {
   /**
-   * The PR's state, by its page, or `undefined` when GitHub could not be read (logged). `fresh`
+   * The PR's state, by its page, or `undefined` when GitHub could not be read (logged once per
+   * failed lookup) or did not answer within `STATE_READ_TIMEOUT`. `fresh`
    * asks GitHub whatever answer is kept: a person's move into `done` right after a merge must not be
    * judged on the open PR a pane read a moment before.
    */
@@ -164,22 +189,31 @@ export class PullRequestStates extends Context.Service<
   PullRequestStatesShape
 >()("@repo/core/PullRequestStates") {}
 
-/** How long one PR's answer stands before GitHub is asked again. A failure is never kept. */
-export const STATE_TTL = Duration.seconds(30);
-
-/** `PullRequestStates` over GitHub's REST API, one answer per PR per `STATE_TTL`. */
+/**
+ * `PullRequestStates` over GitHub's REST API, one answer per PR per `STATE_TTL` (a failure, per
+ * `FAILED_STATE_TTL`).
+ */
 export const PullRequestStatesLive = Layer.effect(
   PullRequestStates,
   Effect.gen(function* () {
     const context = yield* Effect.context<
       CredentialProvider | HttpClient.HttpClient
     >();
+    // Warned once per failed lookup, not per read: a kept failure answers quietly until it lapses.
     const cache = yield* Cache.makeWith(
       (url: string) =>
-        readPullRequestState(url).pipe(Effect.provideContext(context)),
+        readPullRequestState(url).pipe(
+          Effect.provideContext(context),
+          Effect.tapError((error) =>
+            Effect.logWarning(
+              `pull request ${url}: its state could not be read: ${error.message}`,
+            ),
+          ),
+        ),
       {
         capacity: 1024,
-        timeToLive: (exit) => (Exit.isSuccess(exit) ? STATE_TTL : 0),
+        timeToLive: (exit) =>
+          Exit.isSuccess(exit) ? STATE_TTL : FAILED_STATE_TTL,
       },
     );
     return PullRequestStates.of({
@@ -187,16 +221,7 @@ export const PullRequestStatesLive = Layer.effect(
         (options?.fresh === true
           ? Effect.andThen(Cache.invalidate(cache, url), Cache.get(cache, url))
           : Cache.get(cache, url)
-        ).pipe(
-          Effect.catchTag("PrError", (error) =>
-            Effect.as(
-              Effect.logWarning(
-                `pull request ${url}: its state could not be read: ${error.message}`,
-              ),
-              undefined,
-            ),
-          ),
-        ),
+        ).pipe(Effect.catchTag("PrError", () => Effect.succeed(undefined))),
     });
   }),
 );

@@ -22,7 +22,15 @@ import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { createFauxModelAccess, readRecordedMerge } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import {
+  Effect,
+  Fiber,
+  Layer,
+  ManagedRuntime,
+  Option,
+  Redacted,
+} from "effect";
+import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
@@ -33,6 +41,7 @@ import {
   pullRequestOfPage,
   readPullRequestState,
   refreshCardPullRequest,
+  STATE_READ_TIMEOUT,
   settleCardsOfDelivery,
 } from "./cardPullRequest";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
@@ -326,6 +335,41 @@ describe("the card's PR read when the card is opened (C20)", () => {
     expect((await card(closedCard.taskId)).blocked?.reason).toBe("pr_closed");
   }, 60_000);
 
+  /**
+   * Mutation: block on every read of a closed PR — the pane's poll would block the card again after
+   * every unblock, so a person could never carry on without reopening the PR.
+   */
+  it("leaves a card a person unblocked after its PR closed unblocked on the next read", async () => {
+    const closed = prPage(15);
+    states.set(closed, { _tag: "closed" });
+    const { taskId } = await cardWithPrs([closed]);
+    expect((await refresh(taskId, true)).changed).toBe(true);
+    const blocked = await card(taskId);
+    await runtime.runPromise(
+      Effect.flatMap(TaskService, (s) =>
+        s.unblock({
+          taskId,
+          expectedRevision: blocked.revision,
+          actor: "person:lukas",
+        }),
+      ),
+    );
+    expect(await refresh(taskId, true)).toEqual({
+      pr: closed,
+      state: "closed",
+      changed: false,
+    });
+    expect(await card(taskId)).toMatchObject({
+      revision: blocked.revision + 1,
+    });
+    expect((await card(taskId)).blocked).toBeUndefined();
+    expect((await events(taskId)).map((event) => event.kind)).toEqual([
+      "created",
+      "blocked",
+      "unblocked",
+    ]);
+  }, 60_000);
+
   /** Mutation: read a finished card's PR — every open of a done card would ask GitHub. */
   it("reads nothing for a card with no PR or a finished card", async () => {
     const none = await cardWithPrs([]);
@@ -381,7 +425,7 @@ describe("readPullRequestState (C20)", () => {
       ),
     );
 
-  it("parses a PR page into its repository and number, and nothing else", () => {
+  it("parses a PR page, or its API resource, into its repository and number, and nothing else", () => {
     expect(pullRequestOfPage("https://github.com/o/r/pull/7")).toEqual({
       repo: "o/r",
       number: 7,
@@ -390,9 +434,16 @@ describe("readPullRequestState (C20)", () => {
       repo: "o/r.js",
       number: 12,
     });
+    // An older session's `pr_url` is the API resource, which names the same PR.
+    expect(pullRequestOfPage("https://api.github.com/repos/o/r/pulls/7")).toEqual(
+      { repo: "o/r", number: 7 },
+    );
+    expect(
+      pullRequestOfPage("https://ghe.example/api/v3/repos/o/r/pulls/3"),
+    ).toEqual({ repo: "o/r", number: 3 });
     for (const url of [
       "https://github.com/o/r/issues/7",
-      "https://api.github.com/repos/o/r/pulls/7",
+      "https://api.github.com/repos/o/r/issues/7",
       "not a url",
     ])
       expect(pullRequestOfPage(url)).toBeUndefined();
@@ -429,7 +480,12 @@ describe("readPullRequestState (C20)", () => {
     expect(await read("https://github.com/o/r/pull/7")).toEqual({
       _tag: "open",
     });
+    // GitHub's status is named, so a bad token (401) reads apart from a deleted PR (404).
     next = { status: 404, body: { message: "Not Found" } };
+    expect(await read("https://github.com/o/r/pull/7")).toEqual({
+      error: "GitHub answered 404",
+    });
+    next = { status: 200, body: { merged: true } };
     expect(await read("https://github.com/o/r/pull/7")).toEqual({
       error: "GitHub's answer for the PR could not be read",
     });
@@ -440,8 +496,12 @@ describe("readPullRequestState (C20)", () => {
     expect(requests.length).toBe(sent);
   });
 
-  /** Mutation: cache a failure — a forge that was down once would stay "unknown" for the TTL. */
-  it("keeps one answer per PR for a while, and never keeps a failure", async () => {
+  /**
+   * Mutation: never keep a failure — a box with no token, or a forge that errors, would be asked (and
+   * warn) on every poll of every open pane. Mutation: keep it past a fresh read — a move right after
+   * the forge came back would still be judged on nothing.
+   */
+  it("keeps one answer per PR for a while, a failure too, and a fresh read asks past either", async () => {
     const reads = (url: string) =>
       Effect.runPromise(
         Effect.gen(function* () {
@@ -459,11 +519,53 @@ describe("readPullRequestState (C20)", () => {
     ]);
     expect(requests.length).toBe(sent + 1);
     next = { status: 500, body: {} };
-    expect(await reads("https://github.com/o/r/pull/9")).toEqual([
-      undefined,
-      undefined,
-    ]);
+    const afterFailure = await Effect.runPromise(
+      Effect.gen(function* () {
+        const reader = yield* PullRequestStates;
+        const first = yield* reader.read("https://github.com/o/r/pull/9");
+        const kept = yield* reader.read("https://github.com/o/r/pull/9");
+        next = { status: 200, body: { state: "open" } };
+        const fresh = yield* reader.read("https://github.com/o/r/pull/9", {
+          fresh: true,
+        });
+        return [first, kept, fresh];
+      }).pipe(Effect.provide(PullRequestStatesLive.pipe(Layer.provide(forge)))),
+    );
+    expect(afterFailure).toEqual([undefined, undefined, { _tag: "open" }]);
     expect(requests.length).toBe(sent + 3);
+  });
+
+  /**
+   * Mutation: drop the timeout — a forge that never answers would hold a person's move into done,
+   * and the card pane's checklist, until the fetch gave up.
+   */
+  it("gives up on a forge that does not answer within STATE_READ_TIMEOUT", async () => {
+    const hanging = Layer.merge(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.never),
+      ),
+      Layer.succeed(
+        CredentialProvider,
+        staticTokenProvider(Option.some(Redacted.make("c20-fake-token"))),
+      ),
+    );
+    const answer = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          readPullRequestState("https://github.com/o/r/pull/7").pipe(
+            Effect.provide(hanging),
+            Effect.match({
+              onFailure: (error) => error.message,
+              onSuccess: () => "answered",
+            }),
+          ),
+        );
+        yield* TestClock.adjust(STATE_READ_TIMEOUT);
+        return yield* Fiber.join(fiber);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+    expect(answer).toBe("GitHub did not answer within 5s");
   });
 
   /** Mutation: ignore `fresh` — a move right after the merge would be judged on the kept "open". */

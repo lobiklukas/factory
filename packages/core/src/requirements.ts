@@ -36,8 +36,11 @@
  * of its change recorded (`factory.pr`; `review_verdict`'s rule), or — for a card none of whose runs
  * recorded one — the PR a merge recorded on one of its runs names. It is met when a run of the card
  * recorded GitHub's merge of that PR (`factory.merge`, which a signed `pull_request` delivery or the
- * PR-state read when the card is opened writes), so a person's move into `done` is refused while the
- * PR is open or was closed without being merged. The actor check is the gate's (B5) and still stands:
+ * PR-state read when the card is opened writes; the PR matched by page or by API resource,
+ * `./pullRequestUrl`), so a person's move into `done` is refused while the PR is open or was closed
+ * without being merged. A card with no PR on record has no merge to wait on and meets it: on a box
+ * with no forge, or for work that needed no PR, the person's move is the completion, held by the
+ * actor gate alone as before C20 (`pr_link`, where a column declares it, is what asks for a PR). The actor check is the gate's (B5) and still stands:
  * a run is refused the move as `HumanGateRequired` before this is read. A merge moves the card to
  * `done` by itself (`TaskService.settlePullRequest`), so this holds the hand-made move only.
  *
@@ -133,6 +136,7 @@
  * `canceled`. That is deliberate — "nothing could check this" is not a pass — and the refusal names
  * the remedy (`VERIFIABLE_REMEDY`) whenever a missing verification is the reason.
  */
+import { samePullRequest } from "./pullRequestUrl";
 import type {
   BoardColumn,
   ColumnRequirement,
@@ -141,6 +145,7 @@ import type {
 import {
   ABANDON_COLUMN,
   HUMAN_MERGE_REQUIREMENT,
+  MERGED_COLUMN,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
@@ -297,9 +302,6 @@ export const VERIFIABLE_REMEDY =
 export type RequirementVerdict =
   | { readonly met: true }
   | { readonly met: false; readonly reason: string };
-
-/** The column a merge completes a card into (C20): `human_merge` is checked on a move into it only. */
-const MERGED_COLUMN = "done";
 
 /**
  * The requirements leaving `column` for `to` has to check: the column's checked keys, in the order
@@ -635,13 +637,14 @@ export const humanMergeVerdict = (
   const cardPr =
     evidence.runs.findLast((run) => run.prUrl !== undefined)?.prUrl ??
     evidence.runs.findLast((run) => run.mergedPr !== undefined)?.mergedPr;
-  if (cardPr === undefined)
-    return {
-      met: false,
-      reason:
-        "the card has no PR on record, so nothing merged: a run of the card opens its PR (factory pr <session>), and its merge in GitHub moves the card to done",
-    };
-  if (evidence.runs.some((run) => run.mergedPr === cardPr))
+  // A card no run opened a PR for has no merge to wait on: B5's actor gate is its only check.
+  if (cardPr === undefined) return { met: true };
+  if (
+    evidence.runs.some(
+      (run) =>
+        run.mergedPr !== undefined && samePullRequest(run.mergedPr, cardPr),
+    )
+  )
     return { met: true };
   return {
     met: false,
