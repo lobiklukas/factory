@@ -1,4 +1,4 @@
-/** A column's settings (D3): what the settings page and a lane's disclosure say about one column. */
+/** A column's settings (LOB-245): what the settings page and a lane's disclosure say about one column. */
 import { renderToStaticMarkup } from "react-dom/server";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";

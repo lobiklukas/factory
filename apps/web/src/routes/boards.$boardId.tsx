@@ -154,7 +154,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           >
             Needs a person
           </Link>
-          {/* What each column does (D3): the pinned version described, read-only. */}
+          {/* What each column does (LOB-245): the pinned version described, read-only. */}
           <Link
             to="/boards/$boardId/settings"
             params={{ boardId }}

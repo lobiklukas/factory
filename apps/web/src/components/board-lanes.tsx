@@ -94,7 +94,7 @@ export const TaskCard = ({
 };
 
 /**
- * What a lane's disclosure shows (D3): its column as `getBoardConfig` describes the board's pinned
+ * What a lane's disclosure shows (LOB-245): its column as `getBoardConfig` describes the board's pinned
  * version — the settings page's own read and words (`ColumnSettings`), so the two cannot disagree.
  * Mounted only while the disclosure is open, so a board nobody inspects never reads its config, and
  * read once rather than with the board's poll: a pinned version does not change (B2).
@@ -150,7 +150,7 @@ const LaneSettings = ({
  *
  * The header carries what the definition says about the column — its kind, and its role where it
  * has one (B4) — so a lane is readable without the definition open beside it, and a disclosure
- * (D3) with the rest: the role's model, the skills, the exit requirements and the moves out. An
+ * (LOB-245) with the rest: the role's model, the skills, the exit requirements and the moves out. An
  * empty lane is rendered like any other: an empty column and a column that does not exist must not
  * look the same.
  */

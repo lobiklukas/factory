@@ -307,7 +307,7 @@ export const decideApprovalAtom = runtime.fn(
 
 /**
  * Which definitions exist and the versions each holds (LOB-270): what the "New board" form's
- * pickers offer, and how the settings page (D3) knows a version newer than a board's pin exists.
+ * pickers offer, and how the settings page (LOB-245) knows a version newer than a board's pin exists.
  * Read once per opening of the form or the page — definitions are written by migrations, so a
  * poll would only re-ask a fixed answer.
  */
@@ -319,7 +319,7 @@ export const definitionsAtom = runtime.atom(
 );
 
 /**
- * A board's configuration (D3): `getBoardConfig`, the instance with the definition version it pins
+ * A board's configuration (LOB-245): `getBoardConfig`, the instance with the definition version it pins
  * described exactly as `getDefinition` describes that version — each column's kind, role and the
  * model it resolves to, skills, requirements marked checked or not, exits and human gates. What the
  * settings page and a lane header's disclosure render, and nothing else.

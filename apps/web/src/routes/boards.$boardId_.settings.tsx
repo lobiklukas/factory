@@ -17,7 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
- * `/boards/$boardId/settings` (D3): what a board will do, in the browser. Its own page beside the
+ * `/boards/$boardId/settings` (LOB-245): what a board will do, in the browser. Its own page beside the
  * lanes rather than nested under them (the `_` in the file name), so opening it leaves the board's
  * poll and card pane behind instead of rendering under them.
  */
@@ -124,7 +124,10 @@ const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
   const { instance, definition } = result.value;
   const caps = capsLabel(definition.caps);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+    <div
+      data-board-settings-page={instance.id}
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
+    >
       <header className="flex flex-col gap-2 border-b border-border px-4 py-3">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <Link

@@ -1,4 +1,4 @@
-// Drive the board settings view (D3) the way an operator reads it, against the instance
+// Drive the board settings view (LOB-245) the way an operator reads it, against the instance
 // `board-settings.sh` starts (`ROLE_MODELS=specifier=faux/faux-spec`), and capture evidence.
 //
 //   node board-settings.mjs      (via ./board-settings.sh, which owns the instance this drives)
@@ -15,6 +15,7 @@
 //   pinned    a board pinned to v2 says v3 exists, and its columns are v2's, not the newest's
 //   lanes     each lane header's disclosure is closed until pressed, then shows its column's facts,
 //             equal to the same `getDefinition` column; its link opens the settings page
+//   read-only the page holds no form, input or button, and every RPC it sends is a read
 //   refused   a malformed board id is refused in the page, and a board that does not exist says so
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR.
@@ -109,6 +110,41 @@ page.on("console", (message) => {
 page.on("pageerror", (error) =>
   consoleErrors.push(`pageerror: ${String(error)}`),
 );
+
+/**
+ * Every RPC tag the browser sends while it is on a settings page, read off the requests themselves:
+ * the page is read-only, so each must be one of its two reads or a read the shell around every page
+ * makes. A write that a later change puts on the page shows up here as an unexpected tag.
+ */
+const SETTINGS_READS = new Set(["getBoardConfig", "listDefinitions"]);
+const SHELL_READS = new Set([
+  // The rail's "Needs a person" count (LOB-271) and the faux banner (LOB-272), on every page.
+  "listAttention",
+  "getServerInfo",
+  // The sidebar's board and session lists.
+  "listBoards",
+  "listSessions",
+]);
+const settingsRpcTags = [];
+page.on("request", (request) => {
+  if (!/\/rpc\/?$/.test(request.url()) || request.method() !== "POST") return;
+  if (!/\/boards\/[^/]+\/settings/.test(page.url())) return;
+  for (const line of (request.postData() ?? "").split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (message?._tag === "Request") settingsRpcTags.push(message.tag);
+    } catch {
+      // Not an envelope line.
+    }
+  }
+});
+
+/** The controls inside a settings page that could change something: none, on a read-only page. */
+const writeControls = (boardId) =>
+  page.$$eval(
+    `[data-board-settings-page='${boardId}'] :is(form, input, textarea, select, button, [contenteditable='true'], [role='button'])`,
+    (nodes) => nodes.map((node) => node.outerHTML.slice(0, 120)),
+  );
 
 /** Every column's facts under `scope`, read from what the page renders. */
 const readColumns = (scope) =>
@@ -366,6 +402,20 @@ try {
     fullPage: true,
   });
 
+  // --- read-only: the page offers no control that changes anything, and sends only reads ---------
+  const controls = await writeControls(pinnedBoard.id);
+  observed.writeControls = controls;
+  const pinnedPageShown = await page
+    .locator(`[data-board-settings-page='${pinnedBoard.id}']`)
+    .count();
+  assert(
+    "the settings page holds no form, input or button",
+    pinnedPageShown === 1 && controls.length === 0,
+    controls.length === 0
+      ? `page found=${pinnedPageShown}`
+      : JSON.stringify(controls),
+  );
+
   // --- lanes: each header's disclosure says the same as the page ---------------------------------
   await page.goto(`${WEB_URL}/boards/${newestBoard.id}`, {
     waitUntil: "domcontentloaded",
@@ -431,6 +481,23 @@ try {
     "a disclosure's link opens the board's settings page",
     page.url() === `${WEB_URL}/boards/${newestBoard.id}/settings`,
     page.url(),
+  );
+
+  const unexpectedTags = [
+    ...new Set(
+      settingsRpcTags.filter(
+        (tag) => !SETTINGS_READS.has(tag) && !SHELL_READS.has(tag),
+      ),
+    ),
+  ];
+  observed.settingsRpcTags = [...new Set(settingsRpcTags)];
+  assert(
+    "the settings page sends only reads: getBoardConfig, listDefinitions and the shell's own",
+    [...SETTINGS_READS].every((tag) => settingsRpcTags.includes(tag)) &&
+      unexpectedTags.length === 0,
+    unexpectedTags.length === 0
+      ? JSON.stringify(observed.settingsRpcTags)
+      : `unexpected=${JSON.stringify(unexpectedTags)}`,
   );
 
   assert(

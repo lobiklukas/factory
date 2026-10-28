@@ -83,7 +83,8 @@ join and the reads; `apps/cli/src/commands/boardConfig.test.ts` the printed layo
 
 ## What it does not prove
 
-The dashboard has no settings view yet (the next child of LOB-245); this is the read it will use.
+The dashboard's settings view reads this same `getBoardConfig` answer; verify-web's
+`board-settings.sh` proves it (`.pi/skills/verify-web/features/board-settings.md`).
 Nothing here writes a definition: versions are still written only by migrations, and the role table
 is deployment configuration, read-only. Transitions and gates are definition data since LOB-267; a
 definition with its own column set is driven through the card pane by verify-web's `drive.mjs`

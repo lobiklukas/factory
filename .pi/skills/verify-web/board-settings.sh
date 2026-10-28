@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove the board settings view (D3): `/boards/$boardId/settings` and each lane header's disclosure
+# Prove the board settings view (LOB-245): `/boards/$boardId/settings` and each lane header's disclosure
 # say what the board's pinned definition version does — every column's kind, role and the model it
 # resolves to, skills, exit requirements marked "checked" or "not yet checked", moves out and human
 # gates — and equal `getDefinition`'s answer for that version; a board pinned to an older version
@@ -17,6 +17,9 @@
 # two boards of its own, so it can be rerun against the same database.
 # Evidence: .verify/evidence/latest/board-settings/ — board-settings-*.png, observed.json, api.log, web.log.
 set -uo pipefail
+
+# Auth off (LOB-20), as spend.sh runs it: the drive's oracle calls send no credential.
+unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${BOARD_SETTINGS_API_PORT:-9471}"

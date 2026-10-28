@@ -4,7 +4,7 @@
 pins, and every column of it in order with its kind, its role and the model that role resolves to,
 its skills, its exit requirements each marked **checked** or **not yet checked**, its moves out and
 the human gate a move crosses. Each lane header on `/boards/<id>` has a disclosure with the same
-facts for its column (D3, under the board-configuration umbrella).
+facts for its column (LOB-245, the board-configuration umbrella).
 
 ## Sub-features
 
@@ -29,8 +29,10 @@ facts for its column (D3, under the board-configuration umbrella).
 - A lane's disclosure (`[data-lane-settings-toggle=<column>]`, panel `[data-lane-settings=<column>]`)
   is closed by default and mounts its read only when opened, so a board nobody inspects never reads
   its config. It renders the same `ColumnSettings` and links to the page.
-- Read-only. There is no edit control on the page; authoring a version is a later change. Skill
-  names are plain text until a skills page exists to link them to.
+- Read-only. There is no edit control on the page; authoring a version is a later change. The drive
+  proves it: the page (`[data-board-settings-page]`) holds no form, input or button, and every RPC
+  the browser sends while on it is `getBoardConfig`, `listDefinitions` or one of the shell's own
+  reads. Skill names are plain text until a skills page exists to link them to.
 - `/boards/not-a-board/settings` is refused by the route's decode; a well-formed id the server does
   not hold reads `No such board`.
 
@@ -75,4 +77,4 @@ except a settings disclosure's, and its write check still fails on any write the
 
 ## Last run
 
-2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`: **21/21** passed.
+2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`: **23/23** passed.

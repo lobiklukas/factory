@@ -24,7 +24,7 @@ const Fact = ({
 );
 
 /**
- * What one column of a definition version does (D3), as `getDefinition` describes it: its kind, its
+ * What one column of a definition version does (LOB-245), as `getDefinition` describes it: its kind, its
  * role and the model a run started in it talks to, its skills, its exit requirements each marked
  * "checked" or "not yet checked", and its moves out, a move across a human gate named by the gate.
  *

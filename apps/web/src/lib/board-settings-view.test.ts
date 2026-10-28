@@ -1,4 +1,4 @@
-/** The board settings view's words (D3): what a reader is told about a definition version. */
+/** The board settings view's words (LOB-245): what a reader is told about a definition version. */
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { DefinitionSummary } from "@repo/domain/Task";

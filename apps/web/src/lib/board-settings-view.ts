@@ -6,7 +6,7 @@ import type {
 } from "@repo/domain/Task";
 
 /**
- * The board settings view (D3): what `/boards/$boardId/settings` and a lane header's disclosure say
+ * The board settings view (LOB-245): what `/boards/$boardId/settings` and a lane header's disclosure say
  * about a definition version, worded from `getDefinition`'s description of it and nothing else.
  *
  * Read-only on purpose. A version is never edited in place (docs/board.md B2), so the page explains
