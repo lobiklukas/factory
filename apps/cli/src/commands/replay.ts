@@ -9,9 +9,10 @@ import { followSession, formatDollars } from "../transcript";
 
 /**
  * `--model` names a model the control plane does not serve (LOB-200). Checked against
- * `getServerInfo` before anything is replayed, so the refusal names the whole allowed list — the
- * server's own `invalid_input` for the same mistake cannot, because it holds the catalog and says
- * only which name it did not find. `errors.ts` reports it as `error: unknown_replay_model: …`.
+ * `getServerInfo` before anything is replayed, so the refusal names the whole allowed list and no
+ * replay is opened for a mistake. The server refuses the same name too, but its `invalid_input`
+ * says only which name it did not find, not which are allowed. `errors.ts` reports this as
+ * `error: unknown_replay_model: …`.
  */
 export class UnknownReplayModel extends Schema.TaggedError<UnknownReplayModel>()(
   "UnknownReplayModel",
@@ -58,12 +59,19 @@ const turnsCell = (run: ReplayRun): string =>
     ? String(run.turns)
     : `${run.turns} (+${run.inherited.turns} inherited)`;
 
-const signed = (amount: number, format: (magnitude: number) => string) =>
-  amount > 0
-    ? `+${format(amount)}`
-    : amount < 0
-      ? `-${format(-amount)}`
-      : format(0);
+/**
+ * `amount` with its sign, or unsigned when it prints as zero. The sign is decided from the
+ * *formatted* magnitude, not the raw number: a cost delta of $0.00003 prints as `$0.0000`, and
+ * `+$0.0000` would read as a change of nothing.
+ */
+const signed = (amount: number, format: (magnitude: number) => string) => {
+  const magnitude = format(Math.abs(amount));
+  return magnitude === format(0)
+    ? magnitude
+    : amount > 0
+      ? `+${magnitude}`
+      : `-${magnitude}`;
+};
 
 /**
  * The comparison as the table `factory replay` prints: one column per side, then the delta.

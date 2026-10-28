@@ -173,7 +173,6 @@ check "the source took the follow-up, so it ran more turns than a replay will" \
 
 run_cmd "$W" lsbefore "$FACTORY ls --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/replay-ls-before.txt"
-SESSIONS_BEFORE="$(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-before.txt")"
 
 # --- replay on another model: the comparison, with both model names -----------------------------------
 run_cmd "$W" replay "$FACTORY replay $SOURCE_ID --model $OTHER_MODEL --api $API_URL" || true
@@ -208,12 +207,22 @@ if [ -n "$TURNS_ROW" ]; then
     "$([ "$((R_TURNS - S_TURNS))" = "$D_TURNS" ] && echo 0 || echo 1)" "$R_TURNS - $S_TURNS = $D_TURNS"
 fi
 
+# The cost cells are dollars to 4 places, so the replay's minus the source's must equal the delta
+# to 4 places (the stored delta is a float subtraction, which can differ from the rounded cells
+# by one in the last place).
+if [ -n "$COST_ROW" ]; then
+  read -r _ S_COST R_COST D_COST <<< "$COST_ROW"
+  check "cost delta is the replay's cost minus the source's, to 4 places" \
+    "$(awk -v s="${S_COST#\$}" -v r="${R_COST#\$}" -v d="${D_COST/\$/}" 'BEGIN { diff = r - s; gap = diff - d; if (gap < 0) gap = -gap; exit !(gap < 0.00015) }' && echo 0 || echo 1)" \
+    "$R_COST - $S_COST = $D_COST"
+fi
+
 # --- a replay is a new session; the source was only read -----------------------------------------------
 run_cmd "$W" lsafter "$FACTORY ls --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/replay-ls-after.txt"
 check "the replay is a new row in factory ls" \
-  "$([ "$(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-after.txt")" = "$((SESSIONS_BEFORE + 1))" ] && grep -q "^$REPLAY_ID" "$EVIDENCE_DIR/replay-ls-after.txt" && echo 0 || echo 1)" \
-  "rows $SESSIONS_BEFORE -> $(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-after.txt")"
+  "$(! grep -q "^$REPLAY_ID" "$EVIDENCE_DIR/replay-ls-before.txt" && grep -q "^$REPLAY_ID" "$EVIDENCE_DIR/replay-ls-after.txt" && echo 0 || echo 1)" \
+  "$REPLAY_ID absent before, listed after"
 
 # --- a replay with no --model runs on the control plane's own model ------------------------------------
 run_cmd "$W" same "$FACTORY replay $SOURCE_ID --api $API_URL" || true
@@ -235,9 +244,10 @@ check "the error names the model it refused and the allowed list" \
   "allowed: $DEFAULT_MODEL, $OTHER_MODEL"
 run_cmd "$W" lsend "$FACTORY ls --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/replay-ls-end.txt"
+ids() { grep -o '^ses_[0-9a-z]\{26\}' "$1" | sort -u; }
 check "the refused replay opened no session" \
-  "$([ "$(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-mid.txt")" = "$(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-end.txt")" ] && echo 0 || echo 1)" \
-  "rows $(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-mid.txt") -> $(grep -c '^ses_' "$EVIDENCE_DIR/replay-ls-end.txt")"
+  "$([ "$(ids "$EVIDENCE_DIR/replay-ls-mid.txt")" = "$(ids "$EVIDENCE_DIR/replay-ls-end.txt")" ] && echo 0 || echo 1)" \
+  "$(ids "$EVIDENCE_DIR/replay-ls-end.txt" | wc -l | tr -d ' ') distinct ids before and after the refusal"
 
 # --- a session with no repo binding cannot be replayed: the refusal reason is printed -------------------
 run_cmd "$W" scratch "$FACTORY run \"scratch probe\" --api $API_URL" || true

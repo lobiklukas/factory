@@ -86,6 +86,13 @@ describe("formatComparison", () => {
     expect(lines[5]).toMatch(/ \$0\.0000$/);
   });
 
+  it("prints a cost delta too small to show unsigned, whichever way it points", () => {
+    for (const cost of [0.00003, -0.00003]) {
+      const lines = formatComparison(comparison({ delta: { turns: 0, cost } }));
+      expect(lines[5]).toMatch(/ \$0\.0000$/);
+    }
+  });
+
   it("says when the source recorded no model, instead of printing a blank column", () => {
     const base = comparison();
     const lines = formatComparison({

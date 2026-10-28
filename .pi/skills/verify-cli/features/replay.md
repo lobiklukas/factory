@@ -32,7 +32,7 @@ unknown model, replays a scratch session with no repo, and replays an unknown id
 **What proves it.** The pane carries `answer: alt-ok` (the replay ran on the other model's script) and
 the table: the session row names both sessions, the model row `faux/faux-1` against `faux/faux-alt`,
 the result row `answered` twice, and the turns and cost rows a negative delta whose arithmetic the
-script re-checks (replay minus source). `factory ls` gains exactly one row for the replay and none for
+script re-checks (replay minus source; the cost to 4 decimal places). `factory ls` gains exactly one row for the replay and none for
 the refused model. Evidence: `.verify/evidence/latest/cli/replay-*.txt` and `replay.json`.
 
 **What it does not prove.** The comparison's content: that a replay's spend, turns and outcome are

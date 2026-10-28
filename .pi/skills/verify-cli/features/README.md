@@ -4,9 +4,9 @@ One file per user-facing feature of `factory`. Each answers: what it is, how a u
 the skill drives it, and what observable end state proves it works.
 
 `factory replay` (a session's task run again on another model, with the comparison printed) was verified
-**2026-10-28** from the `agent/LOB-200` worktree with `./replay.sh` (API on `:9570`) — **20/20** checks. A mutation
-run (the source and replay columns swapped) failed 3 of them: the session row, the model row and the delta
-arithmetic.
+**2026-10-28** from the `agent/LOB-200` worktree with `./replay.sh` (API on `:9570`) — **21/21** checks, twice on the same database. A
+mutation run (the source and replay columns swapped) failed 3 of them: the session row, the model row and
+the turns-delta arithmetic; the cost-delta arithmetic check was proven by hand against a wrong sign.
 
 `factory repo add --url` / `repo sync` / `factory doctor` (a URL-only repo cloned into the factory's cache)
 were verified **2026-10-28** from the `agent/LOB-265` worktree with `./clone.sh` (API on `:9660`, the
