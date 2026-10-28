@@ -446,7 +446,11 @@ delegation, any diff or review UI (review is GitHub's, per D16), and the Cloudfl
 
 Of the design's component inventory (§3), these do not exist yet, and none of them is an oversight.
 `packages/sandbox` does (LOB-88): the `SandboxRuntime` interface, its capability descriptor, and
-the in-process runtime with its `ExecutionEnv` adapter; nothing outside its tests uses it yet.
+the in-process runtime with its `ExecutionEnv` adapter. Every session's commands run through it
+(LOB-244): the harness binds a sandbox to the session's worktree (`InProcess.bind`, the
+`BindableSandboxRuntimeShape`) through the runtime `SANDBOX_RUNTIME` selects in apps/api
+(`in-process`, the only value and the default), and releasing the owner ends the sandbox and keeps
+the worktree's files.
 
 | Package                       | Status                                                       |
 | ----------------------------- | ------------------------------------------------------------ |

@@ -182,6 +182,7 @@ import {
   writePage,
   writeTitle,
 } from "@repo/harness";
+import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
@@ -486,6 +487,12 @@ export type SessionServiceOptions = {
   /** Where a session's working directory is created, one directory per session. */
   readonly sessionRoot: string;
   /**
+   * The runtime every session's commands run through (LOB-244), in a sandbox bound to its working
+   * directory: the deployment's, selected by its configuration. Absent: each session's own
+   * in-process runtime, which runs them on the host (`@repo/harness`'s `openSessionEnvironment`).
+   */
+  readonly sandbox?: BindableSandboxRuntimeShape;
+  /**
    * Close an owner that has been idle this long, releasing its fold. `undefined` keeps every owner
    * open, which is what a test wants and what a long-lived server does not.
    */
@@ -621,6 +628,8 @@ type PageRow = {
 type LiveOwner = {
   readonly harness: Harness;
   readonly root: Conversation;
+  /** Ends the sandboxes the session's commands ran in (LOB-244), after the harness is closed. */
+  readonly releaseEnvironment: Effect.Effect<void>;
   readonly storage: PostgresStorage;
   /** Resolved when the owner was opened, so a live read never touches the disk or the registry. */
   readonly workspace: SessionWorkspace;
@@ -1512,6 +1521,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const owner: LiveOwner = {
               harness: opened.harness,
               root: opened.root,
+              releaseEnvironment: opened.releaseEnvironment,
               storage,
               workspace,
               lastUsedAt: now,
@@ -1549,6 +1559,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             openSession({
               storage,
               model: options.model,
+              ...(options.sandbox === undefined
+                ? {}
+                : { sandbox: options.sandbox }),
               // The run's role picks its model from the deployment's table (LOB-207); a session
               // with no card has no role, so it talks to the deployment's model.
               ...(options.roleModels === undefined
@@ -2094,6 +2107,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     ...(parent.actor === null ? {} : { actor: parent.actor }),
                     model: options.model,
                     cwd,
+                    ...(options.sandbox === undefined
+                      ? {}
+                      : { sandbox: options.sandbox }),
                     policy: sessionPolicy,
                     // A fork keeps its parent's cap and carries its spend; an uncapped parent's
                     // fork gets the default a create would (LOB-163).
@@ -2196,6 +2212,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 // (LOB-162), committed with the lineage.
                 ...(source.actor === null ? {} : { actor: source.actor }),
                 cwd,
+                ...(options.sandbox === undefined
+                  ? {}
+                  : { sandbox: options.sandbox }),
                 policy: sessionPolicy,
                 run,
                 verify,
@@ -3608,6 +3627,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // Interrupting the projection first: a released owner has no status to report.
           yield* FiberMap.remove(projectors, sessionId);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
+          // Then its sandboxes, which nothing runs in once the harness is closed; never the
+          // worktree's files, which stay for the session's next run like the worktree itself.
+          yield* owner.releaseEnvironment;
           yield* Effect.promise(() => owner.storage.dispose());
           // Nobody owns the session now, so the list's honest status is idle (D8).
           yield* setActivityStatus(sessionId, "idle");
