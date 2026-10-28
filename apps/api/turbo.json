@@ -36,6 +36,7 @@
         "DEFAULT_MODEL",
         "FAUX_VERIFY",
         "FAUX_SLEEP_MS",
+        "FAUX_FAIL",
         "FAUX_MODEL_SCRIPTS",
         "SESSION_ROOT",
         "SESSION_IDLE_TIMEOUT_MS",

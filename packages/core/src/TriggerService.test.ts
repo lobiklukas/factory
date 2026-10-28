@@ -35,6 +35,7 @@ import {
   DEFAULT_DEFINITION_ID,
   DefinitionId,
   MAX_TASK_BODY_CHARS,
+  MAX_TASK_TITLE_CHARS,
 } from "@repo/domain/Task";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
@@ -58,6 +59,7 @@ import {
 import { TaskService, TaskServiceLive } from "./TaskService";
 import {
   cardBodyOf,
+  cardTitleOf,
   NoCards,
   NoWriteBack,
   sessionRequestIdOf,
@@ -1835,6 +1837,71 @@ describe("a card rule", () => {
       expect(cards[0]?.body).toHaveLength(MAX_TASK_BODY_CHARS);
       expect(cards[0]?.body?.startsWith("## Logs")).toBe(true);
       expect(cards[0]?.body).toContain("[cut at ");
+      expect(await deliveryStatus(delivery!.requestId)).toBe("processed");
+      expect(created).toHaveLength(0);
+    });
+  }, 60_000);
+
+  it("fits a title over the card title's cap to the cap, with the whole title opening the body, and a blank one to the item's key (F10)", () => {
+    // At the cap the title is the card's as written, trimmed.
+    const exact = "t".repeat(MAX_TASK_TITLE_CHARS);
+    expect(cardTitleOf(`  ${exact}  `, "the body", "linear X")).toEqual({
+      title: exact,
+      body: "the body",
+    });
+    // One over: cut to its head and a marker, exactly at the cap, and nothing the source said lost.
+    const long = `${"w".repeat(MAX_TASK_TITLE_CHARS)}TAIL`;
+    const cut = cardTitleOf(long, "the body", "linear X");
+    expect(cut.titleCut).toBe(long.length);
+    expect(cut.title).toHaveLength(MAX_TASK_TITLE_CHARS);
+    expect(cut.title.endsWith("…")).toBe(true);
+    expect(cut.title).not.toContain("TAIL");
+    expect(cut.body).toBe(`Title: ${long}\n\nthe body`);
+    expect(cardTitleOf(long, "", "linear X").body).toBe(`Title: ${long}`);
+    // A cut never leaves half a surrogate pair on the card.
+    const emoji = `${"e".repeat(MAX_TASK_TITLE_CHARS - 2)}😀😀`;
+    const split = cardTitleOf(emoji, "", "linear X").title;
+    expect(split.length).toBeLessThanOrEqual(MAX_TASK_TITLE_CHARS);
+    expect(split.endsWith("e…")).toBe(true);
+    // A head that ends in whitespace loses it, so the cut title is a character short of the cap.
+    const spaced = `${"s".repeat(MAX_TASK_TITLE_CHARS - 2)} TAIL`;
+    const trimmed = cardTitleOf(spaced, "", "linear X");
+    expect(trimmed.title).toBe(`${"s".repeat(MAX_TASK_TITLE_CHARS - 2)}…`);
+    expect(trimmed.titleCut).toBe(spaced.length);
+    // A blank title names the item rather than being refused.
+    expect(cardTitleOf("   ", "the body", "linear X")).toEqual({
+      title: "linear X",
+      body: "the body",
+    });
+  });
+
+  it("files the card for an issue whose title is over the card title's cap, cut to at most the cap with the whole title in its body (F10)", async () => {
+    // A card's title is refused over the cap (`TaskService.cardTitle`); an outside item's is not, so
+    // a refusal here would be a skip for a delivery that is an honest card. It files instead.
+    const slug = cardRepo("longtitle");
+    await withCards(slug, async ({ trigger, created, run }) => {
+      // The head the cut keeps ends in a space, which it drops: the card's title is one short of the
+      // cap, and the recorded reason says the length the card has. Mutation: name the cap in the
+      // reason — it says 300 for a 299-character title.
+      const prefix = "Widget wobble: ";
+      const title = `${prefix}${"w".repeat(MAX_TASK_TITLE_CHARS - 2 - prefix.length)} ${"a very long summary ".repeat(5)}END`;
+      expect(title.length).toBeGreaterThan(MAX_TASK_TITLE_CHARS);
+      const delivery = linearDeliveryFor(cardRules(slug))(
+        linearIssue(`iss-${runId}-longtitle`, { title }),
+      );
+      const outcome = await run(trigger.deliver(delivery!));
+      expect(outcome.status).toBe("processed");
+      expect(outcome.reason).toContain(
+        `its title was cut to ${MAX_TASK_TITLE_CHARS - 1} of ${title.length} characters`,
+      );
+      const cards = await run(cardsOn(slug));
+      expect(cards).toHaveLength(1);
+      expect(cards[0]?.title).toHaveLength(MAX_TASK_TITLE_CHARS - 1);
+      expect(cards[0]?.title.startsWith("Widget wobble: ")).toBe(true);
+      expect(cards[0]?.title.endsWith("…")).toBe(true);
+      expect(cards[0]?.body?.startsWith(`Title: ${title}\n\n## Goal`)).toBe(
+        true,
+      );
       expect(await deliveryStatus(delivery!.requestId)).toBe("processed");
       expect(created).toHaveLength(0);
     });

@@ -28,6 +28,7 @@ import {
   FAUX_COMMAND,
   FAUX_MODEL_ID,
   modelKey,
+  parseFauxFail,
   parseFauxModelScripts,
   parseRoleModels,
   parseRolePolicies,
@@ -255,6 +256,14 @@ const ModelConfig = Config.all({
    * arrive while it is in flight (`.pi/skills/verify-cli/steer.sh`). `0`: the script answers at once.
    */
   fauxSleepMs: Config.Int("FAUX_SLEEP_MS").pipe(Config.withDefault(0)),
+  /**
+   * Fail the faux's requests on demand (F6): `model_error` ends every step of a turn with a provider
+   * error Pi Durable does not retry, and `model_error:<n>` fails once a request's context holds `n`
+   * model answers (a compaction can lower that count). What a drive needs to make a faulted run (`verify-board/requires.sh`'s `run_completed`,
+   * `verify-api/notify.sh`'s `failed:` message); one model's script can fail alone
+   * (`FAUX_MODEL_SCRIPTS`'s `fail`). Unset: the faux never fails. Anything else fails the boot.
+   */
+  fauxFail: Config.String("FAUX_FAIL").pipe(Config.withDefault("")),
   /**
    * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
    * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
@@ -486,7 +495,7 @@ const DocsScheduleDaemon = (schedule: {
  * database may not be reachable or migrated yet. Logs what it resumed under `what`.
  */
 const resumeAtBoot = (
-  what: "missions" | "runs",
+  what: "missions" | "runs" | "settled PR steps",
   resume: Effect.Effect<readonly string[], SessionError>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -516,7 +525,10 @@ const resumeAtBoot = (
  * each session whose row says a mission is in flight and schedules it, so the mission continues in
  * the phase it died in. A run is the same story for a conversation: a SIGTERM's close or a SIGKILL
  * leaves its submission placed and unanswered, and `resumeRuns` reopens each session whose row says
- * a run is in flight, which continues it as the same submission. Forked beside `MigrationsDaemon`
+ * a run is in flight, which continues it as the same submission. Then the PR step a settled run was
+ * owed and no process took (F16): `settlePullRequestsAtBoot` runs it for each session the settle rule
+ * declares that records no PR and whose step never answered at its branch's tip — a process killed
+ * between a run settling and its step leaves exactly that. Forked beside `MigrationsDaemon`
  * and for the same reason — the boot binds first. Built on `SessionShutdown`, like the docs
  * schedule, so a resume still in progress is interrupted before the owners are released.
  */
@@ -526,6 +538,10 @@ const BootResumeDaemon = Layer.effectDiscard(
     yield* Effect.forkScoped(
       resumeAtBoot("missions", sessions.resumeMissions).pipe(
         Effect.andThen(resumeAtBoot("runs", sessions.resumeRuns)),
+        // After the runs, so a run the boot continued settles and takes its step as a live one does.
+        Effect.andThen(
+          resumeAtBoot("settled PR steps", sessions.settlePullRequestsAtBoot),
+        ),
       ),
     );
   }),
@@ -668,6 +684,12 @@ const HttpLive = Effect.gen(function* () {
       `faux model scripts: ${[...fauxModelScripts.keys()].join(", ")} (FAUX_MODEL_SCRIPTS)`,
     );
   }
+  const fauxFail = yield* parseFauxFail(model.fauxFail);
+  if (backend === "faux" && fauxFail !== undefined) {
+    yield* Effect.logWarning(
+      `faux requests fail with model_error once a session holds ${fauxFail.afterAnswers} answers (FAUX_FAIL)`,
+    );
+  }
   const backendAccess = createModelAccess(backend, {
     fauxCommand: model.fauxCommand,
     fauxEveryTurn: model.fauxEveryTurn,
@@ -679,6 +701,7 @@ const HttpLive = Effect.gen(function* () {
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
+    fauxFail,
     fauxModels,
     fauxModelScripts,
   });

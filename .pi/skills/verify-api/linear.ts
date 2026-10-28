@@ -41,6 +41,8 @@
 //  19. once the board exists, the issue's next delivery files exactly one card in intake — external
 //      ref `linear:<id>`, the description as its body, the issue's link — and opens no session
 //  20. Linear's retry of that delivery is a replay, and the repo's board still holds one card
+//  20b. an issue whose title is over a card title's cap (F10) files a card anyway: its title cut to
+//      the cap with a marker, the whole title opening its body, and the reason saying so
 //  21. `listTriggerDeliveries` (T4) holds the drive's own deliveries with their exact reasons: the
 //      unmapped issue's skip ("no rule matches labels [Bug, Frontend]"), the unregistered repo's
 //      skip (read before the repo is registered), the processed delivery naming its session and
@@ -79,7 +81,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionRpc, TasksRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
-import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
+import {
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
+  MAX_TASK_TITLE_CHARS,
+} from "@repo/domain/Task";
 import { SQL } from "bun";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -699,6 +705,38 @@ const program = Effect.gen(function* () {
       (yield* boards.listTasks({ boardId: board.id })).length === 1 &&
       (yield* sessionsOn(CARD_REPO)).length === 0,
     `retry=${JSON.stringify(retriedCard.body)}`,
+  );
+
+  // 20b (F10): an issue whose title is over a card title's cap still files a card — the title cut to
+  // the cap, the whole title opening its body — rather than a skip the board refused.
+  const longIssue = {
+    id: `lin-${STAMP}-long-title`,
+    identifier: `VER-${STAMP}8`,
+    title: `A title past the cap ${STAMP}: ${"the widget wobbles again ".repeat(16)}END`,
+    description: "## Goal\n\nA long title, cut on the card.\n",
+  };
+  const longFiled = yield* Effect.promise(() =>
+    deliver("card-long-title", issueBody({ ...longIssue, labels: [CARDED] })),
+  );
+  const longCard = (yield* boards.listTasks({ boardId: board.id })).find(
+    (candidate) => candidate.externalRef === `linear:${longIssue.id}`,
+  );
+  assert(
+    "an issue whose title is over the card title's cap files a card with the title cut to the cap and the whole title opening its body",
+    longIssue.title.length > MAX_TASK_TITLE_CHARS &&
+      longFiled.status === 200 &&
+      longFiled.body?.["status"] === "processed" &&
+      longFiled.body?.["taskId"] === longCard?.id &&
+      String(longFiled.body?.["reason"] ?? "").includes(
+        `its title was cut to ${longCard?.title.length} of ${longIssue.title.length} characters`,
+      ) &&
+      longCard !== undefined &&
+      longCard.title.length <= MAX_TASK_TITLE_CHARS &&
+      longCard.title.length >= MAX_TASK_TITLE_CHARS - 2 &&
+      longCard.title.endsWith("…") &&
+      longCard.title.startsWith(`A title past the cap ${STAMP}: `) &&
+      longCard.body === `Title: ${longIssue.title}\n\n${longIssue.description}`,
+    `answer=${JSON.stringify(longFiled.body)} card=${JSON.stringify(longCard)}`,
   );
 
   // 22–24: a reply in Linear's agent session (T5), against the card filed above.

@@ -5,7 +5,8 @@
  *
  * Real Postgres, real git worktrees, the real trigger seam over the real session service. The model
  * is faux, and its one `bash` call commits as many files as its repository's committed `c18-files`
- * marker says (none when there is no marker), then sleeps as long as its `c18-sleep` marker says, so
+ * marker says (none when there is no marker), once more on every run when it has a `c18-again`
+ * marker (F14), then sleeps as long as its `c18-sleep` marker says, so
  * each repository below is one outcome: a change that fits the cap, one over it, none, and one a
  * run is still busy after committing (to be interrupted). GitHub is a fake `HttpClient` that records
  * what it was asked; nothing leaves the process.
@@ -16,7 +17,7 @@
  * Postgres only, not mocked: `docker compose up -d --wait postgres`.
  */
 import { BunServices } from "@effect/platform-bun";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +31,7 @@ import {
   BoardInstanceId,
   DEFAULT_DEFINITION_ID,
   DefinitionId,
+  type TaskExit,
 } from "@repo/domain/Task";
 import { createFauxModelAccess, readRecordedPullRequest } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
@@ -46,7 +48,9 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import type { SettleDecision } from "./prOnSettle";
+import type { RepoRemote } from "./RepoRemote";
 import { SessionService, SessionServiceLive } from "./SessionService";
+import { SessionWriteBack } from "./SessionWriteBack";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import {
   NoCards,
@@ -102,7 +106,7 @@ const decisions: Array<{
  * `bash` call in a worktree of it commits that many files, and a `c18-sleep` marker of `sleep`
  * seconds the call then sleeps for (none for 0).
  */
-const fixtureRepo = (files: number, sleep = 0): string => {
+const fixtureRepo = (files: number, sleep = 0, again = false): string => {
   const root = mkdtempSync(join(tmpdir(), "factory-c18-repo-"));
   const git = (command: string) =>
     execSync(command, { cwd: root, stdio: "ignore" });
@@ -117,6 +121,10 @@ const fixtureRepo = (files: number, sleep = 0): string => {
     writeFileSync(join(root, "c18-sleep"), `${sleep}\n`);
     git("git add c18-sleep");
   }
+  if (again) {
+    writeFileSync(join(root, "c18-again"), "1\n");
+    git("git add c18-again");
+  }
   git("git commit --allow-empty -m init");
   return root;
 };
@@ -127,6 +135,9 @@ const COMMAND = [
   "i=0",
   'while [ "$i" -lt "$n" ]; do i=$((i+1)); echo x > "change-$i.txt"; done',
   'if [ "$n" -gt 0 ]; then git add -A && git commit -qm c18; fi',
+  // F14: a repository with a `c18-again` marker commits once more on every run, so a session that
+  // settles again has a commit its PR does not carry.
+  "if [ -f c18-again ]; then echo x >> again.txt && git add again.txt && git commit -qm again; fi",
   'sleep "$(cat c18-sleep 2>/dev/null || echo 0)"',
   "echo faux-ok",
 ].join("; ");
@@ -144,16 +155,88 @@ const repos = {
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-c18-sessions-"));
 
+/**
+ * The forge's git endpoint: one bare repository every case's branches are pushed into (each session
+ * and card names its own branch), so a case reads what the forge holds rather than trusting the
+ * step's record of it (F14).
+ */
+const forgeGit = mkdtempSync(join(tmpdir(), "factory-c18-forge-"));
+execFileSync("git", ["init", "-q", "--bare"], { cwd: forgeGit });
+const onForge = (branch: string): string | undefined => {
+  try {
+    return execFileSync(
+      "git",
+      ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd: forgeGit, encoding: "utf8" },
+    ).trim();
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * The deployment's remote over that bare repository. The base is "fetched" as the checkout already
+ * holds it — the forge's `main` is the checkout's, so a worktree is cut where it would be with no
+ * remote — and a push is a real `git push`, never forced.
+ */
+const repoRemote: RepoRemote = {
+  fetchBase: (input) =>
+    Effect.sync(() => {
+      const ref = `refs/heads/${input.branch}`;
+      const sha = execFileSync("git", ["rev-parse", ref], {
+        cwd: input.checkout,
+        encoding: "utf8",
+      }).trim();
+      return { ref, sha };
+    }),
+  push: (input) =>
+    Effect.sync(() => {
+      const commit =
+        input.commit ??
+        execFileSync("git", ["rev-parse", input.branch], {
+          cwd: input.worktree,
+          encoding: "utf8",
+        }).trim();
+      execFileSync(
+        "git",
+        ["push", "-q", forgeGit, `${commit}:refs/heads/${input.branch}`],
+        { cwd: input.worktree, stdio: "ignore" },
+      );
+      return {
+        ref: `refs/heads/${input.branch}`,
+        sha: commit,
+        outcome: "updated" as const,
+      };
+    }),
+  defaultBranch: () => Effect.succeed("main"),
+};
+
+/** Every session the trackers' write-back was told about, once per PR step it reported (LOB-15). */
+const reported: SessionId[] = [];
+
 const sessions = SessionServiceLive({
-  model: createFauxModelAccess({ fauxCommand: COMMAND }).access,
+  // Every run's turn, not only the session's first (LOB-52): a session sent on runs its command
+  // again, which is what commits once more on a `c18-again` repository (F14).
+  model: createFauxModelAccess({ fauxCommand: COMMAND, fauxEveryTurn: true })
+    .access,
   sessionRoot,
+  repoRemote,
   prCap: { maxFiles: 2, maxLines: 1_000 },
   pullRequestOnSettle,
   onPullRequestSettled: (sessionId, decision) =>
     Effect.sync(() => {
       decisions.push({ sessionId, decision });
     }),
-});
+}).pipe(
+  Layer.provide(
+    Layer.succeed(SessionWriteBack, {
+      pullRequest: (input) =>
+        Effect.sync(() => {
+          reported.push(input.sessionId);
+        }),
+    }),
+  ),
+);
 
 const runtime = ManagedRuntime.make(
   Layer.mergeAll(
@@ -618,6 +701,159 @@ describe("a settled run's PR (C18)", () => {
     expect(outcome.review.session.prUrl).toBe(outcome.built.session.prUrl);
     // An opened PR is its own announcement; nothing is noted on the card.
     expect(outcome.thread).toEqual([]);
+  }, 120_000);
+
+  /**
+   * F14. Mutation: keep a recorded PR undeclared on settle (the rule before F14) — the second
+   * settle's decision is `undeclared` and the record stays at the first commit, so `pr_link` stays
+   * unmet. Mutation: compare `pr_link` with the latest run's own PR by its link alone — the manual
+   * commit's move is met.
+   */
+  it("a card's building run that settles again with a new commit updates its PR, and pr_link is met only at the published tip", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const tasks = yield* TaskService;
+        const before = forge.length;
+        const repo = RepoSlug.make(`c18-${runId}/again`);
+        yield* service.registerRepo({
+          repo,
+          url: `https://github.com/${repo}.git`,
+          localPath: fixtureRepo(1, 0, true),
+        });
+        const { taskId, sessionId } = yield* buildRun(repo);
+        yield* settled(sessionId);
+        const opened = yield* waitUntil(
+          service.get(sessionId),
+          (read) => read.session.prUrl !== undefined,
+          "the building run's PR",
+        );
+        yield* decided(sessionId);
+        const first = yield* recordedPr(sessionId);
+        const worktree = opened.workspace.path;
+        // A commit the step has not seen: the PR does not carry it, so the card may not move on.
+        execSync(
+          "echo by-hand >> again.txt && git add again.txt && git commit -qm by-hand",
+          { cwd: worktree, stdio: "ignore" },
+        );
+        const unpublished = yield* tasks.exit(taskId);
+        // The session steered again: its run commits once more and settles.
+        yield* service.send({ sessionId, content: "and again" });
+        const made = yield* decided(sessionId, 2);
+        const tip = execSync("git rev-parse HEAD", {
+          cwd: worktree,
+          encoding: "utf8",
+        }).trim();
+        const published = yield* tasks.exit(taskId);
+        const recorded = yield* recordedPr(sessionId);
+        const pushedTip =
+          recorded === undefined ? undefined : onForge(recorded.head);
+        // A third file takes the PR over the cap of two: the push is refused, and the PR is kept
+        // at the commit it was last published at.
+        execSync(
+          "echo x > third.txt && git add third.txt && git commit -qm third",
+          { cwd: worktree, stdio: "ignore" },
+        );
+        yield* service.send({ sessionId, content: "one more" });
+        const refused = yield* decided(sessionId, 3);
+        return {
+          made,
+          refused,
+          published,
+          recorded,
+          kept: yield* recordedPr(sessionId),
+          first,
+          tip,
+          unpublished,
+          pushedTip,
+          keptOnForge:
+            recorded === undefined ? undefined : onForge(recorded.head),
+          snapshot: yield* service.get(sessionId),
+          prUrl: opened.session.prUrl,
+          asked: forge.length - before,
+          thread: yield* tasks.comments(taskId),
+        };
+      }),
+    );
+
+    const prLink = (exit: TaskExit) =>
+      exit.requirements.find((requirement) => requirement.key === "pr_link");
+    expect(outcome.made).toEqual(["opened", "updated"]);
+    // One PR, opened once; the second settle moved its record to the new tip.
+    expect(outcome.asked).toBe(1);
+    expect(outcome.recorded?.url).toBe(outcome.prUrl);
+    expect(outcome.recorded?.commit).toBe(outcome.tip);
+    // The record moved because the forge took the push, not on the step's say-so.
+    expect(outcome.pushedTip).toBe(outcome.tip);
+    expect(outcome.first?.commit).not.toBe(outcome.tip);
+    expect(outcome.snapshot.session.prUrl).toBe(outcome.prUrl);
+    expect(prLink(outcome.unpublished)).toMatchObject({
+      status: "unmet",
+      reason: expect.stringContaining(
+        `where that PR was published: push the run's commits to the PR`,
+      ),
+    });
+    expect(prLink(outcome.published)?.status).toBe("met");
+    expect(
+      said(
+        outcome.snapshot,
+        `pushed ${outcome.tip.slice(0, 12)} to ${outcome.prUrl}`,
+      ),
+    ).toHaveLength(1);
+    // The refused push says so, names the PR, and leaves the record where the forge has it.
+    expect(outcome.refused).toEqual(["opened", "updated", "over-cap"]);
+    expect(outcome.kept).toEqual(outcome.recorded);
+    expect(outcome.keptOnForge).toBe(outcome.tip);
+    const refusal = `the run settled and the PR step pushed nothing to ${outcome.prUrl}: the branch's diff is over the cap (3 files, at most 2)`;
+    expect(said(outcome.snapshot, refusal)).toHaveLength(1);
+    expect(outcome.thread).toEqual([
+      expect.objectContaining({ kind: "note", body: refusal }),
+    ]);
+  }, 120_000);
+
+  /**
+   * F14. Mutation: measure and re-record a recorded PR on every settle — a second write, a log line.
+   * Mutation: step a recorded PR at its published commit through `openPr` — the write-back reports it.
+   */
+  it("a trigger's session that settles again with no new commit pushes nothing and asks the forge nothing", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register;
+        const service = yield* SessionService;
+        const { sessionId } = yield* deliver(
+          `c18-${runId}-steered`,
+          `c18-${runId}`,
+          "Fix the doohickey",
+        );
+        yield* settled(sessionId);
+        yield* decided(sessionId);
+        const recorded = yield* recordedPr(sessionId);
+        const before = forge.length;
+        const reports = reported.filter((id) => id === sessionId).length;
+        // The same command again: it writes the same file, so nothing new is committed.
+        yield* service.send({ sessionId, content: "anything else?" });
+        const made = yield* decided(sessionId, 2);
+        return {
+          made,
+          recorded,
+          reports,
+          after: yield* recordedPr(sessionId),
+          asked: forge.length - before,
+          reportedAgain:
+            reported.filter((id) => id === sessionId).length - reports,
+          snapshot: yield* service.get(sessionId),
+        };
+      }),
+    );
+
+    expect(outcome.made).toEqual(["opened", "up-to-date"]);
+    expect(outcome.asked).toBe(0);
+    // Nor a tracker: the open was reported once, and the settle that had nothing to push reported
+    // nothing, so a Linear issue or a Slack thread is not read and rewritten on every turn.
+    expect(outcome.reports).toBe(1);
+    expect(outcome.reportedAgain).toBe(0);
+    expect(outcome.after).toEqual(outcome.recorded);
+    expect(said(outcome.snapshot, "pushed ")).toEqual([]);
   }, 120_000);
 
   it("a replay of a trigger's session keeps its actor and opens no second PR", async () => {

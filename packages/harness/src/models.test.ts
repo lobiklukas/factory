@@ -18,12 +18,15 @@ import {
   checkModelAuth,
   compactionPolicyFor,
   createModelAccess,
+  FAUX_FAIL_MESSAGE,
   fauxAnswer,
   isFauxTurnStep,
   modelKey,
+  parseFauxFail,
   parseFauxModelScripts,
   resolveDefaultModel,
 } from "./models";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { VERIFY_TOOL } from "./verify";
 
 /** pi-durable's pinned defaults, which a large window must keep to the token. */
@@ -422,6 +425,128 @@ describe("parseFauxModelScripts", () => {
       expect(Exit.isFailure(parsed)).toBe(true);
       expect(JSON.stringify(parsed)).toContain("faux model scripts are not a");
     }
+  });
+});
+
+/**
+ * The faux fails a request on demand (F6): `FAUX_FAIL`, process-wide or one model's `fail`, ends a
+ * turn's step with `stopReason: "error"` and `FAUX_FAIL_MESSAGE`, which Pi Durable does not retry.
+ * `SessionService.failures.test.ts` proves the session that reaches goes idle with an error entry
+ * and a `run_failures` row; these pin which request fails. Mutation: drop the failure from the
+ * factory — every case answers; count user messages rather than answers — `model_error:1` fails the
+ * first step; fail a summary — the compaction case errors; retryable wording — the retry case fails.
+ */
+describe("the failing faux (F6)", () => {
+  const user: Message = { role: "user", content: "go", timestamp: 0 };
+  const bashCall: Message = {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "call_1",
+        name: "bash",
+        arguments: { command: "echo faux-ok" },
+      },
+    ],
+    api: "faux",
+    provider: "faux",
+    model: "faux-1",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  };
+  const bashResult: Message = {
+    role: "toolResult",
+    toolCallId: "call_1",
+    toolName: "bash",
+    content: [{ type: "text", text: "faux-ok" }],
+    isError: false,
+    timestamp: 0,
+  };
+  const turn = (
+    access: ReturnType<typeof createModelAccess>,
+    messages: Message[],
+    modelId = access.modelId,
+  ) => {
+    const model = access.models.getModel("faux", modelId);
+    if (model === undefined) throw new Error(`faux does not serve ${modelId}`);
+    return access.models.completeSimple(model, { messages });
+  };
+
+  it("fails a turn's first request with model_error, as a provider error Pi Durable does not retry", async () => {
+    const failing = createModelAccess("faux", {
+      fauxFail: { afterAnswers: 0 },
+    });
+    const answer = await turn(failing, [user]);
+    expect(answer.stopReason).toBe("error");
+    expect(answer.errorMessage).toBe(FAUX_FAIL_MESSAGE);
+    expect(answer.content).toEqual([]);
+    expect(isRetryableAssistantError(answer)).toBe(false);
+    // A compaction's summary is not a turn's step: it still answers, so the failure is the run's.
+    const summary = await turn(failing, [
+      { ...user, content: "<conversation>user: hi</conversation>" },
+    ]);
+    expect(summary.stopReason).toBe("stop");
+  });
+
+  it("lets the model answer n times first with model_error:n", async () => {
+    const afterOne = createModelAccess("faux", {
+      fauxFail: { afterAnswers: 1 },
+    });
+    const first = await turn(afterOne, [user]);
+    expect(first.stopReason).toBe("toolUse");
+    const second = await turn(afterOne, [user, bashCall, bashResult]);
+    expect(second.stopReason).toBe("error");
+    expect(second.errorMessage).toBe(FAUX_FAIL_MESSAGE);
+  });
+
+  it("fails only the model whose script says so, and never by default", async () => {
+    const access = createModelAccess("faux", {
+      fauxModels: ["faux-1", "faulted"],
+      fauxModelScripts: new Map([["faulted", { fail: { afterAnswers: 0 } }]]),
+    });
+    expect((await turn(access, [user], "faulted")).stopReason).toBe("error");
+    expect((await turn(access, [user], "faux-1")).stopReason).toBe("toolUse");
+    expect((await turn(createModelAccess("faux"), [user])).stopReason).toBe(
+      "toolUse",
+    );
+  });
+
+  it("reads FAUX_FAIL as model_error or model_error:<answers>, blank as never, and refuses anything else", () => {
+    const read = (text: string) => Effect.runSyncExit(parseFauxFail(text));
+    expect(read("")).toEqual(Exit.succeed(undefined));
+    expect(read(" model_error ")).toEqual(Exit.succeed({ afterAnswers: 0 }));
+    expect(read("model_error:2")).toEqual(Exit.succeed({ afterAnswers: 2 }));
+    for (const text of ["yes", "model_error:", "model_error:-1", "budget"]) {
+      const refused = read(text);
+      expect(Exit.isFailure(refused)).toBe(true);
+      expect(JSON.stringify(refused)).toContain("neither model_error");
+    }
+    const scripts = Effect.runSyncExit(
+      parseFauxModelScripts('{"builder": {"fail": "model_error:1"}}', [
+        "faux-1",
+        "builder",
+      ]),
+    );
+    expect(Exit.isSuccess(scripts) && [...scripts.value]).toEqual([
+      ["builder", { fail: { afterAnswers: 1 } }],
+    ]);
+    const typo = Effect.runSyncExit(
+      parseFauxModelScripts('{"builder": {"fail": "model-error"}}', [
+        "faux-1",
+        "builder",
+      ]),
+    );
+    expect(JSON.stringify(typo)).toContain(
+      "faux model script for builder: FAUX_FAIL is",
+    );
   });
 });
 

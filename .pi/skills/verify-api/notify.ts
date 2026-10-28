@@ -5,13 +5,14 @@
 //
 //   bun notify.ts      (via ./notify.sh, which owns the API, the fake and the database)
 //
-//   PHASE=seed     a board and three cards: one whose run asks a question (the run's own `ask`
+//   PHASE=seed     a board and four cards: one whose run asks a question (the run's own `ask`
 //                  service call, in-process, as `verify-web/seed-attention.ts` makes it), one whose
 //                  run asks an approval (`requestApproval`), and one whose run its one-cent cap
-//                  stops (`createSession` with `budget`, then `sendMessage`); each reaches both sinks
-//                  once, linked to its card
+//                  stops (`createSession` with `budget`, then `sendMessage`), and one whose run's
+//                  model request fails (`createSession` on `faux/faulted`, whose script fails every
+//                  request, F6); each reaches both sinks once, linked to its card
 //   PHASE=restart  the same API configuration, restarted: a new question on a new card arrives, so
-//                  the notifier is polling, and the first three are still one message each
+//                  the notifier is polling, and the first four are still one message each
 //   PHASE=toggled  restarted with `NOTIFY_TYPES=question,failed` and a fresh ntfy topic (a new
 //                  destination, so a new ledger): the questions and the failure reach it, the pending
 //                  approval does not
@@ -25,6 +26,7 @@ import { TaskService, TaskServiceLive } from "@repo/core";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DefinitionId } from "@repo/domain/Task";
+import { FAUX_FAIL_MESSAGE } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -41,6 +43,8 @@ const LINK_BASE = process.env["LINK_BASE"] ?? "";
 const TOPIC = process.env["TOPIC"] ?? "";
 const NTFY_TOKEN = process.env["NTFY_TOKEN"] ?? "";
 const PERSON = "person:verify-api";
+/** The faux model whose every request fails (`notify.sh`'s `FAUX_MODEL_SCRIPTS`, F6). */
+const FAULTED_MODEL = "faux/faulted";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 
@@ -123,7 +127,7 @@ const program = Effect.gen(function* () {
    * One board per card because a board caps the runs in flight on it (LOB-71), and a parked run and
    * a run waiting on its approval are both still in flight.
    */
-  const cardWithRun = (title: string, budget?: number) =>
+  const cardWithRun = (title: string, budget?: number, model?: string) =>
     Effect.gen(function* () {
       const board = yield* client.createBoard({
         repo: RepoSlug.make(`verify-api/notify-${Date.now()}-${boards++}`),
@@ -140,6 +144,7 @@ const program = Effect.gen(function* () {
         taskId: card.id,
         taskColumn: card.column,
         ...(budget === undefined ? {} : { budget }),
+        ...(model === undefined ? {} : { model }),
       });
       return { boardId, card, run: run.id };
     });
@@ -210,6 +215,25 @@ const program = Effect.gen(function* () {
       ),
       "the capped run to stop at its budget",
     );
+    // A run whose model request fails (F6): created on the faux model whose script fails every
+    // request (`FAUX_MODEL_SCRIPTS`'s `fail`), so the run ends `model_error` and is a `failed:` event.
+    const faultedRun = yield* cardWithRun(
+      "notify: the model failed",
+      undefined,
+      FAULTED_MODEL,
+    );
+    yield* client.sendMessage({ sessionId: faultedRun.run, content: "try" });
+    yield* waitUntil(
+      Effect.map(client.getSession({ sessionId: faultedRun.run }), (snapshot) =>
+        snapshot.entries.some(
+          (entry) =>
+            entry.kind === "assistant" &&
+            entry.isError === true &&
+            entry.error === FAUX_FAIL_MESSAGE,
+        ),
+      ),
+      "the faulted run to end on its model's error",
+    );
     const events: ReadonlyArray<Event> = [
       question,
       {
@@ -230,6 +254,15 @@ const program = Effect.gen(function* () {
         }),
         says: "budget reached",
       },
+      {
+        kind: "failed",
+        taskId: faultedRun.card.id,
+        runId: faultedRun.run,
+        link: cardLink(faultedRun.boardId, faultedRun.card.id, {
+          run: faultedRun.run,
+        }),
+        says: FAUX_FAIL_MESSAGE,
+      },
     ];
     const state: State = { events };
     observed.state = state;
@@ -240,7 +273,7 @@ const program = Effect.gen(function* () {
     yield* delivered(
       events,
       [{ sink: "slack" }, { sink: "ntfy", topic: TOPIC }],
-      "the three events on both sinks",
+      "the four events on both sinks",
     );
     yield* settle;
     const after = yield* Effect.promise(ledger);
@@ -249,7 +282,7 @@ const program = Effect.gen(function* () {
     const ntfy = on(after, "ntfy", TOPIC);
     for (const event of events) {
       assert(
-        `the ${event.kind} is exactly one Slack message and one ntfy message, linked to its card`,
+        `the ${event.kind} on ${event.taskId} is exactly one Slack message and one ntfy message, linked to its card`,
         count(slack, event.link) === 1 && count(ntfy, event.link) === 1,
         `slack=${count(slack, event.link)} ntfy=${count(ntfy, event.link)} link=${event.link}`,
       );
@@ -258,7 +291,7 @@ const program = Effect.gen(function* () {
       ];
       const ntfyBody = ntfy.find((m) => linkOf(m) === event.link)?.body;
       assert(
-        `the ${event.kind}'s message says what it is about`,
+        `the ${event.kind} on ${event.taskId}'s message says what it is about`,
         typeof slackText === "string" &&
           slackText.includes(event.says) &&
           typeof ntfyBody?.["message"] === "string" &&
@@ -269,8 +302,8 @@ const program = Effect.gen(function* () {
       );
     }
     assert(
-      "nothing else reached either sink: three events, three messages each",
-      slack.length === 3 && ntfy.length === 3,
+      "nothing else reached either sink: four events, four messages each",
+      slack.length === 4 && ntfy.length === 4,
       `slack=${slack.length} ntfy=${ntfy.length}`,
     );
     assert(
@@ -315,14 +348,14 @@ const program = Effect.gen(function* () {
     );
     for (const event of state.events) {
       assert(
-        `the restart sent the ${event.kind} again to neither sink`,
+        `the restart sent the ${event.kind} on ${event.taskId} again to neither sink`,
         count(slack, event.link) === 1 && count(ntfy, event.link) === 1,
         `slack=${count(slack, event.link)} ntfy=${count(ntfy, event.link)}`,
       );
     }
     assert(
-      "four events, four messages per sink, across two processes",
-      slack.length === 4 && ntfy.length === 4,
+      "five events, five messages per sink, across two processes",
+      slack.length === 5 && ntfy.length === 5,
       `slack=${slack.length} ntfy=${ntfy.length}`,
     );
     return;

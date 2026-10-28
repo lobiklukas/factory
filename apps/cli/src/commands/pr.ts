@@ -31,6 +31,8 @@ export const prAnswer = (
   switch (step.outcome) {
     case "opened":
     case "already-open":
+    // The PR was already open and this call pushed the branch's new commits onto it (F14).
+    case "updated":
       return {
         _tag: "Opened",
         lines: [
@@ -43,7 +45,7 @@ export const prAnswer = (
       return {
         _tag: "NotOpened",
         code: "over_cap",
-        message: `session ${sessionId}'s diff is over the cap (${step.measured} ${step.limit}, at most ${step.cap}); no PR was opened`,
+        message: `session ${sessionId}'s diff is over the cap (${step.measured} ${step.limit}, at most ${step.cap}); ${step.pullRequest === undefined ? "no PR was opened" : `nothing was pushed to ${step.pullRequest}`}`,
       };
     case "no-change":
       return {
@@ -55,13 +57,13 @@ export const prAnswer = (
       return {
         _tag: "NotOpened",
         code: "non_fast_forward",
-        message: `session ${sessionId}'s branch ${step.head} is behind the remote's: the remote has commits it does not, and the push is never forced; integrate them and run factory pr again. No PR was opened`,
+        message: `session ${sessionId}'s branch ${step.head} is behind the remote's: the remote has commits it does not, and the push is never forced; integrate them and run factory pr again. ${step.pullRequest === undefined ? "No PR was opened" : `Nothing was pushed to ${step.pullRequest}`}`,
       };
     case "secret-found":
       return {
         _tag: "NotOpened",
         code: "secret_found",
-        message: `session ${sessionId}'s branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed and no PR was opened; take it out of the branch's history and run factory pr again`,
+        message: `session ${sessionId}'s branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed${step.pullRequest === undefined ? " and no PR was opened" : ` to ${step.pullRequest}`}; take it out of the branch's history and run factory pr again`,
       };
   }
 };

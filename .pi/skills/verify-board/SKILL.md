@@ -48,9 +48,10 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | build, PR, merge (LOB-86, C18)   | a diff; the PR opened on settle (no call) in the fake's ledger, its body's evidence; merge refusal                                                                                                         | the PR and its evidence are real, and only a person reaches `done`        |
 | the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done                                                                                                            | `done` takes a reviewer run's pass on the PR's head, not a note           |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer (`comment --start`) and next run                                                                                                            | a run that needs a person ends, and the answer reaches the next run       |
-| `requires[]` on exit (B8)        | `requires.sh`: specifying refused with no spec; planning with no plan; building refused with no run, no diff; PR on settle; review per-head; merge read (C20)                                              | a refusal names the requirement; evidence is a condition of the move      |
+| `requires[]` on exit (B8)        | `requires.sh`: specifying refused with no spec; planning with no plan; building refused with no run, a faulted run (F6), no diff; PR on settle; review per-head; merge read (C20)                          | a refusal names the requirement; evidence is a condition of the move      |
 | the merge (C20)                  | `drive.sh`: `human_merge` refused, PR open; `merge.ts`: merged on the fake, signed close ×2, done once                                                                                                     | merging in GitHub completes the card, once, and nothing else does         |
 | PR review and checks (C21)       | `feedback.sh`: a signed `changes_requested` review blocks the card once, a failing check is a note; `attention` lists it; the next run is told it, its start lifts the block                               | a reviewer's changes or red CI become the next run's input                |
+| PR after settles, boot (F14,F16) | `pr-settle.sh`: a killed step's PR opens at the next boot, once; a later settle pushes its tip (fast-forward), `pr_link` waits for it; diverged → `non-fast-forward`                                       | a PR carries the run's latest commits, and a crash loses none             |
 | a card's one branch + PR (C19)   | `requires.sh`: a 2nd building run on the 1st's branch, its PR `already-open`; review run has diff                                                                                                          | a later run works on the card's change, and the card keeps one PR         |
 | a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows                                                                                                             | a card made in either surface is the same card in the other               |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                                                                                                                                   | the equivalence holds with both surfaces' own drives green                |
@@ -61,7 +62,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | caps and WIP limits (LOB-71)     | `caps.sh`: task, board, repo and column caps refused by name, nothing written; v2's threshold                                                                                                              | a definition's caps bound the runs in flight, per pinned version          |
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `feedback.sh`, `board-create.sh`, `definitions.sh`, `define.sh`, `triage.sh`, `start-body.sh`, `upgrade.sh`,
-`start-prompt.sh`, `budget.sh`, `caps.sh`, `card-create.sh`, `guide.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+`start-prompt.sh`, `budget.sh`, `caps.sh`, `card-create.sh`, `guide.sh`, `pr-settle.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `plan.ts`'s and `plan-pane.mjs`'s (its planning phase, D10), `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
 
@@ -151,6 +152,7 @@ runs the real script against a closed port and an answering one.
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
 ./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), five runs on one card
 ./feedback.sh    # standalone: its own API on FEEDBACK_PORT (default 9405) and GitHub fake on FEEDBACK_GITHUB_PORT (9406): a PR's review and checks reach the card (C21)
+./pr-settle.sh   # standalone: its own API on PR_SETTLE_PORT (default 9407), GitHub fake on PR_SETTLE_GITHUB_PORT (9409), git forge on PR_SETTLE_GIT_PORT (9408); a killed PR step, later settles (F14, F16)
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./define.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: authoring a definition version (D4)
@@ -323,6 +325,9 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   `drive.sh` deletes `add.json`, `add{,-pair,-unknown,-empty}.txt`, `specify-*.json`, `spec-*.json`, `spec-pane.png`, `build-*.json`,
   `pr-body.md`, `review-drive.json`, `web.json`, `web-board.png`, `both-ways*` and `observed.json` before it starts,
   so a phase that dies before writing cannot leave an earlier run's passing file behind
+- `pr-settle.json`, `pr-settle-github.json`, `pr-settle-git.json`, `pr-settle-*.txt`,
+  `pr-settle-api.log` — `pr-settle.sh`'s checks, both fakes' ledgers, each CLI call and probe, and the
+  log of the three processes it boots (F14, F16)
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
 - `requires-observed.json`, `requires-build.json`, `requires-{web,api-unverified,api-verified}.json`,

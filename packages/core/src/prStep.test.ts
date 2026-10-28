@@ -19,15 +19,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PullRequestStep } from "@repo/domain/PullRequest";
-import { RepoSlug } from "@repo/domain/Session";
-import { createFauxModelAccess } from "@repo/harness";
-import { DatabaseLive } from "@repo/storage-postgres";
+import { RepoSlug, type SessionId } from "@repo/domain/Session";
+import { createFauxModelAccess, readRecordedPullRequest } from "@repo/harness";
+import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Layer, ManagedRuntime, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CredentialProvider } from "./credentials";
 import { startGitRemote } from "./git-remote.test-fake";
+import { DEFAULT_DIFF_CAP } from "./pr";
 import { gitRepoRemote } from "./RepoRemote";
 import { SessionService, SessionServiceLive } from "./SessionService";
 
@@ -149,7 +150,7 @@ const runtime = ManagedRuntime.make(
   ).pipe(Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer))),
 );
 
-const run = <A, E>(effect: Effect.Effect<A, E, SessionService>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, SessionService | SqlClient>) =>
   runtime.runPromise(effect);
 
 /** Every repo slug a case registered: its rows, and its sessions' rows, leave with the suite. */
@@ -189,7 +190,11 @@ const makeRepo = (defaultBranch = "main") => {
 
 /** The step's answer when it opened a PR; the case fails naming the answer otherwise. */
 const link = (answer: PullRequestStep) => {
-  if (answer.outcome === "opened" || answer.outcome === "already-open")
+  if (
+    answer.outcome === "opened" ||
+    answer.outcome === "already-open" ||
+    answer.outcome === "updated"
+  )
     return answer;
   throw new Error(`the step opened no PR: ${JSON.stringify(answer)}`);
 };
@@ -370,6 +375,271 @@ describe("the PR step publishes the branch it names", CASE, () => {
     ).toBeUndefined();
   });
 });
+
+/** The `factory.pr` the session's log records, read as a board's `pr_link` reads it. */
+const recordedPr = (sessionId: SessionId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const storage = yield* Effect.promise(() =>
+      PostgresStorage.reader(sql, sessionId),
+    );
+    return yield* readRecordedPullRequest(storage).pipe(
+      Effect.ensuring(Effect.promise(() => storage.dispose())),
+    );
+  });
+
+/**
+ * A session on a fresh repo with its PR opened through the step at a first commit: the session, its
+ * worktree, and the commit the PR was published at.
+ */
+const openedSession = (title: string, push = true) =>
+  Effect.gen(function* () {
+    const fixture = makeRepo();
+    const sessions = yield* SessionService;
+    // With no URL, and a checkout whose `origin` is a path, the step has nowhere to push.
+    yield* sessions.registerRepo({
+      repo: fixture.repo,
+      url: push ? fixture.url : "",
+      localPath: fixture.checkout,
+    });
+    const created = yield* sessions.create({ repo: fixture.repo, title });
+    const worktree = (yield* sessions.get(created.id)).workspace.path;
+    const first = commitFile(worktree, "FIRST.md", "the first change\n");
+    const answer = yield* sessions
+      .openPullRequest({ sessionId: created.id, title: `factory: ${title}` })
+      .pipe(Effect.provide(GitHubFake));
+    return { fixture, id: created.id, worktree, first, answer };
+  });
+
+// Two PR steps and a forge push each, under a loaded gate: twice the suite's budget.
+describe(
+  "a recorded PR takes the session's later commits (F14)",
+  { timeout: 120_000 },
+  () => {
+    /**
+     * Mutation: answer a recorded PR from the log whatever the branch's tip (the step before F14) —
+     * the forge keeps the first commit, the answer is `already-open`, and the record names the first.
+     * Mutation: push without moving the record — `commit` stays the first, so `pr_link` stays unmet.
+     * Mutation: call GitHub on the update — a second create reaches the fake.
+     */
+    it("pushes a new commit onto the PR, answers updated, and records the new tip", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that commits again");
+          const creates = opened.length;
+          const second = commitFile(session.worktree, "SECOND.md", "more\n");
+          const answer = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          const snapshot = yield* sessions.get(session.id);
+          return {
+            ...session,
+            second,
+            updated: answer,
+            creates: opened.length - creates,
+            snapshot,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      const head = `factory/${result.id}`;
+      const first = link(result.answer);
+      const updated = link(result.updated);
+      expect(first.outcome).toBe("opened");
+      expect(updated.outcome).toBe("updated");
+      expect(updated.url).toBe(first.url);
+      expect(result.snapshot.session.prUrl).toBe(first.url);
+      // The forge moved to the new tip, fast-forward, and GitHub was asked for nothing more.
+      expect(shaOf(result.fixture.bare, `refs/heads/${head}`)).toBe(
+        result.second,
+      );
+      expect(result.creates).toBe(0);
+      expect(result.recorded?.commit).toBe(result.second);
+      expect(result.recorded?.url).toBe(first.url);
+      // The transcript says the PR moved, and where to.
+      expect(
+        result.snapshot.entries.filter((entry) =>
+          entry.text.startsWith(`pushed ${result.second.slice(0, 12)} to `),
+        ),
+      ).toHaveLength(1);
+    });
+
+    /**
+     * Mutation: measure and push a recorded PR on every call — the forge is asked (a push, the base's
+     * fetch) and the provider is asked for a token.
+     */
+    it("pushes nothing and reaches no forge when the branch is where the PR was published", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that settles again");
+          const requests = remote.requests.count;
+          const tokens = asked.length;
+          const creates = opened.length;
+          const again = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            again,
+            requests: remote.requests.count - requests,
+            tokens: asked.length - tokens,
+            creates: opened.length - creates,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(link(result.answer).outcome).toBe("opened");
+      expect(link(result.again).outcome).toBe("already-open");
+      expect(result.requests).toBe(0);
+      expect(result.tokens).toBe(0);
+      expect(result.creates).toBe(0);
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBe(result.first);
+    });
+
+    /**
+     * Mutation: move the record whether or not a push ran — the answer is `updated`, the record
+     * names the second commit, and a "pushed" line claims a push the forge never took.
+     */
+    it("with no push, leaves the PR and its record where they were and claims no push", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession(
+            "a session with no forge",
+            false,
+          );
+          const second = commitFile(session.worktree, "SECOND.md", "more\n");
+          const again = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            second,
+            again,
+            snapshot: yield* sessions.get(session.id),
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(link(result.again).outcome).toBe("already-open");
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBeUndefined();
+      expect(
+        result.snapshot.entries.filter((entry) =>
+          entry.text.startsWith("pushed "),
+        ),
+      ).toEqual([]);
+    });
+
+    /**
+     * Mutation: answer a recorded PR's update without measuring it — a branch past the cap is
+     * pushed. Mutation: drop the PR from the refusal — a reader says "no PR was opened".
+     */
+    it("caps the later commits under the open's cap, pushes none of them, and keeps the PR at its commit", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that grows too far");
+          commitFile(
+            session.worktree,
+            "LONG.md",
+            "x\n".repeat(DEFAULT_DIFF_CAP.maxLines + 1),
+          );
+          const creates = opened.length;
+          const refused = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            refused,
+            creates: opened.length - creates,
+            prUrl: (yield* sessions.get(session.id)).session.prUrl,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(result.refused).toEqual({
+        outcome: "over-cap",
+        limit: "lines",
+        cap: DEFAULT_DIFF_CAP.maxLines,
+        measured: DEFAULT_DIFF_CAP.maxLines + 2,
+        pullRequest: link(result.answer).url,
+      });
+      expect(result.creates).toBe(0);
+      expect(result.prUrl).toBe(link(result.answer).url);
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBe(result.first);
+    });
+
+    /**
+     * Mutation: force the update's push — the remote's commit is overwritten.
+     * Mutation: record the new tip before the push answers — the record names a commit the forge
+     * does not hold.
+     */
+    it("answers non-fast-forward for a diverged remote, forces nothing, and keeps the PR at its commit", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a branch someone else moved");
+          const head = `factory/${session.id}`;
+          // Someone else's commit on the PR's branch, on the forge only.
+          git(session.fixture.upstream, "fetch", "-q", "origin", head);
+          git(
+            session.fixture.upstream,
+            "checkout",
+            "-q",
+            "-b",
+            head,
+            `origin/${head}`,
+          );
+          const theirs = commitFile(
+            session.fixture.upstream,
+            "THEIRS.md",
+            "x\n",
+          );
+          git(session.fixture.upstream, "push", "-q", "origin", head);
+          commitFile(session.worktree, "MINE.md", "the run's next change\n");
+          const creates = opened.length;
+          const refused = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          const after = yield* sessions.get(session.id);
+          return {
+            ...session,
+            head,
+            theirs,
+            refused,
+            creates: opened.length - creates,
+            prUrl: after.session.prUrl,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      // Naming the PR it left as it was, so no reader says "no PR was opened" (F14).
+      expect(result.refused).toEqual({
+        outcome: "non-fast-forward",
+        head: result.head,
+        pullRequest: link(result.answer).url,
+      });
+      expect(shaOf(result.fixture.bare, `refs/heads/${result.head}`)).toBe(
+        result.theirs,
+      );
+      expect(result.creates).toBe(0);
+      // The PR is still the session's, at the commit the step last published.
+      expect(result.prUrl).toBe(link(result.answer).url);
+      expect(result.recorded?.commit).toBe(result.first);
+    });
+  },
+);
 
 describe("the worktree is cut from the remote's base", CASE, () => {
   /**
