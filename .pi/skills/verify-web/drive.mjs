@@ -2667,6 +2667,80 @@ assert(
   foreignShown && foreignPanes === 0,
   `foreign note shown: ${foreignShown}; run tabs ${foreignPanes}`,
 );
+
+// The card pane links the issue a card was filed from (LOB-254). The seeded card was filed from
+// nowhere, so its pane shows no external ref at all; a card filed as a Linear delivery files one —
+// `createTask` with the ref and the issue's link, the fields `TriggerCardsFromTaskService` sets —
+// shows the ref as a link to the issue, opening in a new tab. A `javascript:` link is refused by the
+// API, so the page is never handed one to render.
+const seededExternal = await page.evaluate(
+  () =>
+    document.querySelectorAll("aside[data-card-pane] [data-card-external]")
+      .length,
+);
+const ISSUE_URL = `https://linear.app/acme/issue/VER-${Date.now()}/filed-from-linear`;
+const filedFromLinear = await rpcFromDrive("createTask", {
+  boardId,
+  title: "filed from Linear",
+  body: "The issue's description, as the card's body.",
+  externalRef: "linear:iss-verify-web",
+  externalUrl: ISSUE_URL,
+  actor: "trigger:linear",
+});
+const refusedLink = await rpcFromDrive("createTask", {
+  boardId,
+  title: "a link that is not one",
+  externalUrl: "javascript:alert(1)",
+  actor: "trigger:linear",
+});
+const linkedId = filedFromLinear.value?.id;
+let externalLinkShown = null;
+if (typeof linkedId === "string") {
+  await page.goto(`${WEB_URL}/boards/${boardId}?card=${linkedId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  externalLinkShown = await page
+    .waitForSelector(
+      `aside[data-card-pane='${linkedId}'] a[data-card-external-link]`,
+      { timeout: 15_000 },
+    )
+    .then(
+      (link) =>
+        link.evaluate((anchor) => ({
+          href: anchor.getAttribute("href"),
+          target: anchor.getAttribute("target"),
+          rel: anchor.getAttribute("rel"),
+          label: anchor.getAttribute("data-card-external"),
+          text: anchor.textContent?.trim() ?? "",
+        })),
+      () => null,
+    );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "card-pane-external-link.png"),
+  });
+}
+paneObserved.externalLink = {
+  seededExternal,
+  created: filedFromLinear.exit,
+  refused: {
+    exit: refusedLink.exit,
+    cause: JSON.stringify(refusedLink.cause).slice(0, 200),
+  },
+  shown: externalLinkShown,
+};
+assert(
+  "the card pane links the Linear issue a card was filed from, and a card from nowhere shows none",
+  seededExternal === 0 &&
+    filedFromLinear.exit === "Success" &&
+    externalLinkShown?.href === ISSUE_URL &&
+    externalLinkShown.label === "linear:iss-verify-web" &&
+    externalLinkShown.text === "linear:iss-verify-web" &&
+    externalLinkShown.target === "_blank" &&
+    (externalLinkShown.rel ?? "").includes("noopener") &&
+    refusedLink.exit === "Failure" &&
+    JSON.stringify(refusedLink.cause).includes("externalUrl"),
+  `seeded card externals ${seededExternal}; link ${JSON.stringify(externalLinkShown)}; javascript: link ${String(refusedLink.exit)}`,
+);
 observed.cardPane = paneObserved;
 
 // A bad board id is refused by the route's decode, as a bad session id is.

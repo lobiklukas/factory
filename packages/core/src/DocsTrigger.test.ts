@@ -55,6 +55,7 @@ import {
 } from "./DocsTrigger";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import {
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -345,7 +346,7 @@ const sessionRoot = mkdtempSync(join(tmpdir(), "docs-trigger-"));
 const runtime = ManagedRuntime.make(
   TriggerServiceLive({ rules: docsTriggerRules(repo) }).pipe(
     Layer.provide(DocsSessionsFromSessionService),
-    Layer.provide(NoWriteBack),
+    Layer.provide(Layer.mergeAll(NoWriteBack, NoCards)),
     Layer.provideMerge(
       SessionServiceLive({
         model: createModelAccess("faux"),

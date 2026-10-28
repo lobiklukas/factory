@@ -6,8 +6,8 @@
  * and its row is written in the same transaction as the event that records the write. What this fold
  * proves is the other half of that rule: every write a card has had is in its history, so the row is
  * derivable from `task_events` alone. The `created` event carries what the create was given — the
- * title, and since LOB-260 the body, the base ref, the external ref and the priority — and every
- * later event the one change it made.
+ * title, and since LOB-260 the body, the base ref, the external ref and the priority (since LOB-254
+ * the external ref's link too) — and every later event the one change it made.
  *
  * Revisions: `created` records revision 1, and every other event the revision its mutation expected,
  * so the card is at the event's revision plus one after it. An ask (a `commented` question and a
@@ -29,6 +29,7 @@ export type TaskProjection = {
   readonly body?: string;
   readonly baseRef?: string;
   readonly externalRef?: string;
+  readonly externalUrl?: string;
   readonly blocked?: { readonly reason: BlockReason; readonly column: string };
 };
 
@@ -53,6 +54,9 @@ export const projectTask = (
     ...(first.externalRef === undefined
       ? {}
       : { externalRef: first.externalRef }),
+    ...(first.externalUrl === undefined
+      ? {}
+      : { externalUrl: first.externalUrl }),
   };
   for (const event of rest) {
     const revision = event.revision + 1;

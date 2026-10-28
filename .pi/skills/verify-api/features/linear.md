@@ -44,6 +44,26 @@ its retry after registration is still a replay, and a new id is the second chanc
 written to `webhook_deliveries.skip_reason`; a rule whose repo is not registered →
 `repo … is not registered`. None opens a session.
 
+**A card rule puts the issue on the board (LOB-254).** A rule or stored route with
+`"mode": "card"` opens no session: the delivery files one card on the repo's board, in its
+definition's initial column (`intake` in the default pipeline), titled with the issue, with the
+description verbatim as the card's body, `linear:<issue id>` as its external ref and the issue's
+`url` as its link (only an `http(s)` one), through `TriggerCardsFromTaskService` →
+`TaskService.file`. The answer carries `taskId` and no `sessionId`. The card is keyed by its
+external ref, not the delivery: a second, distinct delivery about the issue answers the card already
+on the board (`already on the board as card …`), and `file` takes an advisory lock on the board and
+the ref so two at once cannot both file one. A repo with no board is a recorded skip,
+`repo X has no board (create one with \`factory board create --repo X\`)`, which the issue-wide key
+reclaims once the board exists, as it does an unregistered repo. The rule's `prompt` is unused: the
+card's runs are told its body (LOB-260). The run starts from the card (B12), and the write-back
+follows the run ([linear-writeback.md](linear-writeback.md)).
+
+**What the board refuses is a decision, not a failure.** A description over the card body's cap
+(32,000 characters) is cut to the cap with a marker, and the reason says so, rather than refused. A
+card the board refuses for its input (a base ref git would not take) is a recorded skip naming the
+field ("the board refused the card's baseRef"), not a 500 for Linear to retry. Filing the card
+acknowledges nothing on the issue, nor on any other source.
+
 **How the skill drives it.** `./linear.sh` boots the skill's API instance (`API_PORT`, default
 `9415`) with two per-run rules (`factory`, and `factory-later` on a repo registered mid-drive) and
 `LINEAR_WEBHOOK_SECRET`, then runs `bun linear.ts`: fourteen checks
@@ -65,8 +85,19 @@ Linear signs one. Every check is required.
     registered and the label is re-added.
 13. A wrong `Linear-Signature` is `401`.
 14. The `factory` repo has exactly two sessions — one per labeled issue — and the later repo one.
+    15–17. A stored route routes, names itself, replays, and is removed (LOB-266).
+15. A card-mode route (LOB-254, added over RPC) on a repo with no board skips the issue, naming the
+    repo and `factory board create`.
+16. Once the board exists (`createBoard` over RPC), the issue's next delivery files exactly one card
+    in `intake` with `linear:<id>`, the description as its body and the issue's link, and the repo has
+    no session.
+17. Linear's retry of that delivery is a replay, and the board still holds one card.
 
-**What proves it works.** `.verify/evidence/lob-164/` (`linear.log`, `observed.json`, `api.log`):
+**What proves it works.** LOB-254: 22/22 (the card checks among them) from the `agent/LOB-254`
+worktree on 2026-10-28 (API on `:9612`, the worktree's own database), evidence in
+`.verify/evidence/lob-254-linear/`. `packages/core/src/TriggerService.test.ts` ("a card rule") proves
+the card path on Postgres, including the second delivery that waits on the first filing's lock.
+Earlier: `.verify/evidence/lob-164/` (`linear.log`, `observed.json`, `api.log`):
 14/14 from the `agent/LOB-164` worktree on 2026-10-27 (API on `:9520`, faux, the worktree's own
 database on 5442). `./webhook.sh` was re-run in the same place (12/12) because the route it drives
 changed shape. `packages/core/src/Linear.test.ts` proves the key and the seam without HTTP.

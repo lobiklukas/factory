@@ -73,6 +73,8 @@ import {
   verifyJiraSignature,
   verifySentrySignature,
   verifySlackSignature,
+  TaskServiceLive,
+  TriggerCardsFromTaskService,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -573,6 +575,7 @@ const handle = (adapter: () => Adapter) =>
       ...(delivered.sessionId === undefined
         ? {}
         : { sessionId: delivered.sessionId }),
+      ...(delivered.taskId === undefined ? {} : { taskId: delivered.taskId }),
       ...(delivered.reason === undefined ? {} : { reason: delivered.reason }),
     });
   });
@@ -781,9 +784,14 @@ const seamFor = (rules: ReadonlyArray<TriggerRule>) =>
   }).pipe(
     // Each source's write-back when its credentials are configured (`./TriggerAdapters`): Linear's
     // started move (LOB-15), Jira's and GitHub's comments, Slack's reply. Only the source a delivery
-    // came from is written back to.
+    // came from is written back to. A card rule (LOB-254) files its card through `TaskService`, the
+    // one writer of cards.
     Layer.provide(
-      Layer.mergeAll(TriggerSessionsFromSessionService, TriggerWriteBacksLive),
+      Layer.mergeAll(
+        TriggerSessionsFromSessionService,
+        TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
+        TriggerWriteBacksLive,
+      ),
     ),
   );
 

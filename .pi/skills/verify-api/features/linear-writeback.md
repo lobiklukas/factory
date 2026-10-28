@@ -13,6 +13,12 @@ declarative map (docs/board.md B11), outbound-only and idempotent:
 | the PR closes unmerged         | one comment saying so                                                                                               |
 | a new commit lands on the PR   | nothing — the issue's state is the task's, not the review's                                                         |
 
+**A card filed from the issue is followed through its runs (LOB-254).** A card-mode delivery
+([linear.md](linear.md)) opens no session and moves nothing: it files a card whose external ref is
+`linear:<issue id>`. A run started on the card is bound to the issue through the card
+(`task_runs` → `tasks.external_ref`), so its PR, its failure and its merge land on the issue exactly
+as rows 2–5 above say, one comment per run's PR (the marker is the run's session id).
+
 `packages/core/src/LinearSync.ts` (`LinearIssueSyncLive` over Linear's GraphQL API; the trigger
 seam's `LinearTriggerWriteBack`; the session layer's `LinearSessionWriteBack`; the PR lifecycle
 reader `githubPullRequestLifecycle`, `syncPullRequestLifecycle`, and the signed GitHub webhook
@@ -62,7 +68,7 @@ so a slow or broken tracker cannot stall or fail the step's own answer.
 API (`linear-api-fake.ts`, port `LINEAR_WRITEBACK_PORT`, default `API_PORT` or `9416`) and GitHub's
 PR endpoint (`github-fake.ts`, the next port) — and runs `bun linear-writeback.ts`: the real
 `TriggerService`, the real `SessionService` with its PR step in a real worktree of a throwaway repo,
-and the real write-back. Twelve checks, every one required:
+and the real write-back. Sixteen checks, every one required:
 
 1. A delegated issue opens a session and moves Todo → In Progress.
 2. The session records the PR's page, not GitHub's API resource. The fake answers both fields, as
@@ -78,10 +84,20 @@ and the real write-back. Twelve checks, every one required:
    not posted twice.
 10. A new commit (`synchronize`) writes nothing to the issue.
 11. The merge moves the issue to Done; a merge event with a forged signature is refused first.
-12. Every request carried the configured key, verbatim.
+12. A mapped issue under a card rule (LOB-254) files exactly one card in `intake` — `linear:<id>`,
+    the description as its body, the issue's link — and opens no session.
+13. Filing the card writes nothing to Linear: the issue moves when the card's run opens its PR.
+14. A replay of that delivery and a second, distinct delivery for the same issue file no second card.
+15. A run started on the card (as `factory board start --task` starts one) opens its PR, and the
+    issue reaches In Review with the PR attached and exactly one comment carrying its link; a retried
+    PR step adds none.
+16. Every request carried the configured key, verbatim.
 
 That the checks are not vacuous is a mutation run: with the marker check removed from
-`LinearSync.ts`, checks 6, 8 and 9 fail (two comments each). Evidence in `.verify/evidence/lob-15/`.
+`LinearSync.ts`, checks 6, 8 and 9 fail (two comments each). Evidence in `.verify/evidence/lob-15/`;
+the card path's in `.verify/evidence/lob-254/` (16/16 on 2026-10-28). Without the card join in
+`issueOfSession`, check 15 fails (the issue is
+never read), and `LinearSync.test.ts`'s "follows a card's run" turns red.
 
 Checks 10 and 11 are signed `pull_request` bodies through `handleGitHubPullRequestWebhook`, the code
 the route runs; the route itself is a thin wrapper over it (headers in, status and JSON out).

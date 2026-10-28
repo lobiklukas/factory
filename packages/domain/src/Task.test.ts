@@ -52,6 +52,7 @@ import {
   TaskPriority,
   TaskRun,
   type BoardInstanceId,
+  isWebLink,
 } from "./Task";
 
 /** Whether `schema` refuses `value`, as a value rather than a throw, so a case reads as data. */
@@ -932,5 +933,29 @@ describe("a new board (B2, LOB-208)", () => {
         definitionVersion: 1.5,
       }),
     ).toBe(true);
+  });
+});
+
+describe("isWebLink (LOB-254)", () => {
+  it("takes an absolute http(s) URL and nothing else", () => {
+    for (const link of [
+      "https://linear.app/acme/issue/ENG-7/title",
+      "http://localhost:3000/issue?id=7#top",
+      "HTTPS://LINEAR.APP",
+    ]) {
+      expect(isWebLink(link), link).toBe(true);
+    }
+    for (const notLink of [
+      "javascript:alert(1)",
+      "ftp://linear.app/x",
+      "/issue/ENG-7",
+      "ENG-7",
+      "https://",
+      "https://user@evil.example/x",
+      "https://linear.app/a b",
+      " https://linear.app",
+    ]) {
+      expect(isWebLink(notLink), notLink).toBe(false);
+    }
   });
 });

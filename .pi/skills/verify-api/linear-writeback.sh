@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Drive the Linear write-back end to end (LOB-15): a delegated issue reaches In Review with its PR
-# on it, a failed run explains itself, and no retry writes anything twice.
+# on it, a failed run explains itself, and no retry writes anything twice. Since LOB-254 it also
+# drives the card path: a card rule files the issue on the repo's board with no session, and the
+# run started on that card carries the issue to In Review with one PR comment.
 #
 #   ./linear-writeback.sh
 #

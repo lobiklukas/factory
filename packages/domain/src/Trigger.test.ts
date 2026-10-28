@@ -5,10 +5,11 @@
  * and what text the session is actually told — so they live in the domain next to the shapes and
  * are tested with no database and no route.
  */
-import { Schema } from "effect";
+import { Exit, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import type { RepoSlug } from "@repo/domain/Session";
 import {
+  externalRefOf,
   renderPrompt,
   resolveMapping,
   ruleClaims,
@@ -48,7 +49,30 @@ describe("resolveMapping", () => {
       baseRef: "release",
       prompt: "Fix the widget: It wobbles.",
       label: "factory",
+      // A rule that names no mode opens a session, as every rule did before card mode (LOB-254).
+      mode: "session",
     });
+  });
+
+  it("carries a card rule's mode, and the item's key as the card's external ref (LOB-254)", () => {
+    const mapping = resolveMapping(
+      [{ label: "factory", repo, prompt: "", mode: "card" }],
+      event(),
+    );
+    expect(mapping?.mode).toBe("card");
+    expect(externalRefOf({ source: "linear", key: "iss-1" })).toBe(
+      "linear:iss-1",
+    );
+  });
+
+  it("decodes a rule's mode, and refuses one it does not know", () => {
+    const decode = Schema.decodeUnknownExit(TriggerRuleSchema);
+    expect(
+      Exit.isSuccess(decode({ label: "x", repo, prompt: "", mode: "card" })),
+    ).toBe(true);
+    expect(
+      Exit.isSuccess(decode({ label: "x", repo, prompt: "", mode: "issue" })),
+    ).toBe(false);
   });
 
   it("takes the order of the rules as the operator's precedence", () => {
