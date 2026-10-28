@@ -543,3 +543,195 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     }
   });
 });
+
+/**
+ * Authoring a definition version over the wire (D4): `defineBoard` against the scratch database's
+ * real skill table (the seeded `implement`, and one put over `putSkill` here) and the session layer's
+ * role table (`builder` only), so the library the handler checks against is the one a run would
+ * resolve from, and every refusal arrives as the typed `InvalidDefinition` a client decodes.
+ */
+describe("authoring a definition over RPC (D4)", () => {
+  const AUTHORED = DefinitionId.make(`authored${run}`);
+
+  const columns = (skills: ReadonlyArray<string>, role = "builder") => [
+    {
+      name: "todo",
+      kind: "resting" as const,
+      skills: [],
+      requires: [],
+      transitions: [{ to: "doing" }],
+    },
+    {
+      name: "doing",
+      kind: "working" as const,
+      role,
+      skills,
+      requires: [{ key: "pr_link", description: "a PR link" }],
+      transitions: [{ to: "done", gate: "sign-off" }],
+    },
+    {
+      name: "done",
+      kind: "terminal" as const,
+      skills: [],
+      requires: [],
+      transitions: [],
+    },
+  ];
+
+  const versionsOf = (id: string) =>
+    scratch.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ version: number }>`
+          SELECT version FROM board_definitions WHERE id = ${id} ORDER BY version
+        `;
+        return rows.map((row) => row.version);
+      }),
+    );
+
+  /**
+   * Mutation: describe the input rather than the written row, or resolve the model against no role
+   * table — `doing` is not `faux/builder (role)`. Mutation: ignore `dryRun` — the dry run writes v1.
+   */
+  it("validates a dry run without writing, then writes v1, described, which createBoard pins", async () => {
+    const payload = {
+      id: AUTHORED,
+      name: "Authored over RPC",
+      columns: columns(["implement"]),
+      initialColumn: "todo",
+    };
+    const dry = await call((client) =>
+      client.defineBoard({ ...payload, dryRun: true }),
+    );
+    expect(dry.outcome).toBe("validated");
+    expect(dry.definition.version).toBe(1);
+    expect(await versionsOf(AUTHORED)).toEqual([]);
+
+    const defined = await call((client) => client.defineBoard(payload));
+    expect(defined.outcome).toBe("created");
+    expect(defined.definition).toEqual({
+      id: AUTHORED,
+      version: 1,
+      name: "Authored over RPC",
+      initialColumn: "todo",
+      columns: [
+        {
+          name: "todo",
+          kind: "resting",
+          model: deployment,
+          skills: [],
+          requires: [],
+          exits: [{ to: "doing" }],
+        },
+        {
+          name: "doing",
+          kind: "working",
+          role: "builder",
+          model: { model: BUILDER_MODEL, source: "role" },
+          skills: ["implement"],
+          requires: [
+            { key: "pr_link", description: "a PR link", checked: true },
+          ],
+          exits: [{ to: "done", humanGate: "sign-off" }],
+        },
+        {
+          name: "done",
+          kind: "terminal",
+          model: deployment,
+          skills: [],
+          requires: [],
+          exits: [],
+        },
+      ],
+    });
+    expect(await versionsOf(AUTHORED)).toEqual([1]);
+
+    const again = await call((client) => client.defineBoard(payload));
+    expect([again.outcome, again.definition.version]).toEqual(["unchanged", 1]);
+    expect(await versionsOf(AUTHORED)).toEqual([1]);
+
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const listed = yield* client.listDefinitions({});
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`factory-test/authored-${run}`),
+          definitionId: AUTHORED,
+        });
+        return { listed, board };
+      }),
+    );
+    expect(
+      outcome.listed
+        .find((definition) => definition.id === AUTHORED)
+        ?.versions.map((version) => version.version),
+    ).toEqual([1]);
+    expect(outcome.board.definitionVersion).toBe(1);
+  });
+
+  /**
+   * Mutation: check skills against a fixed list, or read the library once when the handler is built
+   * — the skill put here is still unknown. Mutation: hand the rules no role table — `buidler` passes.
+   */
+  it("refuses a skill the library lacks until it is put, and a role the role table lacks, writing nothing", async () => {
+    const skill = `authoring-${run}`;
+    const id = DefinitionId.make(`refused${run}`);
+    const unknownSkill = await call((client) =>
+      failureOf(
+        client.defineBoard({
+          id,
+          name: "Refused",
+          columns: columns(["implement", skill]),
+          initialColumn: "todo",
+        }),
+      ),
+    );
+    expect(unknownSkill).toMatchObject({
+      _tag: "InvalidDefinition",
+      definitionId: id,
+      field: "columns[1].skills[1]",
+      problems: [
+        {
+          field: "columns[1].skills[1]",
+          message: `column "doing" binds skill "${skill}", which the skill library does not hold: put it first (factory skill put)`,
+        },
+      ],
+    });
+
+    const unknownRole = await call((client) =>
+      failureOf(
+        client.defineBoard({
+          id,
+          name: "Refused",
+          columns: columns(["implement"], "buidler"),
+          initialColumn: "todo",
+        }),
+      ),
+    );
+    expect(unknownRole).toMatchObject({
+      _tag: "InvalidDefinition",
+      field: "columns[1].role",
+    });
+    expect(await versionsOf(id)).toEqual([]);
+
+    const defined = await call((client) =>
+      Effect.gen(function* () {
+        yield* client.putSkill({
+          name: skill,
+          description: "a skill put for this case",
+          body: "Do the thing.",
+        });
+        return yield* client.defineBoard({
+          id,
+          name: "Refused, then fixed",
+          columns: columns(["implement", skill]),
+          initialColumn: "todo",
+        });
+      }),
+    );
+    expect([defined.outcome, defined.definition.version]).toEqual([
+      "created",
+      1,
+    ]);
+    expect(await versionsOf(id)).toEqual([1]);
+  });
+});

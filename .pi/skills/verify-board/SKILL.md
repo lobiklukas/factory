@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|add|ls|show|move|comment|start|block|unblock|attention|runs`, the run's PR opened in the browser, read definitions and a board's configuration through `factory board definitions|definition show|list|config`, in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|add|ls|show|move|comment|start|block|unblock|attention|runs`, the run's PR opened in the browser, read definitions and a board's configuration through `factory board definitions|definition show|list|config`, author a new definition version with `factory board define --file`, in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -50,9 +50,10 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows     | a card made in either surface is the same card in the other          |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                           | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden          | an operator sees what a board will do before trusting it             |
+| authoring a definition (D4)      | `define.sh`: `--dry-run` writes nothing; v1 then v2 as new rows only; 8 refusals by field          | the pipeline changes without a migration, and never in place         |
 | caps and WIP limits (LOB-71)     | `caps.sh`: task, board, repo and column caps refused by name, nothing written; v2's threshold      | a definition's caps bound the runs in flight, per pinned version     |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`,
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `define.sh`, `triage.sh`, `start-body.sh`,
 `start-prompt.sh`, `caps.sh`, `card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
@@ -139,6 +140,7 @@ runs the real script against a closed port and an answering one.
 ./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), four runs on one card
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
+./define.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: authoring a definition version (D4)
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./start-body.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database: a card's body and base ref in its run
 ./caps.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: board caps and WIP limits (LOB-71)
@@ -169,6 +171,15 @@ exits with the human gates marked), compared whole with the hand-written `defini
 and once more as a tmux pane, the newest by default, `factory board list` and `factory board config`,
 and the `definition_not_found`, `board_not_found` and `invalid_input` refusals. The expected models
 are `up.sh`'s `ROLE_MODELS`. See `features/definitions.md`.
+
+`define.sh` (D4) authors a definition of its own (`drv<hex>`) with `factory board define --file`:
+`--dry-run` validates and writes nothing, the define writes v1 and only v1, the same file again is
+`unchanged`, a changed file on stdin writes v2 with v1 untouched (every row read back by
+`define.ts` from `board_definitions`, with an md5 of the whole row), `board definitions` lists both,
+`board create --definition` pins v2 and `board add` starts a card in its initial column; then the
+spec's eight refusals, each `invalid_definition` naming its field and writing nothing, and the CLI's
+own `invalid_input` for a file that is not JSON, carries an unknown key, or cannot be read. See
+`features/define.md`.
 
 `caps.sh` (LOB-71) proves the board caps and WIP limits from the terminal on boards of its own, over
 a definition `caps.ts` writes with two versions (v1 caps 2/1/2 and gives `review` a WIP limit of 1;
@@ -287,6 +298,8 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `definitions.json`, `definitions-*.txt`, `definitions-*.diff`, `definitions-pane.txt` —
   `definitions.sh`'s checks, each command with its output, the comparisons with the expected
   description, and the tmux pane
+- `define.json`, `define-*.txt`, `define-v1.json` — `define.sh`'s checks, each command with its
+  output, and the definition file it defined
 - `../equivalence/observed.json`, `../equivalence/<step>.log` — `equivalence.sh`'s steps and their
   exit codes; the drives it runs write `../cli/`, `../web/` and this directory
 

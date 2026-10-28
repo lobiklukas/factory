@@ -677,6 +677,11 @@ export type SessionServiceShape = {
    */
   readonly roleModel: (role: string | undefined) => ResolvedModel;
   /**
+   * The roles this layer's role table names (B6): what an authored definition version's roles are
+   * held to when there are any (D4, `./boardDefine`). Empty for a deployment with no `ROLE_MODELS`.
+   */
+  readonly roles: ReadonlySet<string>;
+  /**
    * Reopen every session that had a mission in flight when the last process stopped, and schedule
    * its log again (LOB-231): the boot's half of "a mission resumes in the phase it died in".
    *
@@ -6242,6 +6247,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         outcomes: (input) =>
           readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
+        roles: new Set((options.roleModels ?? NO_ROLE_MODELS).keys()),
         resumeMissions,
         resumeRuns,
         close: closeAll,
