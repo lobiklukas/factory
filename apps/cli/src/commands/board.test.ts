@@ -12,6 +12,7 @@ import { SessionError } from "@repo/domain/Session";
 import {
   AttentionItem,
   BlockReason,
+  CreatedBoard,
   NotBlocked,
   StaleRevision,
   Task,
@@ -28,10 +29,12 @@ import {
   attentionLines,
   blockCard,
   bodyLines,
+  createdLines,
   runsLines,
   specLines,
   threadLines,
   unblockCard,
+  warningLines,
 } from "./board";
 
 const comment = (
@@ -573,5 +576,39 @@ describe("runsLines (LOB-264)", () => {
       ),
     );
     expect(failed).toBeInstanceOf(SessionError);
+  });
+});
+
+describe("createdLines and warningLines (LOB-263)", () => {
+  const made = (warning?: string) =>
+    Schema.decodeSync(CreatedBoard)({
+      id: `brd_${"0".repeat(26)}`,
+      repo: "acme/widgets",
+      definitionId: "default",
+      definitionVersion: 3,
+      createdAt: "2026-10-28T00:00:00.000Z",
+      ...(warning === undefined ? {} : { warning }),
+    });
+  const board = made();
+
+  /** Mutation: drop the warning from the output — a path-less repo's operator reads nothing. */
+  it("prints the server's warning under the board, with the command that fixes it", () => {
+    const warning =
+      "repo acme/widgets has no local checkout registered: register one with `factory repo add acme/widgets --path <dir>`";
+    const lines = createdLines(made(warning));
+    expect(lines).toEqual([
+      `board       ${board.id}`,
+      "repo        acme/widgets",
+      "definition  default v3",
+      `warning     ${warning}`,
+    ]);
+    expect(lines.at(-1)).toContain(
+      "factory repo add acme/widgets --path <dir>",
+    );
+  });
+
+  it("prints exactly the three lines it always did when the repo has a checkout", () => {
+    expect(createdLines(board)).toHaveLength(3);
+    expect(warningLines(undefined, "warning ")).toEqual([]);
   });
 });
