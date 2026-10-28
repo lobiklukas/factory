@@ -1992,7 +1992,7 @@ const BOARD_READS = new Set([
   "listAttention",
   // The shell's faux banner (LOB-272) reads it on every page.
   "getServerInfo",
-  // The New session form's cost estimate (LOB-38), on the sessions page the walk starts from.
+  // The New session form's cost estimate (LOB-38) is a read: it spends nothing and opens nothing.
   "predictCost",
 ]);
 const boardRpcTags = [];
@@ -2533,11 +2533,13 @@ assert(
   `building ${JSON.stringify(toBuilding ?? null)}; canceled ${JSON.stringify(toCanceled ?? null)}`,
 );
 
-// Run start: `planning` is a working column, so the pane offers a run; the click is
+// Run start: `planning` is a working column, so the pane offers a run; Start run then Send is
 // `createSession` with the card named, and the run is listed on the card and opened beside it.
 let runId = null;
 try {
   await page.locator("aside[data-card-pane] [data-start-run]").click();
+  // Start run opens the prompt field (C6); Send opens the run and sends its text.
+  await page.locator("aside[data-card-pane] [data-start-send]").click();
   await page.waitForFunction(
     () => new URL(window.location.href).searchParams.get("run") !== null,
     null,
@@ -2679,10 +2681,15 @@ await page.screenshot({
 });
 
 // The lanes still hold no control that can change a card, and the only writes the board pages sent
-// are the two moves the walk clicked (the refused one and the accepted one) and the run start. The
-// tags are the requests' own, so a write wired to any other element would be caught here.
+// are the two moves the walk clicked (the refused one and the accepted one) and the run start —
+// `createSession` then the first message Send puts in the run (C6). The tags are the requests' own, so a write wired to any other element would be caught here.
 page.off("request", recordRpcTags);
-const BOARD_WRITES = new Set(["moveTask", "createSession", "decideApproval"]);
+const BOARD_WRITES = new Set([
+  "moveTask",
+  "createSession",
+  "sendMessage",
+  "decideApproval",
+]);
 const boardWrites = boardRpcTags.filter((tag) => !BOARD_READS.has(tag));
 boardObserved.rpcTags = boardRpcTags;
 assert(
@@ -2692,6 +2699,7 @@ assert(
     boardWrites.every((tag) => BOARD_WRITES.has(tag)) &&
     boardWrites.filter((tag) => tag === "moveTask").length === 2 &&
     boardWrites.filter((tag) => tag === "createSession").length === 1 &&
+    boardWrites.filter((tag) => tag === "sendMessage").length === 1 &&
     boardWrites.filter((tag) => tag === "decideApproval").length === 1,
   `controls ${before.controls}/${afterReload.controls}; writes ${JSON.stringify(boardWrites)}`,
 );
@@ -3008,7 +3016,7 @@ assert(
     : `seed exit ${String(attentionSeed.status)}: ${attentionSeed.stderr ?? ""}`,
 );
 
-/** `createSession` with the card named, as the card pane's Start run and `factory board start` do. */
+/** An idle run on the card (`createSession` with the card named, nothing sent), as `factory board start --idle` opens. */
 const startRunOn = async (taskId, column) => {
   const created = await rpcFromDrive("createSession", {
     title: `attention run ${column}`,

@@ -10,12 +10,12 @@ import type {
 } from "@repo/domain/Task";
 import type { DecideApprovalInput } from "@repo/domain/Approval";
 import type { SessionId } from "@repo/domain/Session";
-import { Duration, Effect, Option } from "effect";
+import { Cause, Duration, Effect, Option } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { definitionOfConfig } from "../board-view";
 import { RpcClient } from "../rpc-client";
-import { DASHBOARD_ACTOR } from "../approvals-view";
+import { startRunSession } from "../run-start-view";
 import { SESSIONS_KEY } from "./session-list";
 
 /** The reactivity key a move invalidates: every board read re-runs once a move lands. */
@@ -185,24 +185,32 @@ export const taskSpecAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
- * Starts a run against a card: `createSession` with the card named, exactly as `factory board
- * start` does (LOB-61), so a run is one Pi Durable session (B1) and its row lands in `task_runs`.
+ * Starts a run against a card and sends it its first message (C6): `createSession` with the card
+ * named, exactly as `factory board start` does (LOB-61), so a run is one Pi Durable session (B1) and
+ * its row lands in `task_runs`; then `sendMessage` with the prompt the person sent from the field
+ * (`startPrompt` opens it with the card's default), so the run starts working, not idle.
  *
  * The run starts from the card's own column, which is the column whose `requires[]` it must satisfy
  * on exit. The card is not moved: the lane a run works in is where the card already sits.
+ *
+ * A first message that is refused does not undo the run: the session is open and bound to the card,
+ * so the answer carries the session and the refusal's words (`sendFailure`), and the pane opens the
+ * run and says so, leaving the person to type into it. Only a failed `createSession` fails the atom.
  */
 export const startRunAtom = runtime.fn(
-  (task: Task) =>
+  (input: { readonly task: Task; readonly prompt: string }) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
-      return yield* rpc.client.createSession({
-        title: task.title,
-        taskId: task.id,
-        taskColumn: task.column,
-        // The run's spend is the dashboard's, as `factory board start`'s is `cli`'s (LOB-162).
-        actor: DASHBOARD_ACTOR,
-        ...(task.repo === undefined ? {} : { repo: task.repo }),
-      });
+      const session = yield* rpc.client.createSession(
+        startRunSession(input.task),
+      );
+      const sendFailure = yield* rpc.client
+        .sendMessage({ sessionId: session.id, content: input.prompt })
+        .pipe(
+          Effect.as(undefined),
+          Effect.catchCause((cause) => Effect.succeed(Cause.pretty(cause))),
+        );
+      return { session, sendFailure };
     }),
   { reactivityKeys: [RUNS_KEY, SESSIONS_KEY] },
 );
