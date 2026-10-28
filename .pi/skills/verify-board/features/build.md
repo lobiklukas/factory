@@ -123,6 +123,11 @@ stays in `building` (a check that passes only when there is no link says so).
 
 ## What proves it works
 
+C20 review round (2026-10-28, `.verify/evidence/c20r2/board/`, the fake now answering one PR by its
+`owner/repo` and number, 404 under another slug): `./drive.sh` exit 0, **156** PASS on the second
+run (the first, at load ~50, failed only the specify phase's busy probe, `live.busy=false after
+15061ms`, before any merge step; the merge phase passed in both).
+
 C20 (2026-10-28, `agent/C20`, API `:9500`, web `:3500`, the fake on `:9503`, `.verify/evidence/c20/board/`):
 `./drive.sh` exit 0, **156** PASS. `move-merge-open.txt`: the person's review → done refused naming
 `human_merge` and the PR while it was open; `merge-drive.json`: the PR merged on the fake, the signed

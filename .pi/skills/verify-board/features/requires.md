@@ -135,7 +135,9 @@ be a path in no package that nothing verifies.
 
 ## Evidence
 
-`.verify/evidence/latest/board/` (last run: `.verify/evidence/c20/board/`, 75/75, C20, 2026-10-28,
+`.verify/evidence/latest/board/` (last run: `.verify/evidence/c20r2/board/`, 75/75, C20's review round
+with the fake reading one PR by `owner/repo` and number, 2026-10-28; before it
+`.verify/evidence/c20/board/`, 75/75, C20, 2026-10-28,
 `REQUIRES_PORT=9502`, `REQUIRES_GITHUB_PORT=9504` — `requires-unmerged.txt`, the move held on
 `human_merge` with the PR open, `requires-forge-merge.json`, the merge on the fake, and
 `requires-done.txt`, the move through on the state it read, 8 `GET …/pulls/1` in the ledger; before
