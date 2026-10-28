@@ -73,7 +73,7 @@ export const attentionReasonText = (item: AttentionItem): string => {
       // The block's note names the reviewer and the PR (C21); the review itself is on the thread,
       // which the next run on the card is told.
       return reason.review === undefined
-        ? `Changes requested on the card's PR; start the next run to address them`
+        ? `Changes requested on the card's PR; start its building run to address them`
         : `Changes requested: ${reason.review}`;
     case "gate":
       if (task === undefined)

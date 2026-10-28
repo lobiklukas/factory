@@ -888,6 +888,7 @@ describe("POST /webhooks/github settles the PR's card (C20)", () => {
         review: {
           id: 7101,
           user: { login: "alice" },
+          author_association: "COLLABORATOR",
           body: "Split the migration out.",
           state: "changes_requested",
           html_url: `${reviewed.url}#pullrequestreview-7101`,
@@ -899,7 +900,7 @@ describe("POST /webhooks/github settles the PR's card (C20)", () => {
       expect(await first.json()).toEqual({
         ok: true,
         event: "changes_requested",
-        feedback: { recorded: 1, blocked: 1 },
+        feedback: { recorded: 1, blocked: 1, failed: 0 },
       });
       const again = await deliver(review, sign, "pull_request_review");
       expect(await again.json()).toMatchObject({

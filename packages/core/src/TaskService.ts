@@ -518,6 +518,11 @@ export type RecordPullRequestFeedbackInput = {
    * checks were each recorded): when a comment on the card carries one, nothing is recorded.
    */
   readonly coveredBy?: string;
+  /**
+   * One more `sourceId` that already says what this one would (a failing check run whose suite's
+   * note was delivered first): when a comment on the card carries it, nothing is recorded.
+   */
+  readonly coveredBySourceId?: string;
   /** Who said it, as the comment's actor: `github:<login>`, or `github:checks`. */
   readonly actor: Actor;
   readonly body: string;
@@ -673,8 +678,9 @@ export type TaskServiceShape = {
    * Record a review or a check of the card's PR on its thread (C21), exactly once per `sourceId`
    * however often GitHub delivers it: a `commented` note by the review's or the check's actor, and —
    * when `block` names one and the card is not blocked already — the block, from the card's column. A
-   * finished card (`done`, `canceled`), a `sourceId` already on the card's thread, and a `coveredBy`
-   * prefix one of its comments carries write nothing (`recorded: false`). The body is clipped to
+   * finished card (`done`, `canceled`), a `sourceId` already on the card's thread, a `coveredBy`
+   * prefix one of its comments carries, and a `coveredBySourceId` one of them is write nothing
+   * (`recorded: false`). The body is clipped to
    * `MAX_COMMENT_CHARS`, since every run on the card is told the thread.
    */
   readonly recordPullRequestFeedback: (
@@ -682,8 +688,8 @@ export type TaskServiceShape = {
   ) => Effect.Effect<RecordedPullRequestFeedback, TaskError>;
   /**
    * Lift a `changes_requested` block because a run that addresses it started on the card (C21): the
-   * run reads the review on the thread, and its settle must not hold the PR's push the way a block
-   * does (C18). Any other block, or none, is left as it is (`changed: false`).
+   * run reads the review on the thread, so the card no longer waits on a person. Any other block, or
+   * none, is left as it is (`changed: false`).
    */
   readonly resumeAfterReview: (input: {
     readonly taskId: string;
@@ -2908,6 +2914,7 @@ export const TaskServiceLive = Layer.effect(
               SELECT 1 AS one FROM task_events
               WHERE task_id = ${input.taskId} AND kind = 'commented'
                 AND (payload->>'sourceId' = ${input.sourceId}
+                  OR payload->>'sourceId' = ${input.coveredBySourceId ?? null}::text
                   OR starts_with(payload->>'sourceId', ${input.coveredBy ?? null}::text))
               LIMIT 1
             `;

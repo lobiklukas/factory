@@ -151,6 +151,8 @@ import {
   NO_REPO_POLICY,
   Policy,
   PolicyLive,
+  readOnlyStageOf,
+  stageRefusalOf,
   repoPolicyWidening,
   resolveRole,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
@@ -3833,24 +3835,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return yield* answerRetry(input, admittedRun.existing);
           }
           const { binding, inserted } = admittedRun.written;
-          if (input.taskId !== undefined && input.review === undefined) {
-            // A review that requested changes blocked the card (C21); this run is the one that
-            // addresses it — the review is on the thread it is told — and a card still blocked when
-            // it settles would hold the very push that answers the review (C18). A reviewer run is
-            // not that run. Best effort: the run is already the card's.
-            yield* tasks
-              .resumeAfterReview({
-                taskId: input.taskId,
-                actor: input.actor ?? id,
-              })
-              .pipe(
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `session ${id}: the card ${input.taskId}'s changes_requested block could not be lifted: ${error.message}`,
-                  ),
-                ),
-              );
-          }
           const row = inserted[0] ?? {
             id,
             title,
@@ -5550,12 +5534,51 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             column?.autonomy,
             repoPolicy.repo,
           );
+          // A read-only stage (LOB-74, C22: a read-only role such as the specifier, or a column whose
+          // autonomy says `write: "none"`) is enforced on its agent by the stage's policy and the
+          // role's tool set, neither of which a check meets. So the check meets the stage here, as the
+          // agent's own `bash` would: one the stage cannot prove is a read is refused, naming the
+          // column, rather than left to write the worktree the stage keeps unchanged. A review run
+          // (LOB-36) is the read-only reviewing stage whatever its column, as its agent's run is.
+          const stage = readOnlyStageOf(
+            column === undefined && review === undefined
+              ? undefined
+              : {
+                  ...(column === undefined
+                    ? {}
+                    : {
+                        column: column.name,
+                        ...(column.role === undefined
+                          ? {}
+                          : { role: column.role }),
+                        ...(column.autonomy === undefined
+                          ? {}
+                          : { autonomy: column.autonomy }),
+                      }),
+                  ...(review === undefined ? {} : { reviewing: true }),
+                },
+            options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
+          );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
             if (worker.check.trim() === "")
               return yield* new SessionErrorClass({
                 code: "invalid_input",
                 message: `the mission worker "${worker.id}" declares an empty check`,
+              });
+            const staged =
+              stage === undefined
+                ? undefined
+                : stageRefusalOf(stage, {
+                    type: "toolCall",
+                    id: `factory.mission.check:${worker.id}`,
+                    name: "bash",
+                    arguments: { command: worker.check },
+                  });
+            if (staged !== undefined)
+              return yield* new SessionErrorClass({
+                code: "invalid_input",
+                message: `the mission worker "${worker.id}"'s check is refused: ${column === undefined ? "the review run" : `column "${staged.column}"`} is the read-only ${staged.stage} stage, where a check may only read (${staged.what} is not a read)`,
               });
             const decision = yield* sessionPolicy.decide({
               type: "toolCall",

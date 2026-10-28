@@ -157,7 +157,7 @@ describe("attentionReasonText", () => {
       "Changes requested: @alice requested changes on pull request #7: split it",
     );
     expect(attentionReasonText(item("r", { _tag: "review", since: AT }))).toBe(
-      "Changes requested on the card's PR; start the next run to address them",
+      "Changes requested on the card's PR; start its building run to address them",
     );
   });
 

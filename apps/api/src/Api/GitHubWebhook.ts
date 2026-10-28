@@ -55,7 +55,9 @@
  *   the card's thread — which the next run on the card is told — once however often GitHub
  *   redelivers it, and a review that requests changes also blocks the card `changes_requested`, so
  *   it shows in the attention view. A delivery that says nothing the card acts on (an approval with
- *   no words, a passing check, a check of a commit the PR has moved past) is `202` with the reason.
+ *   no words, a passing check, a check of a commit the PR has moved past, a review by someone with
+ *   no standing on the repository) is `202` with the reason; a card that could not be written to is
+ *   `500`, so the delivery can be redelivered.
  *
  * Any other event is answered `202` and ignored.
  */

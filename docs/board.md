@@ -374,11 +374,19 @@ attention view lists it (**Address a review**); a review that approves or commen
 comment on a line of the change are notes; a failing check (`failure`, `timed_out`,
 `action_required`, `startup_failure`) on the PR's head commit is a note naming the check, once across
 the check run, its suite and its workflow run, and does not block — CI is red on every intermediate
-push of a run that is still working. The factory's own reviewer's comment (LOB-36, marked) is not
-echoed. Since every run on the card is told the thread, the next run reads the review with nothing
-pasted into its prompt, and starting that run (any run on the card but a reviewer's) lifts the
-`changes_requested` block, because a card still blocked when its run settles holds the run's PR push
-(C18) — the push that answers the review.
+push of a run that is still working; a check's summary is quoted to its first 1,000 characters. The
+factory's own reviewer's `COMMENT` review (LOB-36, marked) is not echoed. Only a reviewer with a
+standing on the repository (`author_association` owner, member or collaborator) reaches the card or
+blocks it — anyone else's review is `202` — and every word that reaches it first passes the trigger
+seam's injection hygiene (`sanitizeTriggerText`), so an HTML comment or a zero-width run no person on
+the PR can see is never told to a run. A card that could not be written to makes the delivery `500`,
+so GitHub lists it as failed and a person can redeliver it. Since every run on the card is told the
+thread, the next run reads the review with nothing pasted into its prompt, and once a run that writes
+code has opened on the card (a building run, not a read-only or a review column's), its start lifts
+the `changes_requested` block. The block is a prompt for a person, never a hold on pushing: C18's
+settle ignores it, so a run already in flight when the review came, or one a person steered, still
+pushes the change that answers it. A check that later passes does not take its failure's note back
+(a follow-up).
 
 Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
 one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in

@@ -2,8 +2,8 @@
 // The probes `feedback.sh` cannot make from a terminal (C21): sign the deliveries GitHub would send
 // about the card's PR, and read what the next run's log says it was told.
 //
-//   MODE=deliver  a `changes_requested` review of PR_URL, delivered twice (the redelivery must write
-//                 nothing), then a failing `check_run` on the PR's head and its failing `check_suite`
+//   MODE=deliver  a stranger's review (ignored, 202), a `changes_requested` review of PR_URL from a
+//                 collaborator, delivered twice (the redelivery must write nothing), then a failing `check_run` on the PR's head and its failing `check_suite`
 //                 (one failure: the suite writes nothing more), and an unsigned review (refused, 401).
 //                 Checks each answer, and that the card's thread holds exactly the two notes.
 //   MODE=told     SESSION_ID's run settled, and its committed `task_thread` prompt section quotes the
@@ -87,6 +87,8 @@ const review = {
   review: {
     id: REVIEW_ID,
     user: { login: "verify-reviewer", type: "User" },
+    // A reviewer with a standing on the repository: anyone else's review does not reach the card.
+    author_association: "COLLABORATOR",
     body: REVIEW_BODY,
     state: "changes_requested",
     html_url: `${PR_URL}#pullrequestreview-${REVIEW_ID}`,
@@ -148,6 +150,25 @@ const deliverAll = Effect.gen(function* () {
     unsigned.status === 401,
     `status=${unsigned.status}`,
   );
+  // A stranger's review (no standing on the repository) reaches nothing: on a public repository
+  // anyone may review, and the review's words would be every later run's prompt.
+  const stranger = yield* Effect.promise(() =>
+    deliver("pull_request_review", {
+      ...review,
+      review: {
+        ...review.review,
+        id: REVIEW_ID + 1,
+        user: { login: "verify-stranger", type: "User" },
+        author_association: "NONE",
+      },
+    }),
+  );
+  observed.deliveries["stranger"] = stranger;
+  check(
+    "a review from someone with no standing on the repository is ignored, 202",
+    stranger.status === 202,
+    `status=${stranger.status}`,
+  );
   const first = yield* Effect.promise(() =>
     deliver("pull_request_review", review),
   );
@@ -160,13 +181,15 @@ const deliverAll = Effect.gen(function* () {
     "the signed changes_requested review lands one note and blocks the card",
     first.status === 200 &&
       first.answer?.["event"] === "changes_requested" &&
-      feedbackOf(first) === JSON.stringify({ recorded: 1, blocked: 1 }),
+      feedbackOf(first) ===
+        JSON.stringify({ recorded: 1, blocked: 1, failed: 0 }),
     `status=${first.status} feedback=${feedbackOf(first)}`,
   );
   check(
     "its redelivery writes nothing",
     again.status === 200 &&
-      feedbackOf(again) === JSON.stringify({ recorded: 0, blocked: 0 }),
+      feedbackOf(again) ===
+        JSON.stringify({ recorded: 0, blocked: 0, failed: 0 }),
     `status=${again.status} feedback=${feedbackOf(again)}`,
   );
   const failed = yield* Effect.promise(() => deliver("check_run", checkRun));
@@ -177,13 +200,15 @@ const deliverAll = Effect.gen(function* () {
     "the failing check run on the PR's head lands one note and blocks nothing",
     failed.status === 200 &&
       failed.answer?.["event"] === "check_failed" &&
-      feedbackOf(failed) === JSON.stringify({ recorded: 1, blocked: 0 }),
+      feedbackOf(failed) ===
+        JSON.stringify({ recorded: 1, blocked: 0, failed: 0 }),
     `status=${failed.status} feedback=${feedbackOf(failed)}`,
   );
   check(
     "its suite's failure is the same failure: nothing more lands",
     suite.status === 200 &&
-      feedbackOf(suite) === JSON.stringify({ recorded: 0, blocked: 0 }),
+      feedbackOf(suite) ===
+        JSON.stringify({ recorded: 0, blocked: 0, failed: 0 }),
     `status=${suite.status} feedback=${feedbackOf(suite)}`,
   );
   const thread = yield* client.listTaskComments({ taskId: TASK });

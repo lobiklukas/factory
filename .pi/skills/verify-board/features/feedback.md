@@ -21,9 +21,12 @@ requested`, and the pane's block note names the reviewer and the PR;
   the check run, its suite and the workflow run, and without blocking the card.
 
 Every note is keyed by the item it carries, so GitHub's redelivery writes nothing twice. The next run
-started on the card is told the whole thread as its `task_thread` prompt section — the review
-verbatim — and its start lifts the `changes_requested` block, because a card left blocked holds its
-run's PR push on settle (C18).
+started on the card is told the whole thread as its `task_thread` prompt section — the review as
+written, less what no person on the PR can see (HTML comments, zero-width and bidi characters,
+`sanitizeTriggerText`) — and, once its owner opens, a run that writes code (a building run, not a
+read-only or a review column's) lifts the `changes_requested` block. Only an owner's, member's or
+collaborator's review reaches the card (`author_association`); a stranger's is `202`. The block never
+holds a PR push on settle (C18): the push is what answers the review.
 
 ## How to get to it (user POV)
 
