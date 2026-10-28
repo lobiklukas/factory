@@ -10,9 +10,11 @@ import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  attentionBadge,
   attentionGroups,
   attentionLink,
   attentionReasonText,
+  attentionTitle,
 } from "./attention-view";
 
 const AT = "2026-10-27T00:00:00.000Z";
@@ -60,6 +62,16 @@ const gate: AttentionReason = {
   sessionId: RUN,
 };
 
+/** An approval of a session no card owns (LOB-271): no task, the session's own title and repo. */
+const sessionItem = (
+  sessionTitle: string,
+  reason: AttentionReason = approval(""),
+): AttentionItem => ({
+  sessionTitle,
+  repo: Schema.decodeSync(RepoSlug)("acme/widgets"),
+  reason,
+});
+
 describe("attentionGroups", () => {
   it("groups approvals, then questions, then gates, keeping the server's order and no empty group", () => {
     const groups = attentionGroups([
@@ -68,10 +80,7 @@ describe("attentionGroups", () => {
       item("gate two", gate),
     ]);
     expect(
-      groups.map((group) => [
-        group.kind,
-        group.items.map((row) => row.task.title),
-      ]),
+      groups.map((group) => [group.kind, group.items.map(attentionTitle)]),
     ).toEqual([
       ["approval", ["approve me"]],
       ["gate", ["gate one", "gate two"]],
@@ -129,13 +138,15 @@ describe("attentionLink", () => {
   it("opens the card on its board, and an approval's run with it", () => {
     const gated = item("g", gate);
     expect(attentionLink(gated)).toEqual({
+      kind: "card",
       boardId: BOARD,
-      search: { card: gated.task.id },
+      search: { card: gated.task?.id },
     });
     const asked = item("a", approval(""));
     expect(attentionLink(asked)).toEqual({
+      kind: "card",
       boardId: BOARD,
-      search: { card: asked.task.id, run: RUN },
+      search: { card: asked.task?.id, run: RUN },
     });
   });
 
@@ -146,9 +157,66 @@ describe("attentionLink", () => {
       since: AT,
     });
     expect(attentionLink(question)).toEqual({
+      kind: "card",
       boardId: BOARD,
-      search: { card: question.task.id },
+      search: { card: question.task?.id },
       hash: "thread",
     });
+  });
+
+  it("opens a session no card owns on the session itself (LOB-271)", () => {
+    expect(attentionLink(sessionItem("scratch"))).toEqual({
+      kind: "session",
+      sessionId: RUN,
+    });
+    expect(attentionLink(sessionItem("scratch", gate))).toEqual({
+      kind: "session",
+      sessionId: RUN,
+    });
+  });
+
+  it("never links a card-less question to a card it does not have", () => {
+    expect(
+      attentionLink(sessionItem("odd", { _tag: "question", since: AT })),
+    ).toEqual({ kind: "sessions" });
+  });
+});
+
+describe("a row with no card (LOB-271)", () => {
+  it("is titled by its session, or by the session id when it was never titled", () => {
+    expect(attentionTitle(sessionItem("fix the flaky test"))).toBe(
+      "fix the flaky test",
+    );
+    expect(attentionTitle(sessionItem(""))).toBe(RUN);
+    expect(attentionTitle(sessionItem("   "))).toBe(RUN);
+    expect(attentionTitle(item("a card", approval("")))).toBe("a card");
+  });
+
+  it("says a session, not a run, asks", () => {
+    expect(attentionReasonText(sessionItem("s", approval("")))).toBe(
+      "A session asks to push refs/heads/main",
+    );
+    expect(attentionReasonText(sessionItem("s", approval("3 commits")))).toBe(
+      "A session asks to push refs/heads/main: 3 commits",
+    );
+  });
+
+  it("groups with the card-bound approvals", () => {
+    const groups = attentionGroups([
+      item("a card", approval("")),
+      sessionItem("scratch"),
+    ]);
+    expect(groups.map((group) => [group.kind, group.items.length])).toEqual([
+      ["approval", 2],
+    ]);
+  });
+});
+
+describe("attentionBadge", () => {
+  it("shows nothing for none, the count otherwise, and caps what a 32px button fits", () => {
+    expect(attentionBadge(0)).toBeUndefined();
+    expect(attentionBadge(1)).toBe("1");
+    expect(attentionBadge(99)).toBe("99");
+    expect(attentionBadge(100)).toBe("99+");
   });
 });
