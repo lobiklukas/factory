@@ -79,7 +79,7 @@ The block runs after the lane checks, on the card the drive seeded in `intake`. 
    for a version other than the board's; LOB-267), and a direct `moveTask` to `done` from the drive
    to be refused `UndeclaredTransition` with the card unchanged;
 3. no gated move and a disabled run start in `intake`, its `title` naming the resting column;
-4. with the page's `getBoard`/`listTasks` held at the network (`page.route`), a block and an unblock
+4. with the page's `getBoard`/`listBoardCards` held at the network (`page.route`), a block and an unblock
    through the API (r1 → r3, same column), then a click on `specifying`: the pane shows
    `StaleRevision` with the service's `is at revision 3, not 1`, the card stays in `intake` in the
    DOM and on the server, and once the held reads land the pane is at r3, still in `intake`;
@@ -120,7 +120,7 @@ Evidence: `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png`,
 
 - **The stale move needs the page's reads held.** The board polls every 2 s, so without the hold a
   poll could land between the out-of-band change and the click, and the click would send the fresh
-  revision. The hold matches the request body's `"tag":"getBoard"` / `"tag":"listTasks"`; every
+  revision. The hold matches the request body's `"tag":"getBoard"` / `"tag":"listBoardCards"`; every
   other RPC passes through.
 - **The revision bump is a block and an unblock**, not a move, so the card's column is the same
   before and after and "does not visually move" is a claim about one lane, not a race with another.

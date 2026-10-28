@@ -43,7 +43,8 @@ web `:3560`), its board now made through the form.
 worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 
 `card-face.sh` (the card face's run status, PR link and cost, C10) last passed **10/10** on 2026-10-28
-from the `agent/C10` worktree, API `:9580` / web `:3580`, `FAUX_SLEEP_MS=5000`.
+from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
+(120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
 
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`

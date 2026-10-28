@@ -412,15 +412,23 @@ describe("TaskService", () => {
     const idle = await create(boardId, "idle");
     const live = await create(boardId, "live");
     await create(boardId, "bare");
+    const reopened = await create(boardId, "reopened");
     const foreign = await create(other, "foreign");
     const ses = (n: string) => `ses_${n.repeat(10)}${hex(8)}`;
-    const [done, older, newer, ofForeign] = [
+    // The newer-by-`started_at` run of each card gets the lexically SMALLER id, so an `ORDER BY id`
+    // alone would pick the wrong run. The suffix keeps the URLs unique to this run: PR-merge,
+    // release and write-back code match sessions by `pr_url`, and these rows stay committed.
+    const [done, newer, older, ofForeign, reopenedNew, reopenedOld] = [
       ses("2"),
       ses("3"),
       ses("4"),
       ses("5"),
+      ses("6"),
+      ses("7"),
     ];
-    const PR = "https://github.com/acme/widgets/pull/7";
+    const PR = `https://github.com/acme/widgets/pull/7?t=${hex(4)}`;
+    const PR_OLD = `https://github.com/acme/widgets/pull/8?t=${hex(4)}`;
+    const PR_FOREIGN = `https://github.com/acme/widgets/pull/99?t=${hex(4)}`;
     const cards = await runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient;
@@ -431,12 +439,14 @@ describe("TaskService", () => {
             yield* sql`
               INSERT INTO sessions (id, title, pr_url)
               VALUES (${done}, 'a', ${PR}), (${older}, 'b', NULL), (${newer}, 'c', NULL),
-                     (${ofForeign}, 'd', 'https://github.com/acme/widgets/pull/99')
+                     (${ofForeign}, 'd', ${PR_FOREIGN}),
+                     (${reopenedNew}, 'e', NULL), (${reopenedOld}, 'f', ${PR_OLD})
             `;
             yield* sql`
               INSERT INTO session_activity (session_id, status, cost_total)
               VALUES (${done}, 'idle', 0.25), (${older}, 'idle', 0.5),
-                     (${newer}, 'busy', 1.125), (${ofForeign}, 'busy', 40)
+                     (${newer}, 'busy', 1.125), (${ofForeign}, 'busy', 40),
+                     (${reopenedNew}, 'busy', 2), (${reopenedOld}, 'idle', 1)
             `;
             // `done` is the idle card's only run and owns the PR; the live card's newest run is busy and
             // its older one is not, so "latest" is by `started_at`, not by insertion or by the id.
@@ -445,7 +455,9 @@ describe("TaskService", () => {
               VALUES (${done}, ${idle.id}, ${done}, 'specifying', now()),
                      (${newer}, ${live.id}, ${newer}, 'planning', now() - interval '1 minute'),
                      (${older}, ${live.id}, ${older}, 'specifying', now() - interval '2 minutes'),
-                     (${ofForeign}, ${foreign.id}, ${ofForeign}, 'specifying', now())
+                     (${ofForeign}, ${foreign.id}, ${ofForeign}, 'specifying', now()),
+                     (${reopenedOld}, ${reopened.id}, ${reopenedOld}, 'specifying', now() - interval '3 minutes'),
+                     (${reopenedNew}, ${reopened.id}, ${reopenedNew}, 'planning', now() - interval '30 seconds')
             `;
             return yield* service.listCards({ boardId });
           }),
@@ -457,8 +469,9 @@ describe("TaskService", () => {
       "idle",
       "live",
       "bare",
+      "reopened",
     ]);
-    const [a, b, c] = cards;
+    const [a, b, c, d] = cards;
     expect(a?.run).toMatchObject({ sessionId: done, status: "idle" });
     expect(a?.prUrl).toBe(PR);
     expect([a?.runCount, a?.costTotal]).toEqual([1, 0.25]);
@@ -469,6 +482,10 @@ describe("TaskService", () => {
     expect(c?.run).toBeUndefined();
     expect(c?.prUrl).toBeUndefined();
     expect([c?.runCount, c?.costTotal]).toEqual([0, 0]);
+    // The link is the newest run that HAS a PR: a later run without one does not hide it.
+    expect(d?.run).toMatchObject({ sessionId: reopenedNew, status: "busy" });
+    expect(d?.prUrl).toBe(PR_OLD);
+    expect([d?.runCount, d?.costTotal]).toEqual([2, 3]);
     expect(
       await withService((s) =>
         s.listCards({ boardId: "bin_missing" as never }),

@@ -38,7 +38,7 @@ const ROOT = path.resolve(
 const SEED = path.join(ROOT, ".pi/skills/verify-web/seed-card-face.ts");
 /** The board's poll interval (`BOARD_POLL`, 2 s) and the slack one read plus a render may add. */
 const POLL_MS = 2_000;
-const WINDOW_MS = POLL_MS + 3_000;
+const WINDOW_MS = POLL_MS + 1_000;
 /** A run is busy for about two naps; allow that and a margin before calling it stuck. */
 const RUN_MS = Number(process.env["FAUX_SLEEP_MS"] ?? "5000") * 2 + 20_000;
 
@@ -314,12 +314,21 @@ try {
       (all["listBoardCards"] ?? 0) >= 3,
     JSON.stringify(all),
   );
-  const tags1 = Object.keys(w1).sort().join(",");
-  const tags2 = Object.keys(w2).sort().join(",");
+  // The board's own reads only: the shell's slower pollers (`getServerInfo`) land in a 6 s window or
+  // miss it, which says nothing about what a card costs.
+  const boardReads = (counts) =>
+    Object.fromEntries(
+      Object.entries(counts).filter(([tag]) =>
+        ["getBoard", "listBoardCards"].includes(tag),
+      ),
+    );
+  const [b1, b2] = [boardReads(w1), boardReads(w2)];
+  const tags1 = Object.keys(b1).sort().join(",");
+  const tags2 = Object.keys(b2).sort().join(",");
   const total = (counts) => Object.values(counts).reduce((a, b) => a + b, 0);
   assert(
     "nine cards cost no more calls per window than three",
-    tags1 === tags2 && total(w2) <= total(w1) + 2,
+    tags1 === tags2 && total(b2) <= total(b1) + 2,
     `3 cards ${JSON.stringify(w1)}; 9 cards ${JSON.stringify(w2)}`,
   );
 
