@@ -142,7 +142,7 @@ check "a fresh process serves the session" \
   "$([ "$SECOND_PID" != "$FIRST_PID" ] && echo 0 || echo 1)" \
   "first=$FIRST_PID second=$SECOND_PID"
 
-MODE=verify API_URL="$API_URL" APPROVAL_STATE="$STATE" EVIDENCE_DIR="$EVIDENCE_DIR" \
+MODE=verify API_URL="$API_URL" APPROVAL_STATE="$STATE" EVIDENCE_DIR="$EVIDENCE_DIR" KILL_SIGNAL="$SIGNAL" \
   FAUX_COMMAND="$COMMAND" bun "$DRIVER" > "$RUN_DIR/verify.log" 2>&1
 VERIFY_RC=$?
 cat "$RUN_DIR/verify.log"

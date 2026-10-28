@@ -59,7 +59,7 @@ import { attempt, type Conversation } from "./session";
 import type { Spec } from "./spec";
 
 /**
- * The skill whose body is a pass's instructions, seeded by `0034_seed_plan_freshness_skill.ts`.
+ * The skill whose body is a pass's instructions, seeded by `0036_seed_plan_freshness_skill.ts`.
  * Named here, once, so the seed and the caller cannot disagree.
  */
 export const PLAN_FRESHNESS_SKILL = "plan-freshness";

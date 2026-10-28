@@ -19,3 +19,4 @@ export * from "./verify";
 export * from "./ask";
 export * from "./body";
 export * from "./budget";
+export * from "./follow";

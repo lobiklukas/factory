@@ -649,7 +649,8 @@ export type SessionSnapshot = typeof SessionSnapshot.Type;
  * What a session stream carries, in order and without gaps.
  *
  * `snapshot` is always first, and for a historical session it is the only event: the stream then
- * ends, so a client can tell a completed fold from a dropped connection. Entries are append-only
+ * ends, so a client can tell a completed fold from a dropped connection. A session another process
+ * owns streams live from its log (LOB-18), and its stream ends when that ownership does. Entries are append-only
  * (Pi Durable commits the in-flight answer into `pi.live`, not into the transcript), so an
  * `entry` event is never an update to an entry already sent.
  *
@@ -995,6 +996,9 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  * - `harness` — Pi Durable rejected the operation (bad input, closed harness, failed submit).
  * - `repo_clone_failed` — a session's worktree could not be cut because the factory's clone of its
  *   repo could not be made or brought up to date (LOB-265); the message names the repo and the reason.
+ * - `owned_elsewhere` — the request needs the session's owner, and another process holds it (its
+ *   presence lease is live, LOB-18): the session reads and streams from anywhere, but work on it is
+ *   taken where it is owned, or once that lease lapses. The message names the holder.
  * - `at_capacity` — admission control (LOB-70): the request would open one more session than the
  *   server runs at once, so nothing was written and nothing opened. The message names the cap and
  *   where it is configured (`SESSION_MAX_CONCURRENT`). Transient: the same request succeeds once a
@@ -1008,6 +1012,7 @@ export const SessionErrorCode = Schema.Literals([
   "storage",
   "harness",
   "repo_clone_failed",
+  "owned_elsewhere",
   "at_capacity",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;

@@ -44,11 +44,13 @@ import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
+  QueuedMessage,
   ReplayComparison,
   SessionError,
   SessionErrorCode,
   SessionEvent,
   SessionId,
+  SessionLive,
   SessionSnapshot,
   SessionTask,
   SessionUsage,
@@ -1865,6 +1867,13 @@ const readDocument = (
     return stored?.value;
   });
 
+/** One document of a log read without owning it (`readDocument`), for the follower (LOB-18). */
+export const readLogDocument = (
+  storage: Storage,
+  kind: string,
+): Effect.Effect<JsonRecord | undefined, SessionError> =>
+  readDocument(storage, kind);
+
 /** Conversations per storage round trip while summing a log's spend. */
 const CONVERSATION_PAGE = 100;
 
@@ -3129,11 +3138,36 @@ export const readHistoricalSnapshot = (
   storage: Storage,
   ref: SessionRef,
 ): Effect.Effect<SessionSnapshot, SessionError> =>
+  readFoldedSnapshot(storage, ref);
+
+/**
+ * What a log says is happening now (LOB-18): its run, its queue, its spend and its live tasks, read
+ * through a reader-mode `Storage` — the parts of a snapshot a historical read reports as "nothing",
+ * because nobody owns the log, and a followed read reports as the owner elsewhere committed them.
+ */
+export type FollowedState = {
+  readonly live: SessionLive;
+  readonly queued: readonly QueuedMessage[];
+  readonly usage: SessionUsage;
+  readonly tasks: readonly SessionTask[];
+};
+
+/**
+ * `readHistoricalSnapshot`'s fold, and the one a followed read takes too (LOB-18): with `followed`,
+ * the session is live in another process, so the snapshot says `live`, and its run, queue, spend and
+ * tasks are what the log holds now rather than an owner-less idle. Everything else — the bounded
+ * transcript window, the documents — is the same read, so the two can never disagree about them.
+ */
+export const readFoldedSnapshot = (
+  storage: Storage,
+  ref: SessionRef,
+  followed?: FollowedState,
+): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const transcript = yield* readTranscriptRecords(storage, {
       limit: HISTORY_WINDOW,
     });
-    const usage = yield* readLogUsage(storage);
+    const usage = followed?.usage ?? (yield* readLogUsage(storage));
     const approvals = yield* readApprovalRecords(storage, transcript.records);
     const replayComparisons = projectReplayComparisons(
       yield* readDocument(storage, REPLAY_DOC_KIND),
@@ -3164,9 +3198,10 @@ export const readHistoricalSnapshot = (
         id: ref.id,
         title: ref.title,
         createdAt: ref.createdAt,
-        mode: "historical",
+        mode: followed === undefined ? "historical" : "live",
         // Nothing is running here by definition; the sandbox that ran it is paused or gone (D8).
-        status: "idle",
+        // Followed, the owner elsewhere says so through the log's `pi.live` (LOB-18).
+        status: followed?.live.busy === true ? "busy" : "idle",
         ...(ref.workspace.repo === undefined
           ? {}
           : { repo: ref.workspace.repo }),
@@ -3182,11 +3217,12 @@ export const readHistoricalSnapshot = (
       ...(transcript.earlier === undefined
         ? {}
         : { earlier: transcript.earlier }),
-      live: { busy: false, tools: [] },
+      live: followed?.live ?? { busy: false, tools: [] },
       usage: log.usage,
-      queued: [],
+      queued: followed?.queued ?? [],
       // Nobody owns this log, so nothing runs in it: a sandbox that ran it is paused or gone (D8).
-      tasks: [],
+      // Followed, somebody does, and its live tasks are in the log (LOB-18).
+      tasks: followed?.tasks ?? [],
       // The mission is document state, not live state: a released session still reports the phase
       // its mission reached, which is what part 3 reads to resume it (LOB-230).
       ...(mission === undefined ? {} : { mission }),

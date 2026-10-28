@@ -100,8 +100,9 @@ The decision's actor (`verify-api operator`) is in `observed.json` under `approv
   tool result is the blocked sentence, without `gated-ran`. The log (`commits`) holds the request
   entry once and the memo write once.
 - **Kill.** `SIGKILL` (`KILL_SIGNAL=TERM` for the graceful path) — the process that asked is gone.
-- **Verify, from a fresh process.** The session folds `historical`/`idle` with the same approval
-  pending, and the log still holds one request. A new turn retries the same call: blocked with "not
+- **Verify, from a fresh process.** The session reads from its log `idle` with the same approval
+  pending — `historical` after `SIGTERM`, whose shutdown gave its presence lease back, and `live`
+  after `SIGKILL`, whose dead process's lease stands until its TTL (LOB-18, [fold.md](fold.md)) — and the log still holds one request. A new turn retries the same call: blocked with "not
   asked for again", and still one request in the log and one row pending. Then `decideApproval`
   approves it and the next turn runs it: busy for the sleep, then `gated-ran`, with the pending list
   empty, the request still asked for once, and the approval spent (one `factory.approval.used`). One
