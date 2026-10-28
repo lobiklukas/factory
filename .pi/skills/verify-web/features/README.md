@@ -27,6 +27,11 @@ worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-str
 own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
 (6/6) re-passed beside it, as each opens the same form.
 
+`pr.sh` (Open pull request on the session pane and a card's run row, C7) last passed on 2026-10-28
+from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571`, and
+`.pi/skills/verify-board`'s `drive.sh` opened its build run's PR in the browser there
+([pr-open.md](pr-open.md)).
+
 `board-create.sh` (the New board form, C5) passed **20/20** on 2026-10-28 from the `agent/C5` worktree,
 API `:9561` / web `:3561`, on an empty throwaway database; `drive.mjs` passed 120/120 there (API `:9560` /
 web `:3560`), its board now made through the form.
@@ -54,6 +59,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | What needs a person        | passing | [attention.md](attention.md)                                                  |
 | The card's thread          | passing | [thread.md](thread.md) (`thread.sh`)                                          |
 | The session's PR link      | passing | [pr-link.md](pr-link.md)                                                      |
+| Open pull request          | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor    | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories               | passing | [repos.md](repos.md) (`repos.sh`)                                             |
 | New board (boards page)    | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |

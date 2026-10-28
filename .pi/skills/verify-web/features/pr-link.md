@@ -51,6 +51,9 @@ Last verified 2026-10-27 from the `agent/LOB-65` worktree (API `:9500`, web `:35
 `:9503`): 49/49 required checks passed. A mutation run (the anchor's `href` suffixed with `#x`)
 failed `the pane header links the recorded PR`.
 
+Since C7 a session with no PR, bound to a repo and idle, shows the **Open pull request** control where
+this link will appear ([pr-open.md](pr-open.md)); `[data-pr-link]` is rendered from the same component.
+
 ## What it does not prove
 
 - That the link opens the real PR: the URL is the fake's, and nothing here fetches it.

@@ -111,6 +111,18 @@ export const PullRequestStep = Schema.Union([
 export type PullRequestStep = typeof PullRequestStep.Type;
 
 /**
+ * The sentence for an answer that opened no PR: the diff over the cap, or the branch with nothing
+ * to open. One function for every reader — the tracker write-back and the web's "Open pull request"
+ * control (C7) — so the two cannot word the same answer differently.
+ */
+export const pullRequestRefusal = (
+  step: OverCapPullRequest | NoChangePullRequest,
+): string =>
+  step.outcome === "over-cap"
+    ? `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`
+    : "the run changed no file against its base branch, so there is nothing to open a pull request for";
+
+/**
  * Open a session's PR (LOB-213): the session and the PR's title, and nothing else.
  *
  * Neither the repo nor the branches are here. The repo is the one the session is bound to, so a

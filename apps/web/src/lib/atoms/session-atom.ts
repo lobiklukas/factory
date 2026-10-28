@@ -13,6 +13,7 @@ import type {
   WithdrawMessageInput,
 } from "@repo/domain/Session";
 import { Cause, Effect, Exit, Option, Stream } from "effect";
+import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
 import { SESSIONS_KEY } from "./session-list";
@@ -250,4 +251,30 @@ export const readSessionHistoryAtom = runtime.fn(
       const rpc = yield* RpcClient;
       return yield* rpc.client.readSessionHistory(input);
     }),
+);
+
+/**
+ * Opens a session's pull request (LOB-213's RPC, C7's control): one atom per session, so the session
+ * pane's header and the card pane's run row read and write the same answer.
+ *
+ * A family of `fn` atoms rather than a call each pane makes, because the answer is the state both
+ * panes render: the link after a press, the reason after a refusal, "opening" while the call is in
+ * flight — so a press in one is visible in the other without either re-reading anything. Kept alive
+ * so a refusal outlives the pane that showed it; the session list is re-read on success, which is
+ * where the row's `prUrl` comes from.
+ *
+ * The title is the caller's and the branches are the server's: the call names the session and what
+ * to call the PR, as `factory pr` does.
+ */
+export const openPullRequestAtom = Atom.family((sessionId: SessionId) =>
+  runtime
+    .fn(
+      (title: string) =>
+        Effect.gen(function* () {
+          const rpc = yield* RpcClient;
+          return yield* rpc.client.openPullRequest({ sessionId, title });
+        }),
+      { reactivityKeys: [SESSIONS_KEY] },
+    )
+    .pipe(Atom.keepAlive),
 );
