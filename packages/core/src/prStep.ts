@@ -88,6 +88,7 @@ import {
 import type { CredentialError, CredentialProvider } from "./credentials";
 import type { GitError, PushedBranch } from "./git";
 import type { DiffCap, OverCapPullRequest, PullRequestStep } from "./pr";
+import { resolveCommit } from "./repos";
 import {
   buildPrBody,
   createPullRequest,
@@ -119,7 +120,9 @@ export type OpenPullRequestInput = {
    * and before GitHub is called, never on the retry the log answers. Absent: the step pushes nothing,
    * as before — a repo the deployment has no forge URL for, whose head must already be there.
    */
-  readonly push?: Effect.Effect<PushedBranch, GitError | CredentialError>;
+  readonly push?: (
+    commit: string | undefined,
+  ) => Effect.Effect<PushedBranch, GitError | CredentialError>;
   /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
   readonly cap?: DiffCap;
   /** What the session was asked to do, and the model and spend behind it, for the body. */
@@ -154,13 +157,34 @@ export const openPullRequest = (
     // branch has grown to since, and re-measuring it would turn a retry into a refusal. The same
     // measurement is what the body lists, so the cap and the changed-path list can never disagree
     // about what this PR carries.
+    //
+    // The head is resolved to one commit first, and that commit is what is measured, listed and
+    // pushed (C17): a commit the agent lands on the branch while the step runs is then neither
+    // pushed past the cap unmeasured nor missing from the body. A head the checkout cannot resolve
+    // is measured by name, which fails on its own terms.
+    const commit =
+      recorded === undefined && existsSync(join(input.worktree, ".git"))
+        ? yield* resolveCommit(input.worktree, `refs/heads/${input.head}`)
+        : undefined;
+    const measuredHead = commit ?? input.head;
     const measured =
       recorded === undefined
         ? yield* diffSize({
             worktree: input.worktree,
             base: input.measureBase ?? input.base,
-            head: input.head,
-          })
+            head: measuredHead,
+          }).pipe(
+            // A failed measurement names the branch, as the caller does, not the commit it resolved.
+            Effect.mapError((error) =>
+              commit === undefined
+                ? error
+                : new PrError({
+                    operation: error.operation,
+                    ref: `${input.measureBase ?? input.base}...${input.head}`,
+                    message: error.message,
+                  }),
+            ),
+          )
         : Option.none<DiffSize>();
     const refused = Option.flatMap(measured, (size) =>
       capRefusal(size, input.cap ?? DEFAULT_DIFF_CAP),
@@ -187,7 +211,7 @@ export const openPullRequest = (
       Option.isSome(measured) &&
       input.push !== undefined
     ) {
-      const pushed = yield* publish(input.push, input.head);
+      const pushed = yield* publish(input.push(commit), input.head);
       if (pushed !== undefined) return pushed;
     }
     const pr =
@@ -195,6 +219,7 @@ export const openPullRequest = (
       (yield* open(
         input,
         Option.match(measured, { onNone: () => [], onSome: (s) => s.paths }),
+        measuredHead,
       ));
 
     const sql = yield* SqlClient;
@@ -253,6 +278,8 @@ const open = (
   input: OpenPullRequestInput,
   /** The branch's changed paths, as the step measured them; listed in the body (LOB-228). */
   changed: readonly string[],
+  /** The commit (or, unresolved, the branch) those paths were measured at. */
+  measuredHead: string,
 ): Effect.Effect<
   PullRequestRecord,
   PrError | CredentialError | SessionError,
@@ -265,7 +292,7 @@ const open = (
     const published = publishedPaths({
       worktree: input.worktree,
       base: input.measureBase ?? input.base,
-      head: input.head,
+      head: measuredHead,
     });
     const evidence = prEvidenceOf(
       yield* readConversationVerifyCalls(input.conversation),

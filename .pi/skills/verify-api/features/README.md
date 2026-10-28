@@ -215,6 +215,11 @@ the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** 
 shell checks), evidence `.verify/evidence/lob-213/api/`, with the no-handler mutation run failing it.
 See [pr-rpc.md](pr-rpc.md).
 
+The push-before-PR checks (C17) were run from the `agent/C17` worktree on 2026-10-28 (`DATABASE_URL`
+the worktree's own `factory_agent_c17` on 5442, faux, API on `PR_PUSH_PORT=9510`, the GitHub fake on
+`PR_PUSH_GITHUB_PORT=9511`, the git forge fake on `PR_PUSH_GIT_PORT=9512`): `./pr-push.sh` **12/12**,
+evidence `.verify/evidence/latest/api/pr-push*`. See [pr-push.md](pr-push.md).
+
 The pages-surface checks (LOB-220) were run from the `agent/LOB-220` worktree on 2026-10-27
 (`DATABASE_URL` the worktree's own `factory_agent_lob_220` on 5442, faux priced at `FAUX_COST=0.01`,
 API on `PAGES_PORT=9570`): `./pages.sh` **15/15** (12 driver checks, 3 shell checks), evidence
@@ -324,6 +329,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |
 | The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                       |
+| The branch pushed first  | passing | [pr-push.md](pr-push.md)                     |
 | The pages surface        | passing | [pages.md](pages.md)                         |
 | Propose child issues     | passing | [decompose.md](decompose.md)                 |
 | Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |

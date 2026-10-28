@@ -295,6 +295,43 @@ describe(
       expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(next);
     });
 
+    /**
+     * Mutation: ignore `commit` and push the branch's tip — the commit landed after the measurement
+     * reaches the remote. Mutation: pass `commit` to git unchecked — an option-shaped value is argv.
+     */
+    it("pushes the commit it is handed rather than the branch's later tip, and refuses one that is no commit id (C17)", async () => {
+      const session = await openSession();
+      const measured = commitFile(session.worktree, "MEASURED.md", "seen\n");
+      commitFile(session.worktree, "LATER.md", "landed after the measure\n");
+      const pushed = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: session.branch,
+          commit: measured,
+        }),
+      );
+      expect(Exit.isSuccess(pushed) ? pushed.value.sha : undefined).toBe(
+        measured,
+      );
+      expect(git(bare, "rev-parse", `refs/heads/${session.branch}`)).toBe(
+        measured,
+      );
+      const before = remote.seen.length;
+      const refused = await runWith(
+        pushBranch({
+          worktree: session.worktree,
+          repo,
+          url: forgeUrl(),
+          branch: session.branch,
+          commit: "--force",
+        }),
+      );
+      expect(gitErrorOf(refused)?.reason).toBe("refused");
+      expect(remote.seen.length).toBe(before);
+    });
+
     it("leaves the token in neither .git/config, the stored remote URL, nor any file on disk", async () => {
       const session = await openSession();
       commitFile(session.worktree, "LEAK.md", "a push to inspect after\n");

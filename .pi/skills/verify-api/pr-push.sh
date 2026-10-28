@@ -24,16 +24,16 @@
 #   pr (again)    after someone else pushed to `factory/<id>`: on a second session, `non_fast_forward`
 #                 and no PR
 #
-# Env: PR_PUSH_PORT (API, 9440), PR_PUSH_GITHUB_PORT (9441), PR_PUSH_GIT_PORT (9442), DATABASE_URL,
+# Env: PR_PUSH_PORT (API, 9580), PR_PUSH_GITHUB_PORT (9581), PR_PUSH_GIT_PORT (9582), DATABASE_URL,
 # EVIDENCE_DIR. Evidence: .verify/evidence/latest/api/pr-push.json (every check), pr-push-github.json
 # and pr-push-git.json (the fakes' ledgers), pr-push-*.txt (what each CLI call printed) and
 # pr-push-api.log.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${PR_PUSH_PORT:-9440}"
-GH_PORT="${PR_PUSH_GITHUB_PORT:-9441}"
-GIT_PORT="${PR_PUSH_GIT_PORT:-9442}"
+PORT="${PR_PUSH_PORT:-9580}"
+GH_PORT="${PR_PUSH_GITHUB_PORT:-9581}"
+GIT_PORT="${PR_PUSH_GIT_PORT:-9582}"
 API_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/pr-push"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"

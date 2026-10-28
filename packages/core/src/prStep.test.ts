@@ -24,6 +24,7 @@ import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Layer, ManagedRuntime, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CredentialProvider } from "./credentials";
 import { startGitRemote } from "./git-remote.test-fake";
@@ -151,13 +152,21 @@ const runtime = ManagedRuntime.make(
 const run = <A, E>(effect: Effect.Effect<A, E, SessionService>) =>
   runtime.runPromise(effect);
 
+/** Every repo slug a case registered: its rows, and its sessions' rows, leave with the suite. */
+const slugs: Array<string> = [];
+const slugOf = (kind: string): RepoSlug => {
+  const repo = RepoSlug.make(`c17/${kind}-${randomBytes(4).toString("hex")}`);
+  slugs.push(repo);
+  return repo;
+};
+
 /**
  * A repo on the forge: its bare repository (pushable, `HEAD` on `defaultBranch`), an upstream clone
  * that moves it, and the operator's checkout the factory is registered over. The checkout's own
  * `origin` is a path, so nothing the checkout's config says can be what the factory reached.
  */
 const makeRepo = (defaultBranch = "main") => {
-  const repo = RepoSlug.make(`c17/push-${randomBytes(4).toString("hex")}`);
+  const repo = slugOf("push");
   const bare = bareOf(repo);
   mkdirSync(join(root, "forge", "c17"), { recursive: true });
   git(root, "init", "--bare", "-b", defaultBranch, bare);
@@ -190,6 +199,18 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The rows point at a session root this suite deletes, so they leave with it rather than waiting
+  // for another suite's rebuild to find them (as `LinearSync.test.ts` does).
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      for (const repo of slugs) {
+        yield* sql`DELETE FROM task_runs WHERE session_id IN (SELECT id FROM sessions WHERE repo = ${repo})`;
+        yield* sql`DELETE FROM sessions WHERE repo = ${repo}`;
+        yield* sql`DELETE FROM repos WHERE slug = ${repo}`;
+      }
+    }),
+  );
   await runtime.dispose();
   remote?.server.close();
   rmSync(root, { recursive: true, force: true });
@@ -473,7 +494,7 @@ describe("a repo whose default branch is not main", CASE, () => {
     mkdirSync(checkout);
     git(checkout, "init", "-q", "-b", "trunk");
     commitFile(checkout, "README.md", "seed\n");
-    const repo = RepoSlug.make(`c17/local-${randomBytes(4).toString("hex")}`);
+    const repo = slugOf("local");
     const result = await run(
       Effect.gen(function* () {
         const sessions = yield* SessionService;

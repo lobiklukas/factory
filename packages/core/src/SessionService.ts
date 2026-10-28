@@ -259,7 +259,7 @@ import {
 } from "@repo/domain/PlanFreshness";
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
-import { baseTrackingRef, forgeUrlOf, type RepoRemote } from "./RepoRemote";
+import { forgeUrlFor, measureBaseOf, type RepoRemote } from "./RepoRemote";
 import { mintSessionId } from "./ids";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
@@ -746,7 +746,7 @@ export type SessionServiceOptions = {
    * The deployment's git path to a repo's forge for a repo with a checkout (C17): the base is fetched
    * into the checkout before a session's worktree is cut, the session's branch is pushed before the
    * PR step opens its PR, and a registration with no base ref asks the forge for its default branch.
-   * Used only for a repo whose registered URL is one a token may be sent to (`forgeUrlOf`). Absent:
+   * Used only for a repo with a forge URL a token may be sent to (`forgeUrlFor`). Absent:
    * worktrees are cut from the checkout's local base and nothing is pushed, as before.
    */
   readonly repoRemote?: RepoRemote;
@@ -1190,45 +1190,52 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
             );
       /**
-       * Serializes PR opens. Two overlapping calls for one session would each read an empty
-       * `factory.pr` and each open a PR, so the read-then-create-then-commit sequence has to be
-       * exclusive. One permit for every session rather than one per session: opening a PR is a
-       * rare control-plane step, and a keyed semaphore buys nothing at that rate. Across processes
-       * the log's single owner is what excludes, which is why no lock is stored anywhere.
+       * One permit per session, held while `effect` runs: an entry lives only while someone holds
+       * or awaits it, so a session that is done with the gate leaves nothing behind.
        */
-      const prGate = yield* Semaphore.make(1);
-      /**
-       * Serializes the approvals of one session, for the reason `prGate` serializes PR opens: two
-       * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
-       * session, because a slow or unreachable tracker must hold up only the session that asked, and
-       * an entry lives only while someone holds or awaits it. The tracker's own marker is what
-       * excludes a second process.
-       */
-      const proposalLocks = new Map<
-        SessionId,
-        { readonly semaphore: Semaphore.Semaphore; users: number }
-      >();
-      const withProposalGate = <A, E>(
-        sessionId: SessionId,
-        effect: Effect.Effect<A, E>,
-      ): Effect.Effect<A, E> =>
-        Effect.acquireUseRelease(
-          Effect.sync(() => {
-            const entry = proposalLocks.get(sessionId) ?? {
-              semaphore: Semaphore.makeUnsafe(1),
-              users: 0,
-            };
-            entry.users += 1;
-            proposalLocks.set(sessionId, entry);
-            return entry;
-          }),
-          (entry) => entry.semaphore.withPermits(1)(effect),
-          (entry) =>
+      const keyedGate = () => {
+        const locks = new Map<
+          SessionId,
+          { readonly semaphore: Semaphore.Semaphore; users: number }
+        >();
+        return <A, E, R>(
+          sessionId: SessionId,
+          effect: Effect.Effect<A, E, R>,
+        ): Effect.Effect<A, E, R> =>
+          Effect.acquireUseRelease(
             Effect.sync(() => {
-              entry.users -= 1;
-              if (entry.users === 0) proposalLocks.delete(sessionId);
+              const entry = locks.get(sessionId) ?? {
+                semaphore: Semaphore.makeUnsafe(1),
+                users: 0,
+              };
+              entry.users += 1;
+              locks.set(sessionId, entry);
+              return entry;
             }),
-        );
+            (entry) => entry.semaphore.withPermits(1)(effect),
+            (entry) =>
+              Effect.sync(() => {
+                entry.users -= 1;
+                if (entry.users === 0) locks.delete(sessionId);
+              }),
+          );
+      };
+      /**
+       * Serializes the PR opens of one session. Two overlapping calls for one session would each read
+       * an empty `factory.pr` and each open a PR, so the read-then-create-then-commit sequence has to
+       * be exclusive. Keyed by session (C17): the step now pushes the branch to the forge inside it,
+       * a network call that can run for minutes, and one session's slow push must not hold up every
+       * other session's PR (a mission's fan-out, a board's runs). Across processes the log's single
+       * owner is what excludes, which is why no lock is stored anywhere.
+       */
+      const withPrGate = keyedGate();
+      /**
+       * Serializes the approvals of one session, for the reason `withPrGate` serializes PR opens: two
+       * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
+       * session, because a slow or unreachable tracker must hold up only the session that asked. The
+       * tracker's own marker is what excludes a second process.
+       */
+      const withProposalGate = keyedGate();
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -1856,7 +1863,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const checkout = registered?.localPath ?? undefined;
           if (registered === undefined || checkout === undefined)
             return undefined;
-          const url = forgeUrlOf(repo, registered.url);
+          const url = yield* forgeUrlFor(repo, registered.url, checkout);
           if (url === undefined) return undefined;
           const occupied = yield* fs
             .readDirectory(
@@ -1873,13 +1880,40 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* remote
             .fetchBase({ repo, url, checkout, branch: baseRef })
             .pipe(
-              Effect.map(() => baseTrackingRef(baseRef)),
+              Effect.map((fetched) => fetched.ref),
               Effect.catch((error) =>
                 Effect.logWarning(
                   `session ${row.id}: could not fetch ${baseRef} from ${repo}'s forge, so its worktree is cut from the checkout's local ${baseRef}: ${error.message}`,
                 ).pipe(Effect.as(undefined)),
               ),
             );
+        });
+
+      /**
+       * The ref a session's `verify` tool measures its branch against (C17): `measureBaseOf` from the
+       * session's own checkout, the answer the PR step and the board get. A directory that is not
+       * its own checkout, or a session with no base, keeps the workspace's base as it was.
+       */
+      const verifyBaseFor = (
+        workspace: SessionWorkspace,
+      ): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const base = workspace.baseRef;
+          if (
+            base === undefined ||
+            base === "" ||
+            workspace.released !== undefined
+          )
+            return base;
+          const checkout = yield* fs
+            .exists(path.join(workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) return base;
+          return yield* measureBaseOf({
+            directory: workspace.path,
+            base,
+            head: "HEAD",
+          });
         });
 
       /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
@@ -2090,7 +2124,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         localPath: string | null,
       ): Effect.Effect<string | undefined> =>
         Effect.gen(function* () {
-          const forgeUrl = forgeUrlOf(repo, url);
+          const forgeUrl =
+            options.repoRemote === undefined
+              ? undefined
+              : yield* forgeUrlFor(repo, url, localPath);
           if (options.repoRemote !== undefined && forgeUrl !== undefined) {
             const named = yield* options.repoRemote
               .defaultBranch({ repo, url: forgeUrl })
@@ -2367,6 +2404,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // `session_pages` stops being told. A session with none passes none, so its prompt has no
             // `pages` section and its log records no page prompt (LOB-205).
             const pages = yield* pagesFor(id);
+            // The run's `verify` tool measures the branch against what the PR step and the board
+            // measure it against (C17): the base the worktree was cut from, which is the fetched
+            // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
+            const verifyBase = yield* verifyBaseFor(workspace);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -2381,7 +2422,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               pages,
               verify: {
                 command: workspace.commands.verify,
-                baseRef: workspace.baseRef,
+                baseRef: verifyBase,
               },
               ...(card === undefined
                 ? {}
@@ -3047,10 +3088,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       /**
        * How the PR step publishes a session's branch (C17): the push to the repo's forge, when the
-       * deployment has a remote and the registry a URL a token may go to, and the base's fetched
-       * tip to measure the branch against, when the worktree's repository holds one. Only a session
-       * directory that is its own checkout is asked — a plain one is a directory under the session
-       * root, where git would answer for the enclosing repository instead (`diffSize`).
+       * deployment has a remote and the repo a forge URL a token may go to (`forgeUrlFor`: the
+       * registry's, or the GitHub URL a checkout-only registration's `origin` names), and the ref to
+       * measure the branch against (`measureBaseOf`, the answer the board and the `verify` tool get
+       * too). Only a session directory that is its own checkout is asked — a plain one is a directory
+       * under the session root, where git would answer for the enclosing repository instead
+       * (`diffSize`).
+       *
+       * A repo with no forge URL is pushed nothing and its PR is asked for as before, which is right
+       * for a head something else published (a drive's local remote, an agent with its own
+       * credential) and wrong for one nothing did — so it is a warning naming the registration that
+       * fixes it, not an info line. Not a refusal: the step cannot tell the two apart without asking
+       * the forge, and GitHub's own answer for a missing head is the one that says which it was.
        */
       const publishingFor = (
         repo: RepoSlug,
@@ -3066,26 +3115,30 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             .exists(path.join(worktree, ".git"))
             .pipe(Effect.orElseSucceed(() => false));
           if (!checkout) return {};
-          const tracking = baseTrackingRef(base);
-          const measureBase = (yield* refExists(worktree, tracking))
-            ? { measureBase: tracking }
-            : {};
+          const measured = yield* measureBaseOf({
+            directory: worktree,
+            base,
+            head: `refs/heads/${head}`,
+          });
+          const measureBase =
+            measured === base ? {} : { measureBase: measured };
           const remote = options.repoRemote;
           if (remote === undefined) return measureBase;
           const registered = (yield* paper("read repo", readRepo(repo)))[0];
           const url =
             registered === undefined
               ? undefined
-              : forgeUrlOf(repo, registered.url);
+              : yield* forgeUrlFor(repo, registered.url, registered.localPath);
           if (url === undefined) {
-            yield* Effect.logInfo(
-              `repo ${repo} has no forge URL a token may be sent to, so the PR step pushes nothing: ${head} must already be on the forge (register one with \`factory repo add ${repo} --url <https url>\`)`,
+            yield* Effect.logWarning(
+              `repo ${repo} has no forge URL a token may be sent to, so the PR step pushes nothing: ${head} must already be on the forge, or GitHub refuses the PR (register one with \`factory repo add ${repo} --url https://github.com/${repo}.git\`)`,
             );
             return measureBase;
           }
           return {
             ...measureBase,
-            push: remote.push({ repo, url, worktree, branch: head }),
+            push: (commit: string | undefined) =>
+              remote.push({ repo, url, worktree, branch: head, commit }),
           };
         });
 
@@ -3102,7 +3155,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * that exit once the gate is released (LOB-15).
        */
       const stepPr = (input: OpenPullRequestArgs) =>
-        prGate.withPermits(1)(
+        withPrGate(
+          input.sessionId,
           Effect.gen(function* () {
             const row = yield* requireSession(input.sessionId);
             const repo =
@@ -3181,8 +3235,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /**
        * The PR step, and its exit reported to the write-back. Every exit is reported — the PR, a
        * refusal, an error — so a tracker can mirror it (LOB-15). The report runs outside the gate:
-       * the gate is every session's, and a tracker slow to answer must not hold up another session's
-       * PR.
+       * a tracker slow to answer must not hold up the session's next PR call.
        *
        * The port promises not to fail or stall the step; this is where that promise is kept rather
        * than trusted. The report has a total budget (`writeBackBudget`) — an implementation's own

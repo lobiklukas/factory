@@ -23,8 +23,9 @@
  * branch, so the latest run's branch is the change the card carries now, and an older run's PR is a
  * PR of a change a later run replaced. `non_empty_diff` is met when that branch has at least one
  * changed file against its base, by the PR step's own measurement (`git diff --numstat
- * base...head`, LOB-196): committed work only, three-dot from the merge base, so a branch the board
- * measures as empty is one the step would publish as empty. The two do not agree everywhere, by
+ * base...head`, LOB-196): committed work only, three-dot from the merge base, against the same base
+ * the step picks (`measureBaseOf`, C17 — the forge's fetched tip when the run was cut from it), so a
+ * branch the board measures as empty is one the step would publish as empty. The two do not agree everywhere, by
  * design. A branch that could not be measured — a run bound to no repository, a repository with no
  * local checkout, a ref git cannot resolve — is not a pass here, as "nothing could check this" is not
  * one for `verified`; the PR step, given a session directory that is no checkout of its own, skips

@@ -8,6 +8,9 @@
  * what makes the credential load-bearing: over a plain path remote git never asks for one, so code
  * that forgot to inject it would still pass. Every request's credential is recorded, so a case can
  * say which token git actually sent. A bare repository must set `http.receivepack` to take a push.
+ *
+ * The one copy of this bridge for core's suites and the verify drives: `@repo/core/testing` exports
+ * it, and `.pi/skills/verify-api/git-forge-fake.ts` is a thin process around it with a ledger.
  */
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- the remote is the real `git http-backend` CGI, spawned per request.
 import { spawn } from "node:child_process";
@@ -16,6 +19,23 @@ import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 
 export type Seen = { readonly user: string; readonly password: string };
+
+/** One request as the forge saw it: never the credential's value, only which one it was. */
+export type GitRemoteRequest = {
+  readonly method: string;
+  readonly path: string;
+  /** `git-upload-pack` (a fetch or an `ls-remote`) or `git-receive-pack` (a push); `""` otherwise. */
+  readonly service: string;
+  /** `none` (git's first, unauthenticated try), `token` (the one accepted), or `other`. */
+  readonly credential: "none" | "token" | "other";
+};
+
+export type GitRemoteOptions = {
+  /** The loopback port to bind. Absent: an ephemeral one. */
+  readonly port?: number;
+  /** Called once per request before it is answered — a drive's ledger (`verify-api/git-forge-fake.ts`). */
+  readonly onRequest?: (request: GitRemoteRequest) => void;
+};
 
 /**
  * The smart-HTTP remote: `git http-backend` as a CGI behind a Basic-auth gate. `seen` records the
@@ -26,6 +46,7 @@ export type Seen = { readonly user: string; readonly password: string };
 export const startGitRemote = async (
   projectRoot: string,
   token: string,
+  options: GitRemoteOptions = {},
 ): Promise<{
   readonly server: Server;
   readonly url: string;
@@ -47,13 +68,31 @@ export const startGitRemote = async (
         password: decoded.slice(at + 1),
       });
     }
-    if (decoded !== `x-access-token:${token}`) {
+    const authorized = decoded === `x-access-token:${token}`;
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    // The service is in the query of the advertisement and the path of the RPC that follows it.
+    options.onRequest?.({
+      method: req.method ?? "GET",
+      path: url.pathname,
+      service:
+        url.searchParams.get("service") ??
+        (url.pathname.endsWith("/git-receive-pack")
+          ? "git-receive-pack"
+          : url.pathname.endsWith("/git-upload-pack")
+            ? "git-upload-pack"
+            : ""),
+      credential: authorized
+        ? "token"
+        : decoded === undefined
+          ? "none"
+          : "other",
+    });
+    if (!authorized) {
       req.resume();
       res.writeHead(401, { "WWW-Authenticate": 'Basic realm="factory-test"' });
       res.end();
       return;
     }
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const cgi = spawn("git", ["http-backend"], {
       env: {
         ...process.env,
@@ -98,7 +137,7 @@ export const startGitRemote = async (
       res.end(out.subarray(split + sep));
     });
   });
-  server.listen(0, "127.0.0.1");
+  server.listen(options.port ?? 0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string")

@@ -149,7 +149,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
 ./admission.sh   # api on :9432 (ADMISSION_PORT), SESSION_MAX_CONCURRENT=2 — the N+1th create and a trigger delivery refused typed, both served after the idle sweep (features/limits.md)
 ./pr-rpc.sh      # api on :9420, fake GitHub on :9421 — openPullRequest over RPC: opened, then already-open, one request (features/pr-rpc.md)
-./pr-push.sh     # api on :9440, fake GitHub on :9441, git forge on :9442 — repo add/run/pr through the CLI: base fetched, branch pushed, then the PR (features/pr-push.md)
+./pr-push.sh     # api on :9580, fake GitHub on :9581, git forge on :9582 — repo add/run/pr through the CLI: base fetched, branch pushed, then the PR (features/pr-push.md)
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)

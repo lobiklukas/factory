@@ -787,6 +787,13 @@ export type PushBranchInput = {
   readonly url?: string;
   /** The session's branch, under `factory/`. Pushed to the same name on the remote. */
   readonly branch: string;
+  /**
+   * The commit to push to `branch`, when the caller already measured one (C17): the PR step measures
+   * a sha and pushes that sha, so a commit landed on the branch between its measurement and the push
+   * is not published past the cap unmeasured. Absent: the branch's tip, resolved here. Either way it
+   * must name a commit in the checkout.
+   */
+  readonly commit?: string;
   /** How long the network call may run. Defaults to `DEFAULT_GIT_TIMEOUT`. */
   readonly timeout?: Duration.Input;
 };
@@ -848,17 +855,19 @@ export const pushBranch = (
         `only ${SESSION_BRANCH_PREFIX}** branches are pushed unattended`,
       );
     const forge = yield* forgeFor(input.repo, input.url, call);
+    if (input.commit !== undefined && !/^[0-9a-f]{40,64}$/.test(input.commit))
+      return yield* refused(call, "the commit is not a full commit id");
     const local = yield* runGit(input.worktree, [
       "rev-parse",
       "--verify",
       "--quiet",
-      `${ref}^{commit}`,
+      `${input.commit ?? ref}^{commit}`,
     ]);
     if (local.exitCode !== 0)
       return yield* new GitError({
         ...call,
         reason: "missing-ref",
-        message: `${subject(call)} failed: the checkout has no such branch`,
+        message: `${subject(call)} failed: ${input.commit === undefined ? "the checkout has no such branch" : "the checkout has no such commit"}`,
       });
     const sha = local.stdout.trim();
     const scratch = yield* makeScratch(input.worktree, call, false);

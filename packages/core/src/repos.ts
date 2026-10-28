@@ -112,7 +112,7 @@ export const inspectCheckout = (
  * failed, could not run, or outlived the deadline. The probes below are read-only questions about a
  * checkout, and "git could not say" is an answer to each of them.
  */
-const gitAnswer = (
+export const gitAnswer = (
   directory: string,
   args: ReadonlyArray<string>,
 ): Effect.Effect<string | undefined> =>
@@ -134,18 +134,30 @@ const gitAnswer = (
     );
   });
 
-/** Whether `ref` (a full ref name) resolves to a commit in the repository `directory` is in. */
-export const refExists = (
+/**
+ * The commit `ref` names in the repository `directory` is in, or `undefined` when it names none.
+ * `--end-of-options` keeps a ref that starts with `-` from being read as an option.
+ */
+export const resolveCommit = (
   directory: string,
   ref: string,
-): Effect.Effect<boolean> =>
+): Effect.Effect<string | undefined> =>
   gitAnswer(directory, [
     "rev-parse",
     "--verify",
     "--quiet",
     "--end-of-options",
     `${ref}^{commit}`,
-  ]).pipe(Effect.map((sha) => sha !== undefined && sha !== ""));
+  ]).pipe(
+    Effect.map((sha) => (sha === undefined || sha === "" ? undefined : sha)),
+  );
+
+/** Whether `ref` (a full ref name) resolves to a commit in the repository `directory` is in. */
+export const refExists = (
+  directory: string,
+  ref: string,
+): Effect.Effect<boolean> =>
+  resolveCommit(directory, ref).pipe(Effect.map((sha) => sha !== undefined));
 
 /**
  * The branch a checkout's repo treats as its default, read from the checkout alone (C17): what a

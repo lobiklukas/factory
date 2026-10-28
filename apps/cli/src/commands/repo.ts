@@ -150,13 +150,13 @@ const addCommand = Command.make(
     ),
     baseRef: Flag.String("base-ref").pipe(
       Flag.withDescription(
-        "The ref sessions start from (keeps the registered one, else main)",
+        "The ref sessions start from (keeps the registered one, else the repo's default branch)",
       ),
       Flag.optional,
     ),
     url: Flag.String("url").pipe(
       Flag.withDescription(
-        "The URL the repository is cloned from into the factory's cache (needs no --path)",
+        "The repository's forge URL: cloned from into the factory's cache with no --path, else fetched from and pushed to (default: the checkout's origin, when it is https://github.com/<repo>)",
       ),
       Flag.optional,
     ),
