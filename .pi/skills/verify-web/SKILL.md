@@ -201,6 +201,23 @@ approval" and `specifying`'s role `specifier`; the v2 board to say v3 exists; ea
 disclosure to show its column's same facts; and a malformed or missing board to be refused
 (`features/board-settings.md`). Evidence goes to `.verify/evidence/latest/board-settings/`.
 
+### Skill pages
+
+```sh
+DATABASE_URL=… SKILLS_API_PORT=9591 SKILLS_WEB_PORT=3591 ./skills.sh   # its own instance and throwaway database; leaves nothing running
+```
+
+The drive edits the shipped `specify` skill, so `skills.sh` starts its own API and dashboard on a
+throwaway database it mints on `DATABASE_URL`'s server and drops on exit. `skills.mjs` opens
+`specify` from a board's Settings page (each column's skill is a link), requires `/skills` to be
+`listSkills` and `/skills/specify` to be `getSkill`, `listSkillVersions` and the `specifying` column,
+an unchanged Publish to send no `putSkill`, a blank body to be `InvalidSkill` inline in the server's
+words with nothing written, an edit to say "v<n+1> created" and list v<n+1> first in the history
+without a reload, `factory skill show specify` to print the new body, a history entry to open its own
+version with a draft in the form kept, Edit to open on a version put from elsewhere, a Publish after
+another put to be stopped as `NewestMoved` with the text kept, and an unknown skill or version to say so (`features/skills.md`). Evidence goes to
+`.verify/evidence/latest/skills/`.
+
 ### The dashboard's credential
 
 ```sh
@@ -376,6 +393,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `board-create.sh`   | The New board form's own instance, empty database and drive (`board-create.mjs`) |
 | `first-run.sh`      | The first run's own instance, empty database and drive (`first-run.mjs`)         |
 | `board-settings.sh` | The settings page's own instance (a role model) and drive (`board-settings.mjs`) |
+| `skills.sh`         | The skill pages' own instance, throwaway database and drive (`skills.mjs`)       |
 | `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |

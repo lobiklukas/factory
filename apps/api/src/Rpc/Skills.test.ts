@@ -249,6 +249,14 @@ describe("skills over RPC", () => {
       before.body,
       put.body,
     ]);
+    // The history names both versions, newest first, the put's attributed to the caller (D8).
+    const history = await call((client) =>
+      client.listSkillVersions({ name: "specify" }),
+    );
+    expect(history.map((entry) => [entry.version, entry.author])).toEqual([
+      [put.version, TEST_ACTOR],
+      [before.version, before.author],
+    ]);
     // The list moved to the new version, and still names the column the put reaches.
     const listed = await call((client) => client.listSkills({}));
     expect(listed.find((skill) => skill.name === "specify")).toMatchObject({
@@ -269,6 +277,14 @@ describe("skills over RPC", () => {
       _tag: "SkillNotFound",
       version: 99,
       message: 'skill "review" has no version 99',
+    });
+
+    const noHistory = await call((client) =>
+      failureOf(client.listSkillVersions({ name: `nope-${run}` })),
+    );
+    expect(noHistory).toMatchObject({
+      _tag: "SkillNotFound",
+      name: `nope-${run}`,
     });
 
     const name = `blank-${run}`;

@@ -35,6 +35,7 @@ export const SkillsRpcHandlers = SkillsRpc.toLayer(
           Effect.map(([list, columns]) => summarizeSkills(list, columns)),
         ),
       getSkill: (input) => skills.get(input.name, input.version),
+      listSkillVersions: (input) => skills.versions(input.name),
       putSkill: (input) => attributed(input).pipe(Effect.flatMap(skills.put)),
     });
   }),
