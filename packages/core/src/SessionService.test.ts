@@ -5114,7 +5114,7 @@ describe("a long session read after its owner is released", () => {
         });
         for (let at = 0; at < HISTORY_WINDOW + 40; at += 1)
           yield* writeTitle(opened.root, `step ${at}`);
-        yield* closeHarness(opened.harness);
+        yield* closeSession(opened);
         yield* Effect.promise(() => storage.dispose());
 
         const snapshot = yield* sessions.get(created.id);
