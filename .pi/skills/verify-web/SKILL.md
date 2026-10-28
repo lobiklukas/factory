@@ -109,6 +109,22 @@ one from `factory run`, one from the dashboard's **New session**, and one run ea
 repo × actor table to be `listSpend`'s answer and its pairs to be the list's costs added up
 (`features/spend.md`). Evidence goes to `.verify/evidence/latest/spend/`.
 
+### The repositories page
+
+```sh
+REPOS_API_PORT=9441 REPOS_WEB_PORT=3441 ./repos.sh   # its own instance and throwaway git checkouts; leaves nothing running
+```
+
+`/repos` needs real git checkouts on the API's disk, so `repos.sh` starts its own API and dashboard and
+`repos.mjs` makes them. It seeds a repo a session registered by naming a slug (no checkout), then
+requires the page to flag it **not runnable** with the reason and the fix, a bad slug refused in the
+form, a path that is not a git work tree refused in the server's own words with nothing written, a
+throwaway checkout registered through the form and listed without a reload (equal to `listRepos`),
+the flagged repo turned runnable in place, a session on the registered repo cut a
+`factory/<session-id>` worktree (asserted over the API and on disk), and a checkout moved away
+behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
+`.verify/evidence/latest/repos/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -153,17 +169,18 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                            |
-| ------------------- | ------------------------------------------------------------------ |
-| `up.sh`             | Launch isolated API + web, wait for readiness                      |
-| `down.sh`           | Stop only what `up.sh` started                                     |
-| `doctor.sh`         | Read-only health check of the instance                             |
-| `drive.mjs`         | Browser drive + evidence capture                                   |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask               |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)   |
-| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`) |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from      |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it  |
+| File                | Purpose                                                                 |
+| ------------------- | ----------------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                           |
+| `down.sh`           | Stop only what `up.sh` started                                          |
+| `doctor.sh`         | Read-only health check of the instance                                  |
+| `drive.mjs`         | Browser drive + evidence capture                                        |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask                    |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)        |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)      |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from           |
+| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`) |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it       |
 
 ## Feature map
 
