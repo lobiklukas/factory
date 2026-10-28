@@ -274,6 +274,7 @@ resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-b
 | Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |
 | The model backend        | passing | [model-backend.md](model-backend.md)         |
 | What the server runs     | passing | [server-info.md](server-info.md)             |
+| Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
@@ -290,6 +291,14 @@ credentials, and `faux/faux-1` on a session's create, get and list row), evidenc
 `.verify/evidence/latest/api/server-info.json`. With the owner open's write of `sessions.model`
 removed, the list-row check fails (`.verify/evidence/lob-269/mutation-no-model-write/`). See
 [server-info.md](server-info.md).
+
+The metrics checks (LOB-69) were run from the `agent/LOB-69` worktree on 2026-10-28
+(`API_PORT=9540`, `OTLP_RECEIVER_PORT=9541`, the worktree's own database on 5442, `MOTEL_URL` unset):
+`./metrics.sh` **10/10** (9 driver checks — the drive, the wire, and each metric of the documented set
+with its unit, read from a loopback OTLP/HTTP receiver — and the boot log naming the endpoint),
+evidence `.verify/evidence/lob-69/api/`. With the endpoint left out of the boot, the receiver is sent
+nothing and the set check fails (`.verify/evidence/lob-69/mutation-no-endpoint/`). See
+[metrics.md](metrics.md).
 
 ## Deliberately absent
 

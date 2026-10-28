@@ -132,6 +132,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
 DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getServerInfo and each session's model; no credential's value in the answer (features/server-info.md)
 ./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
+DATABASE_URL=… ./metrics.sh  # api on :9200 (API_PORT), OTLP receiver on API_PORT+1 (OTLP_RECEIVER_PORT) — the documented metric set reaches a loopback collector, never motel (features/metrics.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: the window it proves is a kill
