@@ -1160,6 +1160,17 @@ describe("updateCard (C11)", () => {
       }),
     );
     expect(lines[0]).toBe(`unchanged ${TASK} (revision 3)`);
+    // Naming the current revision does not make a no-op an edit.
+    const named = await Effect.runPromise(
+      updateCard(b.client, {
+        taskId: TASK as never,
+        title: undefined,
+        priority: "urgent",
+        actor: "cli",
+        expectedRevision: 3,
+      }),
+    );
+    expect(named[0]).toBe(`unchanged ${TASK} (revision 3)`);
     const stale = await Effect.runPromise(
       Effect.flip(
         updateCard(b.client, {

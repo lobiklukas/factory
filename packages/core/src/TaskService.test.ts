@@ -540,12 +540,16 @@ describe("TaskService", () => {
    * changes, with one event per changed field at the revision the call expected, and the history
    * rebuilds the card (`replay`).
    *
-   * Mutation: bump the revision once per field — the card lands at 4, not 3.
+   * Mutation: bump the revision once per field — the card lands at 3, not 2.
    * Mutation: skip the `retitled` event — the replayed title is the old one.
    * Mutation: write the title untrimmed — the card reads back with the padding.
    */
   it("updates a card's title and priority in one revision, one event per changed field", async () => {
     const boardId = await newBoard();
+    // Older than `task`, so it reads first in the FIFO until `task` is urgent.
+    const first = await withService((s) =>
+      s.create({ boardId, title: "first", actor: LUKAS }),
+    );
     const task = await withService((s) =>
       s.create({ boardId, title: "typo in titel", actor: LUKAS }),
     );
@@ -589,9 +593,9 @@ describe("TaskService", () => {
       revision: 2,
     });
     // Urgent reads first in its column (B9), and back to normal drops it behind the FIFO.
-    const second = await withService((s) =>
-      s.create({ boardId, title: "second", actor: LUKAS }),
-    );
+    expect(
+      (await withService((s) => s.list({ boardId }))).map((t) => t.id),
+    ).toEqual([task.id, first.id]);
     const demoted = await withService((s) =>
       s.update({
         taskId: task.id,
@@ -603,7 +607,7 @@ describe("TaskService", () => {
     expect(demoted.title).toBe("typo in title");
     expect(
       (await withService((s) => s.list({ boardId }))).map((t) => t.id),
-    ).toEqual([task.id, second.id]);
+    ).toEqual([first.id, task.id]);
   });
 
   /**

@@ -276,9 +276,9 @@ export const CardHeading = ({
  * The card's block (C11, B4): park it on a reason and a note, or lift the park. A block is a state,
  * not a column, so the card stays in its lane and the lane shows it. A card that is not blocked
  * offers **Block**, which opens a form (the reason, an optional note); one that is offers
- * **Unblock** and says what it waits on. Both send the revision on screen. A `needs_input` block
- * is a run's question and an answer in the thread lifts it, so the pane says so rather than
- * offering a second way to lift it blind.
+ * **Unblock** and says what it waits on. Both send the revision on screen. Unblock is offered for
+ * every reason; a `needs_input` block is a run's question, so the pane also says that an answer in
+ * the thread lifts it.
  */
 export const BlockControl = ({
   boardId,

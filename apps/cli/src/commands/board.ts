@@ -1204,15 +1204,16 @@ export const updateCard = Effect.fnUntraced(function* <E>(
   },
 ) {
   const before = yield* client.getTask({ taskId: input.taskId });
+  const sent = input.expectedRevision ?? before.revision;
   const after = yield* client.updateTask({
     taskId: input.taskId,
-    expectedRevision: input.expectedRevision ?? before.revision,
+    expectedRevision: sent,
     ...(input.title === undefined ? {} : { title: input.title }),
     ...(input.priority === undefined ? {} : { priority: input.priority }),
     actor: input.actor,
   });
   return [
-    after.revision === before.revision && input.expectedRevision === undefined
+    after.revision === sent
       ? `unchanged ${after.id} (revision ${after.revision})`
       : `updated ${after.id} (revision ${after.revision})`,
     `title     ${after.title}`,

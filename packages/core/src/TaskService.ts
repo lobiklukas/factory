@@ -1,5 +1,5 @@
 /**
- * Tasks: create, read, list, move, block and unblock cards on a board (docs/board.md B1–B5, B7, B9),
+ * Tasks: create, read, list, move, block, unblock and update (title, priority) cards on a board (docs/board.md B1–B5, B7, B9),
  * the thread on each card — a run's question, a person's answer, a note (B7, LOB-73) — and the spec
  * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
@@ -9,7 +9,8 @@
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
- * row, and appends exactly one `task_events` row. A refusal fails the transaction before anything is
+ * row, and appends exactly one `task_events` row (an `ask` appends two, at two revisions; an `update`
+ * that changes both title and priority appends two, at the one revision it expected). A refusal fails the transaction before anything is
  * written, so a refused move leaves no event behind.
  *
  * Refusals are typed values (`TaskRefusal`-family, below), each naming what failed. They are not

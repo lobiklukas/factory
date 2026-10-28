@@ -43,3 +43,6 @@ wording and send rules are `apps/web/src/lib/card-edit-view.test.ts`.
 - `needs_input` is not offered as a reason: a block with no question in the thread has nothing for an
   answer to answer. A `needs_input` card shows Unblock all the same (the server allows it) and says an
   answer in the thread lifts it.
+- The 300-character title cap and the blank check apply to `updateTask` only. `createTask` and the
+  trigger path take any title, so a card can be created with a title longer than an edit accepts (a
+  one-character fix to it is refused until the person shortens it). Follow-up, not yet done.
