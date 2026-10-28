@@ -402,6 +402,9 @@ export const openPullRequestAtom = Atom.family((sessionId: SessionId) =>
                 ),
               ),
             ),
+            // One more read on a failed one: a dropped read is the only way a refusal would never
+            // learn the session moved on.
+            Effect.retry({ times: 1 }),
             Effect.ignore,
           );
           return yield* rpc.client

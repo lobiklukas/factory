@@ -65,13 +65,14 @@ const isDeterminate = (error: {
   readonly _tag: string;
   readonly code?: unknown;
   readonly status?: unknown;
+  readonly rateLimited?: unknown;
   readonly message: string;
 }): boolean => {
   switch (error._tag) {
     case "PrError":
       return forgeRefusalRepeats(
         typeof error.status === "number" ? error.status : undefined,
-        error.message,
+        error.rateLimited === true,
       );
     case "CredentialError":
       return error.code === "missing" || error.code === "unsupported";
@@ -93,11 +94,11 @@ const isDeterminate = (error: {
  */
 export const forgeRefusalRepeats = (
   status: number | undefined,
-  message: string,
+  rateLimited: boolean,
 ): boolean => {
   if (status === undefined || status < 400 || status >= 500) return false;
   if (status === 408 || status === 425 || status === 429) return false;
-  if (status === 403 && /rate limit|abuse/i.test(message)) return false;
+  if (rateLimited) return false;
   return true;
 };
 
@@ -113,6 +114,7 @@ export const attemptOfCause = (cause: Cause.Cause<unknown>): PrAttempt => {
         readonly _tag?: unknown;
         readonly code?: unknown;
         readonly status?: unknown;
+        readonly rateLimited?: unknown;
         readonly existing?: unknown;
         readonly message?: unknown;
       }
@@ -130,6 +132,7 @@ export const attemptOfCause = (cause: Cause.Cause<unknown>): PrAttempt => {
       _tag: error._tag,
       code: error.code,
       status: error.status,
+      rateLimited: error.rateLimited,
       message: reason,
     })
   ) {

@@ -1,6 +1,7 @@
 /**
  * E9: when a session's pinned model is not one this server serves. The disabled composer, the
- * explanation and the Replay action are proven in a browser by `.pi/skills/verify-web` (`model.sh`);
+ * explanation and the Replay action are proven in a browser by `.pi/skills/verify-web`
+ * (`model-unavailable.sh`);
  * these are the cases a screenshot cannot settle: which summaries lock the composer, and what the
  * words name.
  */

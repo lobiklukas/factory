@@ -344,6 +344,19 @@ export const SessionPane = ({
   }, [sessionId, settle, view]);
 
   /**
+   * A session pinned to a model this server does not serve (E9): the server refuses a send to it,
+   * so the composer is disabled with the reason and a Replay that runs its task on the default.
+   */
+  const pinnedElsewhere = view === null ? null : unservedModel(view.summary);
+  const unavailable =
+    pinnedElsewhere === null
+      ? null
+      : modelUnavailableNotice(
+          pinnedElsewhere,
+          Option.getOrUndefined(AsyncResult.value(serverInfo))?.defaultModel,
+        );
+
+  /**
    * Why Compact cannot be pressed right now, or `null` when it can (LOB-223).
    *
    * A disabled button that says nothing is a dead control: the same header either has a run in
@@ -358,7 +371,9 @@ export const SessionPane = ({
         : "This session could not be read"
       : view.live.busy
         ? "Wait for this run to finish before compacting"
-        : null;
+        : unavailable !== null
+          ? "This session's model is not served, so it cannot compact"
+          : null;
 
   /**
    * Whether a compaction is under way: the call is in flight, or its task is still live (LOB-224).
@@ -377,19 +392,6 @@ export const SessionPane = ({
     settleNow,
     view !== null && view.live.busy,
   );
-
-  /**
-   * A session pinned to a model this server does not serve (E9): the server refuses a send to it,
-   * so the composer is disabled with the reason and a Replay that runs its task on the default.
-   */
-  const pinnedElsewhere = view === null ? null : unservedModel(view.summary);
-  const unavailable =
-    pinnedElsewhere === null
-      ? null
-      : modelUnavailableNotice(
-          pinnedElsewhere,
-          Option.getOrUndefined(AsyncResult.value(serverInfo))?.defaultModel,
-        );
 
   /** What the PR control reads (C7): shared by the header's button and the line under it. */
   const prSession = {

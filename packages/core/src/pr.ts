@@ -1,4 +1,4 @@
-import { Effect, Redacted, Schema } from "effect";
+import { Effect, Option, Redacted, Schema } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
@@ -490,6 +490,7 @@ export const createPullRequest = (
       );
       const detail = forgeDetail(body);
       const existing = existingPullRequestUrl(body);
+      const rateLimited = isRateLimited(response, body);
       return yield* new PrError({
         operation: "createPullRequest",
         ref,
@@ -499,6 +500,7 @@ export const createPullRequest = (
             : `GitHub answered HTTP ${response.status}: ${detail}`,
         status: response.status,
         ...(existing === undefined ? {} : { existing }),
+        ...(rateLimited ? { rateLimited } : {}),
       });
     }
     return yield* HttpClientResponse.schemaBodyJson(GitHubPullRequest)(
@@ -516,23 +518,54 @@ export const createPullRequest = (
     );
   });
 
+/** The slice of a GitHub refusal body this module reads: the top-level `message` and each error's. */
+const GitHubRefusal = Schema.Struct({
+  message: Schema.optional(Schema.String),
+  errors: Schema.optional(
+    Schema.Array(Schema.Struct({ message: Schema.optional(Schema.String) })),
+  ),
+});
+
+const decodeRefusal = Schema.decodeUnknownOption(GitHubRefusal);
+
 /**
  * What a forge refusal says, from its JSON body: the `message` of each entry in `errors`, which is
  * where GitHub puts the reason of a 422 (`A pull request already exists for o:b.`). The top-level
- * `message` is left out — `Validation Failed` says nothing the status does not. `undefined` when
- * the body names no reason.
+ * `message` is left out — `Validation Failed` says nothing the status does not; whether it says
+ * "rate limit" is `isRateLimited`'s to read. `undefined` when the body names no reason.
  */
 const forgeDetail = (body: unknown): string | undefined => {
-  const errors = (body as { readonly errors?: unknown } | null | undefined)
-    ?.errors;
-  if (!Array.isArray(errors)) return undefined;
-  const reasons = errors.flatMap((error: unknown) => {
-    const message = (error as { readonly message?: unknown } | null)?.message;
-    return typeof message === "string" && message.trim() !== ""
-      ? [message.trim()]
-      : [];
-  });
+  const refusal = decodeRefusal(body);
+  if (Option.isNone(refusal)) return undefined;
+  const reasons = (refusal.value.errors ?? []).flatMap((error) =>
+    error.message !== undefined && error.message.trim() !== ""
+      ? [error.message.trim()]
+      : [],
+  );
   return reasons.length === 0 ? undefined : reasons.join("; ");
+};
+
+/**
+ * Whether the forge refused because of a rate limit (C7b): GitHub answers a primary limit with
+ * `x-ratelimit-remaining: 0`, a secondary one with `retry-after`, and both with a top-level
+ * `message` ("API rate limit exceeded", "You have exceeded a secondary rate limit"). Only a 403 or
+ * a 429 can be one. It clears with time, so it is the one 4xx a client keeps the retry for.
+ */
+const isRateLimited = (
+  response: HttpClientResponse.HttpClientResponse,
+  body: unknown,
+): boolean => {
+  if (response.status !== 403 && response.status !== 429) return false;
+  if (
+    response.headers["x-ratelimit-remaining"] === "0" ||
+    response.headers["retry-after"] !== undefined
+  )
+    return true;
+  const message = Option.match(decodeRefusal(body), {
+    onNone: () => "",
+    onSome: (refusal) => refusal.message ?? "",
+  });
+  return /rate limit|abuse/i.test(message);
 };
 
 /**

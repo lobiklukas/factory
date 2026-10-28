@@ -162,7 +162,11 @@ describe("attemptOfCause", () => {
 });
 
 describe("a forge refusal that will repeat (C7b)", () => {
-  const forge = (fields: { status?: number; existing?: string }) =>
+  const forge = (fields: {
+    status?: number;
+    existing?: string;
+    rateLimited?: boolean;
+  }) =>
     attemptOfCause(
       Cause.fail(
         new PrError({
@@ -189,14 +193,10 @@ describe("a forge refusal that will repeat (C7b)", () => {
     for (const status of [500, 502, 503, 408, 425, 429]) {
       expect(forge({ status })._tag, `HTTP ${status}`).toBe("failed");
     }
-    expect(
-      forgeRefusalRepeats(
-        403,
-        "GitHub answered HTTP 403: API rate limit exceeded",
-      ),
-    ).toBe(false);
-    expect(forgeRefusalRepeats(403, "GitHub answered HTTP 403")).toBe(true);
-    expect(forgeRefusalRepeats(200, "")).toBe(false);
+    expect(forge({ status: 403, rateLimited: true })._tag).toBe("failed");
+    expect(forgeRefusalRepeats(403, true)).toBe(false);
+    expect(forgeRefusalRepeats(403, false)).toBe(true);
+    expect(forgeRefusalRepeats(200, false)).toBe(false);
   });
 
   it("carries the existing PR the forge named, and the refusal blocks with the link", () => {

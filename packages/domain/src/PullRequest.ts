@@ -19,6 +19,9 @@ import { SessionId } from "@repo/domain/Ids";
  * to tell a refusal the same call would meet again (a 422, a 401, a 404) from a condition that
  * passes (a 502, a rate limit, a dropped connection, which carry none). `existing` is the page of
  * the PR the forge's own answer named as already open for this head, when it named one.
+ * `rateLimited` is set when the forge said the refusal is a rate limit (`x-ratelimit-remaining: 0`,
+ * `retry-after`, or a body that says so): a 403 or 429 that clears with time, so a client keeps the
+ * retry. It is carried on the error because the reason text leaves the top-level `message` out.
  */
 export class PrError extends Schema.TaggedError<PrError>()("PrError", {
   operation: Schema.String,
@@ -26,6 +29,7 @@ export class PrError extends Schema.TaggedError<PrError>()("PrError", {
   message: Schema.String,
   status: Schema.optional(Schema.Int),
   existing: Schema.optional(Schema.String),
+  rateLimited: Schema.optional(Schema.Boolean),
 }) {}
 
 /** A credential could not be resolved. Typed, so callers handle it instead of crashing. */

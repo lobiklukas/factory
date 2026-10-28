@@ -1923,6 +1923,16 @@ describe("the model a session runs on", () => {
             content: "and now, deferred?",
           }),
         );
+        // The other ways to start a model turn on the pinned root are refused the same way.
+        const compacted = yield* Effect.exit(
+          sessions.compact({ sessionId: created.id }),
+        );
+        const mission = yield* Effect.exit(
+          sessions.startMission({
+            sessionId: created.id,
+            feature: "a mission on a model that is gone",
+          }),
+        );
         const settled = yield* sessions.get(created.id);
         const listed = find(
           (yield* sessions.list({ limit: 100 })).sessions,
@@ -1932,7 +1942,16 @@ describe("the model a session runs on", () => {
           SELECT status FROM session_activity WHERE session_id = ${created.id}
         `;
         yield* sessions.close;
-        return { before, exit, deferred, settled, listed, status };
+        return {
+          before,
+          exit,
+          deferred,
+          compacted,
+          mission,
+          settled,
+          listed,
+          status,
+        };
       }),
     );
 
@@ -1945,6 +1964,8 @@ describe("the model a session runs on", () => {
     };
     expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.exit)));
     expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.deferred)));
+    expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.compacted)));
+    expectRefused(Option.getOrUndefined(Exit.findErrorOption(after.mission)));
     // No run: the transcript is the one the refused sends found, the session is idle, and it is not
     // a busy turn about to fail inside pi-ai with "Unknown provider".
     expect(after.settled.entries).toEqual(after.before.entries);

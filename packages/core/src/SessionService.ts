@@ -5513,6 +5513,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<CompactSessionResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           const instructions = input.instructions?.trim();
           const owner = yield* acquireOwner(input.sessionId, row);
           const taskId = yield* compactSession(
@@ -5643,6 +5644,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
+          yield* refuseUnservedModel(input.sessionId, row);
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });

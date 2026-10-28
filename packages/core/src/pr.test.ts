@@ -70,6 +70,7 @@ const makeRoutedFake = (
   answers: (request: { readonly method: string; readonly path: string }) => {
     readonly status: number;
     readonly body: unknown;
+    readonly headers?: Record<string, string>;
   },
 ) => {
   const requests: Array<{
@@ -103,7 +104,10 @@ const makeRoutedFake = (
         );
         const response = new Response(text, {
           status: answer.status,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...answer.headers,
+          },
         });
         return HttpClientResponse.fromWeb(request, response);
       }).pipe(Effect.orDie),
@@ -588,6 +592,7 @@ describe("createPullRequest", () => {
     answer: (request: { method: string }) => {
       status: number;
       body: unknown;
+      headers?: Record<string, string>;
     },
   ) => {
     const { client } = makeRoutedFake(answer);
@@ -647,6 +652,57 @@ describe("createPullRequest", () => {
     const mute = await refusedBy(() => ({ status: 401, body: "nope" }));
     expect(mute.status).toBe(401);
     expect(mute.message).toBe("GitHub answered HTTP 401");
+  });
+
+  // A real GitHub rate limit is a 403 whose reason is the body's top-level `message` (not `errors`),
+  // so the signal has to ride on the error itself, or the client reads it as a verdict.
+  it("marks a rate-limit 403 or 429 as rateLimited, by header or by the body's own words", async () => {
+    const primary = await refusedBy(() => ({
+      status: 403,
+      body: { message: "API rate limit exceeded for user ID 1." },
+    }));
+    expect(primary.status).toBe(403);
+    expect(primary.rateLimited).toBe(true);
+
+    const secondary = await refusedBy(() => ({
+      status: 403,
+      body: {
+        message:
+          "You have exceeded a secondary rate limit. Please wait a few minutes.",
+      },
+      headers: { "retry-after": "60" },
+    }));
+    expect(secondary.rateLimited).toBe(true);
+
+    const exhausted = await refusedBy(() => ({
+      status: 403,
+      body: { message: "Forbidden" },
+      headers: { "x-ratelimit-remaining": "0" },
+    }));
+    expect(exhausted.rateLimited).toBe(true);
+
+    const throttled = await refusedBy(() => ({ status: 429, body: {} }));
+    expect(throttled.rateLimited).toBe(undefined);
+    const throttledByHeader = await refusedBy(() => ({
+      status: 429,
+      body: {},
+      headers: { "retry-after": "5" },
+    }));
+    expect(throttledByHeader.rateLimited).toBe(true);
+
+    // A plain 403 (a token the forge will not take) is a verdict, and a 422 never is a rate limit.
+    const denied = await refusedBy(() => ({
+      status: 403,
+      body: { message: "Resource not accessible by personal access token" },
+      headers: { "x-ratelimit-remaining": "4999" },
+    }));
+    expect(denied.rateLimited).toBeUndefined();
+    const invalid = await refusedBy(({ method }) =>
+      method === "POST"
+        ? { status: 422, body: { message: "rate limit", errors: [] } }
+        : { status: 200, body: [] },
+    );
+    expect(invalid.rateLimited).toBeUndefined();
   });
 
   it("links the existing PR when the forge's refusal names its page, and no other URL", async () => {

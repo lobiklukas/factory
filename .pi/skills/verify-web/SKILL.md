@@ -112,7 +112,7 @@ repo × actor table to be `listSpend`'s answer and its pairs to be the list's co
 ### Cost prediction
 
 ```sh
-DATABASE_URL=… COST_API_PORT=9453 COST_WEB_PORT=3453 ./cost.sh   # its own priced instance and database; leaves nothing running
+DATABASE_URL=… COST_API_PORT=9452 COST_WEB_PORT=3452 ./cost.sh   # its own priced instance and database; leaves nothing running
 ```
 
 The New session form's predicted range and its **Cap at predicted high**, and `/spend`'s backtest
