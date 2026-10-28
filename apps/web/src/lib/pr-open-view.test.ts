@@ -42,6 +42,16 @@ describe("attemptOfStep", () => {
     });
   });
 
+  it("refuses a branch the forge has moved past, and never offers a force", () => {
+    expect(
+      attemptOfStep({ outcome: "non-fast-forward", head: "factory/s1" }),
+    ).toEqual({
+      _tag: "refused",
+      reason:
+        "the forge's factory/s1 has commits the run's branch does not, and the step never forces a push, so no pull request was opened",
+    });
+  });
+
   it("refuses a diff over the cap, naming the limit, the cap and what the branch measured", () => {
     expect(
       attemptOfStep({

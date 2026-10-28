@@ -20,6 +20,7 @@ import { CredentialProvider } from "./credentials";
 export {
   DiffCapLimit,
   NoChangePullRequest,
+  NonFastForwardPullRequest,
   OpenedPullRequest,
   OverCapPullRequest,
   PrError,

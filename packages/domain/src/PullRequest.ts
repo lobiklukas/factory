@@ -101,12 +101,30 @@ export const NoChangePullRequest = Schema.Struct({
 });
 export type NoChangePullRequest = typeof NoChangePullRequest.Type;
 
-/** What the PR step answers: the link and the path that produced it, the cap that refused it, or
- * the empty branch that had nothing to open. */
+/**
+ * The answer for a branch the forge would not take (C17): the PR step pushes the session's branch
+ * before it opens the PR, and the remote's `factory/<id>` holds commits this branch does not — a
+ * push would have to force, and the step never forces. No PR, no `factory.pr` document, no `pr_url`
+ * row, and `head` names the branch that was refused.
+ *
+ * A value rather than a `PrError` for the same reason a cap refusal is one: the push ran and the
+ * forge answered a definite "not without the commits it has", which a retry of the same branch would
+ * get again. The fix is the run's — fetch the remote branch, integrate it, push again — so a caller
+ * reads an outcome it can route back to the run, not an error it would retry.
+ */
+export const NonFastForwardPullRequest = Schema.Struct({
+  outcome: Schema.Literal("non-fast-forward"),
+  head: Schema.String,
+});
+export type NonFastForwardPullRequest = typeof NonFastForwardPullRequest.Type;
+
+/** What the PR step answers: the link and the path that produced it, the cap that refused it, the
+ * empty branch that had nothing to open, or the branch the forge would not take without a force. */
 export const PullRequestStep = Schema.Union([
   OpenedPullRequest,
   OverCapPullRequest,
   NoChangePullRequest,
+  NonFastForwardPullRequest,
 ]);
 export type PullRequestStep = typeof PullRequestStep.Type;
 
@@ -116,11 +134,17 @@ export type PullRequestStep = typeof PullRequestStep.Type;
  * control (C7) — so the two cannot word the same answer differently.
  */
 export const pullRequestRefusal = (
-  step: OverCapPullRequest | NoChangePullRequest,
-): string =>
-  step.outcome === "over-cap"
-    ? `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`
-    : "the run changed no file against its base branch, so there is nothing to open a pull request for";
+  step: OverCapPullRequest | NoChangePullRequest | NonFastForwardPullRequest,
+): string => {
+  switch (step.outcome) {
+    case "over-cap":
+      return `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`;
+    case "no-change":
+      return "the run changed no file against its base branch, so there is nothing to open a pull request for";
+    case "non-fast-forward":
+      return `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so no pull request was opened`;
+  }
+};
 
 /**
  * Open a session's PR (LOB-213): the session and the PR's title, and nothing else.

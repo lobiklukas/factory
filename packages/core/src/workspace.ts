@@ -84,6 +84,13 @@ export type WorkspaceInput = {
       }
     | undefined;
   /**
+   * The ref a new branch is cut at instead of `baseRef`, when the caller fetched the base from the
+   * repo's forge into the registered checkout (C17): `refs/remotes/factory/<base>`, so the worktree
+   * starts at the remote's base rather than at however far behind it the operator's local branch is.
+   * Cut untracked. Ignored for a mirror, whose `sync` answers its own start point.
+   */
+  readonly startPoint?: string | undefined;
+  /**
    * Whether a missing worktree is cut (LOB-268). Absent means yes. A session whose workspace was
    * torn down resolves with `false`, so reading it never cuts a fresh worktree on a fresh branch at
    * the base — which is what a read would otherwise do, because the directory is gone.
@@ -169,7 +176,8 @@ export const resolveWorkspace = (
       // Only a worktree about to be cut needs the mirror's tip: fetching it for one that exists
       // would put the network under every reopened session.
       const mirror = input.localPath === undefined ? input.mirror : undefined;
-      let startPoint = baseRef;
+      let startPoint =
+        mirror === undefined ? (input.startPoint ?? baseRef) : baseRef;
       if (mirror !== undefined && !occupied) {
         startPoint = yield* mirror.sync;
         mirrorUsed = true;
@@ -233,9 +241,12 @@ export const resolveWorkspace = (
                 [
                   "worktree",
                   "add",
-                  // The mirror's start point is a remote-tracking ref of a remote it does not have:
-                  // tracking it would write an upstream into its config for nothing.
-                  ...(mirror === undefined ? [] : ["--no-track"]),
+                  // The mirror's start point, and a fetched base's, is a remote-tracking ref of a
+                  // remote the checkout has not configured: tracking it would write an upstream
+                  // into its config for nothing.
+                  ...(mirror === undefined && input.startPoint === undefined
+                    ? []
+                    : ["--no-track"]),
                   "-b",
                   worktreeBranch,
                   directory,

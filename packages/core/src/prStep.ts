@@ -56,6 +56,14 @@
  * part of the change says so. Read here rather than passed in, so no caller can hand the body a verdict the log does not
  * hold; and committed on the `factory.pr` document beside the link, so the record and the body state
  * one verdict.
+ *
+ * The step publishes the branch before it names it (C17). GitHub opens a PR only for a head it has,
+ * and nothing else pushes a session's branch — the agent's environment carries no credential — so
+ * when the caller hands the step a `push`, it runs after the branch is measured and before GitHub is
+ * called: a refused or empty branch is never published, and a PR is never asked for a head the forge
+ * does not hold. The push is never forced, so a remote branch that moved past this one is the
+ * `non-fast-forward` outcome — nothing opened, nothing recorded — rather than a PR over commits the
+ * run never saw. Any other push failure is a `PrError` naming the push.
  */
 import { DateTime, Effect, Option } from "effect";
 import type { HttpClient } from "effect/http";
@@ -78,7 +86,9 @@ import {
   type PullRequestRecord,
 } from "@repo/harness";
 import type { CredentialError, CredentialProvider } from "./credentials";
+import type { GitError, PushedBranch } from "./git";
 import type { DiffCap, OverCapPullRequest, PullRequestStep } from "./pr";
+import { resolveCommit } from "./repos";
 import {
   buildPrBody,
   createPullRequest,
@@ -98,6 +108,21 @@ export type OpenPullRequestInput = {
   readonly base: string;
   /** The session's working directory: where the branch's diff is measured against `base`. */
   readonly worktree: string;
+  /**
+   * The ref the branch is measured against when it is not `base` itself: the base's tip as last
+   * fetched from the forge (`refs/remotes/factory/<base>`, C17). The worktree was cut from it, and the
+   * operator's local `base` can be behind it, which would count the remote's own commits as the
+   * session's. `base` is still what the PR targets. Absent: `base`.
+   */
+  readonly measureBase?: string;
+  /**
+   * Publish `head` to the repo's forge (C17): run once a PR would be opened, after the measurement
+   * and before GitHub is called, never on the retry the log answers. Absent: the step pushes nothing,
+   * as before — a repo the deployment has no forge URL for, whose head must already be there.
+   */
+  readonly push?: (
+    commit: string | undefined,
+  ) => Effect.Effect<PushedBranch, GitError | CredentialError>;
   /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
   readonly cap?: DiffCap;
   /** What the session was asked to do, and the model and spend behind it, for the body. */
@@ -132,13 +157,34 @@ export const openPullRequest = (
     // branch has grown to since, and re-measuring it would turn a retry into a refusal. The same
     // measurement is what the body lists, so the cap and the changed-path list can never disagree
     // about what this PR carries.
+    //
+    // The head is resolved to one commit first, and that commit is what is measured, listed and
+    // pushed (C17): a commit the agent lands on the branch while the step runs is then neither
+    // pushed past the cap unmeasured nor missing from the body. A head the checkout cannot resolve
+    // is measured by name, which fails on its own terms.
+    const commit =
+      recorded === undefined && existsSync(join(input.worktree, ".git"))
+        ? yield* resolveCommit(input.worktree, `refs/heads/${input.head}`)
+        : undefined;
+    const measuredHead = commit ?? input.head;
     const measured =
       recorded === undefined
         ? yield* diffSize({
             worktree: input.worktree,
-            base: input.base,
-            head: input.head,
-          })
+            base: input.measureBase ?? input.base,
+            head: measuredHead,
+          }).pipe(
+            // A failed measurement names the branch, as the caller does, not the commit it resolved.
+            Effect.mapError((error) =>
+              commit === undefined
+                ? error
+                : new PrError({
+                    operation: error.operation,
+                    ref: `${input.measureBase ?? input.base}...${input.head}`,
+                    message: error.message,
+                  }),
+            ),
+          )
         : Option.none<DiffSize>();
     const refused = Option.flatMap(measured, (size) =>
       capRefusal(size, input.cap ?? DEFAULT_DIFF_CAP),
@@ -157,11 +203,23 @@ export const openPullRequest = (
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR.
     if (Option.isSome(refused)) return refused.value;
+    // Published only when a PR is about to be asked for, and only a branch the step measured: a
+    // directory that is not its own checkout has no branch to push. A rejected push writes nothing,
+    // so the session reads as one with no PR, as a refusal above does.
+    if (
+      recorded === undefined &&
+      Option.isSome(measured) &&
+      input.push !== undefined
+    ) {
+      const pushed = yield* publish(input.push(commit), input.head);
+      if (pushed !== undefined) return pushed;
+    }
     const pr =
       recorded ??
       (yield* open(
         input,
         Option.match(measured, { onNone: () => [], onSome: (s) => s.paths }),
+        measuredHead,
       ));
 
     const sql = yield* SqlClient;
@@ -181,6 +239,34 @@ export const openPullRequest = (
   });
 
 /**
+ * Run the caller's push, answering the `non-fast-forward` outcome for a remote that moved past the
+ * branch and `undefined` once the forge holds it. Every other `GitError` is a `PrError` on the push
+ * — the wire does not carry `GitError`, and its message already names the operation, the ref and
+ * the repo without a URL or a token. A `CredentialError` stays what it is.
+ */
+const publish = (
+  push: Effect.Effect<PushedBranch, GitError | CredentialError>,
+  head: string,
+): Effect.Effect<
+  { readonly outcome: "non-fast-forward"; readonly head: string } | undefined,
+  PrError | CredentialError
+> =>
+  push.pipe(
+    Effect.as(undefined),
+    Effect.catchTag("GitError", (error) =>
+      error.reason === "non-fast-forward"
+        ? Effect.succeed({ outcome: "non-fast-forward" as const, head })
+        : Effect.fail(
+            new PrError({
+              operation: "pushBranch",
+              ref: error.ref,
+              message: error.message,
+            }),
+          ),
+    ),
+  );
+
+/**
  * The one call to GitHub, its record, and the event an attached client sees.
  *
  * The body's evidence is read here, from the session's own log (LOB-79): the `verify` tool's
@@ -192,6 +278,8 @@ const open = (
   input: OpenPullRequestInput,
   /** The branch's changed paths, as the step measured them; listed in the body (LOB-228). */
   changed: readonly string[],
+  /** The commit (or, unresolved, the branch) those paths were measured at. */
+  measuredHead: string,
 ): Effect.Effect<
   PullRequestRecord,
   PrError | CredentialError | SessionError,
@@ -201,7 +289,11 @@ const open = (
     // The cited call's measured paths are compared with the paths this PR publishes, so a run that
     // verified and then changed more is said on the body rather than cited as if it saw them. Not
     // the numstat list above: that spells a rename `{old => new}`, the record spells the new path.
-    const published = publishedPaths(input);
+    const published = publishedPaths({
+      worktree: input.worktree,
+      base: input.measureBase ?? input.base,
+      head: measuredHead,
+    });
     const evidence = prEvidenceOf(
       yield* readConversationVerifyCalls(input.conversation),
       {

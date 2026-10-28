@@ -111,6 +111,7 @@ import { isSafeBranchName } from "./git";
 import { mintBoardId, mintTaskId } from "./ids";
 import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
+import { measureBaseOf } from "./RepoRemote";
 import { noCheckoutWarning } from "./workspace";
 import {
   type BranchDiff,
@@ -1372,14 +1373,22 @@ export const TaskServiceLive = Layer.effect(
         });
       const head = run.branch ?? `factory/${sessionId}`;
       const base = run.baseRef ?? "main";
-      return branchDiffSize({ checkout: run.localPath, base, head }).pipe(
-        Effect.map(({ files }): BranchDiff => ({
-          _tag: "measured",
-          sessionId,
-          base,
-          head,
-          files,
-        })),
+      const checkout = run.localPath;
+      // Against the base the PR step measures against (C17, `measureBaseOf`): the forge's fetched
+      // tip when the run was cut from it, so the forge's own new commits are not the run's change.
+      // The answer names the ref it measured against, so its `git diff` is the one that ran.
+      return measureBaseOf({ directory: checkout, base, head }).pipe(
+        Effect.flatMap((measureBase) =>
+          branchDiffSize({ checkout, base: measureBase, head }).pipe(
+            Effect.map(({ files }): BranchDiff => ({
+              _tag: "measured",
+              sessionId,
+              base: measureBase,
+              head,
+              files,
+            })),
+          ),
+        ),
         Effect.catchTag("PrError", (error) =>
           Effect.succeed<BranchDiff>({
             _tag: "unmeasured",

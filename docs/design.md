@@ -205,6 +205,13 @@ Branch `factory/<session-id>` per session, worktree as the sandbox working direc
 may commit and **push its own branch**. The control plane opens the PR.
 _Rejected:_ agent working on the user's current branch (blast radius is the working tree);
 control-plane-only pushes (the agent cannot iterate against real remote state).
+_Refined (C17):_ the agent's environment carries no credential, so the control plane also pushes
+`factory/<session-id>` itself, with the provider's token, just before the PR step opens the PR —
+the commit it measured, never forced; a remote branch that moved past it is the typed
+`non-fast-forward` outcome, not a PR. Before a worktree is cut, the control plane fetches the base
+into the checkout's `refs/remotes/factory/<base>` and cuts there. The agent's own push stays
+allowed once it has a credential of its own; what is rejected above is pushes that are _only_ the
+control plane's.
 
 ### D11 — Autonomy: the branch is the boundary
 
