@@ -73,7 +73,8 @@ export type SessionRpcClient = SessionClient["Service"]["client"];
  *
  * `factory board start` needs both halves of the surface — it reads a card and then opens the run
  * against it — so the board commands hold one client over `RpcApi` rather than two layers; so do
- * `factory approve` / `deny` (LOB-53), which decide over `ApprovalsRpc` and then follow the session. The
+ * `factory approve` / `deny` (LOB-53), which decide over `ApprovalsRpc` and then follow the session, and
+ * `factory status` / `factory run` (LOB-272), which read `getServerInfo` from the server group. The
  * session commands keep `SessionClient`, because a command that cannot reach the board should not
  * fail to compile with it.
  */

@@ -14,8 +14,15 @@ import { SessionClient } from "../rpc";
  */
 export const NO_PR = "-";
 
+/**
+ * What the `model` column says for a session whose row names no model (LOB-272): one that predates
+ * the column and has not been refolded. The same `-` as the other empty cells.
+ */
+export const NO_MODEL = "-";
+
 /** The header `factory ls` prints above its rows: one name per column, in row order. */
-export const LS_HEADER = "id  status  repo  last-activity  cost  pr  title";
+export const LS_HEADER =
+  "id  status  repo  last-activity  cost  pr  model  title";
 
 /**
  * One `factory ls` row.
@@ -31,6 +38,7 @@ export const lsRow = (session: SessionListEntry): string =>
     session.lastActivityAt,
     String(session.costTotal),
     session.prUrl ?? NO_PR,
+    session.model ?? NO_MODEL,
     session.title,
   ].join("  ");
 
@@ -38,7 +46,7 @@ export const lsRow = (session: SessionListEntry): string =>
  * `factory ls` — the server's list of sessions, newest activity first.
  *
  * One row per session with the fields the index already carries (id, status, repo, last activity,
- * spend, the PR link once one was opened, title); nothing here folds a log. When the server has more
+ * spend, the PR link once one was opened, the model it is pinned to, title); nothing here folds a log. When the server has more
  * than a page it returns a keyset cursor, which is echoed so `--cursor` can ask for the next page.
  */
 export const lsCommand = Command.make(

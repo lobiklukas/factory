@@ -227,6 +227,34 @@ const program = Effect.gen(function* () {
     `issueCreate=${count(afterThird, "issueCreate")} issueRelationCreate=${count(afterThird, "issueRelationCreate")}`,
   );
 
+  // --- rerun (LOB-203): the same spec, proposed and approved again, creates nothing ---------------------------
+  const rerun = yield* client.proposeDecomposition({ sessionId });
+  const fourth = yield* client.approveProposals({
+    sessionId,
+    approved: [0, 1, 2],
+  });
+  observed.approvals["rerun [0,1,2]"] = fourth;
+  const afterFourth = yield* Effect.promise(ledger);
+  const snapshotFourth = yield* client.getSession({ sessionId });
+  assert(
+    "decomposing the same spec again and approving everything sends not one more write, and every id is still recorded",
+    rerun.diff.added.length === 0 &&
+      rerun.diff.updated.length === 0 &&
+      rerun.diff.removed.length === 0 &&
+      fourth.created.length === 0 &&
+      fourth.related === 0 &&
+      writesOf(afterFourth) === writesOf(afterThird) &&
+      afterFourth.children.length === afterThird.children.length &&
+      afterFourth.relations.length === afterThird.relations.length &&
+      snapshotFourth.proposedIssues?.proposals.every(
+        (proposal) =>
+          proposal.created !== undefined &&
+          afterFourth.children.find((child) => child.title === proposal.title)
+            ?.id === proposal.created.id,
+      ) === true,
+    `diff=${JSON.stringify(rerun.diff)} created=${JSON.stringify(fourth.created)} writes=${writesOf(afterThird)}->${writesOf(afterFourth)}`,
+  );
+
   // --- refused ---------------------------------------------------------------------------------------------
   const undelegated = yield* specified("undelegated", undefined);
   yield* client.proposeDecomposition({ sessionId: undelegated });

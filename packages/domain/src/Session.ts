@@ -13,7 +13,7 @@ import { Schema } from "effect";
 import { ApprovalRequest } from "@repo/domain/Approval";
 import { SessionId, Timestamp } from "@repo/domain/Ids";
 import { ProposedIssues } from "@repo/domain/Decomposition";
-import { MissionSnapshot } from "@repo/domain/Mission";
+import { MissionSnapshot, ModelUsage } from "@repo/domain/Mission";
 
 // The two scalars every contract names. They are defined in `Ids` so `Approval` can name a session
 // without importing this module, which imports it back for the snapshot's pending approvals; the
@@ -264,15 +264,8 @@ export const SessionLive = Schema.Struct({
 });
 export type SessionLive = typeof SessionLive.Type;
 
-export const ModelUsage = Schema.Struct({
-  input: Schema.Finite,
-  output: Schema.Finite,
-  cacheRead: Schema.Finite,
-  cacheWrite: Schema.Finite,
-  totalTokens: Schema.Finite,
-  costTotal: Schema.Finite,
-});
-export type ModelUsage = typeof ModelUsage.Type;
+// Defined in `Mission.ts`, which this module imports: a mission's workers report it too (LOB-194).
+export { ModelUsage };
 
 /**
  * One live task in a session: what is running right now, in which phase, on whose behalf, and what

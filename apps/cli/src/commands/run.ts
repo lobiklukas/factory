@@ -3,8 +3,9 @@ import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
-import { SessionClient } from "../rpc";
+import { BoardClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
+import { runModelLines } from "./status";
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -14,7 +15,9 @@ import { followSession, formatDollars } from "../transcript";
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
  * `factory approve` decides as `cli`) — a declaration only an open control plane keeps: one that
  * authenticates records the actor of the `FACTORY_API_TOKEN` the call carried (LOB-20). The workspace line is the server's own answer for where the work will
- * live, so the run proves the read path as well as the write.
+ * live, so the run proves the read path as well as the write. The `model` line is the model the
+ * session is pinned to (LOB-272), and under the faux backend a `warning: faux backend` line follows
+ * it: a scripted answer reads exactly like a real one, so the run says which it is getting.
  */
 export const runCommand = Command.make(
   "run",
@@ -54,7 +57,7 @@ export const runCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
-      const { client } = yield* SessionClient;
+      const { client } = yield* BoardClient;
 
       const input: {
         repo?: RepoSlug;
@@ -70,6 +73,14 @@ export const runCommand = Command.make(
       yield* Console.log(`session ${session.id}`);
       if (Option.isSome(budget)) {
         yield* Console.log(`budget ${formatDollars(budget.value)}`);
+      }
+
+      // A server that cannot answer `getServerInfo` costs the run its warning, never the run.
+      const info = yield* client
+        .getServerInfo({})
+        .pipe(Effect.option, Effect.map(Option.getOrUndefined));
+      for (const line of runModelLines(session.model, info)) {
+        yield* Console.log(line);
       }
 
       const opened = yield* client.getSession({ sessionId: session.id });
@@ -101,7 +112,7 @@ export const runCommand = Command.make(
       }
     });
 
-    yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription(

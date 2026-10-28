@@ -45,14 +45,19 @@ fake's ledger file between calls:
 3. Each created id is in `getSession`'s `proposedIssues`; B has none.
 4. Approving the same set again sends no write; B is still uncreated.
 5. Approving B creates it and the two edges that were waiting.
-6. A decomposed session no Linear issue opened is refused `no_delegating_issue`, and the ledger does
+6. Decomposing the same spec again (LOB-203) answers a diff of nothing but `unchanged`; approving
+   everything then sends not one more write, and every proposal still carries its recorded id.
+7. A decomposed session no Linear issue opened is refused `no_delegating_issue`, and the ledger does
    not move.
 
 The shell then counts, from the ledger alone: three `issueCreate` requests, three distinct issues.
 
 Below the wire: `packages/core/src/SessionService.test.ts` ("approving proposals into tracker
 issues"), against the in-process Linear fake in `packages/core/src/linearFake.ts` — the ledger
-counts, a refused second `issueCreate` halfway (the first recorded, the retry creating only the
+counts; a second propose + approve over an unchanged spec leaving the ledger and the document
+unchanged, a changed spec answering a diff (the created keep their ids, a dropped one is marked
+removed and takes its issue back when its title returns), and the derived rows deleted and the log
+replayed giving the same proposals and ids (LOB-203); a refused second `issueCreate` halfway (the first recorded, the retry creating only the
 rest), `success: false`, a lost acknowledgement the sync's retry heals, a lost acknowledgement it
 cannot (typed error, then the next approval adopts the issue), a refused and a lost relation, and
 every refusal with an empty ledger; `packages/core/src/LinearSync.test.ts` (`createChild` and
