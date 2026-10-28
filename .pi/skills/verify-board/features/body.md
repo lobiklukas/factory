@@ -29,8 +29,9 @@ factory board show --task tsk_0123456789abcdefghjkmnpqrs
 factory board start --task tsk_0123456789abcdefghjkmnpqrs --prompt "work on this card"
 ```
 
-No `factory` command creates a card yet (`factory board add` is LOB-261): a trigger or a client calls
-`createTask` with the body and the refs.
+`factory board add --body/--body-file --base-ref` puts such a card on a board from the terminal
+(LOB-261, [add.md](add.md)); a trigger or a client calls `createTask` with the same body and refs.
+`start-body.sh`'s `body.ts` still makes its cards over `createTask` on purpose, as one read-back.
 
 ## How the skill drives it
 

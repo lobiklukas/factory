@@ -16,8 +16,9 @@
 //    script makes a third with `createTask` from the same inputs — the call the dashboard's 'New
 //    card' form makes — and the board lists both with the same title, body, repo, priority and base
 //    ref. The third card is the only direct create here, and it exists to be compared.
-//  * the refused `board add` commands (an empty title, an unknown board) wrote no card: the board
-//    holds the cards it did before them (`CARDS_BEFORE`, read by the drive before they ran).
+//  * the refused `BoardRepoMismatch` create wrote no card on this board: it holds the cards it did
+//    before (`CARDS_BEFORE`) plus the form's one. The refused commands are not counted here: the empty
+//    title never reaches a server (`--api` is a closed port) and the unknown board is another board's.
 //
 // Env: API_URL, BOARD_ID, TASK_ID (the drive's card), TITLE, BODY (what it was given), PAIR_ID (the
 // CLI's equivalence card), PAIR_TITLE, PAIR_BODY, PAIR_PRIORITY, PAIR_BASE_REF (what it was given),
@@ -149,7 +150,7 @@ const readBack = Effect.gen(function* () {
     JSON.stringify(observed.facts["equivalence"]),
   );
   check(
-    "the refused create and the refused commands wrote no card",
+    "the refused BoardRepoMismatch create wrote no card on this board",
     !cards.some((card) => card.title === refusedTitle) &&
       cards.length === CARDS_BEFORE + 1,
     `${cards.length} cards on ${boardId}, ${CARDS_BEFORE} before the form's card`,

@@ -332,6 +332,60 @@ export const addCard = Effect.fnUntraced(function* <E>(
   return [`task ${card.id} revision ${card.revision} column ${card.column}`];
 });
 
+/** What `factory board add` was typed with, before any flag is decoded. */
+export interface AddRawFlags {
+  readonly board: string;
+  readonly title: string;
+  readonly body: string | undefined;
+  readonly bodyFile: string | undefined;
+  readonly repo: string | undefined;
+  readonly priority: TaskPriority | undefined;
+  readonly baseRef: string | undefined;
+  readonly actor: string;
+}
+
+/**
+ * Decode the typed flags of `board add`, or `invalid_input` and no request: a board id or repo that
+ * cannot be one, `--body` and `--body-file` both named (two ways to write the same field), and a
+ * `--body-file` that cannot be read (`-` is stdin). `readFile` is the one effect, injected so a test
+ * feeds it without a disk.
+ */
+export const addFlagsToCard = <R>(
+  raw: AddRawFlags,
+  readFile: (path: string) => Effect.Effect<string, SessionError, R>,
+): Effect.Effect<AddCardFlags, SessionError, R> =>
+  Effect.gen(function* () {
+    const boardId = decodeId(BoardInstanceId, raw.board);
+    if (boardId === undefined) {
+      return yield* invalidInput(
+        `--board "${raw.board}" is not a board id (brd_…)`,
+      );
+    }
+    const repo =
+      raw.repo === undefined ? undefined : decodeId(RepoSlug, raw.repo);
+    if (raw.repo !== undefined && repo === undefined) {
+      return yield* invalidInput(
+        `--repo "${raw.repo}" is not a repository (owner/name)`,
+      );
+    }
+    if (raw.body !== undefined && raw.bodyFile !== undefined) {
+      return yield* invalidInput(
+        "--body and --body-file are two ways to write the body: name one",
+      );
+    }
+    const body =
+      raw.bodyFile === undefined ? raw.body : yield* readFile(raw.bodyFile);
+    return {
+      boardId,
+      title: raw.title,
+      repo,
+      priority: raw.priority,
+      body,
+      baseRef: raw.baseRef,
+      actor: raw.actor,
+    };
+  });
+
 /**
  * Read a body from a file, or from stdin for `-`: a spec is a document, and a shell argument is the
  * wrong place for one. Unreadable is `invalid_input` naming the path, and nothing is sent.
@@ -405,41 +459,21 @@ const addCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
-      const boardId = decodeId(BoardInstanceId, board);
-      if (boardId === undefined) {
-        return yield* reportFailure(
-          "invalid_input",
-          `--board "${board}" is not a board id (brd_…)`,
-        );
-      }
-      const repoSlug = Option.isSome(repo)
-        ? decodeId(RepoSlug, repo.value)
-        : undefined;
-      if (Option.isSome(repo) && repoSlug === undefined) {
-        return yield* reportFailure(
-          "invalid_input",
-          `--repo "${repo.value}" is not a repository (owner/name)`,
-        );
-      }
-      if (Option.isSome(body) && Option.isSome(bodyFile)) {
-        return yield* reportFailure(
-          "invalid_input",
-          "--body and --body-file are two ways to write the body: name one",
-        );
-      }
-      const text = Option.isSome(bodyFile)
-        ? yield* readBodyFile(bodyFile.value)
-        : Option.getOrUndefined(body);
+      const decoded = yield* addFlagsToCard(
+        {
+          board,
+          title,
+          body: Option.getOrUndefined(body),
+          bodyFile: Option.getOrUndefined(bodyFile),
+          repo: Option.getOrUndefined(repo),
+          priority: Option.getOrUndefined(priority),
+          baseRef: Option.getOrUndefined(baseRef),
+          actor,
+        },
+        readBodyFile,
+      );
       const { client } = yield* BoardClient;
-      const lines = yield* addCard(client, {
-        boardId,
-        title,
-        repo: repoSlug,
-        priority: Option.getOrUndefined(priority),
-        body: text,
-        baseRef: Option.getOrUndefined(baseRef),
-        actor,
-      });
+      const lines = yield* addCard(client, decoded);
       for (const line of lines) yield* Console.log(line);
     });
 

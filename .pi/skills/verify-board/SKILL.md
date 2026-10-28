@@ -213,7 +213,9 @@ commands: an assertion must not match an earlier command's output.
 
 Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), gitignored:
 
-- `create.json` — the created card, its `getTask` read-back, and the create phase's checks
+- `add.json` — the drive's cards (`factory board add`'s and the form-equivalent one) read back, the equivalence, and the add phase's checks
+- `add.txt`, `add-pair.txt`, `add-unknown.txt`, `add-empty.txt` — raw panes of `board add`: the drive's card, the card with every flag, and the two refusals
+- `create.json` — a card made over `createTask` by `create.ts` (`triage.sh`, `board-create.sh`): the card, its `getTask` read-back and its checks
 - `ls.txt`, `show.txt`, `move.txt`, `move-stale.txt`, `move-undeclared.txt`, `start.txt`,
   `show-asked.txt`, `comment.txt`, `show-answered.txt`, `start-next.txt`, `move-planning.txt`,
   `move-gate.txt`, `show-after.txt`, `show-building.txt` (`move-building.txt` only when the browser
@@ -233,7 +235,7 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `web.json`, `web-board.png` — the dashboard phase's checks, the lanes and pane as rendered, the
   server's `getTask` it was compared with, and the screenshot
 - `observed.json` — every check with its detail, the board id, the card id and both session ids.
-  `drive.sh` deletes `create.json`, `specify-*.json`, `spec-*.json`, `spec-pane.png`, `build-*.json`,
+  `drive.sh` deletes `add.json`, `add{,-pair,-unknown,-empty}.txt`, `specify-*.json`, `spec-*.json`, `spec-pane.png`, `build-*.json`,
   `pr-body.md`, `web.json`, `web-board.png`, `both-ways*` and `observed.json` before it starts,
   so a phase that dies before writing cannot leave an earlier run's passing file behind
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,

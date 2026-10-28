@@ -255,12 +255,12 @@ check "and the empty-title refusal exits non-zero" \
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" \
   TASK_ID="$TASK_ID" TITLE="$TASK_TITLE" BODY="$CARD_BODY" PAIR_ID="$PAIR_ID" \
   PAIR_TITLE="$PAIR_TITLE" PAIR_BODY="$PAIR_BODY" PAIR_PRIORITY=urgent PAIR_BASE_REF="$PAIR_BASE_REF" \
-  CARDS_BEFORE="$CARDS_BEFORE" bun "$SKILL/add.ts" > "$RUN_DIR/create.log" 2>&1
-CREATE_RC=$?
-cat "$RUN_DIR/create.log"
+  CARDS_BEFORE="$CARDS_BEFORE" bun "$SKILL/add.ts" > "$RUN_DIR/add.log" 2>&1
+ADD_RC=$?
+cat "$RUN_DIR/add.log"
 check "the cards read back as made (add.ts)" \
-  "$([ "$CREATE_RC" = "0" ] && echo 0 || echo 1)" \
-  "exit=$CREATE_RC, see add.json"
+  "$([ "$ADD_RC" = "0" ] && echo 0 || echo 1)" \
+  "exit=$ADD_RC, see add.json"
 
 # --- ls: lanes in definition order, the card in its lane ------------------------------------------
 fresh

@@ -43,12 +43,13 @@ factory board add --board brd_… --title Release --body-file spec.md --priority
 board's repository and the body it was given; a `createTask` naming another repository is
 `BoardRepoMismatch`, naming both; a `createTask` with the second card's inputs — the form's call —
 lists with the same title, body, repo, priority and base ref as the CLI's card; and the refused
-commands wrote no card. That `createTask` is the only direct create in the phase, and it is there to
+`BoardRepoMismatch` create wrote no card on the board. That `createTask` is the only direct create in the phase, and it is there to
 be compared.
 
 `apps/cli/src/commands/board.test.ts` covers the printed line, the exact input sent (present fields
 only, trimmed title), the empty-title and over-limit refusals sending nothing, and the unknown
-board's printed refusal and exit code.
+board's printed refusal and exit code. `addFlagsToCard` (the decode of the typed flags) is tested
+for `--body` with `--body-file`, a malformed `--board` or `--repo`, and an unreadable `--body-file`.
 
 ## What it does not prove
 

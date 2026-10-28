@@ -31,6 +31,7 @@ import {
   NOTHING_NEEDS_A_PERSON,
   RUNS_HEADER,
   addCard,
+  addFlagsToCard,
   attentionLines,
   blockCard,
   bodyLines,
@@ -774,5 +775,104 @@ describe("addCard (LOB-261)", () => {
       expect(out.codes).toEqual([1]);
       expect(out.s.sent).toEqual([]);
     });
+  });
+});
+
+describe("addFlagsToCard (LOB-261)", () => {
+  const BOARD_ID = `brd_${"1".repeat(26)}`;
+  const raw = (over: Partial<Parameters<typeof addFlagsToCard>[0]> = {}) => ({
+    board: BOARD_ID,
+    title: "Pin the Postgres major",
+    body: undefined,
+    bodyFile: undefined,
+    repo: undefined,
+    priority: undefined,
+    baseRef: undefined,
+    actor: "cli",
+    ...over,
+  });
+  /** A disk with the files named; any other path is unreadable, as the real reader reports it. */
+  const disk = (files: Record<string, string>) => {
+    const read: string[] = [];
+    return {
+      read,
+      readFile: (path: string) => {
+        read.push(path);
+        return path in files
+          ? Effect.succeed(files[path] as string)
+          : Effect.fail(
+              new SessionError({
+                code: "invalid_input",
+                message: `--body-file "${path}" cannot be read: no such file`,
+              }),
+            );
+      },
+    };
+  };
+  const refusal = async (over: Partial<Parameters<typeof addFlagsToCard>[0]>) =>
+    Effect.runPromise(
+      Effect.flip(addFlagsToCard(raw(over), disk({ "spec.md": "x" }).readFile)),
+    );
+
+  it("decodes the board and repo and carries every other flag through", async () => {
+    const decoded = await Effect.runPromise(
+      addFlagsToCard(
+        raw({ repo: "acme/api", priority: "urgent", baseRef: "release" }),
+        disk({}).readFile,
+      ),
+    );
+    expect(decoded).toMatchObject({
+      boardId: BOARD_ID,
+      repo: "acme/api",
+      priority: "urgent",
+      baseRef: "release",
+      body: undefined,
+    });
+  });
+
+  it("takes the body from --body-file, verbatim, without touching the disk for --body", async () => {
+    const d = disk({ "spec.md": "# Spec\n\nline\n" });
+    const fromFile = await Effect.runPromise(
+      addFlagsToCard(raw({ bodyFile: "spec.md" }), d.readFile),
+    );
+    expect(fromFile.body).toBe("# Spec\n\nline\n");
+    const typed = await Effect.runPromise(
+      addFlagsToCard(raw({ body: "typed" }), d.readFile),
+    );
+    expect(typed.body).toBe("typed");
+    expect(d.read).toEqual(["spec.md"]);
+  });
+
+  it("refuses --body with --body-file as invalid_input, reading nothing", async () => {
+    const d = disk({ "spec.md": "x" });
+    const error = await Effect.runPromise(
+      Effect.flip(
+        addFlagsToCard(raw({ body: "typed", bodyFile: "spec.md" }), d.readFile),
+      ),
+    );
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain("name one");
+    expect(d.read).toEqual([]);
+  });
+
+  it("refuses a malformed --board or --repo as invalid_input, naming the flag", async () => {
+    const board = await refusal({ board: "not-a-board" });
+    expect(board.code).toBe("invalid_input");
+    expect(board.message).toContain('--board "not-a-board"');
+    for (const repo of ["not-a-slug", "a/b/c", ""]) {
+      const error = await refusal({ repo });
+      expect(error.code).toBe("invalid_input");
+      expect(error.message).toContain(`--repo "${repo}"`);
+    }
+  });
+
+  it("refuses an unreadable --body-file as invalid_input naming the path", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
+        addFlagsToCard(raw({ bodyFile: "/nonexistent" }), disk({}).readFile),
+      ),
+    );
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain('--body-file "/nonexistent"');
   });
 });
