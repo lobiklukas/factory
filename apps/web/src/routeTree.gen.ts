@@ -16,6 +16,7 @@ import { Route as ReposRouteImport } from './routes/repos'
 import { Route as SandboxesRouteImport } from './routes/sandboxes'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as SpendRouteImport } from './routes/spend'
+import { Route as TriggersRouteImport } from './routes/triggers'
 import { Route as BoardsIndexRouteImport } from './routes/boards.index'
 import { Route as BoardsBoardIdRouteImport } from './routes/boards.$boardId'
 import { Route as SessionsIndexRouteImport } from './routes/sessions.index'
@@ -57,6 +58,11 @@ const SpendRoute = SpendRouteImport.update({
   path: '/spend',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TriggersRoute = TriggersRouteImport.update({
+  id: '/triggers',
+  path: '/triggers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BoardsIndexRoute = BoardsIndexRouteImport.update({
   id: '/boards/',
   path: '/boards/',
@@ -91,6 +97,7 @@ export interface FileRoutesByFullPath {
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/spend': typeof SpendRoute
+  '/triggers': typeof TriggersRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/boards/': typeof BoardsIndexRoute
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/spend': typeof SpendRoute
+  '/triggers': typeof TriggersRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/boards': typeof BoardsIndexRoute
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/spend': typeof SpendRoute
+  '/triggers': typeof TriggersRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/boards/': typeof BoardsIndexRoute
@@ -135,6 +144,7 @@ export interface FileRouteTypes {
     | '/sandboxes'
     | '/sessions'
     | '/spend'
+    | '/triggers'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
     | '/boards/'
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/repos'
     | '/sandboxes'
     | '/spend'
+    | '/triggers'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
     | '/boards'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/sandboxes'
     | '/sessions'
     | '/spend'
+    | '/triggers'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
     | '/boards/'
@@ -177,6 +189,7 @@ export interface RootRouteChildren {
   SandboxesRoute: typeof SandboxesRoute
   SessionsRoute: typeof SessionsRouteWithChildren
   SpendRoute: typeof SpendRoute
+  TriggersRoute: typeof TriggersRoute
   BoardsBoardIdRoute: typeof BoardsBoardIdRoute
   BoardsIndexRoute: typeof BoardsIndexRoute
   BoardsBoardIdSettingsRoute: typeof BoardsBoardIdSettingsRoute
@@ -231,6 +244,13 @@ declare module '@tanstack/react-router' {
       path: '/spend'
       fullPath: '/spend'
       preLoaderRoute: typeof SpendRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/triggers': {
+      id: '/triggers'
+      path: '/triggers'
+      fullPath: '/triggers'
+      preLoaderRoute: typeof TriggersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/boards/': {
@@ -293,6 +313,7 @@ const rootRouteChildren: RootRouteChildren = {
   SandboxesRoute: SandboxesRoute,
   SessionsRoute: SessionsRouteWithChildren,
   SpendRoute: SpendRoute,
+  TriggersRoute: TriggersRoute,
   BoardsBoardIdRoute: BoardsBoardIdRoute,
   BoardsIndexRoute: BoardsIndexRoute,
   BoardsBoardIdSettingsRoute: BoardsBoardIdSettingsRoute,
