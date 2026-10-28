@@ -3,8 +3,10 @@
 **What it is.** The composer's **Interrupt this run** button (C8, D9's steer and interrupt), shown
 while the session is `busy`. A press sends one `interruptSession`: the server commits an
 `interrupted` entry and aborts the root conversation, so the run settles without an answer, its
-queued messages are withdrawn, and the session goes `idle`. The transcript ends the turn with an
-`interrupted` row (`data-entry-kind="interrupted"`), the control plane's line rather than the agent's.
+queued messages are withdrawn, and the session goes `idle`. The turn carries one `interrupted` row
+(`data-entry-kind="interrupted"`), the control plane's line rather than the agent's. It is committed
+before the abort, so an interrupt that lands mid tool call is followed by that call's aborted result;
+one that lands while the model naps, as here, is the turn's last entry.
 A later message runs normally. While the call is in flight the button is unavailable (`aria-busy`,
 never natively `disabled`) and a second press is dropped. An interrupt that reaches a session whose
 run already settled is answered `not_running`, an outcome rather than an error, and the pane shows
@@ -31,10 +33,14 @@ text contains `session <id> is not running: there was no run to interrupt` (the 
 and the log still holds one `interrupted` entry. Evidence: `interrupt-busy.png`,
 `interrupt-stopped.png`, `interrupt-follow-up.png`, `interrupt-refused.png`, `observed.json`.
 
-**What it does not prove.** Interrupting a running tool call, or a run a dead process left behind:
-those are Pi Durable's abort, proven at the service by `packages/core/src/SessionService.test.ts`
-("stops a run the shutdown interrupted on an interrupt"). The stop itself, the marker and
-`not_running` are unit-proven in `packages/core/src/SessionService.interrupt.test.ts`; the wire shape
+**What it does not prove.** Interrupting a running tool call, overlapping interrupts, or a run a
+dead process left behind: those are proven at the service — a sleeping `bash` call stopped by two
+interrupts at once leaves one marker with the call's aborted result after it, and a full server
+(`SESSION_MAX_CONCURRENT`) still stops a paused run and answers an idle session `not_running`
+without opening it, in `packages/core/src/SessionService.interrupt.test.ts`; a run the shutdown
+interrupted in `packages/core/src/SessionService.test.ts` ("stops a run the shutdown interrupted on
+an interrupt"). The stop itself, the marker and `not_running` are unit-proven in
+`packages/core/src/SessionService.interrupt.test.ts`; the wire shape
 in `apps/api/src/Rpc/Session.test.ts`; the button's markup and one-press guard in
 `apps/web/src/components/interrupt-button.test.tsx`; the toast's words in
 `apps/web/src/lib/interrupt-view.test.ts`. The CLI is `verify-cli`'s [interrupt.md](../../verify-cli/features/interrupt.md).

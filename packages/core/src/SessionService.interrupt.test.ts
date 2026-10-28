@@ -1,7 +1,7 @@
 /**
- * Interrupting a session (C8): a busy run stops, the transcript ends the turn with an `interrupted`
- * entry, a later message runs normally, and an interrupt with no run to stop is an answer
- * (`not_running`) that writes nothing.
+ * Interrupting a session (C8): a busy run stops, the turn carries one `interrupted` entry, a later
+ * message runs normally, and an interrupt with no run to stop is an answer (`not_running`) that
+ * writes nothing and opens nothing — at capacity too, where an interrupt of work is never refused.
  *
  * The owner's model naps before each step of a turn, so a run is busy for several seconds — long
  * enough to interrupt mid-nap, and long enough that a run the interrupt missed would still go on to
@@ -56,6 +56,9 @@ const waitUntil = <E, R>(
 
 /** What the faux command prints: present in a transcript only if its `bash` call ran. */
 const FAUX_OUTPUT = FAUX_COMMAND.replace(/^echo /, "");
+
+/** What the sleeping tool would print, had the interrupt missed it. */
+const SLEPT = "slept-ok";
 
 const printed = (snapshot: SessionSnapshot): boolean =>
   snapshot.entries.some((entry) => entry.text.includes(FAUX_OUTPUT));
@@ -144,6 +147,128 @@ describe("interrupting a session", () => {
       `session ${outcome.created.id} is not running: there was no run to interrupt`,
     );
     expect(outcome.after.entries).toEqual(outcome.before.entries);
+  }, 120_000);
+
+  it("marks a run stopped mid tool call once, however many interrupts overlap, with the call's result after the marker", async () => {
+    // A `bash` call that sleeps: the interrupt lands while the tool runs, not while the model naps.
+    const tooling = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({
+          fauxCommand: `sleep 20 && echo ${SLEPT}`,
+        }).access,
+        sessionRoot: mkdtempSync(
+          join(tmpdir(), "factory-core-interrupt-tool-"),
+        ),
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      const outcome = await tooling.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "a tool to stop" });
+          yield* sessions.send({ sessionId: created.id, content: "sleep" });
+          yield* waitUntil(
+            sessions
+              .get(created.id)
+              .pipe(
+                Effect.map((snapshot) =>
+                  snapshot.live.tools.some((tool) => tool.status === "running"),
+                ),
+              ),
+            "the bash call to start",
+          );
+          // The dashboard and `factory interrupt` at once: both answer, one marker is written.
+          const answers = yield* Effect.all(
+            [sessions.interrupt(created.id), sessions.interrupt(created.id)],
+            { concurrency: "unbounded" },
+          );
+          const again = yield* sessions.interrupt(created.id);
+          const stopped = yield* sessions.get(created.id);
+          yield* sessions.close;
+          return { answers, again, stopped };
+        }),
+      );
+
+      expect(outcome.answers.map((answer) => answer.outcome)).toContain(
+        "interrupted",
+      );
+      expect(outcome.again.outcome).toBe("not_running");
+      expect(outcome.stopped.live.busy).toBe(false);
+      const entries = outcome.stopped.entries;
+      expect(entries.some((entry) => entry.text.includes(SLEPT))).toBe(false);
+      const markers = entries.filter((entry) => entry.kind === "interrupted");
+      expect(markers).toHaveLength(1);
+      // The marker is committed before the abort, so the call the abort stopped settles after it:
+      // what follows the marker is that call's result, and no answer.
+      const after = entries
+        .slice(entries.findIndex((entry) => entry.kind === "interrupted") + 1)
+        .map((entry) => entry.kind);
+      expect(after).not.toContain("assistant");
+      expect(after).toContain("toolResult");
+    } finally {
+      await tooling.dispose();
+    }
+  }, 120_000);
+
+  it("is never refused at capacity: an idle session answers not_running unopened, and a paused run is stopped", async () => {
+    const capped = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({ fauxSleepMs: SLEEP_MS }).access,
+        sessionRoot: mkdtempSync(join(tmpdir(), "factory-core-interrupt-cap-")),
+        maxConcurrentSessions: 1,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      const outcome = await capped.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const idle = yield* sessions.create({ title: "idle at capacity" });
+          yield* sessions.close;
+          // A run the close left placed and unanswered: what a dead process leaves (LOB-25).
+          const paused = yield* sessions.create({
+            title: "paused at capacity",
+          });
+          yield* sessions.send({ sessionId: paused.id, content: "go slowly" });
+          yield* waitUntil(
+            sessions
+              .get(paused.id)
+              .pipe(Effect.map((snapshot) => snapshot.live.busy)),
+            "the run to start",
+          );
+          yield* sessions.close;
+          // The one slot taken by another session.
+          yield* sessions.create({ title: "the slot's holder" });
+          const refused = yield* Effect.exit(
+            sessions.create({ title: "one too many" }),
+          );
+
+          const idleAnswer = yield* sessions.interrupt(idle.id);
+          const pausedAnswer = yield* sessions.interrupt(paused.id);
+          yield* Effect.sleep(SLEEP_MS * 2 + 500);
+          const stopped = yield* sessions.get(paused.id);
+          yield* sessions.close;
+          return { refused, idleAnswer, pausedAnswer, stopped };
+        }),
+      );
+
+      // The server is full: a create is refused, an interrupt is not.
+      expect(Exit.isFailure(outcome.refused)).toBe(true);
+      expect(outcome.idleAnswer.outcome).toBe("not_running");
+      // Answered from the committed log: no owner was opened to say so.
+      expect(outcome.idleAnswer.session.mode).toBe("historical");
+      expect(outcome.pausedAnswer.outcome).toBe("interrupted");
+      expect(outcome.stopped.live.busy).toBe(false);
+      expect(printed(outcome.stopped)).toBe(false);
+      expect(
+        outcome.stopped.entries.filter((entry) => entry.kind === "interrupted"),
+      ).toHaveLength(1);
+    } finally {
+      await capped.dispose();
+    }
   }, 120_000);
 
   it("fails not_found for a session that does not exist", async () => {

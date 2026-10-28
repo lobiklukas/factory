@@ -131,7 +131,7 @@ export const TranscriptRow = ({
     );
   }
 
-  // An interrupt (C8) ends the turn it stopped: the control plane's line, in the
+  // An interrupt (C8) marks the turn it stopped: the control plane's line, in the
   // shape of the Interrupt button that made it, so the turn above it reads as cut
   // short by the operator rather than as an answer that never came.
   if (entry.kind === "interrupted") {

@@ -172,6 +172,8 @@ export const BUDGET_STOPPED_ENTRY_KIND = "factory.budget.stopped";
  * writes nothing a reader would see, so without it an interrupted turn reads as one that went quiet.
  */
 export const INTERRUPTED_ENTRY_KIND = "factory.run.interrupted";
+/** Which work an interrupt already marked (C8), so an overlapping or retried one marks it once. */
+export const INTERRUPT_DOC_KIND = "factory.interrupt";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 /**

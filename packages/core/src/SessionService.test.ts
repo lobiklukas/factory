@@ -1744,9 +1744,14 @@ describe("the model a session runs on", () => {
           (yield* sessions.list({ limit: 100 })).sessions,
           created.id,
         );
-        // The second session's row is blanked again after the rebuild, and its owner reopened.
+        // The second session's row is blanked again after the rebuild, and its owner reopened — by
+        // a send: an interrupt of an idle session answers from the log and opens nothing (C8).
         yield* sql`UPDATE sessions SET model = NULL WHERE id = ${other.id}`;
-        yield* sessions.interrupt(other.id);
+        yield* sessions.send({ sessionId: other.id, content: "reopen" });
+        yield* waitUntil(
+          sessions.get(other.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the reopening run to settle",
+        );
         const reopened = yield* sql<{ model: string | null }>`
           SELECT model FROM sessions WHERE id = ${other.id}
         `;

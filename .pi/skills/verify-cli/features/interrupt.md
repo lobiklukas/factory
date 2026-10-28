@@ -2,7 +2,8 @@
 
 **What it is.** The command that stops a session's run (C8, D9's steer and interrupt). It calls
 `interruptSession`: the server commits an `interrupted` entry and aborts the root conversation, so
-the run settles without an answer and its queued messages are withdrawn. The call returns once the
+the run settles without an answer and its queued messages are withdrawn. The entry comes first, so a
+tool call the abort stopped mid-way prints its aborted result after it. The call returns once the
 session is idle, and the command prints the status it settled in.
 
 **How a user reaches it.** `factory interrupt ses_…` prints `interrupted ses_…: idle` and exits 0. A
