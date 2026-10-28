@@ -143,7 +143,7 @@ export const pullRequestReport = (
         return {
           _tag: "failed",
           step: "non-fast-forward",
-          reason: `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so no pull request was opened`,
+          reason: pullRequestRefusal(step),
         };
     }
   }

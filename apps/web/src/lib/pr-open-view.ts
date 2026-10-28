@@ -41,6 +41,7 @@ export const attemptOfStep = (step: PullRequestStep): PrAttempt => {
     // The same words the tracker write-back posts: one function in the domain, not a copy.
     case "over-cap":
     case "no-change":
+    case "non-fast-forward":
       return { _tag: "refused", reason: pullRequestRefusal(step) };
   }
 };

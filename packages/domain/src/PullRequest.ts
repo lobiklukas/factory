@@ -134,11 +134,17 @@ export type PullRequestStep = typeof PullRequestStep.Type;
  * control (C7) — so the two cannot word the same answer differently.
  */
 export const pullRequestRefusal = (
-  step: OverCapPullRequest | NoChangePullRequest,
-): string =>
-  step.outcome === "over-cap"
-    ? `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`
-    : "the run changed no file against its base branch, so there is nothing to open a pull request for";
+  step: OverCapPullRequest | NoChangePullRequest | NonFastForwardPullRequest,
+): string => {
+  switch (step.outcome) {
+    case "over-cap":
+      return `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`;
+    case "no-change":
+      return "the run changed no file against its base branch, so there is nothing to open a pull request for";
+    case "non-fast-forward":
+      return `the forge's ${step.head} has commits the run's branch does not, and the step never forces a push, so no pull request was opened`;
+  }
+};
 
 /**
  * Open a session's PR (LOB-213): the session and the PR's title, and nothing else.
