@@ -50,8 +50,9 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
 (120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
 
-`exit-checklist.sh` (a column's exit checklist in the card pane, D9) last passed **12/12** on 2026-10-28 from the
-`agent/D9` worktree, API `:9560` / web `:3560`; the pane re-reads on the 10 s `EXIT_POLL`.
+`exit-checklist.sh` (a column's exit checklist in the card pane, D9; planning's `plan_doc` and the Plan
+section, D10) last passed **16/16** on 2026-10-28 from the `agent/D10` worktree, API `:9550` / web `:3550`;
+the pane re-reads on the 10 s `EXIT_POLL`.
 
 `card-edit.sh` (the card pane's block, unblock, urgent flag and title edit, C11) last passed **11/11** on
 2026-10-28 from the `agent/C11` worktree, API `:9582` / web `:3582`.
