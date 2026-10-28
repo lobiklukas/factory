@@ -198,6 +198,17 @@ const DEFAULT = DefinitionId.make("default");
 const deployment = { model: DEPLOYMENT_MODEL, source: "deployment" } as const;
 
 /**
+ * A column's effective autonomy under this deployment (C22), which gates nothing: D11's scopes, or
+ * the read-only stage's for a read-only role.
+ */
+const unasked = {
+  approvalRequired: [],
+  write: "worktree",
+  push: "branch",
+} as const;
+const readOnly = { ...unasked, write: "none" } as const;
+
+/**
  * The default pipeline at version 3, described — written out here rather than derived from the
  * code under test, so a change to the exits, a gate, a checked key or a model is a red diff here.
  */
@@ -209,6 +220,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     skills: [],
     requires: [],
     exits: [{ to: "specifying" }, { to: "canceled" }],
+    autonomy: unasked,
   },
   {
     name: "specifying",
@@ -225,6 +237,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       },
     ],
     exits: [{ to: "planning" }, { to: "canceled" }],
+    autonomy: readOnly,
   },
   {
     name: "planning",
@@ -241,6 +254,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       },
     ],
     exits: [{ to: "building", humanGate: "plan approval" }, { to: "canceled" }],
+    autonomy: unasked,
   },
   {
     name: "building",
@@ -258,6 +272,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       { key: "pr_link", description: "a PR link", checked: true },
     ],
     exits: [{ to: "review" }, { to: "canceled" }],
+    autonomy: unasked,
   },
   {
     name: "review",
@@ -284,6 +299,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       },
     ],
     exits: [{ to: "done", humanGate: "merge" }, { to: "canceled" }],
+    autonomy: unasked,
   },
   {
     name: "done",
@@ -292,6 +308,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     skills: [],
     requires: [],
     exits: [],
+    autonomy: unasked,
   },
   {
     name: "canceled",
@@ -300,6 +317,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     skills: [],
     requires: [],
     exits: [],
+    autonomy: unasked,
   },
 ];
 
@@ -568,6 +586,7 @@ describe("authoring a definition over RPC (D4)", () => {
       skills,
       requires: [{ key: "pr_link", description: "a PR link" }],
       transitions: [{ to: "done", gate: "sign-off" }],
+      autonomy: { approvalRequired: ["git push"], push: "none" as const },
     },
     {
       name: "done",
@@ -622,6 +641,7 @@ describe("authoring a definition over RPC (D4)", () => {
           skills: [],
           requires: [],
           exits: [{ to: "doing" }],
+          autonomy: unasked,
         },
         {
           name: "doing",
@@ -633,6 +653,12 @@ describe("authoring a definition over RPC (D4)", () => {
             { key: "pr_link", description: "a PR link", checked: true },
           ],
           exits: [{ to: "done", humanGate: "sign-off" }],
+          // The column's own autonomy (C22), carried over the RPC and described as a run meets it.
+          autonomy: {
+            approvalRequired: [{ command: "git push", source: "column" }],
+            write: "worktree",
+            push: "none",
+          },
         },
         {
           name: "done",
@@ -641,6 +667,7 @@ describe("authoring a definition over RPC (D4)", () => {
           skills: [],
           requires: [],
           exits: [],
+          autonomy: unasked,
         },
       ],
     });
