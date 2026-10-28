@@ -991,6 +991,11 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  * - `owned_elsewhere` — the request needs the session's owner, and another process holds it (its
  *   presence lease is live, LOB-18): the session reads and streams from anywhere, but work on it is
  *   taken where it is owned, or once that lease lapses. The message names the holder.
+ * - `at_capacity` — admission control (LOB-70): the request would open one more session than the
+ *   server runs at once, so nothing was written and nothing opened. The message names the cap and
+ *   where it is configured (`SESSION_MAX_CONCURRENT`). Transient: the same request succeeds once a
+ *   session is released (the idle sweep), and a retried create with the same `requestId` is a fresh
+ *   attempt, because the refused one left no row behind.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1000,6 +1005,7 @@ export const SessionErrorCode = Schema.Literals([
   "harness",
   "repo_clone_failed",
   "owned_elsewhere",
+  "at_capacity",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

@@ -77,6 +77,13 @@ export const TriggerEvent = Schema.Struct({
    */
   fingerprint: Schema.optional(Schema.String),
   /**
+   * The id a write-back addresses when `key` is not it (LOB-83): a Sentry alert's `key` is its
+   * event, but the note that links the session goes on the event's *issue*, and nothing else on the
+   * event carries that to the write-back. Absent means `key` is the address, as it is for a Linear
+   * issue or a Jira key. Unlike `fingerprint` it routes nothing: it says only where to answer.
+   */
+  address: Schema.optional(Schema.String),
+  /**
    * Why the adapter's own filter refuses this event, when it does (LOB-82): a sentence naming the
    * field and the value that failed (`level "warning" is below SENTRY_MIN_LEVEL "error"`). The seam
    * records it as the delivery's skip reason and starts nothing — a recorded decision, not a drop.
@@ -255,11 +262,17 @@ export const TriggerOutcome = Schema.Struct({
 });
 export type TriggerOutcome = typeof TriggerOutcome.Type;
 
+/**
+ * Why a delivery failed. `at-capacity` (LOB-70) is the session layer's `at_capacity`: the delivery
+ * would have opened one more session than the server runs at once. It is the one code a route
+ * answers `503` with `Retry-After` rather than `500`, because it is a "not now", not a fault.
+ */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
   "session-create",
   "card-create",
   "write-back",
+  "at-capacity",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 
