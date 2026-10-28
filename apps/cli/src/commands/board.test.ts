@@ -41,6 +41,9 @@ import {
   runsLines,
   specLines,
   exitLines,
+  commentCard,
+  StartNeedsAnswer,
+  StartNotStarted,
   startCard,
   type StartClient,
   updateCard,
@@ -1171,6 +1174,163 @@ describe("startCard (C6)", () => {
       "warning no checkout",
     ]);
     expect(lines.some((line) => line.startsWith("sent"))).toBe(false);
+  });
+});
+
+describe("commentCard --start (C24)", () => {
+  const SESSION = Schema.decodeSync(SessionId)(SESSION_A);
+  const ANSWER = "Postgres 16.\n  Keep port 5442 — it is shared.";
+  const blocked = {
+    reason: "needs_input",
+    column: "building",
+    since: "2026-10-27T00:00:00.000Z",
+  } as const;
+
+  /**
+   * A server with one card that is `before` the comment and `after` it, every call recorded in order
+   * so a case reads what the command did and when: the comment must precede the session.
+   */
+  const server = (before: Task, after: Task) => {
+    const calls: Array<string> = [];
+    const sent: Array<string> = [];
+    const client = {
+      getTask: () =>
+        Effect.succeed(calls.includes("commentTask") ? after : before),
+      commentTask: (input: { expectedRevision: number }) => {
+        calls.push(`commentTask r${input.expectedRevision}`);
+        calls.push("commentTask");
+        return Effect.succeed(after);
+      },
+      getBoard: () =>
+        Effect.succeed({
+          instance: { definitionId: "default" as never },
+          definition: {
+            version: 1,
+            columns: [{ name: "building", requires: [] }],
+          },
+        }),
+      getDefinition: () => Effect.succeed({ columns: [] }),
+      createSession: (input: { taskColumn: string; actor: string }) => {
+        calls.push(`createSession ${input.taskColumn} ${input.actor}`);
+        return Effect.succeed({ id: SESSION });
+      },
+      getSession: () => Effect.succeed({ workspace: {} }),
+      sendMessage: (input: { content: string }) => {
+        calls.push("sendMessage");
+        sent.push(input.content);
+        return Effect.succeed({});
+      },
+    };
+    return { client, calls, sent };
+  };
+  const run = <E>(
+    client: Parameters<typeof commentCard<E, E>>[0],
+    start: string | undefined,
+  ) => {
+    const lines: Array<string> = [];
+    const effect = commentCard(
+      client,
+      {
+        taskId: TASK as never,
+        expectedRevision: 3,
+        body: ANSWER,
+        actor: "person:ana",
+        start,
+      },
+      (line) =>
+        Effect.sync(() => {
+          lines.push(line);
+        }),
+    );
+    return { lines, effect };
+  };
+  const asked = card({ blocked, revision: 3 });
+  const answered = card({ revision: 5 });
+
+  /**
+   * The acceptance: an answer with --start opens the next run on the card, after the comment, in the
+   * card's column, attributed to the one who answered, and sends it the card's default prompt.
+   * Mutation: start before the comment, ignore the flag, drop the actor, or send no prompt.
+   */
+  it("answers, then opens and prompts the next run on the card", async () => {
+    const s = server(asked, answered);
+    const { lines, effect } = run(s.client, "person:ana");
+    await Effect.runPromise(effect);
+    expect(s.calls).toEqual([
+      "commentTask r3",
+      "commentTask",
+      "createSession building person:ana",
+      "sendMessage",
+    ]);
+    expect(s.sent).toHaveLength(1);
+    expect(s.sent[0]).toContain("Pin the Postgres major");
+    expect(lines).toEqual([
+      `commented on ${TASK} (revision 5)`,
+      `answered: ${TASK} is no longer blocked (needs_input from building)`,
+      `session ${SESSION_A}`,
+      `task    ${TASK} in building`,
+      "sent    Pin the Postgres major (the card's default prompt)",
+    ]);
+  });
+
+  it("starts nothing without --start: the answer alone, as before", async () => {
+    const s = server(asked, answered);
+    const { lines, effect } = run(s.client, undefined);
+    await Effect.runPromise(effect);
+    expect(s.calls).toEqual(["commentTask r3", "commentTask"]);
+    expect(lines).toEqual([
+      `commented on ${TASK} (revision 5)`,
+      `answered: ${TASK} is no longer blocked (needs_input from building)`,
+    ]);
+  });
+
+  /** Mutation: check after the write, or start anyway — a note would leave a run nobody asked for. */
+  it("refuses --start on a card that is not blocked needs_input, before writing anything", async () => {
+    for (const given of [
+      card({ revision: 3 }),
+      card({ blocked: { ...blocked, reason: "dependency" }, revision: 3 }),
+    ]) {
+      const s = server(given, given);
+      const { effect } = run(s.client, "cli");
+      const error = await Effect.runPromise(Effect.flip(effect));
+      expect(error).toBeInstanceOf(StartNeedsAnswer);
+      expect(error.message).toContain("nothing was commented");
+      expect(s.calls).toEqual([]);
+    }
+  });
+
+  it("reports a comment that left the card blocked and starts no run", async () => {
+    const stillBlocked = card({ blocked, revision: 4 });
+    const s = server(asked, stillBlocked);
+    const { lines, effect } = run(s.client, "cli");
+    const error = await Effect.runPromise(Effect.flip(effect));
+    expect(error).toBeInstanceOf(StartNotStarted);
+    expect(s.calls).not.toContain("sendMessage");
+    expect(lines.at(-1)).toContain("not started");
+  });
+
+  /** A run's comment is a note on the server; --start must be refused before it is written. */
+  it("refuses --start with a run's actor, before writing anything", async () => {
+    const s = server(asked, asked);
+    const lines: Array<string> = [];
+    const error = await Effect.runPromise(
+      Effect.flip(
+        commentCard(
+          s.client,
+          {
+            taskId: TASK as never,
+            expectedRevision: 3,
+            body: ANSWER,
+            actor: SESSION_A,
+            start: "cli",
+          },
+          (line) => Effect.sync(() => void lines.push(line)),
+        ),
+      ),
+    );
+    expect(error).toBeInstanceOf(StartNeedsAnswer);
+    expect(error.message).toContain("nothing was commented");
+    expect(s.calls).toEqual([]);
   });
 });
 
