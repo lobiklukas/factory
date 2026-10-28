@@ -666,6 +666,106 @@ const snapshot = (boardId: string) =>
   );
 
 /**
+ * Who wrote a version (F7): `defineBoard` records the actor it is given on the row it inserts, and
+ * only there — an `unchanged` answer and a dry run write no row and so no author.
+ */
+describe("TaskService.defineBoard author (F7)", () => {
+  const authorColumn = (id: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return (yield* sql<{ version: number; author: string | null }>`
+          SELECT version, author FROM board_definitions WHERE id = ${id} ORDER BY version
+        `).map((row) => [row.version, row.author] as const);
+      }),
+    );
+
+  /**
+   * Mutation: drop `author` from the INSERT — the column stays NULL. Mutation: read the author from
+   * the newest version rather than the one asked for — v1 answers v2's author. Mutation: write `''`
+   * for an unattributed version — it would read as an author with no name.
+   */
+  it("records the actor on the version it writes, reads it back, and lists it", async () => {
+    const id = newId();
+    const v1 = await withService((s) =>
+      s.defineBoard({ ...input(id), actor: "alice" }, LIBRARY),
+    );
+    expect(v1.definition.author).toBe("alice");
+    const v2 = await withService((s) =>
+      s.defineBoard({ ...input(id, { name: "two" }), actor: "bob" }, LIBRARY),
+    );
+    expect(v2.definition.author).toBe("bob");
+    const v3 = await withService((s) =>
+      s.defineBoard(input(id, { name: "three" }), LIBRARY),
+    );
+    expect(v3.definition.author).toBeUndefined();
+    expect(await authorColumn(id)).toEqual([
+      [1, "alice"],
+      [2, "bob"],
+      [3, null],
+    ]);
+    expect((await withService((s) => s.getDefinition(id, 1))).author).toBe(
+      "alice",
+    );
+    expect("author" in (await withService((s) => s.getDefinition(id)))).toBe(
+      false,
+    );
+    const listed = await withService((s) => s.listDefinitions);
+    expect(
+      listed.find((entry) => entry.id === id)?.versions.map((v) => v.author),
+    ).toEqual(["alice", "bob", undefined]);
+  });
+
+  /**
+   * Mutation: attribute an `unchanged` answer by updating the newest row's author — the second
+   * caller would take the first's version. Mutation: insert on a dry run.
+   */
+  it("writes no author for an unchanged answer or a dry run", async () => {
+    const id = newId();
+    await withService((s) =>
+      s.defineBoard({ ...input(id), actor: "alice" }, LIBRARY),
+    );
+    const before = await allRows();
+    const same = await withService((s) =>
+      s.defineBoard({ ...input(id), actor: "bob" }, LIBRARY),
+    );
+    expect([same.outcome, same.definition.author]).toEqual([
+      "unchanged",
+      "alice",
+    ]);
+    const dry = await withService((s) =>
+      s.defineBoard(
+        { ...input(id, { name: "dry" }), actor: "bob", dryRun: true },
+        LIBRARY,
+      ),
+    );
+    expect(dry.outcome).toBe("validated");
+    expect(dry.definition.author).toBeUndefined();
+    expect(await allRows()).toEqual(before);
+    expect(await authorColumn(id)).toEqual([[1, "alice"]]);
+  });
+
+  it("leaves a seeded version without an author", async () => {
+    const seeded = await withService((s) =>
+      s.getDefinition(DEFAULT_DEFINITION_ID, 1),
+    );
+    expect(seeded.author).toBeUndefined();
+  });
+
+  /** A refused version writes no row, so there is no author to name for it. */
+  it("writes nothing for a refused version", async () => {
+    const id = newId();
+    await refusal((s) =>
+      s.defineBoard(
+        { ...input(id, { initialColumn: "nowhere" }), actor: "alice" },
+        LIBRARY,
+      ),
+    );
+    expect(await authorColumn(id)).toEqual([]);
+  });
+});
+
+/**
  * A run on the card, written as `createSession` writes it (a `task_runs` row): unfinished unless
  * `finished`. The rows are written and the upgrade run in one transaction (the upgrade's own nests
  * as a savepoint), because a concurrent `rebuildIndexes` in another suite deletes every `task_runs`

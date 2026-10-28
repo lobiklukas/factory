@@ -7,12 +7,15 @@
  */
 import { Schema } from "effect";
 import {
+  BoardDefinition,
   BoardInstance,
   ColumnConfig,
   DefinitionConfig,
   DefinitionSummary,
+  DefinitionVocabulary,
   InvalidDefinition,
   LIST_BOARDS_LIMIT,
+  definitionSourceOf,
 } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,9 +24,11 @@ import {
   columnLines,
   decodeDefinitionFile,
   definedLines,
+  definitionFileText,
   definitionLines,
   definitionsLines,
   invalidDefinitionLines,
+  vocabularyLines,
 } from "./boardConfig";
 
 const planning = Schema.decodeSync(ColumnConfig)({
@@ -353,5 +358,216 @@ describe("board define (D4)", () => {
       "  initialColumn: no initial column",
       "  columns[1].role: unknown role",
     ]);
+  });
+});
+
+/** Who wrote a version (F7): named when someone did, absent for a seeded version. */
+describe("a definition version's author (F7)", () => {
+  /** Mutation: print `by ` with an empty name, or print it for a seeded version — absent must read as absent. */
+  it("names the author last on a definitions line, and prints nothing for a seeded version", () => {
+    const definitions = Schema.decodeSync(Schema.Array(DefinitionSummary))([
+      {
+        id: "default",
+        versions: [
+          {
+            version: 1,
+            name: "Seeded",
+            createdAt: "2026-10-01T00:00:00.000Z",
+          },
+          {
+            version: 2,
+            name: "Authored",
+            createdAt: "2026-10-02T00:00:00.000Z",
+            author: "alice",
+          },
+        ],
+      },
+    ]);
+    expect(definitionsLines(definitions)).toEqual([
+      "default  v1  Seeded  2026-10-01T00:00:00.000Z",
+      "default  v2  Authored  2026-10-02T00:00:00.000Z  by alice",
+    ]);
+  });
+
+  it("prints an author line under the definition header only when the version has one", () => {
+    const base = {
+      id: "authored",
+      version: 2,
+      name: "Authored",
+      initialColumn: "done",
+      columns: [done],
+    };
+    const authored = definitionLines(
+      Schema.decodeSync(DefinitionConfig)({ ...base, author: "alice" }),
+    );
+    expect(authored.slice(0, 3)).toEqual([
+      "definition  authored v2  Authored",
+      "author      alice",
+      "initial     done",
+    ]);
+    expect(
+      definitionLines(Schema.decodeSync(DefinitionConfig)(base)).some((line) =>
+        line.startsWith("author"),
+      ),
+    ).toBe(false);
+  });
+});
+
+/** `factory board vocabulary` (F5): every key and role the server answered, marked as the RPC marks them. */
+describe("vocabularyLines (F5)", () => {
+  const vocabulary = Schema.decodeSync(DefinitionVocabulary)({
+    requirements: [
+      {
+        key: "pr_link",
+        description: "a PR link",
+        checked: true,
+        humanGate: false,
+      },
+      {
+        key: "plan_doc",
+        description: "a plan doc",
+        checked: false,
+        humanGate: false,
+      },
+      {
+        key: "merge",
+        description: "a person merges",
+        checked: false,
+        humanGate: true,
+      },
+      {
+        key: "human_merge",
+        description: "the PR merged",
+        checked: true,
+        humanGate: true,
+      },
+    ],
+    roles: ["planner", "reviewer"],
+  });
+
+  /**
+   * Mutation: drop the `[human gate]` marker, swap checked and unchecked, or print only the keys
+   * and not the roles — each fails a line below.
+   */
+  it("prints one line per requirement key, marking checked and human-gate keys, then one per role", () => {
+    expect(vocabularyLines(vocabulary)).toEqual([
+      "requirement  pr_link  checked  a PR link",
+      "requirement  plan_doc  unchecked  a plan doc",
+      "requirement  merge  unchecked  [human gate]  a person merges",
+      "requirement  human_merge  checked  [human gate]  the PR merged",
+      "role  planner",
+      "role  reviewer",
+    ]);
+  });
+
+  it("prints nothing for an empty vocabulary", () => {
+    expect(vocabularyLines({ requirements: [], roles: [] })).toEqual([]);
+  });
+});
+
+/**
+ * `factory board definition show --json` (F8): the file text for a version, which `board define`
+ * decodes — with excess properties refused — back to the same definition.
+ */
+describe("definitionFileText (F8)", () => {
+  const column = (name: string, kind: string, extra: object = {}) => ({
+    name,
+    kind,
+    skills: [],
+    requires: [],
+    ...extra,
+  });
+
+  /** A legacy version: no moves, no initial column, and a field the file must not carry. */
+  const legacy = Schema.decodeSync(BoardDefinition)({
+    id: "default",
+    version: 2,
+    name: "Legacy",
+    author: "alice",
+    columns: [
+      column("intake", "resting"),
+      column("specifying", "working", { wipLimit: 2 }),
+      column("planning", "working", {
+        autonomy: { approvalRequired: ["npm publish"], push: "none" },
+      }),
+      column("building", "working"),
+      column("review", "resting"),
+      column("done", "terminal"),
+      column("canceled", "terminal"),
+    ],
+  });
+
+  it("is a file `define` decodes, with the moves and the initial column a legacy version leaves implicit spelled out", () => {
+    const text = definitionFileText(definitionSourceOf(legacy));
+    const decoded = decodeDefinitionFile(text);
+    expect(decoded).toHaveProperty("file");
+    const file = "file" in decoded ? decoded.file : undefined;
+    expect(file?.initialColumn).toBe("intake");
+    expect(
+      file?.columns.map((entry) => entry.transitions?.map((m) => m.to)),
+    ).toEqual([
+      ["specifying", "canceled"],
+      ["planning", "canceled"],
+      ["building", "canceled"],
+      ["review", "canceled"],
+      ["done", "canceled"],
+      [],
+      [],
+    ]);
+    // Fields the column declares come back as declared, not as the deployment resolves them.
+    expect(file?.columns[1]?.wipLimit).toBe(2);
+    expect(file?.columns[2]?.autonomy).toEqual({
+      approvalRequired: ["npm publish"],
+      push: "none",
+    });
+  });
+
+  /** Mutation: emit the described `version` or `author` — `define` refuses unknown keys, so the file would not load. */
+  it("names no key `define` would refuse: no version, no author, no actor", () => {
+    const parsed: unknown = JSON.parse(
+      definitionFileText(definitionSourceOf(legacy)),
+    );
+    expect(Object.keys(parsed as object).toSorted()).toEqual([
+      "columns",
+      "id",
+      "initialColumn",
+      "name",
+    ]);
+    expect(
+      decodeDefinitionFile(
+        JSON.stringify({ ...(parsed as object), version: 2 }),
+      ),
+    ).toHaveProperty("refused");
+    expect(
+      decodeDefinitionFile(
+        JSON.stringify({ ...(parsed as object), author: "alice" }),
+      ),
+    ).toHaveProperty("refused");
+    expect(
+      decodeDefinitionFile(
+        JSON.stringify({ ...(parsed as object), actor: "alice" }),
+      ),
+    ).toHaveProperty("refused");
+  });
+
+  it("is a fixed point: a version that declares its moves and caps is emitted as it is, and decodes to itself", () => {
+    const authored = Schema.decodeSync(BoardDefinition)({
+      id: "authored",
+      version: 3,
+      name: "Authored",
+      initialColumn: "todo",
+      caps: { board: 2 },
+      columns: [
+        column("todo", "resting", {
+          transitions: [{ to: "done", gate: "merge" }],
+        }),
+        column("done", "terminal", { transitions: [] }),
+      ],
+    });
+    const source = definitionSourceOf(authored);
+    expect(source.columns).toEqual(authored.columns);
+    expect(source.caps).toEqual({ board: 2 });
+    const decoded = decodeDefinitionFile(definitionFileText(source));
+    expect(decoded).toEqual({ file: source });
   });
 });

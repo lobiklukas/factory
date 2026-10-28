@@ -2,8 +2,8 @@ import { Console, Effect, FileSystem, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import {
   BoardInstanceId,
-  DefineBoardInput,
   DefinitionId,
+  DefinitionSource,
   InvalidDefinition,
   LIST_BOARDS_LIMIT,
   type BoardInstance,
@@ -13,6 +13,7 @@ import {
   type DefinedBoard,
   type DefinitionConfig,
   type DefinitionSummary,
+  type DefinitionVocabulary,
 } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
@@ -72,7 +73,10 @@ export const boardListLines = (
           : []),
       ];
 
-/** `factory board definitions`: one line per definition version, oldest first within each id. */
+/**
+ * `factory board definitions`: one line per definition version, oldest first within each id. A
+ * version someone wrote names them last (`by <actor>`, F7); a seeded one ends at its time.
+ */
 export const definitionsLines = (
   definitions: ReadonlyArray<DefinitionSummary>,
 ): ReadonlyArray<string> =>
@@ -83,6 +87,7 @@ export const definitionsLines = (
         `v${version.version}`,
         version.name,
         version.createdAt,
+        ...(version.author === undefined ? [] : [`by ${version.author}`]),
       ].join("  "),
     ),
   );
@@ -183,13 +188,17 @@ const capsLines = (caps: DefinitionConfig["caps"]): ReadonlyArray<string> => {
 };
 
 /**
- * A definition version described: its id, version and name, the column a new card starts in
+ * A definition version described: its id, version and name, who wrote it when someone did (F7), the
+ * column a new card starts in
  * (LOB-267), its run caps when it declares any (LOB-71), then every column in order.
  */
 export const definitionLines = (
   definition: DefinitionConfig,
 ): ReadonlyArray<string> => [
   `definition  ${definition.id} v${definition.version}  ${definition.name}`,
+  ...(definition.author === undefined
+    ? []
+    : [`author      ${definition.author}`]),
   `initial     ${definition.initialColumn ?? NONE}`,
   ...capsLines(definition.caps),
   ...definition.columns.flatMap(columnLines),
@@ -242,9 +251,39 @@ const definitionsCommand = Command.make(
 ).pipe(Command.withDescription("List every board definition and its versions"));
 
 /**
- * `factory board definition show <id> [--version N]` — one definition version, column by column. The
- * version defaults to the newest, the one `board create` pins. An unknown id or version is the
- * server's `definition_not_found`, printed verbatim, and a non-zero exit.
+ * A definition version as the file `board define` accepts (F8): `DefinitionSource` encoded, two-space
+ * indented. Encoded rather than stringified, so a field the schema does not
+ * name — a `version`, an `author` — can never reach the file, and `define` (which refuses unknown
+ * keys) takes it back as it is.
+ */
+export const definitionFileText = (source: DefinitionSource): string =>
+  JSON.stringify(Schema.encodeSync(DefinitionSource)(source), null, 2);
+
+/**
+ * What the definition vocabulary prints (F5): one line per requirement key a column may declare —
+ * `checked` when a move out of the column is refused over it today, `unchecked` when it is only
+ * declared, and `[human gate]` for a key that labels a person's gate — then one line per role.
+ */
+export const vocabularyLines = (
+  vocabulary: DefinitionVocabulary,
+): ReadonlyArray<string> => [
+  ...vocabulary.requirements.map((requirement) =>
+    [
+      "requirement",
+      requirement.key,
+      requirement.checked ? "checked" : "unchecked",
+      ...(requirement.humanGate ? ["[human gate]"] : []),
+      requirement.description,
+    ].join("  "),
+  ),
+  ...vocabulary.roles.map((role) => `role  ${role}`),
+];
+
+/**
+ * `factory board definition show <id> [--version N] [--json]` — one definition version, column by
+ * column. The version defaults to the newest, the one `board create` pins. `--json` prints the file
+ * `board define` accepts instead (F8), moves and initial column spelled out. An unknown id or version
+ * is the server's `definition_not_found`, printed verbatim, and a non-zero exit.
  */
 const definitionShowCommand = Command.make(
   "show",
@@ -256,9 +295,15 @@ const definitionShowCommand = Command.make(
       Flag.withDescription("The version to show (defaults to the newest)"),
       Flag.optional,
     ),
+    json: Flag.Boolean("json").pipe(
+      Flag.withDescription(
+        "Print the definition as a file `factory board define --file` accepts",
+      ),
+      Flag.withDefault(false),
+    ),
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ id, version, api }) {
+  Effect.fnUntraced(function* ({ id, version, json, api }) {
     const apiUrl = yield* resolveApiUrl(api);
     const program = Effect.gen(function* () {
       const definitionId = decodeId(DefinitionId, id);
@@ -269,10 +314,16 @@ const definitionShowCommand = Command.make(
         );
       }
       const { client } = yield* BoardClient;
-      const definition = yield* client.getDefinition({
+      const query = {
         definitionId,
         ...(Option.isSome(version) ? { version: version.value } : {}),
-      });
+      };
+      if (json) {
+        const source = yield* client.getDefinitionSource(query);
+        yield* Console.log(definitionFileText(source));
+        return;
+      }
+      const definition = yield* client.getDefinition(query);
       for (const line of definitionLines(definition)) yield* Console.log(line);
     });
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -286,7 +337,34 @@ const definitionShowCommand = Command.make(
       command: "factory board definition show default --version 3",
       description: "The default pipeline at version 3",
     },
+    {
+      command: "factory board definition show default --json > def.json",
+      description: "The newest version as a file `factory board define` takes",
+    },
   ]),
+);
+
+/**
+ * `factory board vocabulary` (F5) — what a definition file may name: the requirement keys, marked
+ * checked or human gate, and the roles `defineBoard` accepts, as the server answers them. Skills are
+ * `factory skill ls`'. Read-only.
+ */
+const vocabularyCommand = Command.make(
+  "vocabulary",
+  { api: apiFlag },
+  Effect.fnUntraced(function* ({ api }) {
+    const apiUrl = yield* resolveApiUrl(api);
+    const program = Effect.gen(function* () {
+      const { client } = yield* BoardClient;
+      const vocabulary = yield* client.getDefinitionVocabulary({});
+      for (const line of vocabularyLines(vocabulary)) yield* Console.log(line);
+    });
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "List the requirement keys and roles a board definition file may name, for `factory board define`",
+  ),
 );
 
 const definitionCommand = Command.make("definition").pipe(
@@ -333,14 +411,12 @@ const configCommand = Command.make(
 );
 
 /**
- * The file `board define` reads (D4): `defineBoard`'s payload less `dryRun`, which is the flag's. A
+ * The file `board define` reads (D4): `defineBoard`'s payload less `dryRun`, which is the flag's, and
+ * the `actor`, which the credential's is (`DefinitionSource`). A
  * key the schema does not name is refused rather than dropped — a misspelt `wipLimit` or `gate`
  * would otherwise be a version that quietly lacks it.
  */
-const { dryRun: _dryRun, ...definitionFileFields } = DefineBoardInput.fields;
-const DefinitionFile = Schema.fromJsonString(
-  Schema.Struct(definitionFileFields),
-);
+const DefinitionFile = Schema.fromJsonString(DefinitionSource);
 
 /**
  * A definition file decoded, or why it cannot be: not JSON, or not a definition (a missing field, a
@@ -349,9 +425,7 @@ const DefinitionFile = Schema.fromJsonString(
  */
 export const decodeDefinitionFile = (
   text: string,
-):
-  | { readonly file: Omit<DefineBoardInput, "dryRun"> }
-  | { readonly refused: string } => {
+): { readonly file: DefinitionSource } | { readonly refused: string } => {
   const decoded = Schema.decodeResult(DefinitionFile)(text, {
     onExcessProperty: "error",
     errors: "all",
@@ -447,7 +521,7 @@ const defineCommand = Command.make(
   }),
 ).pipe(
   Command.withDescription(
-    "Define a new version of a board definition from a JSON file; boards created after it pin it",
+    "Define a new version of a board definition from a JSON file; boards created after it pin it. `factory board vocabulary` lists the requirement keys and roles a file may name; `factory board definition show <id> --json` prints a file to start from",
   ),
   Command.withExamples([
     {
@@ -466,6 +540,7 @@ export const boardConfigCommands = [
   listCommand,
   definitionsCommand,
   definitionCommand,
+  vocabularyCommand,
   configCommand,
   defineCommand,
 ] as const;

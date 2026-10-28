@@ -8,7 +8,7 @@ import type {
   DefinitionFault,
   RequirementOption,
 } from "@repo/domain/Task";
-import { columnTransitions, initialColumnOf } from "@repo/domain/Task";
+import { materializeDefinition } from "@repo/domain/Task";
 import { NONE } from "./board-settings-view";
 
 /**
@@ -62,17 +62,7 @@ export type DefinitionDraft = {
  * (they are read through the default pipeline's table), and an authored version must declare both,
  * so a draft of one starts from what its cards meet — and the diff does not call that a change.
  */
-export const materialize = (definition: BoardDefinition): BoardDefinition => {
-  const initial = initialColumnOf(definition);
-  return {
-    ...definition,
-    ...(initial === undefined ? {} : { initialColumn: initial }),
-    columns: definition.columns.map((column) => ({
-      ...column,
-      transitions: columnTransitions(definition, column.name),
-    })),
-  };
-};
+export const materialize = materializeDefinition;
 
 /** The key of the first column of the draft named `name`, or `undefined` when none is. */
 const keyNamed = (
@@ -116,7 +106,12 @@ export const defineInputOf = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
 ): DefineBoardInput => {
-  const { version: _version, initialColumn: _initial, ...kept } = pinned;
+  const {
+    version: _version,
+    initialColumn: _initial,
+    author: _author,
+    ...kept
+  } = pinned;
   return {
     ...kept,
     name: draft.name,
