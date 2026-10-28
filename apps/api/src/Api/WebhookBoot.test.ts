@@ -20,6 +20,7 @@ import { Effect, Logger } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   bootEnvFromProcess,
+  describeSentryFilter,
   describeWebhookRoutes,
   logTriggerBoot,
   readTriggerRules,
@@ -130,6 +131,32 @@ describe("TRIGGER_RULES at boot", () => {
   });
 });
 
+describe("the Sentry filter at boot (LOB-82)", () => {
+  it("names what the filter admits, at info", async () => {
+    const { exit, lines } = await boot({
+      SENTRY_MIN_LEVEL: "Error",
+      SENTRY_ENVIRONMENTS: "production, canary",
+    });
+    expect(exit._tag).toBe("Success");
+    const line = lines.find((entry) => entry.text.startsWith("sentry filter:"));
+    expect(line).toEqual({
+      level: "Info",
+      text: "sentry filter: level >= error, environments [production, canary], releases any",
+    });
+  });
+
+  it("logs a level that is not a Sentry level as an error naming the variable, before any alert is refused for it", async () => {
+    const { exit, lines } = await boot({ SENTRY_MIN_LEVEL: "eror" });
+    // Not fatal: only the Sentry route is unusable, and it says so per delivery too.
+    expect(exit._tag).toBe("Success");
+    const error = lines.find((entry) => entry.level === "Error");
+    expect(error?.text).toBe(
+      'sentry filter: SENTRY_MIN_LEVEL is "eror"; it must be one of debug, info, warning, error, fatal; /webhooks/sentry answers 503 not-configured until it is fixed',
+    );
+    expect(describeSentryFilter({}).ok).toBe(true);
+  });
+});
+
 describe("webhook routes at boot", () => {
   it("logs armed for every route whose secret is set, and the secret nowhere", async () => {
     const { lines } = await boot(ALL_ARMED);
@@ -195,6 +222,9 @@ describe("webhook routes at boot", () => {
     const names = [
       TRIGGER_RULES_VARIABLE,
       ...WEBHOOK_ROUTES.map((row) => row.variable),
+      "SENTRY_MIN_LEVEL",
+      "SENTRY_ENVIRONMENTS",
+      "SENTRY_RELEASES",
     ];
     const saved = new Map(names.map((name) => [name, process.env[name]]));
     try {

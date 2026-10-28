@@ -113,10 +113,12 @@ import {
   createFauxModelAccess,
   createModelAccess,
   DECOMPOSITION_PROMPT_PREFIX,
+  DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_AUTONOMY,
   mirrorComparison,
   modelAccessFor,
   openSession,
+  readPinnedModelKey,
   readPromptSubmission,
   readReplayRun,
   readReplaySource,
@@ -129,6 +131,7 @@ import {
   readPromptSections,
   readSessionLog,
   readVerifyRecords,
+  resolveDefaultModel,
   resolveRoleModels,
   HISTORY_WINDOW,
   writeTitle,
@@ -1795,6 +1798,208 @@ describe("the model a session runs on", () => {
     expect(result.filled).toBeGreaterThanOrEqual(1);
     expect(result.old).toBe("faux/faux-1");
     expect(result.set).toBe("faux/faux-2");
+  }, 120_000);
+
+  /**
+   * A session created on a model (LOB-274) runs that model: the create resolves it against the
+   * catalog the deployment serves and pins it into the root. The deployment here is the real
+   * Anthropic catalog with no credential, which is enough: opening a root sends no request. The pin
+   * is read from the log's `pi.agent` through a reader, not only from what the service answers.
+   */
+  const anthropicRoot = mkdtempSync(join(tmpdir(), "factory-core-anthropic-"));
+  const anthropicRuntime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: createModelAccess("anthropic", {
+        authContext: {
+          env: async () => undefined,
+          fileExists: async () => false,
+        },
+      }),
+      sessionRoot: anthropicRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await anthropicRuntime.dispose();
+  });
+
+  it("pins the model a create names into the root, and the deployment's when it names none (LOB-274)", async () => {
+    const result = await anthropicRuntime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const chosen = yield* sessions.create({
+          title: "a cheaper model",
+          model: "anthropic/claude-haiku-4-5",
+        });
+        const unchosen = yield* sessions.create({ title: "the default" });
+        const pinned = (id: SessionId) =>
+          Effect.acquireUseRelease(
+            Effect.promise(() => PostgresStorage.reader(sql, id)),
+            (storage) => readPinnedModelKey(storage),
+            (storage) => Effect.promise(() => storage.dispose()),
+          );
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        const result = {
+          chosen: chosen.model,
+          chosenLog: yield* pinned(chosen.id),
+          chosenRow: find(listed, chosen.id)?.model,
+          unchosen: unchosen.model,
+          unchosenLog: yield* pinned(unchosen.id),
+        };
+        yield* sessions.close;
+        return {
+          ...result,
+          folded: (yield* sessions.get(chosen.id)).session.model,
+        };
+      }),
+    );
+
+    expect(result.chosen).toBe("anthropic/claude-haiku-4-5");
+    expect(result.chosenLog).toBe("anthropic/claude-haiku-4-5");
+    expect(result.chosenRow).toBe("anthropic/claude-haiku-4-5");
+    expect(result.folded).toBe("anthropic/claude-haiku-4-5");
+    expect(result.unchosen).toBe(`anthropic/${DEFAULT_ANTHROPIC_MODEL}`);
+    expect(result.unchosenLog).toBe(`anthropic/${DEFAULT_ANTHROPIC_MODEL}`);
+  }, 120_000);
+
+  it("refuses a model the deployment does not serve as invalid_input naming it, and writes nothing", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const tag = randomBytes(4).toString("hex");
+        const repo = RepoSlugSchema.make(`factory-test/unserved-${tag}`);
+        const refused = (model: string) =>
+          Effect.gen(function* () {
+            const requestId = `unserved-${tag}-${model}`;
+            const exit = yield* Effect.exit(
+              sessions.create({
+                title: `unserved ${tag} ${model}`,
+                requestId,
+                repo,
+                model,
+              }),
+            );
+            const rows = yield* sql<{ id: string }>`
+              SELECT id FROM sessions WHERE request_id = ${requestId}
+            `;
+            return { exit, rows: rows.length };
+          });
+        const results = {
+          // Not published by this faux deployment, another backend's model, and no provider at all.
+          unpublished: yield* refused("faux/faux-9"),
+          otherBackend: yield* refused("anthropic/claude-haiku-4-5"),
+          bare: yield* refused("faux-2"),
+        };
+        // `createSession` registers a repo it has not seen; a refused one must not have.
+        const repos = yield* sql<{ slug: string }>`
+          SELECT slug FROM repos WHERE slug = ${repo}
+        `;
+        // Scoped to this case's titles rather than the whole table, which other suites write to.
+        const titled = yield* sql<{ id: string }>`
+          SELECT id FROM sessions WHERE title LIKE ${`unserved ${tag} %`}
+        `;
+        return { results, repos: repos.length, titled: titled.length };
+      }),
+    );
+
+    for (const [model, { exit, rows }] of [
+      ["faux/faux-9", result.results.unpublished],
+      ["anthropic/claude-haiku-4-5", result.results.otherBackend],
+      ["faux-2", result.results.bare],
+    ] as const) {
+      expect(rows, model).toBe(0);
+      const failure = Exit.findErrorOption(exit);
+      if (failure._tag !== "Some") throw new Error(`${model} was not refused`);
+      expect(failure.value._tag).toBe("SessionError");
+      expect(failure.value.code).toBe("invalid_input");
+      expect(failure.value.message).toBe(
+        `model ${model} is not one this process serves`,
+      );
+    }
+    expect(result.repos).toBe(0);
+    expect(result.titled).toBe(0);
+  }, 120_000);
+
+  it("pins the model a retried create names when the first attempt died before the root was opened", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const tag = randomBytes(4).toString("hex");
+        // What a create that died between its index row and the owner's open leaves behind (a
+        // URL-only repo's mirror fetch fails there): the row with its request id, and no root.
+        const requestId = `model-retry-${tag}`;
+        const id = yield* mintSessionId;
+        yield* sql`
+          INSERT INTO sessions (id, title, request_id)
+          VALUES (${id}, ${`model retry ${tag}`}, ${requestId})
+        `;
+        const retried = yield* sessions.create({
+          title: `model retry ${tag}`,
+          requestId,
+          model: "faux/faux-2",
+        });
+        // A second retry, once the root is pinned, changes nothing.
+        const again = yield* sessions.create({
+          title: `model retry ${tag}`,
+          requestId,
+          model: "faux/faux-2",
+        });
+        yield* sessions.send({ sessionId: retried.id, content: "go" });
+        yield* waitUntil(
+          sessions.get(retried.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the retried session's turn to settle",
+        );
+        const snapshot = yield* sessions.get(retried.id);
+        const pinned = yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, retried.id)),
+          (storage) => readPinnedModelKey(storage),
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+        return {
+          id,
+          retried: retried.id,
+          again: again.id,
+          model: retried.model,
+          pinned,
+          usage: snapshot.usage.models.map((entry) => entry.key),
+        };
+      }),
+    );
+
+    expect(result.retried).toBe(result.id);
+    expect(result.again).toBe(result.id);
+    expect(result.model).toBe("faux/faux-2");
+    expect(result.pinned).toBe("faux/faux-2");
+    expect(result.usage).toEqual(["faux/faux-2"]);
+  }, 120_000);
+
+  it("runs a faux session created on another published faux model offline, every request on it", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({
+          title: "on faux-2",
+          model: "faux/faux-2",
+        });
+        yield* sessions.send({ sessionId: created.id, content: "go" });
+        yield* waitUntil(
+          sessions.get(created.id).pipe(Effect.map((s) => !s.live.busy)),
+          "the faux-2 turn to settle",
+        );
+        const snapshot = yield* sessions.get(created.id);
+        return {
+          model: created.model,
+          usage: snapshot.usage.models.map((entry) => entry.key),
+          answer: snapshot.entries.at(-1)?.text,
+        };
+      }),
+    );
+
+    expect(result.model).toBe("faux/faux-2");
+    expect(result.usage).toEqual(["faux/faux-2"]);
+    expect(result.answer).toContain("faux-ok");
   }, 120_000);
 });
 
@@ -7842,6 +8047,103 @@ describe("a run's prompt comes from its column", () => {
       "faux/faux-1",
       "faux/faux-1",
     ]);
+  }, 120_000);
+
+  /**
+   * The precedence (LOB-274): a session's own model > its column's role row (`ROLE_MODELS`) > the
+   * deployment's default (`DEFAULT_MODEL`) > the backend's own. One deployment holds every rung: a
+   * faux catalog publishing four models, `faux/faux-default` as its default the way the boot resolves
+   * `DEFAULT_MODEL`, and a role row for the specifier. Each run's model is read from the requests it
+   * sent (`pi.usage`), so it is what the run did, not what the service says it chose.
+   */
+  const precedenceRoot = mkdtempSync(
+    join(tmpdir(), "factory-core-precedence-"),
+  );
+  const precedenceBackend = createFauxModelAccess({
+    fauxModels: ["faux-1", "faux-default", "faux-spec", "faux-pick"],
+  }).access;
+  const precedenceDeployment = Effect.runSync(
+    resolveDefaultModel(precedenceBackend, "faux/faux-default"),
+  );
+  const precedenceRuntime = ManagedRuntime.make(
+    SessionServiceLive({
+      model: precedenceDeployment,
+      roleModels: Effect.runSync(
+        resolveRoleModels(
+          precedenceDeployment,
+          new Map([["specifier", "faux/faux-spec"]]),
+        ),
+      ),
+      sessionRoot: precedenceRoot,
+    }).pipe(Layer.provideMerge(DatabaseLayer)),
+  );
+  afterAll(async () => {
+    await precedenceRuntime.dispose();
+  });
+
+  it("runs a card run named onto a model on it, over its role's row and the deployment's default", async () => {
+    const result = await precedenceRuntime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const boardId = yield* newBoard;
+        const ran = (column: string, model?: string) =>
+          Effect.gen(function* () {
+            const created = yield* sessions.create({
+              taskId: yield* newCard(boardId, column),
+              taskColumn: column,
+              ...(model === undefined ? {} : { model }),
+            });
+            yield* sessions.send({
+              sessionId: created.id,
+              content: `begin in ${column}`,
+            });
+            yield* waitUntil(
+              sessions
+                .get(created.id)
+                .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+              `the ${column} run to settle`,
+            );
+            const snapshot = yield* sessions.get(created.id);
+            return {
+              named: created.model,
+              ran: snapshot.usage.models.map((entry) => entry.key),
+            };
+          });
+        return {
+          // Both a role row and an explicit model: the explicit one.
+          explicitOverRole: yield* ran("specifying", "faux/faux-pick"),
+          // An explicit model that is the backend's own, over the role's row and the default.
+          explicitBackend: yield* ran("specifying", "faux/faux-1"),
+          // A role row and no explicit model: the role's.
+          roleOverDefault: yield* ran("specifying"),
+          // No role row (`builder` has none) and no explicit model: DEFAULT_MODEL, not the backend's.
+          deploymentDefault: yield* ran("building"),
+          // No role row, an explicit model.
+          explicitOverDefault: yield* ran("building", "faux/faux-pick"),
+        };
+      }),
+    );
+
+    expect(result.explicitOverRole).toEqual({
+      named: "faux/faux-pick",
+      ran: ["faux/faux-pick"],
+    });
+    expect(result.explicitBackend).toEqual({
+      named: "faux/faux-1",
+      ran: ["faux/faux-1"],
+    });
+    expect(result.roleOverDefault).toEqual({
+      named: "faux/faux-spec",
+      ran: ["faux/faux-spec"],
+    });
+    expect(result.deploymentDefault).toEqual({
+      named: "faux/faux-default",
+      ran: ["faux/faux-default"],
+    });
+    expect(result.explicitOverDefault).toEqual({
+      named: "faux/faux-pick",
+      ran: ["faux/faux-pick"],
+    });
   }, 120_000);
 });
 

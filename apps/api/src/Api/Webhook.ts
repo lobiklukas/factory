@@ -66,6 +66,7 @@ import {
   SENTRY_RESOURCE_HEADER,
   SENTRY_SIGNATURE_HEADER,
   sentryDelivery,
+  sentryFilterFromEnv,
   sentryStartsWork,
   slackDelivery,
   slackFilterFromEnv,
@@ -229,8 +230,16 @@ const genericEvent = (
   };
 };
 
-/** A body the adapter cannot turn into a delivery: the `400` it answers, and its code. */
-type Refusal = { readonly refused: string; readonly code: string };
+/**
+ * A body the adapter cannot turn into a delivery: the `400` it answers, and its code. `status` is
+ * for the one refusal that is not the sender's fault — the route's own configuration does not parse
+ * (`503 not-configured`), which the sender should retry once an operator fixes it.
+ */
+type Refusal = {
+  readonly refused: string;
+  readonly code: string;
+  readonly status?: 503;
+};
 
 /** How an adapter reads a request header: by name, in any case. */
 type HeaderLookup = (name: string) => string | undefined;
@@ -462,6 +471,17 @@ const handle = (adapter: () => Adapter) =>
     const rules = read.rules;
     const delivery = config.delivery(body, header, rules);
     if ("refused" in delivery) {
+      if (delivery.status === 503) {
+        yield* logRefusal(delivery.code);
+        return HttpServerResponse.setStatus(
+          HttpServerResponse.jsonUnsafe({
+            ok: false,
+            error: delivery.refused,
+            code: delivery.code,
+          }),
+          503,
+        );
+      }
       return badRequest(delivery.refused, delivery.code);
     }
 
@@ -633,7 +653,9 @@ const genericRoute = HttpRouter.add(
  * `SENTRY_RATE_WINDOW_SECONDS` (20 per 60 s by default) in this process. An alert storm is the burst
  * the cap exists for: every alert past it is `429`, and every one inside it is still deduped by its
  * event. A delivery no rule lets start work (`issue`, `comment`, `installation`, …) spends no token;
- * `rules` is the seam's, so the cap, the key and the filter agree on which those are.
+ * `rules` is the seam's, so the cap, the key and the filter agree on which those are. Neither does an
+ * alert outside `SENTRY_MIN_LEVEL`, `SENTRY_ENVIRONMENTS` or `SENTRY_RELEASES` (LOB-82): the seam
+ * records it skipped with the field that failed.
  */
 const sentryRoute = HttpRouter.add(
   "POST",
@@ -657,15 +679,28 @@ const sentryRoute = HttpRouter.add(
       ),
       counts: (delivery, rules) => sentryStartsWork(delivery.event, rules),
     },
-    delivery: (payload, header, rules) =>
-      sentryDelivery(
+    delivery: (payload, header, rules) => {
+      // The filter (LOB-82) is read per delivery, like Slack's: which alerts are work is the
+      // deployment's, and a value that does not parse refuses the delivery naming the variable
+      // rather than quietly admitting every alert, or none.
+      const read = sentryFilterFromEnv({
+        SENTRY_MIN_LEVEL: process.env["SENTRY_MIN_LEVEL"],
+        SENTRY_ENVIRONMENTS: process.env["SENTRY_ENVIRONMENTS"],
+        SENTRY_RELEASES: process.env["SENTRY_RELEASES"],
+      });
+      if (!read.ok) {
+        return { refused: read.message, code: "not-configured", status: 503 };
+      }
+      return sentryDelivery(
         payload,
         {
           resource: header(SENTRY_RESOURCE_HEADER),
           requestId: header(SENTRY_REQUEST_ID_HEADER),
         },
         rules,
-      ),
+        read.filter,
+      );
+    },
   })),
 );
 

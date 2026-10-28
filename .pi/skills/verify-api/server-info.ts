@@ -8,7 +8,8 @@
 //             default budget, the armed webhook routes, and no model credential mode
 //   wire      the same call's raw NDJSON body carries none of the dummy credentials' values
 //   model     a session created over RPC names `faux/faux-1` on `createSession`, `getSession` and
-//             its `listSessions` row
+//             its `listSessions` row; one created with `model: faux/faux-spec` names that (LOB-274),
+//             and `model: faux/faux-unserved` is refused `invalid_input` naming it, creating nothing
 //
 // Env: API_URL, EVIDENCE_DIR, SERVER_INFO_ANTHROPIC_KEY / _GITHUB_SECRET / _LINEAR_SECRET (the
 // dummies the shell booted the API with).
@@ -133,6 +134,65 @@ await Effect.runPromise(
         "model: the listSessions row names faux/faux-1",
         row?.model === "faux/faux-1",
         String(row?.model),
+      );
+
+      // A session created on a model (LOB-274): one ROLE_MODELS published is served and pinned, and
+      // one the catalog does not hold is refused, typed, naming it, with no session behind it.
+      const chosen = yield* client.createSession({
+        title: "server-info chosen model",
+        model: "faux/faux-spec",
+      });
+      const chosenSnapshot = yield* client.getSession({
+        sessionId: chosen.id,
+      });
+      observed.session["chosen"] = {
+        id: chosen.id,
+        created: chosen.model,
+        snapshot: chosenSnapshot.session.model,
+      };
+      assert(
+        "model: createSession({model}) pins the model it names",
+        chosen.model === "faux/faux-spec" &&
+          chosenSnapshot.session.model === "faux/faux-spec",
+        `${String(chosen.model)} / ${String(chosenSnapshot.session.model)}`,
+      );
+      // The refused create carries a request id no other create has used. Had it written a row, a
+      // later create with that id would be answered by that row (the request-id dedupe) and come back
+      // with the refused create's title; a page length would prove nothing once 200 sessions exist.
+      const probe = `server-info-unserved-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const refusedTitle = `server-info unserved model ${probe}`;
+      const refused = yield* Effect.flip(
+        client.createSession({
+          title: refusedTitle,
+          requestId: probe,
+          model: "faux/faux-unserved",
+        }),
+      );
+      const listed = (yield* client.listSessions({ limit: 200 })).sessions;
+      const followUp = yield* client.createSession({
+        title: `server-info after the refusal ${probe}`,
+        requestId: probe,
+      });
+      observed.session["refused"] = {
+        tag: refused._tag,
+        message: refused.message,
+        requestId: probe,
+        followUp: { id: followUp.id, title: followUp.title },
+      };
+      assert(
+        "model: an unserved model is SessionError invalid_input naming it",
+        refused._tag === "SessionError" &&
+          "code" in refused &&
+          refused.code === "invalid_input" &&
+          refused.message ===
+            "model faux/faux-unserved is not one this process serves",
+        `${refused._tag}: ${refused.message}`,
+      );
+      assert(
+        "model: and creates no session",
+        !listed.some((entry) => entry.title === refusedTitle) &&
+          followUp.title === `server-info after the refusal ${probe}`,
+        `listed with its title: ${listed.some((entry) => entry.title === refusedTitle)}; a later create with its request id answered "${followUp.title}"`,
       );
     }),
   ).pipe(Effect.provide(protocolFor(API_URL))),

@@ -49,6 +49,7 @@ import {
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 import { linearDeliveryFor } from "./Linear";
+import { SENTRY_LABEL, sentryDelivery } from "./Sentry";
 import {
   TriggerRoutes,
   TriggerRoutesLive,
@@ -1581,6 +1582,59 @@ describe("a card rule", () => {
       expect(cards[0]?.title).toBe("Make the widget stop wobbling");
       expect(created).toHaveLength(0);
     });
+  }, 60_000);
+
+  it("files one card per Sentry issue, not per event: a card rule binds the issue's events as a session rule does (LOB-82)", async () => {
+    const slug = cardRepo("sentry");
+    const sentryRules: ReadonlyArray<TriggerRule> = [
+      { label: SENTRY_LABEL, repo: slug, prompt: "", mode: "card" },
+    ];
+    const issue = `${runId}-sentry-issue`;
+    const alertIn = (eventId: string) => ({
+      action: "triggered",
+      data: {
+        event: {
+          event_id: eventId,
+          issue_id: issue,
+          title: "ReferenceError: heck is not defined",
+          level: "error",
+          project: 1,
+          environment: "production",
+        },
+        triggered_rule: "Very Important Alert!",
+      },
+    });
+    await withCards(
+      slug,
+      async ({ trigger, created, run }) => {
+        const outcomes = [];
+        for (const eventId of [`${runId}-sentry-e1`, `${runId}-sentry-e2`]) {
+          const delivery = sentryDelivery(
+            alertIn(eventId),
+            { resource: "event_alert", requestId: `req-${eventId}` },
+            sentryRules,
+          );
+          if ("refused" in delivery) throw new Error(delivery.refused);
+          outcomes.push(await run(trigger.deliver(delivery)));
+        }
+        const [first, second] = outcomes;
+        expect(first?.status).toBe("processed");
+        expect(second).toMatchObject({
+          status: "processed",
+          replayed: false,
+          taskId: first?.taskId,
+        });
+        expect(second?.reason).toContain(
+          `already on the board as card ${first?.taskId} (sentry:${issue})`,
+        );
+        const cards = await run(cardsOn(slug));
+        expect(cards.map((card) => card.externalRef)).toEqual([
+          `sentry:${issue}`,
+        ]);
+        expect(created).toHaveLength(0);
+      },
+      { rules: sentryRules },
+    );
   }, 60_000);
 
   it("files one card when a second delivery about the issue arrives while the first is still filing it", async () => {

@@ -156,6 +156,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readPinnedModelKey,
   readRecordedReview,
   readTranscriptPage,
   readVerifyRecords,
@@ -1815,6 +1816,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * (`continueRemaining`). No effect on an owner already open.
          */
         readonly resume?: false;
+        /**
+         * The model the session was created on (LOB-274), resolved against the deployment's catalog:
+         * `create` passes it to the open that creates the root, which pins it ahead of the role's.
+         */
+        readonly model?: ModelAccess;
       };
 
       /** The part of an acquisition that is serialized: everything but the network (below). */
@@ -2037,6 +2043,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(options.roleModels === undefined
                 ? {}
                 : { roles: options.roleModels }),
+              // A session created on a model runs it, whatever its role's row says (LOB-274).
+              ...(acquisition.model === undefined
+                ? {}
+                : { sessionModel: acquisition.model }),
               cwd,
               pages,
               verify,
@@ -2109,6 +2119,48 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* writeReviewTarget(owner.root, { repo: row.repo, ...review });
         });
 
+      /**
+       * The model a create or a replay names, `provider/modelId`, resolved against the catalog the
+       * deployment serves (`modelAccessFor`): `undefined` when it names none, and `invalid_input`
+       * naming it when the catalog has no such model — a session asked onto a model the process
+       * cannot serve is a refusal, never quietly served by another one (LOB-198, LOB-274).
+       */
+      const sessionModelFor = (
+        key: string | undefined,
+      ): Effect.Effect<ModelAccess | undefined, SessionError> =>
+        Effect.gen(function* () {
+          if (key === undefined) return undefined;
+          const access = modelAccessFor(options.model, key);
+          if (access === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `model ${key} is not one this process serves`,
+            });
+          }
+          return access;
+        });
+
+      /**
+       * A retried create (LOB-274) that names a model finds its session by request id; if the first
+       * attempt died between the index row and the owner's open (a URL-only repo's mirror fetch
+       * fails there, LOB-265), no root was pinned, and the next open — a send's — would pin the
+       * role's model or the deployment's instead of the one asked for. The retry opens the owner on
+       * the model it names, so that open is the one that pins it. A session that is live or whose
+       * root is already pinned keeps the model it runs: a root's model is never changed afterwards.
+       */
+      const ensureSessionModel = (
+        id: SessionId,
+        row: SessionRow,
+        model: ModelAccess,
+        acquisition: { readonly reviewing: boolean },
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (HashMap.has(yield* Ref.get(live), id)) return;
+          const pinned = yield* withReader(id, readPinnedModelKey);
+          if (pinned !== undefined) return;
+          yield* acquireOwner(id, row, { ...acquisition, model });
+        });
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -2123,6 +2175,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const already = requested?.[0];
           if (already !== undefined) {
             const sessionId = yield* toSessionId(already.id);
+            const model = yield* sessionModelFor(input.model);
+            if (model !== undefined)
+              yield* ensureSessionModel(sessionId, already, model, {
+                reviewing: input.review !== undefined && already.repo !== null,
+              });
             if (input.review !== undefined)
               yield* ensureReviewTarget(sessionId, already, input.review);
             return yield* describe(sessionId, already);
@@ -2135,6 +2192,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 "a session that reviews a pull request names the repo the pull request is in",
             });
           }
+          // The session's own model (LOB-274), resolved against the catalog the deployment serves —
+          // the lookup a replay does — before anything is written: a model this process cannot serve
+          // is refused here, not registered as a repo, an index row and a log that never run.
+          const model = yield* sessionModelFor(input.model);
           const binding = yield* resolveBinding(input);
           const id = yield* mintSessionId;
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
@@ -2183,6 +2244,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const owner = yield* acquireOwner(id, row, {
             reviewing: input.review !== undefined,
+            ...(model === undefined ? {} : { model }),
           });
           if (input.review !== undefined && binding.repo !== undefined) {
             // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
@@ -2676,16 +2738,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const source = yield* requireSession(input.sessionId);
-          const target =
-            input.model === undefined
-              ? options.model
-              : modelAccessFor(options.model, input.model);
-          if (target === undefined) {
-            return yield* new SessionErrorClass({
-              code: "invalid_input",
-              message: `model ${input.model ?? ""} is not one this process serves`,
-            });
-          }
+          const target = (yield* sessionModelFor(input.model)) ?? options.model;
           const origin = yield* withReader(input.sessionId, readReplaySource);
           const binding: Binding = {
             repo: yield* toRepoSlug(origin.binding.repo),

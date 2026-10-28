@@ -121,7 +121,7 @@ research adds is the contract detail the design leaves out and the evidence that
 > `.factory/config` (evidence: `packages/domain/src/Session.ts`, `.factory/session` doc in the log);
 > `template?`, `model?`, and `autonomy?` were deliberately _not_ added as inert input fields —
 > `autonomy` is A3/D11 and `template` is A5/D13, and a field nothing reads is worse than an absent
-> one. A2 landed as `session_activity` + `listSessions` + `rebuildIndexes`; `factory ls` shipped with
+> one. (`model?` landed with LOB-274, once something read it: it is pinned into the session's root.) A2 landed as `session_activity` + `listSessions` + `rebuildIndexes`; `factory ls` shipped with
 > LOB-7 and is driven by `.pi/skills/verify-cli` (14/14 in tmux), so what remains of A2 is its UI half:
 > LOB-22 replaces the sidebar's browser-local registry with the server list.
 >
