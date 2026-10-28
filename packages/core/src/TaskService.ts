@@ -1300,8 +1300,8 @@ export const TaskServiceLive = Layer.effect(
      * What the card's runs recorded, oldest run first (B1: a run is one session, and its log is the
      * truth for what it did). One batched read folds every run's log; none is opened as an owner.
      * The latest run's branch is measured only when `measureDiff` says the move checks it. The review
-     * runs are split out, in the same order — by `started_at`, so the newest is the one the latest
-     * `synchronize` opened (LOB-241).
+     * runs are split out, in the same order, beside the head each of the card's PRs was last
+     * reported at (`review_heads`), which says which of them `review_verdict` judges (LOB-241).
      */
     const cardEvidence = (taskId: string, measureDiff: boolean) =>
       Effect.gen(function* () {
@@ -1382,11 +1382,29 @@ export const TaskServiceLive = Layer.effect(
             });
           },
         );
+        // The head each of the card's PRs was last reported at, which picks the review that counts
+        // (`review_heads`, LOB-241).
+        const reviewHeads = (yield* sql<{
+          readonly prUrl: string;
+          readonly apiUrl: string | null;
+          readonly head: string;
+        }>`
+          SELECT pr_url, api_url, head FROM review_heads WHERE task_id = ${taskId}
+        `).map((row) => ({
+          url: row.prUrl,
+          ...(row.apiUrl === null ? {} : { apiUrl: row.apiUrl }),
+          head: row.head,
+        }));
         const latest = changing.at(-1);
         const evidence: CardEvidence =
           measureDiff && latest !== undefined
-            ? { runs: recorded, reviews, diff: yield* branchDiff(latest) }
-            : { runs: recorded, reviews };
+            ? {
+                runs: recorded,
+                reviews,
+                reviewHeads,
+                diff: yield* branchDiff(latest),
+              }
+            : { runs: recorded, reviews, reviewHeads };
         return evidence;
       });
 

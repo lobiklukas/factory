@@ -172,6 +172,7 @@ const payload = (
     readonly baseSha?: string;
     readonly number?: number;
     readonly draft?: boolean;
+    readonly updatedAt?: string;
   } = {},
 ) => ({
   action: over.action ?? "opened",
@@ -182,6 +183,7 @@ const payload = (
     url: `https://api.github.com/repos/${repo}/pulls/${over.number ?? NUMBER}`,
     title: "Skip the first element",
     draft: over.draft ?? false,
+    ...(over.updatedAt === undefined ? {} : { updated_at: over.updatedAt }),
     base: {
       ref: "main",
       ...(over.baseSha === undefined ? {} : { sha: over.baseSha }),
@@ -437,6 +439,78 @@ describe("the review a pull_request event starts", () => {
     // One marker per head: the second comment is not the first one again.
     expect(posts[0]?.marker).not.toBe(posts[1]?.marker);
     forge.head = HEAD;
+  }, 120_000);
+
+  it("records the head every delivery names, a replay's included, so a push back to an old head is the head the gate judges", async () => {
+    const number = 17;
+    const url = pageOf(number);
+    const { card } = await cardWithPr(url);
+    const reportedHead = () =>
+      run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const rows = yield* sql<{ taskId: string; head: string }>`
+            SELECT task_id, head FROM review_heads WHERE pr_url = ${url}
+          `;
+          return rows[0];
+        }),
+      );
+    const opened = await deliver(
+      payload({ number, updatedAt: "2026-10-28T10:00:00Z" }),
+    );
+    await settled(opened.body["sessionId"] as SessionId);
+    expect(await reportedHead()).toEqual({ taskId: card.id, head: HEAD });
+
+    forge.head = PUSHED;
+    const pushed = await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: PUSHED,
+        updatedAt: "2026-10-28T10:05:00Z",
+      }),
+    );
+    expect(pushed.body).toMatchObject({ replayed: false, head: PUSHED });
+    await settled(pushed.body["sessionId"] as SessionId);
+    expect(await reportedHead()).toMatchObject({ head: PUSHED });
+
+    // A force-push back to the first head: the delivery replays that head's run and opens none, and
+    // the PR's reported head is the first one again.
+    forge.head = HEAD;
+    const back = await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: HEAD,
+        updatedAt: "2026-10-28T10:10:00Z",
+      }),
+    );
+    expect(back.body).toMatchObject({ replayed: true, head: HEAD });
+    expect(await reportedHead()).toMatchObject({ head: HEAD });
+
+    // GitHub redelivering the past push does not move the head back to it.
+    await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: PUSHED,
+        updatedAt: "2026-10-28T10:05:00Z",
+      }),
+    );
+    expect(await reportedHead()).toMatchObject({ head: HEAD });
+
+    // A draft's push is still the PR's head, though it starts no review until the PR is ready.
+    const draft = await deliver(
+      payload({
+        number,
+        action: "synchronize",
+        head: REMOTE_ONLY,
+        draft: true,
+        updatedAt: "2026-10-28T10:15:00Z",
+      }),
+    );
+    expect(draft.body).toMatchObject({ status: "skipped" });
+    expect(await reportedHead()).toMatchObject({ head: REMOTE_ONLY });
   }, 120_000);
 
   it("posts nothing for a head the PR has already left", async () => {

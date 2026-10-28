@@ -588,6 +588,103 @@ describe("the review_verdict requirement (LOB-241)", () => {
     );
   });
 
+  it("judges the review of the head the PR was last reported at, not the newest review run", () => {
+    const PR = "https://github.com/acme/widgets/pull/7";
+    const failOn = (sessionId: string, head: string) =>
+      reviewed(sessionId, head, {
+        verdict: "fail",
+        outcome: "clean",
+        outcomeDetail: "",
+        failing: ["correctness"],
+      });
+    // A fails, B passes, then a force-push takes the PR back to A: A's delivery replays A's old run,
+    // so B's pass is the newest run, but the PR is at A, which the reviewer failed.
+    const backToA = [
+      failOn("ses_r1", HEAD_A),
+      reviewed("ses_r2", HEAD_B, pass()),
+    ];
+    expect(
+      reviewVerdictVerdict({
+        runs: [],
+        reviews: backToA,
+        reviewHeads: [{ url: PR, head: HEAD_A }],
+      }),
+    ).toEqual({
+      met: false,
+      reason:
+        "run ses_r1's review of acme/widgets#7 at aaaaaaaaaaaa failed correctness: fix the findings and push, and the new head's review decides the move",
+    });
+    // The reverse: A passes, B fails, back to A — the PR's head passed, so the card may leave.
+    expect(
+      reviewVerdictVerdict({
+        runs: [],
+        reviews: [reviewed("ses_r1", HEAD_A, pass()), failOn("ses_r2", HEAD_B)],
+        reviewHeads: [{ url: PR, head: HEAD_A }],
+      }),
+    ).toEqual({ met: true });
+    // A head reported before its run has a target (still being opened, or skipped as unfetchable):
+    // the previous head's pass does not stand in for it.
+    const HEAD_C = "c".repeat(40);
+    expect(
+      reviewVerdictVerdict({
+        runs: [],
+        reviews: [reviewed("ses_r1", HEAD_A, pass())],
+        reviewHeads: [{ url: PR, head: HEAD_C }],
+      }),
+    ).toEqual({
+      met: false,
+      reason: `${PR} was last reported at cccccccccccc, and no review run has recorded a target for that head (its run is still being opened, or its delivery was skipped — a head the checkout could not fetch); a review of another head does not stand in for it`,
+    });
+    // The card's PR recorded by its API resource still finds its reported head.
+    expect(
+      reviewVerdictVerdict({
+        runs: [
+          {
+            sessionId: "ses_build",
+            calls: [],
+            prUrl: "https://api.github.com/repos/acme/widgets/pulls/7",
+          },
+        ],
+        reviews: backToA,
+        reviewHeads: [
+          {
+            url: PR,
+            apiUrl: "https://api.github.com/repos/acme/widgets/pulls/7",
+            head: HEAD_B,
+          },
+        ],
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("judges only the card's current PR: another PR's pass says nothing about it", () => {
+    const OLD_PR = "https://github.com/acme/widgets/pull/7";
+    const NEW_PR = "https://github.com/acme/widgets/pull/8";
+    const approvedOld = reviewed("ses_r1", HEAD_A, pass());
+    const evidence = (prUrls: string[]) => ({
+      runs: prUrls.map((prUrl, at) => ({
+        sessionId: `ses_build${at}`,
+        calls: [],
+        prUrl,
+      })),
+      reviews: [approvedOld],
+      reviewHeads: [{ url: OLD_PR, head: HEAD_A }],
+    });
+    // The run that opened PR 7 was reviewed and passed.
+    expect(reviewVerdictVerdict(evidence([OLD_PR]))).toEqual({ met: true });
+    // A fix-up run opened PR 8: PR 7's pass does not let the card leave.
+    expect(reviewVerdictVerdict(evidence([OLD_PR, NEW_PR]))).toEqual({
+      met: false,
+      reason: `no review ran on the card's PR ${NEW_PR}: its newest review run ses_r1 reviewed ${OLD_PR}, another PR, whose verdict says nothing about this one (the review trigger opens one for each head its PR's pull_request events name, and those reach the factory only as signed deliveries to POST /webhooks/github, which needs GITHUB_WEBHOOK_SECRET set and GitHub able to reach it)`,
+    });
+  });
+
+  it("says where review runs come from when none ran", () => {
+    expect(unmet([])).toBe(
+      "no review ran: the card has no review run (the review trigger opens one for each head its PR's pull_request events name, and those reach the factory only as signed deliveries to POST /webhooks/github, which needs GITHUB_WEBHOOK_SECRET set and GitHub able to reach it)",
+    );
+  });
+
   it("is what requirementVerdict checks for the key", () => {
     expect(
       requirementVerdict(

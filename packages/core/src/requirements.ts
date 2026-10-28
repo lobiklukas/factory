@@ -40,21 +40,31 @@
  * commits, not the index's `pr_url` column a rebuild derives from it.
  *
  * **What `review_verdict` means (LOB-241).** It reads the card's *review runs* — the runs whose log
- * records a `factory.review` target, which the review trigger opens one per head of the card's PR —
- * and only the newest of them, by when its `task_runs` row started: a `synchronize` (a push) opens
- * the next head's run, so the newest review run is the review of the newest head the factory was told
- * about. It is met when that run recorded a verdict of `pass` on the head it was opened for. It is
- * not met, and the refusal says which, when no review ran; when the newest review run has recorded
- * no verdict yet (it is still reviewing, or it died before it called the tool), naming the head under
- * review; when the verdict is `fail`, naming the failing dimensions; and when a `pass` was found
- * `stale` as it was posted — the PR had moved to another head, so the pass is about a head the PR is
- * no longer at, and no newer review run has spoken for the head it moved to. An older pass never
- * stands in for a newer head's missing or failing verdict: a stale approval does not survive a push
- * at the gate. **The window it cannot see** is a push the review trigger has not been told of yet —
- * between GitHub's push and its `synchronize` delivery, or a delivery the trigger skipped (a head it
- * could not fetch) — when the newest review run is still the previous head's, and its pass is judged
- * as the newest. A `clean` pass is never posted, so it is never marked `stale` either. Gating on the
- * PR's live head would close it, at the cost of a forge read on every move.
+ * records a `factory.review` target, which the review trigger opens one per head of a PR — and
+ * judges exactly one: the review of the card's PR at the head that PR was last reported at.
+ *
+ * - *The card's PR* is the newest PR a run of the card's change recorded (`factory.pr`), so a fix-up
+ *   run that opens a new PR is not passed on the old PR's review; a card none of whose runs recorded
+ *   one (a version with no `pr_link`) is judged on its newest review's PR.
+ * - *The head it was last reported at* is `review_heads`' row for that PR, which every review
+ *   delivery writes before its run is opened — a replay included, since a replay opens no run. It is
+ *   not "the newest review run": a push back to a head the PR had before (a force-push undoing one)
+ *   replays that head's old run and leaves another head's run the newest, and the row is what says
+ *   the PR is at the old head again. With no row (a PR from before the table, or a review run opened
+ *   outside the trigger) the newest review run of the PR is judged.
+ *
+ * It is met when that run recorded a verdict of `pass` on its head. It is not met, and the refusal
+ * says which, when no review ran (and where review runs come from: a deployment GitHub cannot deliver
+ * `pull_request` webhooks to has none, so its cards cannot leave `review` for `done`); when the
+ * card's PR has no review while another PR's does; when no review run has a target for the reported
+ * head yet (its run is still being opened, or its delivery was skipped because the head could not be
+ * fetched); when that run has recorded no verdict yet (it is still reviewing, or it died before it
+ * called the tool), naming the head under review; when the verdict is `fail`, naming the failing
+ * dimensions; and when a `pass` was found `stale` as it was posted. Another head's pass never stands
+ * in for the reported head's missing or failing verdict: a stale approval does not survive a push at
+ * the gate. **The window it cannot see** is a push the trigger has not been told of yet — between
+ * GitHub's push and its `synchronize` delivery — when the reported head is still the previous one.
+ * Gating on the PR's live head would close it, at the cost of a forge read on every move.
  *
  * **What `verified` means.** The card's change is the newest `verify` call, over all of the card's
  * runs, that measured a change. "Newest" is by when the call's result was written (the tool
@@ -149,14 +159,26 @@ export type ReviewRunEvidence = {
 };
 
 /**
+ * The head one of the card's PRs was last reported at by a `pull_request` delivery (`review_heads`,
+ * LOB-241): its page, its API resource when the delivery named one, and the head.
+ */
+export type ReportedHead = {
+  readonly url: string;
+  readonly apiUrl?: string;
+  readonly head: string;
+};
+
+/**
  * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
  * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
- * and its review runs, oldest first by when each started (absent: it has none).
+ * its review runs, oldest first by when each started (absent: it has none), and the head each of
+ * its PRs was last reported at (absent: none was).
  */
 export type CardEvidence = {
   readonly runs: readonly RunEvidence[];
   readonly diff?: BranchDiff;
   readonly reviews?: readonly ReviewRunEvidence[];
+  readonly reviewHeads?: readonly ReportedHead[];
 };
 
 /**
@@ -346,16 +368,51 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
 /** A commit as a reader takes it in a sentence: its first twelve characters. */
 const shortSha = (sha: string): string => sha.slice(0, 12);
 
-/** The `review_verdict` requirement over the card's newest review run (module doc). */
+/**
+ * Where a review run comes from, for a refusal that finds none: a deployment that GitHub cannot
+ * reach has no way to open one (module doc).
+ */
+const REVIEW_RUNS_COME_FROM =
+  "the review trigger opens one for each head its PR's pull_request events name, and those reach the factory only as signed deliveries to POST /webhooks/github, which needs GITHUB_WEBHOOK_SECRET set and GitHub able to reach it";
+
+/** The `review_verdict` requirement over the review of the card's PR at its reported head (module doc). */
 export const reviewVerdictVerdict = (
   evidence: CardEvidence,
 ): RequirementVerdict => {
-  const newest = evidence.reviews?.at(-1);
+  const reviews = evidence.reviews ?? [];
+  const newestReview = reviews.at(-1);
+  // The card's PR: the newest one a run of its change opened; the newest review's when none did.
+  const cardPr =
+    evidence.runs.findLast((run) => run.prUrl !== undefined)?.prUrl ??
+    newestReview?.review.target.url;
+  if (cardPr === undefined || newestReview === undefined)
+    return {
+      met: false,
+      reason: `no review ran: the card has no review run${cardPr === undefined ? "" : ` of ${cardPr}`} (${REVIEW_RUNS_COME_FROM})`,
+    };
+  const reported = evidence.reviewHeads?.find(
+    (head) => head.url === cardPr || head.apiUrl === cardPr,
+  );
+  const ofPr = reviews.filter(
+    (run) =>
+      run.review.target.url === cardPr ||
+      (reported !== undefined && run.review.target.url === reported.url),
+  );
+  if (ofPr.length === 0)
+    return {
+      met: false,
+      reason: `no review ran on the card's PR ${cardPr}: its newest review run ${newestReview.sessionId} reviewed ${newestReview.review.target.url}, another PR, whose verdict says nothing about this one (${REVIEW_RUNS_COME_FROM})`,
+    };
+  // The review of the head the PR was last reported at; with no report (a PR from before
+  // `review_heads`, or a run opened outside the trigger), the newest review of the PR.
+  const newest =
+    reported === undefined
+      ? ofPr.at(-1)
+      : ofPr.findLast((run) => run.review.target.head === reported.head);
   if (newest === undefined)
     return {
       met: false,
-      reason:
-        "no review ran: the card has no review run (the review trigger opens one for each head its PR's pull_request events name)",
+      reason: `${cardPr} was last reported at ${shortSha(reported?.head ?? "")}, and no review run has recorded a target for that head (its run is still being opened, or its delivery was skipped — a head the checkout could not fetch); a review of another head does not stand in for it`,
     };
   const { sessionId, review } = newest;
   const pr = `${review.target.repo}#${review.target.number}`;

@@ -249,7 +249,7 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `ask-observed.json`, `ask-{busy,parked,told}.json`, `ask-*.txt`, `ask-api.log` — `ask.sh`'s checks,
   its probes' facts, the CLI outputs and both processes' log
 - `requires-observed.json`, `requires-build.json`, `requires-{web,api-unverified,api-verified}.json`,
-  `review-requires-{a,b,c}.json`, `requires-*.txt`, `requires-api.log` — `requires.sh`'s checks, each
+  `review-requires-{a,b,c,b-again,c-again}.json`, `requires-*.txt`, `requires-api.log` — `requires.sh`'s checks, each
   run's decoded `verify` record, each head's delivery and the review its reviewer recorded, the CLI
   outputs
 - `create-board.json`, `create-board-*.txt`, `create-board-prompt.json` — `board-create.sh`'s checks,

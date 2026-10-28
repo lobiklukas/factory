@@ -157,14 +157,26 @@ measured on our own PRs (LOB-242).
 
 Built (LOB-241): the verdict is the gate. `review_verdict`, which `review` declares in every version
 of the default pipeline, is checked on exit (`packages/core/src/requirements.ts`): `review → done`
-goes through only when the card's **newest** review run — by when its `task_runs` row started, so a
-`synchronize` opens the run that decides — recorded `pass` on the head it was opened for. No review
-run ("no review ran"), a newest run with no verdict yet (naming the head under review), a `fail`
-(naming the failing dimensions) and a pass its post found `stale` are each refused naming the
+goes through only when the review of the **card's PR** — the newest PR a run of its change recorded —
+at the **head that PR was last reported at** recorded `pass`. The head is not "the newest review
+run": the review trigger opens one run per head, so a push back to a head the PR had before (a
+force-push undoing one) replays that head's old run, and another head's run stays the newest. Every
+review delivery on a card's PR, a replay included, records its head in `review_heads` before its run
+is opened (`ReviewTrigger.recordReviewHead`), and that row picks the run (migration 0027). No review
+run ("no review ran"), only another PR's review, a reported head with no review run yet (still being
+opened, or skipped as unfetchable), a run with no verdict yet (naming the head under review), a
+`fail` (naming the failing dimensions) and a pass its post found `stale` are each refused naming the
 requirement, so an older head's approval never survives a push at the gate. What it cannot see is a
-push the trigger has not been told of yet: until its `synchronize` opens the next run, the previous
-head's pass is the newest. The verdict is read from the run's log (`factory.review`, D7), not from
-GitHub, so an unposted or withheld verdict counts the same as a posted one.
+push the trigger has not been told of yet: until its `synchronize` arrives, the reported head is the
+previous one. The verdict is read from the run's log (`factory.review`, D7), not from GitHub, so an
+unposted or withheld verdict counts the same as a posted one.
+
+**Operational requirement.** A review run is opened only by a signed `pull_request` delivery to
+`POST /webhooks/github` (`GITHUB_WEBHOOK_SECRET` set, and GitHub able to reach the control plane — a
+tunnel for a local run). A deployment without inbound webhooks has no review runs, so none of its
+cards can move from `review` to `done`; they can only be canceled. The API warns at boot when the
+secret is unset, and the refusal says where review runs come from. A person's or the CLI's way to
+request a review of the PR's current head is a follow-up on LOB-241, not built.
 
 ## B7 — Asking a human happens on the task, never in the transcript
 

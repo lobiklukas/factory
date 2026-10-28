@@ -15,8 +15,9 @@
 // is read back through `factory board` by the calling script.
 //
 // Env: API_URL, GITHUB_WEBHOOK_SECRET, REPO (the PR's repository slug), PR_URL (its page, which the
-// build run's `factory pr` recorded), PR_NUMBER, ACTION, HEAD, HEAD_REF, BASE_SHA, EXPECT (`pass` or
-// `fail`), LABEL, EVIDENCE_DIR, DATABASE_URL. Exits non-zero when a check fails.
+// build run's `factory pr` recorded), PR_NUMBER, ACTION, HEAD, HEAD_REF, BASE_SHA, EXPECT (`pass`,
+// `fail`, or `replay`: a head already reviewed, whose run the delivery replays and does not wait
+// for), LABEL, EVIDENCE_DIR, DATABASE_URL. Exits non-zero when a check fails.
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -111,6 +112,19 @@ const review = Effect.gen(function* () {
     unknown
   >;
   const sessionId = answered["sessionId"] as SessionId | undefined;
+  if (EXPECT === "replay") {
+    // A push back to a head already reviewed: the trigger replays that head's run and opens none,
+    // and records the head as the PR's again (`review_heads`) — the head the gate then judges.
+    check(
+      `the signed ${ACTION} back to a head already reviewed replays its run`,
+      delivered.status === 200 &&
+        answered["status"] === "processed" &&
+        answered["replayed"] === true &&
+        answered["head"] === HEAD,
+      `status=${delivered.status} review=${JSON.stringify(answered)}`,
+    );
+    return;
+  }
   check(
     `the signed ${ACTION} on the card's PR starts a reviewer run`,
     delivered.status === 200 &&

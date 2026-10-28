@@ -2685,7 +2685,7 @@ describe("TaskService — exit requirements", () => {
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
     expect(err.message).toBe(
-      'the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: the card has no review run (the review trigger opens one for each head its PR\'s pull_request events name)',
+      'the move review → done needs "review_verdict" (a review verdict), which is not met: no review ran: the card has no review run (the review trigger opens one for each head its PR\'s pull_request events name, and those reach the factory only as signed deliveries to POST /webhooks/github, which needs GITHUB_WEBHOOK_SECRET set and GitHub able to reach it)',
     );
     const after = await withService((s) => s.get(task.id));
     expect(after).toMatchObject({ column: "review", revision: task.revision });
@@ -2777,6 +2777,84 @@ describe("TaskService — exit requirements", () => {
     const done = await withService(merge(task));
     expect(done.column).toBe("done");
   }, 180_000);
+
+  /**
+   * What the review trigger records for every delivery on the card's PR (`recordReviewHead`): the
+   * head the PR was last reported at — here PR 7, which `reviewRun` reviews.
+   */
+  const reportHead = (taskId: string, head: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          INSERT INTO review_heads (pr_url, task_id, head, reported_at)
+          VALUES ('https://github.com/factory-test/requires/pull/7', ${taskId}, ${head}, now())
+          ON CONFLICT (pr_url) DO UPDATE
+            SET task_id = EXCLUDED.task_id, head = EXCLUDED.head, reported_at = EXCLUDED.reported_at
+        `;
+      }),
+    );
+
+  it("judges the review of the head the PR was pushed back to, not the newest review run (A → B → A)", async () => {
+    // A fails, B passes, then a force-push takes the PR back to A: A's delivery replays A's old run
+    // and opens none, so B's pass is the newest run — but the PR is at A, which the reviewer failed.
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    const headA = headWith(repoRoot, "src/a.ts");
+    const reviewerA = await reviewRun({
+      taskId: task.id,
+      repoRoot,
+      head: headA,
+      review: failingOn("src/a.ts"),
+    });
+    const headB = headWith(repoRoot, "src/b.ts");
+    await reviewRun({ taskId: task.id, repoRoot, head: headB, review: CLEAN });
+    await reportHead(task.id, headB);
+    // At B, B's pass decides; back at A, A's fail does.
+    await reportHead(task.id, headA);
+    const back = await refusal(merge(task));
+    expect(back).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: REVIEW_VERDICT_REQUIREMENT,
+    });
+    expect(back.message).toContain(
+      `run ${reviewerA}'s review of factory-test/`,
+    );
+    expect(back.message).toContain(
+      `#7 at ${headA.slice(0, 12)} failed correctness, tests`,
+    );
+    // A head the trigger was told of whose run has no target yet: the gate does not fall back to
+    // another head's pass.
+    const headC = headWith(repoRoot, "src/c.ts");
+    await reportHead(task.id, headC);
+    const opening = await refusal(merge(task));
+    expect(opening.message).toContain(
+      `was last reported at ${headC.slice(0, 12)}, and no review run has recorded a target for that head`,
+    );
+    await reportHead(task.id, headB);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
+  }, 240_000);
+
+  it("lets the card leave when the PR is pushed back to a head that passed (A pass → B fail → A)", async () => {
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    const headA = headWith(repoRoot, "src/a.ts");
+    await reviewRun({ taskId: task.id, repoRoot, head: headA, review: CLEAN });
+    const headB = headWith(repoRoot, "src/b.ts");
+    await reviewRun({
+      taskId: task.id,
+      repoRoot,
+      head: headB,
+      review: failingOn("src/b.ts"),
+    });
+    await reportHead(task.id, headB);
+    const failed = await refusal(merge(task));
+    expect(failed.message).toContain(`at ${headB.slice(0, 12)} failed`);
+    await reportHead(task.id, headA);
+    const done = await withService(merge(task));
+    expect(done.column).toBe("done");
+  }, 240_000);
 
   /** A card on a board over `version`, walked by a person from intake into building. */
   const inBuilding = (version = 1) =>

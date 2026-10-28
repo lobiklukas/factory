@@ -27,8 +27,10 @@
 #   6. head B fails    a push to the PR's branch and its `synchronize`: the new head's reviewer fails
 #                      `correctness`, and the move is refused naming it — A's pass does not survive
 #                      the push
-#   7. head C passes   a second push reverts the regression; its reviewer passes, and the same move
-#                      goes through to `done`
+#   7. head C passes   a second push reverts the regression; its reviewer passes
+#   8. back to B, to C a force-push back to head B replays B's run and opens none: C's pass is the
+#                      newest run, yet the move is refused on B's fail (review_heads); back at C, the
+#                      same move goes through to `done`
 #
 # Each review run's change is the fixture's `change.sh`, committed on `main` before the run starts, so
 # the worktree the run is cut from carries it and FAUX_COMMAND stays one fixed `bash change.sh`. The
@@ -370,8 +372,16 @@ check "and head A's earlier pass does not stand in for it" \
 
 HEAD_C="$(push_pr "revert the regression" "git rm -q $REGRESSION")"
 review_head c synchronize "$HEAD_C" pass
+# A force-push back to head B: its delivery replays B's run and opens none, so C's pass is still the
+# newest review run — and the gate judges B's fail, the head the PR is at again (review_heads).
+review_head b-again synchronize "$HEAD_B" replay
+rc="$(cli requires-refused-back.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
+check "after a force-push back to head B, B's fail refuses review → done again, though C's pass is the newest run" \
+  "$([ "$rc" != "0" ] && grep -qF "#${PR_URL##*/} at ${HEAD_B:0:12} failed correctness" "$EVIDENCE_DIR/requires-refused-back.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+review_head c-again synchronize "$HEAD_C" replay
 rc="$(cli requires-done.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
-check "once the newest head's reviewer passed, the same review → done goes through" \
+check "back at head C, whose reviewer passed, the same review → done goes through" \
   "$([ "$rc" = "0" ] && grep -q "moved $TASK_ID to done (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-done.txt" && echo 0 || echo 1)" \
   "exit=$rc"
 
