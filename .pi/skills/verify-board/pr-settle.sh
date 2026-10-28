@@ -293,8 +293,8 @@ check "and nothing was forced: the forge's branch keeps their commit, the PR sta
   "$(yes_if '[ "$(sha "$BARE" "refs/heads/$HEAD")" = "$THEIRS" ] && [ "$(field diverged prUrl)" = "$PR_URL" ]')" \
   "forge=$(sha "$BARE" "refs/heads/$HEAD") theirs=$THEIRS pr=$(field diverged prUrl)"
 cli pr3 pr "$SESSION" --title "factory: pr-settle"
-check "factory pr says non_fast_forward too, exit non-zero" \
-  "$(yes_if '[ "$(rc pr3)" != 0 ] && out pr3 | grep -q non_fast_forward')" "exit=$(rc pr3)"
+check "factory pr says non_fast_forward too, exit non-zero, naming the PR it pushed nothing to" \
+  "$(yes_if '[ "$(rc pr3)" != 0 ] && out pr3 | grep -q non_fast_forward && out pr3 | grep -qF "Nothing was pushed to $PR_URL" && ! out pr3 | grep -qi "no PR was opened"')" "exit=$(rc pr3)"
 check "no line of the API's log, nor any CLI output, carries the token" \
   "$(yes_if '! grep -rqF "$TOKEN" "$LOG" "$EVIDENCE_DIR"/pr-settle-*.txt')" "grep -F token"
 
