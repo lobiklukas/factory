@@ -23,6 +23,9 @@ the turns-delta arithmetic; the cost-delta arithmetic check was proven by hand a
 were verified **2026-10-28** from the `agent/LOB-265` worktree with `./clone.sh` (API on `:9660`, the
 loopback git forge on `:9661`) — **21/21** checks.
 
+`factory doctor` (the E8 preflight: every prerequisite, one line each) was verified **2026-10-28** from the
+`agent/E8` worktree with `./preflight.sh` (API on `:9570`, degraded on `:9571`) — **23/23** checks.
+
 `factory fork` / `reset` / `compact` / `spend` were verified **2026-10-28** from the `agent/C15`
 worktree with `./session.sh` (API on `:9580`, re-run after merging main with D7's `factory skill`) —
 **29/29** checks, which include `watch --ids` / `history --ids` printing the entry id `fork --at` takes
@@ -82,6 +85,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory replay`                                  | passing | [replay.md](replay.md)                                                |
 | `factory fork` / `reset` / `compact` / `spend`    | passing | [session.md](session.md)                                              |
 | `factory repo add --url`, `repo sync`, `doctor`   | passing | [clone.md](clone.md)                                                  |
+| `factory doctor` (preflight)                      | passing | [doctor.md](doctor.md) (`preflight.sh`)                               |
 | `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)         |
 | Feature                                           | Status  | File                                                                  |
 | -----------------------------------------------   | ------- | ---------------------------------------------------------------       |

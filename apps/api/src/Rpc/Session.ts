@@ -12,6 +12,7 @@ import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
+import { DoctorRpcHandlers } from "./Doctor";
 import { ServerRpcHandlers } from "./Server";
 import { SkillsRpcHandlers } from "./Skills";
 import { TaskRpcHandlers } from "./Task";
@@ -108,6 +109,7 @@ export const SessionRpcLive = RpcServer.layerHttp({
       TaskRpcHandlers,
       TriggerRoutesRpcHandlers,
       ServerRpcHandlers,
+      DoctorRpcHandlers,
       SkillsRpcHandlers,
     ),
   ),
