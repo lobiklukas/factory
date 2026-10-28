@@ -65,8 +65,9 @@ and leaves the board on its pin (`.pi/skills/verify-web/features/definition-edit
 carries each column as stored, so a field the editor has no control for is kept.
 
 Built (F5, F7, F8): a definition version records its author (`board_definitions.author`, nullable:
-the credential's actor over `defineBoard`, as a skill version's is; seeded versions and an
-`unchanged` or dry-run answer have none), shown by `factory board definitions` (`by <actor>`),
+the credential's actor over `defineBoard`, as a skill version's is, and on an open control plane the
+caller's own name: `cli` from `factory board define`, `dashboard` from the editor, as their card writes
+are; seeded versions and an `unchanged` or dry-run answer have none), shown by `factory board definitions` (`by <actor>`),
 `definition show` and the settings page. `factory board vocabulary` prints the requirement keys
 (checked, human gate) and roles `getDefinitionVocabulary` answers, and `factory board definition show
 <id> [--version N] --json` prints the version as the file `factory board define --file` accepts

@@ -256,19 +256,22 @@ check "a legacy version (default v1) spells out its initial column and every col
   "initialColumn intake, transitions on every column"
 BEFORE_LEGACY="$(table)"
 run legacy-dry board define --file "$FILES/legacy.json" --dry-run --api "$API_URL"
-check "and that file decodes on the way in (never invalid_input) and a dry run writes nothing" \
-  "$(! has legacy-dry 'error: invalid_input' && [ "$(table)" = "$BEFORE_LEGACY" ] && echo 0 || echo 1)" "exit=$rc; $(head -1 "$RUN_DIR/define-legacy-dry.err")"
+check "and that file decodes on the way in and is accepted as a definition: valid, a dry run writes nothing" \
+  "$([ "$rc" = "0" ] && has legacy-dry "valid       default would be written as v" && [ "$(table)" = "$BEFORE_LEGACY" ] && echo 0 || echo 1)" "exit=$rc; $(head -1 "$RUN_DIR/define-legacy-dry.out")"
 check "after the round trip $ID holds v1, v2 and v3" \
   "$([ "$(versions "$ID")" = "1 2 3" ] && echo 0 || echo 1)" "versions=[$(versions "$ID")]"
 
-# --- author (F7): this suite runs with auth off, so no caller is named --------------------------------
-# The credential's actor on a version is proven by verify-api's identity.sh (auth on); here the
-# contrary: with no caller there is no author, in the table and in the listing.
-check "with auth off a version written by board define has no author (NULL), seeded or not" \
-  "$([ "$(MODE=authors ID="$ID" probe)" = "1=NULL 2=NULL 3=NULL" ] && echo 0 || echo 1)" \
+# --- author (F7): this suite runs with auth off, so the CLI's own actor is the author ---------------
+# A credential's actor overrides it, which verify-api's identity.sh proves (auth on); here the
+# unauthenticated case: `board define` names itself `cli`, as a card move does, in the table and in
+# the listing.
+check "with auth off a version written by board define is authored by cli, v1 to v3" \
+  "$([ "$(MODE=authors ID="$ID" probe)" = "1=cli 2=cli 3=cli" ] && echo 0 || echo 1)" \
   "authors=[$(MODE=authors ID="$ID" probe)]"
-check "board definitions prints no author for them" \
-  "$(! grep -E "^$ID  " "$RUN_DIR/define-list.out" | grep -q ' by ' && echo 0 || echo 1)" "no 'by' column"
+run list-after board definitions --api "$API_URL"
+check "board definitions prints 'by cli' on each of $ID's three versions" \
+  "$([ "$rc" = "0" ] && [ "$(grep -cE "^$ID  v[123]  .* by cli$" "$RUN_DIR/define-list-after.out")" = "3" ] && echo 0 || echo 1)" \
+  "$(grep -E "^$ID  " "$RUN_DIR/define-list-after.out" | awk '{print $2 ":" $NF}' | tr '\n' ' ')"
 
 # --- evidence --------------------------------------------------------------------------------------
 cp "$FILES/v1.json" "$EVIDENCE_DIR/define-v1.json"

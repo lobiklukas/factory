@@ -42,6 +42,8 @@ the page says "v<n> created", and the board stays pinned to its version until it
 - When the definition holds versions newer than the pin (`listDefinitions`), the header says so
   (`[data-editor-newer-versions=<list>]`): the draft starts from the pin and the save writes newest +
   1, so it supersedes those versions without their changes.
+- The version is written as the dashboard's (`actor: "dashboard"`, F7): `definition-edit.mjs` reads the saved
+  v2's `author` back as `dashboard`.
 - Saved: `[data-definition-saved="created"][data-saved-version=<n>]` reads "v<n> created. This board
   stays pinned to v<pinned> until it is upgraded; a board created now pins v<n>." Saving content the
   newest version already holds writes nothing (`unchanged`). The definition list re-reads

@@ -34,6 +34,12 @@ import { BoardClient } from "../rpc";
 /** What a field with nothing in it prints: one glyph, so "none" never reads as a value. */
 const NONE = "—";
 
+/**
+ * Who a version written from the terminal is attributed to (F7): `cli`, as a card move's actor is,
+ * and — like it — overridden by the token's actor on a control plane that authenticates (LOB-20).
+ */
+const DEFINE_ACTOR = "cli";
+
 const apiFlag = Flag.String("api").pipe(
   Flag.withDescription("Control plane base URL"),
   Flag.optional,
@@ -506,7 +512,11 @@ const defineCommand = Command.make(
     }
     const program = Effect.gen(function* () {
       const { client } = yield* BoardClient;
-      const defined = yield* client.defineBoard({ ...decoded.file, dryRun });
+      const defined = yield* client.defineBoard({
+        ...decoded.file,
+        actor: DEFINE_ACTOR,
+        dryRun,
+      });
       for (const line of definedLines(defined)) yield* Console.log(line);
     }).pipe(
       Effect.catchIf(Schema.is(InvalidDefinition), (refusal) =>

@@ -211,7 +211,7 @@ default definition's newest version and one pinned to v2. `board-settings.mjs` o
 model and its source, skills, requirements marked checked or "not yet checked", moves out and human
 gates — to equal `getDefinition` for the board's version; `planning → building` to be the gate "plan
 approval" and `specifying`'s role `specifier`; the v2 board to say v3 exists; each lane header's
-disclosure to show its column's same facts; and a malformed or missing board to be refused
+disclosure to show its column's same facts; a version's author (F7) to show on its page, and a malformed or missing board to be refused
 (`features/board-settings.md`). Booted with `APPROVAL_REQUIRED="npm publish"`, it also authors a
 definition whose `careful` column gates `sleep` (C22), requires every column's effective autonomy on
 the page to equal `getDefinition`, and starts a run in `careful` and one in `building` with the same

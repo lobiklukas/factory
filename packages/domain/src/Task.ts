@@ -398,7 +398,7 @@ export const definitionSourceOf = (
   const { id, name, columns, caps } = declaresTransitions(definition)
     ? definition
     : materializeDefinition(definition);
-  const initialColumn = definition.initialColumn ?? initialColumnOf(definition);
+  const initialColumn = initialColumnOf(definition);
   return {
     id,
     name,

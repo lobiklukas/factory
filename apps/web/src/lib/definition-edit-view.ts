@@ -9,6 +9,7 @@ import type {
   RequirementOption,
 } from "@repo/domain/Task";
 import { materializeDefinition } from "@repo/domain/Task";
+import { DASHBOARD_ACTOR } from "./approvals-view";
 import { NONE } from "./board-settings-view";
 
 /**
@@ -62,7 +63,6 @@ export type DefinitionDraft = {
  * (they are read through the default pipeline's table), and an authored version must declare both,
  * so a draft of one starts from what its cards meet — and the diff does not call that a change.
  */
-export const materialize = materializeDefinition;
 
 /** The key of the first column of the draft named `name`, or `undefined` when none is. */
 const keyNamed = (
@@ -76,7 +76,7 @@ const keyNamed = (
 
 /** The draft a pinned version opens as: its own columns, keyed in order, moves and initial spelled out. */
 export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
-  const base = materialize(definition);
+  const base = materializeDefinition(definition);
   const keyed = base.columns.map((column, index) => ({
     key: `c${index}`,
     origin: column.name,
@@ -114,6 +114,8 @@ export const defineInputOf = (
   } = pinned;
   return {
     ...kept,
+    // Who wrote the version (F7), as a dashboard card write's actor is; a credential overrides it.
+    actor: DASHBOARD_ACTOR,
     name: draft.name,
     columns: draft.columns.map((entry) => entry.column),
     ...(draft.initialColumn === ""
@@ -688,7 +690,7 @@ export const definitionDiff = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
 ): ReadonlyArray<DiffLine> => {
-  const base = materialize(pinned);
+  const base = materializeDefinition(pinned);
   const lines: Array<DiffLine> = [];
   if (base.name !== draft.name)
     lines.push({
