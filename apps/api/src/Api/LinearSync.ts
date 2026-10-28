@@ -25,7 +25,10 @@ import { FetchHttpClient } from "effect/http";
 import type { SqlClient } from "effect/sql/SqlClient";
 import {
   type LinearIssueSync,
+  LinearAskWriteBack,
   LinearIssueSyncLive,
+  LinearTriggerBlockers,
+  LinearTriggerReplies,
   LinearProposalTracker,
   LinearSessionWriteBack,
   LinearTriggerWriteBack,
@@ -68,6 +71,29 @@ export const SessionWriteBackLive: Layer.Layer<
   never,
   LinearIssueSync | SqlClient
 > = linearConfig === undefined ? Layer.empty : LinearSessionWriteBack;
+
+/**
+ * Where a question a run asks on a card filed from a Linear issue is also asked, as an `elicitation`
+ * in Linear (T5). Without a key nothing is provided and the `ask` tool is unchanged.
+ */
+export const AskWriteBackLive: Layer.Layer<
+  never,
+  never,
+  LinearIssueSync | SqlClient
+> = linearConfig === undefined ? Layer.empty : LinearAskWriteBack;
+
+/**
+ * The seam's blocker gate (T5): an issue with an open `blockedBy` relation starts nothing. Without a
+ * key there is no way to read the relations, and the seam waits on nothing, as before.
+ */
+export const TriggerBlockersLive: Layer.Layer<never, never, LinearIssueSync> =
+  linearConfig === undefined ? Layer.empty : LinearTriggerBlockers;
+
+/**
+ * Where a person's reply in a Linear agent session goes (T5): the answer on the card its question
+ * parked. A reply is a signed event like any delivery, so this needs no Linear key.
+ */
+export const TriggerRepliesLive = LinearTriggerReplies;
 
 /**
  * Where an approved proposal becomes a Linear issue (LOB-202). Without a key nothing is provided and

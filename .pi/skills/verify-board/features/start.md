@@ -52,6 +52,13 @@ opened as a scratch session. `--prompt` is driven by the drive's specify phase
 ([specify.md](specify.md)) and by `./ask.sh` ([ask.md](ask.md)): every run in both is started with
 it, and the drives check the `sent …` line and that the run then works.
 
+`--budget <usd>` (C23) caps the run's spend: it goes on the `createSession` that opens the run, so the
+session's `budget.cap` records it, and `budget  $2.5000` is printed after the `task` line. A cap of zero
+or less is refused before anything is opened. Without it the server's default cap applies, if it has one.
+The card pane's Start run has the same Budget field (blank is no cap of the run's own). A stopped run's
+cap is raised with `factory budget <session> --cap <usd>` or the pane's **Raise cap**; `./budget.sh` drives
+both doors, the stop and the raise against a priced faux (`FAUX_COST=0.01 ./up.sh`).
+
 `./start-prompt.sh` (C6) is the no-`--prompt` proof: two cards with one title and body, one started with
 `factory board start` and one from the board page (**Start run**, which opens a field holding the card's
 default prompt, then **Send**). It reads each run's first `user` (`pi.user`) entry back from `getSession`

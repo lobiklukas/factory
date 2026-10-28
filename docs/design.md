@@ -559,6 +559,12 @@ most one request. A stop the log refuses to commit fails closed: the request is 
 fork keeps its parent's cap and carries its spend; a replay keeps its source's cap at no spend; a fork
 or a replay of an uncapped session gets `SESSION_BUDGET`, as a create does. The full stop semantics
 are that module's header.
+_As built (C23)._ A cap can be set after the fact. `setSessionBudget({ sessionId, budget })` commits
+the new ceiling on `factory.budget` and clears the stop fields in the same commit (`commitBudget`), so
+a session the cap stopped runs again on its next message; the stop's transcript entry stays as
+history. `factory budget <session> --cap` and the dashboard's **Raise cap** (under the stop in the
+transcript) call it. A board run takes a cap when it is started: `factory board start --budget` and the
+card pane's Start run (a Budget field) put `budget` on the `createSession` that opens it.
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.

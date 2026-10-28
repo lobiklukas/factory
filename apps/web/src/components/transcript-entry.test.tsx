@@ -32,6 +32,25 @@ describe("TranscriptRow", () => {
     expect(render(entry("system", "policy"))).toContain("system");
   });
 
+  it("puts a budget stop's action under it, and no other row's (C23)", () => {
+    const stop = entry("budget", "budget reached: stopped");
+    const withAction = renderToStaticMarkup(
+      <TranscriptRow entry={stop} action={<button>Raise cap</button>} />,
+    );
+    expect(withAction).toContain("budget reached: stopped");
+    expect(withAction.indexOf("Raise cap")).toBeGreaterThan(
+      withAction.indexOf("budget reached: stopped"),
+    );
+    expect(render(stop)).not.toContain("Raise cap");
+    const other = renderToStaticMarkup(
+      <TranscriptRow
+        entry={entry("assistant", "On it")}
+        action={<button>Raise cap</button>}
+      />,
+    );
+    expect(other).not.toContain("Raise cap");
+  });
+
   it("still renders the user's message once, in its bubble, and the agent's reply as prose", () => {
     const user = render(entry("user", "Fix the login bug"));
     expect(user.split("Fix the login bug")).toHaveLength(2);

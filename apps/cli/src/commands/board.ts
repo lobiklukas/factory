@@ -3,6 +3,7 @@ import { Command, Flag } from "effect/cli";
 import {
   RepoSlug,
   SessionActor,
+  SessionBudgetCap,
   SessionError,
   SessionId,
 } from "@repo/domain/Session";
@@ -33,6 +34,7 @@ import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { NO_PR } from "./ls";
 import { BoardClient } from "../rpc";
+import { formatDollars } from "../transcript";
 import { boardConfigCommands } from "./boardConfig";
 
 /**
@@ -707,71 +709,6 @@ const moveCommand = Command.make(
 );
 
 /**
- * `factory board comment` — add to a card's thread (B7, LOB-73).
- *
- * From a person on a card blocked `needs_input`, the comment is the answer: it lifts the block in the
- * same transaction, and the next run started on the card reads it in its prompt. Anywhere else it is
- * a note. `--expect-revision` is required for the reason it is on `move`: an answer typed against a
- * card someone else already answered must be refused, not silently appended.
- */
-const commentCommand = Command.make(
-  "comment",
-  {
-    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
-    body: Flag.String("body").pipe(
-      Flag.withDescription("The comment, verbatim — the answer to a question"),
-    ),
-    expectRevision: Flag.Int("expect-revision").pipe(
-      Flag.withDescription("The revision this comment expects"),
-    ),
-    actor: actorFlag,
-    api: apiFlag,
-  },
-  Effect.fnUntraced(function* ({ task, body, expectRevision, actor, api }) {
-    const apiUrl = yield* resolveApiUrl(api);
-
-    const program = Effect.gen(function* () {
-      const taskId = decodeId(TaskId, task);
-      if (taskId === undefined) {
-        return yield* reportFailure(
-          "invalid_input",
-          `--task "${task}" is not a task id (tsk_…)`,
-        );
-      }
-      const { client } = yield* BoardClient;
-      const before = yield* client.getTask({ taskId });
-      const after = yield* client.commentTask({
-        taskId,
-        expectedRevision: expectRevision,
-        body,
-        actor,
-      });
-      yield* Console.log(
-        `commented on ${after.id} (revision ${after.revision})`,
-      );
-      if (before.blocked !== undefined && after.blocked === undefined) {
-        yield* Console.log(
-          `answered: ${after.id} is no longer blocked (${before.blocked.reason} from ${before.blocked.column})`,
-        );
-      }
-    });
-
-    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
-  }),
-).pipe(
-  Command.withDescription(
-    "Comment on a card; on a card blocked needs_input, the answer",
-  ),
-  Command.withExamples([
-    {
-      command:
-        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16."',
-      description: "Answer the question a parked run asked",
-    },
-  ]),
-);
-
-/**
  * What `factory board start` needs of the client, as slices a test can fake: the card, the definition
  * version the card pinned (for the column's instruction), the session it opens and the message it sends.
  */
@@ -801,6 +738,7 @@ export interface StartClient<B, S> {
     readonly taskColumn: string;
     readonly actor: string;
     readonly repo?: RepoSlug;
+    readonly budget?: number;
   }) => Effect.Effect<{ readonly id: SessionId }, S>;
   readonly getSession: (input: {
     readonly sessionId: SessionId;
@@ -861,6 +799,8 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     readonly prompt: string | undefined;
     readonly idle: boolean;
     readonly actor: string;
+    /** The run's spend ceiling in US dollars (C23); absent: the server's default cap, if any. */
+    readonly budget?: number | undefined;
   },
   emit: (line: string) => Effect.Effect<void>,
 ) {
@@ -872,9 +812,13 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     taskColumn,
     actor: input.actor,
     ...(card.repo === undefined ? {} : { repo: card.repo }),
+    ...(input.budget === undefined ? {} : { budget: input.budget }),
   });
   yield* emit(`session ${session.id}`);
   yield* emit(`task    ${card.id} in ${taskColumn}`);
+  if (input.budget !== undefined) {
+    yield* emit(`budget  ${formatDollars(input.budget)}`);
+  }
   // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
   // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
   // Advisory: the run has started, so a failed read skips the warning and never fails the command.
@@ -925,10 +869,25 @@ const startCommand = Command.make(
       ),
       Flag.withDefault(false),
     ),
+    budget: Flag.Finite("budget").pipe(
+      Flag.withDescription(
+        "Spend ceiling for the run, in US dollars: it stops before a model request once the session's spend reaches it (raise it with `factory budget`)",
+      ),
+      Flag.withSchema(SessionBudgetCap),
+      Flag.optional,
+    ),
     actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, idle, actor, api }) {
+  Effect.fnUntraced(function* ({
+    task,
+    column,
+    prompt,
+    idle,
+    budget,
+    actor,
+    api,
+  }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -953,6 +912,7 @@ const startCommand = Command.make(
           column: Option.getOrUndefined(column),
           prompt: Option.getOrUndefined(prompt),
           idle,
+          budget: Option.getOrUndefined(budget),
           actor,
         },
         Console.log,
@@ -970,8 +930,209 @@ const startCommand = Command.make(
         "A session bound to the card, in the card's own column, sent the card's default prompt",
     },
     {
+      command: "factory board start --task tsk_… --budget 2.50",
+      description: "The same run, capped at $2.50 of spend",
+    },
+    {
       command: "factory board start --task tsk_… --idle",
       description: "The same session, opened and left waiting",
+    },
+  ]),
+);
+
+/**
+ * `--start` on a card that is not waiting for an answer: there is no answer to start a run for, so
+ * nothing is written. Reported as `error: start_needs_answer`.
+ */
+export class StartNeedsAnswer extends Schema.TaggedError<StartNeedsAnswer>()(
+  "StartNeedsAnswer",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * `--start` on a comment that landed but answered nothing: the card is still blocked, so no run is
+ * waiting on it and none was opened. Reported as `error: start_not_started` with a non-zero exit, so
+ * a script that asked for a run can tell that it got none; the comment itself is already written.
+ */
+export class StartNotStarted extends Schema.TaggedError<StartNotStarted>()(
+  "StartNotStarted",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
+/** What `factory board comment` needs of the client: the card, and the write of a comment to it. */
+export interface CommentClient<E> {
+  readonly getTask: (input: {
+    readonly taskId: TaskId;
+  }) => Effect.Effect<Task, E>;
+  readonly commentTask: (input: {
+    readonly taskId: TaskId;
+    readonly expectedRevision: number;
+    readonly body: string;
+    readonly actor: string;
+  }) => Effect.Effect<Task, E>;
+}
+
+/**
+ * Add a comment to a card and say what it did; when it answered a question and `start` names the run's
+ * actor (C24), open the next run on the card.
+ *
+ * The run is `startCard` with nothing but the card: its column, the default prompt (C6). The answer is
+ * not pasted into that prompt — every run on the card is told the whole thread, the answer included
+ * (B7, the `task_thread` prompt section) — so what is started is the run that reads it. `--start` on a
+ * card that is not blocked `needs_input` is refused before the comment is written: a comment that is
+ * only a note has no run waiting on it, and starting one anyway would be the surprise. If the
+ * comment lands and the card is nevertheless still blocked, no run is started and the command fails
+ * (`StartNotStarted`, exit 1) after saying so. A run's actor is refused up front like a card that is not blocked.
+ */
+export const commentCard = Effect.fnUntraced(function* <B, S>(
+  client: CommentClient<B> & StartClient<B, S>,
+  input: {
+    readonly taskId: TaskId;
+    readonly expectedRevision: number;
+    readonly body: string;
+    readonly actor: string;
+    /** The actor the next run is attributed to; `undefined` for a comment that starts nothing. */
+    readonly start: string | undefined;
+  },
+  emit: (line: string) => Effect.Effect<void>,
+) {
+  const before = yield* client.getTask({ taskId: input.taskId });
+  if (input.start !== undefined && before.blocked?.reason !== "needs_input") {
+    return yield* new StartNeedsAnswer({
+      taskId: input.taskId,
+      message: `--start follows an answer, and ${before.id} is not blocked needs_input (${
+        before.blocked === undefined
+          ? "it is not blocked"
+          : `it is blocked ${before.blocked.reason}`
+      }): nothing was commented`,
+    });
+  }
+  // Only a person answers: a run's comment on its own parked card is a note and leaves the block.
+  if (input.start !== undefined && Schema.is(SessionId)(input.actor)) {
+    return yield* new StartNeedsAnswer({
+      taskId: input.taskId,
+      message: `--start follows an answer, and --actor ${input.actor} is a run: a run's comment is a note and does not lift the block: nothing was commented`,
+    });
+  }
+  const after = yield* client.commentTask({
+    taskId: input.taskId,
+    expectedRevision: input.expectedRevision,
+    body: input.body,
+    actor: input.actor,
+  });
+  yield* emit(`commented on ${after.id} (revision ${after.revision})`);
+  const lifted = after.blocked === undefined ? before.blocked : undefined;
+  if (lifted !== undefined) {
+    yield* emit(
+      `answered: ${after.id} is no longer blocked (${lifted.reason} from ${lifted.column})`,
+    );
+  }
+  if (input.start === undefined) return;
+  if (lifted === undefined) {
+    const message = `${after.id} is still blocked, so no run is waiting on this comment`;
+    yield* emit(`not started: ${message}`);
+    return yield* new StartNotStarted({ taskId: input.taskId, message });
+  }
+  yield* startCard(
+    client,
+    {
+      taskId: input.taskId,
+      column: undefined,
+      prompt: undefined,
+      idle: false,
+      actor: input.start,
+    },
+    emit,
+  );
+});
+
+/**
+ * `factory board comment` — add to a card's thread (B7, LOB-73).
+ *
+ * From a person on a card blocked `needs_input`, the comment is the answer: it lifts the block in the
+ * same transaction, and the next run started on the card reads it in its prompt. Anywhere else it is
+ * a note. `--expect-revision` is required for the reason it is on `move`: an answer typed against a
+ * card someone else already answered must be refused, not silently appended.
+ *
+ * `--start` is the next step of an answer (C24): it opens that run, as `board start` with no flags
+ * does, so an answered card is not left with an answer and no run to read it.
+ */
+const commentCommand = Command.make(
+  "comment",
+  {
+    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
+    body: Flag.String("body").pipe(
+      Flag.withDescription("The comment, verbatim — the answer to a question"),
+    ),
+    expectRevision: Flag.Int("expect-revision").pipe(
+      Flag.withDescription("The revision this comment expects"),
+    ),
+    start: Flag.Boolean("start").pipe(
+      Flag.withDescription(
+        "After an answer lifts the block, start the next run on the card (its default prompt; the run reads the answer in the card's thread). Refused, before anything is written, on a card that is not blocked needs_input",
+      ),
+      Flag.withDefault(false),
+    ),
+    actor: actorFlag,
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({
+    task,
+    body,
+    expectRevision,
+    start,
+    actor,
+    api,
+  }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
+      const runActor = start
+        ? Option.getOrUndefined(Schema.decodeOption(SessionActor)(actor))
+        : undefined;
+      if (start && runActor === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--actor "${actor}" cannot own a run: --start attributes the run to the one who answered`,
+        );
+      }
+      const { client } = yield* BoardClient;
+      yield* commentCard(
+        client,
+        {
+          taskId,
+          expectedRevision: expectRevision,
+          body,
+          actor,
+          start: runActor,
+        },
+        Console.log,
+      );
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "Comment on a card; on a card blocked needs_input, the answer",
+  ),
+  Command.withExamples([
+    {
+      command:
+        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16."',
+      description: "Answer the question a parked run asked",
+    },
+    {
+      command:
+        'factory board comment --task tsk_… --expect-revision 3 --body "Target Postgres 16." --start',
+      description: "Answer it and start the next run, which reads the answer",
     },
   ]),
 );
