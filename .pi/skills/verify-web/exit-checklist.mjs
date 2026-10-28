@@ -12,15 +12,19 @@
 //   spec        a spec declared in-process (`lib/seed-spec.ts`, what a specifying run's `spec` tool
 //               does) flips `spec_doc` to met and drops the warning within one poll interval, and the
 //               same click now moves the card
-//   planning    `plan_doc` and the human-gate label are listed `not checked`, never `met`, and no
-//               move is warned over them
+//   planning    `plan_doc` is unmet with the server's reason and warns the move to `building` (D10);
+//               the human-gate label is listed `not checked`, never `met`
+//   plan        a plan declared in-process (`lib/seed-plan.ts`, what a planning run's `plan` tool
+//               does) flips `plan_doc` to met within one poll, drops the warning, and the pane's Plan
+//               section shows it as `getTaskPlan` answers it
 //   building    with no run, `run_completed`, `non_empty_diff` and `pr_link` are all unmet with the
 //               server's reasons, the move to `review` names all three, `canceled` none
 //
 // The card is walked with the API's own moves (`moveTask`) as a person: what is driven here is the
 // pane's reading of the card, and the move controls are the card pane's other feature's.
 //
-// Env: WEB_URL, API_URL, EVIDENCE_DIR, DATABASE_URL (for `lib/seed-spec.ts`, the API's database).
+// Env: WEB_URL, API_URL, EVIDENCE_DIR, DATABASE_URL (for `lib/seed-spec.ts` and `lib/seed-plan.ts`,
+// the API's database).
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -37,6 +41,7 @@ const ROOT = path.resolve(
   "../../..",
 );
 const SEED_SPEC = path.join(ROOT, ".pi/skills/lib/seed-spec.ts");
+const SEED_PLAN = path.join(ROOT, ".pi/skills/lib/seed-plan.ts");
 /** The exit view's poll interval (`EXIT_POLL`, 10 s) and the slack one read plus a render may add. */
 const POLL_MS = 10_000;
 const WINDOW_MS = POLL_MS + 2_000;
@@ -289,7 +294,7 @@ try {
   );
   await page.locator("aside[data-card-pane] [data-move-to='planning']").click();
 
-  // --- planning: unchecked keys are listed, never judged ------------------------------------------
+  // --- planning: plan_doc judged (D10), the human-gate label listed, never judged -----------------
   await paneIn("planning");
   const truth3 = await rpc("getTaskExit", { taskId });
   const shown3 = await readChecklist();
@@ -301,16 +306,86 @@ try {
     "planning",
   );
   assert(
-    "planning's plan_doc and human gate label read 'not checked', and no move is warned",
+    "planning's plan_doc reads unmet with the server's reason, its human gate label 'not checked'",
     sameAsServer(shown3, truth3) &&
-      truth3.requirements.length >= 2 &&
-      truth3.requirements.every((r) => r.status === "unchecked") &&
-      shown3.items.every((item) => item.word === "not checked") &&
-      moves3.every((move) => move.unmet === null),
-    `pane ${JSON.stringify(shown3?.items.map((i) => [i.key, i.word]))}; moves ${JSON.stringify(moves3?.map((m) => [m.to, m.unmet]))}`,
+      JSON.stringify(truth3.requirements.map((r) => [r.key, r.status])) ===
+        JSON.stringify([
+          ["plan_doc", "unmet"],
+          ["human_move", "unchecked"],
+        ]) &&
+      shown3.items.find((item) => item.key === "human_move")?.word ===
+        "not checked",
+    `pane ${JSON.stringify(shown3?.items.map((i) => [i.key, i.word]))}`,
+  );
+  assert(
+    "the move to building is warned naming plan_doc; canceled is not",
+    moves3?.find((move) => move.to === "building")?.unmet === "plan_doc" &&
+      moves3?.find((move) => move.to === "canceled")?.unmet === null,
+    JSON.stringify(moves3?.map((m) => [m.to, m.unmet])),
   );
   await page.screenshot({
-    path: path.join(EVIDENCE_DIR, "exit-planning-unchecked.png"),
+    path: path.join(EVIDENCE_DIR, "exit-planning-unplanned.png"),
+    fullPage: true,
+  });
+
+  // --- plan: declared in-process, met within a poll, and shown in the pane's Plan section --------
+  const planned = spawnSync("bun", ["run", SEED_PLAN], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, TASK_ID: taskId },
+  });
+  const plannedAt = Date.now();
+  assert(
+    "a plan is declared on the card, a revision on",
+    planned.status === 0 && planned.stdout.includes(`"taskId":"${taskId}"`),
+    `${planned.status} ${(planned.stdout || planned.stderr).trim().slice(0, 200)}`,
+  );
+  await page.waitForSelector(
+    "aside[data-card-pane] [data-exit-key='plan_doc'][data-exit-status='met']",
+    { timeout: 20_000 },
+  );
+  const planMetAfterMs = Date.now() - plannedAt;
+  const truth3b = await rpc("getTaskExit", { taskId });
+  const shown3b = await readChecklist();
+  const moves3b = await readMoves();
+  await page.waitForSelector("aside[data-card-pane] [data-plan]", {
+    timeout: 20_000,
+  });
+  const planShown = await page.evaluate(() => ({
+    summary:
+      document.querySelector("aside[data-card-pane] [data-plan-summary]")
+        ?.textContent ?? null,
+    steps: Array.from(
+      document.querySelectorAll(
+        "aside[data-card-pane] [data-plan-list='steps'] [data-plan-item]",
+      ),
+    ).map((item) => item.textContent ?? ""),
+  }));
+  const planTruth = await rpc("getTaskPlan", { taskId });
+  observed.plan = {
+    truth: truth3b,
+    shown: shown3b,
+    moves: moves3b,
+    planMetAfterMs,
+    planShown,
+    planTruth,
+  };
+  assert(
+    "plan_doc turns met within one poll interval, equal to the server, and building is no longer warned",
+    planMetAfterMs <= WINDOW_MS + 1_000 &&
+      sameAsServer(shown3b, truth3b) &&
+      moves3b?.find((move) => move.to === "building")?.unmet === null,
+    `${planMetAfterMs}ms (poll ${POLL_MS}ms); pane ${JSON.stringify(shown3b?.items.map((i) => [i.key, i.status]))}`,
+  );
+  assert(
+    "the pane's Plan section shows the card's plan, as getTaskPlan answers it",
+    planTruth !== null &&
+      planShown.summary === planTruth.summary &&
+      JSON.stringify(planShown.steps) === JSON.stringify(planTruth.steps),
+    `summary "${String(planShown.summary)}", steps ${JSON.stringify(planShown.steps)}`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "exit-planning-planned.png"),
     fullPage: true,
   });
 
