@@ -122,15 +122,22 @@ export const sessionAtom = runtime.fn((sessionId: SessionId) =>
  * the sidebar re-read the server's list once the session exists.
  */
 export const startSessionAtom = runtime.fn(
-  (input: { readonly content: string; readonly title?: string | undefined }) =>
+  (input: {
+    readonly content: string;
+    readonly title?: string | undefined;
+    /** The model the picker chose (LOB-274); absent, the server's default. */
+    readonly model?: string | undefined;
+  }) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
       // `title` is optional on the wire (CreateSessionInput), and the control plane
       // names a session from its first message, so omitting the key is the honest
       // default rather than sending an empty string. The spend is the dashboard's (LOB-162).
+      // `model` likewise: absent is the server's choice, not the default's key echoed back.
       const session = yield* rpc.client.createSession({
         actor: DASHBOARD_ACTOR,
         ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.model === undefined ? {} : { model: input.model }),
       });
       yield* rpc.client.sendMessage({
         sessionId: session.id,

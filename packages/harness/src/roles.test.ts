@@ -37,6 +37,8 @@ import {
 } from "./loader";
 import {
   createFauxModelAccess,
+  createModelAccess,
+  DEFAULT_ANTHROPIC_MODEL,
   modelAccessFor,
   modelKey,
   type ModelAccess,
@@ -309,6 +311,7 @@ const runIn = (
   options: {
     readonly model?: ModelAccess;
     readonly roles?: RoleModels;
+    readonly sessionModel?: ModelAccess;
   } = {},
 ) =>
   Effect.runPromise(
@@ -319,6 +322,9 @@ const runIn = (
         storage,
         model: options.model ?? deployment.access,
         roles: options.roles ?? roles,
+        ...(options.sessionModel === undefined
+          ? {}
+          : { sessionModel: options.sessionModel }),
         cwd,
         ...(profile === undefined ? {} : { run: profile }),
       });
@@ -492,5 +498,121 @@ describe("a reopened run", () => {
     expect(read.usage.models.map((entry) => entry.key)).toEqual([
       "faux/faux-small",
     ]);
+  });
+});
+
+/**
+ * A session created on a model (LOB-274): `openSession`'s `sessionModel` pins the root ahead of the
+ * role's row and the deployment's model, and only on the open that creates the root. The pin is read
+ * back from the conversation itself (`root.agent`, Pi Durable's `pi.agent`), not from what
+ * `openSession` says it chose.
+ */
+describe("a session's own model", () => {
+  /** Open a root on `options`, read what it is pinned to, and close it without sending anything. */
+  const pinnedBy = (options: {
+    readonly model: ModelAccess;
+    readonly sessionModel?: ModelAccess;
+    readonly roles?: RoleModels;
+    readonly run?: RunProfile;
+    readonly storage?: Storage;
+  }) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const opened = yield* openSession({
+          storage: options.storage ?? new MemoryStorage(),
+          model: options.model,
+          ...(options.roles === undefined ? {} : { roles: options.roles }),
+          ...(options.sessionModel === undefined
+            ? {}
+            : { sessionModel: options.sessionModel }),
+          ...(options.run === undefined ? {} : { run: options.run }),
+          cwd: mkdtempSync(join(tmpdir(), "factory-session-model-")),
+        });
+        const agent = yield* Effect.promise(() => opened.root.agent(context));
+        yield* closeHarness(opened.harness);
+        return { pinned: agent.model, model: modelKey(opened.model) };
+      }),
+    );
+
+  it("pins anthropic/claude-haiku-4-5 into the root of a session created on it", async () => {
+    // The real Anthropic catalog, with no credential: opening a root sends no request.
+    const anthropic = createModelAccess("anthropic", {
+      authContext: {
+        env: async () => undefined,
+        fileExists: async () => false,
+      },
+    });
+    const haiku = modelAccessFor(anthropic, "anthropic/claude-haiku-4-5");
+    if (haiku === undefined)
+      throw new Error("pi-ai's catalog serves claude-haiku-4-5");
+
+    const chosen = await pinnedBy({ model: anthropic, sessionModel: haiku });
+    expect(chosen.pinned).toEqual({
+      provider: "anthropic",
+      modelId: "claude-haiku-4-5",
+    });
+    expect(chosen.model).toBe("anthropic/claude-haiku-4-5");
+
+    // Without one, the same deployment pins its own model: the pin above is the session's choice.
+    const unchosen = await pinnedBy({ model: anthropic });
+    expect(unchosen.pinned).toEqual({
+      provider: "anthropic",
+      modelId: DEFAULT_ANTHROPIC_MODEL,
+    });
+  });
+
+  it("wins over the column's role row, and runs every request of the run on it", async () => {
+    const access = createFauxModelAccess({
+      fauxModels: ["faux-1", "faux-spec", "faux-pick"],
+    }).access;
+    const pick = modelAccessFor(access, "faux/faux-pick");
+    const spec = modelAccessFor(access, "faux/faux-spec");
+    if (pick === undefined || spec === undefined)
+      throw new Error("the catalog serves both");
+    const table: RoleModels = new Map([["specifier", spec]]);
+
+    const chosen = await pinnedBy({
+      model: access,
+      roles: table,
+      run: run("specifying", "specifier"),
+      sessionModel: pick,
+    });
+    expect(chosen.pinned).toEqual({ provider: "faux", modelId: "faux-pick" });
+    // The same run with no model of its own takes the role's row, as before.
+    const role = await pinnedBy({
+      model: access,
+      roles: table,
+      run: run("specifying", "specifier"),
+    });
+    expect(role.pinned).toEqual({ provider: "faux", modelId: "faux-spec" });
+
+    // A whole turn: the faux model answers, and the run's usage is billed to the session's model.
+    const ran = await runIn(run("specifying", "specifier"), {
+      model: access,
+      roles: table,
+      sessionModel: pick,
+    });
+    expect(ran.status).toBe("done");
+    expect(ran.models).toEqual(["faux/faux-pick"]);
+  });
+
+  it("decides only the open that creates the root: a reopen keeps the model it was pinned to", async () => {
+    const access = createFauxModelAccess({
+      fauxModels: ["faux-1", "faux-pick"],
+    }).access;
+    const pick = modelAccessFor(access, "faux/faux-pick");
+    if (pick === undefined) throw new Error("the catalog serves faux-pick");
+    const log = new MemoryStorage();
+
+    const first = await pinnedBy({
+      model: access,
+      sessionModel: pick,
+      storage: sharedLog(log),
+    });
+    expect(first.pinned).toEqual({ provider: "faux", modelId: "faux-pick" });
+    // A later owner opens with no session model (the control plane passes it only at create).
+    const reopened = await pinnedBy({ model: access, storage: sharedLog(log) });
+    expect(reopened.pinned).toEqual({ provider: "faux", modelId: "faux-pick" });
+    expect(reopened.model).toBe("faux/faux-pick");
   });
 });

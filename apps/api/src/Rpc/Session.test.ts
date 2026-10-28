@@ -426,6 +426,43 @@ const callApi = <A, E>(
     ).pipe(Effect.provide(ClientProtocol)),
   );
 
+describe("createSession's model over RPC (LOB-274)", () => {
+  it("pins a served model it is named, and carries an unserved one back as invalid_input naming it", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const pinned = yield* client.createSession({
+          title: "named model",
+          model: "faux/faux-1",
+        });
+        const refused = yield* Effect.flip(
+          client.createSession({
+            title: "unserved model",
+            model: "anthropic/claude-haiku-4-5",
+          }),
+        );
+        return {
+          pinned: pinned.model,
+          refused: {
+            _tag: refused._tag,
+            code: "code" in refused ? refused.code : undefined,
+            message: refused.message,
+          },
+        };
+      }),
+    );
+
+    expect(outcome.pinned).toBe("faux/faux-1");
+    expect(outcome.refused).toMatchObject({
+      _tag: "SessionError",
+      code: "invalid_input",
+    });
+    // The message is what the CLI prints after `error: invalid_input`, so it is part of the answer.
+    expect(outcome.refused.message).toBe(
+      "model anthropic/claude-haiku-4-5 is not one this process serves",
+    );
+  }, 120_000);
+});
+
 describe("proposeDecomposition over RPC (LOB-201)", () => {
   it("carries a session without a spec, and a refused proposal set, across the wire with their own tags", async () => {
     const outcome = await callApi((client) =>
