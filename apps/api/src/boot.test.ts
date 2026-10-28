@@ -277,6 +277,20 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
     }
   }, 30_000);
 
+  it("reports the forge credential as none when neither GITHUB_TOKEN nor a GitHub App is configured", async () => {
+    const { code, output, asked } = await boot(
+      { MODEL_BACKEND: "faux" },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    expect(asked.info.credentialMode).toEqual({
+      model: null,
+      forge: "none",
+      reviewer: "none",
+    });
+  }, 30_000);
+
   it("names ANTHROPIC_API_KEY as the credential mode on an inferred anthropic boot, never its value", async () => {
     const { code, output, asked } = await boot(
       { ANTHROPIC_API_KEY: KEY, ...SECRETS },

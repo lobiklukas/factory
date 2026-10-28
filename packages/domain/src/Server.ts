@@ -47,13 +47,15 @@ export type ModelAuthMode = typeof ModelAuthMode.Type;
  *
  * - `model`: what authenticates the model backend; `null` under faux, which needs none (a key that is
  *   set while `MODEL_BACKEND=faux` is not in use, so it is not reported as one).
- * - `forge`: what the PR step pushes and opens with (LOB-51): one static token, or a GitHub App.
+ * - `forge`: what the PR step pushes and opens with (LOB-51): one static token, or a GitHub App;
+ *   `none` when neither is configured (no `GITHUB_TOKEN`, no `GITHUB_APP_ID`), so every PR step fails
+ *   with `missing`.
  * - `reviewer`: the review agent's own identity (LOB-36), or `none`, when reviews are recorded and
  *   not posted.
  */
 export const CredentialMode = Schema.Struct({
   model: Schema.NullOr(ModelAuthMode),
-  forge: Schema.Literals(["static-token", "github-app"]),
+  forge: Schema.Literals(["static-token", "github-app", "none"]),
   reviewer: Schema.Literals(["github-app", "token", "none"]),
 });
 export type CredentialMode = typeof CredentialMode.Type;

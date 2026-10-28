@@ -130,7 +130,7 @@ import {
   type VerifyRecord,
 } from "@repo/harness";
 import { mintSessionId } from "./ids";
-import { rebuildIndexes } from "./rebuild";
+import { backfillSessionModels, rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
@@ -1630,14 +1630,6 @@ describe("replay", () => {
 });
 
 /**
- * Reset (LOB-181): a new model context, opened with the handoff note, over the same transcript.
- *
- * What the service owes: the entry is in the log (not in this process), the transcript keeps the
- * turns before it, and a released session folds to the same thing the live read showed. The model
- * context itself is read at the harness boundary, where a `ContextView` is available
- * (`packages/harness/src/session.test.ts`); this is the contract the RPC surface serves.
- */
-/**
  * Every session names the model it runs on (LOB-269): its summary, its snapshot and its list row
  * carry `provider/modelId`, read from what its root conversation is pinned to — `pi.agent` — and
  * not from the deployment's default, so a replay names the model it was replayed onto. The list
@@ -1760,8 +1752,46 @@ describe("the model a session runs on", () => {
     expect(result.refoldedRow?.model).toBe("faux/faux-1");
     expect(result.reopened).toBe("faux/faux-1");
   }, 120_000);
+
+  /**
+   * A row older than migration 0027 has a blank column and a log that names its model. The boot's
+   * backfill fills it from `pi.agent` without a rebuild or an owner open, and leaves a column that
+   * is already set alone.
+   */
+  it("backfills a blank model column from the log, and leaves a set one alone", async () => {
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const old = yield* sessions.create({ title: "older than 0027" });
+        const set = yield* sessions.create({ title: "already named" });
+        yield* sessions.close;
+        yield* sql`UPDATE sessions SET model = NULL WHERE id = ${old.id}`;
+        yield* sql`UPDATE sessions SET model = 'faux/faux-2' WHERE id = ${set.id}`;
+        const filled = yield* backfillSessionModels;
+        const listed = (yield* sessions.list({ limit: 100 })).sessions;
+        return {
+          filled,
+          old: find(listed, old.id)?.model,
+          set: find(listed, set.id)?.model,
+        };
+      }),
+    );
+
+    expect(result.filled).toBeGreaterThanOrEqual(1);
+    expect(result.old).toBe("faux/faux-1");
+    expect(result.set).toBe("faux/faux-2");
+  }, 120_000);
 });
 
+/**
+ * Reset (LOB-181): a new model context, opened with the handoff note, over the same transcript.
+ *
+ * What the service owes: the entry is in the log (not in this process), the transcript keeps the
+ * turns before it, and a released session folds to the same thing the live read showed. The model
+ * context itself is read at the harness boundary, where a `ContextView` is available
+ * (`packages/harness/src/session.test.ts`); this is the contract the RPC surface serves.
+ */
 describe("reset", () => {
   it("keeps the transcript, marks the boundary, and folds to the same entries", async () => {
     const { resetSummary, before, live, folded } = await program(

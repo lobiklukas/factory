@@ -45,7 +45,11 @@ import {
   SessionError as SessionErrorClass,
   SessionId,
 } from "@repo/domain/Session";
-import { readSessionLog, usageCostTotal } from "@repo/harness";
+import {
+  readPinnedModelKey,
+  readSessionLog,
+  usageCostTotal,
+} from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
 
 export type RebuildReport = {
@@ -440,3 +444,51 @@ export const rebuildIndexes: Effect.Effect<
       : storageError("rebuild indexes", cause),
   ),
 );
+
+/**
+ * Fill `sessions.model` for every index row that has none, from its log's `pi.agent` (LOB-269).
+ *
+ * Migration 0027 adds the column and reads no log, so on an existing deployment every older row
+ * would list no model until its owner reopens or someone runs `rebuildIndexes`, which nothing runs
+ * at boot. The server calls this once its migrations are applied. It is narrower than a rebuild:
+ * one reader per blank row, one document read each, and only the `model` column is written — `AND
+ * model IS NULL`, so an owner that opened meanwhile and wrote the column is never overwritten. A
+ * row whose log has no root yet stays blank: that owner's first open writes it. Answers how many
+ * rows it filled.
+ */
+export const backfillSessionModels: Effect.Effect<
+  number,
+  SessionError,
+  SqlClient
+> = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const rows = yield* sql<{ id: string }>`
+    SELECT id FROM sessions WHERE model IS NULL ORDER BY id
+  `.pipe(
+    Effect.mapError((cause) =>
+      storageError("read the sessions with no model", cause),
+    ),
+  );
+  let filled = 0;
+  for (const { id } of rows) {
+    if (!Schema.is(SessionId)(id)) continue;
+    const model = yield* Effect.acquireUseRelease(
+      Effect.tryPromise({
+        try: () => PostgresStorage.reader(sql, id),
+        catch: (cause) => storageError(`open log ${id}`, cause),
+      }),
+      readPinnedModelKey,
+      (storage) => Effect.promise(() => storage.dispose()),
+    );
+    if (model === undefined) continue;
+    yield* sql`
+      UPDATE sessions SET model = ${model} WHERE id = ${id} AND model IS NULL
+    `.pipe(
+      Effect.mapError((cause) =>
+        storageError(`write the model of ${id}`, cause),
+      ),
+    );
+    filled += 1;
+  }
+  return filled;
+});

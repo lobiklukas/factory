@@ -31,7 +31,11 @@ import {
 import { RpcClient, RpcSerialization, RpcServer } from "effect/rpc";
 import { describe, expect, it } from "vitest";
 import { selectModelBackend } from "../ModelBackend";
-import { ServerFacts, type ServerFactsShape } from "../ServerInfo";
+import {
+  ServerFacts,
+  type ServerFactsShape,
+  webhookRouteStates,
+} from "../ServerInfo";
 import { ServerRpcHandlers } from "./Server";
 
 /** Dummy credentials, each distinct, so a leak names which one leaked. */
@@ -57,6 +61,8 @@ const factsFor = (input: {
   readonly forced: "anthropic" | "faux" | undefined;
   readonly env: Readonly<Record<string, string>>;
   readonly roleModels: string;
+  /** Whether `GITHUB_TOKEN` is set; set unless a case says otherwise. */
+  readonly githubTokenSet?: boolean;
 }) =>
   Effect.gen(function* () {
     const choice = yield* selectModelBackend({
@@ -80,7 +86,8 @@ const factsFor = (input: {
       roleModels: yield* resolveRoleModels(model, declared),
       approvalRequired: ["npm publish", "terraform apply"],
       defaultBudget: Option.some(5),
-      webhookEnv: input.env,
+      webhooks: webhookRouteStates(input.env),
+      githubTokenSet: input.githubTokenSet ?? true,
       linearStates: { started: "Doing", inReview: "Review", done: "Shipped" },
       reviewer: "token",
       sandbox: "in-process",
@@ -269,5 +276,21 @@ describe("getServerInfo over RPC (LOB-269)", () => {
     expect(info.roleModels).toEqual([]);
     expect(info.models).toEqual(["faux/faux-1"]);
     expect(info.webhooks.every((route) => !route.armed)).toBe(true);
+  });
+
+  it("reports the forge as none when the static-token provider has no GITHUB_TOKEN behind it, and a GitHub App as itself", async () => {
+    const unset = await factsFor({
+      forced: "faux",
+      env: {},
+      roleModels: "",
+      githubTokenSet: false,
+    });
+    expect((await ask(unset, "static-token")).info.credentialMode.forge).toBe(
+      "none",
+    );
+    // An App needs no static token: its source is what is in use.
+    expect((await ask(unset, "github-app")).info.credentialMode.forge).toBe(
+      "github-app",
+    );
   });
 });

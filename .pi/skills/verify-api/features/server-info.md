@@ -7,7 +7,8 @@ default model, the `ROLE_MODELS` rows as the boot resolved them, every model the
 the approval gate, the default budget, the credential mode of the model backend, the forge and the
 reviewer, every webhook route and whether it is armed, whether the Linear write-back is on, and the
 sandbox runtime. A credential is reported as the _mode_ that authenticated (`ANTHROPIC_API_KEY`,
-`static-token`), never its value; a webhook route as armed or not, naming its variable. The answer
+`static-token`), never its value, and as absent when nothing authenticates (`model: null` under
+faux, `forge: "none"` with neither `GITHUB_TOKEN` nor a GitHub App, `reviewer: "none"`); a webhook route as armed or not, naming its variable. The answer
 is computed once from the facts the boot resolved (`apps/api/src/ServerInfo.ts`), touches no
 database, and so answers while Postgres is down.
 
@@ -16,7 +17,9 @@ on the summary `createSession`, `getSession` and every mutation answer, and on e
 row. It is read from the log's `pi.agent`, so a replay names the model it was replayed onto and a
 run in a column whose role has a `ROLE_MODELS` row names that row's model. The list reads the
 `sessions.model` column (migration 0027), which the owner's open writes and `rebuildIndexes`
-refolds; a fold falls back to the log when the column is blank.
+refolds; a fold falls back to the log when the column is blank. Rows older than the column are
+filled once the API has applied its migrations (`backfillSessionModels`, from each log's
+`pi.agent`), so an existing deployment's list names every session's model without a rebuild.
 
 **How a user reaches it.** Any RPC client: `client.getServerInfo({})`. The dashboard and the CLI
 surfaces are LOB-272.
@@ -32,10 +35,12 @@ row; and sends the same request as raw NDJSON, checking that no dummy's value is
 shell checks the API's log for the same dummies.
 
 The gate runs the rest: `apps/api/src/boot.test.ts` boots the real `index.ts` under
-`MODEL_BACKEND=faux` with a role table and under an inferred anthropic with a dummy key, and asks
+`MODEL_BACKEND=faux` with a role table, with no forge credential (`forge: "none"`), and under an
+inferred anthropic with a dummy key, and asks
 over `/rpc`; `apps/api/src/Rpc/Server.test.ts` covers the three backend choices and the secret
 check through the RPC client; `packages/core/src/SessionService.test.ts` ("the model a session runs
-on", and the role-model block) covers faux, a replay, a role row, a blanked column and a rebuild.
+on", and the role-model block) covers faux, a replay, a role row, a blanked column, a rebuild and
+the boot's backfill.
 
 **What it does not prove.** That the credential the answer names is valid (see
 [model-backend.md](model-backend.md)). The anthropic catalog in `models` is pi-ai's published list,

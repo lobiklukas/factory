@@ -1,5 +1,6 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import {
+  backfillSessionModels,
   CredentialConfig,
   CredentialProvider,
   CredentialProviderLive,
@@ -25,7 +26,16 @@ import {
   REVIEW_ROLES,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
-import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
+import {
+  Cause,
+  Config,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Redacted,
+  Schema,
+} from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
@@ -47,7 +57,7 @@ import {
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
-import { ServerFacts } from "./ServerInfo";
+import { ServerFacts, webhookRouteStates } from "./ServerInfo";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
   DEFAULT_SANDBOX_RUNTIME,
@@ -329,6 +339,23 @@ const applyMigrations = Effect.gen(function* () {
     );
     if (Exit.isSuccess(exit)) {
       yield* Effect.logInfo("migrations: applied");
+      // Rows older than migration 0027 name no model until something reads their logs (LOB-269):
+      // once, here, so the list names every session's model without waiting for each to reopen. A
+      // failure is a stale display column, never a reason to stop serving.
+      yield* backfillSessionModels.pipe(
+        Effect.flatMap((filled) =>
+          filled > 0
+            ? Effect.logInfo(
+                `session models: filled ${filled} index row(s) from their logs`,
+              )
+            : Effect.void,
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning(
+            `session models: the backfill stopped: ${error.message}`,
+          ),
+        ),
+      );
       return;
     }
     yield* Effect.logError(
@@ -514,8 +541,9 @@ const HttpLive = Effect.gen(function* () {
   // The reviewer's identity (LOB-36): its own token or App, never the worker's. One that *is* the
   // worker's fails the boot here; none at all boots, and each review's post says what is missing.
   const reviewerConfig = yield* ReviewerCredentialConfig;
+  const credentialConfig = yield* CredentialConfig;
   const reviewerCredentials = yield* selectReviewerCredentialProvider(
-    yield* CredentialConfig,
+    credentialConfig,
     reviewerConfig,
   ).pipe(Effect.provide(FetchHttpClient.layer));
   const reviewerAppId = Option.filter(reviewerConfig.appId, (id) => id !== "");
@@ -549,7 +577,12 @@ const HttpLive = Effect.gen(function* () {
     roleModels,
     approvalRequired: autonomy.approvalRequired,
     defaultBudget,
-    webhookEnv: bootEnvFromProcess(),
+    // Resolved here to armed-or-not, so the secrets' values never enter the service.
+    webhooks: webhookRouteStates(bootEnvFromProcess()),
+    githubTokenSet: Option.exists(
+      credentialConfig.githubToken,
+      (token) => Redacted.value(token) !== "",
+    ),
     linearStates: linearConfig?.states,
     reviewer: reviewerIdentity,
     sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),

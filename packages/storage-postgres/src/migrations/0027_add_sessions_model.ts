@@ -11,9 +11,11 @@ import { SqlClient } from "effect/sql/SqlClient";
  * (R6). The control plane writes it right after an owner opens, and `rebuildIndexes` refolds it from
  * `pi.agent` like every other derived column (D7).
  *
- * Existing rows keep `NULL` until a rebuild refolds them or their owner next opens: the migration
- * does not read logs, and guessing the deployment's current model would be a claim about history a
- * replay or a role row may contradict.
+ * Existing rows keep `NULL` here: the migration does not read logs (the log's `writes` are folded in
+ * the application, never queried in SQL), and guessing the deployment's current model would be a
+ * claim about history a replay or a role row may contradict. The API fills them once its migrations
+ * are applied, from each log's `pi.agent` (`backfillSessionModels` in `@repo/core`); a rebuild or
+ * the session's next owner open writes them too.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient;

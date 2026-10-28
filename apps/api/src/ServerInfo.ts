@@ -19,10 +19,11 @@ import {
  * them, so the answer and the boot's log lines are computed from one set of facts and cannot drift.
  *
  * No credential is in here, by construction: the model backend's choice holds pi-ai's *label* for
- * what authenticated, the webhook routes are read from the environment as set-or-not, the Linear
- * write-back contributes its state names (its key stays in `LinearConfig`), and the reviewer is the
- * identity kind the boot selected. `describeServer` is the one place a fact becomes an answer, and
- * `ServerInfo.test.ts` asserts a known credential appears nowhere in it.
+ * what authenticated, the webhook routes are resolved at boot to armed-or-not (the secrets' values
+ * never enter this service), the forge contributes whether a static token is set, the Linear
+ * write-back its state names (its key stays in `LinearConfig`), and the reviewer the identity kind
+ * the boot selected. `describeServer` is the one place a fact becomes an answer, and
+ * `Rpc/Server.test.ts` and `boot.test.ts` assert a known credential appears nowhere in it.
  */
 export type ServerFactsShape = {
   readonly choice: ModelBackendChoice;
@@ -32,8 +33,13 @@ export type ServerFactsShape = {
   readonly roleModels: RoleModels;
   readonly approvalRequired: readonly string[];
   readonly defaultBudget: Option.Option<number>;
-  /** The webhook secrets' environment: each route is armed when its variable is set. */
-  readonly webhookEnv: Env;
+  /** Every webhook route and whether its secret is set, resolved at boot (`webhookRouteStates`). */
+  readonly webhooks: ReadonlyArray<WebhookRouteState>;
+  /**
+   * Whether `GITHUB_TOKEN` is set to a non-empty value. Under the static-token provider an unset one
+   * means no forge credential is in use, which the answer reports as `none`.
+   */
+  readonly githubTokenSet: boolean;
   /** The write-back's state names when a Linear key is configured; absent when none is. */
   readonly linearStates: LinearStates | undefined;
   readonly reviewer: "github-app" | "token" | "none";
@@ -59,7 +65,9 @@ export const webhookRouteStates = (
 
 /**
  * The answer to `getServerInfo`. `forge` is the credential source the PR step's provider selected,
- * read from the provider itself rather than from the configuration that chose it.
+ * read from the provider itself rather than from the configuration that chose it; a static-token
+ * provider with no token behind it is reported as `none`, the way `model` is `null` and `reviewer`
+ * is `none` when nothing authenticates them.
  */
 export const describeServer = (
   facts: ServerFactsShape,
@@ -88,10 +96,10 @@ export const describeServer = (
       facts.choice.backend === "anthropic"
         ? { source: facts.choice.auth.source, type: facts.choice.auth.type }
         : null,
-    forge,
+    forge: forge === "static-token" && !facts.githubTokenSet ? "none" : forge,
     reviewer: facts.reviewer,
   },
-  webhooks: [...webhookRouteStates(facts.webhookEnv)],
+  webhooks: [...facts.webhooks],
   linearWriteBack:
     facts.linearStates === undefined
       ? { enabled: false }
