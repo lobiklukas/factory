@@ -489,7 +489,7 @@ model+shape, model, shape and all; only the newest fifty count. The answer is th
 p90, read from the same index the list reads, never a fold.
 `factory run` prints the range before it creates a session; `--cap-at-prediction`, or the dashboard's
 **Cap at predicted high**, sets the session's cap to the high. `backtestCost` predicts every completed
-session from the ones created before it, and the median relative error is published on `/spend` and
+session from the ones that had finished before it was created, and the median relative error is published on `/spend` and
 by `factory cost backtest`. The rules are in `docs/cost-prediction.md`.
 _As built (LOB-20)._ The actor is the one the control plane authenticated, not the one the caller
 typed. Every RPC group carries one middleware, `ControlPlaneAuth` (`@repo/domain/Auth`), which reads

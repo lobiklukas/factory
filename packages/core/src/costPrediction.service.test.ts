@@ -11,8 +11,9 @@
  * The sessions are real runs on a priced faux model (`fauxCost`, a cent a request): the first
  * message is two requests (the `bash` call and the reply) and each later one a reply alone, so a
  * session sent k messages costs k + 1 cents, and four of them cost 2, 2, 3 and 4 cents in creation
- * order. Every expected number is worked out by hand beside it. The repo is
- * this run's own, so the suite's other sessions never land in the repo-scoped answers asserted.
+ * order. Every expected number is worked out by hand beside it. The repo is this run's own, so the
+ * suite's other sessions never land in the repo's comparables; the backtest's fallback tiers read the
+ * whole shared index, so only the row whose own tier answers is asserted number for number.
  *
  * Postgres only, not mocked: `docker compose up -d --wait postgres`.
  */
@@ -105,7 +106,8 @@ describe("cost prediction from the session index", () => {
         const last = yield* run("fix the broken import", 3);
         // A session that never ran: it costs nothing, so it is no history.
         yield* sessions.create({ repo, title: "fix nothing at all" });
-        // Another repo's session, more expensive than any of ours: never in a repo-scoped answer.
+        // Another repo's session, more expensive than any of ours: never scored in a repo-scoped
+        // backtest, and created after ours, so never history any of them is predicted from.
         yield* run("fix the api bug", 4, other);
 
         const costs = yield* sql<{ costTotal: number }>`
@@ -118,7 +120,7 @@ describe("cost prediction from the session index", () => {
           prompt: "fix the flaky test\n\nit fails one run in ten",
           repo,
         });
-        const backtest = yield* sessions.backtestCost({ repo });
+        const backtest = yield* sessions.backtestCost({ repo, rows: true });
 
         // A session still running, or one whose run or mission is in flight, is not completed.
         const without = <A, E>(statement: Effect.Effect<A, E>) =>
@@ -173,18 +175,22 @@ describe("cost prediction from the session index", () => {
     expect(prediction.range?.median).toBeCloseTo(0.025, 10);
     expect(prediction.range?.high).toBeCloseTo(0.037, 10);
 
-    // The backtest walks the four forward: the first three have fewer than three before them; the
-    // last is predicted from [0.02, 0.02, 0.03] — median 0.02, high 0.02 + 0.8 × 0.01 = 0.028 — and
-    // cost 0.04: off by 0.02, which is half of it, and outside its range.
+    // The backtest scores the repo's four. The first three have fewer than three of the repo's own
+    // before them, so they are skipped or answered from the suite's other sessions on a fallback
+    // tier, which this case does not pin. The last is predicted from the three fixes before it on
+    // repo+model+shape, [0.02, 0.02, 0.03] — median 0.02, high 0.02 + 0.8 × 0.01 = 0.028 — and cost
+    // 0.04: off by 0.02, which is half of it, and outside its range.
     const { backtest } = outcome;
     expect(backtest.sessions).toBe(4);
-    expect(backtest.skipped).toBe(3);
-    expect(backtest.scored).toBe(1);
-    expect(backtest.rows[0]?.title).toBe("fix the broken import");
-    expect(backtest.rows[0]?.range.high).toBeCloseTo(0.028, 10);
-    expect(backtest.medianRelativeError).toBeCloseTo(0.5, 10);
-    expect(backtest.medianAbsoluteError).toBeCloseTo(0.02, 10);
-    expect(backtest.coverage).toBe(0);
+    expect(backtest.scored + backtest.skipped).toBe(4);
+    expect(backtest.rows).toHaveLength(backtest.scored);
+    const lastRow = backtest.rows?.find(
+      (row) => row.title === "fix the broken import",
+    );
+    expect(lastRow?.basis).toBe("repo+model+shape");
+    expect(lastRow?.range.median).toBeCloseTo(0.02, 10);
+    expect(lastRow?.range.high).toBeCloseTo(0.028, 10);
+    expect(lastRow?.relativeError).toBeCloseTo(0.5, 10);
     expect(backtest.meaningful).toBe(false);
 
     expect(outcome.busy).toBe(3);

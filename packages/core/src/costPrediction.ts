@@ -17,10 +17,16 @@
  * at, so roughly one comparable run in ten would have been stopped by it.
  *
  * **Backtest.** Walk-forward: every completed session, oldest first, is predicted from only the
- * sessions created strictly before it — exactly what `predictCost` would have answered on the day it
- * was created — and scored on `|median − actual| / actual`. The report is the median of those, the
- * median absolute error, and how often the actual fell inside the range. Fewer than
- * `BACKTEST_MINIMUM_SAMPLE` scored sessions is reported, and marked as not meaningful.
+ * sessions that had already *finished* when it was created — their last activity strictly before its
+ * creation — and scored on `|median − actual| / actual`. A session the index still saw working then
+ * is left out of that prediction, so no comparable is scored at spend it had not made yet: a
+ * finished session's `cost_total` now is the one it had then. The cost of that rule is the other
+ * way: a session that had finished then but was resumed since is left out too, so the backtest
+ * draws on slightly less history than `predictCost` had that day. With `repo`, the walk still runs over the whole
+ * history — the fallback tiers draw on every repo, as `predictCost`'s do — and only that repo's
+ * sessions are scored. The report is the median error, the median absolute error, and how often the
+ * actual fell inside the range. Fewer than `BACKTEST_MINIMUM_SAMPLE` scored sessions is reported,
+ * and marked as not meaningful.
  */
 import type {
   CostBacktest,
@@ -31,6 +37,7 @@ import type {
   TaskShape,
 } from "@repo/domain/Cost";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
+import { titleFrom } from "./sessionTitle";
 
 /** Fewest comparable sessions a tier needs before it answers a range. */
 export const MIN_COMPARABLES = 3;
@@ -41,8 +48,6 @@ export const BACKTEST_MINIMUM_SAMPLE = 20;
 /** The percentiles the range is drawn at. */
 const LOW_QUANTILE = 0.1;
 const HIGH_QUANTILE = 0.9;
-/** How much of a prompt a title keeps (`SessionService`'s `TITLE_MAX`): all a history row carries. */
-const TITLE_CHARS = 80;
 
 /** One completed session, as the index remembers it. */
 export type CostHistoryRow = {
@@ -57,6 +62,12 @@ export type CostHistoryRow = {
   readonly costTotal: number;
   /** When it was created, in epoch milliseconds. */
   readonly createdAt: number;
+  /**
+   * When the index last saw it active (`session_activity.last_activity_at`), in epoch
+   * milliseconds: from then on its cost has not moved. The backtest admits a session as history
+   * only once this is behind the session being scored.
+   */
+  readonly finishedAt: number;
 };
 
 /** What is being predicted: the prompt, and the repo and model it would run on. */
@@ -92,18 +103,11 @@ const SHAPE_WORDS: ReadonlyArray<readonly [TaskShape, RegExp]> = [
 ];
 
 /**
- * The line a session's title keeps of a prompt: the first non-blank line, trimmed, at most 80
- * characters — the rule `SessionService` titles a session by, so a prompt and the title it will
- * become classify alike.
+ * The shape of a task, from its title line: the line `SessionService` titles a session by
+ * (`titleFrom`), so a prompt and the title it will become classify alike.
  */
-export const titleLine = (prompt: string): string =>
-  (prompt.split("\n").find((line) => line.trim().length > 0) ?? "")
-    .trim()
-    .slice(0, TITLE_CHARS);
-
-/** The shape of a task, from its title line. */
 export const classifyTask = (prompt: string): TaskShape => {
-  const line = titleLine(prompt).toLowerCase();
+  const line = titleFrom(prompt).toLowerCase();
   for (const [shape, words] of SHAPE_WORDS) {
     if (words.test(line)) return shape;
   }
@@ -189,7 +193,7 @@ const newestFirst = (a: CostHistoryRow, b: CostHistoryRow): number =>
 const predictSorted = (
   history: readonly CostHistoryRow[],
   query: CostQuery,
-): Omit<CostPrediction, "model" | "repo"> => {
+): Omit<CostPrediction, "model" | "repo" | "minimumComparables"> => {
   const shape = classifyTask(query.prompt);
   for (const tier of TIERS) {
     const costs: number[] = [];
@@ -222,32 +226,69 @@ export const predictCost = (
   ...predictSorted(history.filter(priced).sort(newestFirst), query),
   ...(query.repo === undefined ? {} : { repo: query.repo }),
   model: query.model,
+  minimumComparables: MIN_COMPARABLES,
 });
 
+/** Where `sorted` (newest first) takes `row`, so it stays newest first: a binary search. */
+const insertNewestFirst = (
+  sorted: CostHistoryRow[],
+  row: CostHistoryRow,
+): void => {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    const at = sorted[middle];
+    if (at !== undefined && newestFirst(at, row) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  sorted.splice(low, 0, row);
+};
+
+/** What a backtest scores and returns. */
+export type BacktestOptions = {
+  /** Score only this repo's sessions; the history each is predicted from is still all of it. */
+  readonly repo?: RepoSlug | undefined;
+  /** Return every scored row, not just the summary. */
+  readonly rows?: boolean | undefined;
+};
+
 /**
- * The walk-forward backtest over `history`: each priced session predicted from the sessions created
- * strictly before it, scored against what it actually cost.
+ * The walk-forward backtest over `history`: each priced session predicted from the sessions that had
+ * finished strictly before it was created, scored against what it actually cost.
  */
 export const backtestCost = (
   history: readonly CostHistoryRow[],
+  options: BacktestOptions = {},
 ): CostBacktest => {
-  const ascending = history.filter(priced).sort((a, b) => newestFirst(b, a));
+  const pricedRows = history.filter(priced);
+  const ascending = [...pricedRows].sort((a, b) => newestFirst(b, a));
+  // A session's spend is final from its last activity on, and never before it was created.
+  const finishedAt = (row: CostHistoryRow): number =>
+    Math.max(row.finishedAt, row.createdAt);
+  const byFinish = [...pricedRows].sort(
+    (a, b) => finishedAt(a) - finishedAt(b) || newestFirst(b, a),
+  );
   const rows: CostBacktestRow[] = [];
+  let sessions = 0;
   let skipped = 0;
   let within = 0;
-  // `earlier` is every session created strictly before the one being scored, newest first. Sessions
-  // created at the same instant never predict each other: neither existed before the other.
+  // `earlier` is every session that finished strictly before the one being scored was created,
+  // newest first by creation, as `predictCost` reads its history. A session still working then is
+  // not history yet, and sessions at the same instant never predict each other.
   const earlier: CostHistoryRow[] = [];
   let next = 0;
   for (const row of ascending) {
     while (
-      next < ascending.length &&
-      (ascending[next]?.createdAt ?? Infinity) < row.createdAt
+      next < byFinish.length &&
+      finishedAt(byFinish[next] ?? row) < row.createdAt
     ) {
-      const admitted = ascending[next];
-      if (admitted !== undefined) earlier.unshift(admitted);
+      const admitted = byFinish[next];
+      if (admitted !== undefined) insertNewestFirst(earlier, admitted);
       next += 1;
     }
+    if (options.repo !== undefined && row.repo !== options.repo) continue;
+    sessions += 1;
     const predicted = predictSorted(earlier, {
       prompt: row.title,
       repo: row.repo,
@@ -271,9 +312,10 @@ export const backtestCost = (
   }
   const scored = rows.length;
   return {
-    sessions: ascending.length,
+    sessions,
     scored,
     skipped,
+    minimumComparables: MIN_COMPARABLES,
     minimumSample: BACKTEST_MINIMUM_SAMPLE,
     meaningful: scored >= BACKTEST_MINIMUM_SAMPLE,
     ...(scored === 0
@@ -285,6 +327,6 @@ export const backtestCost = (
           ),
           coverage: within / scored,
         }),
-    rows,
+    ...(options.rows === true ? { rows } : {}),
   };
 };

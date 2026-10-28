@@ -103,7 +103,8 @@ const program = Effect.gen(function* () {
     "with no completed session the backtest scores nothing and reports no error",
     emptyBacktest.sessions === 0 &&
       emptyBacktest.scored === 0 &&
-      emptyBacktest.medianRelativeError === undefined,
+      emptyBacktest.medianRelativeError === undefined &&
+      emptyBacktest.rows === undefined,
     JSON.stringify(emptyBacktest),
   );
 
@@ -224,22 +225,24 @@ const program = Effect.gen(function* () {
   );
 
   // --- backtest ---------------------------------------------------------------------------------
-  // REPO, oldest first: fix-1..3 have fewer than three before them. fix-4 (0.04) from [0.02, 0.02,
+  // REPO's sessions scored, each from the whole history finished before it was created (OTHER's
+  // fix ran last, so it is history to none of them). Oldest first: fix-1..3 have fewer than three
+  // before them. fix-4 (0.04) from [0.02, 0.02,
   // 0.03]: median 0.02, off by half, outside [0.02, 0.028]. The feature (0.02) from the four fixes
   // on repo+model: median 0.025, off by a quarter, inside [0.02, 0.037]. Median error (0.5 + 0.25)
   // / 2 = 0.375; median absolute error (0.02 + 0.005) / 2 = 0.0125; coverage one of two.
-  const repoBacktest = yield* client.backtestCost({ repo: REPO });
+  const repoBacktest = yield* client.backtestCost({ repo: REPO, rows: true });
   observed.answers["backtest-repo"] = repoBacktest;
   assert(
     "the repo's backtest predicts each session from the ones before it",
     repoBacktest.sessions === 5 &&
       repoBacktest.scored === 2 &&
       repoBacktest.skipped === 3 &&
-      repoBacktest.rows.map((row) => row.id).join(",") ===
+      (repoBacktest.rows ?? []).map((row) => row.id).join(",") ===
         [observed.sessions["fix-4"]?.id, observed.sessions["feature"]?.id].join(
           ",",
         ),
-    `scored=${repoBacktest.scored} skipped=${repoBacktest.skipped} rows=${repoBacktest.rows.map((r) => r.title).join(" | ")}`,
+    `scored=${repoBacktest.scored} skipped=${repoBacktest.skipped} rows=${(repoBacktest.rows ?? []).map((r) => r.title).join(" | ")}`,
   );
   assert(
     "and reports the median error, the median absolute error and the coverage",
@@ -256,7 +259,7 @@ const program = Effect.gen(function* () {
 
   // Everything: OTHER's fix (0.05) is scored too, from the fixes on the model (model+shape, the
   // four REPO fixes): median 0.025, off by half, outside. Errors [0.5, 0.25, 0.5] → median 0.5.
-  const all = yield* client.backtestCost({});
+  const all = yield* client.backtestCost({ rows: true });
   observed.answers["backtest-all"] = all;
   assert(
     "the whole history's backtest adds the other repo's fix, predicted across repos",
@@ -264,8 +267,8 @@ const program = Effect.gen(function* () {
       all.scored === 3 &&
       close(all.medianRelativeError, 0.5) &&
       close(all.coverage, 1 / 3) &&
-      all.rows.at(-1)?.basis === "model+shape",
-    `scored=${all.scored} median=${all.medianRelativeError} coverage=${all.coverage} last=${all.rows.at(-1)?.basis}`,
+      all.rows?.at(-1)?.basis === "model+shape",
+    `scored=${all.scored} median=${all.medianRelativeError} coverage=${all.coverage} last=${all.rows?.at(-1)?.basis}`,
   );
 });
 

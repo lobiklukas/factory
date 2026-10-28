@@ -15,8 +15,11 @@ comparables, history, range? }`. The predictor is pure (`packages/core/src/costP
   - it answers their p10 / median / p90
   - a model absent from the input is the deployment's; one the process does not serve is
     `invalid_input`, as `createSession` refuses it
-- `backtestCost({ repo? })` walks the completed sessions forward. Each one is predicted from only the
-  sessions created strictly before it, then scored on `|median − actual| / actual`. It reports:
+- `backtestCost({ repo?, rows? })` walks the completed sessions forward. Each one is predicted from
+  only the sessions that had finished (last activity) strictly before it was created, then scored on
+  `|median − actual| / actual`. `repo` limits the scoring, never the history: every session is
+  predicted from the whole index, as `predictCost` reads it. The scored rows come back only with
+  `rows: true`. It reports:
   - the median of that (the headline)
   - the median absolute error
   - the range's coverage
@@ -54,7 +57,8 @@ high)`.
 Every check in `cost-process.json`, `cost.json` and `cost-capped.json`, plus the CLI's own output in
 `cost-cli-*.txt`, under `.verify/evidence/latest/api/`. The arithmetic's edge cases are unit cases:
 
-- `packages/core/src/costPrediction.test.ts`: tiers, window, quantiles, strictly-before, minimum sample
+- `packages/core/src/costPrediction.test.ts`: tiers, window, quantiles, strictly-before, a session
+  still working is no history, a repo scored from the whole history, minimum sample
 - `packages/core/src/costPrediction.service.test.ts`: which index rows count as history
 - the CLI's and the dashboard's wording: `apps/cli/src/commands/cost.test.ts` and
   `apps/web/src/lib/cost-view.test.ts`

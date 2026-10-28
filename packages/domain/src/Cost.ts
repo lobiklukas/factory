@@ -67,7 +67,8 @@ export type PredictCostInput = typeof PredictCostInput.Type;
  * A prediction. `range` is absent when the history is too small (`basis: "none"`); `comparables`
  * is how many sessions the range is from and `history` how many completed sessions there were to
  * choose from, so a three-session guess never reads like a fifty-session one. `model` is the one
- * predicted for — the deployment's when the input named none.
+ * predicted for — the deployment's when the input named none. `minimumComparables` is the fewest
+ * comparable sessions a range needs, so a no-range answer can say how many it lacked.
  */
 export const CostPrediction = Schema.Struct({
   shape: TaskShape,
@@ -76,16 +77,20 @@ export const CostPrediction = Schema.Struct({
   basis: CostBasis,
   comparables: Schema.Int,
   history: Schema.Int,
+  minimumComparables: Schema.Int,
   range: Schema.optional(CostRange),
 });
 export type CostPrediction = typeof CostPrediction.Type;
 
 /**
- * What `backtestCost` reads: every completed session the index holds, or `repo`'s only — then both
- * the sessions scored and the history they are predicted from are that repo's.
+ * What `backtestCost` scores: every completed session the index holds, or `repo`'s only. The history
+ * each one is predicted from is always the whole index, as `predictCost`'s is, so a repo's number is
+ * the error of the predictor its runs actually get. `rows` asks for every scored session as well as
+ * the summary; absent, only the summary comes back.
  */
 export const BacktestCostInput = Schema.Struct({
   repo: Schema.optional(RepoSlug),
+  rows: Schema.optional(Schema.Boolean),
 });
 export type BacktestCostInput = typeof BacktestCostInput.Type;
 
@@ -103,16 +108,18 @@ export const CostBacktestRow = Schema.Struct({
 export type CostBacktestRow = typeof CostBacktestRow.Type;
 
 /**
- * The backtest (LOB-38's acceptance): each completed session predicted from only the sessions
- * created before it, in creation order. `scored` sessions had a range to score; `skipped` ones came
- * too early to have one. The errors and the coverage are absent when nothing was scored.
- * `meaningful` is `scored >= minimumSample`: below it the number is still reported, and every surface
- * says it is too few to mean much.
+ * The backtest (LOB-38's acceptance): each completed session, in creation order, predicted from only
+ * the sessions that had finished before it was created. `scored` sessions had a range to score;
+ * `skipped` ones came too early to have one (fewer than `minimumComparables` before them). The
+ * errors and the coverage are absent when nothing was scored. `meaningful` is
+ * `scored >= minimumSample`: below it the number is still reported, and every surface says it is too
+ * few to mean much.
  */
 export const CostBacktest = Schema.Struct({
   sessions: Schema.Int,
   scored: Schema.Int,
   skipped: Schema.Int,
+  minimumComparables: Schema.Int,
   minimumSample: Schema.Int,
   meaningful: Schema.Boolean,
   /** The headline: the median of `|median − actual| / actual` across scored sessions. */
@@ -121,7 +128,7 @@ export const CostBacktest = Schema.Struct({
   medianAbsoluteError: Schema.optional(Schema.Finite),
   /** The share of scored sessions whose actual cost fell inside their predicted range. */
   coverage: Schema.optional(Schema.Finite),
-  /** Every scored session, oldest first. */
-  rows: Schema.Array(CostBacktestRow),
+  /** Every scored session, oldest first: present only when the input asked for `rows`. */
+  rows: Schema.optional(Schema.Array(CostBacktestRow)),
 });
 export type CostBacktest = typeof CostBacktest.Type;

@@ -196,8 +196,8 @@ try {
   });
 
   // --- publish: /spend carries the backtest -----------------------------------------------------
-  const backtest = await rpc("backtestCost", {});
-  observed.backtest = { ...backtest, rows: backtest.rows.length };
+  const backtest = await rpc("backtestCost", { rows: true });
+  observed.backtest = { ...backtest, rows: backtest.rows?.length };
   // The fourth session (the capped one, 2 cents) is the only one with three before it: predicted
   // 0.03, off by half.
   assert(

@@ -240,6 +240,7 @@ import {
   predictCost,
   type CostHistoryRow,
 } from "./costPrediction";
+import { TITLE_MAX, titleFrom } from "./sessionTitle";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -253,9 +254,6 @@ import {
   sessionDirectory,
   type WorkspaceInput,
 } from "./workspace";
-
-/** Longest title we derive from a first message, in characters. */
-const TITLE_MAX = 80;
 
 /** Longest message a session accepts, in characters. Beyond this the call is refused, not truncated. */
 export const MAX_MESSAGE_CHARS = 100_000;
@@ -378,7 +376,8 @@ export type SessionServiceShape = {
   ) => Effect.Effect<CostPrediction, SessionError>;
   /**
    * How wrong `predictCost` has been (LOB-38): every completed session — `input.repo`'s only, when
-   * named — predicted from the ones created before it, and scored against what it cost.
+   * named — predicted from the whole history that had finished before it was created, and scored
+   * against what it cost. The scored rows come back only when `input.rows` asks.
    */
   readonly backtestCost: (
     input: BacktestCostInput,
@@ -765,6 +764,7 @@ type CostHistoryIndexRow = {
   readonly model: string | null;
   readonly costTotal: number;
   readonly createdAtMs: number;
+  readonly finishedAtMs: number;
 };
 
 /**
@@ -843,12 +843,6 @@ type LiveOwner = {
    */
   readonly resumed: readonly string[];
   readonly lastUsedAt: number;
-};
-
-const titleFrom = (content: string): string => {
-  const line =
-    content.split("\n").find((candidate) => candidate.trim().length > 0) ?? "";
-  return line.trim().slice(0, TITLE_MAX);
 };
 
 /**
@@ -4314,44 +4308,45 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * one still running has not finished spending. The cost is the list's own `cost_total`, so a
        * prediction and the spend pane never disagree about what a session cost.
        */
-      const costHistory = (
-        repo: RepoSlug | undefined,
-      ): Effect.Effect<readonly CostHistoryRow[], SessionError> =>
-        Effect.gen(function* () {
-          const rows = yield* paper(
-            "read cost history",
-            sql<CostHistoryIndexRow>`
+      const costHistory: Effect.Effect<
+        readonly CostHistoryRow[],
+        SessionError
+      > = Effect.gen(function* () {
+        const rows = yield* paper(
+          "read cost history",
+          sql<CostHistoryIndexRow>`
               SELECT
                 s.id,
                 s.title,
                 s.repo,
                 s.model,
                 a.cost_total::double precision AS cost_total,
-                (extract(epoch FROM s.created_at) * 1000)::double precision AS created_at_ms
+                (extract(epoch FROM s.created_at) * 1000)::double precision AS created_at_ms,
+                (extract(epoch FROM COALESCE(a.last_activity_at, s.created_at)) * 1000)::double precision AS finished_at_ms
               FROM session_activity a
               JOIN sessions s ON s.id = a.session_id
               WHERE a.status = 'idle'
                 AND a.cost_total > 0
                 AND s.run_session_root IS NULL
                 AND NOT s.mission_in_flight
-                AND (${repo ?? null}::text IS NULL OR s.repo = ${repo ?? null})
               ORDER BY s.created_at DESC, s.id DESC
               LIMIT ${COST_HISTORY_LIMIT}
             `,
-          );
-          const history: CostHistoryRow[] = [];
-          for (const row of rows) {
-            history.push({
-              id: yield* toSessionId(row.id),
-              title: row.title,
-              repo: row.repo === null ? undefined : yield* toRepoSlug(row.repo),
-              model: row.model ?? undefined,
-              costTotal: row.costTotal,
-              createdAt: row.createdAtMs,
-            });
-          }
-          return history;
-        });
+        );
+        const history: CostHistoryRow[] = [];
+        for (const row of rows) {
+          history.push({
+            id: yield* toSessionId(row.id),
+            title: row.title,
+            repo: row.repo === null ? undefined : yield* toRepoSlug(row.repo),
+            model: row.model ?? undefined,
+            costTotal: row.costTotal,
+            createdAt: row.createdAtMs,
+            finishedAt: row.finishedAtMs,
+          });
+        }
+        return history;
+      });
 
       const predictSessionCost = (
         input: PredictCostInput,
@@ -4360,7 +4355,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The model a create with this input would run on: the one it names, refused when this
           // process does not serve it, else the deployment's.
           const model = (yield* sessionModelFor(input.model)) ?? options.model;
-          const history = yield* costHistory(undefined);
+          const history = yield* costHistory;
           return predictCost(history, {
             prompt: input.prompt,
             repo: input.repo,
@@ -4371,7 +4366,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const backtestSessionCost = (
         input: BacktestCostInput,
       ): Effect.Effect<CostBacktest, SessionError> =>
-        Effect.map(costHistory(input.repo), backtestCost);
+        // The whole history, always: a repo's sessions are predicted from every repo's, as
+        // `predictCost` predicts them, and only the scoring is that repo's.
+        Effect.map(costHistory, (history) =>
+          backtestCost(history, { repo: input.repo, rows: input.rows }),
+        );
 
       const parseCursor = (
         raw: string,

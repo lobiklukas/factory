@@ -6,8 +6,10 @@
   range for the form's prompt on the picked model, its median, how many sessions it came from and
   how they were chosen. With too little history it says "No estimate yet" and why.
   **Cap at predicted high** creates the session with `budget` set to the range's high. The choice is
-  disabled while there is no range.
-- **`/spend`** publishes the backtest under its header: the median error over the sessions scored,
+  disabled while there is no range; changing the model unticks it, and if it is ticked with no range
+  to cap at, **New session** is disabled with a line saying why (`capBlocked`), so a cap asked for is
+  never silently dropped. The range re-reads every 30 s, so a run that finishes reaches it.
+- **`/spend`** publishes the backtest under its header (re-read every minute, summary only): the median error over the sessions scored,
   the median absolute error, how often the range held the actual, and — below twenty scored sessions
   — that the number is too few to mean much.
 

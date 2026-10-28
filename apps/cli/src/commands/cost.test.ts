@@ -26,6 +26,7 @@ const prediction = (
     basis: "repo+model+shape",
     comparables: 4,
     history: 9,
+    minimumComparables: 3,
     range: { low: 0.02, median: 0.025, high: 0.037 },
     ...extra,
   });
@@ -47,6 +48,7 @@ const backtest = (
     sessions: 4,
     scored: 1,
     skipped: 3,
+    minimumComparables: 3,
     minimumSample: 20,
     meaningful: false,
     medianRelativeError: 0.5,
@@ -126,10 +128,11 @@ describe("backtestLines", () => {
       medianRelativeError: _r,
       medianAbsoluteError: _a,
       coverage: _c,
+      rows: _rows,
       ...rest
     } = backtest();
     expect(
-      backtestLines({ ...rest, sessions: 2, scored: 0, skipped: 2, rows: [] }),
+      backtestLines({ ...rest, sessions: 2, scored: 0, skipped: 2 }),
     ).toEqual([
       "backtest: no session could be scored (2 sessions completed; each needs 3 comparable before it)",
     ]);
@@ -138,7 +141,7 @@ describe("backtestLines", () => {
 
 describe("backtestRow", () => {
   it("is one tab-separated line per scored session, in the header's order", () => {
-    const [row] = backtest().rows;
+    const [row] = backtest().rows ?? [];
     if (row === undefined) throw new Error("one row");
     const cells = backtestRow(row).split("\t");
     expect(BACKTEST_ROWS_HEADER.split("\t")).toHaveLength(cells.length);

@@ -1,6 +1,10 @@
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
-import type { CostBacktest, CostPrediction } from "@repo/domain/Cost";
+import type {
+  CostBacktest,
+  CostBacktestRow,
+  CostPrediction,
+} from "@repo/domain/Cost";
 import { RepoSlug } from "@repo/domain/Session";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
@@ -16,9 +20,6 @@ import { formatDollars } from "../transcript";
  * Every number is the server's (`predictCost`, `backtestCost`); this file only words them.
  */
 
-/** Fewest comparable sessions a range needs: the server's `MIN_COMPARABLES`, said in the no-range line. */
-const NEEDED = 3;
-
 const sessionsWord = (n: number): string =>
   `${n} ${n === 1 ? "session" : "sessions"}`;
 
@@ -32,7 +33,7 @@ export const predictionLine = (prediction: CostPrediction): string => {
   const what = `${prediction.shape} on ${prediction.model}`;
   const range = prediction.range;
   if (range === undefined) {
-    return `predicted: no estimate (${sessionsWord(prediction.history)} completed, ${NEEDED} comparable needed; ${what})`;
+    return `predicted: no estimate (${sessionsWord(prediction.history)} completed, ${prediction.minimumComparables} comparable needed; ${what})`;
   }
   return `predicted ${formatDollars(range.low)} to ${formatDollars(range.high)}, median ${formatDollars(range.median)}, from ${sessionsWord(prediction.comparables)} (${prediction.basis}; ${what})`;
 };
@@ -46,7 +47,7 @@ export const predictedCap = (
 ): { readonly cap: number } | { readonly refused: string } =>
   prediction.range === undefined
     ? {
-        refused: `no prediction to cap at: ${sessionsWord(prediction.history)} completed, ${NEEDED} comparable needed; pass --budget instead`,
+        refused: `no prediction to cap at: ${sessionsWord(prediction.history)} completed, ${prediction.minimumComparables} comparable needed; pass --budget instead`,
       }
     : { cap: prediction.range.high };
 
@@ -63,7 +64,7 @@ export const backtestLines = (report: CostBacktest): readonly string[] => {
     report.coverage === undefined
   ) {
     return [
-      `backtest: no session could be scored (${sessionsWord(report.sessions)} completed; each needs ${NEEDED} comparable before it)`,
+      `backtest: no session could be scored (${sessionsWord(report.sessions)} completed; each needs ${report.minimumComparables} comparable before it)`,
     ];
   }
   const within = Math.round(report.coverage * report.scored);
@@ -92,7 +93,7 @@ export const BACKTEST_ROWS_HEADER = [
   "title",
 ].join("\t");
 
-export const backtestRow = (row: CostBacktest["rows"][number]): string =>
+export const backtestRow = (row: CostBacktestRow): string =>
   [
     row.id,
     row.shape,
@@ -172,13 +173,16 @@ const backtestCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
-      const report = yield* client.backtestCost(
-        Option.isSome(repo) ? { repo: repo.value } : {},
-      );
+      // The scored rows travel only when they will be printed.
+      const report = yield* client.backtestCost({
+        ...(Option.isSome(repo) ? { repo: repo.value } : {}),
+        ...(rows ? { rows: true } : {}),
+      });
       for (const line of backtestLines(report)) yield* Console.log(line);
-      if (rows && report.rows.length > 0) {
+      const scored = report.rows ?? [];
+      if (rows && scored.length > 0) {
         yield* Console.log(BACKTEST_ROWS_HEADER);
-        for (const row of report.rows) yield* Console.log(backtestRow(row));
+        for (const row of scored) yield* Console.log(backtestRow(row));
       }
     });
     yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));

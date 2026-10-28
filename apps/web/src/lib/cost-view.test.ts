@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   backtestHeadline,
   fromPredictionKey,
+  capBlocked,
   predictedBudget,
   predictionKey,
   predictionText,
@@ -22,6 +23,7 @@ const ranged = Schema.decodeSync(CostPrediction)({
   basis: "model+shape",
   comparables: 4,
   history: 6,
+  minimumComparables: 3,
   range: { low: 0.02, median: 0.025, high: 0.037 },
 });
 const unranged = Schema.decodeSync(CostPrediction)({
@@ -30,6 +32,7 @@ const unranged = Schema.decodeSync(CostPrediction)({
   basis: "none",
   comparables: 0,
   history: 1,
+  minimumComparables: 3,
 });
 
 const report = (extra: Partial<typeof CostBacktest.Encoded> = {}) =>
@@ -37,12 +40,12 @@ const report = (extra: Partial<typeof CostBacktest.Encoded> = {}) =>
     sessions: 6,
     scored: 3,
     skipped: 3,
+    minimumComparables: 3,
     minimumSample: 20,
     meaningful: false,
     medianRelativeError: 0.25,
     medianAbsoluteError: 0.01,
     coverage: 2 / 3,
-    rows: [],
     ...extra,
   });
 
@@ -69,6 +72,21 @@ describe("predictedBudget", () => {
     expect(predictedBudget(ranged, false)).toEqual({});
     expect(predictedBudget(unranged, true)).toEqual({});
     expect(predictedBudget(undefined, true)).toEqual({});
+  });
+});
+
+describe("capBlocked", () => {
+  it("holds Start while the cap is asked for and there is no range to cap at", () => {
+    // Still loading (or failed): no answer yet.
+    expect(capBlocked(undefined, true)).toBe(true);
+    // Too little history: an answer with no range.
+    expect(capBlocked(unranged, true)).toBe(true);
+    expect(capBlocked(ranged, true)).toBe(false);
+  });
+
+  it("never holds Start when no cap was asked for", () => {
+    expect(capBlocked(undefined, false)).toBe(false);
+    expect(capBlocked(unranged, false)).toBe(false);
   });
 });
 

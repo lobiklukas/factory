@@ -9,9 +9,6 @@ import type { CostBacktest, CostPrediction } from "@repo/domain/Cost";
  * are unit cases rather than screenshots.
  */
 
-/** Fewest comparable sessions a range needs: the server's `MIN_COMPARABLES`. */
-const NEEDED = 3;
-
 /** A predicted amount: four decimals, as `factory run` prints a budget, so a cent is never lost. */
 export const formatPredictedDollars = (amount: number): string =>
   `$${amount.toFixed(4)}`;
@@ -29,7 +26,7 @@ const sessions = (n: number): string =>
 export const predictionText = (prediction: CostPrediction): string => {
   const range = prediction.range;
   if (range === undefined) {
-    return `No estimate yet: ${sessions(prediction.history)} completed, ${NEEDED} comparable needed`;
+    return `No estimate yet: ${sessions(prediction.history)} completed, ${prediction.minimumComparables} comparable needed`;
   }
   return `Predicted ${formatPredictedDollars(range.low)} to ${formatPredictedDollars(range.high)} (median ${formatPredictedDollars(range.median)}, ${sessions(prediction.comparables)}, ${prediction.basis})`;
 };
@@ -37,7 +34,8 @@ export const predictionText = (prediction: CostPrediction): string => {
 /**
  * What a create adds when the operator asked for the predicted cap: the range's high as the
  * session's `budget` (LOB-163). Nothing when they did not ask, or when there is no range to cap at
- * — the form disables the choice then, so this only guards a stale render.
+ * — the form refuses to start while a cap is asked for and there is none (`capBlocked`), so this
+ * only guards a stale render.
  */
 export const predictedBudget = (
   prediction: CostPrediction | undefined,
@@ -46,6 +44,16 @@ export const predictedBudget = (
   capped && prediction?.range !== undefined
     ? { budget: prediction.range.high }
     : {};
+
+/**
+ * Whether the form must hold Start: the operator asked for the predicted cap and there is no range
+ * to cap at yet — still loading, failed, or too little history. Starting then would create an
+ * uncapped session the operator asked to cap, so the form waits or says why instead.
+ */
+export const capBlocked = (
+  prediction: CostPrediction | undefined,
+  capped: boolean,
+): boolean => capped && prediction?.range === undefined;
 
 /**
  * The backtest headline `/spend` publishes: the median error over the sessions scored, how often the
@@ -63,7 +71,7 @@ export const backtestHeadline = (
   ) {
     return {
       headline: "No session could be scored yet",
-      detail: `${sessions(report.sessions)} completed; each needs ${NEEDED} comparable before it.`,
+      detail: `${sessions(report.sessions)} completed; each needs ${report.minimumComparables} comparable before it.`,
     };
   }
   const caveat = report.meaningful

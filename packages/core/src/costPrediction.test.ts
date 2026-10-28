@@ -17,9 +17,9 @@ import {
   predictCost,
   quantile,
   rangeOf,
-  titleLine,
   type CostHistoryRow,
 } from "./costPrediction";
+import { titleFrom } from "./sessionTitle";
 
 const WEB = RepoSlug.make("acme/web");
 const API = RepoSlug.make("acme/api");
@@ -31,12 +31,15 @@ const row = (
   fields: Partial<CostHistoryRow> & { readonly costTotal: number },
 ): CostHistoryRow => {
   serial += 1;
+  const createdAt = fields.createdAt ?? serial * 1000;
+  // Finished the instant it was created unless a case says otherwise.
   return {
     id: SessionId.make(`ses_${String(serial).padStart(26, "0")}`),
     title: "fix the parser bug",
     repo: WEB,
     model: SONNET,
-    createdAt: serial * 1000,
+    createdAt,
+    finishedAt: createdAt,
     ...fields,
   };
 };
@@ -63,14 +66,14 @@ describe("classifyTask", () => {
     expect(classifyTask("\n\n  explain the dispatcher\nthen fix the bug")).toBe(
       "other",
     );
-    expect(titleLine("\n  explain the dispatcher  \nthen fix")).toBe(
+    expect(titleFrom("\n  explain the dispatcher  \nthen fix")).toBe(
       "explain the dispatcher",
     );
   });
 
   it("ignores a word past the 80 characters a title keeps", () => {
     const long = `${"x".repeat(80)} fix`;
-    expect(titleLine(long)).toHaveLength(80);
+    expect(titleFrom(long)).toHaveLength(80);
     expect(classifyTask(long)).toBe("other");
   });
 
@@ -118,6 +121,7 @@ describe("predictCost", () => {
       basis: "none",
       comparables: 0,
       history: 2,
+      minimumComparables: 3,
     });
   });
 
@@ -243,19 +247,19 @@ describe("backtestCost", () => {
       row({ costTotal: cost }),
     );
     if (!a || !b || !c || !d || !e) throw new Error("five rows");
-    const report = backtestCost([e, c, a, d, b]);
+    const report = backtestCost([e, c, a, d, b], { rows: true });
     // a, b, c have fewer than three sessions before them.
     // d: before it [1,2,3] → low 1.2, median 2, high 2.8; actual 4: off by 2, 0.5 of it, outside.
     // e: before it [1,2,3,4] → low 1.3, median 2.5, high 3.7; actual 10: off by 7.5, 0.75, outside.
     expect(report.sessions).toBe(5);
     expect(report.skipped).toBe(3);
     expect(report.scored).toBe(2);
-    expect(report.rows.map((r) => r.id)).toEqual([d.id, e.id]);
-    expect(report.rows[0]?.range.low).toBeCloseTo(1.2, 10);
-    expect(report.rows[0]?.range.median).toBeCloseTo(2, 10);
-    expect(report.rows[0]?.range.high).toBeCloseTo(2.8, 10);
-    expect(report.rows[0]?.relativeError).toBeCloseTo(0.5, 10);
-    expect(report.rows[1]?.relativeError).toBeCloseTo(0.75, 10);
+    expect(report.rows?.map((r) => r.id)).toEqual([d.id, e.id]);
+    expect(report.rows?.[0]?.range.low).toBeCloseTo(1.2, 10);
+    expect(report.rows?.[0]?.range.median).toBeCloseTo(2, 10);
+    expect(report.rows?.[0]?.range.high).toBeCloseTo(2.8, 10);
+    expect(report.rows?.[0]?.relativeError).toBeCloseTo(0.5, 10);
+    expect(report.rows?.[1]?.relativeError).toBeCloseTo(0.75, 10);
     // The medians of two values are their means: (0.5 + 0.75) / 2 and (2 + 7.5) / 2.
     expect(report.medianRelativeError).toBeCloseTo(0.625, 10);
     expect(report.medianAbsoluteError).toBeCloseTo(4.75, 10);
@@ -267,7 +271,7 @@ describe("backtestCost", () => {
   it("counts an actual inside its range as covered", () => {
     // 2, 2, 2, then 2 and 5: the fourth lands on its range [2, 2], the fifth (range [2, 2]) does not.
     const rows = [2, 2, 2, 2, 5].map((cost) => row({ costTotal: cost }));
-    const report = backtestCost(rows);
+    const report = backtestCost(rows, { rows: true });
     expect(report.scored).toBe(2);
     expect(report.coverage).toBe(0.5);
     // Errors 0 and 3/5: the median is their mean, 0.3.
@@ -282,10 +286,10 @@ describe("backtestCost", () => {
       row({ costTotal: cost, createdAt: at }),
     );
     const later = row({ costTotal: 2, createdAt: at + 1 });
-    const report = backtestCost([later, ...same]);
+    const report = backtestCost([later, ...same], { rows: true });
     expect(report.skipped).toBe(3);
-    expect(report.rows.map((r) => r.id)).toEqual([later.id]);
-    expect(report.rows[0]?.relativeError).toBe(0);
+    expect(report.rows?.map((r) => r.id)).toEqual([later.id]);
+    expect(report.rows?.[0]?.relativeError).toBe(0);
   });
 
   it("is meaningful from twenty scored sessions, and reports no error when nothing scored", () => {
@@ -304,6 +308,55 @@ describe("backtestCost", () => {
     expect(empty.medianRelativeError).toBeUndefined();
     expect(empty.medianAbsoluteError).toBeUndefined();
     expect(empty.coverage).toBeUndefined();
+  });
+
+  it("never predicts a session from one still working when it was created", () => {
+    // Three sessions finished early (1 each). A fourth, created before the fifth but still spending
+    // (cost 100) until long after the fifth was created, must not reach the fifth's prediction: the
+    // fifth is predicted from the three alone, median 1, and its actual 1 is off by nothing.
+    const early = [1, 1, 1].map((cost) => row({ costTotal: cost }));
+    const slow = row({
+      costTotal: 100,
+      createdAt: 10_000_000,
+      finishedAt: 20_000_000,
+    });
+    const scoredLater = row({ costTotal: 1, createdAt: 10_000_500 });
+    const report = backtestCost([...early, slow, scoredLater], {
+      rows: true,
+    });
+    const last = report.rows?.find((r) => r.id === scoredLater.id);
+    expect(last?.range).toEqual({ low: 1, median: 1, high: 1 });
+    expect(last?.relativeError).toBe(0);
+    // Had the slow session counted, [1, 1, 1, 100] would put the high at position 2.7 → 1 + 0.7 ×
+    // 99 = 70.3: the range proves it was left out.
+  });
+
+  it("scores one repo's sessions from the whole history, as predictCost reads it", () => {
+    // Three API fixes (5 each), then one WEB fix (5). Scoped to WEB, only the WEB fix is scored, and
+    // it is predicted on model+shape from the API fixes — the fallback `predictCost` would take.
+    const api = [5, 5, 5].map((cost) => row({ costTotal: cost, repo: API }));
+    const web = row({ costTotal: 5, repo: WEB });
+    const report = backtestCost([...api, web], { repo: WEB, rows: true });
+    expect(report.sessions).toBe(1);
+    expect(report.skipped).toBe(0);
+    expect(report.rows?.map((r) => r.id)).toEqual([web.id]);
+    expect(report.rows?.[0]?.basis).toBe("model+shape");
+    expect(report.medianRelativeError).toBe(0);
+    const prediction = predictCost(api, {
+      prompt: web.title,
+      repo: WEB,
+      model: SONNET,
+    });
+    expect(prediction.basis).toBe("model+shape");
+  });
+
+  it("answers the summary alone unless the rows are asked for", () => {
+    const rows = [1, 1, 1, 1].map((cost) => row({ costTotal: cost }));
+    const summary = backtestCost(rows);
+    expect(summary.rows).toBeUndefined();
+    expect(summary.scored).toBe(1);
+    expect(summary.minimumComparables).toBe(MIN_COMPARABLES);
+    expect(backtestCost(rows, { rows: true }).rows).toHaveLength(1);
   });
 
   it("leaves out sessions that cost nothing", () => {

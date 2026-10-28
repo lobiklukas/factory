@@ -11,6 +11,7 @@ import { startSessionAtom } from "@/lib/atoms/session-atom";
 import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
 import { costPredictionAtom } from "@/lib/atoms/cost-atom";
 import {
+  capBlocked,
   predictedBudget,
   predictionKey,
   predictionText,
@@ -67,6 +68,9 @@ export const SessionSidebar = () => {
     : undefined;
   const canCap = predicted?.range !== undefined;
   const [capped, setCapped] = useState(false);
+  // Asked to cap with no range to cap at (a new model's prediction still loading, or too little
+  // history): Start waits rather than create the uncapped session nobody asked for.
+  const blocked = capBlocked(predicted, capped);
   return (
     <aside
       className={cn(
@@ -85,7 +89,11 @@ export const SessionSidebar = () => {
           id="new-session-model"
           name="model"
           value={model}
-          onChange={(event) => setModel(event.currentTarget.value)}
+          onChange={(event) => {
+            // A cap was asked of the old model's range: the new model's is another number.
+            setModel(event.currentTarget.value);
+            setCapped(false);
+          }}
           className="h-8 w-full truncate rounded-none border border-input bg-transparent px-2 font-mono text-[11px] outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 dark:bg-input/30"
         >
           {choices.map((choice) => (
@@ -114,16 +122,27 @@ export const SessionSidebar = () => {
             id="new-session-cap"
             name="cap"
             type="checkbox"
-            checked={capped && canCap}
-            disabled={!canCap}
+            checked={capped}
+            // Once ticked it can always be unticked, even if the range it was ticked for is gone.
+            disabled={!canCap && !capped}
             onChange={(event) => setCapped(event.currentTarget.checked)}
             className="size-3"
           />
           Cap at predicted high
         </label>
+        {blocked ? (
+          <p
+            role="status"
+            data-cost-cap-blocked=""
+            className="text-[10px] leading-relaxed text-muted-foreground"
+          >
+            No predicted high to cap at yet: untick the cap to start uncapped.
+          </p>
+        ) : null}
         <Button
           className="w-full justify-start"
           variant="outline"
+          disabled={blocked}
           onClick={() => {
             // Navigating on the created id rather than waiting for the list to
             // re-read: the pane attaches on the route, so the route is what has
