@@ -61,6 +61,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { SessionRpcLive } from "./Session";
 import {
   sendingToken,
+  TEST_ACTOR,
   TEST_TOKEN,
   TestControlPlaneAuth,
 } from "./Auth.test-fake";
@@ -725,13 +726,17 @@ describe("authoring a definition over RPC (D4)", () => {
     expect(dry.definition.version).toBe(1);
     expect(await versionsOf(AUTHORED)).toEqual([]);
 
-    const defined = await call((client) => client.defineBoard(payload));
+    // A body actor on an authenticated control plane changes nothing: the author is the credential's (F7).
+    const defined = await call((client) =>
+      client.defineBoard({ ...payload, actor: "person:someone-else" }),
+    );
     expect(defined.outcome).toBe("created");
     expect(defined.definition).toEqual({
       id: AUTHORED,
       version: 1,
       name: "Authored over RPC",
       initialColumn: "todo",
+      author: TEST_ACTOR,
       columns: [
         {
           name: "todo",
@@ -792,6 +797,121 @@ describe("authoring a definition over RPC (D4)", () => {
         ?.versions.map((version) => version.version),
     ).toEqual([1]);
     expect(outcome.board.definitionVersion).toBe(1);
+  });
+
+  /**
+   * The author over the wire (F7): `getDefinition` and `listDefinitions` carry the credential's actor
+   * for a version someone wrote, and nothing for a seeded one; an `unchanged` answer and a dry run
+   * write no row. Mutation: take the actor from the body, or skip `attributed` — the author is
+   * `person:someone-else`, or absent.
+   */
+  it("attributes a version to the caller's credential, and names no author for a seeded one", async () => {
+    const id = DefinitionId.make(`authorship${run}`);
+    const payload = {
+      id,
+      name: "Authorship",
+      columns: columns(["implement"]),
+      initialColumn: "todo",
+    };
+    await call((client) =>
+      client.defineBoard({ ...payload, actor: "person:someone-else" }),
+    );
+    const again = await call((client) =>
+      client.defineBoard({ ...payload, actor: "person:someone-else" }),
+    );
+    expect(again.outcome).toBe("unchanged");
+    const dry = await call((client) =>
+      client.defineBoard({ ...payload, name: "next", dryRun: true }),
+    );
+    expect(dry.definition.author).toBeUndefined();
+    expect(await versionsOf(id)).toEqual([1]);
+
+    const read = await call((client) =>
+      Effect.gen(function* () {
+        return {
+          written: yield* client.getDefinition({ definitionId: id }),
+          seeded: yield* client.getDefinition({
+            definitionId: DEFAULT,
+            version: 1,
+          }),
+          listed: yield* client.listDefinitions({}),
+        };
+      }),
+    );
+    expect(read.written.author).toBe(TEST_ACTOR);
+    expect("author" in read.seeded).toBe(false);
+    const versions = (definitionId: string) =>
+      read.listed.find((definition) => definition.id === definitionId)
+        ?.versions ?? [];
+    expect(versions(id).map((version) => version.author)).toEqual([TEST_ACTOR]);
+    expect(versions(DEFAULT).every((v) => v.author === undefined)).toBe(true);
+  });
+
+  /**
+   * `getDefinitionSource` (F8): the file `defineBoard` takes, round-tripping — sent back whole it is
+   * `unchanged`, with one field edited it is a new version differing in that field only, and it
+   * carries neither the version nor the author. A seeded legacy version has its moves and initial
+   * column spelled out. Mutation: describe the version rather than materialize it — the columns have
+   * `exits` and no `transitions`.
+   */
+  it("answers the file defineBoard accepts for a version, and a round trip is unchanged", async () => {
+    const id = DefinitionId.make(`source${run}`);
+    const payload = {
+      id,
+      name: "Source",
+      // `done` carries no `transitions` key, as an author may write a terminal column: the file must
+      // not add one, or it is a different version to `defineBoard`'s comparison.
+      columns: columns(["implement"]).map(({ transitions, ...column }) =>
+        column.kind === "terminal" ? column : { ...column, transitions },
+      ),
+      initialColumn: "todo",
+      caps: { board: 3 },
+    };
+    await call((client) => client.defineBoard(payload));
+    const source = await call((client) =>
+      client.getDefinitionSource({ definitionId: id, version: 1 }),
+    );
+    expect(source).toEqual(payload);
+    expect(Object.keys(source).toSorted()).toEqual([
+      "caps",
+      "columns",
+      "id",
+      "initialColumn",
+      "name",
+    ]);
+
+    const back = await call((client) =>
+      client.defineBoard({ ...source, dryRun: true }),
+    );
+    expect([back.outcome, back.definition.version]).toEqual(["unchanged", 1]);
+    const edited = await call((client) =>
+      client.defineBoard({ ...source, name: "Source, edited" }),
+    );
+    expect([edited.outcome, edited.definition.version]).toEqual(["created", 2]);
+    const v2 = await call((client) =>
+      client.getDefinitionSource({ definitionId: id, version: 2 }),
+    );
+    expect({ ...v2, name: source.name }).toEqual(source);
+    expect(v2.name).toBe("Source, edited");
+
+    const legacy = await call((client) =>
+      client.getDefinitionSource({
+        definitionId: DEFAULT,
+        version: 1,
+      }),
+    );
+    expect(legacy.initialColumn).toBe("intake");
+    expect(
+      legacy.columns.every((column) => column.transitions !== undefined),
+    ).toBe(true);
+    expect(
+      legacy.columns.find((column) => column.name === "intake")?.transitions,
+    ).toEqual([{ to: "specifying" }, { to: "canceled" }]);
+
+    const missing = await call((client) =>
+      failureOf(client.getDefinitionSource({ definitionId: id, version: 9 })),
+    );
+    expect(missing).toMatchObject({ _tag: "DefinitionNotFound", version: 9 });
   });
 
   /**

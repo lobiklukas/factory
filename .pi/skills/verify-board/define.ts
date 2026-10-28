@@ -7,6 +7,8 @@
 //                            ordered — two snapshots are equal exactly when no row changed, and a
 //                            new row is one more line.
 //   MODE=versions ID=…       the versions one id holds, oldest first, space-separated ("" for none).
+//   MODE=authors ID=…        each version's author column (F7), `<version>=<author>` with `NULL` for
+//                            none, oldest first, space-separated.
 //
 // Env: MODE, ID, DATABASE_URL. Exits non-zero when the read fails.
 import { Effect, Schema } from "effect";
@@ -25,7 +27,7 @@ const rows = Effect.gen(function* () {
   const sql = yield* SqlClient;
   const all = yield* sql<{ key: string; digest: string }>`
     SELECT id || '@' || version AS key,
-           md5(concat_ws('|', name, columns::text, initial_column, caps::text, created_at::text)) AS digest
+           md5(concat_ws('|', name, columns::text, initial_column, caps::text, author, created_at::text)) AS digest
     FROM board_definitions
     ORDER BY id COLLATE "C", version
   `;
@@ -40,6 +42,14 @@ const versions = Effect.gen(function* () {
   return all.map((row) => String(row.version)).join(" ");
 });
 
+const authors = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const all = yield* sql<{ version: number; author: string | null }>`
+    SELECT version, author FROM board_definitions WHERE id = ${ID} ORDER BY version
+  `;
+  return all.map((row) => `${row.version}=${row.author ?? "NULL"}`).join(" ");
+});
+
 /** Every failure as a `ProbeError` carrying its own words, which is all the shell reads. */
 const named = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
@@ -51,11 +61,13 @@ const program: Effect.Effect<string, ProbeError, SqlClient> =
     ? named(rows)
     : MODE === "versions" && ID !== ""
       ? named(versions)
-      : Effect.fail(
-          new ProbeError({
-            message: `MODE=rows or MODE=versions ID=…, not "${MODE}"`,
-          }),
-        );
+      : MODE === "authors" && ID !== ""
+        ? named(authors)
+        : Effect.fail(
+            new ProbeError({
+              message: `MODE=rows, MODE=versions ID=… or MODE=authors ID=…, not "${MODE}"`,
+            }),
+          );
 
 Effect.runPromise(program.pipe(Effect.provide(DatabaseLive))).then(
   (out) => {
