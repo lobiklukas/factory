@@ -35,7 +35,7 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ServerFacts, type ServerFactsShape } from "../ServerInfo";
 import { DoctorRpcHandlers } from "./Doctor";
 import {
@@ -126,7 +126,9 @@ const ask = async <A>(
     >;
   },
   use: (client: {
-    readonly checkDeployment: (input: {}) => Effect.Effect<unknown>;
+    readonly checkDeployment: (input: {
+      readonly repo?: string;
+    }) => Effect.Effect<unknown>;
     readonly pingModel: (input: {}) => Effect.Effect<unknown>;
   }) => Effect.Effect<A>,
 ) => {
@@ -312,6 +314,54 @@ describe("checkDeployment over RPC (E8)", () => {
     expect(result.triggerRules).toBe(3);
   });
 
+  /** Mutation: ignore the repo filter, so a scoped run mints a token for every registered repo. */
+  it("checks only the repo it is asked about", async () => {
+    const faux = createFauxModelAccess();
+    const minted: string[] = [];
+    const counting = tokenProvider("static-token", (slug) => {
+      minted.push(slug);
+      return Effect.succeed(Redacted.make(FORGE_TOKEN));
+    });
+    const { result } = (await ask(
+      {
+        facts: await Effect.runPromise(factsWith(faux.access)),
+        credentials: counting,
+        repos: registry([repo({}), repo({ repo: "acme/y" })]),
+      },
+      (client) => client.checkDeployment({ repo: "acme/y" }),
+    )) as { result: any; wire: string };
+    expect(minted).toEqual(["acme/y"]);
+    expect(result.repos.map((row: { repo: string }) => row.repo)).toEqual([
+      "acme/y",
+    ]);
+  });
+
+  /** Mutation: no bound on the mint, so one stalled provider hangs the whole command. */
+  it("answers a stalled token mint as a failed forge check instead of hanging", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const faux = createFauxModelAccess();
+      const stalled = tokenProvider("github-app", () => Effect.never);
+      const pending = ask(
+        {
+          facts: await Effect.runPromise(factsWith(faux.access)),
+          credentials: stalled,
+          repos: registry([repo({})]),
+        },
+        (client) => client.checkDeployment({}),
+      );
+      await vi.advanceTimersByTimeAsync(25_000);
+      const { result } = (await pending) as { result: any; wire: string };
+      expect(result.repos[0].forge).toMatchObject({
+        mode: "github-app",
+        status: "failed",
+        message: "no answer within 20s",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   /** "Without --live, spend is unchanged": checking a deployment never calls the model. */
   it("makes no model request", async () => {
     const faux = createFauxModelAccess();
@@ -369,6 +419,50 @@ describe("pingModel over RPC (E8)", () => {
       message: "401 invalid x-api-key",
       costUsd: 0,
     });
+  });
+
+  /** Mutation: no signal and no bound, so a provider that never answers hangs `doctor --live`. */
+  it("answers a provider that never replies as a refusal, and aborts the request", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const faux = createFauxModelAccess();
+      let aborted = false;
+      const hanging: ModelAccess = {
+        ...faux.access,
+        models: new Proxy(faux.access.models, {
+          get: (target, property) =>
+            property === "completeSimple"
+              ? (
+                  _model: unknown,
+                  _context: unknown,
+                  options?: { signal?: AbortSignal },
+                ) =>
+                  new Promise(() => {
+                    options?.signal?.addEventListener("abort", () => {
+                      aborted = true;
+                    });
+                  })
+              : Reflect.get(target, property),
+        }),
+      };
+      const pending = ask(
+        {
+          facts: await Effect.runPromise(factsWith(hanging)),
+          credentials: resolvesToken,
+          repos: registry([]),
+        },
+        (client) => client.pingModel({}),
+      );
+      await vi.advanceTimersByTimeAsync(35_000);
+      const { result } = (await pending) as { result: any; wire: string };
+      expect(result).toMatchObject({
+        ok: false,
+        message: "no answer within 30s",
+      });
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses a default model this process does not serve, without calling anything", async () => {

@@ -6,6 +6,7 @@ import {
 } from "@repo/core";
 import { DoctorRpc } from "@repo/domain/Rpc";
 import type {
+  BaseRefCheck,
   DeploymentChecks,
   ForgeCredentialCheck,
   ModelPing,
@@ -13,7 +14,7 @@ import type {
 } from "@repo/domain/Server";
 import type { RepoSummary } from "@repo/domain/Session";
 import { modelKey } from "@repo/harness";
-import { Clock, Effect } from "effect";
+import { Clock, Effect, Option } from "effect";
 import { ServerFacts } from "../ServerInfo";
 
 /**
@@ -32,6 +33,13 @@ const oneLine = (text: string): string => {
   if (line === "") return "no message";
   return line.length > 200 ? `${line.slice(0, 197)}...` : line;
 };
+
+/**
+ * What one repo's token mint and one base-ref probe may take, and what the model ping may take.
+ * Without a bound, a provider that stalls turns the command that names what is broken into a hang.
+ */
+const REPO_CHECK_SECONDS = 20;
+const PING_SECONDS = 30;
 
 /**
  * Whether the PR step could get a token for `repo`. `none` is a static-token provider with no token
@@ -71,23 +79,45 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
     const credentials = yield* CredentialProvider;
     const sessions = yield* SessionService;
 
-    const checkRepo = (repo: RepoSummary): Effect.Effect<RepoCheck> =>
-      Effect.all(
+    const checkRepo = (repo: RepoSummary): Effect.Effect<RepoCheck> => {
+      // Each half is bounded on its own, so a stalled mint is a `failed` forge line and the base
+      // ref beside it is still answered.
+      const stalled = `no answer within ${REPO_CHECK_SECONDS}s`;
+      return Effect.all(
         {
-          forge: forgeCheck(credentials, facts.githubTokenSet, repo.repo),
+          forge: forgeCheck(credentials, facts.githubTokenSet, repo.repo).pipe(
+            Effect.timeoutOption(`${REPO_CHECK_SECONDS} seconds`),
+            Effect.map((answer) =>
+              Option.getOrElse(answer, (): ForgeCredentialCheck => ({
+                mode: credentials.source,
+                status: "failed",
+                message: stalled,
+              })),
+            ),
+          ),
           baseRef: checkBaseRef({
             ref: repo.defaultBaseRef,
             workTree: repo.workTree,
             mirrorPath: repo.mirrorPath,
-          }),
+          }).pipe(
+            Effect.timeoutOption(`${REPO_CHECK_SECONDS} seconds`),
+            Effect.map((answer) =>
+              Option.getOrElse(answer, (): BaseRefCheck => ({
+                ref: repo.defaultBaseRef,
+                status: "unresolved",
+                message: stalled,
+              })),
+            ),
+          ),
         },
         { concurrency: 2 },
       ).pipe(Effect.map((checks) => ({ repo: repo.repo, ...checks })));
+    };
 
     return DoctorRpc.of({
       // The registry read is the one part that needs Postgres; its failure is an answer, so the
       // boot facts above it still reach an operator whose database is down.
-      checkDeployment: () =>
+      checkDeployment: ({ repo }) =>
         Effect.gen(function* () {
           const listed = yield* sessions.listRepos.pipe(Effect.result);
           const base = {
@@ -101,7 +131,12 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
               reposError: oneLine(listed.failure.message),
             } satisfies DeploymentChecks;
           }
-          const repos = yield* Effect.forEach(listed.success.repos, checkRepo, {
+          // `doctor owner/name` asks about one repo: do not mint a token for the others.
+          const asked =
+            repo === undefined
+              ? listed.success.repos
+              : listed.success.repos.filter((row) => row.repo === repo);
+          const repos = yield* Effect.forEach(asked, checkRepo, {
             concurrency: 4,
           });
           return { ...base, repos } satisfies DeploymentChecks;
@@ -128,8 +163,9 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
             return refused(`this process serves no model ${model}`);
           }
           const started = yield* Clock.currentTimeMillis;
+          // The signal aborts the request when the timeout fires or the RPC is interrupted.
           const answer = yield* Effect.tryPromise({
-            try: () =>
+            try: (signal) =>
               facts.model.models.completeSimple(
                 served,
                 {
@@ -142,11 +178,20 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
                     },
                   ],
                 },
-                { maxTokens: 16 },
+                { maxTokens: 16, signal },
               ),
             catch: (cause) =>
               cause instanceof Error ? cause.message : String(cause),
-          }).pipe(Effect.result);
+          }).pipe(
+            Effect.timeoutOption(`${PING_SECONDS} seconds`),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.fail(`no answer within ${PING_SECONDS}s`),
+                onSome: Effect.succeed,
+              }),
+            ),
+            Effect.result,
+          );
           const finished = yield* Clock.currentTimeMillis;
           if (answer._tag === "Failure") {
             return refused(oneLine(answer.failure));

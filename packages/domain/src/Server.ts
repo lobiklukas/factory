@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { RepoSlug } from "@repo/domain/Session";
 
 /**
  * What the control plane is running (LOB-269): the answer to `getServerInfo`.
@@ -160,7 +161,10 @@ export const RepoCheck = Schema.Struct({
 });
 export type RepoCheck = typeof RepoCheck.Type;
 
-export const CheckDeploymentInput = Schema.Struct({});
+export const CheckDeploymentInput = Schema.Struct({
+  /** Check only this repo; every registered repo when absent (`factory doctor owner/name`). */
+  repo: Schema.optional(RepoSlug),
+});
 export type CheckDeploymentInput = typeof CheckDeploymentInput.Type;
 
 export const DeploymentChecks = Schema.Struct({

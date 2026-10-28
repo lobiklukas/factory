@@ -10,8 +10,13 @@ import {
   type RepoCheck,
   ServerInfo,
 } from "@repo/domain/Server";
-import { type RepoSlug, RepoSummary } from "@repo/domain/Session";
-import { describe, expect, it } from "vitest";
+import {
+  RepoNotFound,
+  type RepoSlug,
+  RepoSummary,
+  SessionError,
+} from "@repo/domain/Session";
+import { describe, expect, it, vi } from "vitest";
 import {
   collectChecks,
   type DoctorCheck,
@@ -515,6 +520,99 @@ describe("collectChecks", () => {
     ).toMatch(
       /^fail live-model: anthropic\/claude-sonnet-5-5 refused: invalid x-api-key -- fix: /,
     );
+  });
+});
+
+describe("a repo that cannot be read or checked", () => {
+  const broken = (
+    client: DoctorClient,
+    over: Partial<Record<keyof DoctorClient, unknown>>,
+  ) => ({ ...client, ...over }) as unknown as DoctorClient;
+
+  /** Mutation: any getRepo failure becomes "the registry could not be read" and sends the operator to Postgres. */
+  it("names a slug that is not registered, and does not blame the database", async () => {
+    const lines = await run(
+      broken(fakeClient({}).client, {
+        getRepo: () =>
+          Effect.fail(
+            new RepoNotFound({
+              repo: "acme/typo",
+              message: "repo acme/typo is not registered",
+            }),
+          ),
+      }),
+      ready,
+      { repo: "acme/typo" as RepoSlug },
+    );
+    expect(lines).toContain(
+      "fail repo acme/typo: not registered -- fix: factory repo add acme/typo --path <dir> | --url <url>",
+    );
+    expect(lines.some((line) => line.includes("registry could not"))).toBe(
+      false,
+    );
+    expect(lines.some((line) => line.includes("docker compose"))).toBe(false);
+  });
+
+  it("still blames the registry for a storage failure reading one repo", async () => {
+    const lines = await run(
+      broken(fakeClient({}).client, {
+        getRepo: () =>
+          Effect.fail(
+            new SessionError({
+              code: "storage",
+              message: "connection refused",
+            }),
+          ),
+      }),
+      ready,
+      { repo: "acme/x" as RepoSlug },
+    );
+    const line = lines.find((entry) => entry.startsWith("fail repos:"));
+    expect(line).toContain(
+      "the registry could not be read: connection refused",
+    );
+    expect(line).toContain("docker compose up -d --wait postgres");
+  });
+
+  /** Mutation: put the per-repo lines inside the deployment-succeeded branch again. */
+  it("keeps a repo's own diagnosis when the deployment checks fail", async () => {
+    const lines = await run(
+      broken(fakeClient({ repos: [summary()] }).client, {
+        checkDeployment: () =>
+          Effect.fail({ message: "unknown rpc checkDeployment" }),
+      }),
+    );
+    expect(lines).toContain(
+      "fail repo acme/x: no clone URL / no local checkout -- fix: factory repo add acme/x --path <dir>",
+    );
+    expect(
+      lines.find((entry) => entry.startsWith("fail deployment:")),
+    ).toContain("restart the API");
+  });
+
+  /** Mutation: no bound on the RPC, so a stalled server hangs doctor. */
+  it("makes a stalled checkDeployment and pingModel into fail lines", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = run(
+        broken(fakeClient({}).client, {
+          checkDeployment: () => Effect.never,
+          pingModel: () => Effect.never,
+        }),
+        ready,
+        { live: true },
+      );
+      await vi.advanceTimersByTimeAsync(120_000);
+      const lines = await pending;
+      expect(
+        lines.find((entry) => entry.startsWith("fail deployment:")),
+      ).toContain("no answer within 60 seconds");
+      expect(
+        lines.find((entry) => entry.startsWith("fail live-model:")),
+      ).toContain("no answer within 45 seconds");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -7,7 +7,7 @@ import type {
   RepoCheck,
   ServerInfo,
 } from "@repo/domain/Server";
-import { RepoCloneFailed, RepoSlug } from "@repo/domain/Session";
+import { RepoCloneFailed, RepoNotFound, RepoSlug } from "@repo/domain/Session";
 import type { RepoSummary } from "@repo/domain/Session";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
@@ -346,6 +346,50 @@ export const diagnoseRow = (repo: RepoSummary): RepoDiagnosis => {
 };
 
 const isCloneFailure = Schema.is(RepoCloneFailed);
+const isRepoNotFound = Schema.is(RepoNotFound);
+
+/**
+ * Longer than the server's own bounds (a git probe and a token mint per repo; one model request),
+ * so a stalled call is named by the server when it can be and by this limit when it cannot.
+ */
+const CHECK_DEPLOYMENT_SECONDS = 60;
+const PING_MODEL_SECONDS = 45;
+
+type Bounded<A, E> =
+  | { readonly _tag: "Success"; readonly success: A }
+  | {
+      readonly _tag: "Failure";
+      readonly failure: {
+        readonly message: string;
+        readonly timedOut: boolean;
+      };
+    };
+
+/** A call that is a `Failure` line when it fails or stalls, never a hang: doctor's whole job. */
+const bounded = <A, E, R>(
+  call: Effect.Effect<A, E, R>,
+  seconds: number,
+): Effect.Effect<Bounded<A, E>, never, R> =>
+  call.pipe(
+    Effect.timeoutOption(`${seconds} seconds`),
+    Effect.map((answer): Bounded<A, E> =>
+      Option.isSome(answer)
+        ? { _tag: "Success", success: answer.value }
+        : {
+            _tag: "Failure",
+            failure: {
+              message: `no answer within ${seconds} seconds`,
+              timedOut: true,
+            },
+          },
+    ),
+    Effect.catch((error) =>
+      Effect.succeed<Bounded<A, E>>({
+        _tag: "Failure",
+        failure: { message: reason(error), timedOut: false },
+      }),
+    ),
+  );
 
 /**
  * Can this repo cut a worktree? A URL-only repo is cloned right now, so the answer is the clone's;
@@ -496,13 +540,18 @@ export const collectChecks = (
     checks.push(...modelChecks(info.success));
 
     // The registry is read from Postgres: when it is down, `readyz` has said so above, and the one
-    // `repos` line below says what that costs.
+    // `repos` line below says what that costs. A slug the registry has no row for is not that: it
+    // is a mistyped argument, and restarting the database would not fix it.
     const asked = options.repo;
     const listed = yield* (
       asked === undefined
         ? client.listRepos({}).pipe(Effect.map((out) => out.repos))
         : client.getRepo({ repo: asked }).pipe(Effect.map((row) => [row]))
     ).pipe(Effect.result);
+    const notRegistered =
+      asked !== undefined &&
+      listed._tag === "Failure" &&
+      isRepoNotFound(listed.failure);
     const diagnosed =
       listed._tag === "Success"
         ? yield* Effect.forEach(
@@ -513,57 +562,80 @@ export const collectChecks = (
         : [];
 
     // After the clones, so a base ref is asked of the clone a URL-only repo has just been given.
-    const deployment = yield* client.checkDeployment({}).pipe(Effect.result);
+    const deployment = yield* bounded(
+      client.checkDeployment({ repo: asked }),
+      CHECK_DEPLOYMENT_SECONDS,
+    );
     if (deployment._tag === "Failure") {
       checks.push(
         fail(
           "deployment",
           reason(deployment.failure),
-          "restart the API: it is older than this CLI",
+          deployment.failure.timedOut
+            ? "the API did not answer: check its logs, and that the forge and the repos' remotes are reachable"
+            : "restart the API: it is older than this CLI",
         ),
       );
     } else {
-      const registryError =
-        listed._tag === "Failure"
-          ? reason(listed.failure)
-          : deployment.success.reposError;
       checks.push(
         ...bootChecks(info.success, deployment.success, diagnosed.length > 0),
       );
-      if (registryError !== undefined) {
-        checks.push(
-          fail(
-            "repos",
-            `the registry could not be read: ${registryError}`,
-            FIX_POSTGRES,
-          ),
-        );
-      }
-      const byRepo = new Map(
-        deployment.success.repos.map((row) => [row.repo, row]),
+    }
+    // The per-repo lines do not depend on the server's half: a clone that failed or a checkout that
+    // is not git is the operator's answer even when the deployment checks could not run.
+    const registryError = notRegistered
+      ? undefined
+      : listed._tag === "Failure"
+        ? reason(listed.failure)
+        : deployment._tag === "Success"
+          ? deployment.success.reposError
+          : undefined;
+    if (notRegistered) {
+      checks.push(
+        fail(
+          `repo ${asked}`,
+          "not registered",
+          `factory repo add ${asked} --path <dir> | --url <url>`,
+        ),
       );
-      for (const { row, diagnosis } of diagnosed) {
-        checks.push(...repoChecks(row, diagnosis, byRepo.get(row.repo)));
-      }
-      if (listed._tag === "Success" && listed.success.length === 0) {
-        checks.push(
-          ok(
-            "repos",
-            "none registered (the first session that names a repo registers it)",
-          ),
-        );
-      }
+    }
+    if (registryError !== undefined) {
+      checks.push(
+        fail(
+          "repos",
+          `the registry could not be read: ${registryError}`,
+          FIX_POSTGRES,
+        ),
+      );
+    }
+    const byRepo = new Map(
+      deployment._tag === "Success"
+        ? deployment.success.repos.map((row) => [row.repo, row])
+        : [],
+    );
+    for (const { row, diagnosis } of diagnosed) {
+      checks.push(...repoChecks(row, diagnosis, byRepo.get(row.repo)));
+    }
+    if (listed._tag === "Success" && listed.success.length === 0) {
+      checks.push(
+        ok(
+          "repos",
+          "none registered (the first session that names a repo registers it)",
+        ),
+      );
     }
 
     if (options.live) {
-      const ping = yield* client.pingModel({}).pipe(Effect.result);
+      const ping = yield* bounded(client.pingModel({}), PING_MODEL_SECONDS);
       checks.push(
         ping._tag === "Success"
           ? liveCheck(ping.success)
           : fail(
               "live-model",
               reason(ping.failure),
-              "restart the API: it is older than this CLI",
+              ping.failure.timedOut
+                ? "check the provider's status and this machine's route to it"
+                : "restart the API: it is older than this CLI",
             ),
       );
     }
