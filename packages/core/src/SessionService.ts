@@ -185,6 +185,17 @@ import {
   writeActor,
   writeBudget,
   writeCurationUsage,
+  PLAN_FRESHNESS_SKILL,
+  planFreshnessPrompt,
+  planFreshnessProposals,
+  planPassWorstCost,
+  proposalSubject,
+  readPlanRevisions,
+  recordPlanApplied,
+  recordPlanDeclined,
+  requestPlanFreshness,
+  specDigest,
+  writePlanRevision,
   readProposedIssues,
   recordCreatedIssue,
   writeProposedIssues,
@@ -217,6 +228,17 @@ import {
   type ProposeDecompositionInput,
   type ProposeDecompositionResult,
 } from "@repo/domain/Decomposition";
+import {
+  type ApprovePlanRevisionInput,
+  type ApprovePlanRevisionResult,
+  type DeclinePlanRevisionInput,
+  MAX_PLAN_ISSUES,
+  type PlanProposal,
+  type PlanProposalsRefused,
+  PlanFreshnessRefused,
+  type PlanRevision,
+  type PlanTrigger,
+} from "@repo/domain/PlanFreshness";
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
@@ -233,7 +255,11 @@ import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
 } from "./SessionWriteBack";
-import { ProposalTracker, proposalIssueBody } from "./ProposalTracker";
+import {
+  planMarker,
+  ProposalTracker,
+  proposalIssueBody,
+} from "./ProposalTracker";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { inspectCheckout, workTreeRoot } from "./repos";
 import {
@@ -479,6 +505,44 @@ export type SessionServiceShape = {
     input: ApproveProposalsInput,
   ) => Effect.Effect<
     ApproveProposalsResult,
+    SessionError | ApproveProposalsError
+  >;
+  /**
+   * One plan-freshness pass over the session's spec (LOB-45): one model call over the spec and the
+   * tracker's current issue set (the delegating issue's children), whose answer — proposals to add,
+   * re-scope or close — is filed as one revision under `key` in the session's `factory.planRevisions`.
+   * A session that already holds a revision under `key` answers it, `created: false`, and makes no
+   * call. Everything that can refuse is decided before the call (`PlanFreshnessRefused`), the cost
+   * bound included: a pass whose worst case is over `maxCost` US dollars is never made. The call's
+   * spend is charged to the session's own ledger. It opens no session and writes to no tracker.
+   * Not on the RPC surface: the cadence (`./PlanFreshness`) is its caller.
+   */
+  readonly refreshPlan: (input: {
+    readonly sessionId: SessionId;
+    readonly key: string;
+    readonly trigger: PlanTrigger;
+    readonly maxCost: number;
+  }) => Effect.Effect<
+    { readonly revision: PlanRevision; readonly created: boolean },
+    SessionError | PlanFreshnessRefused | PlanProposalsRefused
+  >;
+  /**
+   * Decline a plan revision (LOB-45): it stays listed, marked declined, and is never applied. No call
+   * is made and nothing is sent; an unknown key is `ApproveProposalsError` (`no_proposals`).
+   */
+  readonly declinePlanRevision: (
+    input: DeclinePlanRevisionInput,
+  ) => Effect.Effect<PlanRevision, SessionError | ApproveProposalsError>;
+  /**
+   * Apply the approved proposals of a plan revision (LOB-45), through the tracker port LOB-202's
+   * approval uses: `add` creates a child of the delegating issue, `rescope` rewrites an issue's title
+   * and description, `close` comments its reason and cancels it. Each applied proposal is recorded
+   * before the next request, so a retry repeats nothing; a declined revision is refused (`declined`).
+   */
+  readonly approvePlanRevision: (
+    input: ApprovePlanRevisionInput,
+  ) => Effect.Effect<
+    ApprovePlanRevisionResult,
     SessionError | ApproveProposalsError
   >;
   /**
@@ -4094,6 +4158,301 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         );
 
       /**
+       * One plan-freshness pass (LOB-45). The shape is `proposeDecomposition`'s — one call, no
+       * session of its own, the spend charged before the answer is judged — with two more reads
+       * before the call: the tracker's issue set, and the call's worst-case cost against the bound.
+       * Under the proposal gate, so two deliveries of one merge cannot both read "no revision yet"
+       * and both pay for a call.
+       */
+      const refreshPlan: SessionServiceShape["refreshPlan"] = (input) =>
+        withProposalGate(
+          input.sessionId,
+          Effect.gen(function* () {
+            const refuse = (
+              reason: PlanFreshnessRefused["reason"],
+              message: string,
+            ) => new PlanFreshnessRefused({ reason, message });
+            const row = yield* requireSession(input.sessionId);
+            const owner = yield* acquireOwner(input.sessionId, row);
+            const held = yield* readPlanRevisions(owner.harness, owner.root);
+            const answered = held?.find((one) => one.key === input.key);
+            if (answered !== undefined) {
+              return { revision: answered, created: false };
+            }
+            if (yield* isBusy(owner.harness, owner.root)) {
+              return yield* refuse(
+                "busy",
+                `session ${input.sessionId} is running; a plan is read against a settled spec`,
+              );
+            }
+            const spec = yield* readSpec(owner.harness, owner.root);
+            if (spec === undefined) {
+              return yield* refuse(
+                "no_spec",
+                `session ${input.sessionId} has no spec to read the plan against`,
+              );
+            }
+            if (spec.gaps.length > 0) {
+              return yield* refuse(
+                "spec_gaps",
+                `session ${input.sessionId}'s spec declares ${spec.gaps.length} gap(s); a person closes them first`,
+              );
+            }
+            const fault = decompositionInputFault(spec);
+            if (fault !== undefined) {
+              return yield* refuse(
+                "spec_too_large",
+                `session ${input.sessionId}'s spec ${fault}`,
+              );
+            }
+            const target = yield* tracker
+              .open(input.sessionId)
+              .pipe(
+                Effect.catchTag("ApproveProposalsError", (error) =>
+                  Effect.fail(
+                    refuse(
+                      error.reason === "no_delegating_issue"
+                        ? "no_delegating_issue"
+                        : "no_tracker",
+                      error.message,
+                    ),
+                  ),
+                ),
+              );
+            const issues = yield* target.issues.pipe(
+              Effect.mapError((error) =>
+                refuse("tracker_failed", error.message),
+              ),
+            );
+            if (issues.length > MAX_PLAN_ISSUES) {
+              return yield* refuse(
+                "too_many_issues",
+                `the plan has ${issues.length} issues; at most ${MAX_PLAN_ISSUES} can be read in one pass`,
+              );
+            }
+            const skill = yield* skills.get(PLAN_FRESHNESS_SKILL).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SessionErrorClass({
+                    code: "storage",
+                    message: `read the ${PLAN_FRESHNESS_SKILL} skill: ${cause.message}`,
+                  }),
+              ),
+            );
+            const pass = {
+              model: options.model,
+              instructions: skill.body,
+              sessionId: input.sessionId,
+              spec,
+              issues,
+            };
+            const worst = planPassWorstCost(
+              options.model,
+              skill.body,
+              planFreshnessPrompt(pass),
+            );
+            if (worst !== undefined && worst > input.maxCost) {
+              return yield* refuse(
+                "over_bound",
+                `the pass could cost up to $${worst.toFixed(6)}, over the bound of $${input.maxCost}; no call was made`,
+              );
+            }
+            const request = yield* requestPlanFreshness(pass);
+            // Charged before the answer is judged, as a decomposition is: a refused answer was still
+            // a billed call.
+            yield* writeCurationUsage(
+              owner.root,
+              modelKey(options.model),
+              request.usage,
+            );
+            const ledger = yield* readCurationUsage(owner.harness);
+            yield* setActivityCost(input.sessionId, costOf(ledger));
+            const proposals = yield* planFreshnessProposals(request, issues);
+            const committed = yield* writePlanRevision(owner.root, {
+              key: input.key,
+              at: DateTime.formatIso(yield* DateTime.now),
+              trigger: input.trigger,
+              spec: {
+                sessionId: input.sessionId,
+                goal: spec.goal,
+                digest: specDigest(spec),
+              },
+              issues,
+              proposals,
+              decision: "pending",
+            });
+            yield* touchActivity(input.sessionId);
+            return committed;
+          }),
+        );
+
+      /** The revision under `key`, or the refusal that it is not there. */
+      const requireRevision = (
+        sessionId: SessionId,
+        revisions: readonly PlanRevision[] | undefined,
+        key: string,
+      ) => {
+        const revision = revisions?.find((one) => one.key === key);
+        return revision === undefined
+          ? Effect.fail(
+              new ApproveProposalsError({
+                reason: "no_proposals",
+                message: `session ${sessionId} has no plan revision ${key}`,
+                created: [],
+              }),
+            )
+          : Effect.succeed(revision);
+      };
+
+      const declinePlanRevision: SessionServiceShape["declinePlanRevision"] = (
+        input,
+      ) =>
+        withProposalGate(
+          input.sessionId,
+          Effect.gen(function* () {
+            const row = yield* requireSession(input.sessionId);
+            const owner = yield* acquireOwner(input.sessionId, row);
+            yield* requireRevision(
+              input.sessionId,
+              yield* readPlanRevisions(owner.harness, owner.root),
+              input.key,
+            );
+            const declined = yield* recordPlanDeclined(owner.root, input.key);
+            if (declined === undefined) {
+              return yield* new ApproveProposalsError({
+                reason: "no_proposals",
+                message: `session ${input.sessionId} has no plan revision ${input.key}`,
+                created: [],
+              });
+            }
+            yield* touchActivity(input.sessionId);
+            return declined;
+          }),
+        );
+
+      /**
+       * One approval of a plan revision (LOB-45), in `approveProposals`' order: everything the
+       * document can refuse first, then the tracker is opened, then each approved proposal in index
+       * order, one request at a time, each recorded before the next is sent.
+       */
+      const approvePlanRevision: SessionServiceShape["approvePlanRevision"] = (
+        input,
+      ) =>
+        withProposalGate(
+          input.sessionId,
+          Effect.gen(function* () {
+            const refuse = (
+              reason: ApproveProposalsError["reason"],
+              message: string,
+              created: readonly number[] = [],
+            ) => new ApproveProposalsError({ reason, message, created });
+            const row = yield* requireSession(input.sessionId);
+            const owner = yield* acquireOwner(input.sessionId, row);
+            let revision = yield* requireRevision(
+              input.sessionId,
+              yield* readPlanRevisions(owner.harness, owner.root),
+              input.key,
+            );
+            if (revision.decision === "declined") {
+              return yield* refuse(
+                "declined",
+                `plan revision ${input.key} of session ${input.sessionId} was declined; nothing of it is applied`,
+              );
+            }
+            const unknown = input.approved.filter(
+              (index) => index < 0 || index >= revision.proposals.length,
+            );
+            if (unknown.length > 0) {
+              return yield* refuse(
+                "unknown_proposal",
+                `${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not proposals of plan revision ${input.key}, which has ${revision.proposals.length}`,
+              );
+            }
+            const target = yield* tracker.open(input.sessionId);
+            const applied: number[] = [];
+            const retag = (error: ApproveProposalsError) =>
+              refuse(error.reason, error.message, [...applied]);
+            const issueOf = (identifier: string) =>
+              revision.issues.find((one) => one.identifier === identifier);
+            for (const index of [...new Set(input.approved)].sort(
+              (left, right) => left - right,
+            )) {
+              const proposal: PlanProposal | undefined =
+                revision.proposals[index];
+              if (proposal === undefined || proposal.applied !== undefined) {
+                continue;
+              }
+              const landed =
+                proposal.kind === "add"
+                  ? yield* target
+                      .create({
+                        title: proposal.title,
+                        body: proposalIssueBody({ ...proposal, blockedBy: [] }),
+                      })
+                      .pipe(Effect.mapError(retag))
+                  : yield* Effect.gen(function* () {
+                      const issue = issueOf(proposal.issue);
+                      if (issue === undefined) {
+                        return yield* refuse(
+                          "proposals_changed",
+                          `proposal ${index} names ${proposal.issue}, which the revision's issue set does not hold`,
+                          applied,
+                        );
+                      }
+                      const ref = {
+                        id: issue.id,
+                        identifier: issue.identifier,
+                      };
+                      const marker = planMarker(
+                        input.sessionId,
+                        input.key,
+                        issue.identifier,
+                      );
+                      yield* proposal.kind === "rescope"
+                        ? target.rescope({
+                            issue: ref,
+                            title: proposal.title,
+                            body: proposalIssueBody({
+                              ...proposal,
+                              blockedBy: [],
+                            }),
+                            marker,
+                          })
+                        : target.close({
+                            issue: ref,
+                            reason: proposal.reason,
+                            marker,
+                          });
+                      return ref;
+                    }).pipe(Effect.mapError(retag));
+              const recorded = yield* recordPlanApplied(
+                owner.root,
+                input.key,
+                index,
+                proposalSubject(proposal),
+                landed,
+              );
+              if (!recorded) {
+                return yield* refuse(
+                  "proposals_changed",
+                  `plan revision ${input.key} changed while proposal ${index} was applied as ${landed.identifier}; approve again`,
+                  applied,
+                );
+              }
+              revision = {
+                ...revision,
+                proposals: revision.proposals.map((one, at) =>
+                  at === index ? { ...one, applied: landed } : one,
+                ),
+              };
+              applied.push(index);
+            }
+            yield* touchActivity(input.sessionId);
+            return { revision, applied };
+          }),
+        );
+
+      /**
        * One page of the session list, newest activity first.
        *
        * A page is exact: the cursor carries `last_activity_exact` at microsecond precision, so the
@@ -4800,6 +5159,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         curate,
         proposeDecomposition,
         approveProposals,
+        refreshPlan,
+        declinePlanRevision,
+        approvePlanRevision,
         openPullRequest: openPr,
         releaseWorkspace,
         roleModel,

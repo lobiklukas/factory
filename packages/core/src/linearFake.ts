@@ -11,6 +11,10 @@
  * Linear accepts them: it does not validate that the team and parent exist or belong together, and it
  * renders no sub-issue (`docs/testing-third-parties.md`).
  *
+ * LOB-45 adds the plan: the parent's children with their titles, states and descriptions
+ * (`issuePlan`), children seeded by a case (`FakeOptions.children`), and the per-child writes a
+ * re-scope and a close send — the issue read, `issueUpdate` and `commentCreate` on a child.
+ *
  * A test file, not exported from the package: `LinearSync.test.ts` and `SessionService.test.ts` share
  * it so the approval cases run against the same fake the write-back cases do.
  */
@@ -58,20 +62,34 @@ export type FakeOptions = {
   readonly hang?: { readonly operation: string; readonly times: number };
   /** Answer the `nth` (1-based) request of this operation with GraphQL `errors`, that once. */
   readonly refuseNth?: { readonly operation: string; readonly nth: number };
+  /** Children the parent already has (LOB-45): the plan a plan-freshness pass reads. */
+  readonly children?: ReadonlyArray<{
+    readonly title: string;
+    readonly description?: string;
+    readonly state?: LinearWorkflowState;
+  }>;
 };
 
-/** An issue the fake made for an `issueCreate`. */
+/** An issue the fake made for an `issueCreate`, or a child a case seeded. */
 export type CreatedChild = {
   readonly id: string;
   readonly identifier: string;
   readonly teamId: string;
   readonly parentId: string;
-  readonly title: string;
-  readonly description: string;
+  title: string;
+  description: string;
+  /** Where the child is (LOB-45): `issueUpdate` with a `stateId` moves it. */
+  state: LinearWorkflowState;
+  readonly comments: string[];
 };
 
 /** The operations that only read: what `writes()` leaves out. */
-const READS = new Set(["issue", "issueChildren", "issueRelations"]);
+const READS = new Set([
+  "issue",
+  "issueChildren",
+  "issueRelations",
+  "issuePlan",
+]);
 
 const Json = Schema.fromJsonString(Schema.Unknown);
 const RequestBody = Schema.Struct({
@@ -99,7 +117,19 @@ export const makeLinear = (options: FakeOptions = {}) => {
   };
   /** The team the issue belongs to — what `issueCreate` must be given (LOB-202). */
   const teamId = "team-uuid-1";
-  const children: CreatedChild[] = [];
+  const prefix = issue.identifier.split("-")[0] ?? "ENG";
+  const children: CreatedChild[] = (options.children ?? []).map(
+    (child, index) => ({
+      id: `iss-seed-${index + 1}`,
+      identifier: `${prefix}-${10 + index + 1}`,
+      teamId,
+      parentId: issue.id,
+      title: child.title,
+      description: child.description ?? "",
+      state: child.state ?? TODO,
+      comments: [],
+    }),
+  );
   const relations: Array<{
     issueId: string;
     relatedIssueId: string;
@@ -127,16 +157,71 @@ export const makeLinear = (options: FakeOptions = {}) => {
                 ? "issueChildren"
                 : query.includes("FactoryRelations")
                   ? "issueRelations"
-                  : "issue";
+                  : query.includes("FactoryPlan")
+                    ? "issuePlan"
+                    : "issue";
   const isParent = (id: unknown) => id === issue.id || id === issue.identifier;
   const everyIssue = () => [
     { id: issue.id, identifier: issue.identifier },
     ...children,
   ];
 
+  const childOf = (id: unknown) =>
+    children.find((child) => child.id === id || child.identifier === id);
+
   const answer = (operation: string, variables: Record<string, unknown>) => {
     const input = asRecord(variables["input"]);
+    const child =
+      operation === "commentCreate"
+        ? childOf(input["issueId"])
+        : childOf(variables["id"]);
+    if (child !== undefined && operation === "issue") {
+      return {
+        issue: {
+          id: child.id,
+          identifier: child.identifier,
+          state: child.state,
+          team: { states: { nodes: states } },
+          comments: { nodes: child.comments.map((body) => ({ body })) },
+          attachments: { nodes: [] },
+        },
+      };
+    }
+    if (child !== undefined && operation === "commentCreate") {
+      child.comments.push(String(input["body"]));
+      return { commentCreate: { success: true } };
+    }
+    if (child !== undefined && operation === "issueUpdate") {
+      if (typeof input["title"] === "string") child.title = input["title"];
+      if (typeof input["description"] === "string") {
+        child.description = input["description"];
+      }
+      if (input["stateId"] !== undefined) {
+        const next = states.find((s) => s.id === input["stateId"]);
+        if (next === undefined) return { issueUpdate: { success: false } };
+        child.state = next;
+      }
+      return { issueUpdate: { success: true } };
+    }
     switch (operation) {
+      case "issuePlan":
+        return {
+          issue: isParent(variables["id"])
+            ? {
+                id: issue.id,
+                identifier: issue.identifier,
+                children: {
+                  nodes: children.map((one) => ({
+                    id: one.id,
+                    identifier: one.identifier,
+                    title: one.title,
+                    description: one.description,
+                    state: { name: one.state.name, type: one.state.type },
+                  })),
+                },
+              }
+            : null,
+        };
       case "issue":
         return {
           issue:
@@ -173,7 +258,6 @@ export const makeLinear = (options: FakeOptions = {}) => {
             : null,
         };
       case "issueCreate": {
-        const prefix = issue.identifier.split("-")[0] ?? "ENG";
         const made: CreatedChild = {
           id: `iss-child-${children.length + 1}`,
           identifier: `${prefix}-${100 + children.length + 1}`,
@@ -184,6 +268,8 @@ export const makeLinear = (options: FakeOptions = {}) => {
             typeof input["description"] === "string"
               ? input["description"]
               : "",
+          state: TODO,
+          comments: [],
         };
         children.push(made);
         return {

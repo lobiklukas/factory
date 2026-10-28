@@ -192,6 +192,10 @@ const failingSync = LinearIssueSync.of({
   // The webhook never creates issues (LOB-202's children are the session layer's).
   createChild: () => Effect.die("the webhook does not create issues"),
   blocks: () => Effect.die("the webhook does not relate issues"),
+  // Nor reads or changes a plan (LOB-45's pass is off by default, and writes no tracker when on).
+  children: () => Effect.die("the webhook does not read a plan"),
+  rescope: () => Effect.die("the webhook does not re-scope issues"),
+  close: () => Effect.die("the webhook does not close issues"),
   merged: (input) =>
     Effect.suspend(() => {
       mirrored.push(input.issueId);
@@ -355,6 +359,50 @@ describe("POST /webhooks/github tears a merged PR's workspaces down (LOB-268)", 
       expect(existsSync(workspace.path)).toBe(true);
       expect(branchSha(workspace.branch)).toBeDefined();
     }
+  }, 120_000);
+});
+
+describe("POST /webhooks/github reads the plan again after a merge (LOB-45)", () => {
+  const savedCadence = process.env["PLAN_FRESHNESS"];
+  afterEach(() => {
+    if (savedCadence === undefined) delete process.env["PLAN_FRESHNESS"];
+    else process.env["PLAN_FRESHNESS"] = savedCadence;
+  });
+
+  it("runs no pass and says nothing of one when the cadence is unset or does not read", async () => {
+    for (const [number, cadence] of [
+      [44, undefined],
+      [45, "always"],
+    ] as const) {
+      if (cadence === undefined) delete process.env["PLAN_FRESHNESS"];
+      else process.env["PLAN_FRESHNESS"] = cadence;
+      const work = await mergedPrSessions(number);
+      const response = await deliver(merge(number, work.url));
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("planFreshness");
+      const claims = await inService(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          return yield* sql`
+            SELECT request_id FROM webhook_deliveries
+            WHERE request_id LIKE ${`plan-freshness:%:${work.url}`}
+          `;
+        }),
+      );
+      expect(claims).toEqual([]);
+    }
+  }, 120_000);
+
+  it("runs a pass per spec of record with PLAN_FRESHNESS=merged, and answers what it came to", async () => {
+    process.env["PLAN_FRESHNESS"] = "merged";
+    const work = await mergedPrSessions(46);
+    const response = await deliver(merge(46, work.url));
+    const body = (await response.json()) as Record<string, unknown>;
+    // The opener holds no spec, so the pass is refused before any call — and says so.
+    expect(body["planFreshness"]).toMatchObject({
+      status: "merged",
+      passes: [{ outcome: "refused", reason: "no_spec" }],
+    });
   }, 120_000);
 });
 

@@ -7,6 +7,9 @@
 // blocker's relations (`query FactoryRelations`) and `issueRelationCreate` — and anything else is a
 // GraphQL error, so a client that started asking for
 // more would fail here instead of being answered by a fake that guessed. Any other path is a 404.
+// LOB-45 adds the plan a plan-freshness pass reads (`query FactoryPlan`: the parent's children with
+// their titles, states and descriptions), children seeded before the API starts, and the per-child
+// writes an approved re-scope or close sends (the issue read, `issueUpdate`, `commentCreate`).
 //
 // Issues are created on first read, in `Todo`, in a team with Linear's default workflow states, so
 // the driver can name a fresh issue per run without seeding anything. The ledger is a file rather
@@ -19,6 +22,8 @@
 //                              answered 500 — Linear has the comment, the caller never learned it,
 //                              and a retry must not turn that into a second comment
 //   LINEAR_FAKE_TEAM_STATES    comma-separated state names to give the team instead of the default
+//   LINEAR_FAKE_CHILDREN       JSON `[{"parent": "<identifier>", "title", "description"?, "state"?}]`:
+//                              children the parent already has — the plan (LOB-45)
 import { readFileSync, writeFileSync } from "node:fs";
 
 type State = {
@@ -59,8 +64,11 @@ type Child = {
   readonly identifier: string;
   readonly teamId: string;
   readonly parentId: string;
-  readonly title: string;
-  readonly description: string;
+  title: string;
+  description: string;
+  /** Where the child is (LOB-45); a created child starts in `Todo`. */
+  state?: State;
+  comments?: string[];
 };
 
 const port = Number(process.env["LINEAR_FAKE_PORT"] ?? "9416");
@@ -110,7 +118,28 @@ const write = (ledger: Ledger): void => {
   writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
 };
 
-write(empty);
+type Seed = {
+  readonly parent: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly state?: string;
+};
+const seeds = JSON.parse(process.env["LINEAR_FAKE_CHILDREN"] ?? "[]") as Seed[];
+const todoState = (): State =>
+  STATES.find((state) => state.name === "Todo") ?? (STATES[0] as State);
+write({
+  ...empty,
+  children: seeds.map((seed, index) => ({
+    id: `uuid-seed-${index + 1}`,
+    identifier: `${seed.parent}-S${index + 1}`,
+    teamId: `team-${seed.parent}`,
+    parentId: `uuid-${seed.parent}`,
+    title: seed.title,
+    description: seed.description ?? "",
+    state: STATES.find((state) => state.name === seed.state) ?? todoState(),
+    comments: [],
+  })),
+});
 
 const lost = new Set<string>();
 
@@ -121,23 +150,25 @@ const json = (status: number, body: unknown): Response =>
   });
 
 const operationOf = (query: string): string | undefined =>
-  query.startsWith("query FactoryIssue")
-    ? "issue"
-    : query.startsWith("query FactoryParent")
-      ? "issueChildren"
-      : query.startsWith("query FactoryRelations")
-        ? "issueRelations"
-        : query.includes("commentCreate(")
-          ? "commentCreate"
-          : query.includes("issueUpdate(")
-            ? "issueUpdate"
-            : query.includes("attachmentCreate(")
-              ? "attachmentCreate"
-              : query.includes("issueRelationCreate(")
-                ? "issueRelationCreate"
-                : query.includes("issueCreate(")
-                  ? "issueCreate"
-                  : undefined;
+  query.startsWith("query FactoryPlan")
+    ? "issuePlan"
+    : query.startsWith("query FactoryIssue")
+      ? "issue"
+      : query.startsWith("query FactoryParent")
+        ? "issueChildren"
+        : query.startsWith("query FactoryRelations")
+          ? "issueRelations"
+          : query.includes("commentCreate(")
+            ? "commentCreate"
+            : query.includes("issueUpdate(")
+              ? "issueUpdate"
+              : query.includes("attachmentCreate(")
+                ? "attachmentCreate"
+                : query.includes("issueRelationCreate(")
+                  ? "issueRelationCreate"
+                  : query.includes("issueCreate(")
+                    ? "issueCreate"
+                    : undefined;
 
 /** The issue a variable names — by UUID or identifier — created on first sight. */
 const issueFor = (ledger: Ledger, key: string): Issue => {
@@ -178,8 +209,78 @@ const server = Bun.serve({
       authorization: request.headers.get("authorization"),
     });
     const input = (variables["input"] ?? {}) as Record<string, unknown>;
+    // A child is addressed by its own id (LOB-45): the read, the update and the comment of an
+    // approved re-scope or close land on it, not on an issue made up on first sight.
+    const childNamed = (key: unknown) =>
+      ledger.children.find((one) => one.id === key || one.identifier === key);
+    const child =
+      operation === "commentCreate"
+        ? childNamed(input["issueId"])
+        : childNamed(variables["id"]);
+    if (child !== undefined && operation === "issue") {
+      write(ledger);
+      return json(200, {
+        data: {
+          issue: {
+            id: child.id,
+            identifier: child.identifier,
+            state: child.state ?? todoState(),
+            team: { states: { nodes: STATES } },
+            comments: {
+              nodes: (child.comments ?? []).map((text) => ({ body: text })),
+            },
+            attachments: { nodes: [] },
+          },
+        },
+      });
+    }
+    if (child !== undefined && operation === "commentCreate") {
+      child.comments = [...(child.comments ?? []), String(input["body"])];
+      write(ledger);
+      return json(200, { data: { commentCreate: { success: true } } });
+    }
+    if (child !== undefined && operation === "issueUpdate") {
+      if (typeof input["title"] === "string") child.title = input["title"];
+      if (typeof input["description"] === "string") {
+        child.description = input["description"];
+      }
+      let success = true;
+      if (input["stateId"] !== undefined) {
+        const next = STATES.find((state) => state.id === input["stateId"]);
+        if (next === undefined) success = false;
+        else child.state = next;
+      }
+      write(ledger);
+      return json(200, { data: { issueUpdate: { success } } });
+    }
 
     switch (operation) {
+      case "issuePlan": {
+        const issue = issueFor(ledger, String(variables["id"]));
+        write(ledger);
+        return json(200, {
+          data: {
+            issue: {
+              id: issue.id,
+              identifier: issue.identifier,
+              children: {
+                nodes: ledger.children
+                  .filter((one) => one.parentId === issue.id)
+                  .map((one) => ({
+                    id: one.id,
+                    identifier: one.identifier,
+                    title: one.title,
+                    description: one.description,
+                    state: {
+                      name: (one.state ?? todoState()).name,
+                      type: (one.state ?? todoState()).type,
+                    },
+                  })),
+              },
+            },
+          },
+        });
+      }
       case "issue": {
         const issue = issueFor(ledger, String(variables["id"]));
         write(ledger);
@@ -230,6 +331,8 @@ const server = Bun.serve({
           parentId: String(input["parentId"]),
           title: String(input["title"]),
           description: String(input["description"] ?? ""),
+          state: todoState(),
+          comments: [],
         };
         ledger.children.push(made);
         write(ledger);

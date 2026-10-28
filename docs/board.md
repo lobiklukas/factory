@@ -311,7 +311,11 @@ customization, decomposition, and board metrics.
    reconciled into the set the session holds by normalized title, so the same spec twice is the
    same proposals and creates nothing the second time, a changed spec answers a diff (added,
    updated, unchanged, removed), and a dropped proposal is marked `removed` with its tracker id
-   rather than deleted. Still not built: child cards and `task_links` (wave 2).
+   rather than deleted. Plan freshness (LOB-45): with `PLAN_FRESHNESS=merged`, a merged factory PR
+   re-reads the plan — the spec of record against the delegating issue's children — in one bounded,
+   read-only call, and files proposals to add, re-scope or close as a revision on the spec's session
+   (`factory.planRevisions`); a person declines it or approves it through the same tracker port, and
+   nothing is auto-approved. Still not built: child cards and `task_links` (wave 2).
 10. **Board metrics** — cycle time, aging, WIP over time, cost per task (LOB-17, LOB-28, LOB-44).
     Trigger: once real cards exist to measure.
 

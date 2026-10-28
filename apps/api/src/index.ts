@@ -211,6 +211,7 @@ const ModelConfig = Config.all({
    * (`.pi/skills/verify-api/approve-proposals.sh`) scripts edges here.
    */
   fauxDecomposition: Config.option(Config.String("FAUX_DECOMPOSITION")),
+  fauxPlanFreshness: Config.option(Config.String("FAUX_PLAN_FRESHNESS")),
   /**
    * The `review` calls the faux script makes, in order (LOB-36's `fauxReview`): a JSON array of the
    * tool's arguments, each sent only when the one before it was refused. Unset: the faux never
@@ -629,6 +630,7 @@ const HttpLive = Effect.gen(function* () {
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
     fauxSpec: Option.getOrUndefined(model.fauxSpec),
     fauxDecomposition: Option.getOrUndefined(model.fauxDecomposition),
+    fauxPlanFreshness: Option.getOrUndefined(model.fauxPlanFreshness),
     fauxReview: Option.getOrUndefined(model.fauxReview),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,

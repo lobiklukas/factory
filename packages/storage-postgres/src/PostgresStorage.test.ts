@@ -2094,6 +2094,59 @@ describe("the skills table and its seeds", () => {
       expect(after).toEqual(before);
     },
   );
+
+  // The `plan-freshness` skill 0033 seeds (LOB-45): what a plan-freshness pass is told. Deleting
+  // 0033's INSERT fails both cases.
+  it(
+    "seeds the plan-freshness skill with the rules its validator holds a pass to",
+    { timeout: 30_000 },
+    async () => {
+      const [row] = (await skills()).filter(
+        (skill) => skill.name === "plan-freshness",
+      );
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+      const skill = decode(row);
+      expect(skill.version).toBe("1");
+      const body = skill.body.toLowerCase();
+      // The rules `validatePlanProposals` refuses on: the three kinds, only issues shown, once each,
+      // never a closed one, a reason for a close, and the empty answer that says "still fresh".
+      for (const rule of [
+        "`add`",
+        "`rescope`",
+        "`close`",
+        "name only issues you were shown, each at most once",
+        "already closed",
+        "say why",
+        "empty list",
+        "change nothing",
+      ]) {
+        expect(body).toContain(rule);
+      }
+      expect(skill.attachments).toEqual([]);
+    },
+  );
+
+  it(
+    "adds the plan-freshness row once, and rewrites no other skill row",
+    { timeout: 30_000 },
+    async () => {
+      const shipped = async () =>
+        (await skills()).filter((skill) => !skill.name.startsWith("test-"));
+      const before = await shipped();
+      const migration = (
+        await import("./migrations/0033_seed_plan_freshness_skill")
+      ).default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      const after = await shipped();
+      expect(
+        after.filter((skill) => skill.name === "plan-freshness"),
+      ).toHaveLength(1);
+      expect(after).toEqual(before);
+    },
+  );
 });
 
 /**

@@ -569,6 +569,39 @@ describe("approveProposals over RPC (LOB-202)", () => {
   }, 60_000);
 });
 
+describe("plan revisions over RPC (LOB-45)", () => {
+  it("carries an unknown revision, for a decline and an approval, across the wire with its tag", async () => {
+    const outcome = await callApi((client) =>
+      Effect.gen(function* () {
+        const scratch = yield* client.createSession({ title: "never planned" });
+        const declined = yield* failureOf(
+          client.declinePlanRevision({
+            sessionId: scratch.id,
+            key: "merged:https://github.com/o/r/pull/1",
+          }),
+        );
+        const approved = yield* failureOf(
+          client.approvePlanRevision({
+            sessionId: scratch.id,
+            key: "merged:https://github.com/o/r/pull/1",
+            approved: [0],
+          }),
+        );
+        const snapshot = yield* client.getSession({ sessionId: scratch.id });
+        return { declined, approved, snapshot };
+      }),
+    );
+    for (const failure of [outcome.declined, outcome.approved]) {
+      expect(failure).toMatchObject({
+        _tag: "ApproveProposalsError",
+        reason: "no_proposals",
+      });
+    }
+    // A session no pass ever ran against reports no revisions, not an empty list.
+    expect(outcome.snapshot.planRevisions).toBeUndefined();
+  }, 60_000);
+});
+
 /**
  * The terminal events this app wires (LOB-268): an operator's `discardSession`, and a `moveTask` that
  * lands a card in `canceled`. Both tear the session's worktree and branch down; the move does it

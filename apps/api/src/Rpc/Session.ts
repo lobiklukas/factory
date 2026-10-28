@@ -60,6 +60,9 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       proposeDecomposition: (input) => sessions.proposeDecomposition(input),
       // Creates the approved proposals in the tracker (LOB-202), behind the session layer's port.
       approveProposals: (input) => sessions.approveProposals(input),
+      // A plan-freshness revision (LOB-45): declined with no call, or approved through the same port.
+      declinePlanRevision: (input) => sessions.declinePlanRevision(input),
+      approvePlanRevision: (input) => sessions.approvePlanRevision(input),
       registerRepo: (input) => sessions.registerRepo(input),
       listRepos: () => sessions.listRepos,
       getRepo: (input) => sessions.getRepo(input),

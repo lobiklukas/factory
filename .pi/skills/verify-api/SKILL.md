@@ -60,6 +60,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A long session's history (LOB-243)      | `history.sh`: released, `getSession` carries the newest 200 entries and `earlier`; `readSessionHistory` pages back to the first entry, joined they are the transcript; `factory watch` says what it did not print; `factory history --all` prints it                                                                        | a historical read costs what it shows, and the rest is one call away               |
 | Proposed child issues (LOB-201)         | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, a rerun of the same spec reconciles into them (LOB-203), and no other row in the database moves                                                                                               | a spec becomes proposals, and nothing else is made                                 |
 | Approving proposals (LOB-202)           | `approve-proposals.sh`: `approveProposals` creates only the approved proposals in a loopback Linear, under the delegating issue and in its team, with the edges whose ends exist, and nothing twice — a rerun of the same spec included (LOB-203)                                                                           | approved proposals become tracker issues, once                                     |
+| Plan freshness (LOB-45)                 | `plan-freshness.sh`: a signed merged PR with `PLAN_FRESHNESS=merged` files one revision on the spec's session (add/re-scope/close), one priced call, one Linear read; a redelivery and a decline call nothing; an approval lands each kind once                                                                             | the plan is re-read after a merge, and a person decides                            |
 | The model backend (LOB-258)             | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
 | What the server runs (LOB-269)          | `server-info.sh`: `getServerInfo` answers faux by `MODEL_BACKEND`, `faux/faux-1`, the `ROLE_MODELS` rows, gate, budget and armed routes; no dummy credential in the raw body or the log; a session names `faux/faux-1` on create, get and list                                                                              | a client can ask which backend and model it is on                                  |
 | Control-plane identity (LOB-20)         | `identity.sh`: no credential or a wrong one is `Unauthenticated` for `listSessions` and the `watchSession` stream; amy's create, decide, card create and move, and the CLI's move record `amy` over a body's `mallory`; `listSpend` by those; a signed delivery needs no credential                                         | the actor is the one the control plane authenticated                               |
@@ -146,6 +147,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getServerInfo and each session's model; no credential's value in the answer (features/server-info.md)
 DATABASE_URL=… ./identity.sh     # api on :9200 (API_PORT), via up.sh with a token table — unauthenticated calls refused, every write records the credential's actor (features/identity.md)
 ./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
+./plan-freshness.sh      # api on :9433 (PLAN_PORT), loopback Linear on :9434 (PLAN_LINEAR_PORT) — a merged PR re-reads the plan into one revision (features/plan-freshness.md)
 DATABASE_URL=… ./metrics.sh  # api on :9200 (API_PORT), OTLP receiver on API_PORT+1 (OTLP_RECEIVER_PORT) — the documented metric set reaches a loopback collector, never motel (features/metrics.md)
 ```
 
@@ -254,6 +256,10 @@ order you want the evidence to end in.
   `approve-proposals-linear-ledger.json`, `approve-proposals-linear-fake.log` — from
   `./approve-proposals.sh`: each approval's answer, the fake Linear's whole ledger (every request,
   the issues made, the relations), and the script's own checks
+- `plan-freshness.json`, `plan-freshness-process.json`, `plan-freshness-api.log`,
+  `plan-freshness-linear-ledger.json`, `plan-freshness-linear-fake.log` — from
+  `./plan-freshness.sh`: each delivery's answer, the revisions, every table's fingerprint before and
+  after the pass, the fake Linear's whole ledger, and the script's own checks
 - `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
   from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
   checks, and the fake's ledger
