@@ -639,6 +639,14 @@ const initialColumnField = (
   initialColumn === null ? {} : { initialColumn };
 
 /**
+ * `board_definitions.caps` (0038, LOB-71) as `BoardDefinition` carries it: absent, not `null`, for a
+ * version written before the column existed, which caps nothing. Read as the driver parses JSONB and
+ * decoded with the rest of the definition, so a malformed value is the definition's decode failure.
+ */
+const capsField = (caps: unknown): { readonly caps?: unknown } =>
+  caps === null || caps === undefined ? {} : { caps };
+
+/**
  * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
  * then session, then request id) into one, without reordering either. `key` is the request time at
  * microsecond precision, as the database orders it: the `requestedAt` an item carries is cut to
@@ -841,6 +849,7 @@ export const TaskServiceLive = Layer.effect(
             name: string;
             columns: string;
             initialColumn: string | null;
+            caps: unknown;
           }>`
             SELECT bi.repo,
                    bi.definition_id AS "definitionId",
@@ -848,7 +857,8 @@ export const TaskServiceLive = Layer.effect(
                    bi.created_at AS "createdAt",
                    bd.name,
                    bd.columns::text AS columns,
-                   bd.initial_column
+                   bd.initial_column,
+                   bd.caps
             FROM board_instances bi
             JOIN board_definitions bd
               ON bd.id = bi.definition_id AND bd.version = bi.definition_version
@@ -878,6 +888,7 @@ export const TaskServiceLive = Layer.effect(
               name: row.name,
               columns,
               ...initialColumnField(row.initialColumn),
+              ...capsField(row.caps),
             },
           }).pipe(
             Effect.mapError(
@@ -1057,18 +1068,19 @@ export const TaskServiceLive = Layer.effect(
             name: string;
             columns: string;
             initialColumn: string | null;
+            caps: unknown;
           };
           const rows =
             version === undefined
               ? yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns, initial_column
+                  SELECT version, name, columns::text AS columns, initial_column, caps
                   FROM board_definitions
                   WHERE id = ${definitionId}
                   ORDER BY version DESC
                   LIMIT 1
                 `
               : yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns, initial_column
+                  SELECT version, name, columns::text AS columns, initial_column, caps
                   FROM board_definitions
                   WHERE id = ${definitionId} AND version = ${version}
                 `;
@@ -1093,6 +1105,7 @@ export const TaskServiceLive = Layer.effect(
             name: row.name,
             columns,
             ...initialColumnField(row.initialColumn),
+            ...capsField(row.caps),
           }).pipe(
             Effect.mapError(
               (cause) =>

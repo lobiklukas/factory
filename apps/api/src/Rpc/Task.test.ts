@@ -419,6 +419,14 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     expect(v4.version).toBe(4);
     expect(v4.initialColumn).toBe("intake");
     expect(v4.columns).toEqual(DEFAULT_V3);
+    expect(v4).not.toHaveProperty("caps");
+
+    // Version 5 (LOB-71) is version 4 with B9's run caps over the wire, and no column WIP limit.
+    const v5 = await call((client) =>
+      client.getDefinition({ definitionId: DEFAULT, version: 5 }),
+    );
+    expect(v5.caps).toEqual({ board: 2, task: 1, repo: 2 });
+    expect(v5.columns).toEqual(DEFAULT_V3);
 
     // Version 1 is its own row: no skills bound, and `review` does not declare `verified` yet.
     const v1 = await call((client) =>
