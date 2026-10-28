@@ -36,6 +36,11 @@
 //      over RPC while the API runs, routes the same issue's next delivery — no env edit, no restart —
 //      and the recorded reason names the route's id; the session lands on the route's repo
 //  17. removing the route over RPC sends the next such issue back to "no rule matches"
+//  18. a card-mode route (LOB-254) on a repo with no board skips the issue, naming the repo and
+//      `factory board create`
+//  19. once the board exists, the issue's next delivery files exactly one card in intake — external
+//      ref `linear:<id>`, the description as its body, the issue's link — and opens no session
+//  20. Linear's retry of that delivery is a replay, and the repo's board still holds one card
 //
 // `linear.sh` also reads the API's boot log after the drive: the rules line and one armed/unarmed
 // line per webhook route (LOB-266).
@@ -46,8 +51,9 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SessionRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
+import { SessionRpc, TasksRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
+import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -62,6 +68,8 @@ const LATER_REPO = RepoSlug.make(
 );
 /** The repo a stored route (LOB-266) sends work to: registered mid-drive, so its count is this run's. */
 const STORED_REPO = RepoSlug.make(`${REPO}-stored`);
+/** The repo a card-mode route (LOB-254) files cards on: its board is made mid-drive. */
+const CARD_REPO = RepoSlug.make(`${REPO}-cards`);
 const SECRET = process.env["LINEAR_WEBHOOK_SECRET"] ?? "";
 const STAMP = process.env["LINEAR_RUN_STAMP"] ?? String(Date.now());
 
@@ -84,6 +92,12 @@ const STORED = {
   id: "lbl-stored",
   name: `factory-stored-${STAMP}`,
   color: "#4cb782",
+};
+/** The card-mode route's label (LOB-254), per run like the stored one. */
+const CARDED = {
+  id: "lbl-carded",
+  name: `factory-card-${STAMP}`,
+  color: "#bb87fc",
 };
 
 /** A Linear `Issue` data-change webhook body, shaped from Linear's webhook docs. */
@@ -165,6 +179,7 @@ const deliver = async (
 const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(SessionRpc);
   const routes = yield* RpcClient.make(TriggerRoutesRpc);
+  const boards = yield* RpcClient.make(TasksRpc);
 
   // `unregistered-repo` is a separate refusal; the mapping is what this drive is testing.
   yield* client.registerRepo({ repo: REPO, defaultBaseRef: "main" });
@@ -542,6 +557,82 @@ const program = Effect.gen(function* () {
       String(afterRemoval.body?.["reason"] ?? "").startsWith("no rule matches"),
     `body=${JSON.stringify(afterRemoval.body)}`,
   );
+
+  // 18–20: a card-mode route (LOB-254): the issue lands on the repo's board, and no session opens.
+  yield* client.registerRepo({ repo: CARD_REPO, defaultBaseRef: "main" });
+  const cardRoute = yield* routes.addTriggerRoute({
+    label: CARDED.name,
+    repo: CARD_REPO,
+    baseRef: "main",
+    prompt: "",
+    mode: "card",
+  });
+  const cardIssue = {
+    id: `lin-${STAMP}-card`,
+    identifier: `VER-${STAMP}9`,
+    title: `File me on the board ${STAMP}`,
+    description: "## Goal\n\nOn the board, not in a bare session.\n",
+  };
+  const noBoard = yield* Effect.promise(() =>
+    deliver("card-no-board", issueBody({ ...cardIssue, labels: [CARDED] })),
+  );
+  assert(
+    "a card route on a repo with no board skips the issue, naming the repo and the command that makes one",
+    noBoard.status === 200 &&
+      noBoard.body?.["status"] === "skipped" &&
+      String(noBoard.body?.["reason"] ?? "").startsWith(
+        `repo ${CARD_REPO} has no board`,
+      ) &&
+      String(noBoard.body?.["reason"] ?? "").includes("factory board create"),
+    `body=${JSON.stringify(noBoard.body)}`,
+  );
+  const board = yield* boards.createBoard({
+    repo: CARD_REPO,
+    definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+  });
+  const relabelledCard = issueBody({
+    ...cardIssue,
+    action: "update",
+    labels: [CARDED],
+    updatedFrom: { labelIds: [] },
+  });
+  const filedCard = yield* Effect.promise(() =>
+    deliver("card-filed", relabelledCard),
+  );
+  const cards = yield* boards.listTasks({ boardId: board.id });
+  const card = cards[0];
+  assert(
+    "once the board exists the next delivery files one card in intake, with the issue's ref, body and link, and opens no session",
+    filedCard.status === 200 &&
+      filedCard.body?.["status"] === "processed" &&
+      filedCard.body?.["sessionId"] === undefined &&
+      filedCard.body?.["taskId"] === card?.id &&
+      String(filedCard.body?.["reason"] ?? "").includes(
+        `(route ${cardRoute.id})`,
+      ) &&
+      cards.length === 1 &&
+      card?.column === "intake" &&
+      card.externalRef === `linear:${cardIssue.id}` &&
+      card.body === cardIssue.description &&
+      card.externalUrl ===
+        `https://linear.app/acme/issue/${cardIssue.identifier}` &&
+      (yield* sessionsOn(CARD_REPO)).length === 0,
+    `answer=${JSON.stringify(filedCard.body)} cards=${JSON.stringify(cards)}`,
+  );
+  const retriedCard = yield* Effect.promise(() =>
+    deliver("card-retry", {
+      ...relabelledCard,
+      webhookTimestamp: Date.now() + 60_000,
+    }),
+  );
+  assert(
+    "Linear's retry of the card's delivery is a replay, and the board still holds one card",
+    retriedCard.body?.["replayed"] === true &&
+      (yield* boards.listTasks({ boardId: board.id })).length === 1 &&
+      (yield* sessionsOn(CARD_REPO)).length === 0,
+    `retry=${JSON.stringify(retriedCard.body)}`,
+  );
+  yield* routes.removeTriggerRoute({ id: cardRoute.id });
 });
 
 try {

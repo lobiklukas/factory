@@ -81,6 +81,7 @@ import {
   gatedColumns,
   gatedExit,
   initialColumnOf,
+  isWebLink,
   LIST_BOARDS_LIMIT,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
@@ -283,8 +284,22 @@ export type CreateTaskInput = {
   readonly baseRef?: string;
   /** The tracker issue the card was filed from (LOB-260): a URL or a key. Blank is none. */
   readonly externalRef?: string;
+  /**
+   * Where a person opens that issue (LOB-254). Blank is none; anything but an absolute `http(s)` URL
+   * is `InvalidTaskInput`, since the card pane renders it as a link.
+   */
+  readonly externalUrl?: string;
   readonly actor: Actor;
 };
+
+/**
+ * A card filed for an item outside the factory (LOB-254): a create whose `externalRef` is the item's
+ * key, and which makes the card only if the board holds none for that key yet.
+ */
+export type FileTaskInput = CreateTaskInput & { readonly externalRef: string };
+
+/** What `file` did: made the card, or found the one already filed for the same item. */
+export type FiledTask = { readonly task: Task; readonly created: boolean };
 
 export type MoveTaskInput = {
   readonly taskId: string;
@@ -387,6 +402,12 @@ export type TaskServiceShape = {
     version?: number,
   ) => Effect.Effect<BoardDefinition, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
+  /**
+   * Make a card for an outside item unless the board already has one for it (LOB-254): the door a
+   * trigger delivery comes through. Keyed by `externalRef`, so a second delivery about the same issue
+   * answers the first's card with `created: false`.
+   */
+  readonly file: (input: FileTaskInput) => Effect.Effect<FiledTask, TaskError>;
   readonly get: (taskId: string) => Effect.Effect<Task, TaskError>;
   readonly list: (
     input: ListTasksInput,
@@ -452,6 +473,7 @@ type TaskRow = {
   readonly body: string;
   readonly baseRef: string | null;
   readonly externalRef: string | null;
+  readonly externalUrl: string | null;
   readonly blockedReason: string | null;
   readonly blockedColumn: string | null;
   readonly blockedNote: string | null;
@@ -491,6 +513,7 @@ const TASK_COLUMN_NAMES = [
   "body",
   "base_ref",
   "external_ref",
+  "external_url",
   "blocked_reason",
   "blocked_column",
   "blocked_note",
@@ -558,11 +581,13 @@ export const cardText = (input: {
   readonly body?: string | undefined;
   readonly baseRef?: string | undefined;
   readonly externalRef?: string | undefined;
+  readonly externalUrl?: string | undefined;
 }): Effect.Effect<
   {
     readonly body: string | undefined;
     readonly baseRef: string | undefined;
     readonly externalRef: string | undefined;
+    readonly externalUrl: string | undefined;
   },
   InvalidTaskInput
 > =>
@@ -570,6 +595,7 @@ export const cardText = (input: {
     const body = present(input.body);
     const baseRef = present(input.baseRef)?.trim();
     const externalRef = present(input.externalRef)?.trim();
+    const externalUrl = present(input.externalUrl)?.trim();
     if (body !== undefined && body.length > MAX_TASK_BODY_CHARS) {
       return yield* new InvalidTaskInput({
         field: "body",
@@ -579,6 +605,7 @@ export const cardText = (input: {
     for (const [field, value] of [
       ["baseRef", baseRef],
       ["externalRef", externalRef],
+      ["externalUrl", externalUrl],
     ] as const) {
       if (value !== undefined && value.length > MAX_TASK_REF_CHARS) {
         return yield* new InvalidTaskInput({
@@ -593,7 +620,13 @@ export const cardText = (input: {
         message: `"${baseRef}" is not a base ref a run can start from: name a branch, a tag or a commit (letters, digits, '.', '_', '-' and '/', no '..')`,
       });
     }
-    return { body, baseRef, externalRef };
+    if (externalUrl !== undefined && !isWebLink(externalUrl)) {
+      return yield* new InvalidTaskInput({
+        field: "externalUrl",
+        message: `"${externalUrl}" is not a link a card can carry: name an absolute http(s) URL`,
+      });
+    }
+    return { body, baseRef, externalRef, externalUrl };
   });
 
 /**
@@ -689,6 +722,7 @@ export const TaskServiceLive = Layer.effect(
         ...(row.body === "" ? {} : { body: row.body }),
         ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
         ...(row.externalRef === null ? {} : { externalRef: row.externalRef }),
+        ...(row.externalUrl === null ? {} : { externalUrl: row.externalUrl }),
         ...(row.blockedReason === null ||
         row.blockedColumn === null ||
         row.blockedSince === null
@@ -1086,19 +1120,20 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
-    const create = (input: CreateTaskInput): Effect.Effect<Task, TaskError> =>
-      withStorage(
-        sql.withTransaction(
-          Effect.gen(function* () {
-            // The board and the definition version it binds, which is the version the card pins (B2)
-            // and so the one whose initial column it starts in (LOB-267).
-            const boards = yield* sql<{
-              id: string;
-              repo: string;
-              definitionVersion: number;
-              columns: string;
-              initialColumn: string | null;
-            }>`
+    /** Make one card, inside the caller's transaction: `create`'s body, and `file`'s second half. */
+    const insertCard = (
+      input: CreateTaskInput,
+    ): Effect.Effect<Task, TaskError | SqlError> =>
+      Effect.gen(function* () {
+        // The board and the definition version it binds, which is the version the card pins (B2)
+        // and so the one whose initial column it starts in (LOB-267).
+        const boards = yield* sql<{
+          id: string;
+          repo: string;
+          definitionVersion: number;
+          columns: string;
+          initialColumn: string | null;
+        }>`
               SELECT bi.id, bi.repo, bi.definition_version,
                      bd.columns::text AS columns, bd.initial_column
               FROM board_instances bi
@@ -1106,73 +1141,119 @@ export const TaskServiceLive = Layer.effect(
                 ON bd.id = bi.definition_id AND bd.version = bi.definition_version
               WHERE bi.id = ${input.boardId}
             `;
-            const board = boards[0];
-            if (board === undefined) {
-              return yield* new BoardNotFound({
-                boardId: input.boardId,
-                message: `no board ${input.boardId}`,
-              });
-            }
-            // The card's repository is its board's (B2, LOB-255): the default when none is named,
-            // and the only one a caller may name. A card with none made only scratch runs, which
-            // have no branch and so can never leave building.
-            const repo = input.repo ?? board.repo;
-            if (repo !== board.repo) {
-              return yield* new BoardRepoMismatch({
-                boardId: board.id,
-                boardRepo: board.repo,
-                repo,
-                message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
-              });
-            }
-            const definition: DefinitionMoves = {
-              columns: yield* readColumns(board.columns, `board ${board.id}`),
-              ...initialColumnField(board.initialColumn),
-            };
-            // A definition that cannot be used as written (an initial column it lacks, no columns
-            // at all, a move to a lane it lacks) makes no card: one would start in a lane the board
-            // does not render, with no moves out (LOB-267). Only migrations write definitions today,
-            // and 0026 holds its seed to the same check; an authored version will be too.
-            const problems = definitionProblems(definition);
-            const column = initialColumnOf(definition);
-            if (problems.length > 0 || column === undefined) {
-              return yield* new TaskStorageError({
-                message: `board ${board.id}'s definition version ${board.definitionVersion} cannot start a card: ${problems.join("; ")}`,
-              });
-            }
-            const id = yield* mintTaskId;
-            const priority = input.priority ?? "normal";
-            // What the card says and where its runs start (LOB-260). A blank value is none, so an
-            // empty body is no body — the row's '' and the event's absence — and no prompt section.
-            const { body, baseRef, externalRef } = yield* cardText(input);
-            const rows = yield* sql<TaskRow>`
+        const board = boards[0];
+        if (board === undefined) {
+          return yield* new BoardNotFound({
+            boardId: input.boardId,
+            message: `no board ${input.boardId}`,
+          });
+        }
+        // The card's repository is its board's (B2, LOB-255): the default when none is named,
+        // and the only one a caller may name. A card with none made only scratch runs, which
+        // have no branch and so can never leave building.
+        const repo = input.repo ?? board.repo;
+        if (repo !== board.repo) {
+          return yield* new BoardRepoMismatch({
+            boardId: board.id,
+            boardRepo: board.repo,
+            repo,
+            message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
+          });
+        }
+        const definition: DefinitionMoves = {
+          columns: yield* readColumns(board.columns, `board ${board.id}`),
+          ...initialColumnField(board.initialColumn),
+        };
+        // A definition that cannot be used as written (an initial column it lacks, no columns
+        // at all, a move to a lane it lacks) makes no card: one would start in a lane the board
+        // does not render, with no moves out (LOB-267). Only migrations write definitions today,
+        // and 0026 holds its seed to the same check; an authored version will be too.
+        const problems = definitionProblems(definition);
+        const column = initialColumnOf(definition);
+        if (problems.length > 0 || column === undefined) {
+          return yield* new TaskStorageError({
+            message: `board ${board.id}'s definition version ${board.definitionVersion} cannot start a card: ${problems.join("; ")}`,
+          });
+        }
+        const id = yield* mintTaskId;
+        const priority = input.priority ?? "normal";
+        // What the card says and where its runs start (LOB-260). A blank value is none, so an
+        // empty body is no body — the row's '' and the event's absence — and no prompt section.
+        const { body, baseRef, externalRef, externalUrl } =
+          yield* cardText(input);
+        const rows = yield* sql<TaskRow>`
               INSERT INTO tasks (
                 id, board_id, title, "column", repo, definition_version,
-                revision, priority, body, base_ref, external_ref, created_at, updated_at
+                revision, priority, body, base_ref, external_ref, external_url,
+                created_at, updated_at
               )
               VALUES (
                 ${id}, ${board.id}, ${input.title}, ${column}, ${repo},
                 ${board.definitionVersion}, 1, ${priority}, ${body ?? ""},
-                ${baseRef ?? null}, ${externalRef ?? null}, now(), now()
+                ${baseRef ?? null}, ${externalRef ?? null}, ${externalUrl ?? null},
+                now(), now()
               )
               RETURNING ${sql.literal(TASK_COLUMNS)}
             `;
-            // The event carries the create's whole input, so the row is derivable from the history
-            // (`./taskProjection`): the projection rebuilt from `task_events` is this card.
-            yield* appendEvent({
-              _tag: "created",
-              taskId: id,
-              boardId: BoardInstanceId.make(board.id),
-              title: input.title,
-              column,
-              actor: input.actor,
-              revision: 1,
-              priority,
-              ...(body === undefined ? {} : { body }),
-              ...(baseRef === undefined ? {} : { baseRef }),
-              ...(externalRef === undefined ? {} : { externalRef }),
-            });
-            return yield* toTask(rows[0] as TaskRow);
+        // The event carries the create's whole input, so the row is derivable from the history
+        // (`./taskProjection`): the projection rebuilt from `task_events` is this card.
+        yield* appendEvent({
+          _tag: "created",
+          taskId: id,
+          boardId: BoardInstanceId.make(board.id),
+          title: input.title,
+          column,
+          actor: input.actor,
+          revision: 1,
+          priority,
+          ...(body === undefined ? {} : { body }),
+          ...(baseRef === undefined ? {} : { baseRef }),
+          ...(externalRef === undefined ? {} : { externalRef }),
+          ...(externalUrl === undefined ? {} : { externalUrl }),
+        });
+        return yield* toTask(rows[0] as TaskRow);
+      });
+
+    const create = (input: CreateTaskInput): Effect.Effect<Task, TaskError> =>
+      withStorage(sql.withTransaction(insertCard(input)));
+
+    /**
+     * File a card for an outside item at most once per board (LOB-254): the trigger seam's door. The
+     * transaction takes an advisory lock on the board and the item's key before it looks — as
+     * `createBoard` does on a repository — so two deliveries about one issue that arrive together
+     * cannot both see no card and both insert: the second waits, then finds the first's card.
+     *
+     * Not a unique index: a person may file several cards against one issue on purpose (LOB-260 keeps
+     * `externalRef` free-form), and only the trigger's door promises one. When the board already holds
+     * cards for the key, the oldest is the answer.
+     */
+    const file = (input: FileTaskInput): Effect.Effect<FiledTask, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const externalRef = input.externalRef.trim();
+            if (externalRef === "") {
+              return yield* new InvalidTaskInput({
+                field: "externalRef",
+                message:
+                  "a card filed for an outside item names the item: its externalRef is blank",
+              });
+            }
+            yield* sql`
+              SELECT pg_advisory_xact_lock(hashtext(${`tasks:${input.boardId}:${externalRef}`}))
+            `;
+            const existing = yield* sql<TaskRow>`
+              SELECT ${sql.literal(TASK_COLUMNS)} FROM tasks
+              WHERE board_id = ${input.boardId} AND external_ref = ${externalRef}
+              ORDER BY created_at, id
+              LIMIT 1
+            `;
+            const found = existing[0];
+            if (found !== undefined) {
+              return { task: yield* toTask(found), created: false };
+            }
+            const task = yield* insertCard({ ...input, externalRef });
+            return { task, created: true };
           }),
         ),
       );
@@ -2297,6 +2378,7 @@ export const TaskServiceLive = Layer.effect(
       listDefinitions,
       getDefinition,
       create,
+      file,
       get,
       list,
       move,

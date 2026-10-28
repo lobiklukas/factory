@@ -425,6 +425,9 @@ export const handleGitHubIssueWebhook = (input: {
             ...(delivered.sessionId === undefined
               ? {}
               : { sessionId: delivered.sessionId }),
+            ...(delivered.taskId === undefined
+              ? {}
+              : { taskId: delivered.taskId }),
             ...(delivered.reason === undefined
               ? {}
               : { reason: delivered.reason }),

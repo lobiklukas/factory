@@ -23,6 +23,7 @@
  */
 import { Schema } from "effect";
 import { RepoSlug, SessionId, Timestamp } from "@repo/domain/Session";
+import { TaskId } from "@repo/domain/Task";
 
 /**
  * Where a delivery came from. `generic` is the plain inbound webhook: the caller names the label
@@ -63,8 +64,35 @@ export const TriggerEvent = Schema.Struct({
    * that names a `team` claims only events from it (LOB-266).
    */
   team: Schema.optional(Schema.String),
+  /**
+   * Where a person opens the item the payload is about, when the source says: a Linear issue's
+   * `url`. A card made from the delivery links it (LOB-254); nothing routes on it.
+   */
+  url: Schema.optional(Schema.String),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
+
+/**
+ * What a mapped delivery starts (LOB-254). `session` — the default, and what every rule meant before
+ * there was a choice — opens a session and sends it the rule's prompt. `card` puts one card on the
+ * repo's board instead, in its definition's initial column, with the event's title, its body as the
+ * card's body and `<source>:<key>` as its external ref, and starts nothing: a run starts from the
+ * card (docs/board.md B12), where the pipeline's gates apply. A card rule's `prompt` is unused — the
+ * card's body is what its runs are told (LOB-260).
+ */
+export const TriggerMode = Schema.Literals(["session", "card"]);
+export type TriggerMode = typeof TriggerMode.Type;
+
+/**
+ * The external ref a card made from `event` carries, and the key card creation dedupes on (LOB-254):
+ * `<source>:<key>` — `linear:<issue id>` for a Linear issue. Keyed by the item, not the delivery, so
+ * a second delivery about the same issue (another label, an edit that re-labels it, a sender that
+ * keys every delivery afresh) finds the card the first one made.
+ */
+export const externalRefOf = (event: {
+  readonly source: TriggerSource;
+  readonly key: string;
+}): string => `${event.source}:${event.key}`;
 
 /**
  * One mapping rule: an event carrying `label` and/or belonging to `team` works on `repo`, at
@@ -105,6 +133,8 @@ const triggerRuleFields = {
    * (`@repo/core/DocsTrigger`) — deliver one.
    */
   startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
+  /** What a delivery this rule maps starts (`TriggerMode`); absent is `session`. */
+  mode: Schema.optional(TriggerMode),
 };
 
 /** A rule claims something: it names a label, a team, or both. */
@@ -132,6 +162,8 @@ export const TriggerMapping = Schema.Struct({
   prompt: Schema.String,
   /** The rule's name (`ruleName`), so a recorded outcome says which rule chose this repo. */
   label: Schema.String,
+  /** What the delivery starts: the rule's `mode`, `session` when it names none. */
+  mode: TriggerMode,
 });
 export type TriggerMapping = typeof TriggerMapping.Type;
 
@@ -155,13 +187,16 @@ export type TriggerDelivery = typeof TriggerDelivery.Type;
 
 /**
  * Why a delivery started nothing. `filtered` is the seam's own policy (an action that is not a
- * create), `unmappable` is "no rule matches these labels", and `unregistered-repo` is a rule that
- * names a repo nobody registered — the one refusal an operator fixes by registering a repo.
+ * create), `unmappable` is "no rule matches these labels", `unregistered-repo` is a rule that
+ * names a repo nobody registered, and `no-board` a card rule (LOB-254) whose repo has no board to
+ * put the card on. The last two are the refusals an operator fixes — by registering the repo, or by
+ * `factory board create` — so a delivery keyed by its work is claimed again after either.
  */
 export const TriggerRefusal = Schema.Literals([
   "filtered",
   "unmappable",
   "unregistered-repo",
+  "no-board",
 ]);
 export type TriggerRefusal = typeof TriggerRefusal.Type;
 
@@ -178,6 +213,11 @@ export const TriggerOutcome = Schema.Struct({
   status: Schema.Literals(["processed", "skipped", "received"]),
   replayed: Schema.Boolean,
   sessionId: Schema.optional(SessionId),
+  /**
+   * The card a card-mode delivery made, or found already on the board for the same item (LOB-254).
+   * Like `sessionId`, absent on a replay: a replay answers what was recorded, which is the reason.
+   */
+  taskId: Schema.optional(TaskId),
   /** The refusal when `skipped`, and the rule that chose the repo when `processed`. */
   reason: Schema.optional(Schema.String),
 });
@@ -186,6 +226,7 @@ export type TriggerOutcome = typeof TriggerOutcome.Type;
 export const TriggerErrorCode = Schema.Literals([
   "storage",
   "session-create",
+  "card-create",
   "write-back",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
@@ -267,6 +308,7 @@ export const resolveMapping = (
     repo: event.repo ?? rule.repo,
     prompt: renderPrompt(rule.prompt, event),
     label: ruleName(rule),
+    mode: rule.mode ?? "session",
     ...(rule.baseRef === undefined ? {} : { baseRef: rule.baseRef }),
   };
 };

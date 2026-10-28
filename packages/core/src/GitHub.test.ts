@@ -14,6 +14,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
+import type { TaskId } from "@repo/domain/Task";
 import {
   TriggerError,
   type TriggerDelivery,
@@ -650,6 +651,21 @@ describe("handleGitHubIssueWebhook", () => {
     expect(delivered.map((d) => d.requestId)).toEqual([
       "github:acme/widget#7:mapped",
     ]);
+  });
+
+  it("answers a card rule's delivery with the card the seam filed (LOB-254)", async () => {
+    const taskId = `tsk_${"1".padStart(26, "0")}` as TaskId;
+    const answered = await run({
+      outcome: {
+        status: "processed",
+        replayed: false,
+        taskId,
+        reason: 'rule "factory" mapped it to acme/widget: filed card',
+      },
+    }).answer;
+    expect(answered.status).toBe(200);
+    expect(answered.body).toMatchObject({ ok: true, taskId });
+    expect(answered.body).not.toHaveProperty("sessionId");
   });
 
   it("answers a redelivery with the seam's replay, and a replay still in flight with 503", async () => {

@@ -27,6 +27,7 @@ import {
   linearRequestId,
 } from "./Linear";
 import {
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -106,7 +107,23 @@ describe("linearEvent", () => {
       title: "The widget wobbles",
       body: "It wobbles when it spins.",
       labels: ["factory", "Bug"],
+      // The webhook's `url` is its subject's: the issue's own link, which a card links (LOB-254).
+      url: "https://linear.app/acme/issue/ENG-42/the-widget-wobbles",
     });
+  });
+
+  it("prefers the issue's own `data.url`, and carries no link that is not a web link (LOB-254)", () => {
+    const payload = issuePayload({});
+    const own = "https://linear.app/acme/issue/ENG-42/own";
+    expect(
+      linearEvent(
+        { ...payload, data: { ...(payload["data"] as object), url: own } },
+        rules,
+      )?.url,
+    ).toBe(own);
+    expect(
+      linearEvent({ ...payload, url: "javascript:alert(1)" }, rules),
+    ).not.toHaveProperty("url");
   });
 
   it("treats an update that adds a label as work: the issue was triaged into the factory", () => {
@@ -383,7 +400,11 @@ const withSeam = async <A>(
   const runtime = ManagedRuntime.make(
     TriggerServiceLive({ rules }).pipe(
       Layer.provide(
-        Layer.mergeAll(Layer.succeed(TriggerSessions, sessions), NoWriteBack),
+        Layer.mergeAll(
+          Layer.succeed(TriggerSessions, sessions),
+          NoWriteBack,
+          NoCards,
+        ),
       ),
       Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
     ),

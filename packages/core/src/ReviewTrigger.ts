@@ -60,6 +60,7 @@ import { fetchBranch } from "./git";
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
 import {
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -413,7 +414,7 @@ export const ReviewTriggerLive = (
 ) =>
   TriggerServiceLive({ rules: reviewTriggerRules(update) }).pipe(
     Layer.provide(ReviewSessionsFromSessionService(update, card, diffBase)),
-    Layer.provide(NoWriteBack),
+    Layer.provide(Layer.mergeAll(NoWriteBack, NoCards)),
   );
 
 /**
