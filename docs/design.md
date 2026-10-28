@@ -236,6 +236,21 @@ mission and both own its log until Postgres poisons one of them on `PRIMARY KEY 
 second process sets `MISSION_RESUME=false`. The presence lease above replaces both the root scoping
 and the flag when replicas arrive.
 
+_As built (LOB-25)._ The same rule now covers a run in a conversation, not only a mission. Any owner
+that opens a log continues the submissions its root conversation holds unsettled (`openSession` →
+`resumePending`), so a run whose process died — a SIGTERM's close or a SIGKILL — carries on as the
+same submission rather than waiting for the next message. Only the root's submissions decide it: a
+mission worker's own conversation holds a placed submission while it talks to the model, and that
+alone does not resume a log. But Pi Durable has one scheduler per harness, so once a root submission
+is pending the reopen resumes everything pending in the log, a mission included — as any submit or
+wait on that log always has. The boot finds those logs the way it finds missions: the owner's
+projection writes `sessions.run_session_root` while a run is in flight, and `resumeRuns` reopens the
+rows marked under its own root. `MISSION_RESUME=false` turns off only these two boot sweeps, for a
+second process on the same database and root; an owner that process opens later still continues
+what its root left unsettled. A released session's open does not resume: its run has no directory.
+`interrupt` and `withdraw` take the owner paused, act, and then continue what is left, so a stop
+lands on the dead run rather than racing a resumed one.
+
 ### D13 — Sandbox image: generic base, then templates where they pay
 
 Bun, Node, git, gh, ripgrep, plus Pi Durable and the harness. Repo-specific toolchains install

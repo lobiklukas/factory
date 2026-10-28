@@ -42,7 +42,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync, execSync } from "node:child_process";
+import {
+  execFileSync,
+  execSync,
+  spawn,
+  type ChildProcess,
+} from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -118,6 +123,7 @@ import {
   readReplayRun,
   readReplaySource,
   replaySession,
+  submissionStanding,
   waitForPrompt,
   writeReplayComparison,
   MAX_DECOMPOSED_CRITERIA,
@@ -10317,6 +10323,501 @@ describe("a mission across a restart", () => {
     } finally {
       writeFileSync(join(hold, "release"), "");
       await runtime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * A run whose process died continues when its session is reopened (LOB-25): the same submission in
+ * the same conversation, its interrupted tool call settled as interrupted rather than run again, and
+ * nothing submitted twice — without anybody calling `Harness.resume()` or sending another message.
+ *
+ * The kill is a real one: `SessionService.kill-fixture.ts` is a separate process that starts a run
+ * whose tool call holds, and the case SIGKILLs it, so no finalizer runs and nothing is committed or
+ * released on its way out. The second process is a runtime in this one over the same database and
+ * session root, as the LOB-231 cases use. The other cases die the way the API's SIGTERM finalizer
+ * stops one (`close`), which leaves the same placed run in the log, and reopen it through an
+ * ordinary acquisition rather than the boot.
+ */
+describe("a run across a kill", () => {
+  const killRoot = mkdtempSync(join(tmpdir(), "factory-core-run-kill-"));
+  const fixture = fileURLToPath(
+    new URL("./SessionService.kill-fixture.ts", import.meta.url),
+  );
+  const prompt = "a run its process will not finish";
+  const requestId = "kill-mid-run";
+  // The run counts into its worktree, where the policy lets it write; the release is the case's.
+  const holding = (hold: string) =>
+    `echo run >> kill.runs; while [ ! -f ${join(hold, "release")} ]; do sleep 0.01; done`;
+  const runsIn = (worktree: string) =>
+    existsSync(join(worktree, "kill.runs"))
+      ? readFileSync(join(worktree, "kill.runs"), "utf8")
+          .split("\n")
+          .filter((line) => line !== "").length
+      : 0;
+  /** A process over the kill's root: its own model, so its requests are its own to count. */
+  const processOver = (fauxCommand?: string) => {
+    const model = createFauxModelAccess(
+      fauxCommand === undefined ? {} : { fauxCommand },
+    );
+    const runtime = ManagedRuntime.make(
+      SessionServiceLive({ model: model.access, sessionRoot: killRoot }).pipe(
+        Layer.provideMerge(DatabaseLayer),
+      ),
+    );
+    return { runtime, calls: () => model.faux.state.callCount };
+  };
+  /** What the row and the activity index say about a session: what a dead process left in them. */
+  const marks = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{
+        readonly runSessionRoot: string | null;
+        readonly status: string | null;
+      }>`
+        SELECT s.run_session_root, a.status
+        FROM sessions s LEFT JOIN session_activity a ON a.session_id = s.id
+        WHERE s.id = ${sessionId}
+      `;
+      return rows[0];
+    });
+  /** Where a submission stands in the session's committed log, read with no owner. */
+  const standing = (sessionId: SessionId, submissionId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      return yield* Effect.acquireUseRelease(
+        Effect.promise(() => PostgresStorage.reader(sql, sessionId)),
+        (reader) => submissionStanding(reader, submissionId),
+        (reader) => Effect.promise(() => reader.dispose()),
+      );
+    });
+  const usersIn = (snapshot: SessionSnapshot) =>
+    snapshot.entries.filter((entry) => entry.kind === "user");
+  const settledLive = (sessions: SessionServiceShape, sessionId: SessionId) =>
+    waitUntil(
+      sessions
+        .get(sessionId)
+        .pipe(
+          Effect.map(
+            (snapshot) =>
+              snapshot.session.mode === "live" && !snapshot.live.busy,
+          ),
+        ),
+      "the resumed run to settle",
+    );
+
+  type Doomed = {
+    readonly child: ChildProcess;
+    readonly sessionId: SessionId;
+    readonly submissionId: string;
+    readonly worktree: string;
+  };
+  /**
+   * Start the fixture's run and answer once its tool call holds: the process, and what it sent. A
+   * process that never gets there within the minute is killed, and the case fails with its output.
+   */
+  const startDoomed = (hold: string) =>
+    Effect.callback<Doomed>((resume) => {
+      const child = spawn("bun", [fixture, killRoot, hold, prompt, requestId], {
+        // oxlint-disable-next-line effecttsgo/process-env -- a test hands its child process an environment.
+        env: { ...process.env, DATABASE_URL: runDatabaseUrl },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      let err = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        err += chunk.toString();
+      });
+      child.stdout?.on("data", (chunk: Buffer) => {
+        out += chunk.toString();
+        const line = out.split("\n").find((each) => each.startsWith("READY "));
+        if (line === undefined) return;
+        const [, sessionId, submissionId, ...worktree] = line.split(" ");
+        resume(
+          Effect.succeed({
+            child,
+            sessionId: SessionIdSchema.make(sessionId ?? ""),
+            submissionId: submissionId ?? "",
+            worktree: worktree.join(" "),
+          }),
+        );
+      });
+      child.on("exit", (code) => {
+        resume(
+          Effect.die(
+            new Error(`the doomed process exited (${code}): ${out}${err}`),
+          ),
+        );
+      });
+      return Effect.sync(() => {
+        child.kill("SIGKILL");
+      });
+    }).pipe(Effect.timeout("60 seconds"));
+  /** SIGKILL the process, if it still runs, and answer the signal it died of. */
+  const killed = (child: ChildProcess) =>
+    Effect.callback<NodeJS.Signals | null>((resume) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resume(Effect.succeed(child.signalCode));
+        return;
+      }
+      child.on("exit", (_code, signal) => resume(Effect.succeed(signal)));
+      child.kill("SIGKILL");
+    });
+
+  it("continues a run a SIGKILL interrupted, at boot, as the same submission", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-kill-hold-"));
+    const doomed = await Effect.runPromise(startDoomed(hold));
+    const after = processOver();
+    try {
+      // The projection writes the mark beside the run's start; it is what the kill leaves behind.
+      await program(
+        waitUntil(
+          marks(doomed.sessionId).pipe(
+            Effect.map((row) => row?.runSessionRoot === killRoot),
+          ),
+          "the row to say a run is in flight",
+        ),
+      );
+      const signal = await Effect.runPromise(killed(doomed.child));
+      const left = await program(marks(doomed.sessionId));
+      const before = await program(
+        standing(doomed.sessionId, doomed.submissionId),
+      );
+
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // A client that reconnects before the boot has resumed anything reads the fold: the run,
+          // where the kill left it.
+          const folded = yield* sessions.get(doomed.sessionId);
+          const resumed = yield* sessions.resumeRuns;
+          yield* settledLive(sessions, doomed.sessionId);
+          const reconnected = yield* sessions.get(doomed.sessionId);
+          // The same request again — a client that never heard back retries it — finds the run.
+          const retried = yield* sessions.send({
+            sessionId: doomed.sessionId,
+            content: prompt,
+            requestId,
+          });
+          yield* settledLive(sessions, doomed.sessionId);
+          const last = yield* sessions.get(doomed.sessionId);
+          const settled = yield* standing(
+            doomed.sessionId,
+            doomed.submissionId,
+          );
+          // The run is over, so its mark is gone: the next boot reopens nothing for it.
+          yield* waitUntil(
+            marks(doomed.sessionId).pipe(
+              Effect.map((row) => row?.runSessionRoot === null),
+            ),
+            "the row to say no run is in flight",
+          );
+          const again = yield* sessions.resumeRuns;
+          yield* sessions.close;
+          return {
+            folded,
+            resumed,
+            reconnected,
+            retried,
+            last,
+            settled,
+            again,
+          };
+        }),
+      );
+
+      // A SIGKILL ran nothing on its way out: the activity index still says busy, the row still
+      // names the run, and the submission is still open in the log.
+      expect(signal).toBe("SIGKILL");
+      expect(left).toEqual({ runSessionRoot: killRoot, status: "busy" });
+      expect(before).toBe("open");
+      expect(outcome.folded.session.mode).toBe("historical");
+
+      // The boot reopened it, unasked, and the run carried on to its answer.
+      expect(outcome.resumed).toEqual([doomed.sessionId]);
+      expect(outcome.settled).toBe("settled");
+      expect(outcome.reconnected.session.mode).toBe("live");
+      // The same run, not a new one: the transcript the fold showed is the start of the one the
+      // reconnected client sees, entry for entry, and it holds the one message ever sent.
+      expect(
+        outcome.reconnected.entries
+          .slice(0, outcome.folded.entries.length)
+          .map((entry) => entry.id),
+      ).toEqual(outcome.folded.entries.map((entry) => entry.id));
+      expect(usersIn(outcome.reconnected).map((entry) => entry.text)).toEqual([
+        prompt,
+      ]);
+      // The tool call the kill interrupted is settled as interrupted, never run a second time.
+      const results = outcome.reconnected.entries.filter(
+        (entry) => entry.kind === "toolResult",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0]?.isError).toBe(true);
+      expect(results[0]?.text).toContain("interrupted");
+      expect(runsIn(doomed.worktree)).toBe(1);
+      expect(outcome.reconnected.entries.at(-1)?.kind).toBe("assistant");
+      // A retry of the request is the same submission, and submits nothing.
+      expect(outcome.retried.submissionId).toBe(doomed.submissionId);
+      expect(usersIn(outcome.last)).toHaveLength(1);
+      expect(outcome.last.entries.map((entry) => entry.id)).toEqual(
+        outcome.reconnected.entries.map((entry) => entry.id),
+      );
+      // The resumed run's one request (the answer after the interrupted call); the retry made none.
+      expect(after.calls()).toBe(1);
+      expect(outcome.again).not.toContain(doomed.sessionId);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await Effect.runPromise(killed(doomed.child));
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
+  it("continues a run the shutdown interrupted when anything reopens the session, not only a message", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-close-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await before.runtime
+        .runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const created = yield* sessions.create({ title: "a run to stop" });
+            const sent = yield* sessions.send({
+              sessionId: created.id,
+              content: prompt,
+            });
+            const worktree = (yield* sessions.get(created.id)).workspace.path;
+            yield* waitUntil(
+              Effect.sync(() => runsIn(worktree) === 1),
+              "the tool call to start",
+            );
+            // What the API's shutdown finalizer runs on SIGTERM.
+            yield* sessions.close;
+            return {
+              sessionId: created.id,
+              submissionId: sent.submissionId,
+              worktree,
+            };
+          }),
+        )
+        .finally(() => before.runtime.dispose());
+
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const open = yield* standing(armed.sessionId, armed.submissionId);
+          // Not a message and not the boot: recording a page takes the owner, and taking the owner
+          // is what continues the run.
+          yield* sessions.recordPage({
+            sessionId: armed.sessionId,
+            name: "a-note",
+            kind: "decision",
+            content: "written while a run was interrupted",
+            links: [],
+            sources: [],
+          });
+          yield* settledLive(sessions, armed.sessionId);
+          const reopened = yield* sessions.get(armed.sessionId);
+          const settled = yield* standing(armed.sessionId, armed.submissionId);
+          yield* sessions.close;
+          return { open, reopened, settled };
+        }),
+      );
+
+      expect(outcome.open).toBe("open");
+      expect(outcome.settled).toBe("settled");
+      expect(usersIn(outcome.reopened).map((entry) => entry.text)).toEqual([
+        prompt,
+      ]);
+      expect(outcome.reopened.entries.at(-1)?.kind).toBe("assistant");
+      expect(runsIn(armed.worktree)).toBe(1);
+      expect(after.calls()).toBe(1);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
+  /**
+   * Start a run whose tool call holds in a process that then shuts down the way the API's SIGTERM
+   * finalizer stops one, with `queued` sent behind it as a follow-up when given.
+   */
+  const stoppedMidRun = (
+    before: ReturnType<typeof processOver>,
+    hold: string,
+    queued?: string,
+  ) =>
+    before.runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "a run to stop" });
+          const sent = yield* sessions.send({
+            sessionId: created.id,
+            content: prompt,
+          });
+          const worktree = (yield* sessions.get(created.id)).workspace.path;
+          yield* waitUntil(
+            Effect.sync(() => runsIn(worktree) === 1),
+            "the tool call to start",
+          );
+          const behind =
+            queued === undefined
+              ? undefined
+              : yield* sessions.send({
+                  sessionId: created.id,
+                  content: queued,
+                  whenBusy: "followUp",
+                });
+          yield* sessions.close;
+          return {
+            sessionId: created.id,
+            submissionId: sent.submissionId,
+            queuedId: behind?.submissionId,
+            worktree,
+          };
+        }),
+      )
+      .finally(() => before.runtime.dispose());
+
+  it("stops a run the shutdown interrupted on an interrupt, without continuing it first", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-interrupt-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await stoppedMidRun(before, hold);
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // The interrupt takes the owner paused: the stop lands on the run where the shutdown left
+          // it, rather than racing a resumed run and its next model request.
+          yield* sessions.interrupt(armed.sessionId);
+          const settled = yield* standing(armed.sessionId, armed.submissionId);
+          // Long enough for a resumed faux run to have made its request many times over.
+          yield* Effect.sleep(1_000);
+          const stopped = yield* sessions.get(armed.sessionId);
+          yield* sessions.close;
+          return { settled, stopped };
+        }),
+      );
+
+      expect(outcome.settled).toBe("settled");
+      expect(outcome.stopped.live.busy).toBe(false);
+      expect(outcome.stopped.entries.at(-1)?.kind).not.toBe("assistant");
+      expect(runsIn(armed.worktree)).toBe(1);
+      expect(after.calls()).toBe(0);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
+  it("withdraws a message queued behind an interrupted run, then continues the run", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-withdraw-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await stoppedMidRun(before, hold, "never mind");
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // The withdrawal takes the owner paused and lands first; what it leaves — the run — is
+          // continued afterwards, as a live process would have carried on with it.
+          const withdrawn = yield* sessions.withdraw({
+            sessionId: armed.sessionId,
+            submissionId: armed.queuedId ?? "",
+          });
+          yield* settledLive(sessions, armed.sessionId);
+          const reopened = yield* sessions.get(armed.sessionId);
+          const settled = yield* standing(armed.sessionId, armed.submissionId);
+          yield* sessions.close;
+          return { withdrawn, reopened, settled };
+        }),
+      );
+
+      expect(outcome.withdrawn.outcome).toBe("withdrawn");
+      expect(outcome.settled).toBe("settled");
+      expect(usersIn(outcome.reopened).map((entry) => entry.text)).toEqual([
+        prompt,
+      ]);
+      expect(outcome.reopened.entries.at(-1)?.kind).toBe("assistant");
+      expect(runsIn(armed.worktree)).toBe(1);
+      // The resumed run's one request; the withdrawn message made none.
+      expect(after.calls()).toBe(1);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
+  it("leaves a released session's interrupted run where it stopped, and the boot leaves it too", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-release-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await before.runtime
+        .runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* SessionService;
+            const created = yield* sessions.create({ title: "a run to drop" });
+            const sent = yield* sessions.send({
+              sessionId: created.id,
+              content: prompt,
+            });
+            const worktree = (yield* sessions.get(created.id)).workspace.path;
+            yield* waitUntil(
+              Effect.sync(() => runsIn(worktree) === 1),
+              "the tool call to start",
+            );
+            yield* waitUntil(
+              marks(created.id).pipe(
+                Effect.map((row) => row?.runSessionRoot === killRoot),
+              ),
+              "the row to say a run is in flight",
+            );
+            yield* sessions.close;
+            return { sessionId: created.id, submissionId: sent.submissionId };
+          }),
+        )
+        .finally(() => before.runtime.dispose());
+
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // Nobody owns it, so the release stops nothing: it marks the row and tears the worktree
+          // down, and the run stays placed in the log.
+          yield* sessions.releaseWorkspace({
+            sessionId: armed.sessionId,
+            reason: "discarded",
+          });
+          const mark = yield* marks(armed.sessionId);
+          const resumed = yield* sessions.resumeRuns;
+          // A released session still opens for a page — in no directory, and without its run.
+          yield* sessions.recordPage({
+            sessionId: armed.sessionId,
+            name: "a-note",
+            kind: "decision",
+            content: "written after the release",
+            links: [],
+            sources: [],
+          });
+          // Long enough for a resumed faux run to have made its request many times over.
+          yield* Effect.sleep(1_000);
+          const opened = yield* sessions.get(armed.sessionId);
+          const open = yield* standing(armed.sessionId, armed.submissionId);
+          yield* sessions.close;
+          return { mark, resumed, opened, open };
+        }),
+      );
+
+      expect(outcome.mark?.runSessionRoot).toBeNull();
+      expect(outcome.resumed).not.toContain(armed.sessionId);
+      expect(outcome.opened.session.mode).toBe("live");
+      expect(outcome.open).toBe("open");
+      expect(after.calls()).toBe(0);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
     }
   }, 120_000);
 });

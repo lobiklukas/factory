@@ -82,10 +82,10 @@ must not leave it for a caller who never comes:
   phase it was in (`converse` mid-turn, or `check`).
 - **The boot resumes it, unasked.** Each session's row carries `mission_in_flight` (migration
   `0029`), mirrored from the live task graph by the owner's activity projection and set by
-  `startMission` before the task exists. At boot the API (`MissionResumeDaemon`) calls
+  `startMission` before the task exists. At boot the API (`BootResumeDaemon`) calls
   `SessionService.resumeMissions`, which reopens every session the row names under this process's
   session root whose workspace was not released, asks its task graph whether a mission is still
-  live, and only then calls `Harness.resume()` on it. The mission continues in the phase it died in: the
+  live, and only then calls `Harness.resume()` on it (unless the open already did: since LOB-25 an open whose root conversation holds an unsettled run resumes the whole log, a mission included). The mission continues in the phase it died in: the
   workers rerun their own phase in the conversations they already own — an interrupted tool call is
   answered as interrupted, a prompt is not asked twice (its request id finds the submission) — and
   the join, verify and the result follow as they would have. A row that outlived its mission costs
