@@ -22,6 +22,7 @@ export const APPROVALS_DOC_KIND = "factory.approvals";
 export const PLAN_REVISIONS_DOC_KIND = "factory.planRevisions";
 export const SKILLS_DOC_KIND = "factory.skills";
 export const REPO_PROMPT_DOC_KIND = "factory.repo.prompt";
+export const POLICY_DOC_KIND = "factory.policy";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -273,6 +274,49 @@ export const RepoPromptDoc = defineDoc({
       listed: [] as Array<{ name: string; path: string }>,
       dropped: [] as string[],
       shadowed: [] as string[],
+    },
+  }),
+});
+
+/**
+ * The policy the session's run meets (S-factory-config-as-code): where its repository's policy was
+ * read (`source` — the base ref, the commit it named, and the config's path; `found: false` for a
+ * base with no `.factory/config`), what that policy declared (`repo`), and the rules the run's
+ * hooks were built from (`effective`: the deployment's, tightened by the repository's and by the
+ * run's column, in the form they are matched in).
+ *
+ * Written by every open the control plane makes, in the open's one commit, so "what was this run
+ * allowed to do" is a read of the log. The repository half is pinned by it: an open of a log whose
+ * record has a `source` uses the declared `repo` again rather than reading the base again, so a run
+ * cannot relax its own rules by any route to the base it is cut from — an edit to `.factory/config`
+ * on its branch is never read, and a base that moved under a running session reaches its next run,
+ * not this one. `source: null` is a session with no repository, or one whose base did not resolve.
+ * `effective.allowedHosts` is what the run may reach; `effective.pushRefPrefixes` empty is a column
+ * that pushes nothing (C22). It is the one document a generator of LOB-30's rulesets would read.
+ */
+export const PolicyDoc = defineDoc({
+  kind: POLICY_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    source: null as {
+      ref: string;
+      commit: string;
+      path: string;
+      found: boolean;
+    } | null,
+    repo: {
+      approvalRequired: [] as string[],
+      denied: [] as string[],
+      allowedHosts: null as string[] | null,
+    },
+    effective: {
+      approvalRequired: [] as string[],
+      denied: [] as string[],
+      allowedHosts: [] as string[],
+      pushRefPrefixes: [] as string[],
     },
   }),
 });

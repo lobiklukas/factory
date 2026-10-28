@@ -102,6 +102,14 @@ export type AutonomyConfig = {
    * accident; it is not a boundary (D15).
    */
   readonly approvalRequired?: readonly string[];
+  /**
+   * Command prefixes that are refused outright (S-factory-config-as-code): matched as a gate is
+   * (`gateOf`'s reading, flags between the words, `sudo` and `sh -c` read through), and refused with
+   * a sentence the agent can act on rather than asked about. Empty by default; a repository's
+   * `.factory/config` adds to it (`withRepoPolicy`). Like a gate, it reads the command's text, so it
+   * stops the accident and is not a boundary (D15).
+   */
+  readonly denied?: readonly string[];
 };
 
 /** D11's boundary as configuration. */
@@ -125,6 +133,8 @@ export type AutonomyRules = {
   readonly allowedHosts: readonly string[];
   /** Command prefixes that need a person's approval before they run (LOB-52), normalized. */
   readonly approvalRequired: readonly string[];
+  /** Command prefixes that are refused outright (S-factory-config-as-code), normalized. */
+  readonly denied: readonly string[];
 };
 
 /** The namespace D11 gives sessions for their own branches. */
@@ -143,6 +153,9 @@ export const autonomyRules = (
   approvalRequired: (config.approvalRequired ?? [])
     .map(normalizeGate)
     .filter((gate) => gate.length > 0),
+  denied: (config.denied ?? [])
+    .map(normalizeGate)
+    .filter((entry) => entry.length > 0),
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1143,9 +1156,28 @@ const decideRefusal = (
   if (call.name === "bash") {
     const command = stringField(args, "command");
     if (command === undefined) return ALLOW;
-    return decideBash(rules, command);
+    const refusal = decideBash(rules, command);
+    return refusal._tag === "allow" ? decideDenied(rules, command) : refusal;
   }
   return ALLOW;
+};
+
+/**
+ * The deny list (S-factory-config-as-code): a command one of whose simple commands runs a denied
+ * prefix is refused, read the way a gate is (`commandRunning`), so `sudo bun publish` and
+ * `sh -c 'bun publish'` are the `bun publish` they run.
+ */
+const decideDenied = (
+  rules: AutonomyRules,
+  command: string,
+): PolicyDecision => {
+  if (rules.denied.length === 0) return ALLOW;
+  const denied = commandRunning(rules.denied, command);
+  return denied === undefined
+    ? ALLOW
+    : block(
+        `${denied} is refused: it is on this session's deny list (a repository's .factory/config policy puts a command there), and no approval lifts that. Reach the goal another way, or leave this step to a person.`,
+      );
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1292,8 +1324,16 @@ const runsGate = (words: readonly string[], gate: string): boolean => {
  * it, or another interpreter (`node -e`). A gate is a prompt that stops the accident, not a boundary
  * (D15); a deployment that needs the boundary puts it outside the agent.
  */
-const gateOf = (
-  rules: AutonomyRules,
+const gateOf = (rules: AutonomyRules, command: string): string | undefined =>
+  commandRunning(rules.approvalRequired, command);
+
+/**
+ * The first of `prefixes` one of `command`'s simple commands runs, by the reading `gateOf` names —
+ * the gate's reading, shared with the deny list (S-factory-config-as-code) so the two cannot read
+ * one command two ways.
+ */
+const commandRunning = (
+  prefixes: readonly string[],
   command: string,
   depth = 0,
 ): string | undefined => {
@@ -1302,11 +1342,11 @@ const gateOf = (
     if (words.length === 0) continue;
     const script = shellScriptOf(words);
     if (script !== undefined && depth < 3) {
-      const inner = gateOf(rules, script, depth + 1);
+      const inner = commandRunning(prefixes, script, depth + 1);
       if (inner !== undefined) return inner;
     }
-    const gate = rules.approvalRequired.find((entry) => runsGate(words, entry));
-    if (gate !== undefined) return gate;
+    const found = prefixes.find((entry) => runsGate(words, entry));
+    if (found !== undefined) return found;
   }
   return undefined;
 };
@@ -2089,6 +2129,90 @@ export const columnAutonomy = (
 };
 
 // ---------------------------------------------------------------------------------------------
+// A repository's policy (S-factory-config-as-code)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What a repository's `.factory/config` declares in its `policy` block, read by the control plane
+ * at the session's base ref (`@repo/core`'s `repoPolicy`), never from the worktree. Three ways to
+ * tighten the deployment, and none to widen it:
+ *
+ * - `approvalRequired` — gates added to the deployment's (`APPROVAL_REQUIRED`).
+ * - `denied` — command prefixes refused outright (`AutonomyConfig.denied`).
+ * - `allowedHosts` — the hosts the session may reach, which must each be one the deployment allows:
+ *   the session's allowlist becomes this list. Absent: the deployment's, as it is.
+ */
+export type RepoPolicy = {
+  readonly approvalRequired: readonly string[];
+  readonly denied: readonly string[];
+  readonly allowedHosts?: readonly string[] | undefined;
+};
+
+/** A repository that declares no policy: the deployment's, unchanged. */
+export const NO_REPO_POLICY: RepoPolicy = { approvalRequired: [], denied: [] };
+
+/**
+ * What `policy` would widen of `config`, one sentence per thing: a host the deployment does not
+ * allow. Empty when the policy only tightens. A repository's policy that widens anything is refused
+ * whole (`@repo/core`'s `RepoPolicyRejected`) rather than applied in part, because the part that was
+ * dropped is the part its author thought was in force.
+ */
+export const repoPolicyWidening = (
+  config: AutonomyConfig,
+  policy: RepoPolicy,
+): readonly string[] => {
+  const allowed = new Set(
+    config.allowedHosts.map((host) => host.toLowerCase()),
+  );
+  return (policy.allowedHosts ?? [])
+    .filter((host) => !allowed.has(host.toLowerCase()))
+    .map(
+      (host) =>
+        `allowedHosts names ${host}, which this deployment does not allow (it allows ${config.allowedHosts.length === 0 ? "no host" : config.allowedHosts.join(", ")})`,
+    );
+};
+
+/**
+ * The deployment's configuration tightened by a repository's policy (S-factory-config-as-code): its
+ * gates and its deny list added, its allowlist narrowed to the hosts the policy names. Tighten-only
+ * by construction — a host is kept only if the deployment allows it too, so even a policy nobody
+ * checked with `repoPolicyWidening` cannot reach a host the deployment refuses. No policy is
+ * `config` itself. The column's autonomy (`withColumnAutonomy`) narrows the result further.
+ */
+export const withRepoPolicy = (
+  config: AutonomyConfig,
+  policy: RepoPolicy | undefined,
+): AutonomyConfig => {
+  if (policy === undefined) return config;
+  const union = (held: readonly string[], added: readonly string[]) => {
+    const seen = new Set(held.map(normalizeGate));
+    const kept = [...held];
+    for (const entry of added) {
+      const normalized = normalizeGate(entry);
+      if (normalized.length === 0 || seen.has(normalized)) continue;
+      seen.add(normalized);
+      kept.push(entry);
+    }
+    return kept;
+  };
+  const narrowed = policy.allowedHosts?.map((host) => host.toLowerCase());
+  return {
+    ...config,
+    approvalRequired: union(
+      config.approvalRequired ?? [],
+      policy.approvalRequired,
+    ),
+    denied: union(config.denied ?? [], policy.denied),
+    allowedHosts:
+      narrowed === undefined
+        ? config.allowedHosts
+        : config.allowedHosts.filter((host) =>
+            narrowed.includes(host.toLowerCase()),
+          ),
+  };
+};
+
+// ---------------------------------------------------------------------------------------------
 // The seam
 // ---------------------------------------------------------------------------------------------
 
@@ -2132,6 +2256,12 @@ export type PolicyShape = {
     worktree: string,
     sessionId?: string,
     column?: ColumnAutonomy,
+    /**
+     * What the session's repository declares at its base (S-factory-config-as-code,
+     * `withRepoPolicy`): applied under the column's autonomy, so the order is deployment, then
+     * repository, then column, and each can only tighten what the one before it allows.
+     */
+    repo?: RepoPolicy,
   ) => SessionPolicy;
 };
 
@@ -2145,8 +2275,12 @@ export const PolicyLive = (
 ): Layer.Layer<Policy> =>
   Layer.succeed(Policy, {
     config,
-    forWorktree: (worktree, sessionId, column) =>
-      autonomyPolicy(withColumnAutonomy(config, column), worktree, sessionId),
+    forWorktree: (worktree, sessionId, column, repo) =>
+      autonomyPolicy(
+        withColumnAutonomy(withRepoPolicy(config, repo), column),
+        worktree,
+        sessionId,
+      ),
   });
 
 /**

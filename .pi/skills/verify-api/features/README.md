@@ -189,6 +189,11 @@ The repo instructions and skills checks (S-repo-instructions-and-skills) were ru
 `DATABASE_URL=…/factory_agent_s_repo_instructions_and_skills` on 5442): `./repo-context.sh` **9/9**,
 evidence `repo-context.json`. See [repo-context.md](repo-context.md).
 
+The repo policy checks (S-factory-config-as-code) were run from the `agent/S-factory-config-as-code`
+worktree on 2026-10-28 (`API_PORT=9530`, faux, `DATABASE_URL=…/factory_agent_s_factory_config_as_code`
+on 5442): `./repo-policy.sh` **12/12** (8 on the first process, 4 on the second), evidence
+`repo-policy-arm.json` and `repo-policy-verify.json`. See [repo-policy.md](repo-policy.md).
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
@@ -340,6 +345,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
 | A worktree's setup       | passing | [setup.md](setup.md)                         |
 | Repo instructions        | passing | [repo-context.md](repo-context.md)           |
+| Repo policy              | passing | [repo-policy.md](repo-policy.md)             |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |
