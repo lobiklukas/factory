@@ -828,12 +828,18 @@ export type SessionServiceShape = {
    * trigger's session, a card's run in a column that requires a PR or continuing the card's PR) that
    * record no PR, have no run or mission in flight, and whose worktree is under this process's
    * session root and its own checkout — so a person's session, a fork, a replay, a released
-   * workspace and a parked run are never opened, and another instance's sessions are its own. A run
-   * whose tail already holds the step's no-change or not-opened entry at the branch's current tip
-   * was answered, so it is not announced again on every boot; a tip that moved since is stepped. The
-   * step is the settle's own (`settlePullRequest`), so its gate, cap, push, record and card note are
-   * the same as a live settle's. Answers the sessions it stepped; one that fails is logged and does
-   * not stop the others. Without `pullRequestOnSettle` it steps nothing, as a settle would not.
+   * workspace and a parked run are never opened, and another instance's sessions are its own. Nor is
+   * a card run a later run of the card took the branch over from (C19): it is superseded, and its
+   * step would publish the later run's branch into its stale log. Nor a session this process saw a
+   * run go busy in before the sweep finished (one `resumeRuns` continued, one a client started):
+   * that run's own settle takes the step. A log whose newest no-change or not-opened entry — whatever
+   * run wrote it — is at the branch's current tip was answered, so it is not announced again on every
+   * boot; a tip that moved since is stepped. The step is the settle's own (`settlePullRequest`), so
+   * its gate, cap, push, record and card note are the same as a live settle's. A settled session is
+   * no work in progress, so the sweep opens it as a background reopen — one the cap has no room for
+   * is logged and left for the next boot — and releases an owner it opened once the step is done.
+   * Answers the sessions it stepped; one that fails is logged and does not stop the others. Without
+   * `pullRequestOnSettle` it steps nothing, as a settle would not.
    */
   readonly settlePullRequestsAtBoot: Effect.Effect<
     readonly SessionId[],

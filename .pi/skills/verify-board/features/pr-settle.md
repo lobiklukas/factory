@@ -22,9 +22,12 @@ Two gaps in the PR a settled run opens without an operator (C18):
   step before `factory.pr` committed, left the session with no PR. At boot, after the runs and
   missions are resumed, `settlePullRequestsAtBoot` takes the step for each session the settle rule
   declares (`prOnSettle.ts`) that records no PR, has no run in flight, and has its worktree under this
-  process's session root — unless its run's tail already holds the step's no-change or not-opened
-  entry at the branch's current tip, which is not announced again. A person's session, a fork, a
-  replay, a released workspace and a parked run are never opened.
+  process's session root — unless the log's newest no-change or not-opened entry (whichever run
+  wrote it) is at the branch's current tip, which is not announced again. A person's session, a
+  fork, a replay, a released workspace, a parked run, a card run a later run of the card took the
+  branch over from, and a run this process already saw settle are never opened; a session the cap
+  has no room for is left for the next boot, and an owner the sweep opened is released after its
+  step. A settle of a session whose PR is at the branch's tip reaches no forge and no tracker.
 
 ## How a user reaches it
 

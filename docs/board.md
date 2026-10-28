@@ -432,7 +432,7 @@ new commit is answered from the log and reaches no forge, and a refused push (`o
 process saw — the process died between the run settling and its step, or inside the step — is
 stepped at the next boot (F16, `settlePullRequestsAtBoot`), for the sessions the same rule declares
 that record no PR, unless the step already answered no-change or not-opened at the branch's current
-tip.
+tip; a card run whose branch a later run took over is not.
 
 Built (C19): a card's runs share one branch and one PR (`packages/core/src/cardBranch.ts`). The card's
 branch is its first change run's — a run started in a column that requires `pr_link` or
