@@ -355,7 +355,7 @@ const isRepoNotFound = Schema.is(RepoNotFound);
 const CHECK_DEPLOYMENT_SECONDS = 60;
 const PING_MODEL_SECONDS = 45;
 
-type Bounded<A, E> =
+type Bounded<A> =
   | { readonly _tag: "Success"; readonly success: A }
   | {
       readonly _tag: "Failure";
@@ -369,10 +369,10 @@ type Bounded<A, E> =
 const bounded = <A, E, R>(
   call: Effect.Effect<A, E, R>,
   seconds: number,
-): Effect.Effect<Bounded<A, E>, never, R> =>
+): Effect.Effect<Bounded<A>, never, R> =>
   call.pipe(
     Effect.timeoutOption(`${seconds} seconds`),
-    Effect.map((answer): Bounded<A, E> =>
+    Effect.map((answer): Bounded<A> =>
       Option.isSome(answer)
         ? { _tag: "Success", success: answer.value }
         : {
@@ -384,7 +384,7 @@ const bounded = <A, E, R>(
           },
     ),
     Effect.catch((error) =>
-      Effect.succeed<Bounded<A, E>>({
+      Effect.succeed<Bounded<A>>({
         _tag: "Failure",
         failure: { message: reason(error), timedOut: false },
       }),

@@ -194,6 +194,11 @@ doctor one doctor "$REPO_OK" --allow-faux --api "$API_URL"
 check "doctor <repo> checks that one repo alone" \
   "$(has one "ok repo $REPO_OK: " && ! grep -q "$REPO_BAD" "$EVIDENCE_DIR/doctor-one.txt" && [ "$(code one)" = "0" ] && echo 0 || echo 1)" "exit=$(code one)"
 
+GHOST_REPO="acme/not-registered"
+doctor unregistered doctor "$GHOST_REPO" --allow-faux --api "$API_URL"
+check "doctor <repo> for a slug nobody registered says so with the command that registers it, and does not blame Postgres" \
+  "$(has unregistered "fail repo $GHOST_REPO: not registered -- fix: factory repo add $GHOST_REPO" && ! grep -qE "registry could not|docker compose" "$EVIDENCE_DIR/doctor-unregistered.txt" && [ "$(code unregistered)" = "1" ] && echo 0 || echo 1)" "exit=$(code unregistered)"
+
 # --- --live: one request, only when asked -----------------------------------------------------------
 check "without --live there is no model request line" \
   "$(grep -q 'live-model' "$EVIDENCE_DIR/doctor-repos.txt" && echo 1 || echo 0)" "no live-model"

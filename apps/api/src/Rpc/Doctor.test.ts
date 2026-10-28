@@ -437,6 +437,7 @@ describe("pingModel over RPC (E8)", () => {
                   _context: unknown,
                   options?: { signal?: AbortSignal },
                 ) =>
+                  // oxlint-disable-next-line effecttsgo/new-promise -- a provider that never answers is a promise that never settles.
                   new Promise(() => {
                     options?.signal?.addEventListener("abort", () => {
                       aborted = true;
