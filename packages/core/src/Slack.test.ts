@@ -694,7 +694,15 @@ describe("SlackSessionWriteBack", () => {
   };
   const address = "C0ENG:1699999999.000000:1699999999.000100";
 
+  // The rows have no log behind them, so they leave with the suite rather than waiting for a
+  // rebuild in another suite to find them.
   afterAll(async () => {
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`DELETE FROM sessions WHERE id LIKE ${`ses_sswb_%_${runId}`}`;
+      }),
+    );
     await runtime.dispose();
   });
 
@@ -709,7 +717,7 @@ describe("SlackSessionWriteBack", () => {
     over: Parameters<typeof makeFakeHttp>[0] = {},
     fake = makeFakeHttp(over),
   ) => {
-    const id = `ses_sswb_${randomBytes(4).toString("hex")}`;
+    const id = `ses_sswb_${randomBytes(4).toString("hex")}_${runId}`;
     // `sessions.request_id` is unique and a row from an earlier run is still there, so the id ends in
     // a nonce: digits, so a Slack address stays one (its last part is the message's `ts`).
     const nonce = Number.parseInt(randomBytes(3).toString("hex"), 16);

@@ -101,6 +101,10 @@ export const SessionWriteBacksLive = SessionWriteBacksAll([
       ),
 ]);
 
+/** The GitHub route's secret as the process holds it *now*: the route reads it per request. */
+const githubWebhookSecret = (): string | undefined =>
+  process.env["GITHUB_WEBHOOK_SECRET"]?.trim();
+
 /** Say at boot which adapters answer back, and where. */
 export const TriggerAdaptersLog = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -114,8 +118,14 @@ export const TriggerAdaptersLog = Layer.effectDiscard(
         ? "slack write-back: off (SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET and SLACK_CHANNELS are not all set)"
         : `slack write-back: on — the session's link and the PR's link in the thread, channels ${slackApp.filter.channels.join(", ")} (POST /webhooks/slack, SLACK_SIGNING_SECRET)`,
     );
+    // The route's secret is read per request, so the line says what the process holds now. The
+    // comment needs the credential the PR step needs (GITHUB_TOKEN or the App), which is not
+    // checked here: the line names it instead of claiming the write-back works.
+    const githubSecret = githubWebhookSecret();
     yield* Effect.logInfo(
-      "github issue write-back: on — one comment with the session's link on the issue (POST /webhooks/github, GITHUB_WEBHOOK_SECRET)",
+      githubSecret === undefined || githubSecret === ""
+        ? "github issue intake: off (GITHUB_WEBHOOK_SECRET is not set, so POST /webhooks/github answers 503)"
+        : "github issue intake: on (POST /webhooks/github); it comments the session's link on the issue with the GitHub credential (GITHUB_TOKEN or the App), and a comment that cannot be posted fails the delivery",
     );
   }),
 );

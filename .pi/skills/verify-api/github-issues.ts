@@ -25,7 +25,7 @@
 //   8. an issue opened with no label is skipped, and labelling it afterwards does start work
 //   9. a pull-request payload on the issues event is 400
 //  10. an `@factory` comment on an issue with no label opens one session and one comment; a second
-//      mention on the issue is a replay; a bot's mention and a comment with none are 202
+//      mention on the issue is a replay; a bot's mention, a stranger's (author_association NONE) and a comment with none are 202
 //  11. a missing and a wrong signature are 401, and record no delivery
 //  12. a comment that landed whose acknowledgement was lost fails the delivery (500 write-back); the
 //      retry is processed, reuses the session, and posts no second comment
@@ -160,6 +160,7 @@ const commentPayload = (over: {
   readonly number: number;
   readonly text: string;
   readonly userType?: string;
+  readonly association?: string;
 }): Record<string, unknown> => ({
   action: "created",
   issue: {
@@ -171,6 +172,7 @@ const commentPayload = (over: {
   comment: {
     body: over.text,
     user: { login: "alice", type: over.userType ?? "User" },
+    author_association: over.association ?? "MEMBER",
   },
   sender: { login: "alice", type: over.userType ?? "User" },
   repository,
@@ -412,6 +414,17 @@ const program = Effect.gen(function* () {
       commentPayload({ number: 13, text: "@factory go", userType: "Bot" }),
     ),
   );
+  const stranger = yield* Effect.promise(() =>
+    post(
+      "stranger mention",
+      "issue_comment",
+      commentPayload({
+        number: 13,
+        text: "@factory go",
+        association: "NONE",
+      }),
+    ),
+  );
   const chatter = yield* Effect.promise(() =>
     post(
       "no mention",
@@ -420,17 +433,18 @@ const program = Effect.gen(function* () {
     ),
   );
   assert(
-    "an @factory comment opens one session and one comment; a second mention is a replay; a bot's mention and a comment with none are 202",
+    "an @factory comment opens one session and one comment; a second mention is a replay; a bot's mention, a stranger's (author_association NONE) and a comment with none are 202",
     mention.status === 200 &&
       field(mention, "status") === "processed" &&
       mentionId !== undefined &&
       commentsOn(12).length === 1 &&
       field(again, "replayed") === true &&
       bot.status === 202 &&
+      stranger.status === 202 &&
       chatter.status === 202 &&
       commentsOn(13).length === 0 &&
       (yield* sessionCount) === 4,
-    `mention=${String(field(mention, "status"))} comments=${commentsOn(12).length} again=${String(field(again, "replayed"))} bot=${bot.status} chatter=${chatter.status} sessions=${yield* sessionCount}`,
+    `mention=${String(field(mention, "status"))} comments=${commentsOn(12).length} again=${String(field(again, "replayed"))} bot=${bot.status} stranger=${stranger.status} chatter=${chatter.status} sessions=${yield* sessionCount}`,
   );
   if (mentionId !== undefined) {
     const mentioned = yield* client.getSession({ sessionId: mentionId });

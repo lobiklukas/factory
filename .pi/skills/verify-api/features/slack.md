@@ -59,7 +59,11 @@ secret unset:
 10. a message in a channel the filter does not watch is skipped, naming the filter;
 11. a bot's own message in a watched channel starts nothing (the loop guard);
 12. a message already in a thread is answered in that thread;
-13. an `@mention` opens one session, and its `message` twin is a replay;
+13. an `@mention` opens one session, and its `message` twin is a replay (Slack sends both events for
+    a mention in a watched channel, and when they arrive together the second finds the first's claim
+    with no outcome yet and is answered `503 in-progress`; Slack retries it and the retry is the
+    replay, so a mention may leave one failed delivery in Slack's log. Known, not hidden: a `200`
+    there would end the retries of a first delivery that died);
 14. a signed payload that carries no event is answered `200` and ignored;
 15. a delivery whose reply landed but whose acknowledgement was lost is `500 write-back`;
 16. its retry is processed, reads the thread, posts no second reply and reuses the session;

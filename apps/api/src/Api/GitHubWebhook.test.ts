@@ -391,6 +391,7 @@ const mentioned = (number: number) => ({
   comment: {
     body: "@factory take this",
     user: { login: "alice", type: "User" },
+    author_association: "MEMBER",
   },
   sender: { login: "alice", type: "User" },
   repository: { full_name: repo },

@@ -208,6 +208,22 @@ export const githubDeliveryFor =
 /** What an `@mention` is called when the deployment names none: `@factory` is the `factory` label. */
 export const DEFAULT_GITHUB_MENTION = "@factory";
 
+/**
+ * `author_association` values that may ask for work by commenting: a person with a standing on the
+ * repository. GitHub sets it on every comment; a value outside the list, or none, asks for nothing.
+ */
+export const GITHUB_TRUSTED_ASSOCIATIONS: ReadonlyArray<string> = [
+  "OWNER",
+  "MEMBER",
+  "COLLABORATOR",
+];
+
+/** A handle always starts with `@`, so the bare word `factory` in a comment is not a mention. */
+export const normalizeGitHubMention = (mention: string): string => {
+  const handle = mention.trim().replace(/^@+/, "");
+  return handle === "" ? DEFAULT_GITHUB_MENTION : `@${handle}`;
+};
+
 /** A mention as a pattern: the handle, not part of a longer word, an e-mail or a hyphenated name. */
 const mentionPattern = (mention: string): RegExp =>
   new RegExp(
@@ -241,9 +257,10 @@ export type GitHubIssueIntake =
  * the label added next as a replay.
  *
  * A pull request is no issue to delegate, whether its comment or its event; a bot's comment never
- * asks (the factory's own is posted as one, and a loop is the cost of getting that wrong). Who
- * *may* ask is not decided here: any commenter on a repository this webhook watches can, until the
- * trust gate (S:trigger-trust-gating) lands.
+ * asks (the factory's own is posted as one, and a loop is the cost of getting that wrong). A comment
+ * is trusted only from an owner, member or collaborator (`author_association`), as a label needs
+ * triage permission: the comment's text becomes the session's prompt, and on a public repository
+ * anyone may comment. The full trust gate (S:trigger-trust-gating) is planned; this is its interim.
  */
 export const githubIssueIntake = (input: {
   readonly event: "issues" | "issue_comment";
@@ -293,7 +310,18 @@ export const githubIssueIntake = (input: {
   ) {
     return ignored("a bot's comment never asks for work");
   }
-  const handle = input.mention ?? DEFAULT_GITHUB_MENTION;
+  const association = stringField(comment, "author_association");
+  if (
+    association === undefined ||
+    !GITHUB_TRUSTED_ASSOCIATIONS.includes(association)
+  ) {
+    return ignored(
+      `a comment from ${association === undefined ? "an author with no association" : `a ${association}`} never asks for work; only ${GITHUB_TRUSTED_ASSOCIATIONS.join(", ")} do`,
+    );
+  }
+  const handle = normalizeGitHubMention(
+    input.mention ?? DEFAULT_GITHUB_MENTION,
+  );
   const text = stringField(comment, "body") ?? "";
   if (!mentionPattern(handle).test(text)) {
     return ignored(`the comment does not mention ${handle}`);

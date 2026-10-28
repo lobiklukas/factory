@@ -43,13 +43,16 @@ rule on `factory` claims it; its key is the issue's, so labelling and then menti
 The prompt's `{{body}}` is the issue's body followed by `Comment from <login>:` and the comment.
 Everything else is `202` and ignored _before_ the seam, so it records no delivery: an `edited`,
 `closed` or `unlabeled` issue event, a comment that is not a mention, a comment on a pull request
-and a bot's comment (the factory's own is posted as one; a loop is what getting that wrong costs).
+a bot's comment (the factory's own is posted as one; a loop is what getting that wrong costs) and a
+comment from anyone but an `OWNER`, `MEMBER` or `COLLABORATOR` (`author_association`).
 An `edited` delivery is ignored rather than recorded because it would share the issue's key and its
 skip would answer the label added next as a replay. A mapped delivery is also `keyedByWork` (as
 Linear's is), so a skip for a repo nobody had registered is reclaimed by the next delivery under the
 same key once the operator registers it. With no secret the issue path is `503`, like the rest of the
-route. Who _may_ ask is not decided here: any commenter on a repository the webhook watches can,
-until the trust gate (S:trigger-trust-gating, planned) lands.
+route. A comment's text becomes the session's prompt and anyone may comment on a public repository,
+so only an owner, member or collaborator may ask by mention, as a label needs triage permission;
+the full trust gate (S:trigger-trust-gating) is planned. `GITHUB_MENTION` without a leading `@`
+(`factory`) is read as `@factory`, so the bare word starts nothing.
 
 **How the skill drives it.** `./github-issues.sh` boots `./github-issues-fake.ts`, boots the **real
 API** with `GITHUB_API_URL` pointed at it (`adapter-lib.sh`), and runs `bun github-issues.ts`, which
@@ -71,7 +74,7 @@ with the secret unset:
    (the later label is new work);
 10. a pull-request payload on the issues event is `400 bad-payload`;
 11. an `@factory` comment on an issue with no label opens one session and one comment, a second
-    mention is a replay, a bot's mention and a comment with no mention are `202`;
+    mention is a replay, a bot's mention, a stranger's (`author_association` `NONE`) and a comment with no mention are `202`;
 12. that session's prompt carries the issue and the comment that asked;
 13. a missing and a wrong signature are `401` and record no delivery;
 14. a delivery whose comment landed but whose acknowledgement was lost is `500 write-back`;

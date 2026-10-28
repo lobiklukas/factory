@@ -27,6 +27,7 @@ import {
   githubEvent,
   githubDeliveryFor,
   githubIssueIntake,
+  normalizeGitHubMention,
   githubRequestId,
   GitHubWriteBack,
   handleGitHubIssueWebhook,
@@ -413,6 +414,7 @@ const commentPayload = (
     readonly login?: string;
     readonly userType?: string;
     readonly senderType?: string;
+    readonly association?: string | null;
     readonly labels?: ReadonlyArray<string>;
     readonly pullRequest?: boolean;
   } = {},
@@ -428,6 +430,9 @@ const commentPayload = (
   comment: {
     body: over.text ?? "@factory please look at this",
     user: { login: over.login ?? "alice", type: over.userType ?? "User" },
+    ...(over.association === null
+      ? {}
+      : { author_association: over.association ?? "MEMBER" }),
   },
   sender: { login: over.login ?? "alice", type: over.senderType ?? "User" },
   repository: { full_name: "acme/widget" },
@@ -541,6 +546,35 @@ describe("githubIssueIntake", () => {
     expect(comment(commentPayload({ action: "deleted" }))._tag).toBe("ignored");
     expect(comment(commentPayload({ userType: "Bot" }))._tag).toBe("ignored");
     expect(comment(commentPayload({ senderType: "Bot" }))._tag).toBe("ignored");
+  });
+
+  it("ignores a comment from anyone but an owner, member or collaborator", () => {
+    for (const association of ["OWNER", "MEMBER", "COLLABORATOR"]) {
+      expect(comment(commentPayload({ association }))._tag).toBe("delivery");
+    }
+    for (const association of [
+      "CONTRIBUTOR",
+      "FIRST_TIME_CONTRIBUTOR",
+      "FIRST_TIMER",
+      "MANNEQUIN",
+      "NONE",
+    ]) {
+      expect(comment(commentPayload({ association }))._tag).toBe("ignored");
+    }
+    expect(comment(commentPayload({ association: null }))._tag).toBe("ignored");
+  });
+
+  it("reads a handle configured without its @ as the handle with one, never the bare word", () => {
+    const bare = (text: string) =>
+      comment(commentPayload({ text }), "factory")._tag;
+    expect(bare("the factory build is red")).toBe("ignored");
+    expect(bare("@factory please look")).toBe("delivery");
+    expect(
+      comment(commentPayload({ text: "@robot do it" }), "robot")._tag,
+    ).toBe("delivery");
+    expect(normalizeGitHubMention(" factory ")).toBe("@factory");
+    expect(normalizeGitHubMention("@@factory")).toBe("@factory");
+    expect(normalizeGitHubMention("@")).toBe("@factory");
   });
 
   it("refuses a mention on a payload that names no repository", () => {
