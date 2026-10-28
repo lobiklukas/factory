@@ -188,6 +188,7 @@ export const make = (
       sandbox: Sandbox,
       shellEnv: NodeJS.ProcessEnv | undefined,
       owned: boolean,
+      keepSpillFiles = false,
     ): Effect.Effect<Sandbox> => {
       const env = new SandboxExecutionEnv(
         new NodeExecutionEnv({
@@ -195,6 +196,7 @@ export const make = (
           ...(shellEnv === undefined ? {} : { shellEnv }),
         }),
         sandbox.id,
+        { keepSpillFiles },
       );
       return Ref.update(live, (sandboxes) =>
         new Map(sandboxes).set(sandbox.id, { sandbox, env, owned }),
@@ -243,7 +245,12 @@ export const make = (
         bindOptions.env === undefined
           ? options.shellEnv
           : { ...options.shellEnv, ...bindOptions.env };
-      return yield* hold({ id, workdir }, shellEnv, false);
+      return yield* hold(
+        { id, workdir },
+        shellEnv,
+        false,
+        bindOptions.keepSpillFiles ?? false,
+      );
     });
 
     const destroy = Effect.fn("SandboxRuntime.InProcess.destroy")(function* (

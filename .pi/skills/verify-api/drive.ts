@@ -192,22 +192,9 @@ const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(SessionRpc);
   const context = yield* Effect.context();
 
-  // Feature: create. A retried create with the same request id must not make a second
-  // session, or every client retry leaks a log.
-  const requestId = `verify-api-${Date.now()}`;
-  const created = yield* client.createSession({ requestId });
-  const retried = yield* client.createSession({ requestId });
-  assert(
-    "createSession",
-    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(created.id),
-    `id=${created.id} mode=${created.mode} status=${created.status}`,
-  );
-  assert(
-    "createSession is idempotent by requestId",
-    retried.id === created.id,
-    `retry id=${retried.id}`,
-  );
-
+  // The repo registry goes first: its checkout inspection takes seconds on a loaded machine, and
+  // the session the watch below attaches to must not sit idle across it, or up.sh's 2 s idle
+  // sweep releases its owner and the stream opens historical instead of live.
   // Feature: repo binding (LOB-5). A session names a repo at a base ref, and its snapshot exposes
   // the workspace the server resolved — including the commands the repo declares about itself in
   // `.factory/config`. The registered local path is this skill's fixture.
@@ -314,6 +301,22 @@ const program = Effect.gen(function* () {
       boundSnapshot.workspace.commands.verify ===
         "bun .pi/skills/verify-api/drive.ts",
     `source=${boundSnapshot.workspace.commandsSource} commands=${JSON.stringify(boundSnapshot.workspace.commands)}`,
+  );
+
+  // Feature: create. A retried create with the same request id must not make a second
+  // session, or every client retry leaks a log.
+  const requestId = `verify-api-${Date.now()}`;
+  const created = yield* client.createSession({ requestId });
+  const retried = yield* client.createSession({ requestId });
+  assert(
+    "createSession",
+    /^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$/.test(created.id),
+    `id=${created.id} mode=${created.mode} status=${created.status}`,
+  );
+  assert(
+    "createSession is idempotent by requestId",
+    retried.id === created.id,
+    `retry id=${retried.id}`,
   );
 
   // Feature: the session list (LOB-6). A session created a moment ago is in the list without any

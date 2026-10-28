@@ -480,18 +480,36 @@ describe("a sandbox bound to an existing directory", () => {
     expect(result.stdout).toBe("runtime|bound|bound wins|[]");
   });
 
-  it("makes no temporary root while it only binds", async () => {
-    const roots = () =>
-      readdirSync(tmpdir()).filter((name) =>
-        name.startsWith("factory-sandboxes-"),
+  it("makes no temporary root while it only binds, and makes one with its first create", async () => {
+    // The temporary root goes under a directory of this case's own, not the shared tmpdir, which
+    // other processes' runtimes (sibling worktrees' gates) fill and empty at the same time.
+    const ownTmp = mkdtempSync(join(scratch, "own-tmpdir-"));
+    // oxlint-disable-next-line effecttsgo/process-env -- the host's tmpdir is what the case varies.
+    const previous = process.env["TMPDIR"];
+    // oxlint-disable-next-line effecttsgo/process-env -- the host's tmpdir is what the case varies.
+    process.env["TMPDIR"] = ownTmp;
+    try {
+      expect(tmpdir()).toBe(ownTmp);
+      const observed = await withBindable((runtime) =>
+        Effect.gen(function* () {
+          yield* runtime.bind(mkdtempSync(join(scratch, "bound-lazy-")));
+          const binding = readdirSync(ownTmp);
+          yield* runtime.create;
+          // The control: the root does land here once a sandbox needs one.
+          const creating = readdirSync(ownTmp);
+          return { binding, creating };
+        }),
       );
-    const before = new Set(roots());
-    const during = await withBindable((runtime) =>
-      Effect.gen(function* () {
-        yield* runtime.bind(mkdtempSync(join(scratch, "bound-lazy-")));
-        return roots().filter((name) => !before.has(name));
-      }),
-    );
-    expect(during).toEqual([]);
+      expect(observed.binding).toEqual([]);
+      expect(observed.creating).toEqual([
+        expect.stringMatching(/^factory-sandboxes-/),
+      ]);
+      expect(readdirSync(ownTmp)).toEqual([]);
+    } finally {
+      // oxlint-disable-next-line effecttsgo/process-env -- the host's tmpdir is what the case varies.
+      if (previous === undefined) delete process.env["TMPDIR"];
+      // oxlint-disable-next-line effecttsgo/process-env -- the host's tmpdir is what the case varies.
+      else process.env["TMPDIR"] = previous;
+    }
   });
 });

@@ -28,7 +28,7 @@ export type SessionEnvironment = {
   /**
    * End every sandbox the session bound, and the session's own runtime when it has one: commands
    * still running are stopped, handles closed, temporary files removed, and the worktree's files
-   * left. A use after it fails.
+   * and the exec spill files its transcript names left. A use after it fails.
    */
   readonly release: Effect.Effect<void>;
 };
@@ -54,7 +54,9 @@ export const openSessionEnvironment = (
     // Bound into the session's scope, so its release ends the sandbox; once released, the scope
     // runs the finalizer at once and the environment read after it fails, which is the refusal.
     const bind = (cwd: string): Effect.Effect<ExecutionEnv, SessionError> =>
-      sandboxes.bind(cwd, { env: shellEnv() }).pipe(
+      // The spill files stay: the transcript names them, and a later turn may read one after an
+      // idle release ended this sandbox and the session reopened in a new one.
+      sandboxes.bind(cwd, { env: shellEnv(), keepSpillFiles: true }).pipe(
         Effect.tap((sandbox) =>
           Scope.addFinalizer(
             scope,

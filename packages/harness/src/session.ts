@@ -397,8 +397,9 @@ export type OpenSession = {
   readonly root: Conversation;
   /**
    * End the sandboxes the session's commands ran in (LOB-244): their commands, handles and
-   * temporary files, never the worktree's files. After `closeHarness`, which settles what still
-   * runs in them; `closeSession` does both, in that order.
+   * temporary files, never the worktree's files or the exec spill files its transcript names.
+   * After `closeHarness`, which settles what still runs in them; `closeSession` does both, in
+   * that order.
    */
   readonly releaseEnvironment: Effect.Effect<void>;
   /**
@@ -1436,6 +1437,11 @@ export const resetSession = (
     conversation.reset(handoff, BACKGROUND_CONTEXT),
   );
 
+/**
+ * Close a harness: settle what runs in it and release its lease. For a harness `openSession`
+ * opened, use `closeSession`, which also ends the sandboxes its commands ran in; this alone leaves
+ * them to the session's `releaseEnvironment`, which the caller then owes.
+ */
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
 

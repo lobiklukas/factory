@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import {
@@ -272,6 +272,33 @@ describe("openSessionEnvironment", () => {
     expect(outcome.missing).toContain(cwd);
     expect(outcome.cwd).toBe(realpathSync(cwd));
     expect(outcome.same).toBe(true);
+  });
+
+  it("leaves the exec spill files its commands made when released, since the transcript names them", async () => {
+    // Pi Durable's bash tool tells the model "Full output: <spill path>"; an idle release ends the
+    // sandbox, and the turn after the session reopens may still read that path.
+    const cwd = worktree();
+    const spillPath = await Effect.runPromise(
+      Effect.gen(function* () {
+        const environment = yield* openSessionEnvironment(
+          undefined,
+          () => ({}),
+        );
+        const env = yield* Effect.promise(() => environment.env(cwd));
+        const spilled = yield* Effect.promise(() =>
+          env.exec(
+            "seq 1 50",
+            { spill: { afterBytes: 10, afterLines: 2 } },
+            context,
+          ),
+        );
+        yield* environment.release;
+        return spilled.ok ? (spilled.value.spillPath ?? "") : "";
+      }),
+    );
+    expect(spillPath).not.toBe("");
+    expect(existsSync(spillPath)).toBe(true);
+    rmSync(dirname(spillPath), { recursive: true, force: true });
   });
 
   it("refuses every use once released, including the environment it already gave", async () => {

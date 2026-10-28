@@ -7,7 +7,9 @@
  * means to it. Once the sandbox is destroyed every operation is refused with `aborted`; commands
  * still running are aborted; readers and watchers opened through it are closed; and the temporary
  * files it made outside the workdir (`createTempDir`, `createTempFile`, exec spill files) are
- * removed, with the directories made to hold them. Everything else is the wrapped environment's own behaviour, which is why Pi Durable's
+ * removed, with the directories made to hold them — exec spill files excepted when the sandbox was
+ * made to keep them (`keepSpillFiles`), because a transcript that names one outlives the sandbox
+ * it was written in. Everything else is the wrapped environment's own behaviour, which is why Pi Durable's
  * conformance suite runs against the wrapper and not against what it wraps.
  *
  * The wrapper adds no boundary: an absolute path or a command reaches whatever the wrapped
@@ -64,6 +66,16 @@ type Closable = { close(context: Context): Promise<void> };
  */
 type Temporary = "tree" | "file";
 
+export type SandboxExecutionEnvOptions = {
+  /**
+   * Leave the exec spill files in place when the sandbox is destroyed. Pi Durable's bash tool tells
+   * the model a truncated command's full output is at its spill path, so a sandbox whose transcript
+   * lives on (a session's, LOB-244) must not take the file with it. Absent: removed like any other
+   * temporary file.
+   */
+  readonly keepSpillFiles?: boolean;
+};
+
 export class SandboxExecutionEnv implements ExecutionEnv {
   /** The wrapped environment's file namespace: wrapping a sandbox's environment changes no files. */
   readonly id: string;
@@ -73,11 +85,15 @@ export class SandboxExecutionEnv implements ExecutionEnv {
   /** The cleanup in progress or done; cleared when it fails, so a later `destroy` retries it. */
   private cleaning: Promise<void> | undefined;
 
+  private readonly keepSpillFiles: boolean;
+
   constructor(
     private readonly inner: ExecutionEnv,
     readonly sandboxId: SandboxId,
+    options: SandboxExecutionEnvOptions = {},
   ) {
     this.id = inner.id;
+    this.keepSpillFiles = options.keepSpillFiles ?? false;
   }
 
   get cwd(): string {
@@ -253,10 +269,12 @@ export class SandboxExecutionEnv implements ExecutionEnv {
     return this.inner
       .exec(command, options, this.scoped(context))
       .then((result) =>
-        this.remember(
-          result.ok ? result.value.spillPath : result.error.spillPath,
-          "file",
-        ).then(() => result),
+        this.keepSpillFiles
+          ? result
+          : this.remember(
+              result.ok ? result.value.spillPath : result.error.spillPath,
+              "file",
+            ).then(() => result),
       );
   }
 

@@ -100,6 +100,13 @@ export type BindOptions = {
    * overrides an inherited one, which is how a caller withholds a variable from the commands.
    */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Leave the exec spill files on the host when the sandbox ends, rather than removing them with
+   * its other temporary files. A session's sandbox sets it (LOB-244): Pi Durable's bash tool tells
+   * the model where a truncated command's full output is, and the session's transcript, which a
+   * later turn reads, outlives the sandbox the command ran in. Absent: removed.
+   */
+  readonly keepSpillFiles?: boolean;
 };
 
 /**
