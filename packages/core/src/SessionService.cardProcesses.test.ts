@@ -4,8 +4,12 @@
  * processes stepping the card's PR together open one PR — the second adopts the first's and answers
  * `already-open`.
  *
- * Two runtimes play the two processes, as `SessionService.follow.test.ts`'s do: each has its own
- * presence holder, its own in-process gates and its own session root. The second's root is a symlink
+ * Two runtimes play the two processes where both have to run sessions, as
+ * `SessionService.follow.test.ts`'s do (a design decision, F13): each has its own presence holder,
+ * its own in-process gates and its own session root. Where the other process only has to hold the
+ * card's PR, it is a real one — `SessionService.cardPrLease-fixture.ts`, spawned and SIGKILLed — and
+ * a third runtime with a pool of three connections steps four cards' PRs at once, which only a gate
+ * that holds no connection while its step runs lets through. The second runtime's root is a symlink
  * to the first's (`aliasOf`): presence tells the two homes apart by the root's spelling, while git,
  * which resolves symlinks, sees one session root, so C19's hand-over of the card's branch from one
  * process's worktree to the other's goes as it does within one.
@@ -18,11 +22,12 @@
  * Postgres only, not mocked: `docker compose up -d --wait postgres`.
  */
 import { BunServices } from "@effect/platform-bun";
-import { execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import {
   BoardInstanceId,
@@ -523,5 +528,95 @@ describe("a card's branch and PR across two API processes (F13)", () => {
     ).toEqual(runs.map((run) => run.branch).sort());
     // Every step gave its card's lease back when it ended.
     expect(leases).toEqual([]);
+  }, 240_000);
+  /**
+   * The other process is a real one here (`SessionService.cardPrLease-fixture.ts`): it holds the
+   * card's PR lease as a step in it would, and this process's step waits for it — past the fixture's
+   * TTL, which its renewals keep pushing out — and steps once a SIGKILL ends it and its claim lapses.
+   *
+   * Mutations this catches: take the card's PR gate in this process only — the step asks GitHub while
+   * the other process holds the card. Wait for a release a dead process never makes — the step never
+   * ends.
+   */
+  it("waits while a real process holds the card's PR, and steps once that process is killed", async () => {
+    const { taskId, repo } = await cardInBuilding("held by another process");
+    const run = await first.runPromise(
+      Effect.flatMap(SessionService, (service) =>
+        service.create({ taskId, taskColumn: "building" }),
+      ),
+    );
+    const tree = worktreeOf(repo, run.id);
+    writeFileSync(join(tree, "held.txt"), "held\n");
+    git(tree, "add", "held.txt");
+    git(tree, "commit", "-q", "-m", "f13 held");
+
+    const fixtureTtlMs = 1_500;
+    const holder = await new Promise<ChildProcess>((resolve, reject) => {
+      const child = spawn(
+        "bun",
+        [
+          fileURLToPath(
+            new URL("./SessionService.cardPrLease-fixture.ts", import.meta.url),
+          ),
+          taskId,
+          String(fixtureTtlMs),
+        ],
+        // oxlint-disable-next-line effecttsgo/process-env -- a test hands its child process an environment.
+        { env: process.env, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let out = "";
+      const giveUp = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`the lease holder never held the lease: ${out}`));
+      }, 60_000);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        out += chunk.toString();
+        if (!out.includes("READY ")) return;
+        clearTimeout(giveUp);
+        resolve(child);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        out += chunk.toString();
+      });
+      child.on("exit", (code) => {
+        clearTimeout(giveUp);
+        reject(new Error(`the lease holder exited (${code}): ${out}`));
+      });
+    });
+
+    const before = posts.length;
+    let settled = false;
+    const stepping = first
+      .runPromise(
+        Effect.flatMap(SessionService, (service) =>
+          service
+            .openPullRequest({ sessionId: run.id, title: "held elsewhere" })
+            .pipe(Effect.provideContext(forgeContext)),
+        ),
+      )
+      .finally(() => {
+        settled = true;
+      });
+    // Twice the holder's TTL: only its renewals keep the claim, so a step through now was let past it.
+    await new Promise((resolve) => setTimeout(resolve, fixtureTtlMs * 2));
+    const askedWhileHeld = posts.length - before;
+    const settledWhileHeld = settled;
+
+    const killedAt = Date.now();
+    await new Promise<void>((resolve) => {
+      holder.on("exit", () => resolve());
+      holder.kill("SIGKILL");
+    });
+    const answer = await stepping;
+    const waitedAfterKill = Date.now() - killedAt;
+
+    expect(askedWhileHeld).toBe(0);
+    expect(settledWhileHeld).toBe(false);
+    expect(answer.outcome).toBe("opened");
+    expect(posts.slice(before)).toEqual([
+      { head: `factory/${run.id}`, base: "main" },
+    ]);
+    // The dead holder's claim lapsed after its TTL; the step did not wait out anything longer.
+    expect(waitedAfterKill).toBeLessThan(30_000);
   }, 240_000);
 });
