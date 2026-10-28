@@ -118,6 +118,46 @@ export type BoardCaps = typeof BoardCaps.Type;
 export const DEFAULT_BOARD_CAPS: BoardCaps = { board: 2, task: 1, repo: 2 };
 
 /**
+ * Where a column's runs may write (B6, C22), narrowest last:
+ *
+ * - `worktree` — anywhere in the run's own worktree: D11's boundary, and every column's default;
+ * - `docs` — documentation only, the docs rule (`DOCS_WRITE_ALLOWLIST`, LOB-195) a column that holds
+ *   the `docs` skill already runs under;
+ * - `none` — nothing: the run is a read-only stage named after its column, as a column whose role is
+ *   read-only (`READ_ONLY_ROLES`, LOB-74) already is.
+ */
+export const ColumnWriteScope = Schema.Literals(["worktree", "docs", "none"]);
+export type ColumnWriteScope = typeof ColumnWriteScope.Type;
+
+/**
+ * Which refs a column's runs may push themselves (B6, C22): `branch` is the run's own
+ * `refs/heads/factory/<session-id>` (D11), every column's default; `none` is no push at all. The
+ * PR step's own push (C17) is the control plane's, not the run's, so a `none` column's change still
+ * reaches its PR.
+ */
+export const ColumnPushScope = Schema.Literals(["branch", "none"]);
+export type ColumnPushScope = typeof ColumnPushScope.Type;
+
+/**
+ * What a column's runs may do without asking (docs/board.md B6, C22): its approval gates and its
+ * write and push scope, over the deployment's (D11's config surface, `APPROVAL_REQUIRED`).
+ *
+ * A column **narrows** the deployment and never widens it, because D11 makes widening a deliberate
+ * act by whoever builds the process, not something a definition row can do: `approvalRequired` adds
+ * command prefixes to the deployment's gates (a column cannot lift one), and `write` and `push` only
+ * ever narrow — a scope wider than what the column's role or skills already make it is read as that
+ * narrower one. Every field is optional and an absent `autonomy` is the deployment's policy
+ * unchanged, which is what every version written before the field existed declares.
+ */
+export const ColumnAutonomy = Schema.Struct({
+  /** Command prefixes a run in this column asks a person before running (D15, LOB-52's shape). */
+  approvalRequired: Schema.optional(Schema.Array(Schema.String)),
+  write: Schema.optional(ColumnWriteScope),
+  push: Schema.optional(ColumnPushScope),
+});
+export type ColumnAutonomy = typeof ColumnAutonomy.Type;
+
+/**
  * One column of a board definition (B4, B6).
  *
  * `role` resolves to model and tool policy in one place, so changing a model is one edit rather
@@ -144,6 +184,11 @@ export const BoardColumn = Schema.Struct({
    * limit — every version written before the field existed, and a column that declares none.
    */
   wipLimit: Schema.optional(RunCap),
+  /**
+   * What the column's runs may do without asking (B6, C22): gates and write and push scope merged
+   * over the deployment's when a run's column resolves. Absent is the deployment's policy unchanged.
+   */
+  autonomy: Schema.optional(ColumnAutonomy),
 });
 export type BoardColumn = typeof BoardColumn.Type;
 
@@ -538,6 +583,29 @@ export const ResolvedModel = Schema.Struct({
 });
 export type ResolvedModel = typeof ResolvedModel.Type;
 
+/**
+ * One approval gate as a reader is told it (C22): the command prefix, and whose it is — the
+ * deployment's `APPROVAL_REQUIRED`, which every run meets, or the column's own `autonomy`.
+ */
+export const AutonomyGate = Schema.Struct({
+  command: Schema.String,
+  source: Schema.Literals(["deployment", "column"]),
+});
+export type AutonomyGate = typeof AutonomyGate.Type;
+
+/**
+ * A column's effective autonomy (B6, C22): what a run started in it meets, the deployment's policy
+ * and the column's `autonomy` already merged by the same function the run's policy is built from
+ * (`@repo/harness`'s `columnAutonomy`). `write` and `push` are the scopes the run gets, its role's
+ * and skills' narrowing included — a specifier column reads `write: none` whether or not it says so.
+ */
+export const ResolvedAutonomy = Schema.Struct({
+  approvalRequired: Schema.Array(AutonomyGate),
+  write: ColumnWriteScope,
+  push: ColumnPushScope,
+});
+export type ResolvedAutonomy = typeof ResolvedAutonomy.Type;
+
 /** One column as a reader is told it (LOB-270): the declared column, plus what the factory does with it. */
 export const ColumnConfig = Schema.Struct({
   name: Schema.String,
@@ -549,6 +617,11 @@ export const ColumnConfig = Schema.Struct({
   exits: Schema.Array(ColumnExit),
   /** The column's WIP limit (LOB-71), as declared; absent is none. */
   wipLimit: Schema.optional(RunCap),
+  /**
+   * What a run in the column may do without asking (C22), effective: always set by this server's
+   * `getDefinition`; optional so a dashboard reading an older server still decodes its answer.
+   */
+  autonomy: Schema.optional(ResolvedAutonomy),
 });
 export type ColumnConfig = typeof ColumnConfig.Type;
 

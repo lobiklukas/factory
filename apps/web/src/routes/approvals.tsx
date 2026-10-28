@@ -58,7 +58,7 @@ function ApprovalsRoute() {
     <EmptyPane
       icon={<CheckSquareIcon strokeWidth={1.75} />}
       title="No approvals pending"
-      detail="No run is waiting on a person. A command this deployment gates (APPROVAL_REQUIRED) parks its run here until someone approves or denies it."
+      detail="No run is waiting on a person. A command this deployment gates (APPROVAL_REQUIRED), or that a run's column gates on its board, parks its run here until someone approves or denies it."
       action={<EmptyLink to="/boards">Open the boards</EmptyLink>}
       visible={approvals.length === 0}
     >

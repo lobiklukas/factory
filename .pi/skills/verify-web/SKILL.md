@@ -212,7 +212,10 @@ model and its source, skills, requirements marked checked or "not yet checked", 
 gates — to equal `getDefinition` for the board's version; `planning → building` to be the gate "plan
 approval" and `specifying`'s role `specifier`; the v2 board to say v3 exists; each lane header's
 disclosure to show its column's same facts; and a malformed or missing board to be refused
-(`features/board-settings.md`). Evidence goes to `.verify/evidence/latest/board-settings/`.
+(`features/board-settings.md`). Booted with `APPROVAL_REQUIRED="npm publish"`, it also authors a
+definition whose `careful` column gates `sleep` (C22), requires every column's effective autonomy on
+the page to equal `getDefinition`, and starts a run in `careful` and one in `building` with the same
+faux call: the first parks on an approval, the second runs. Evidence goes to `.verify/evidence/latest/board-settings/`.
 
 ### Definition editor
 

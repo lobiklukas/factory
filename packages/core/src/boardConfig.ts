@@ -18,6 +18,10 @@
  *   `SessionService.create` refuses a card's start by (`./boardCaps`).
  * - **The role's model** is the deployment's role table (B6, `ROLE_MODELS`), which only the process
  *   that resolved it knows; the caller passes its resolution in (`SessionService.roleModel`).
+ * - **The column's autonomy** (C22) is the deployment's (`APPROVAL_REQUIRED`, D11) narrowed by what
+ *   the column declares, its role and skills included — again only the process knows the
+ *   deployment's half, so the caller passes it in (`SessionService.columnAutonomy`), which builds it
+ *   with the functions a run's policy is built with.
  *
  * Pure, so the whole description is a table in a test.
  */
@@ -25,6 +29,7 @@ import type {
   BoardDefinition,
   ColumnConfig,
   DefinitionConfig,
+  ResolvedAutonomy,
   ResolvedModel,
 } from "@repo/domain/Task";
 import { columnTransitions, initialColumnOf } from "@repo/domain/Task";
@@ -33,11 +38,22 @@ import { CHECKED_REQUIREMENTS } from "./requirements";
 /** The model a run with `role` talks to; `undefined` is a column with no role. */
 export type RoleModelOf = (role: string | undefined) => ResolvedModel;
 
-/** One column of `definition`, described: its exits, its requirements' status and its model. */
+/** What a run in a column may do without asking (C22), the deployment's policy narrowed by it. */
+export type AutonomyOf = (
+  column: BoardDefinition["columns"][number],
+) => ResolvedAutonomy;
+
+/** What the description reads from the deployment: the role table and the autonomy policy. */
+export type DeploymentFacts = {
+  readonly modelOf: RoleModelOf;
+  readonly autonomyOf: AutonomyOf;
+};
+
+/** One column of `definition`, described: its exits, its requirements' status, its model and autonomy. */
 const describeColumn = (
   definition: BoardDefinition,
   column: BoardDefinition["columns"][number],
-  modelOf: RoleModelOf,
+  { modelOf, autonomyOf }: DeploymentFacts,
 ): ColumnConfig => ({
   name: column.name,
   kind: column.kind,
@@ -53,12 +69,13 @@ const describeColumn = (
     gate === undefined ? { to } : { to, humanGate: gate },
   ),
   ...(column.wipLimit === undefined ? {} : { wipLimit: column.wipLimit }),
+  autonomy: autonomyOf(column),
 });
 
 /** A definition version described, its columns in declaration order. */
 export const describeDefinition = (
   definition: BoardDefinition,
-  modelOf: RoleModelOf,
+  deployment: DeploymentFacts,
 ): DefinitionConfig => {
   const initialColumn = initialColumnOf(definition);
   return {
@@ -68,7 +85,7 @@ export const describeDefinition = (
     ...(initialColumn === undefined ? {} : { initialColumn }),
     ...(definition.caps === undefined ? {} : { caps: definition.caps }),
     columns: definition.columns.map((column) =>
-      describeColumn(definition, column, modelOf),
+      describeColumn(definition, column, deployment),
     ),
   };
 };

@@ -11,7 +11,20 @@ import {
   type ResolvedModel,
   VERIFIED_REQUIREMENT,
 } from "@repo/domain/Task";
-import { describeDefinition } from "./boardConfig";
+import { columnAutonomy, DEFAULT_AUTONOMY } from "@repo/harness";
+import {
+  type AutonomyOf,
+  describeDefinition,
+  type RoleModelOf,
+} from "./boardConfig";
+
+/** A deployment with D11's defaults and no gate: what every case but C22's describes against. */
+const ungated: AutonomyOf = (column) =>
+  columnAutonomy(DEFAULT_AUTONOMY, column);
+const facts = (modelOf: RoleModelOf, autonomyOf: AutonomyOf = ungated) => ({
+  modelOf,
+  autonomyOf,
+});
 
 const definition: BoardDefinition = {
   id: DefinitionId.make("custom"),
@@ -55,7 +68,7 @@ const modelOf = (role: string | undefined): ResolvedModel => {
 };
 
 describe("describeDefinition (LOB-270)", () => {
-  const described = describeDefinition(definition, modelOf);
+  const described = describeDefinition(definition, facts(modelOf));
 
   it("keeps the row's identity and its columns in declaration order", () => {
     expect(described.id).toBe("custom");
@@ -150,7 +163,7 @@ describe("describeDefinition over a definition's own transitions (LOB-267)", () 
       },
     ],
   };
-  const described = describeDefinition(declared, deploymentModel);
+  const described = describeDefinition(declared, facts(deploymentModel));
 
   /** Mutation: describe exits from the default table — `todo` and `doing` read none, `review` two. */
   it("lists each column's declared transitions, gates marked, and none where it declares none", () => {
@@ -168,17 +181,20 @@ describe("describeDefinition over a definition's own transitions (LOB-267)", () 
     expect(
       describeDefinition(
         { ...declared, initialColumn: "doing" },
-        deploymentModel,
+        facts(deploymentModel),
       ).initialColumn,
     ).toBe("doing");
-    expect(describeDefinition(definition, deploymentModel).initialColumn).toBe(
-      "planning",
-    );
+    expect(
+      describeDefinition(definition, facts(deploymentModel)).initialColumn,
+    ).toBe("planning");
     // No columns: no initial column, rather than a default name it lacks.
     const { initialColumn: _declaredInitial, ...undeclared } = declared;
     expect(
       "initialColumn" in
-        describeDefinition({ ...undeclared, columns: [] }, deploymentModel),
+        describeDefinition(
+          { ...undeclared, columns: [] },
+          facts(deploymentModel),
+        ),
     ).toBe(false);
   });
 });
@@ -194,7 +210,7 @@ describe("describeDefinition's caps and WIP limits (LOB-71)", () => {
           column.name === "review" ? { ...column, wipLimit: 1 } : column,
         ),
       },
-      modelOf,
+      facts(modelOf),
     );
     expect(capped.caps).toEqual({ board: 2, task: 1, repo: 2 });
     expect(capped.columns.map((column) => column.wipLimit)).toEqual([
@@ -202,8 +218,90 @@ describe("describeDefinition's caps and WIP limits (LOB-71)", () => {
       undefined,
       1,
     ]);
-    const plain = describeDefinition(definition, modelOf);
+    const plain = describeDefinition(definition, facts(modelOf));
     expect(plain).not.toHaveProperty("caps");
     expect(plain.columns[2]).not.toHaveProperty("wipLimit");
+  });
+});
+
+/**
+ * A column's autonomy (C22): every column is described with what a run in it may do unasked — the
+ * deployment's gates and D11's scopes, narrowed by what the column declares and by its role and
+ * skills — built by the functions the run's policy is built with.
+ */
+describe("describeDefinition's column autonomy (C22)", () => {
+  const gated: AutonomyOf = (column) =>
+    columnAutonomy(
+      { ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] },
+      column,
+    );
+  const declared: BoardDefinition = {
+    ...definition,
+    columns: [
+      {
+        name: "building",
+        kind: "working",
+        role: "builder",
+        skills: [],
+        requires: [],
+        autonomy: { approvalRequired: ["git push", "npm  publish"] },
+      },
+      {
+        name: "review",
+        kind: "working",
+        role: "reviewer",
+        skills: [],
+        requires: [],
+        autonomy: { write: "none", push: "none" },
+      },
+      // Declares nothing, but its role already makes it the read-only specifying stage.
+      {
+        name: "specifying",
+        kind: "working",
+        role: "specifier",
+        skills: [],
+        requires: [],
+        autonomy: { write: "worktree" },
+      },
+      { name: "docs", kind: "working", skills: ["docs"], requires: [] },
+      { name: "intake", kind: "resting", skills: [], requires: [] },
+    ],
+  };
+  // Not `modelOf`: the first case counts the roles that table was asked for.
+  const described = describeDefinition(
+    declared,
+    facts(() => ({ model: "faux/faux-1", source: "deployment" }), gated),
+  );
+  const autonomy = (name: string) =>
+    described.columns.find((column) => column.name === name)?.autonomy;
+
+  /**
+   * Mutation: drop the column's gates from `withColumnAutonomy` — `building` reads only the
+   * deployment's; or tag every gate the column's — `npm publish` reads as `building`'s own.
+   */
+  it("adds a column's gates to the deployment's, each named by whose it is, a repeated one once", () => {
+    expect(autonomy("building")).toEqual({
+      approvalRequired: [
+        { command: "npm publish", source: "deployment" },
+        { command: "git push", source: "column" },
+      ],
+      write: "worktree",
+      push: "branch",
+    });
+    expect(autonomy("intake")).toEqual({
+      approvalRequired: [{ command: "npm publish", source: "deployment" }],
+      write: "worktree",
+      push: "branch",
+    });
+  });
+
+  /** Mutation: read `write` or `push` as declared only — `specifying` reads `worktree`, `docs` too. */
+  it("narrows write and push by the declaration, the role and the skills, and never widens", () => {
+    expect(autonomy("review")).toMatchObject({ write: "none", push: "none" });
+    expect(autonomy("specifying")).toMatchObject({
+      write: "none",
+      push: "branch",
+    });
+    expect(autonomy("docs")).toMatchObject({ write: "docs", push: "branch" });
   });
 });

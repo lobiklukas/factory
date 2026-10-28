@@ -35,6 +35,14 @@ const planning = column({
   ],
   exits: [{ to: "building", humanGate: "plan approval" }, { to: "canceled" }],
   wipLimit: 2,
+  autonomy: {
+    approvalRequired: [
+      { command: "npm publish", source: "deployment" },
+      { command: "git push", source: "column" },
+    ],
+    write: "docs",
+    push: "none",
+  },
 });
 
 const intake = column({
@@ -124,5 +132,42 @@ describe("ColumnSettings", () => {
     expect(bare).toContain("data-column-requires-none");
     expect(bare).toContain("data-column-exits-none");
     expect(bare).not.toContain("data-column-wip");
+    // An older server describes no autonomy: nothing is claimed about it.
+    expect(bare).not.toContain("data-column-write");
+    expect(bare).not.toContain("data-column-gates-none");
+  });
+
+  /**
+   * The column's effective autonomy (C22). Mutation: drop the source — the deployment's gate reads as
+   * the column's; or render the declared scope rather than the server's — `docs` reads `worktree`.
+   */
+  it("shows each gate with whose it is, and where the column's runs may write and push", () => {
+    expect(textAt(markup, "data-gate-command")).toEqual([
+      "npm publish",
+      "git push",
+    ]);
+    expect(markup).toContain('data-gate="git push" data-gate-source="column"');
+    expect(markup).toContain(
+      'data-gate="npm publish" data-gate-source="deployment"',
+    );
+    expect(markup).toContain("this column");
+    expect(textAt(markup, 'data-column-write="docs"')).toEqual([
+      "documentation only",
+    ]);
+    expect(textAt(markup, 'data-column-push="none"')).toEqual([
+      "nothing — the PR step pushes",
+    ]);
+    const open = renderToStaticMarkup(
+      <ColumnSettings
+        column={{
+          ...intake,
+          autonomy: { approvalRequired: [], write: "worktree", push: "branch" },
+        }}
+      />,
+    );
+    expect(open).toContain("data-column-gates-none");
+    expect(textAt(open, 'data-column-write="worktree"')).toEqual([
+      "anywhere in its worktree",
+    ]);
   });
 });

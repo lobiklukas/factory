@@ -164,8 +164,8 @@ import {
 } from "./review";
 import {
   autonomyPolicy,
+  columnWriteScope,
   DEFAULT_AUTONOMY,
-  DOCS_SKILL,
   docsPolicy,
   policyExtension,
   readOnlyStagePolicy,
@@ -671,12 +671,21 @@ const openSessionIn = (
     // task result the model reads, not an exception somewhere in the call path.
     const policy =
       options.policy ?? autonomyPolicy(DEFAULT_AUTONOMY, options.cwd);
-    // A column that holds the `docs` skill makes this a documentation run, which may write
-    // documentation and nothing else (LOB-195). Composed here, where a policy becomes hooks, so a
-    // session cannot be opened with the skill and without the rule.
-    const columnPolicy = skills.some((skill) => skill.name === DOCS_SKILL)
-      ? docsPolicy(policy)
-      : policy;
+    // Where the run may write (C22, `columnWriteScope`): the narrower of what its column's role and
+    // skills make it and what its autonomy declares — the same function `getDefinition` describes
+    // the column with, so the settings view cannot say "documentation only" of a run that writes
+    // anywhere. Anything narrower than the worktree composes the docs rule (LOB-195): a column that
+    // holds the `docs` skill or declares `write: "docs"` writes documentation and nothing else.
+    // `none` holds it too, as the subset it is, and is refused every write first by the read-only
+    // stage below (`readOnlyStageOf`). Composed here, where a policy becomes hooks, so a session
+    // cannot be opened with the skill or the declaration and without the rule.
+    const writeScope = columnWriteScope({
+      role: options.run?.role,
+      skills: skills.map((skill) => skill.name),
+      autonomy: options.run?.autonomy,
+    });
+    const columnPolicy =
+      writeScope === "worktree" ? policy : docsPolicy(policy);
     // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
     // `verify`, and any `bash` that is not a known read command. The stage is the run's
     // column's, resolved from the same profile, so a session cannot be opened in `specifying` and

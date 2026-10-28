@@ -56,9 +56,10 @@ from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. 
 `card-edit.sh` (the card pane's block, unblock, urgent flag and title edit, C11) last passed **11/11** on
 2026-10-28 from the `agent/C11` worktree, API `:9582` / web `:3582`.
 
-`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **23/23** on
-2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`; `drive.mjs` re-passed there
-(API `:9541` / web `:3541`), its lane-control count now leaving the settings disclosure out.
+`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **28/28** on
+2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`, with each column's effective autonomy
+shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
+`drive.mjs` re-passed (API `:9541` / web `:3541`), its lane-control count leaving the settings disclosure out.
 
 `definition-edit.sh` (edit a board definition as a new version, D6) last passed **18/18** on 2026-10-28
 from the `agent/D6` worktree, API `:9512` / web `:3512`; `board-settings.sh` re-passed there beside it.

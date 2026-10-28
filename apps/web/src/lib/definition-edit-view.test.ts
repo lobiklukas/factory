@@ -143,7 +143,7 @@ describe("draftOf and defineInputOf", () => {
   it("round-trips a column field and a definition field the editor does not know", () => {
     const future = {
       ...column("todo", "resting", [{ to: "done" }]),
-      autonomy: "gated",
+      autonomy: { approvalRequired: ["git push"] },
     };
     const pinned = {
       ...PINNED,

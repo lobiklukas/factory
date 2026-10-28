@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest";
 import { DefinitionSummary } from "@repo/domain/Task";
 import {
   capsLabel,
+  gateSource,
   modelSource,
+  pushScopeLabel,
   newerVersions,
   newerVersionsNotice,
   requirementState,
   wipLabel,
+  writeScopeLabel,
 } from "./board-settings-view";
 
 const at = "2026-10-28T00:00:00.000Z";
@@ -96,5 +99,18 @@ describe("capsLabel and wipLabel", () => {
     expect(wipLabel(1)).toBe("at most 1 run in flight");
     expect(wipLabel(3)).toBe("at most 3 runs in flight");
     expect(wipLabel(undefined)).toBeNull();
+  });
+});
+
+describe("a column's autonomy (C22)", () => {
+  /** Mutation: read every scope as the worktree, or call a deployment gate the column's. */
+  it("words each write and push scope apart, and whose a gate is", () => {
+    expect(writeScopeLabel("worktree")).toBe("anywhere in its worktree");
+    expect(writeScopeLabel("docs")).toBe("documentation only");
+    expect(writeScopeLabel("none")).toBe("nothing — read-only");
+    expect(pushScopeLabel("branch")).toBe("its own branch");
+    expect(pushScopeLabel("none")).toBe("nothing — the PR step pushes");
+    expect(gateSource({ source: "column" })).toBe("this column");
+    expect(gateSource({ source: "deployment" })).toBe("deployment");
   });
 });

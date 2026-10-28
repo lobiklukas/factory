@@ -100,6 +100,28 @@ describe("loadRun", () => {
     });
   });
 
+  it("carries the autonomy a column with skills declares, and invents none (C22)", () => {
+    const autonomy = {
+      approvalRequired: ["npm publish"],
+      write: "docs",
+      push: "none",
+    } as const;
+    expect(
+      run({ name: "careful", skills: ["implement"], autonomy }),
+    ).toMatchObject({
+      ok: true,
+      profile: {
+        column: "careful",
+        skills: [{ name: "implement" }],
+        autonomy,
+      },
+    });
+    const plain = run({ name: "building", skills: ["implement"] });
+    expect(plain.ok).toBe(true);
+    if (!plain.ok) return;
+    expect("autonomy" in plain.profile).toBe(false);
+  });
+
   it("refuses a column that names a skill the factory does not hold, naming both", () => {
     const loaded = run({ name: "specifying", skills: ["specify", "explain"] });
 
