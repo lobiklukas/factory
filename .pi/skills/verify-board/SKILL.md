@@ -18,40 +18,41 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 ## What it proves
 
-| Feature                          | Check in the driver                                                                             | Why it matters                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals            | a board is a real operation, not a row a test inserts                |
-| `board add` (B3, LOB-261)        | `drive.sh`: prints `task tsk_… revision 1 column intake`; unknown board and empty title refused | an operator puts work on a board from the terminal                   |
-| a card's repo (B2, LOB-255)      | `add.ts`: no repo named, the board's inherited; another refused; `build.ts`: run bound          | a card made without a repo still gets a branch and reaches review    |
-| CLI card = form card (LOB-261)   | `add.ts`: `board add` and `createTask` with the same inputs list the same title, body, repo     | both doors of the board make the same card                           |
-| create a card (B2, LOB-84)       | `create.ts` (`triage.sh`, `board-create.sh`): `createTask` opens it in `intake` at r1           | a trigger's card is a real row the board reads back                  |
-| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                                 | the lane order is the definition's, not the DB's                     |
-| a card in its lane               | the created card is the row under `intake`                                                      | lanes and cards come from one read, so they agree                    |
-| `board show`                     | revision and title printed, exit 0                                                              | one card as the server has it                                        |
-| `board move` (B5)                | a declared move prints the new column and revision, exit 0                                      | the write path is real, at the revision it expected                  |
-| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                                   | a script can tell a refusal from a success                           |
-| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                                      | the refusal is typed, not generic prose                              |
-| `board block\|unblock` (LOB-264) | `drive.sh`: stale, parked, already_blocked, stale unblock, restored to `building`               | a person's triage writes are typed, at a revision                    |
-| `board attention` (LOB-264)      | `drive.sh`: the asked card's `question` row; `triage.sh`: a `gate` row, server order            | a person finds what waits on them without the browser                |
-| `board runs` (LOB-264)           | `drive.sh`: three runs newest first, the build run's PR link, `-` for runs with none            | a card's runs, their status and PR, are one command                  |
-| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                           | a run is one session, bound to the card                              |
-| body and base ref (LOB-260)      | `start-body.sh`: `show` prints them; the run's `task_body` verbatim, its worktree on `release`  | a run starts from the task as filed, at the ref the card names       |
-| specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told                | the drive's own card is specified and answered before `planning`     |
-| the run's spec (LOB-238)         | `spec.ts`: refused without `gaps`, retried; log + `getTaskSpec`; `show`; `spec-pane.mjs`        | a specifying run writes the typed spec, and the card shows it        |
-| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim                     | only a person crosses plan approval, and the refusal names the gate  |
-| the refusals wrote nothing       | `board show` after them: the last accepted column and revision                                  | a refused move is not a half-applied one                             |
-| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                           | the browser shows what the CLI left, and offers a person the gate    |
-| CLI ⇄ browser (LOB-87)           | `both-ways.mjs`: an open page follows `board move`; its plan approval is what `show` prints     | the CLI and the browser are one board, on the drive's own card       |
-| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal            | the PR and its evidence are real, and only a person reaches `done`   |
-| the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done | `done` takes a reviewer run's pass on the PR's head, not a note      |
-| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                     | a run that needs a person ends, and the answer reaches the next run  |
-| `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then per-head review  | a refusal names the requirement; evidence is a condition of the move |
-| a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows  | a card made in either surface is the same card in the other          |
-| the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                        | the equivalence holds with both surfaces' own drives green           |
-| definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden       | an operator sees what a board will do before trusting it             |
+| Feature                          | Check in the driver                                                                                | Why it matters                                                       |
+| -------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `board create` (B2, LOB-208)     | `board-create.sh`: newest version unless named, `ls`, a run told its skill, refusals               | a board is a real operation, not a row a test inserts                |
+| `board add` (B3, LOB-261)        | `drive.sh`: prints `task tsk_… revision 1 column intake`; unknown board and empty title refused    | an operator puts work on a board from the terminal                   |
+| a card's repo (B2, LOB-255)      | `add.ts`: no repo named, the board's inherited; another refused; `build.ts`: run bound             | a card made without a repo still gets a branch and reaches review    |
+| CLI card = form card (LOB-261)   | `add.ts`: `board add` and `createTask` with the same inputs list the same title, body, repo        | both doors of the board make the same card                           |
+| create a card (B2, LOB-84)       | `create.ts` (`triage.sh`, `board-create.sh`): `createTask` opens it in `intake` at r1              | a trigger's card is a real row the board reads back                  |
+| `board ls` (B9, LOB-61)          | every lane printed, in definition order, exit 0                                                    | the lane order is the definition's, not the DB's                     |
+| a card in its lane               | the created card is the row under `intake`                                                         | lanes and cards come from one read, so they agree                    |
+| `board show`                     | revision and title printed, exit 0                                                                 | one card as the server has it                                        |
+| `board move` (B5)                | a declared move prints the new column and revision, exit 0                                         | the write path is real, at the revision it expected                  |
+| refusal: a stale revision (B3)   | the service's message verbatim, non-zero exit                                                      | a script can tell a refusal from a success                           |
+| refusal: an undeclared move (B5) | names both columns verbatim, non-zero exit                                                         | the refusal is typed, not generic prose                              |
+| `board block\|unblock` (LOB-264) | `drive.sh`: stale, parked, already_blocked, stale unblock, restored to `building`                  | a person's triage writes are typed, at a revision                    |
+| `board attention` (LOB-264)      | `drive.sh`: the asked card's `question` row; `triage.sh`: a `gate` row, server order               | a person finds what waits on them without the browser                |
+| `board runs` (LOB-264)           | `drive.sh`: three runs newest first, the build run's PR link, `-` for runs with none               | a card's runs, their status and PR, are one command                  |
+| `board start` (B1)               | a `ses_…` id, and the card's column on stdout, exit 0                                              | a run is one session, bound to the card                              |
+| the first message (C6)           | `start-prompt.sh`: Start run → Send and `board start` (no `--prompt`): equal first `pi.user`, busy | a run started with no words is put to work, the same from both doors |
+| body and base ref (LOB-260)      | `start-body.sh`: `show` prints them; the run's `task_body` verbatim, its worktree on `release`     | a run starts from the task as filed, at the ref the card names       |
+| specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told                   | the drive's own card is specified and answered before `planning`     |
+| the run's spec (LOB-238)         | `spec.ts`: refused without `gaps`, retried; log + `getTaskSpec`; `show`; `spec-pane.mjs`           | a specifying run writes the typed spec, and the card shows it        |
+| refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim                        | only a person crosses plan approval, and the refusal names the gate  |
+| the refusals wrote nothing       | `board show` after them: the last accepted column and revision                                     | a refused move is not a half-applied one                             |
+| the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                              | the browser shows what the CLI left, and offers a person the gate    |
+| CLI ⇄ browser (LOB-87)           | `both-ways.mjs`: an open page follows `board move`; its plan approval is what `show` prints        | the CLI and the browser are one board, on the drive's own card       |
+| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal               | the PR and its evidence are real, and only a person reaches `done`   |
+| the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done    | `done` takes a reviewer run's pass on the PR's head, not a note      |
+| the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                        | a run that needs a person ends, and the answer reaches the next run  |
+| `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then per-head review     | a refusal names the requirement; evidence is a condition of the move |
+| a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows     | a card made in either surface is the same card in the other          |
+| the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                           | the equivalence holds with both surfaces' own drives green           |
+| definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden          | an operator sees what a board will do before trusting it             |
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`,
-`card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+`start-prompt.sh`, `card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
 
@@ -139,6 +140,7 @@ runs the real script against a closed port and an answering one.
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./start-body.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database: a card's body and base ref in its run
+./start-prompt.sh # requires the instance from ./up.sh (API and web): Start run + Send ⇄ `board start` with no --prompt, equal first message
 ./card-create.sh # requires the instance from ./up.sh (API and web): the New card form ⇄ `board ls|show|add`; drive.sh runs it too
 ./equivalence.sh   # standalone, no instance up: verify-cli, verify-web, then up/drive/down here
 ```
@@ -249,6 +251,9 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
 - `both-ways.json`, `both-ways-cli.png`, `both-ways-browser.png` — the both-ways phase's checks,
   what the open page rendered at each step, its own `moveTask` request, and the page after the
   terminal's move and after its own
+- `start-prompt-web.json`, `start-prompt-{form,sent}.png` — `start-prompt.sh`'s checks, both runs' first
+  `user` entries and status as `getSession` read them, the page's own writes, and the form and the run
+  after Send; `start-prompt.sh` deletes its own before it starts
 - `card-create.json`, `card-create-web.json`, `card-create-*.png`, `card-create-*.txt` — the new-card
   leg's terminal checks (both card ids), the page's checks with what it
   sent and the oracle's reads, its screenshots, and what `ls`, `show` and `add` printed;
@@ -316,8 +321,10 @@ seeded rows: deleting a card's history is not cleanup, and re-running `./up.sh` 
 - **The board is one per repository.** Every drive against one `./up.sh` instance opens its PR on the
   same repository, so `build.ts` finds this drive's request and PR in the ledger by the run's branch
   (`factory/<run>`), not by being the only one.
-- **`board start` sends nothing unless asked.** Without `--prompt` the run opens and waits; the drive
-  and `ask.sh` pass one so the run takes a turn.
+- **`board start` sends the card's prompt unless told not to (C6).** Without `--prompt` the run is sent
+  the card's default prompt (its title, body and the column's instruction); `--idle` opens the run and
+  sends nothing, as `triage.sh` needs for a run that must be idle. The drive and `ask.sh` pass their
+  own `--prompt`, so the run's first turn is theirs.
 - **The faux asks only once per card.** `FAUX_ASK` makes the script call `ask` when the run was
   offered the tool and its prompt has no `task_thread` yet, so the run after an answer replies instead.
   A phase that starts a run on a card nobody has answered yet will park it; that is the script, not a

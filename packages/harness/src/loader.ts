@@ -12,6 +12,9 @@
  *   no skills (or a session with no card, which is a scratch session) resolves to no sections.
  * - `skillsExtension` turns those records into one prompt section each, rendered in the order the
  *   column names them.
+ * - Which version of a skill a run is told is decided in `loadRun` too (D7, B2): the version its log
+ *   pinned when it first opened (`SkillPin`, the `factory.skills` document `openSession` commits),
+ *   else the newest. So an operator's `putSkill` reaches the next run, never one already in flight.
  *
  * - The column's `role` is carried through as declared, and `resolveRole` is where it becomes what
  *   B6 says a role is: the model the run talks to and the tools it is offered (LOB-207). Both halves
@@ -46,15 +49,29 @@ export class MissingSkill extends Schema.TaggedError<MissingSkill>()(
 ) {}
 
 /**
- * One factory skill, as the run's prompt needs it: the markdown body, and the name it is addressed
- * by. The record's description, version and attachments are deliberately not here — none of them is
- * prompt text (B6's stored shape mirrors `.pi/skills/<name>/SKILL.md`, whose frontmatter is not
- * injected either).
+ * One factory skill, as the run's prompt needs it: the markdown body, the name it is addressed by,
+ * and the version the body is (D7). The record's description and attachments are deliberately not
+ * here — neither is prompt text (B6's stored shape mirrors `.pi/skills/<name>/SKILL.md`, whose
+ * frontmatter is not injected either). The version is not prompt text either, but it is what the
+ * run's log pins (`factory.skills`), so a reopened run is told the body it was first told.
  */
 export type RunSkill = {
   readonly name: string;
+  readonly version: number;
   readonly body: string;
 };
+
+/**
+ * A skill version a run was given (D7): what its log's `factory.skills` document records, one per
+ * skill, and what `loadRun` holds a reopened run to.
+ */
+export type SkillPin = {
+  readonly name: string;
+  readonly version: number;
+};
+
+/** `name@version`, the way a pin is named in a refusal, a log line and `factory skill ls`. */
+export const pinLabel = (pin: SkillPin): string => `${pin.name}@${pin.version}`;
 
 /**
  * A run's column as the board definition declares it (B4, B6). Read by the control plane from the
@@ -96,22 +113,46 @@ export const EMPTY_RUN_PROFILE: RunProfile = { skills: [] };
  * Order is the column's, so a board author controls the order the sections render in. A name with
  * no record is a `MissingSkill`: the column asked for text the run would not get, and a silently
  * missing section is the failure this check exists to make loud.
+ *
+ * Which version (D7, docs/board.md B2): the one `pinned` names for that skill — the run's log
+ * recorded it when the run first opened, so a reopened run is told what it was told then, whatever
+ * was put since — and otherwise the newest `library` holds, which is what a new run is told. A pin
+ * the library does not hold is a `MissingSkill` too, naming the version: a pinned run quietly moved
+ * onto another body is exactly what pinning exists to prevent. `library` may hold several versions
+ * of one name; the caller passes the newest of each and the pinned ones.
  */
 export const loadRun = (
   column: RunColumn | undefined,
   library: readonly RunSkill[],
+  pinned: readonly SkillPin[] = [],
 ): Effect.Effect<RunProfile, MissingSkill> =>
   Effect.gen(function* () {
     if (column === undefined) return EMPTY_RUN_PROFILE;
-    const byName = new Map(library.map((skill) => [skill.name, skill]));
+    const newest = new Map<string, RunSkill>();
+    for (const skill of library) {
+      const held = newest.get(skill.name);
+      if (held === undefined || skill.version > held.version) {
+        newest.set(skill.name, skill);
+      }
+    }
+    const pins = new Map(pinned.map((pin) => [pin.name, pin.version]));
     const skills: RunSkill[] = [];
     for (const name of column.skills) {
-      const found = byName.get(name);
+      const version = pins.get(name);
+      const found =
+        version === undefined
+          ? newest.get(name)
+          : library.find(
+              (skill) => skill.name === name && skill.version === version,
+            );
       if (found === undefined) {
         return yield* new MissingSkill({
           column: column.name,
           skill: name,
-          message: `column "${column.name}" names skill "${name}", which the factory does not hold`,
+          message:
+            version === undefined
+              ? `column "${column.name}" names skill "${name}", which the factory does not hold`
+              : `column "${column.name}" runs pinned to skill ${pinLabel({ name, version })}, which the factory does not hold`,
         });
       }
       skills.push(found);

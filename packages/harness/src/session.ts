@@ -87,6 +87,8 @@ import {
   skillsExtension,
   type RoleModels,
   type RunProfile,
+  type RunSkill,
+  type SkillPin,
 } from "./loader";
 import {
   compactionPolicyFor,
@@ -110,6 +112,8 @@ import {
   ReviewDoc,
   ReplayDoc,
   PLAN_REVISIONS_DOC_KIND,
+  SKILLS_DOC_KIND,
+  SkillPinsDoc,
   PlanRevisionsDoc,
   PROPOSED_ISSUES_DOC_KIND,
   ProposedIssuesDoc,
@@ -552,6 +556,9 @@ const openSessionIn = (
     // does not exist yet is pinned to the session's own model when it was created on one (LOB-274),
     // ahead of the role's row, which is ahead of the deployment's model.
     const pinned = yield* readPinnedModel(options.storage);
+    // The skill versions the log already pins (D7), read before the root opens like the model is:
+    // the open adds a pin only for a skill it has not recorded, and writes nothing when there is none.
+    const recordedPins = yield* readSkillPins(options.storage);
     const chosen = options.sessionModel ?? role.model;
     const model =
       pinned === undefined
@@ -689,13 +696,19 @@ const openSessionIn = (
       // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
       // Written on every open, an empty page set included, so a session that was told pages once and
       // holds none now records the absence instead of leaving the last answer standing.
-      yield* writePagePrompt(root, {
-        cap: PAGES_TOKEN_CAP,
-        tokens: pagesPrompt.tokens,
-        held: pages.length,
-        included: pagesPrompt.included,
-        dropped: pagesPrompt.dropped,
-      });
+      // The skill versions the run was told ride the same commit (D7): what pins a reopened run to
+      // the bodies it opened with is in the log by the time anything can be sent.
+      yield* writePagePrompt(
+        root,
+        {
+          cap: PAGES_TOKEN_CAP,
+          tokens: pagesPrompt.tokens,
+          held: pages.length,
+          included: pagesPrompt.included,
+          dropped: pagesPrompt.dropped,
+        },
+        mergeSkillPins(recordedPins, skills),
+      );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
       // on here rather than waiting for the next message.
@@ -787,6 +800,8 @@ export type PagePromptRecord = {
 export const writePagePrompt = (
   conversation: Conversation,
   record: PagePromptRecord,
+  /** The run's skill pins (D7), when this open changes them; absent leaves the document alone. */
+  skillPins?: readonly SkillPin[],
 ): Effect.Effect<void, SessionError> =>
   attempt("write page prompt", () =>
     conversation.commit(
@@ -795,17 +810,80 @@ export const writePagePrompt = (
         // session can append an approval entry: a no-op once it is seeded, and the one-time seed of
         // a log written before the ledger existed. No open pays a commit of its own for it.
         approvalLedger(tx, conversation.id).then(() =>
-          tx.doc(PagePromptDoc, conversation.id).then((doc) => {
-            doc.cap = record.cap;
-            doc.tokens = record.tokens;
-            doc.held = record.held;
-            doc.included = [...record.included];
-            doc.dropped = [...record.dropped];
-          }),
+          Promise.all([
+            tx.doc(PagePromptDoc, conversation.id).then((doc) => {
+              doc.cap = record.cap;
+              doc.tokens = record.tokens;
+              doc.held = record.held;
+              doc.included = [...record.included];
+              doc.dropped = [...record.dropped];
+            }),
+            skillPins === undefined
+              ? Promise.resolve()
+              : tx.doc(SkillPinsDoc, conversation.id).then((doc) => {
+                  doc.skills = skillPins.map((pin) => ({
+                    name: pin.name,
+                    version: pin.version,
+                  }));
+                }),
+          ]).then(() => undefined),
         ),
       BACKGROUND_CONTEXT,
     ),
   );
+
+/**
+ * The pins a run's log should hold after this open (D7): every pin it already recorded, then one for
+ * each skill the run was given that it had not pinned, in the order given. `undefined` when that adds
+ * nothing, so an open that changes no pin writes no pin. A recorded pin is never replaced: the
+ * control plane resolved this run's skills *from* those pins (`loadRun`), so a given skill whose
+ * version disagrees with its pin would be a bug upstream, and the pin is what stays true.
+ */
+export const mergeSkillPins = (
+  recorded: readonly SkillPin[],
+  given: readonly RunSkill[],
+): readonly SkillPin[] | undefined => {
+  const pinned = new Set(recorded.map((pin) => pin.name));
+  const added = given
+    .filter((skill) => !pinned.has(skill.name))
+    .map((skill) => ({ name: skill.name, version: skill.version }));
+  // One pin per name, the first given winning: a column that names a skill twice pins it once.
+  const unique = added.filter(
+    (pin, index) =>
+      added.findIndex((other) => other.name === pin.name) === index,
+  );
+  return unique.length === 0 ? undefined : [...recorded, ...unique];
+};
+
+/**
+ * The skill versions a log pins (D7, `factory.skills`), read without owning it: what the control
+ * plane hands `loadRun` so a reopened run keeps the bodies it opened with, and what a reader checks
+ * to learn which version a run was told. Empty for a log no open has pinned — a scratch session, a
+ * column with no skills, or a log older than the document. An entry that is not a name and a
+ * positive integer version is skipped rather than trusted.
+ */
+export const readSkillPins = (
+  storage: Storage,
+): Effect.Effect<readonly SkillPin[], SessionError> =>
+  Effect.map(readDocument(storage, SKILLS_DOC_KIND), (value) => {
+    const skills = value?.["skills"];
+    if (!Array.isArray(skills)) return [];
+    const pins: SkillPin[] = [];
+    for (const entry of skills) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+        continue;
+      const { name, version } = entry;
+      if (
+        typeof name === "string" &&
+        typeof version === "number" &&
+        Number.isInteger(version) &&
+        version >= 1
+      ) {
+        pins.push({ name, version });
+      }
+    }
+    return pins;
+  });
 
 /**
  * What this session's last open was told, or `undefined` when it has never been opened.
