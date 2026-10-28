@@ -40,6 +40,7 @@ import {
   type PrError,
   SessionService,
   SessionServiceLive,
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -105,7 +106,7 @@ const assert = makeChecker(observed);
 const runtime = ManagedRuntime.make(
   TriggerServiceLive({ rules: docsTriggerRules(REPO) }).pipe(
     Layer.provide(DocsSessionsFromSessionService),
-    Layer.provide(NoWriteBack),
+    Layer.provide(Layer.mergeAll(NoWriteBack, NoCards)),
     Layer.provideMerge(
       SessionServiceLive({
         model: createModelAccess("faux"),

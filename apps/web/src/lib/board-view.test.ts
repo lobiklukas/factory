@@ -20,6 +20,7 @@ import {
   boardLanes,
   definitionFor,
   definitionOfConfig,
+  externalLink,
   landedOn,
   moveRefusal,
   recordLanding,
@@ -438,5 +439,42 @@ describe("runSelection", () => {
   it("waits rather than refusing while the card's runs are still being read", () => {
     expect(runSelection("ses_a", undefined, false)).toBe("loading");
     expect(runSelection("ses_new", runs, true)).toBe("loading");
+  });
+});
+
+describe("externalLink (LOB-254)", () => {
+  const URL_ = "https://linear.app/acme/issue/ENG-7/title";
+
+  it("labels the link with the external ref and links the card's URL", () => {
+    expect(
+      externalLink(
+        card("filed", "intake", {
+          externalRef: "linear:iss-7",
+          externalUrl: URL_,
+        }),
+      ),
+    ).toEqual({ label: "linear:iss-7", href: URL_ });
+  });
+
+  it("links a ref that is itself a web link, and shows a bare key unlinked", () => {
+    expect(externalLink(card("ref", "intake", { externalRef: URL_ }))).toEqual({
+      label: URL_,
+      href: URL_,
+    });
+    expect(
+      externalLink(card("key", "intake", { externalRef: "LOB-42" })),
+    ).toEqual({ label: "LOB-42", href: undefined });
+  });
+
+  it("never links what is not an http(s) URL, and is nothing for a card from nowhere", () => {
+    expect(
+      externalLink(
+        card("bad", "intake", {
+          externalRef: "linear:iss-7",
+          externalUrl: "javascript:alert(1)",
+        }),
+      )?.href,
+    ).toBeUndefined();
+    expect(externalLink(card("none", "intake"))).toBeNull();
   });
 });

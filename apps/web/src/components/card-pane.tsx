@@ -7,6 +7,7 @@ import {
   ArrowRightIcon,
   BoxesIcon,
   CheckIcon,
+  ExternalLinkIcon,
   MessageSquareIcon,
   PlayIcon,
   UserCheckIcon,
@@ -33,6 +34,7 @@ import {
 import {
   awaitingMove,
   blockedLabel,
+  externalLink,
   landedOn,
   moveRefusal,
   offeredMoves,
@@ -749,6 +751,7 @@ export const CardPane = ({
   readonly run: SessionId | undefined;
 }) => {
   const blocked = blockedLabel(task);
+  const external = externalLink(task);
   const writes = useCardWrites(task);
   const runs = useAtomValue(taskRunsAtom(task.id));
   const selection = runSelection(
@@ -783,6 +786,31 @@ export const CardPane = ({
               </Badge>
             )}
           </span>
+          {/* Where the card came from (LOB-254): the tracker issue, linked when the card has a link. */}
+          {external === null ? null : external.href === undefined ? (
+            <span
+              data-card-external={external.label}
+              className="truncate font-mono text-[10px] text-muted-foreground"
+            >
+              {external.label}
+            </span>
+          ) : (
+            <a
+              href={external.href}
+              target="_blank"
+              rel="noreferrer noopener"
+              data-card-external={external.label}
+              data-card-external-link={external.href}
+              aria-label={`Open ${external.label} where it was filed (opens in a new tab)`}
+              className="flex min-w-0 items-center gap-1 self-start font-mono text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              <ExternalLinkIcon
+                className="size-3 shrink-0"
+                strokeWidth={1.75}
+              />
+              <span className="truncate">{external.label}</span>
+            </a>
+          )}
         </div>
         <Link
           to="/boards/$boardId"

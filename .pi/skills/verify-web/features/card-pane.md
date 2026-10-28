@@ -47,6 +47,15 @@ transcript, approvals and sandbox as panes (LOB-76, part 2 of LOB-22).
   pending list since LOB-53, see [routing.md](routing.md)).
 - **Thread.** The card's question, answers and notes, oldest first and verbatim, with a composer
   that answers a `needs_input` block (LOB-239). See [thread.md](thread.md), driven by `thread.sh`.
+- **Where the card came from (LOB-254).** A card filed by a trigger delivery carries its tracker
+  issue's ref (`linear:<issue id>`) and link; the header shows the ref as
+  `a[data-card-external-link=<url>][data-card-external=<ref>]`, opening in a new tab
+  (`rel="noreferrer noopener"`). A ref with no link is shown as text (`[data-card-external]`), a ref
+  that is itself a URL is linked, and a card from nowhere shows neither. Only an absolute `http(s)`
+  URL is ever an `href` (`isWebLink`; `createTask` refuses any other `externalUrl`). The drive files
+  such a card through `createTask` (the fields the Linear card path sets) and requires the link, its
+  target and rel, no external ref on the seeded card, and a `javascript:` link refused by the API
+  (evidence `card-pane-external-link.png`).
 - Selection is in the URL only; nothing is kept in the browser's storage.
 
 ## How to get to it (user POV)

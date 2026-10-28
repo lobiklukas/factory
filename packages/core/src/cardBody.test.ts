@@ -570,3 +570,112 @@ describe("a run on a card with a body and a base ref (LOB-260)", () => {
     expect(outcome.barePrompt[BODY_SECTION_KEY]).toBeUndefined();
   }, 120_000);
 });
+
+describe("a card's external link, and filing a card for an outside item (LOB-254)", () => {
+  const LINK = "https://linear.app/acme/issue/ENG-7/make-it-stop";
+
+  /**
+   * Mutation: drop `external_url` from the INSERT or the read — the read-back lacks it.
+   * Mutation: drop it from the `created` event — the projection lacks it.
+   */
+  it("round-trips the link through create, the row, the created event and the projection", async () => {
+    const board = await newBoard();
+    const created = await run(
+      Effect.flatMap(TaskService, (tasks) =>
+        tasks.create({
+          boardId: board.id,
+          title: "linked",
+          externalRef: "linear:iss-7",
+          externalUrl: ` ${LINK} `,
+          actor: LUKAS,
+        }),
+      ),
+    );
+    expect(created.externalUrl).toBe(LINK);
+    const read = await run(
+      Effect.flatMap(TaskService, (tasks) => tasks.get(created.id)),
+    );
+    expect(read.externalUrl).toBe(LINK);
+    const [event] = await createdPayload(created.id);
+    expect(event).toMatchObject({ externalUrl: LINK });
+    const projected = await run(
+      Effect.flatMap(TaskService, (tasks) => tasks.replay(created.id)),
+    );
+    expect(projected.externalUrl).toBe(LINK);
+  });
+
+  /** Mutation: drop the `isWebLink` check — a `javascript:` link is stored and rendered. */
+  it("refuses a link that is not an absolute http(s) URL, writing nothing", async () => {
+    const board = await newBoard();
+    for (const externalUrl of [
+      "javascript:alert(1)",
+      "/issue/ENG-7",
+      "ENG-7",
+      "ftp://linear.app/x",
+    ]) {
+      const refused = await run(
+        Effect.flip(
+          Effect.flatMap(TaskService, (tasks) =>
+            tasks.create({
+              boardId: board.id,
+              title: "refused link",
+              externalUrl,
+              actor: LUKAS,
+            }),
+          ),
+        ),
+      );
+      expect(refused).toMatchObject({
+        _tag: "InvalidTaskInput",
+        field: "externalUrl",
+      });
+    }
+    const cards = await run(
+      Effect.flatMap(TaskService, (tasks) => tasks.list({ boardId: board.id })),
+    );
+    expect(cards).toEqual([]);
+  });
+
+  /**
+   * Mutation: drop the existing-card read from `file` — the second filing makes a second card.
+   * Mutation: key the read on the untrimmed ref — `" linear:iss-8 "` makes a second card.
+   */
+  it("files one card per item and board: the second filing answers the first card, and another board gets its own", async () => {
+    const [board, other] = [await newBoard(), await newBoard()];
+    const file = (boardId: typeof board.id, externalRef: string) =>
+      run(
+        Effect.flatMap(TaskService, (tasks) =>
+          tasks.file({
+            boardId,
+            title: "filed",
+            externalRef,
+            actor: "trigger:linear",
+          }),
+        ),
+      );
+    const first = await file(board.id, "linear:iss-8");
+    const second = await file(board.id, " linear:iss-8 ");
+    const elsewhere = await file(other.id, "linear:iss-8");
+    expect(first.created).toBe(true);
+    expect(second).toEqual({ task: first.task, created: false });
+    expect(elsewhere.created).toBe(true);
+    expect(elsewhere.task.id).not.toBe(first.task.id);
+
+    const blank = await run(
+      Effect.flip(
+        Effect.flatMap(TaskService, (tasks) =>
+          tasks.file({
+            boardId: board.id,
+            title: "no item",
+            externalRef: "  ",
+            actor: "trigger:linear",
+          }),
+        ),
+      ),
+    );
+    expect(blank).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "externalRef",
+    });
+  });
+});
