@@ -41,7 +41,7 @@ import { boardConfigCommands } from "./boardConfig";
  * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card, its
  * spec and its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73),
  * start the run that advances it (`start`), put a card on it (`add`, LOB-261), and, for triage (LOB-264), park or free a card (`block`,
- * `unblock`), list what needs a person (`attention`) and list a card's runs (`runs`). Nothing here
+ * `unblock`) and fix a card's title or priority (`update`, C11), list what needs a person (`attention`) and list a card's runs (`runs`). Nothing here
  * reads the database, and nothing but `runs` reads a session snapshot (see `runsLines`); every
  * answer is the server's, which is what keeps `factory board ls` and the RPC list in agreement.
  *
@@ -1171,6 +1171,130 @@ const unblockCommand = Command.make(
   ]),
 );
 
+/**
+ * `factory board update` talks to the board through this slice of the client, as `block` does: which
+ * revision the write expects and what is printed are a function of a client a test can fake.
+ */
+export interface UpdateClient<E> {
+  readonly getTask: (input: {
+    readonly taskId: TaskId;
+  }) => Effect.Effect<Task, E>;
+  readonly updateTask: (input: {
+    readonly taskId: TaskId;
+    readonly expectedRevision: number;
+    readonly title?: string;
+    readonly priority?: TaskPriority;
+    readonly actor: string;
+  }) => Effect.Effect<Task, E>;
+}
+
+/**
+ * Fix a card's title and/or priority (C11). The revision is the one named or the card's own right
+ * now (as `block`'s), and the answer says what the card now reads, or that nothing changed when the
+ * values were already the card's.
+ */
+export const updateCard = Effect.fnUntraced(function* <E>(
+  client: UpdateClient<E>,
+  input: {
+    readonly taskId: TaskId;
+    readonly title: string | undefined;
+    readonly priority: TaskPriority | undefined;
+    readonly actor: string;
+    readonly expectedRevision: number | undefined;
+  },
+) {
+  const before = yield* client.getTask({ taskId: input.taskId });
+  const sent = input.expectedRevision ?? before.revision;
+  const after = yield* client.updateTask({
+    taskId: input.taskId,
+    expectedRevision: sent,
+    ...(input.title === undefined ? {} : { title: input.title }),
+    ...(input.priority === undefined ? {} : { priority: input.priority }),
+    actor: input.actor,
+  });
+  return [
+    after.revision === sent
+      ? `unchanged ${after.id} (revision ${after.revision})`
+      : `updated ${after.id} (revision ${after.revision})`,
+    `title     ${after.title}`,
+    `priority  ${after.priority}`,
+  ];
+});
+
+/**
+ * `factory board update` — fix a card's title and/or priority (C11). A blank title is the server's
+ * `invalid_task_input`, a stale `--expect-revision` its `stale_revision`; both are printed verbatim
+ * with a non-zero exit, like every refusal of the board.
+ */
+const updateCommand = Command.make(
+  "update",
+  {
+    task: Flag.String("task").pipe(Flag.withDescription("Task id (tsk_…)")),
+    title: Flag.String("title").pipe(
+      Flag.withDescription("The card's new title"),
+      Flag.optional,
+    ),
+    priority: Flag.Literals("priority", TaskPriority.literals).pipe(
+      Flag.withDescription(
+        `The card's new priority: ${TaskPriority.literals.join(", ")}`,
+      ),
+      Flag.optional,
+    ),
+    expectRevision: optionalRevisionFlag("update"),
+    actor: actorFlag,
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({
+    task,
+    title,
+    priority,
+    expectRevision,
+    actor,
+    api,
+  }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const taskId = decodeId(TaskId, task);
+      if (taskId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--task "${task}" is not a task id (tsk_…)`,
+        );
+      }
+      if (Option.isNone(title) && Option.isNone(priority)) {
+        return yield* reportFailure(
+          "invalid_input",
+          "name what to change: --title, --priority or both",
+        );
+      }
+      const { client } = yield* BoardClient;
+      const lines = yield* updateCard(client, {
+        taskId,
+        title: Option.getOrUndefined(title),
+        priority: Option.getOrUndefined(priority),
+        actor,
+        expectedRevision: Option.getOrUndefined(expectRevision),
+      });
+      for (const line of lines) yield* Console.log(line);
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription("Fix a card's title or priority"),
+  Command.withExamples([
+    {
+      command: "factory board update --task tsk_… --priority urgent",
+      description: "Flag the card urgent: it reads first in its lane",
+    },
+    {
+      command: 'factory board update --task tsk_… --title "Ship the release"',
+      description: "Retitle the card",
+    },
+  ]),
+);
+
 /** One value on one line: a question or a note may span several, and a row must not. */
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
@@ -1402,6 +1526,7 @@ export const boardCommand = Command.make("board").pipe(
     ...boardConfigCommands,
     blockCommand,
     unblockCommand,
+    updateCommand,
     attentionCommand,
     runsCommand,
   ]),

@@ -92,7 +92,9 @@ precedent ("an index, not a projection").
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
 transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
-lane and there is no "return to where it was" ambiguity. `setup_failed` is written by a run, not a
+lane and there is no "return to where it was" ambiguity. A person parks and frees a card from the card pane or `factory board block` / `unblock`, and fixes its
+title or priority with `updateTask` (`factory board update`; C11), a revision-checked write that records
+a `retitled` / `priorityChanged` event per changed field. `setup_failed` is written by a run, not a
 person: its worktree's declared `install` or `build` failed before its first turn (S-env-setup), and
 the note names the step, its exit code and its output's last lines. There is **no `ready` column** in the MVP: nothing
 auto-starts, so `ready` only means something once a dispatcher exists (wave 2).
@@ -155,6 +157,17 @@ that first resolves its column's skills records `name@version` in the run's log 
 every later open resolves from those pins (`loadRun`'s `pinned`), so a put reaches the next run and a
 reopened run keeps the body it opened with. A pinned version the table no longer holds refuses the open
 by name and version rather than moving the run onto another body.
+
+Built (S-repo-instructions-and-skills): the repository speaks too, beside the factory's skills rather
+than as a copy of them. Every open of a session on a repository reads its `AGENTS.md` and its
+`.pi/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md` at the commit the session's base names — not
+the worktree's files, which the run's own branch may have changed — and `openSession` installs them
+as two capped sections: `repo_instructions` (the file verbatim, ahead of the column's skills) and
+`repo_skills` (one line per skill — name, description, path — after them; the run reads a body on
+demand with its own tools, and the factory's skills table never holds it). A repo skill whose name the
+column binds is left out of the index: the factory's skill is authoritative. What both cost is the
+log's `factory.repo.prompt` record. Importing a repository's skill _into_ the factory (wave 2, below)
+is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
 
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
@@ -372,7 +385,8 @@ customization, decomposition, and board metrics.
 4. **Failure policy** — B10 in full, plus `maxRuntime` and the breaker. Trigger: the first `faulted`
    run, or the first retry you care about.
 5. **Skills platform** — authoring UI and repo-skill import (version pinning per run and editing
-   without a migration are built, D7). Trigger: the second repository.
+   without a migration are built, D7; a repository's own skills are listed into every run, B6).
+   Trigger: the second repository.
 6. **Sync map** — per-column declarative mapping, Jira and GitHub, conflict rules. Trigger: the second
    tracker.
 7. **Identity** — real authentication, per-column move permissions, audit views (LOB-20). Trigger: the

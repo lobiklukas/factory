@@ -34,6 +34,7 @@ import {
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { ReplayDoc } from "./docs";
 import type { RunProfile } from "./loader";
+import type { RepoContext } from "./repoContext";
 import type { ModelAccess } from "./models";
 import { modelKey } from "./models";
 import type { ApprovalAsker, SessionPolicy } from "./policy";
@@ -165,6 +166,11 @@ export type ReplaySessionOptions = {
   /** How the replay's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
   readonly approvalAsker?: ApprovalAsker;
   readonly run?: RunProfile;
+  /**
+   * What the replay's repository tells it, as `OpenSessionOptions.repo`: read again for the replay's
+   * own worktree, so the run on the other model is told what the source's repository says.
+   */
+  readonly repo?: RepoContext;
   /** What the replay's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
   /**
@@ -204,6 +210,7 @@ export const replaySession = (
         ? {}
         : { approvalAsker: options.approvalAsker }),
       ...(options.run === undefined ? {} : { run: options.run }),
+      ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
     });
     // A failure that leaves the harness open would leave a lease nobody releases: close it where the
