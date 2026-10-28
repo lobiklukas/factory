@@ -155,6 +155,13 @@ export const PAGE_ENTRY_KIND = "factory.page.written";
  */
 export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
 /**
+ * The entry a settled run's PR step announces when it opened no PR for a reason other than an
+ * unchanged branch (C18): the diff over the cap, a remote branch the push may not overwrite, or a
+ * failure. The step's operator-driven caller answers those to the person who asked; a run that
+ * settled has nobody waiting on the answer, so the transcript is where a reader finds it.
+ */
+export const PR_NOT_OPENED_ENTRY_KIND = "factory.pr.not-opened";
+/**
  * A session's spend ceiling and its last stop (LOB-163, `./budget`). A document because the cap is
  * state a hook reads before every request, and the stop beside it is what a snapshot reports.
  */
@@ -403,6 +410,38 @@ const entryKind = (kind: string): TranscriptEntryKind => {
   }
 };
 
+/**
+ * How a log's newest run ended (C18): `finished` when it answered, `interrupted` when an operator
+ * stopped it (C8), `budget` when its cap did (LOB-163), and `failed` when its last model answer is
+ * an error or an abort. A settled run's PR step reads it, because only a run that finished made the
+ * change it set out to make: a stopped one's branch holds whatever it had reached.
+ */
+export type RunEnding = "finished" | "interrupted" | "budget" | "failed";
+
+/**
+ * The newest run's ending, from the log's entries newest first, read back to the run's newest user
+ * input (`pi.user`, where a run — or a steer into it — starts). The interrupt and budget markers
+ * are committed before their abort, so either one that sits after that input is this run's, and it
+ * decides whatever follows it (an interrupted tool call's aborted result, a partial answer). With
+ * neither, the newest model answer decides: an `error` or `aborted` stop is a run that failed.
+ * Entries past the input — an earlier run's markers, the PR step's own lines — say nothing about it.
+ */
+export const runEndingOf = (newestFirst: Iterable<EntryRecord>): RunEnding => {
+  let answered: boolean | undefined;
+  for (const entry of newestFirst) {
+    if (entry.kind === "pi.user") break;
+    if (entry.kind === INTERRUPTED_ENTRY_KIND) return "interrupted";
+    if (entry.kind === BUDGET_STOPPED_ENTRY_KIND) return "budget";
+    if (entry.kind === "pi.assistant" && answered === undefined) {
+      const message = entry.model?.[0];
+      answered =
+        message?.role !== "assistant" ||
+        (message.stopReason !== "error" && message.stopReason !== "aborted");
+    }
+  }
+  return answered === false ? "failed" : "finished";
+};
+
 export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const message = entry.model?.[0];
   const toolName =
@@ -418,13 +457,14 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
       : failedRequest
         ? true
         : undefined;
-  // The title, no-change, budget, interrupted and inherited-PR entries carry no model content, so
-  // their text comes from their data — which is what makes a no-op PR step or a budget stop a
-  // readable line, not an empty entry.
+  // The title, no-change, not-opened, budget, interrupted and inherited-PR entries carry no model
+  // content, so their text comes from their data — which is what makes a no-op PR step or a budget
+  // stop a readable line, not an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
       : entry.kind === NO_CHANGE_ENTRY_KIND ||
+          entry.kind === PR_NOT_OPENED_ENTRY_KIND ||
           entry.kind === BUDGET_STOPPED_ENTRY_KIND ||
           entry.kind === INTERRUPTED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")

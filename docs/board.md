@@ -258,6 +258,24 @@ change or no PR. Only keys with a recorded artifact are checked (`packages/core/
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
 
+Built (C18): a run whose column requires `pr_link` opens its PR itself. When this process sees the run
+settle (its session goes idle), the control plane runs the same PR step `factory pr` and the
+dashboard's Open pull request call — measured, capped, pushed with the provider's token and recorded
+as `factory.pr` — with no operator call (`packages/core/src/prOnSettle.ts`). A session a trigger opened
+with no card (`trigger:<source>`: Linear, Jira, GitHub, Slack, Sentry, the generic webhook, docs) does
+the same. Every other run's PR stays a person's call: a card's run in a column that requires no PR
+(the specifier, the reviewer), a person's own session, a fork or a replay (a trigger's session is
+read from the delivery it was created for, which a replay does not carry), and a working directory
+that is not its own checkout. Only a run that finished opens its PR: one parked on a person (an
+undecided approval, a blocked card) holds it until a later run settles done, which the process's log
+records as `parked`; one interrupted by an operator, stopped by its budget, or whose model answer
+failed opens none and says so. A settled run whose step opened nothing — stopped, no change, a
+diff over the cap, a remote branch the push may not overwrite, a failure — says so in its transcript
+(no-change's line, or `factory.pr.not-opened`) and as a note by the run on its card, which the card's
+next run is told; a later settle at the same commit an even branch was found at is not stepped again.
+The PR opens at the first settle that finds a change: commits a later run of the same session makes
+are not pushed by a later settle yet (the step answers `already-open` without pushing), a follow-up.
+
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
 declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or
 carries a `verify-<surface>` skill for each one. A surface with neither — or a path outside every

@@ -10,8 +10,15 @@
 //                             record over a change: the changed path the builder's script writes,
 //                             verified by `verify-web`, exit 0 — the evidence the PR body and the
 //                             `review` column's `verified` requirement both read
+//   MODE=settled SESSION_ID=… TASK_ID=…
+//                             the build run's PR is opened when its run settles (C18), with no
+//                             `factory pr` and no press of Open pull request: `getSession` reports a
+//                             link within the wait, and the probe prints it as `factory pr` did
+//                             (`pr       <url>`). A settled run whose step opened nothing prints
+//                             `error: <the run's own line>` — the transcript's `factory.pr.not-opened`
+//                             (or no-change) entry — and the same sentence must be on the card's thread
 //   MODE=pr SESSION_ID=… PR_URL=… LEDGER=… REPO=…
-//                             the link the browser's Open pull request showed is the fake GitHub's: its ledger holds
+//                             the link the settled run's PR step recorded is the fake GitHub's: its ledger holds
 //                             exactly one create request for the card's repo, publishing the run's
 //                             own branch onto `main`, and the PR it answered has that link. The body
 //                             that request carried lists the changed path under `## Changed files`
@@ -31,6 +38,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
 import type { SessionId } from "@repo/domain/Session";
+import { TaskId } from "@repo/domain/Task";
 import { readVerifyRecords } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Effect, Scope } from "effect";
@@ -43,6 +51,7 @@ const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
 const MODE = process.env["MODE"] ?? "";
 const SESSION = (process.env["SESSION_ID"] ?? "") as SessionId;
 const PR_URL = process.env["PR_URL"] ?? "";
+const TASK_ID = process.env["TASK_ID"] ?? "";
 const LEDGER = process.env["LEDGER"] ?? "";
 const REPO = process.env["REPO"] ?? "";
 const CHANGED = process.env["CHANGED"] ?? "apps/web/src/card.ts";
@@ -131,6 +140,65 @@ const built = Effect.gen(function* () {
   );
 });
 
+/** The sentence a settled run's PR step leaves when it opened nothing (`notOpenedText`, C18). */
+const NOT_OPENED = "the run settled and the PR step opened no PR";
+
+const settled = Effect.gen(function* () {
+  const client = yield* RpcClient.make(RpcApi);
+  const started = Date.now();
+  let snapshot = yield* client.getSession({ sessionId: SESSION });
+  const reason = () =>
+    snapshot.entries.find(
+      (entry) =>
+        entry.text.startsWith(NOT_OPENED) ||
+        entry.text.startsWith("no documentation change: "),
+    )?.text;
+  // Nothing asks for the PR: the drive only reads, until the step has answered one way or the other.
+  while (
+    snapshot.session.prUrl === undefined &&
+    reason() === undefined &&
+    Date.now() - started < 60_000
+  ) {
+    yield* Effect.sleep(200);
+    snapshot = yield* client.getSession({ sessionId: SESSION });
+  }
+  const url = snapshot.session.prUrl;
+  observed.facts["prUrl"] = url;
+  observed.facts["reason"] = reason();
+  observed.facts["waitedMs"] = Date.now() - started;
+  check(
+    "the settled build run's PR is recorded with no operator call",
+    url !== undefined,
+    url ??
+      `no PR after ${Date.now() - started}ms: ${reason() ?? "and no line saying why"}`,
+  );
+  if (url !== undefined) {
+    console.log(`pr       ${url}`);
+    return;
+  }
+  const said = reason();
+  console.log(
+    `error: ${said ?? "the settled run recorded no PR and said nothing"}`,
+  );
+  // The card carries the run's sentence too (C18), so a person reading the card sees why.
+  const thread =
+    TASK_ID === ""
+      ? []
+      : yield* client.listTaskComments({ taskId: TaskId.make(TASK_ID) });
+  const note = thread.find(
+    (comment) =>
+      comment.actor === SESSION && comment.body.startsWith(NOT_OPENED),
+  );
+  observed.facts["note"] = note;
+  check(
+    "a settled run that opened no PR says why in its transcript and on its card",
+    said !== undefined &&
+      note !== undefined &&
+      said.includes(note.body.slice(NOT_OPENED.length)),
+    `transcript=${said ?? "none"} card=${note?.body ?? "none"}`,
+  );
+});
+
 type Ledger = {
   readonly requests: ReadonlyArray<{
     readonly method: string;
@@ -160,7 +228,7 @@ const sectionOf = (body: string, heading: string): string => {
 
 const pr = Effect.gen(function* () {
   check(
-    "the browser showed a link (the PR path exists)",
+    "the settled run recorded a link (the PR path exists)",
     PR_URL !== "",
     PR_URL === "" ? "no link: see pr.txt for the reason" : PR_URL,
   );
@@ -259,11 +327,11 @@ const runScoped = <E>(
     ),
   );
 
-if (MODE !== "built" && MODE !== "pr") {
-  console.error("build.ts: MODE must be one of built, pr");
+if (MODE !== "built" && MODE !== "settled" && MODE !== "pr") {
+  console.error("build.ts: MODE must be one of built, settled, pr");
   process.exit(2);
 }
-await runScoped(MODE === "built" ? built : pr);
+await runScoped(MODE === "built" ? built : MODE === "settled" ? settled : pr);
 await mkdir(EVIDENCE_DIR, { recursive: true });
 await writeFile(
   path.join(EVIDENCE_DIR, `build-${MODE}.json`),
