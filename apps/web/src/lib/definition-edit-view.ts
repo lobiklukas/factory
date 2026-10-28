@@ -27,18 +27,32 @@ import { NONE } from "./board-settings-view";
  * diff says what the save will change — are unit cases rather than something only a screenshot shows.
  */
 
-/** One column of the draft: a stable key for the page, the base column it came from, and the column. */
+/**
+ * One column of the draft: a stable key for the page, the base column it came from, the column, and
+ * the column each of its moves points at, by key.
+ */
 export type DraftColumn = {
   readonly key: string;
   /** The pinned version's name for the column this one came from; absent for a column added here. */
   readonly origin?: string;
   readonly column: BoardColumn;
+  /**
+   * The draft key of the column each of `column.transitions` points at, in the same order, or
+   * `undefined` for a move to a name no column of the draft held. A move follows its column by key,
+   * never by name, so a rename typed through another column's name (`review` → `review_2` passing
+   * `review`) leaves every move pointing where it pointed; the move's `to` is that column's name.
+   */
+  readonly targets: ReadonlyArray<string | undefined>;
 };
 
-/** What the editor holds: the version's name, where a new card starts (`""` for none), its columns. */
+/**
+ * What the editor holds: the version's name, where a new card starts (`""` for none) and the key of
+ * that column (`undefined` for none, or a name no column holds), and its columns.
+ */
 export type DefinitionDraft = {
   readonly name: string;
   readonly initialColumn: string;
+  readonly initialKey: string | undefined;
   readonly columns: ReadonlyArray<DraftColumn>;
 };
 
@@ -60,16 +74,35 @@ export const materialize = (definition: BoardDefinition): BoardDefinition => {
   };
 };
 
+/** The key of the first column of the draft named `name`, or `undefined` when none is. */
+const keyNamed = (
+  columns: ReadonlyArray<{
+    readonly key: string;
+    readonly column: BoardColumn;
+  }>,
+  name: string,
+): string | undefined =>
+  columns.find((entry) => entry.column.name === name)?.key;
+
 /** The draft a pinned version opens as: its own columns, keyed in order, moves and initial spelled out. */
 export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
   const base = materialize(definition);
+  const keyed = base.columns.map((column, index) => ({
+    key: `c${index}`,
+    origin: column.name,
+    column,
+  }));
+  const initialColumn = base.initialColumn ?? "";
   return {
     name: base.name,
-    initialColumn: base.initialColumn ?? "",
-    columns: base.columns.map((column, index) => ({
-      key: `c${index}`,
-      origin: column.name,
-      column,
+    initialColumn,
+    initialKey:
+      initialColumn === "" ? undefined : keyNamed(keyed, initialColumn),
+    columns: keyed.map((entry) => ({
+      ...entry,
+      targets: (entry.column.transitions ?? []).map((move) =>
+        keyNamed(keyed, move.to),
+      ),
     })),
   };
 };
@@ -105,19 +138,25 @@ const replaceColumn = (
   ),
 });
 
-/** How many of the draft's columns carry `name`: a rename follows a name only while it is unique. */
-const named = (draft: DefinitionDraft, name: string): number =>
-  draft.columns.filter((entry) => entry.column.name === name).length;
-
 export const setName = (
   draft: DefinitionDraft,
   name: string,
 ): DefinitionDraft => ({ ...draft, name });
 
+/** Picks where a new card starts, by name (`""` for none); the pick follows that column's renames. */
 export const setInitialColumn = (
   draft: DefinitionDraft,
   initialColumn: string,
-): DefinitionDraft => ({ ...draft, initialColumn });
+): DefinitionDraft => ({
+  ...draft,
+  initialColumn,
+  initialKey:
+    initialColumn === ""
+      ? undefined
+      : draft.initialColumn === initialColumn && draft.initialKey !== undefined
+        ? draft.initialKey
+        : keyNamed(draft.columns, initialColumn),
+});
 
 /** The name a new column gets: `new_column`, then `new_column_2`, … — never one the draft holds. */
 export const newColumnName = (draft: DefinitionDraft): string => {
@@ -145,6 +184,7 @@ export const addColumn = (draft: DefinitionDraft): DefinitionDraft => {
       requires: [],
       transitions: [],
     },
+    targets: [],
   };
   const at = draft.columns.findIndex(
     (entry) => entry.column.kind === "terminal",
@@ -154,36 +194,52 @@ export const addColumn = (draft: DefinitionDraft): DefinitionDraft => {
   return { ...draft, columns };
 };
 
+/** One move of a column with the key of the column it points at: what every move edit works on. */
+type KeyedMove = {
+  readonly move: ColumnTransition;
+  readonly target: string | undefined;
+};
+
+const keyedMoves = (entry: DraftColumn): Array<KeyedMove> =>
+  (entry.column.transitions ?? []).map((move, at) => ({
+    move,
+    target: entry.targets[at],
+  }));
+
+/** The column with its moves replaced, `to` and `targets` written together so they never drift. */
+const withMoves = (
+  entry: DraftColumn,
+  moves: ReadonlyArray<KeyedMove>,
+): DraftColumn => ({
+  ...entry,
+  column: { ...entry.column, transitions: moves.map(({ move }) => move) },
+  targets: moves.map(({ target }) => target),
+});
+
 /**
  * Removes a column, and every move into it with it — a move to a column the version no longer
  * declares is one the server would refuse. The initial column, when it was this one, becomes none:
- * the person picks another rather than this page picking one for them.
+ * the person picks another rather than this page picking one for them. Moves and the initial column
+ * are matched by key, so a column that shares the removed one's name keeps the moves into it.
  */
 export const removeColumn = (
   draft: DefinitionDraft,
   key: string,
 ): DefinitionDraft => {
-  const removed = draft.columns.find((entry) => entry.key === key);
-  if (removed === undefined) return draft;
-  const name = removed.column.name;
-  const unique = named(draft, name) === 1;
+  if (!draft.columns.some((entry) => entry.key === key)) return draft;
+  const wasInitial = draft.initialKey === key;
   return {
     ...draft,
-    initialColumn:
-      unique && draft.initialColumn === name ? "" : draft.initialColumn,
+    initialColumn: wasInitial ? "" : draft.initialColumn,
+    initialKey: wasInitial ? undefined : draft.initialKey,
     columns: draft.columns
       .filter((entry) => entry.key !== key)
       .map((entry) =>
-        unique
-          ? {
-              ...entry,
-              column: {
-                ...entry.column,
-                transitions: (entry.column.transitions ?? []).filter(
-                  (move) => move.to !== name,
-                ),
-              },
-            }
+        entry.targets.includes(key)
+          ? withMoves(
+              entry,
+              keyedMoves(entry).filter(({ target }) => target !== key),
+            )
           : entry,
       ),
   };
@@ -207,39 +263,33 @@ export const moveColumn = (
 
 /**
  * Renames a column. Every move into it, and the initial column when it was this one, follow the new
- * name while the old one is the column's alone; a name two columns share (a duplicate the person is
- * typing their way out of) is left where it points, since which column it meant is not known.
+ * name — matched by the column's key, not its old name, so a name typed on the way that another
+ * column holds (`review` → `done_review` passes `done`) never re-points a move at that other column.
  */
 export const renameColumn = (
   draft: DefinitionDraft,
   key: string,
   name: string,
 ): DefinitionDraft => {
-  const entry = draft.columns.find((candidate) => candidate.key === key);
-  if (entry === undefined) return draft;
-  const old = entry.column.name;
-  const follow = named(draft, old) === 1;
+  if (!draft.columns.some((candidate) => candidate.key === key)) return draft;
   return {
     ...draft,
-    initialColumn:
-      follow && draft.initialColumn === old ? name : draft.initialColumn,
+    initialColumn: draft.initialKey === key ? name : draft.initialColumn,
     columns: draft.columns.map((candidate) => {
-      const column =
+      const renamed =
         candidate.key === key
-          ? { ...candidate.column, name }
-          : candidate.column;
-      return {
-        ...candidate,
-        column:
-          follow && column.transitions !== undefined
-            ? {
-                ...column,
-                transitions: column.transitions.map((move) =>
-                  move.to === old ? { ...move, to: name } : move,
-                ),
-              }
-            : column,
-      };
+          ? { ...candidate, column: { ...candidate.column, name } }
+          : candidate;
+      return renamed.targets.includes(key)
+        ? withMoves(
+            renamed,
+            keyedMoves(renamed).map((keyed) =>
+              keyed.target === key
+                ? { ...keyed, move: { ...keyed.move, to: name } }
+                : keyed,
+            ),
+          )
+        : renamed;
     }),
   };
 };
@@ -326,12 +376,13 @@ export const setRequirementDescription = (
 const replaceMoves = (
   draft: DefinitionDraft,
   key: string,
-  change: (moves: ReadonlyArray<ColumnTransition>) => Array<ColumnTransition>,
-): DefinitionDraft =>
-  replaceColumn(draft, key, (column) => ({
-    ...column,
-    transitions: change(column.transitions ?? []),
-  }));
+  change: (moves: Array<KeyedMove>) => Array<KeyedMove>,
+): DefinitionDraft => ({
+  ...draft,
+  columns: draft.columns.map((entry) =>
+    entry.key === key ? withMoves(entry, change(keyedMoves(entry))) : entry,
+  ),
+});
 
 /**
  * The columns a column's move `index` may point at: every other column of the draft that none of
@@ -374,7 +425,10 @@ export const addTransition = (
   )[0];
   return to === undefined
     ? draft
-    : replaceMoves(draft, key, (moves) => [...moves, { to }]);
+    : replaceMoves(draft, key, (moves) => [
+        ...moves,
+        { move: { to }, target: keyNamed(draft.columns, to) },
+      ]);
 };
 
 export const removeTransition = (
@@ -383,18 +437,38 @@ export const removeTransition = (
   index: number,
 ): DefinitionDraft =>
   replaceMoves(draft, key, (moves) =>
-    moves.filter((_move, at) => at !== index),
+    moves.filter((_keyed, at) => at !== index),
   );
 
+/**
+ * Points a move at the column named `to`. The move keeps the column it held when that one still
+ * carries the name; otherwise it points at the first column so named (a name two columns share is
+ * one the server refuses, so the person renames one of them before the save goes through).
+ */
 export const setTransitionTarget = (
   draft: DefinitionDraft,
   key: string,
   index: number,
   to: string,
-): DefinitionDraft =>
-  replaceMoves(draft, key, (moves) =>
-    moves.map((move, at) => (at === index ? { ...move, to } : move)),
+): DefinitionDraft => {
+  const holds = (target: string | undefined) =>
+    target !== undefined &&
+    draft.columns.some(
+      (entry) => entry.key === target && entry.column.name === to,
+    );
+  return replaceMoves(draft, key, (moves) =>
+    moves.map((keyed, at) =>
+      at === index
+        ? {
+            move: { ...keyed.move, to },
+            target: holds(keyed.target)
+              ? keyed.target
+              : keyNamed(draft.columns, to),
+          }
+        : keyed,
+    ),
   );
+};
 
 /**
  * Names the human gate a move crosses, or takes it away: a blank name is no gate, so the move is
@@ -407,10 +481,13 @@ export const setTransitionGate = (
   gate: string,
 ): DefinitionDraft =>
   replaceMoves(draft, key, (moves) =>
-    moves.map((move, at) => {
-      if (at !== index) return move;
-      const { gate: _gate, ...rest } = move;
-      return gate.trim() === "" ? rest : { ...rest, gate };
+    moves.map((keyed, at) => {
+      if (at !== index) return keyed;
+      const { gate: _gate, ...rest } = keyed.move;
+      return {
+        ...keyed,
+        move: gate.trim() === "" ? rest : { ...rest, gate },
+      };
     }),
   );
 
@@ -508,11 +585,19 @@ const COLUMN_FIELDS: ReadonlySet<string> = new Set([
   "transitions",
 ]);
 
-/** The changes inside one column the draft kept, `renamed` mapping the base's names to the draft's. */
+/**
+ * A move in the diff: the column it points at as an identity (`id`) and the move as shown. The id is
+ * the target's draft key — for a base move, the key of the draft column that came from its target —
+ * so two moves are the same move only when they point at the same column, whatever it is named now.
+ */
+type DiffMove = { readonly id: string; readonly move: ColumnTransition };
+
+/** The changes inside one column the draft kept, its base and draft moves given by target identity. */
 const columnDiff = (
   before: BoardColumn,
   after: BoardColumn,
-  renamed: (name: string) => string,
+  beforeMoves: ReadonlyArray<DiffMove>,
+  afterMoves: ReadonlyArray<DiffMove>,
 ): Array<DiffLine> => {
   const lines: Array<DiffLine> = [];
   const at = `"${after.name}"`;
@@ -547,35 +632,38 @@ const columnDiff = (
   for (const requirement of after.requires)
     if (!before.requires.some((candidate) => candidate.key === requirement.key))
       lines.push({ sign: "+", text: `${at} requires ${requirement.key}` });
-  const beforeMoves = (before.transitions ?? []).map((move) => ({
-    ...move,
-    to: renamed(move.to),
-  }));
-  const afterMoves = after.transitions ?? [];
-  for (const move of beforeMoves) {
-    const kept = afterMoves.find((candidate) => candidate.to === move.to);
+  for (const { id, move } of beforeMoves) {
+    const kept = afterMoves.find((candidate) => candidate.id === id)?.move;
     if (kept === undefined)
       lines.push({ sign: "-", text: `${at} ${moveText(move)}` });
     else if (kept.gate !== move.gate)
       lines.push({
         sign: "~",
-        text: `${at} move to "${move.to}": gate ${shown(move.gate)} → ${shown(kept.gate)}`,
+        text: `${at} move to "${kept.to}": gate ${shown(move.gate)} → ${shown(kept.gate)}`,
       });
   }
-  for (const move of afterMoves)
-    if (!beforeMoves.some((candidate) => candidate.to === move.to))
+  for (const { id, move } of afterMoves)
+    if (!beforeMoves.some((candidate) => candidate.id === id))
       lines.push({ sign: "+", text: `${at} ${moveText(move)}` });
-  const keptTargets = afterMoves
-    .map((move) => move.to)
-    .filter((to) => beforeMoves.some((move) => move.to === to));
-  const wasOrder = beforeMoves
-    .map((move) => move.to)
-    .filter((to) => keptTargets.includes(to));
-  if (!sameValue(wasOrder, keptTargets))
+  const keptMoves = afterMoves.filter(({ id }) =>
+    beforeMoves.some((move) => move.id === id),
+  );
+  const wasMoves = beforeMoves.filter(({ id }) =>
+    keptMoves.some((move) => move.id === id),
+  );
+  if (
+    !sameValue(
+      wasMoves.map(({ id }) => id),
+      keptMoves.map(({ id }) => id),
+    )
+  ) {
+    const now = (id: string) =>
+      keptMoves.find((move) => move.id === id)?.move.to ?? id;
     lines.push({
       sign: "~",
-      text: `${at} moves reordered: ${wasOrder.join(", ")} → ${keptTargets.join(", ")}`,
+      text: `${at} moves reordered: ${wasMoves.map(({ id }) => now(id)).join(", ")} → ${keptMoves.map(({ move }) => move.to).join(", ")}`,
     });
+  }
   // Every other field — a WIP limit, a field this editor has no control for — compared as declared.
   const others = [
     ...new Set([...Object.keys(before), ...Object.keys(after)]),
@@ -596,7 +684,9 @@ const columnDiff = (
  * What saving the draft would change against the board's pinned version, line by line: the name,
  * the initial column, columns added, removed, renamed and reordered, and inside each column its
  * kind, role, skills, requirements, moves and gates, and any other field. Columns are matched by
- * where they came from, not by name, so a rename is one line rather than a removal and an addition.
+ * where they came from, not by name, so a rename is one line rather than a removal and an addition;
+ * moves and the initial column are matched by the column they point at, so a removed column's name
+ * taken by a rename reads as the move removed, not as the move kept.
  * Empty when the draft declares exactly what the pinned version does — the save would add nothing.
  */
 export const definitionDiff = (
@@ -610,20 +700,43 @@ export const definitionDiff = (
       sign: "~",
       text: `name: ${shown(base.name)} → ${shown(draft.name)}`,
     });
-  const renames = new Map(
+  // A column's identity: the draft key of what it became, `removed:` for a base column the draft
+  // dropped, and `name:` for a name no column holds (a move a version read without checks points at).
+  const fromBase = new Map(
     draft.columns.flatMap((entry) =>
-      entry.origin === undefined
-        ? []
-        : [[entry.origin, entry.column.name] as const],
+      entry.origin === undefined ? [] : [[entry.origin, entry.key] as const],
     ),
   );
-  const renamed = (name: string) => renames.get(name) ?? name;
+  const baseId = (name: string): string =>
+    fromBase.get(name) ??
+    (base.columns.some((column) => column.name === name)
+      ? `removed:${name}`
+      : `name:${name}`);
+  const draftId = (target: string | undefined, name: string): string =>
+    target ?? `name:${name}`;
   const wasInitial = base.initialColumn ?? "";
-  if (renamed(wasInitial) !== draft.initialColumn)
+  const initialChanged =
+    wasInitial === "" || draft.initialColumn === ""
+      ? wasInitial !== draft.initialColumn
+      : baseId(wasInitial) !== draftId(draft.initialKey, draft.initialColumn);
+  if (initialChanged) {
+    // The same name for another column (a rename took a removed column's name) says which it is.
+    const nowOrigin = draft.columns.find(
+      (entry) => entry.key === draft.initialKey,
+    )?.origin;
+    const which =
+      draft.initialColumn === wasInitial &&
+      nowOrigin !== undefined &&
+      nowOrigin !== draft.initialColumn
+        ? ` (the column renamed from "${nowOrigin}")`
+        : draft.initialColumn === wasInitial && nowOrigin === undefined
+          ? " (a column added here)"
+          : "";
     lines.push({
       sign: "~",
-      text: `new cards start in: ${wasInitial === "" ? NONE : wasInitial} → ${draft.initialColumn === "" ? NONE : draft.initialColumn}`,
+      text: `new cards start in: ${wasInitial === "" ? NONE : wasInitial} → ${draft.initialColumn === "" ? NONE : draft.initialColumn}${which}`,
     });
+  }
   for (const column of base.columns)
     if (!draft.columns.some((entry) => entry.origin === column.name))
       lines.push({ sign: "-", text: `column "${column.name}"` });
@@ -639,16 +752,34 @@ export const definitionDiff = (
         sign: "~",
         text: `column "${before.name}" renamed to "${entry.column.name}"`,
       });
-    lines.push(...columnDiff(before, entry.column, renamed));
+    lines.push(
+      ...columnDiff(
+        before,
+        entry.column,
+        (before.transitions ?? []).map((move) => ({
+          id: baseId(move.to),
+          move: {
+            ...move,
+            to:
+              draft.columns.find(
+                (candidate) => candidate.key === fromBase.get(move.to),
+              )?.column.name ?? move.to,
+          },
+        })),
+        keyedMoves(entry).map(({ move, target }) => ({
+          id: draftId(target, move.to),
+          move,
+        })),
+      ),
+    );
   }
   const keptOrder = draft.columns
     .filter((entry) => entry.origin !== undefined)
     .map((entry) => entry.column.name);
-  const wasOrder = base.columns
-    .filter((column) =>
-      draft.columns.some((entry) => entry.origin === column.name),
-    )
-    .map((column) => renamed(column.name));
+  const wasOrder = base.columns.flatMap((column) => {
+    const kept = draft.columns.find((entry) => entry.origin === column.name);
+    return kept === undefined ? [] : [kept.column.name];
+  });
   if (!sameValue(wasOrder, keptOrder))
     lines.push({
       sign: "~",
@@ -788,3 +919,23 @@ export const savedNotice = (
     : outcome === "validated"
       ? `v${version} would be created.`
       : `v${version} created. This board stays pinned to v${pinned} until it is upgraded; a board created now pins v${version}.`;
+
+/**
+ * What the editor says when the definition has versions newer than the board's pin, or `null` when
+ * the pin is the newest. The draft starts from the pin and `defineBoard` writes newest + 1, so a save
+ * supersedes the newer versions without what they changed — said before the person edits, not after.
+ */
+export const supersedeNotice = (
+  definitionId: string,
+  pinned: number,
+  newer: ReadonlyArray<number>,
+): string | null => {
+  const newest = newer.at(-1);
+  if (newest === undefined) return null;
+  const exists =
+    newer.length === 1
+      ? `v${newest} of ${definitionId} already exists`
+      : `v${newer[0]}–v${newest} of ${definitionId} already exist`;
+  const their = newer.length === 1 ? "its changes" : "their changes";
+  return `${exists}, and this draft starts from v${pinned}, the board's pin. Saving writes v${newest + 1} as v${pinned} plus these edits, without ${their}.`;
+};

@@ -34,6 +34,7 @@ import {
   setTransitionGate,
   setTransitionTarget,
   skillOptions,
+  supersedeNotice,
   targetOptions,
   type DefinitionDraft,
 } from "./definition-edit-view";
@@ -196,6 +197,90 @@ describe("editing columns", () => {
     expect(columnOf(draft, "todo").transitions).toEqual([
       { to: "doing" },
       { to: "canceled" },
+    ]);
+  });
+
+  /** Types `name` into column `key` one keystroke at a time, from its current name. */
+  const typeName = (
+    start: DefinitionDraft,
+    key: string,
+    steps: ReadonlyArray<string>,
+  ): DefinitionDraft =>
+    steps.reduce((draft, name) => renameColumn(draft, key, name), start);
+
+  /** Mutation: follow moves by name — passing `review` points `todo`'s move at the real `review`. */
+  it("keeps moves on the renamed column while a name typed on the way is another column's", () => {
+    const pinned: BoardDefinition = {
+      ...PINNED,
+      columns: [
+        column("todo", "resting", [{ to: "review_2" }, { to: "review" }]),
+        column("review", "working", [{ to: "done" }]),
+        column("review_2", "working", [{ to: "done" }]),
+        column("done", "terminal", []),
+      ],
+    };
+    const start = draftOf(pinned);
+    const draft = typeName(start, keyOf(start, "review_2"), [
+      "review_",
+      "review",
+      "review_",
+      "review_b",
+    ]);
+    expect(defineInputOf(pinned, draft).columns[0]?.transitions).toEqual([
+      { to: "review_b" },
+      { to: "review" },
+    ]);
+    expect(definitionDiff(pinned, draft)).toEqual([
+      { sign: "~", text: 'column "review_2" renamed to "review_b"' },
+    ]);
+  });
+
+  /** Mutation: as above, for the initial column and a move a column makes back to itself's twin. */
+  it("keeps moves and the initial column on a column renamed through a later column's name", () => {
+    const pinned: BoardDefinition = {
+      ...PINNED,
+      initialColumn: "specifying",
+      columns: [
+        column("intake", "resting", [{ to: "specifying" }]),
+        column("specifying", "working", [{ to: "planning" }]),
+        column("planning", "working", [{ to: "specifying" }, { to: "done" }]),
+        column("done", "terminal", []),
+      ],
+    };
+    const start = draftOf(pinned);
+    const draft = typeName(
+      start,
+      keyOf(start, "specifying"),
+      [..."planning_s"].map((_letter, at) => "planning_s".slice(0, at + 1)),
+    );
+    const sent = defineInputOf(pinned, draft);
+    expect(sent.initialColumn).toBe("planning_s");
+    expect(sent.columns.map((entry) => entry.transitions)).toEqual([
+      [{ to: "planning_s" }],
+      [{ to: "planning" }],
+      [{ to: "planning_s" }, { to: "done" }],
+      [],
+    ]);
+    // Removing the real `planning` now takes only the moves into it, not the renamed column's.
+    const removed = removeColumn(draft, keyOf(draft, "planning"));
+    expect(columnOf(removed, "intake").transitions).toEqual([
+      { to: "planning_s" },
+    ]);
+    expect(columnOf(removed, "planning_s").transitions).toEqual([]);
+    expect(removed.initialColumn).toBe("planning_s");
+  });
+
+  /** Mutation: re-point a move at the first column of a shared name though its own still holds it. */
+  it("keeps a move's column when its target is re-picked under a name two columns share", () => {
+    let draft = draftOf(PINNED);
+    const canceled = keyOf(draft, "canceled");
+    draft = renameColumn(draft, keyOf(draft, "done"), "canceled");
+    // doing's second move pointed at the real `canceled`; picking `canceled` again keeps it there.
+    draft = setTransitionTarget(draft, keyOf(draft, "doing"), 1, "canceled");
+    draft = renameColumn(draft, canceled, "dropped");
+    expect(columnOf(draft, "doing").transitions).toEqual([
+      { to: "canceled", gate: "sign-off" },
+      { to: "dropped" },
     ]);
   });
 
@@ -411,6 +496,33 @@ describe("definitionDiff", () => {
     ]);
   });
 
+  /** Mutation: map base moves through the draft's names — a removed `qa` and a renamed one match. */
+  it("says a move into a removed column is removed when a rename takes the column's name", () => {
+    const pinned: BoardDefinition = {
+      ...PINNED,
+      initialColumn: "qa",
+      columns: [
+        column("todo", "resting", [{ to: "qa" }, { to: "review" }]),
+        column("qa", "working", [{ to: "done" }]),
+        column("review", "working", [{ to: "done" }]),
+        column("done", "terminal", []),
+      ],
+    };
+    let draft = draftOf(pinned);
+    draft = removeColumn(draft, keyOf(draft, "qa"));
+    draft = renameColumn(draft, keyOf(draft, "review"), "qa");
+    draft = setInitialColumn(draft, "qa");
+    expect(definitionDiff(pinned, draft)).toEqual([
+      {
+        sign: "~",
+        text: 'new cards start in: qa → qa (the column renamed from "review")',
+      },
+      { sign: "-", text: 'column "qa"' },
+      { sign: "-", text: '"todo" move to "qa"' },
+      { sign: "~", text: 'column "review" renamed to "qa"' },
+    ]);
+  });
+
   it("names a change of initial column", () => {
     expect(
       definitionDiff(PINNED, setInitialColumn(draftOf(PINNED), "doing")),
@@ -500,6 +612,17 @@ describe("defineRefusal and savedNotice", () => {
       message: "connection reset",
       faults: [],
     });
+  });
+
+  /** Mutation: stay silent about newer versions — a save from v1 over v3 would drop v2 and v3. */
+  it("says a save from the pin supersedes newer versions without their changes", () => {
+    expect(supersedeNotice("edited", 3, [])).toBeNull();
+    expect(supersedeNotice("edited", 1, [2])).toBe(
+      "v2 of edited already exists, and this draft starts from v1, the board's pin. Saving writes v3 as v1 plus these edits, without its changes.",
+    );
+    expect(supersedeNotice("edited", 1, [2, 3])).toBe(
+      "v2–v3 of edited already exist, and this draft starts from v1, the board's pin. Saving writes v4 as v1 plus these edits, without their changes.",
+    );
   });
 
   /** Mutation: say the board moved to the new version — it stays on its pin until upgraded (B2). */

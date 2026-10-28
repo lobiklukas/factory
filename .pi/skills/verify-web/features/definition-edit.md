@@ -23,7 +23,8 @@ the page says "v<n> created", and the board stays pinned to its version until it
   sent back as it came. A legacy version (default v1–3) opens with its moves and initial column
   spelled out, as its cards meet them, and the diff does not count that as a change.
 - A rename carries the moves into the column and the initial column with it. Removing a column drops
-  the moves into it. **Add a column** (`[data-add-column]`) puts `new_column` (working, no moves)
+  the moves into it. Both match moves by the target column's draft key, not its name, so a name typed
+  on the way that another column holds (`doing` → `todo_x` passes `todo`) never re-points a move. **Add a column** (`[data-add-column]`) puts `new_column` (working, no moves)
   before the first terminal column.
 - Pickers, never free text: `[data-skill-picker]` is a `<select>` of the library's names the column
   does not bind, and `[data-requires-picker]` a `<select>` of the vocabulary's keys the column does
@@ -31,12 +32,16 @@ the page says "v<n> created", and the board stays pinned to its version until it
   typed. So is a gate's name (`[data-move-gate]`); left blank, the move has no gate. A move's target
   (`[data-move-to]`) is a select of the other columns.
 - `[data-definition-diff]` lists `+`/`-`/`~` lines (`[data-diff-line]`) against the pinned version.
-  Columns are matched by where they came from, so a rename is one line. `[data-definition-diff-empty]`
+  Columns are matched by where they came from, so a rename is one line; moves by the column they
+  point at, so a removed column's name taken by a rename still reads as the move into it removed. `[data-definition-diff-empty]`
   and a disabled **Save** (`[data-definition-save]`) show when there is nothing to change.
 - A refusal is the server's. `InvalidDefinition` puts each fault next to the field it names
   (`[data-field-fault=<path>]`, in `[data-fault-slot]`). The fault's column index is read against the
   columns as they were sent, so a reorder after the refusal keeps each fault on its column. A fault
   no field holds is listed in the banner (`[data-define-refusal]`). A save that answers clears it.
+- When the definition holds versions newer than the pin (`listDefinitions`), the header says so
+  (`[data-editor-newer-versions=<list>]`): the draft starts from the pin and the save writes newest +
+  1, so it supersedes those versions without their changes.
 - Saved: `[data-definition-saved="created"][data-saved-version=<n>]` reads "v<n> created. This board
   stays pinned to v<pinned> until it is upgraded; a board created now pins v<n>." Saving content the
   newest version already holds writes nothing (`unchanged`). The definition list re-reads
@@ -68,16 +73,19 @@ the RPC, never the page, for the oracle. It requires:
 5. Save to read "v2 created" and that the board stays pinned to v1. `listDefinitions` must hold
    `[1, 2]`, and v2's columns must be the draft's, with doing's WIP limit 2, its role and skill, and
    the caps `{ board: 3 }` kept. `getBoard` must still pin v1;
-6. a second Save of the same draft to answer `unchanged` and write nothing;
-7. the settings page to read v1 and say v2 exists, the editor of a missing board to read
+6. the editor, once v2 exists, to say a save from v1 writes v3 without v2's changes;
+7. a second Save of the same draft to answer `unchanged` and write nothing;
+8. doing renamed key by key to `todo_x`, passing `todo`, to leave todo's move on it: the diff holds
+   the rename and no change to todo's moves;
+9. the settings page to read v1 and say v2 exists, the editor of a missing board to read
    `No such board`, and no console error.
 
 Evidence goes to `.verify/evidence/latest/definition-edit/`: `definition-edit-open.png`, `-refused.png`
-(the inline fault), `-diff.png`, `-saved.png`, `-settings.png`, `observed.json` (the vocabulary, the
+(the inline fault), `-diff.png`, `-saved.png`, `-typed.png`, `-settings.png`, `observed.json` (the vocabulary, the
 pickers' options, the diff, v2 as the RPC answers it, every check), `api.log`, `web.log`.
 
 ## Last run
 
-2026-10-28 from the `agent/D6` worktree, API `:9512` / web `:3512`: **18/18** passed.
+2026-10-28 from the `agent/D6` worktree, API `:9512` / web `:3512`: **20/20** passed.
 `board-settings.sh` re-passed there (API `:9513` / web `:3513`) once the board page's getting-started
 reads (C9) joined its shell-read allowlist.

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { useAtomSet } from "@effect/atom-react";
+import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
 import { Cause, Exit, Option } from "effect";
 import {
   ArrowDownIcon,
@@ -19,8 +20,9 @@ import type {
   DefinitionFault,
   DefinitionVocabulary,
 } from "@repo/domain/Task";
+import { definitionsAtom } from "@/lib/atoms/board-atom";
 import { defineBoardAtom } from "@/lib/atoms/definition-edit-atom";
-import { NONE } from "@/lib/board-settings-view";
+import { NONE, newerVersions } from "@/lib/board-settings-view";
 import {
   addColumn,
   addRequirement,
@@ -49,6 +51,7 @@ import {
   setTransitionGate,
   setTransitionTarget,
   skillOptions,
+  supersedeNotice,
   targetOptions,
   type DefineRefusal,
   type DefinitionDraft,
@@ -499,6 +502,38 @@ const ColumnEditor = ({
   );
 };
 
+/**
+ * Whether the definition has versions newer than the board's pin (B2), from `listDefinitions`: the
+ * draft starts from the pin and the save writes newest + 1, so a newer version's changes are not in
+ * what the save writes. A failed list says it could not tell rather than claiming the pin is newest.
+ */
+const NewerThanPin = ({ pinned }: { readonly pinned: BoardDefinition }) => {
+  const result = useAtomValue(definitionsAtom);
+  if (AsyncResult.isInitial(result)) return null;
+  if (AsyncResult.isFailure(result))
+    return (
+      <p
+        data-editor-newer-unknown
+        title={Cause.pretty(result.cause)}
+        className="max-w-3xl text-[11px] text-destructive"
+      >
+        Whether a version of {pinned.id} newer than v{pinned.version} exists
+        could not be read; saving writes the newest version + 1.
+      </p>
+    );
+  const newer = newerVersions(result.value, pinned.id, pinned.version);
+  const notice = supersedeNotice(pinned.id, pinned.version, newer);
+  return notice === null ? null : (
+    <p
+      role="status"
+      data-editor-newer-versions={newer.join(",")}
+      className="max-w-3xl border border-border bg-muted/40 px-3 py-2 text-xs"
+    >
+      {notice}
+    </p>
+  );
+};
+
 /** The last refused save: the refusal, the column keys it was sent with, and the draft it was. */
 type Refused = {
   readonly refusal: DefineRefusal;
@@ -604,6 +639,7 @@ export const DefinitionEditor = ({
           and a board created after the save pins the new version. Skills and
           requirement keys are picked from what the server holds.
         </p>
+        <NewerThanPin pinned={pinned} />
         <div className="grid max-w-3xl gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1">
             <Label htmlFor="definition-name" className="text-[11px]">

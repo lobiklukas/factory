@@ -18,7 +18,11 @@
 //             (the oracle, never the page) `listDefinitions` holds v1 and v2, v2's columns are the
 //             draft's — with doing's WIP limit and the version's caps kept though the editor has no
 //             control for them — and the board is still pinned to v1
+//   newer     once v2 exists the editor, still on the pin v1, says a save writes v3 from v1 without
+//             v2's changes
 //   again     a second Save of the same draft writes nothing: the page says v2 already holds it
+//   typed     doing renamed key by key to `todo_x`, passing `todo`: the diff is the rename alone —
+//             todo's move into doing follows doing, never the real todo it shared a name with
 //   settings  the board's settings page still reads v1 and says v2 exists
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR.
@@ -344,6 +348,18 @@ try {
   );
   await shot("saved");
 
+  // --- newer -------------------------------------------------------------------------------------
+  const superseding = page.locator("[data-editor-newer-versions]");
+  await superseding.waitFor({ timeout: 15_000 });
+  const supersedingText = (await superseding.textContent())?.trim() ?? "";
+  assert(
+    "the editor, still on v1, says v2 exists and a save writes v3 without v2's changes",
+    (await superseding.getAttribute("data-editor-newer-versions")) === "2" &&
+      supersedingText.includes("this draft starts from v1") &&
+      supersedingText.includes("Saving writes v3"),
+    supersedingText,
+  );
+
   const versions = await versionsOf(DEFINITION_ID);
   assert(
     "listDefinitions holds version N+1",
@@ -400,6 +416,31 @@ try {
         JSON.stringify([1, 2]),
     (await unchanged.textContent())?.trim() ?? "",
   );
+
+  // --- typed -------------------------------------------------------------------------------------
+  const doingName = page.locator(
+    "[data-editor-column-origin='doing'] [data-column-name-input]",
+  );
+  await doingName.fill("");
+  await doingName.pressSequentially("todo_x");
+  const typedDiff = await page.$$eval("[data-diff-line]", (nodes) =>
+    nodes.map((node) => node.textContent?.trim() ?? ""),
+  );
+  const todoMoves = await page.$$eval(
+    "[data-editor-column-origin='todo'] [data-column-move]",
+    (nodes) => nodes.map((node) => node.getAttribute("data-column-move")),
+  );
+  observed.typedDiff = typedDiff;
+  assert(
+    "a rename typed through another column's name keeps the moves on the renamed column",
+    JSON.stringify(todoMoves) === JSON.stringify(["todo_x", "canceled"]) &&
+      typedDiff.some((line) =>
+        line.includes('column "doing" renamed to "todo_x"'),
+      ) &&
+      !typedDiff.some((line) => line.includes('"todo" move to')),
+    JSON.stringify({ todoMoves, typedDiff }),
+  );
+  await shot("typed");
 
   // --- settings ----------------------------------------------------------------------------------
   await page.locator("[data-editor-settings-link]").click();
