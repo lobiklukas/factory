@@ -13,6 +13,7 @@ import {
   AlreadyBlocked,
   AttentionItem,
   BlockTaskInput,
+  BoardConfig,
   BoardInstance,
   BoardExists,
   BoardNotFound,
@@ -20,14 +21,19 @@ import {
   CommentTaskInput,
   CreateBoardInput,
   CreateTaskInput,
+  DefinitionConfig,
   DefinitionNotFound,
+  DefinitionSummary,
   EmptyComment,
+  GetBoardConfigInput,
   GetBoardInput,
+  GetDefinitionInput,
   GetTaskInput,
   GetTaskSpecInput,
   HumanGateRequired,
   ListAttentionInput,
   ListBoardsInput,
+  ListDefinitionsInput,
   ListTaskCommentsInput,
   ListTaskRunsInput,
   ListTasksInput,
@@ -282,6 +288,27 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("createBoard", {
     payload: CreateBoardInput,
     success: BoardInstance,
+    error: TaskErrorSchema,
+  }),
+  // Which definitions exist and the versions each holds (LOB-270): what `createBoard` can name.
+  Rpc.make("listDefinitions", {
+    payload: ListDefinitionsInput,
+    success: Schema.Array(DefinitionSummary),
+    error: TaskErrorSchema,
+  }),
+  // One definition version described (LOB-270): each column's exits and human gates, its
+  // requirements marked checked or not, and its role's model as this deployment resolves it.
+  // An unknown id or version is `DefinitionNotFound`.
+  Rpc.make("getDefinition", {
+    payload: GetDefinitionInput,
+    success: DefinitionConfig,
+    error: TaskErrorSchema,
+  }),
+  // A board's full configuration (LOB-270): `getBoard`'s instance with its pinned version described
+  // as `getDefinition` describes it, in one read.
+  Rpc.make("getBoardConfig", {
+    payload: GetBoardConfigInput,
+    success: BoardConfig,
     error: TaskErrorSchema,
   }),
   Rpc.make("createTask", {

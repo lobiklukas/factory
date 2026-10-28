@@ -723,6 +723,122 @@ describe("TaskService — creating a board (LOB-208)", () => {
 });
 
 /**
+ * Reading definitions (LOB-270): which exist, and one version's columns. The database is shared with
+ * every other case (and every other run), so the cases make a definition of their own wherever "every
+ * version" or "the newest" has to be a claim the case controls, and read `default` against the rows
+ * themselves.
+ */
+describe("TaskService — reading definitions (LOB-270)", () => {
+  /** A definition of the case's own, one row per version, each with the default v1 columns. */
+  const newDefinition = (versions: ReadonlyArray<number>) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const id = `lst${hex(4)}`;
+        for (const version of versions) {
+          yield* sql`
+            INSERT INTO board_definitions (id, version, name, columns)
+            SELECT ${id}, ${version}, ${`Listed v${version}`}, columns
+            FROM board_definitions WHERE id = 'default' AND version = 1
+          `;
+        }
+        return DefinitionId.make(id);
+      }),
+    );
+
+  /** The default definition's versions straight from the rows: the oracle the list is read against. */
+  const defaultVersions = () =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ version: number }>`
+          SELECT version FROM board_definitions WHERE id = 'default' ORDER BY version
+        `;
+        return rows.map((row) => row.version);
+      }),
+    );
+
+  /**
+   * Mutation: group by name instead of id, or keep only each id's first row — the definition made
+   * here does not list `[1, 2, 3]`. Mutation: order by version descending — its versions read newest
+   * first.
+   */
+  it("lists every definition once, ordered by id, with each version oldest first", async () => {
+    const made = await newDefinition([2, 1, 3]);
+    const listed = await withService((s) => s.listDefinitions);
+
+    const ids = listed.map((definition) => definition.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([...ids].sort());
+
+    const mine = listed.find((definition) => definition.id === made);
+    expect(mine?.versions.map((version) => version.version)).toEqual([1, 2, 3]);
+    expect(mine?.versions.map((version) => version.name)).toEqual([
+      "Listed v1",
+      "Listed v2",
+      "Listed v3",
+    ]);
+
+    // The seeded pipeline: v1–v3 at least, and every version a later migration adds.
+    const seeded = listed.find(
+      (definition) => definition.id === DEFAULT_DEFINITION_ID,
+    );
+    const versions = seeded?.versions.map((version) => version.version);
+    expect(versions?.slice(0, 3)).toEqual([1, 2, 3]);
+    expect(versions).toEqual(await defaultVersions());
+  });
+
+  /** Mutation: drop the `ORDER BY version DESC` — the definition made with [1, 3, 2] answers 1. */
+  it("reads the version named, and the newest when none is", async () => {
+    const made = await newDefinition([1, 3, 2]);
+    const newest = await withService((s) => s.getDefinition(made));
+    expect(newest.id).toBe(made);
+    expect(newest.version).toBe(3);
+    expect(newest.name).toBe("Listed v3");
+    expect(newest.columns.map((column) => column.name)).toEqual([
+      "intake",
+      "specifying",
+      "planning",
+      "building",
+      "review",
+      "done",
+      "canceled",
+    ]);
+
+    const named = await withService((s) => s.getDefinition(made, 2));
+    expect(named.version).toBe(2);
+    expect(named.name).toBe("Listed v2");
+
+    const v3 = await withService((s) =>
+      s.getDefinition(DEFAULT_DEFINITION_ID, 3),
+    );
+    expect(
+      v3.columns
+        .find((column) => column.name === "review")
+        ?.requires.map((requirement) => requirement.key),
+    ).toContain(VERIFIED_REQUIREMENT);
+  });
+
+  /** The refusal is `createBoard`'s, in the same words. */
+  it("refuses an unknown id, and a version the definition lacks, as DefinitionNotFound", async () => {
+    const missing = `missing${hex(4)}`;
+    const unknown = await refusal((s) => s.getDefinition(missing));
+    expect(unknown._tag).toBe("DefinitionNotFound");
+    if (unknown._tag !== "DefinitionNotFound") throw new Error("unreachable");
+    expect(unknown.definitionId).toBe(missing);
+    expect(unknown.version).toBeUndefined();
+    expect(unknown.message).toBe(`no board definition ${missing}`);
+
+    const made = await newDefinition([1]);
+    const noVersion = await refusal((s) => s.getDefinition(made, 2));
+    expect(noVersion._tag).toBe("DefinitionNotFound");
+    if (noVersion._tag !== "DefinitionNotFound") throw new Error("unreachable");
+    expect(noVersion.version).toBe(2);
+    expect(noVersion.message).toBe(`board definition ${made} has no version 2`);
+  });
+});
+
+/**
  * The thread on a card (B7, LOB-73): a run's question, a person's answer, and every refusal on the
  * way — each refusal checked against the event count, because a refused ask that left a comment
  * behind would be a question nobody can tell was never asked.

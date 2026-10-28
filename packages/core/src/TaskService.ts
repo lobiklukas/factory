@@ -3,7 +3,8 @@
  * the thread on each card — a run's question, a person's answer, a note (B7, LOB-73) — and the spec
  * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
- * exist before any card and this service is the one that reads it back for every card.
+ * exist before any card and this service is the one that reads it back for every card; so are the
+ * definitions they bind (`listDefinitions`, `getDefinition`, LOB-270), which only migrations write.
  *
  * Cards are rows (B3). Every mutation runs in one transaction that locks the task row, checks the
  * caller's expected `revision`, checks the declared transition and any human gate, writes the task
@@ -62,10 +63,12 @@ import type { SqlError } from "effect/sql/SqlError";
 import {
   AttentionItem,
   BoardColumn,
+  BoardDefinition,
   BoardInstance,
   BoardInstanceId,
   BoardView,
   type CreateBoardInput,
+  DefinitionSummary,
   GATED_COLUMNS,
   gatedExit,
   LIST_BOARDS_LIMIT,
@@ -316,6 +319,19 @@ export type TaskServiceShape = {
   readonly createBoard: (
     input: CreateBoardInput,
   ) => Effect.Effect<BoardInstance, TaskError>;
+  /** Every definition, ordered by id, with its versions oldest first (LOB-270). */
+  readonly listDefinitions: Effect.Effect<
+    ReadonlyArray<DefinitionSummary>,
+    TaskError
+  >;
+  /**
+   * One definition version as its row declares it (LOB-270): the one named, or by default the
+   * newest — the version `createBoard` would pin. An unknown id or version is `DefinitionNotFound`.
+   */
+  readonly getDefinition: (
+    definitionId: string,
+    version?: number,
+  ) => Effect.Effect<BoardDefinition, TaskError>;
   readonly create: (input: CreateTaskInput) => Effect.Effect<Task, TaskError>;
   readonly get: (taskId: string) => Effect.Effect<Task, TaskError>;
   readonly list: (
@@ -454,6 +470,26 @@ export const TaskServiceLive = Layer.effect(
     const decodeTask = Schema.decodeUnknownEffect(Task);
     const decodeBoard = Schema.decodeUnknownEffect(BoardView);
     const decodeInstance = Schema.decodeUnknownEffect(BoardInstance);
+    const decodeDefinition = Schema.decodeUnknownEffect(BoardDefinition);
+    const decodeDefinitions = Schema.decodeUnknownEffect(
+      Schema.Array(DefinitionSummary),
+    );
+    const decodeColumnsJson = Schema.decodeEffect(
+      Schema.fromJsonString(Schema.Array(BoardColumn)),
+    );
+    /**
+     * A definition row's column set. `board_definitions.columns` is unconstrained JSONB (0007), so a
+     * set `BoardColumn` rejects is a storage fault naming the row, not a column set to guess at.
+     */
+    const readColumns = (text: string, what: string) =>
+      decodeColumnsJson(text).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TaskStorageError({
+              message: `${what} holds an invalid column set: ${String(cause)}`,
+            }),
+        ),
+      );
     const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(TaskEvent));
 
     const toInstance = (
@@ -598,16 +634,7 @@ export const TaskServiceLive = Layer.effect(
               message: `no board ${boardId}`,
             });
           }
-          const columns = yield* Schema.decodeEffect(
-            Schema.fromJsonString(Schema.Array(BoardColumn)),
-          )(row.columns).pipe(
-            Effect.mapError(
-              (cause) =>
-                new TaskStorageError({
-                  message: `board ${boardId} holds an invalid column set: ${String(cause)}`,
-                }),
-            ),
-          );
+          const columns = yield* readColumns(row.columns, `board ${boardId}`);
           return yield* decodeBoard({
             instance: {
               id: boardId,
@@ -724,6 +751,115 @@ export const TaskServiceLive = Layer.effect(
             return yield* toInstance(row);
           }),
         ),
+      );
+
+    /**
+     * Every definition and its versions (LOB-270), from the rows' own columns — never their column
+     * sets, which the list does not answer. Ordered by id (byte order, so the answer does not depend
+     * on the server's collation), then version, so the grouping below sees each definition's rows
+     * together and oldest first.
+     */
+    const listDefinitions: Effect.Effect<
+      ReadonlyArray<DefinitionSummary>,
+      TaskError
+    > = withStorage(
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          id: string;
+          version: number;
+          name: string;
+          createdAt: Date | string;
+        }>`
+          SELECT id, version, name, created_at AS "createdAt"
+          FROM board_definitions
+          ORDER BY id COLLATE "C", version
+        `;
+        const grouped: Array<{
+          id: string;
+          versions: Array<{ version: number; name: string; createdAt: string }>;
+        }> = [];
+        for (const row of rows) {
+          const version = {
+            version: row.version,
+            name: row.name,
+            createdAt: iso(row.createdAt),
+          };
+          const last = grouped.at(-1);
+          if (last !== undefined && last.id === row.id) {
+            last.versions.push(version);
+          } else {
+            grouped.push({ id: row.id, versions: [version] });
+          }
+        }
+        return yield* decodeDefinitions(grouped).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TaskStorageError({
+                message: `board definitions do not decode: ${String(cause)}`,
+              }),
+          ),
+        );
+      }),
+    );
+
+    /**
+     * One definition version (LOB-270): the one named, or the newest. The refusal is `createBoard`'s,
+     * in the same words, so "no such definition" reads the same whichever call met it.
+     */
+    const getDefinition = (
+      definitionId: string,
+      version?: number,
+    ): Effect.Effect<BoardDefinition, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          type DefinitionRow = {
+            version: number;
+            name: string;
+            columns: string;
+          };
+          const rows =
+            version === undefined
+              ? yield* sql<DefinitionRow>`
+                  SELECT version, name, columns::text AS columns
+                  FROM board_definitions
+                  WHERE id = ${definitionId}
+                  ORDER BY version DESC
+                  LIMIT 1
+                `
+              : yield* sql<DefinitionRow>`
+                  SELECT version, name, columns::text AS columns
+                  FROM board_definitions
+                  WHERE id = ${definitionId} AND version = ${version}
+                `;
+          const row = rows[0];
+          if (row === undefined) {
+            return yield* version === undefined
+              ? new DefinitionNotFound({
+                  definitionId,
+                  message: `no board definition ${definitionId}`,
+                })
+              : new DefinitionNotFound({
+                  definitionId,
+                  version,
+                  message: `board definition ${definitionId} has no version ${version}`,
+                });
+          }
+          const what = `board definition ${definitionId} v${row.version}`;
+          const columns = yield* readColumns(row.columns, what);
+          return yield* decodeDefinition({
+            id: definitionId,
+            version: row.version,
+            name: row.name,
+            columns,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `${what} does not decode: ${String(cause)}`,
+                }),
+            ),
+          );
+        }),
       );
 
     const get = (taskId: string): Effect.Effect<Task, TaskError> =>
@@ -1694,6 +1830,8 @@ export const TaskServiceLive = Layer.effect(
       getBoard,
       listBoards,
       createBoard,
+      listDefinitions,
+      getDefinition,
       create,
       get,
       list,

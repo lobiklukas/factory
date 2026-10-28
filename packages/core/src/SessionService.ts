@@ -178,7 +178,7 @@ import {
 import { PostgresStorage } from "@repo/storage-postgres";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
-import { BoardColumn } from "@repo/domain/Task";
+import { BoardColumn, type ResolvedModel } from "@repo/domain/Task";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import type {
   CurateSessionInput,
@@ -403,6 +403,13 @@ export type SessionServiceShape = {
     SessionError | PrError | CredentialError,
     CredentialProvider | HttpClient.HttpClient
   >;
+  /**
+   * The model a run whose column declares `role` talks to (B6, LOB-207; read by LOB-270's
+   * `getDefinition`): the role's row in this layer's `roleModels`, or the deployment's model for a
+   * role with no row and for no role. The same table `openSession` resolves a run's model from, so
+   * what a reader is told is what a run gets. Deployment configuration: read here, never written.
+   */
+  readonly roleModel: (role: string | undefined) => ResolvedModel;
   /** Close every harness this process owns. */
   readonly close: Effect.Effect<void>;
 };
@@ -3390,6 +3397,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* setActivityStatus(sessionId, "idle");
         });
 
+      // `resolveRole`'s model half, which `openSession` takes a run's model from (LOB-270).
+      const roleModel = (role: string | undefined): ResolvedModel => {
+        const access =
+          role === undefined ? undefined : options.roleModels?.get(role);
+        return access === undefined
+          ? { model: modelKey(options.model), source: "deployment" }
+          : { model: modelKey(access), source: "role" };
+      };
+
       const closeAll = Effect.gen(function* () {
         // A comparison still waiting would reopen the owners this is closing (LOB-199), so the waits
         // end first. Nothing is lost: what is owed is in the logs, and the next owner or fold of
@@ -3474,6 +3490,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         curate,
         proposeDecomposition,
         openPullRequest: openPr,
+        roleModel,
         close: closeAll,
       });
     }),

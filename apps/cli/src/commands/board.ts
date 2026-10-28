@@ -11,6 +11,7 @@ import type { Task, TaskComment, TaskSpec } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { BoardClient } from "../rpc";
+import { boardConfigCommands } from "./boardConfig";
 
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
@@ -485,7 +486,7 @@ const startCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Create a board, then read and move its cards: lanes, one card, a move, a comment, a run",
+    "Create a board, read its configuration, then read and move its cards: lanes, one card, a move, a comment, a run",
   ),
   Command.withSubcommands([
     createCommand,
@@ -494,5 +495,7 @@ export const boardCommand = Command.make("board").pipe(
     moveCommand,
     commentCommand,
     startCommand,
+    // Read-only: which boards and definitions exist, and what each does (LOB-270).
+    ...boardConfigCommands,
   ]),
 );
