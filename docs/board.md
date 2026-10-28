@@ -72,7 +72,9 @@ never changes under work in flight. Cards move only by an explicit migration (`m
 mapping): each card is re-pinned in the column its own maps to, with a `repinned` event and a new
 revision, or — when one has an unfinished run, sits in a column the mapping leaves out, or would land
 in a column of another kind — none is and the pin stays (`CardMigrationRefused`, naming every such
-card). The board page and `factory board ls` say when the cards pin more than one version
+card). A migration re-pins, it does not move: a column the new version still declares keeps its
+cards, and only one it renamed or dropped may be mapped elsewhere, so no card is carried past an exit
+it would have to meet in a move. Only a person upgrades a board; a run's actor is refused. The board page and `factory board ls` say when the cards pin more than one version
 (`.pi/skills/verify-board/features/upgrade.md`).
 
 **Seed migrations and authored versions share one id space.** The default pipeline's seeds write

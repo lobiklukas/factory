@@ -737,8 +737,9 @@ export type ColumnMapping = typeof ColumnMapping.Type;
  * in the column the mapping names for its own, with a `repinned` event and a new revision each. The
  * batch is all or nothing — a card with an unfinished run, in a column the mapping does not name, or
  * mapped to a column of another kind refuses the whole upgrade as `CardMigrationRefused`, naming every
- * such card, and nothing is written; a mapping onto a column `toVersion` does not declare is
- * `InvalidTaskInput`.
+ * such card, and nothing is written. A mapping onto a column `toVersion` does not declare, or one that
+ * sends a column `toVersion` still declares to another (a move past its exit, not a re-pin), is
+ * `InvalidTaskInput`, as is a run's `actor`: only a person upgrades a board.
  */
 export const UpgradeBoardInput = Schema.Struct({
   boardId: BoardInstanceId,
@@ -1320,8 +1321,10 @@ export class StaleBoardVersion extends Schema.TaggedError<StaleBoardVersion>()(
 /**
  * Why one card cannot be migrated (D5): a run on it has not finished (`unfinished_run`) — its column,
  * prompt and policy were resolved from the version it pins — its column is not a key of the mapping
- * (`unmapped_column`), or the mapping sends it to a column of another kind (`kind_changed`): a
- * migration re-pins a card, it does not move it past a gate.
+ * (`unmapped_column`), or the mapping sends it to a column of another kind (`kind_changed`). A
+ * migration re-pins a card, it does not move it: a mapping that sends a column the target still
+ * declares to another is refused before any card is read (`InvalidTaskInput`), so only a renamed or
+ * dropped column's cards land somewhere new.
  */
 export const CardMigrationProblem = Schema.Struct({
   taskId: TaskId,

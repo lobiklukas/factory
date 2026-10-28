@@ -1022,6 +1022,82 @@ describe("TaskService.upgradeBoard", () => {
     expect(await snapshot(boardId)).toEqual(before);
   });
 
+  /**
+   * Mutation: drop the still-declared check — a v2 card in `building` with no run, diff or PR is
+   * re-pinned into v3's `review`, past `run_completed`, `non_empty_diff` and `pr_link`, though both
+   * columns are `working` and the kind check passes it.
+   * Mutation: drop the run-actor check — a run upgrades its own card's board.
+   */
+  it("refuses a mapping that sends a column the target still declares to another, and a run's actor", async () => {
+    const boardId = await defaultBoard(2);
+    const building = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const service = yield* TaskService;
+        const made = yield* service.create({
+          boardId,
+          title: "building",
+          actor: LUKAS,
+        });
+        // Setup: building's entry needs nothing this case is about.
+        yield* sql`
+          UPDATE tasks SET "column" = 'building', revision = revision + 1 WHERE id = ${made.id}
+        `;
+        return yield* service.get(made.id);
+      }),
+    );
+    const before = await snapshot(boardId);
+    const same = [
+      "intake",
+      "specifying",
+      "planning",
+      "building",
+      "review",
+      "done",
+      "canceled",
+    ];
+    const identity = Object.fromEntries(same.map((c) => [c, c]));
+    const skipped = await refusal((s) =>
+      s.upgradeBoard({
+        boardId,
+        toVersion: 3,
+        expectedVersion: 2,
+        migrateCards: { ...identity, building: "review" },
+        actor: LUKAS,
+      }),
+    );
+    expect(skipped).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "migrateCards.building",
+    });
+    const gated = await refusal((s) =>
+      s.upgradeBoard({
+        boardId,
+        toVersion: 3,
+        expectedVersion: 2,
+        migrateCards: { ...identity, planning: "building" },
+        actor: LUKAS,
+      }),
+    );
+    expect(gated).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "migrateCards.planning",
+    });
+    const run = await refusal((s) =>
+      s.upgradeBoard({
+        boardId,
+        toVersion: 3,
+        expectedVersion: 2,
+        actor: `ses_${"0".repeat(10)}${hex(8)}`,
+      }),
+    );
+    expect(run).toMatchObject({ _tag: "InvalidTaskInput", field: "actor" });
+    expect(await snapshot(boardId)).toEqual(before);
+    expect((await withService((s) => s.get(building.id))).column).toBe(
+      "building",
+    );
+  });
+
   /** Mutation: migrate only cards on the pin before the upgrade — the straggler is never re-pinned. */
   it("re-pins the cards an earlier upgrade left behind, at the pin, and only those", async () => {
     const { boardId } = await twoVersions();

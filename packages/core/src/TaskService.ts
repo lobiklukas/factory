@@ -1450,10 +1450,12 @@ export const TaskServiceLive = Layer.effect(
      * before this reads the board's cards, or waits and starts at the new one: no card is made at the
      * old pin after a migration has read the cards it re-pins. The refusals that need no card come
      * next — a version that is not newer, one the definition does not hold, one that cannot start a
-     * card, a mapping onto a column the version lacks — and then, for a migration, the cards: under the
+     * card, a mapping onto a column the version lacks or of a column it still declares onto another (a
+     * move, not a re-pin), a run's actor — and then, for a migration, the cards: under the
      * repository's `task_runs` advisory lock, which every run start on a card takes while it writes its
      * run (`checkRunCaps`), so no run starts on a card between the check that it has none unfinished
-     * and its re-pin. Every card is judged before any is written, and one that cannot move refuses the
+     * and its re-pin, and a start that waited on the lock resolves its column again once it holds it
+     * (`withRunAdmitted`), refusing rather than writing a run in a column of the old pin. Every card is judged before any is written, and one that cannot move refuses the
      * batch, naming every such card; only then is anything written — the pin, each card's row at its
      * next revision, and one `repinned` event per card at the revision it was read at.
      *
@@ -1489,6 +1491,15 @@ export const TaskServiceLive = Layer.effect(
                 message: `board ${board.id} is pinned to ${pinned}, not v${input.expectedVersion}: someone upgraded it first`,
               });
             }
+            // A person's write, never a run's: an upgrade changes the moves and exits every card on
+            // the board is held to, which a run of one of them must not do to its own (as a move
+            // across a human gate is refused one, `move`).
+            if (isRunActor(input.actor)) {
+              return yield* new InvalidTaskInput({
+                field: "actor",
+                message: `${input.actor} is a run: only a person upgrades a board`,
+              });
+            }
             const mapping = input.migrateCards;
             if (
               input.toVersion < board.definitionVersion ||
@@ -1521,6 +1532,19 @@ export const TaskServiceLive = Layer.effect(
                   return yield* new InvalidTaskInput({
                     field: `migrateCards.${from}`,
                     message: `the mapping sends ${from} to "${to}", which ${targetName} does not declare`,
+                  });
+                }
+                // A column the target still declares keeps its cards: sending them on to another
+                // is a move, and a move is made past the exit requirements and gates between the
+                // two (`move`), not around them by a re-pin. Only a column the target no longer
+                // declares — renamed or dropped — is mapped elsewhere.
+                if (
+                  to !== from &&
+                  target.columns.some((column) => column.name === from)
+                ) {
+                  return yield* new InvalidTaskInput({
+                    field: `migrateCards.${from}`,
+                    message: `the mapping sends ${from} to "${to}", but ${targetName} still declares ${from}: a migration keeps a card in a column the version declares, and moving it on to ${to} is a move, past the column's exit`,
                   });
                 }
               }

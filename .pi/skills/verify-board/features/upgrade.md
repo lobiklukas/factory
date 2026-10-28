@@ -25,10 +25,13 @@ toVersion> }`). Every card not already on `toVersion` is re-pinned in the column
   mapped the same way.
 - **All or nothing.** A card with an unfinished run (`unfinished_run`: `task_runs.finished_at` unset
   and its workspace not released), in a column the mapping does not name (`unmapped_column`), or
-  mapped to a column of another kind (`kind_changed`: a migration re-pins a card, it does not move it
-  past a gate) refuses the whole batch as `CardMigrationRefused`, naming every such card — and
-  nothing is written, not even the pin. A mapping onto a column `toVersion` does not declare is
-  `InvalidTaskInput` naming `migrateCards.<column>`.
+  mapped to a column of another kind (`kind_changed`) refuses the whole batch as
+  `CardMigrationRefused`, naming every such card — and nothing is written, not even the pin. A
+  mapping onto a column `toVersion` does not declare, or one that sends a column `toVersion` still
+  declares to another (`building=review` between two versions that both have `building`: that is a
+  move past building's exit, not a re-pin), is `InvalidTaskInput` naming `migrateCards.<column>`.
+  Only a column the new version renamed or dropped is mapped elsewhere. A run's actor is refused
+  (`InvalidTaskInput` naming `actor`): only a person upgrades a board.
 
 `TaskService.upgradeBoard` is one transaction: the instance row locked (`FOR NO KEY UPDATE`), so two
 upgrades are serialised and a card being made waits (`insertCard` reads its board `FOR SHARE`) or
