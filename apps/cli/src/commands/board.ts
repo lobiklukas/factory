@@ -14,11 +14,13 @@ import {
   DefinitionId,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
+  runPrompt,
   TaskId,
   TaskPriority,
 } from "@repo/domain/Task";
 import type {
   AttentionItem,
+  RunPromptColumn,
   CreatedBoard,
   CreateTaskInput,
   Task,
@@ -745,13 +747,137 @@ const commentCommand = Command.make(
 );
 
 /**
- * `factory board start` — open the run that advances a card.
+ * What `factory board start` needs of the client, as slices a test can fake: the card, the definition
+ * version the card pinned (for the column's instruction), the session it opens and the message it sends.
+ */
+export interface StartClient<B, S> {
+  readonly getTask: (input: {
+    readonly taskId: TaskId;
+  }) => Effect.Effect<Task, B>;
+  readonly getBoard: (input: {
+    readonly boardId: BoardInstanceId;
+  }) => Effect.Effect<
+    {
+      readonly instance: { readonly definitionId: DefinitionId };
+      readonly definition: {
+        readonly version: number;
+        readonly columns: ReadonlyArray<RunPromptColumn>;
+      };
+    },
+    B
+  >;
+  readonly getDefinition: (input: {
+    readonly definitionId: DefinitionId;
+    readonly version: number;
+  }) => Effect.Effect<{ readonly columns: ReadonlyArray<RunPromptColumn> }, B>;
+  readonly createSession: (input: {
+    readonly title: string;
+    readonly taskId: TaskId;
+    readonly taskColumn: string;
+    readonly actor: string;
+    readonly repo?: RepoSlug;
+  }) => Effect.Effect<{ readonly id: SessionId }, S>;
+  readonly getSession: (input: {
+    readonly sessionId: SessionId;
+  }) => Effect.Effect<
+    { readonly workspace: { readonly warning?: string | undefined } },
+    S
+  >;
+  readonly sendMessage: (input: {
+    readonly sessionId: SessionId;
+    readonly content: string;
+  }) => Effect.Effect<unknown, S>;
+}
+
+/**
+ * The column's instruction for a card's run (C6): the column of the definition version the card
+ * pinned (B2) that the run starts in, as `runPrompt` reads it — or `undefined` when that version
+ * cannot be read or does not name the column, so a definition that is not there costs the default
+ * prompt its instruction line and never the run its start.
+ */
+const runColumn = <B, S>(
+  client: Pick<StartClient<B, S>, "getBoard" | "getDefinition">,
+  card: Task,
+  column: string,
+): Effect.Effect<RunPromptColumn | undefined> =>
+  Effect.gen(function* () {
+    const view = yield* client.getBoard({ boardId: card.boardId });
+    const columns =
+      view.definition.version === card.definitionVersion
+        ? view.definition.columns
+        : (yield* client.getDefinition({
+            definitionId: view.instance.definitionId,
+            version: card.definitionVersion,
+          })).columns;
+    return columns.find((candidate) => candidate.name === column);
+  }).pipe(Effect.orElseSucceed(() => undefined));
+
+/**
+ * Open the run that advances a card, and send it its first message, printing what happened.
  *
  * A run is exactly one Pi Durable session (B1), so starting one is `createSession` with the card
  * named: the session carries the `factory.task` document, the run row is written against the card,
  * and the column the run started in is the column whose `requires[]` it must satisfy on exit. The
  * card is not moved here — the lane a run works in is where the card already sits.
+ *
+ * The first message is `prompt` when one was given, and otherwise `runPrompt`'s — the same text the
+ * card pane's Start run pre-fills (C6), built from the card and the column the run starts in — so a
+ * run started with no words is put to work, not left idle. `idle` opts out: the run opens and waits.
+ *
+ * Each line is handed to `emit` the moment it is known, not returned at the end: the session id is
+ * what names an open run, so a first message the server refuses must not take it with it — the
+ * operator is told which run is open and bound to the card before the refusal is reported.
  */
+export const startCard = Effect.fnUntraced(function* <B, S>(
+  client: StartClient<B, S>,
+  input: {
+    readonly taskId: TaskId;
+    readonly column: string | undefined;
+    readonly prompt: string | undefined;
+    readonly idle: boolean;
+    readonly actor: string;
+  },
+  emit: (line: string) => Effect.Effect<void>,
+) {
+  const card = yield* client.getTask({ taskId: input.taskId });
+  const taskColumn = input.column ?? card.column;
+  const session = yield* client.createSession({
+    title: card.title,
+    taskId: card.id,
+    taskColumn,
+    actor: input.actor,
+    ...(card.repo === undefined ? {} : { repo: card.repo }),
+  });
+  yield* emit(`session ${session.id}`);
+  yield* emit(`task    ${card.id} in ${taskColumn}`);
+  // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
+  // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
+  // Advisory: the run has started, so a failed read skips the warning and never fails the command.
+  const opened = yield* client
+    .getSession({ sessionId: session.id })
+    .pipe(Effect.option);
+  for (const line of warningLines(
+    Option.isSome(opened) ? opened.value.workspace.warning : undefined,
+    "warning ",
+  )) {
+    yield* emit(line);
+  }
+  if (input.idle) {
+    return;
+  }
+  const content =
+    input.prompt ?? runPrompt(card, yield* runColumn(client, card, taskColumn));
+  // Sent, not followed: the run is headless (B7), so the command returns as soon as the turn is
+  // accepted, and the card — not this terminal — is where the run's outcome is read.
+  yield* client.sendMessage({ sessionId: session.id, content });
+  // The words typed are echoed as typed; the default's are a card's whole body, so only its title.
+  yield* emit(
+    input.prompt === undefined
+      ? `sent    ${card.title} (the card's default prompt)`
+      : `sent    ${input.prompt}`,
+  );
+});
+
 const startCommand = Command.make(
   "start",
   {
@@ -764,14 +890,20 @@ const startCommand = Command.make(
     ),
     prompt: Flag.String("prompt").pipe(
       Flag.withDescription(
-        "The first message the run is sent; without it the run opens and waits",
+        "The first message the run is sent; without it the run is sent the card's default prompt: its title, its body and the column's instruction",
       ),
       Flag.optional,
+    ),
+    idle: Flag.Boolean("idle").pipe(
+      Flag.withDescription(
+        "Open the run and send it nothing: it waits for a message from the dashboard or `factory send`",
+      ),
+      Flag.withDefault(false),
     ),
     actor: runActorFlag,
     api: apiFlag,
   },
-  Effect.fnUntraced(function* ({ task, column, prompt, actor, api }) {
+  Effect.fnUntraced(function* ({ task, column, prompt, idle, actor, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -782,39 +914,24 @@ const startCommand = Command.make(
           `--task "${task}" is not a task id (tsk_…)`,
         );
       }
+      if (idle && Option.isSome(prompt)) {
+        return yield* reportFailure(
+          "invalid_input",
+          "--idle sends nothing, so it cannot be given a --prompt",
+        );
+      }
       const { client } = yield* BoardClient;
-      const card = yield* client.getTask({ taskId });
-      const taskColumn = Option.isSome(column) ? column.value : card.column;
-      const session = yield* client.createSession({
-        title: card.title,
-        taskId: card.id,
-        taskColumn,
-        actor,
-        ...(card.repo === undefined ? {} : { repo: card.repo }),
-      });
-      yield* Console.log(`session ${session.id}`);
-      yield* Console.log(`task    ${card.id} in ${taskColumn}`);
-      // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
-      // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
-      // Advisory: the run has started, so a failed read skips the warning and never fails the command.
-      const opened = yield* client
-        .getSession({ sessionId: session.id })
-        .pipe(Effect.option);
-      const advice = Option.isSome(opened)
-        ? opened.value.workspace.warning
-        : undefined;
-      for (const line of warningLines(advice, "warning ")) {
-        yield* Console.log(line);
-      }
-      if (Option.isSome(prompt)) {
-        // Sent, not followed: the run is headless (B7), so the command returns as soon as the turn
-        // is accepted, and the card — not this terminal — is where the run's outcome is read.
-        yield* client.sendMessage({
-          sessionId: session.id,
-          content: prompt.value,
-        });
-        yield* Console.log(`sent    ${prompt.value}`);
-      }
+      yield* startCard(
+        client,
+        {
+          taskId,
+          column: Option.getOrUndefined(column),
+          prompt: Option.getOrUndefined(prompt),
+          idle,
+          actor,
+        },
+        Console.log,
+      );
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -824,7 +941,12 @@ const startCommand = Command.make(
   Command.withExamples([
     {
       command: "factory board start --task tsk_…",
-      description: "A session bound to the card, in the card's own column",
+      description:
+        "A session bound to the card, in the card's own column, sent the card's default prompt",
+    },
+    {
+      command: "factory board start --task tsk_… --idle",
+      description: "The same session, opened and left waiting",
     },
   ]),
 );

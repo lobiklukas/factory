@@ -3,6 +3,13 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory skill ls` / `show` / `put` were verified **2026-10-28** from the `agent/D7` worktree with
+`./skill.sh` (API on `:9520`) — **16/16** checks ([skill.md](skill.md)) — and `./drive.sh` (API on
+`:9520`, approve on `:9522`, the seed's GitHub fake on `:9523`) at **31/31**, one check being
+`./skill.sh`. Under that machine's load the drive's first run lost "watch labels a session this
+process owns live" to the 5 s idle window (the sweep released the owner before `watch` attached);
+it passed with `SESSION_IDLE_TIMEOUT_MS=15000` given to `./up.sh`.
+
 `factory run --model` and `DEFAULT_MODEL` were verified **2026-10-28** from the `agent/LOB-274`
 worktree with `./model.sh` (API on `:9500`, the refused boot on `:9501`) — **12/12** checks — and
 `./drive.sh` (API on `:9502`, approve on `:9503`) at **23/23**, which adds the `model` line.
@@ -80,6 +87,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory send --when-busy steer/reject`           | passing | [steer.md](steer.md)                                                  |
 | `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                              |
 | `factory repo add` / `ls` / `show`                | passing | [repo.md](repo.md)                                                    |
+| `factory skill ls` / `show` / `put`               | passing | [skill.md](skill.md) (`skill.sh`)                                     |
 | `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)         |
 | `factory board block\|unblock\|attention\|runs`   | passing | [verify-board triage.md](../../verify-board/features/triage.md)       |
 | `factory board add`                               | passing | [verify-board add.md](../../verify-board/features/add.md)             |

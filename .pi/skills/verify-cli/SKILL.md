@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `pr` / `outcomes` in apps/cli; `pr` is proven by verify-board's build phase, `outcomes` by verify-api's `outcomes.sh`) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `skill` / `discard` / `replay` / `pr` / `outcomes` in apps/cli; `pr` is proven by verify-board's build phase, `outcomes` by verify-api's `outcomes.sh`) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -34,6 +34,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`           | a script can refuse to queue behind a running run            |
 | `factory interrupt` (C8)                                  | `./interrupt.sh`: a busy run stops, no `faux-ok`; idle → `not running`, 0     | an operator stops a run going wrong without killing the API  |
 | `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`           | an operator binds a checkout without writing code            |
+| `factory skill` (D7)                                      | `./skill.sh`, run by `drive.sh`: `ls`, `show`, two puts, refusals             | a skill is edited without a migration, as a new version      |
 | `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed         | the answer reaches the run, not only the row                 |
 | `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release      | the only way an operator ends a session's work               |
 | `factory replay` (LOB-200)                                | `./replay.sh`: a replay on another model prints both models and the deltas    | an operator compares two models on the same task, in a shell |
@@ -59,6 +60,7 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./replay.sh      # self-contained: its own API on :9360 (REPLAY_PORT), a checkout, and a second faux model
 ./clone.sh       # self-contained: its own API on :9350 (CLONE_PORT) and a loopback git forge on :9351
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
+./skill.sh       # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it after repo.sh
 ./model.sh       # self-contained: its own API on :9370 (MODEL_PORT) and a refused boot on :9371
 ./interrupt.sh   # self-contained: its own API on :9380 (INTERRUPT_PORT) with the sleeping faux script
 ```

@@ -1,6 +1,7 @@
 import {
   CredentialProvider,
   SessionService,
+  SkillServiceLive,
   TaskServiceLive,
   TriggerRoutesLive,
 } from "@repo/core";
@@ -11,6 +12,7 @@ import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
 import { ServerRpcHandlers } from "./Server";
+import { SkillsRpcHandlers } from "./Skills";
 import { TaskRpcHandlers } from "./Task";
 import { TriggerRoutesRpcHandlers } from "./TriggerRoutes";
 
@@ -105,9 +107,11 @@ export const SessionRpcLive = RpcServer.layerHttp({
       TaskRpcHandlers,
       TriggerRoutesRpcHandlers,
       ServerRpcHandlers,
+      SkillsRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
   Layer.provide(TaskServiceLive),
   Layer.provide(TriggerRoutesLive),
+  Layer.provide(SkillServiceLive),
 );

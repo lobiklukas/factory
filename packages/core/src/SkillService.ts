@@ -1,40 +1,56 @@
 /**
  * Skills: read and write the named, versioned skill documents in the `skills` table (LOB-173,
- * part 2 of LOB-48).
+ * part 2 of LOB-48; versioned by D7).
  *
  * A skill mirrors its on-disk shape, `.pi/skills/<name>/SKILL.md`: a name, a version, a one-line
- * description, the markdown body, and the attachments it links. `name` is the primary key, so a
- * write is an upsert — writing an existing name replaces the document in place, and writing a new
- * one adds it.
+ * description, the markdown body, and the attachments it links. The table is keyed by
+ * `(name, version)` (`0037_version_skills.ts`): a write is `put`, which adds version `newest + 1`
+ * and never rewrites a row, so the body a run opened with is still there when the run is reopened
+ * (docs/board.md B2). A read names a version, or takes the newest.
  *
  * The rows come from `0009_create_skills.ts`, which seeds the three stage skills (`specify`,
- * `implement`, `review`), and `0015_seed_docs_skill.ts`, which seeds the `docs` prompt a
- * documentation run holds (LOB-225). Postgres only: the tests run against the real schema, not a
- * mock.
+ * `implement`, `review`), and the seeds after it (`docs`, `decompose`, `plan-freshness`), each at
+ * version 1; every later version is an operator's `putSkill`. Postgres only: the tests run against
+ * the real schema, not a mock.
  *
  * `attachments` is a jsonb column but is read and written as JSON text, encoded and decoded by a
  * Schema codec, so a stored value always round-trips through `readonly string[]` rather than
  * whatever the driver chose to do with the column.
  */
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, DateTime, Effect, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import {
-  Skill,
+  InvalidSkill,
   SkillNotFound,
+  SkillRecord,
   SkillStorageError,
-  type SkillError,
+  type PutSkillInput,
+  type SkillSummary,
 } from "@repo/domain/Skill";
+import type { BoardColumn } from "@repo/domain/Task";
 
 export type SkillServiceShape = {
-  /** One skill by name, or a `SkillNotFound` naming it. */
+  /**
+   * One skill by name: the version named, or the newest. A name the table does not hold, or a
+   * version it does not hold of it, is a `SkillNotFound` naming both.
+   */
   readonly get: (
     name: string,
-  ) => Effect.Effect<Skill, SkillNotFound | SkillStorageError>;
-  /** Every skill, ordered by name. An Effect value: each run reads the table again. */
-  readonly list: Effect.Effect<ReadonlyArray<Skill>, SkillStorageError>;
-  /** Writes a skill, replacing the document of the same name. Adds it when it is new. */
-  readonly upsert: (skill: Skill) => Effect.Effect<void, SkillStorageError>;
+    version?: number,
+  ) => Effect.Effect<SkillRecord, SkillNotFound | SkillStorageError>;
+  /**
+   * Every skill at its newest version, ordered by name. An Effect value: each run reads the table
+   * again, so a version put since the last read is the one it answers.
+   */
+  readonly list: Effect.Effect<ReadonlyArray<SkillRecord>, SkillStorageError>;
+  /**
+   * Add a version: `newest + 1`, or 1 for a name the table does not hold. Never an update — no row
+   * a run may have opened on is touched. A blank body is `InvalidSkill`, and nothing is written.
+   */
+  readonly put: (
+    input: PutSkillInput,
+  ) => Effect.Effect<SkillRecord, InvalidSkill | SkillStorageError>;
 };
 
 export class SkillService extends Context.Service<
@@ -52,23 +68,58 @@ const AttachmentsJson = Schema.fromJsonString(Schema.Array(Schema.String));
 /** One `skills` row as the driver returns it; `attachments` is selected as text. */
 type SkillRow = {
   readonly name: string;
-  readonly version: string;
+  readonly version: number;
   readonly description: string;
   readonly body: string;
   readonly attachments: string;
+  readonly createdAt: Date | string;
+  readonly author: string;
+  readonly newest: number;
 };
 
 /**
- * The column list, with `attachments` cast to text. Spelled out once so every read returns the
- * same shape.
+ * The column list, with `attachments` cast to text and the name's newest version beside each row.
+ * Spelled out once so every read returns the same shape; `s` is the `skills` row being read.
  */
 const SKILL_COLUMNS = [
-  "name",
-  "version",
-  "description",
-  "body",
-  "attachments::text AS attachments",
+  "s.name",
+  "s.version",
+  "s.description",
+  "s.body",
+  "s.attachments::text AS attachments",
+  "s.created_at",
+  "s.author",
+  "(SELECT max(n.version) FROM skills n WHERE n.name = s.name) AS newest",
 ].join(", ");
+
+/**
+ * How many times a put asks again after a concurrent put took the version it computed. Each retry
+ * reads the newest version afresh, so it loses only to another put that committed in between; a
+ * put that loses this many times in a row is reported rather than spun on.
+ */
+const PUT_ATTEMPTS = 5;
+
+const iso = (value: Date | string): string =>
+  DateTime.formatIso(DateTime.makeUnsafe(value));
+
+/**
+ * Which columns of a definition bind each skill, in column order (D7): what `factory skill ls`
+ * prints beside a skill, so an operator can see which runs a put reaches before making it. Pure, so
+ * the join is a table in a test; a skill no column names maps to `[]`.
+ */
+export const summarizeSkills = (
+  skills: ReadonlyArray<SkillRecord>,
+  columns: ReadonlyArray<Pick<BoardColumn, "name" | "skills">>,
+): ReadonlyArray<SkillSummary> =>
+  skills.map((skill) => ({
+    name: skill.name,
+    version: skill.version,
+    description: skill.description,
+    createdAt: skill.createdAt,
+    columns: columns
+      .filter((column) => column.skills.includes(skill.name))
+      .map((column) => column.name),
+  }));
 
 export const SkillServiceLive = Layer.effect(
   SkillService,
@@ -77,19 +128,21 @@ export const SkillServiceLive = Layer.effect(
 
     const decodeAttachments = Schema.decodeUnknownEffect(AttachmentsJson);
     const encodeAttachments = Schema.encodeEffect(AttachmentsJson);
-    const decodeSkill = Schema.decodeUnknownEffect(Skill);
+    const decodeSkill = Schema.decodeUnknownEffect(SkillRecord);
 
-    /** Turns a driver failure into a storage failure and leaves the typed refusals alone. */
-    const withStorage = <A, E extends SkillError>(
-      effect: Effect.Effect<A, E | SqlError>,
-    ): Effect.Effect<A, E | SkillStorageError> =>
+    /** Turns a driver failure into a storage failure. */
+    const withStorage = <A>(
+      effect: Effect.Effect<A, SqlError>,
+    ): Effect.Effect<A, SkillStorageError> =>
       effect.pipe(
         Effect.catchTag("SqlError", (cause) =>
           Effect.fail(new SkillStorageError({ message: cause.message })),
         ),
       );
 
-    const toSkill = (row: SkillRow): Effect.Effect<Skill, SkillStorageError> =>
+    const toSkill = (
+      row: SkillRow,
+    ): Effect.Effect<SkillRecord, SkillStorageError> =>
       Effect.gen(function* () {
         const attachments = yield* decodeAttachments(row.attachments);
         return yield* decodeSkill({
@@ -98,73 +151,116 @@ export const SkillServiceLive = Layer.effect(
           description: row.description,
           body: row.body,
           attachments,
+          createdAt: iso(row.createdAt),
+          author: row.author,
+          newest: row.newest,
         });
       }).pipe(
         Effect.mapError(
           (cause) =>
             new SkillStorageError({
-              message: `the skills table holds an invalid row ${row.name}: ${String(cause)}`,
+              message: `the skills table holds an invalid row ${row.name}@${row.version}: ${String(cause)}`,
             }),
         ),
       );
 
-    const get = (
+    const get = Effect.fn("SkillService.get")(function* (
       name: string,
-    ): Effect.Effect<Skill, SkillNotFound | SkillStorageError> =>
-      withStorage(
-        Effect.gen(function* () {
-          const rows = yield* sql<SkillRow>`
-            SELECT ${sql.literal(SKILL_COLUMNS)} FROM skills WHERE name = ${name}
-          `;
-          const row = rows[0];
-          if (row === undefined) {
-            return yield* new SkillNotFound({
-              name,
-              message: `no skill named "${name}"`,
-            });
-          }
-          return yield* toSkill(row);
-        }),
+      version?: number,
+    ) {
+      const rows = yield* withStorage(
+        version === undefined
+          ? sql<SkillRow>`
+              SELECT ${sql.literal(SKILL_COLUMNS)} FROM skills s
+              WHERE s.name = ${name}
+              ORDER BY s.version DESC
+              LIMIT 1
+            `
+          : sql<SkillRow>`
+              SELECT ${sql.literal(SKILL_COLUMNS)} FROM skills s
+              WHERE s.name = ${name} AND s.version = ${version}
+            `,
       );
+      const row = rows[0];
+      if (row === undefined) {
+        return yield* version === undefined
+          ? new SkillNotFound({ name, message: `no skill named "${name}"` })
+          : new SkillNotFound({
+              name,
+              version,
+              message: `skill "${name}" has no version ${version}`,
+            });
+      }
+      return yield* toSkill(row);
+    });
 
     const list: Effect.Effect<
-      ReadonlyArray<Skill>,
+      ReadonlyArray<SkillRecord>,
       SkillStorageError
-    > = withStorage(
-      Effect.gen(function* () {
-        const rows = yield* sql<SkillRow>`
-            SELECT ${sql.literal(SKILL_COLUMNS)} FROM skills ORDER BY name
-          `;
-        return yield* Effect.forEach(rows, toSkill);
-      }),
-    );
+    > = Effect.gen(function* () {
+      // `DISTINCT ON` keeps the first row of each name in the `ORDER BY`, which is its newest.
+      const rows = yield* withStorage(
+        sql<SkillRow>`
+          SELECT DISTINCT ON (s.name) ${sql.literal(SKILL_COLUMNS)} FROM skills s
+          ORDER BY s.name, s.version DESC
+        `,
+      );
+      return yield* Effect.forEach(rows, toSkill);
+    });
 
-    const upsert = (skill: Skill): Effect.Effect<void, SkillStorageError> =>
-      withStorage(
-        Effect.gen(function* () {
-          const attachments = yield* encodeAttachments(skill.attachments).pipe(
-            Effect.mapError(
-              (cause) =>
+    const put = Effect.fn("SkillService.put")(function* (input: PutSkillInput) {
+      if (input.body.trim().length === 0) {
+        return yield* new InvalidSkill({
+          name: input.name,
+          message: `skill "${input.name}" has an empty body: a run would be told nothing`,
+        });
+      }
+      const attachments = yield* encodeAttachments(
+        input.attachments ?? [],
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new SkillStorageError({
+              message: `the attachments of skill "${input.name}" do not encode: ${String(cause)}`,
+            }),
+        ),
+      );
+      // One statement computes `newest + 1` and inserts it. Two puts of one name at once can compute
+      // the same number: the second meets the primary key, inserts nothing (`DO NOTHING`), and asks
+      // again — after the first committed, so it reads the first's version as the newest.
+      for (let attempt = 1; attempt <= PUT_ATTEMPTS; attempt += 1) {
+        const inserted = yield* withStorage(
+          sql<{ version: number }>`
+            INSERT INTO skills (name, version, description, body, attachments, author)
+            SELECT
+              ${input.name},
+              COALESCE((SELECT max(version) FROM skills WHERE name = ${input.name}), 0) + 1,
+              ${input.description},
+              ${input.body},
+              ${attachments}::jsonb,
+              ${input.actor ?? ""}
+            ON CONFLICT (name, version) DO NOTHING
+            RETURNING version
+          `,
+        );
+        const written = inserted[0];
+        if (written !== undefined) {
+          return yield* get(input.name, written.version).pipe(
+            Effect.catchTag("SkillNotFound", (missing) =>
+              Effect.fail(
                 new SkillStorageError({
-                  message: `the attachments of skill "${skill.name}" do not encode: ${String(cause)}`,
+                  message: `the version just put is gone: ${missing.message}`,
                 }),
+              ),
             ),
           );
-          yield* sql`
-            INSERT INTO skills (name, version, description, body, attachments)
-            VALUES (
-              ${skill.name}, ${skill.version}, ${skill.description},
-              ${skill.body}, ${attachments}::jsonb
-            )
-            ON CONFLICT (name) DO UPDATE SET
-              version = EXCLUDED.version,
-              description = EXCLUDED.description,
-              body = EXCLUDED.body,
-              attachments = EXCLUDED.attachments
-          `;
-        }),
-      );
+        }
+      }
+      return yield* new SkillStorageError({
+        message: `skill "${input.name}": ${PUT_ATTEMPTS} concurrent puts took every version this put computed; try again`,
+      });
+    });
 
-    return SkillService.of({ get, list, upsert });
+    return SkillService.of({ get, list, put });
   }),
 );
