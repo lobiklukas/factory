@@ -203,7 +203,12 @@ try {
   };
   await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
+  // New session opens the form (E6); its prompt is the drive's own, on no repo.
   await page.getByRole("button", { name: /new session/i }).click();
+  await page
+    .locator("#new-session-prompt")
+    .fill("Run the check and report it.");
+  await page.locator("[data-session-submit]").click();
   await page.waitForFunction(
     () => /^\/sessions\/ses_/.test(window.location.pathname),
     null,

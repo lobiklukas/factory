@@ -3,12 +3,12 @@
 //
 //   node cost.mjs      (via ./cost.sh, which owns the instance this drives)
 //
-//   empty     with no completed session the New session form says there is no estimate yet and why,
-//             and its "Cap at predicted high" choice is disabled
+//   empty     with no completed session the New session form, its prompt typed, says there is no
+//             estimate yet and why, and its "Cap at predicted high" choice is disabled
 //   predict   after three runs costing 2, 3 and 4 cents, the form shows the range `predictCost`
 //             answers for its prompt — $0.0220 to $0.0380, median $0.0300 — read over the RPC as
 //             the oracle, never off the page
-//   cap       ticking the cap and pressing New session opens a session whose budget is that high
+//   cap       ticking the cap and pressing Start session opens a session whose budget is that high
 //   publish   `/spend` shows the backtest headline, its numbers the ones `backtestCost` answers, and
 //             says three-odd sessions are too few to mean much
 //
@@ -22,7 +22,8 @@ const API_URL = process.env["API_URL"] ?? "http://localhost:9452";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/cost";
 const COST = Number(process.env["FAUX_COST"] ?? "0.01");
-// The New session form's own prompt (`session-sidebar.tsx`): what its prediction is for.
+// The prompt the drive types into the New session form (E6): what its prediction is for, and the
+// first message of every seeded run, so the three are its comparables.
 const PROMPT = "Run echo faux-ok and tell me what it printed.";
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
@@ -112,10 +113,17 @@ page.on("pageerror", (error) =>
 const line = () => page.locator("[data-cost-prediction]");
 const cap = () => page.locator("input#new-session-cap");
 
+/** A fresh load of `/sessions`, with the New session form open and the drive's prompt typed. */
+const openForm = async () => {
+  await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator("#new-session-prompt").fill(PROMPT);
+};
+
 let exitCode = 0;
 try {
   // --- empty: nothing has run --------------------------------------------------------------------
-  await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  await openForm();
   await page.waitForSelector("[data-cost-prediction='none']", {
     timeout: 15_000,
   });
@@ -150,7 +158,7 @@ try {
     JSON.stringify(oracle),
   );
   // A fresh load: the form's read is the one a person opening the page gets.
-  await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  await openForm();
   await page.waitForSelector("[data-cost-prediction='repo+model+shape']", {
     timeout: 15_000,
   });
@@ -179,13 +187,13 @@ try {
     `disabled=${await cap().isDisabled()}`,
   );
   await cap().check();
-  await page.getByRole("button", { name: "New session" }).click();
+  await page.locator("[data-session-submit]").click();
   await page.waitForURL(/\/sessions\/ses_[0-9a-z]{26}$/, { timeout: 15_000 });
   const cappedId = /\/sessions\/(ses_[0-9a-z]{26})$/.exec(page.url())?.[1];
   const capped = await settled(cappedId, 1, 2 * COST);
   observed.capped = { sessionId: cappedId, budget: capped.budget };
   assert(
-    "New session with the cap ticked opens a session capped at the predicted high",
+    "Start session with the cap ticked opens a session capped at the predicted high",
     close(capped.budget?.cap, oracle.range.high) &&
       capped.budget?.stopped === undefined,
     `budget=${JSON.stringify(capped.budget)} predicted high=${oracle.range.high}`,

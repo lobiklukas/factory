@@ -8,7 +8,7 @@ them), inside `./drive.sh` exit 0, 66/66; earlier, before the late-answer leg, o
 An operator delegates work from the browser (LOB-275): the board page's **New card** puts a card on
 the board through `createTask`, as the dashboard, exactly as `factory board add` (LOB-261) and a
 trigger do. The form is the board's only create surface; the empty states and the getting-started
-path that link to it are C9's (planned), the New session form E6's (planned).
+path that link to it are C9's (planned), the New session form is E6's ([session-new.md](session-new.md)).
 
 ## What is shown
 

@@ -158,8 +158,13 @@ assert(
 
 // Feature: session stream. Required: it is the dashboard's only end-to-end check of
 // creating a session, driving it, and watching the events arrive. See
-// features/session-stream.md.
+// features/session-stream.md. New session opens a form (E6, features/session-new.md): the drive
+// types its own prompt, which is the transcript's first user entry below. The faux model runs
+// `FAUX_COMMAND` whatever the prompt says, so the answer is still `faux-ok (re: ...)`.
+const promptText = `Run the repository's check and tell me what it printed (drive ${Date.now()}).`;
 await page.getByRole("button", { name: /new session/i }).click();
+await page.locator("#new-session-prompt").fill(promptText);
+await page.locator("[data-session-submit]").click();
 
 // The route moves to the created session's own URL, which is what a user would
 // then share or reload.
@@ -313,8 +318,6 @@ const transcriptItems = await page
       bubble: item.querySelector("[data-slot='bubble']") !== null,
     })),
   );
-// Keep in step with PROMPT in apps/web/src/components/session-sidebar.tsx, the sample the sidebar sends.
-const promptText = "Run echo faux-ok and tell me what it printed.";
 // Equal to, not containing: the agent's answer quotes the prompt ("faux-ok (re: ...)").
 const promptRows = transcriptItems.filter((item) => item.text === promptText);
 const bareMarkers = transcriptItems.filter((item) =>
