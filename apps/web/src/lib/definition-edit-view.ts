@@ -1127,7 +1127,7 @@ export const limitFaults = (
 ): ReadonlyArray<DefinitionFault> => {
   const refusal = (value: number | undefined): string | undefined => {
     if (value === undefined) return undefined;
-    const decoded = Schema.decodeUnknownResult(RunCap)(value);
+    const decoded = Schema.decodeResult(RunCap)(value);
     return Result.isFailure(decoded) ? decoded.failure.message : undefined;
   };
   return [

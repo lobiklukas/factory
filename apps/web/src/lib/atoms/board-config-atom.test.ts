@@ -7,6 +7,7 @@
  */
 import { BoardInstanceId } from "@repo/domain/Task";
 import type { UpgradeBoardInput } from "@repo/domain/Task";
+import { Effect } from "effect";
 import { AsyncResult, AtomRegistry } from "effect/reactivity";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -54,10 +55,8 @@ const versionOf = (registry: AtomRegistry.AtomRegistry): number | undefined => {
     : undefined;
 };
 
-const settled = async (until: () => boolean) => {
-  for (let tick = 0; tick < 200 && !until(); tick += 1)
-    await new Promise((resolve) => setTimeout(resolve, 5));
-};
+const settled = (until: () => boolean) =>
+  vi.waitFor(() => expect(until()).toBe(true), { timeout: 1_000 });
 
 afterEach(() => {
   server.pinned = 1;
@@ -98,7 +97,7 @@ describe("boardConfigAtom after a re-pin (F9)", () => {
     const registry = AtomRegistry.make();
     const unmount = registry.mount(boardConfigAtom(BOARD));
     await settled(() => versionOf(registry) !== undefined);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await Effect.runPromise(Effect.sleep("100 millis"));
     expect(server.reads).toBe(1);
     unmount();
   });
