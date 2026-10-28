@@ -135,6 +135,11 @@ forge on `:9561`, faux, the worktree's own database on 5442): `./review.sh` **13
 `.verify/evidence/lob-36/`. `./docs-trigger-http.sh` and `./linear-writeback.sh` were re-run there,
 because the GitHub route they drive now hands a `pull_request` to the review too. See `review.md`.
 
+The reviewer measurement (LOB-242) was run from the `agent/LOB-242` worktree on 2026-10-28 (API on
+`:9570`, forge on `:9571`, faux, the worktree's own database on 5442): `REVIEW_EVAL=faux
+./review-eval.sh` **52/52** (36 per-run checks, 12 row checks, 4 aggregate; the live run is not part of it), and `REVIEW_EVAL=live-check` (the live boot with a dummy key, no network) passing, evidence `.verify/evidence/lob-242/`.
+The live run, on a real model, is the owner's; see `review-eval.md`.
+
 The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on
 `:9410`, faux, Postgres on 5442, `DATABASE_URL=…/factory_ralph_2`): `bun drive.ts` **47/47** with
 the curation block added, evidence `.verify/evidence/lob-206/verify-api/`. `./sigterm.sh` and
@@ -319,6 +324,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | What the server runs     | passing | [server-info.md](server-info.md)             |
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
 | Control-plane identity   | passing | [identity.md](identity.md)                   |
+| Reviewer measurement     | passing | [review-eval.md](review-eval.md)             |
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
 

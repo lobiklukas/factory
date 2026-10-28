@@ -65,7 +65,7 @@ worktree's own database on 5442): **13/13**, evidence `.verify/evidence/lob-36/`
 
 That a real model finds a real bug, or stays quiet on a clean PR: the faux reviewer files what its
 script says (the rubric and the diff check are what is proven). Measuring the reviewer on the
-factory's own PRs with a live model is LOB-242. Nor that GitHub accepts the review as spelled
+factory's own PRs with a live model is LOB-242 (`review-eval.md`). Nor that GitHub accepts the review as spelled
 (`docs/testing-third-parties.md`'s GitHub review row). Nor the fetch of a head pushed elsewhere: the
 drive builds every head in the registered checkout, and `ReviewTrigger.test.ts` proves the fetch
 path with a path remote standing in for `fetchBranch` (whose credentialed fetch `git.test.ts`

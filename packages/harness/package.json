@@ -24,6 +24,8 @@
     "vitest": "^4.1.4"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./reviewEval": "./src/reviewEval.ts",
+    "./reviewEvalCorpus": "./src/reviewEvalCorpus.ts"
   }
 }
