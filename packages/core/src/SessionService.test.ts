@@ -10818,9 +10818,9 @@ describe("a mission on a session", () => {
       // Nothing ran: no mission, no task, and no file in the worktree the stage keeps unchanged.
       expect(snapshot.mission).toBeUndefined();
       expect(snapshot.tasks).toEqual([]);
-      expect(existsSync(join(snapshot.workspace.path, "check-wrote-here"))).toBe(
-        false,
-      );
+      expect(
+        existsSync(join(snapshot.workspace.path, "check-wrote-here")),
+      ).toBe(false);
     }
     expect(outcome.reads._tag).toBe("Success");
     expect(outcome.building._tag).toBe("Success");
