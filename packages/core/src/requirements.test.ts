@@ -7,16 +7,24 @@
  */
 import { describe, expect, it } from "vitest";
 import type { BoardColumn } from "@repo/domain/Task";
-import type { RecordedReview, VerifyRecord, VerifyResult } from "@repo/harness";
+import type {
+  RecordedReview,
+  RunTurn,
+  VerifyRecord,
+  VerifyResult,
+} from "@repo/harness";
 import {
   type BranchDiff,
   CHECKED_REQUIREMENTS,
   exitRequirements,
+  exitView,
   nonEmptyDiffVerdict,
   prLinkVerdict,
   requirementVerdict,
   type ReviewRunEvidence,
   reviewVerdictVerdict,
+  runCompletedVerdict,
+  specDocVerdict,
   VERIFIABLE_REMEDY,
   verifiedVerdict,
   type RunEvidence,
@@ -103,15 +111,18 @@ describe("exitRequirements", () => {
       "non_empty_diff",
       "pr_link",
       "review_verdict",
+      "spec_doc",
+      "run_completed",
     ]);
     // `human_merge` is the merge gate, enforced by actor, not by a check of evidence.
     expect(exitRequirements(review, "done").map((r) => r.key)).toEqual([
       "verified",
       "review_verdict",
     ]);
-    // `run_completed` has no recorded artifact yet, so it is skipped; the two that do are kept in
-    // the order building declares them, which is the order a refusal names the first unmet one.
+    // All three of building's keys are checked since D9, in the order it declares them, which is the
+    // order a refusal names the first unmet one.
     expect(exitRequirements(building, "review").map((r) => r.key)).toEqual([
+      "run_completed",
       "non_empty_diff",
       "pr_link",
     ]);
@@ -130,6 +141,152 @@ describe("exitRequirements", () => {
         { runs: [] },
       ),
     ).toEqual({ met: false, reason: '"plan_doc" has no checker' });
+  });
+});
+
+/** One run whose newest turn ended as `turn` says (`runTurnOf`); none when `turn` is absent. */
+const turned = (sessionId: string, turn?: RunTurn): RunEvidence => ({
+  sessionId,
+  calls: [],
+  ...(turn === undefined ? {} : { turn }),
+});
+
+const unmet = (verdict: ReturnType<typeof specDocVerdict>): string => {
+  if (verdict.met) throw new Error("expected the requirement to be unmet");
+  return verdict.reason;
+};
+
+describe("the spec_doc requirement (D9)", () => {
+  /** Mutation: treat a card with no `specified` event as met — the first case passes it. */
+  it("is unmet for a card no run specified, and met once one did, whatever its gaps", () => {
+    expect(unmet(specDocVerdict({ runs: [] }))).toContain(
+      "the card has no spec",
+    );
+    expect(
+      specDocVerdict({
+        runs: [],
+        specified: true,
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is dispatched by key, so a card without a spec is refused on `spec_doc`", () => {
+    expect(
+      requirementVerdict(
+        { key: "spec_doc", description: "a spec doc" },
+        { runs: [turned("ses_a", "completed")] },
+      ),
+    ).toMatchObject({ met: false });
+  });
+});
+
+describe("the run_completed requirement (D9)", () => {
+  it("is unmet for a card with no runs", () => {
+    expect(unmet(runCompletedVerdict({ runs: [] }))).toBe(
+      "the card has no runs, so none completed a turn",
+    );
+  });
+
+  /** Mutation: treat every settled turn as completed — a failed, stopped or unanswered run passes. */
+  it.each([
+    ["unfinished", "has not completed its turn"],
+    ["truncated", "cut off at the output limit"],
+    ["interrupted", "was interrupted"],
+    ["budget", "was stopped by its budget"],
+    ["failed", "faulted"],
+  ] as const)("is unmet for a latest run whose turn is %s", (turn, words) => {
+    const reason = unmet(
+      runCompletedVerdict({ runs: [turned("ses_a", turn)] }),
+    );
+    expect(reason).toContain("ses_a");
+    expect(reason).toContain(words);
+  });
+
+  /** Mutation: judge the newest run whatever column started it — a planner's completed run meets building's gate. */
+  it("judges the newest run started in the column being left, not an earlier column's", () => {
+    const runs = [
+      { ...turned("ses_build", "failed"), column: "building" },
+      { ...turned("ses_plan", "completed"), column: "planning" },
+    ];
+    expect(unmet(runCompletedVerdict({ column: "building", runs }))).toContain(
+      "ses_build",
+    );
+    expect(
+      unmet(
+        runCompletedVerdict({
+          column: "building",
+          runs: [{ ...turned("ses_plan", "completed"), column: "planning" }],
+        }),
+      ),
+    ).toContain("no run of the card was started in building");
+    expect(
+      runCompletedVerdict({
+        column: "planning",
+        runs,
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is met for a latest run that completed", () => {
+    expect(
+      runCompletedVerdict({ runs: [turned("ses_a", "completed")] }),
+    ).toEqual({ met: true });
+  });
+
+  /** Mutation: judge the first run, or any run — an earlier completed run carries a later fault. */
+  it("judges the latest run only", () => {
+    expect(
+      runCompletedVerdict({
+        runs: [turned("ses_old", "completed"), turned("ses_new", "failed")],
+      }).met,
+    ).toBe(false);
+    expect(
+      runCompletedVerdict({
+        runs: [turned("ses_old", "failed"), turned("ses_new", "completed")],
+      }),
+    ).toEqual({ met: true });
+  });
+
+  it("is unmet, not met, when the evidence carries no turn at all", () => {
+    expect(unmet(runCompletedVerdict({ runs: [turned("ses_a")] }))).toContain(
+      "turn was not read",
+    );
+  });
+});
+
+describe("exitView (D9)", () => {
+  /** Mutation: mark an unchecked key `met` — `plan_doc` or `human_merge` would read as satisfied. */
+  it("lists every declared key in order: judged ones met or unmet with a reason, the rest unchecked", () => {
+    const planning: BoardColumn = {
+      name: "planning",
+      kind: "working",
+      skills: [],
+      requires: [
+        { key: "plan_doc", description: "a plan doc" },
+        { key: "spec_doc", description: "a spec" },
+        { key: "human_move", description: "a person's move" },
+      ],
+    };
+    expect(exitView(planning, { runs: [] })).toEqual([
+      { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+      {
+        key: "spec_doc",
+        description: "a spec",
+        status: "unmet",
+        reason: expect.stringContaining("no spec"),
+      },
+      {
+        key: "human_move",
+        description: "a person's move",
+        status: "unchecked",
+      },
+    ]);
+    expect(
+      exitView(planning, {
+        runs: [],
+        specified: true,
+      })[1],
+    ).toEqual({ key: "spec_doc", description: "a spec", status: "met" });
   });
 });
 

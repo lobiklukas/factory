@@ -332,8 +332,7 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           .openPullRequest({ sessionId: second.id, title: "build the widget" })
           .pipe(Effect.provideContext(forgeContext));
 
-        // A follow-up run that opens no PR of its own (opened, never sent): `pr_link` still passes.
-        const followUp = yield* runOnCard(card.id, "building");
+        // The card moves on with its PR (its latest run's own record, `already-open`).
         const before = yield* tasks.get(card.id);
         const moved = yield* tasks.move({
           taskId: card.id,
@@ -341,12 +340,18 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           to: "review",
           actor: "person:c19",
         });
+        // A follow-up run that opens no PR of its own (opened, never sent). It has completed no turn,
+        // so `run_completed` would hold the card in `building`: the card is put back for it, the
+        // follow-up being about the workspace, not the exit.
+        yield* sql`UPDATE tasks SET "column" = 'building' WHERE id = ${card.id}`;
+        const followUp = yield* runOnCard(card.id, "building");
         // Discarding the follow-up keeps the branch the other runs are still on, and frees the
         // card's run slot for the review run.
         yield* service.releaseWorkspace({
           sessionId: followUp,
           reason: "discarded",
         });
+        yield* sql`UPDATE tasks SET "column" = 'review' WHERE id = ${card.id}`;
         const branchAfterDiscard = git(
           checkout,
           "rev-parse",
@@ -445,7 +450,7 @@ describe("a card's runs share one branch and one PR (C19)", () => {
       outcome: "already-open",
     });
 
-    // `pr_link` (and `non_empty_diff`) read the card's branch and PR: the follow-up opened none.
+    // `pr_link` (and `non_empty_diff`) read the card's branch and PR.
     expect(outcome.moved.column).toBe("review");
     // The discarded follow-up's teardown left the branch its card's other runs are on.
     expect(outcome.branchAfterDiscard).toBe(outcome.secondCommit);
@@ -474,16 +479,14 @@ describe("a card's runs share one branch and one PR (C19)", () => {
   }, 240_000);
 
   /**
-   * The review's P1 and its busy hand-over (C19): an earlier run's PR stands for the card only while
-   * the branch is where it was published, and a start that would take the branch from under a busy
-   * run is refused. On a card pinned to default version 4, which declares no caps, so the busy run
+   * The busy hand-over (C19): a start that would take the branch from under a busy run is refused,
+   * and (D9) so is the move while that run has not completed its turn. On a card pinned to default version 4, which declares no caps, so the busy run
    * is the only thing that stops a second start.
    *
-   * Mutations this catches: let `pr_link` stand on the earlier run's PR whatever the branch's tip —
-   * the move with the busy run's unpublished commit goes through; drop `refuseBusyHolder` — the third
-   * start takes the branch over from under the busy run.
+   * Mutations this catches: drop `refuseBusyHolder` — the third start takes the branch over from
+   * under the busy run; read no turn for `run_completed` — the busy run's card moves on.
    */
-  it("refuses a move while a later run's commits are unpublished, and a start while a run on the branch is busy", async () => {
+  it("refuses a move while a later run on the branch is busy, and a start while it is", async () => {
     const outcome = await runtime.runPromise(
       Effect.gen(function* () {
         const service = yield* SessionService;
@@ -527,24 +530,12 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           .create({ taskId: card.id, taskColumn: "building" })
           .pipe(Effect.flip);
 
-        // A commit on the card's branch nothing published yet: the card's PR lacks it.
-        writeFileSync(
-          join(worktreeOf(second.id, gadgetRepo), "manual.txt"),
-          "manual\n",
-        );
-        git(worktreeOf(second.id, gadgetRepo), "add", "manual.txt");
-        git(
-          worktreeOf(second.id, gadgetRepo),
-          "commit",
-          "-q",
-          "-m",
-          "unpublished",
-        );
-        const before = yield* tasks.get(card.id);
-        const refused = yield* tasks
+        // The move is refused while that run is busy: it has not completed its turn (`run_completed`).
+        const busy = yield* tasks.get(card.id);
+        const refusedBusy = yield* tasks
           .move({
             taskId: card.id,
-            expectedRevision: before.revision,
+            expectedRevision: busy.revision,
             to: "review",
             actor: "person:c19",
           })
@@ -553,6 +544,17 @@ describe("a card's runs share one branch and one PR (C19)", () => {
         // The run finishes, and its settle pushes the branch onto the card's PR.
         rmSync(hold);
         const secondDecision = yield* decided(second.id);
+        yield* waitUntil(
+          service.get(second.id),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.some((entry) => entry.kind === "assistant"),
+          "the second run to settle",
+        );
+
+        // Its settle recorded the card's PR at the branch's tip, so the move goes through. (A run
+        // that committed past its PR and never published is `prLinkVerdict`'s unit case: a run that
+        // has completed its turn has had its PR step run, and a busy one is held by `run_completed`.)
         const tip = git(checkout, "rev-parse", branch);
         const again = yield* tasks.get(card.id);
         const moved = yield* tasks.move({
@@ -567,7 +569,7 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           branch,
           firstDecision,
           thirdStart,
-          refused,
+          refusedBusy,
           secondDecision,
           tip,
           forgeHead: git(forgeRepo, "rev-parse", `refs/heads/${branch}`),
@@ -587,11 +589,10 @@ describe("a card's runs share one branch and one PR (C19)", () => {
     );
     // The refused start wrote no run.
     expect(outcome.runs).toHaveLength(2);
-    expect(outcome.refused).toMatchObject({
+    expect(outcome.refusedBusy).toMatchObject({
       _tag: "RequirementUnmet",
-      requirement: "pr_link",
+      requirement: "run_completed",
     });
-    expect(outcome.refused.message).toContain(`where run ${outcome.first}`);
     expect(outcome.secondDecision).toEqual(["opened"]);
     expect(outcome.forgeHead).toBe(outcome.tip);
     expect(outcome.secondPr?.commit).toBe(outcome.tip);

@@ -2,13 +2,17 @@
 # Prove a column's `requires[]` refuses the move it gates, naming the requirement (LOB-80;
 # docs/board.md B5, B8).
 #
-# The default pipeline's `building` declares `non_empty_diff` and `pr_link` (checked since LOB-240): a
-# card leaves it only when its latest run's branch carries a committed change and that run recorded a
-# PR. Its `review` declares `verified` from definition version 3: a card leaves it only when the card's
+# The default pipeline's `specifying` declares `spec_doc` (checked since D9): a card leaves it only
+# when a run declared its spec. Its `building` declares `run_completed` (D9), `non_empty_diff` and
+# `pr_link` (checked since LOB-240): a card leaves it only when its latest run completed a turn, that
+# run's branch carries a committed change and the run recorded a PR. Its `review` declares `verified` from definition version 3: a card leaves it only when the card's
 # latest verified change passed for every surface it touched. This script walks a card into
 # `building` the way a person does, then proves both gates from the terminal:
 #
-#   0. building        with no run, `board move --to review` is refused naming "non_empty_diff"; a
+#   a. specifying      with no spec, `board move --to planning` is refused naming "spec_doc" and
+#                      writes nothing; once the spec is declared (`lib/seed-spec.ts`, the `spec`
+#                      tool's own service call) the same move goes through
+#   0. building        with no run, `board move --to review` is refused naming "run_completed"; a
 #                      builder run commits a change on its branch and settles, and its PR is opened
 #                      on a loopback GitHub fake with no call (C18) — `factory pr` answers it
 #                      `already-open`
@@ -235,20 +239,44 @@ check "the board binds a definition whose review requires verified" \
 
 # --- walk the card into building, as a person --------------------------------------------------------
 REVISION=1
-for to in specifying planning building; do
-  rc="$(cli "requires-move-$to.txt" board move --task "$TASK_ID" --to "$to" --expect-revision "$REVISION")"
+move_to() { # column: one move at the current REVISION; bumps it when the move lands
+  local to="$1"
+  local rc; rc="$(cli "requires-move-$to.txt" board move --task "$TASK_ID" --to "$to" --expect-revision "$REVISION")"
   if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to $to (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-move-$to.txt"; then
     REVISION=$((REVISION + 1))
   else
     check "the card moves into $to" 1 "exit=$rc"
   fi
-done
-check "a person walks the card into building" "$([ "$REVISION" = "4" ] && echo 0 || echo 1)" "revision=$REVISION"
+}
+move_to specifying
+
+# --- a. specifying: no spec, then the spec (D9) ------------------------------------------------------
+rc="$(cli requires-specifying-none.txt board move --task "$TASK_ID" --to planning --expect-revision "$REVISION")"
+check "with no spec, specifying → planning is refused naming spec_doc" \
+  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move specifying → planning needs "spec_doc" (a spec doc, gaps declared (explicitly [] when there are none)), which is not met: the card has no spec: no run has declared one with its spec tool' "$EVIDENCE_DIR/requires-specifying-none.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-specifying-none.txt" | cut -c1-100)"
+rc="$(cli requires-show-specifying.txt board show --task "$TASK_ID")"
+check "the refused card is still in specifying at the same revision" \
+  "$([ "$rc" = "0" ] && grep -qx "column    specifying" "$EVIDENCE_DIR/requires-show-specifying.txt" && grep -qx "revision  $REVISION" "$EVIDENCE_DIR/requires-show-specifying.txt" && echo 0 || echo 1)" \
+  "exit=$rc"
+TASK_ID="$TASK_ID" bun "$ROOT/.pi/skills/lib/seed-spec.ts" > "$EVIDENCE_DIR/requires-spec.json" 2>"$RUN_DIR/spec.err"
+spec_rc=$?
+SPEC_REVISION="$(sed -n 's/.*"revision":\([0-9]*\).*/\1/p' "$EVIDENCE_DIR/requires-spec.json")"
+check "a spec is declared on the card, a revision on" \
+  "$([ "$spec_rc" = "0" ] && [ "$SPEC_REVISION" = "$((REVISION + 1))" ] && echo 0 || echo 1)" \
+  "exit=$spec_rc revision=${SPEC_REVISION:-none}"
+REVISION="${SPEC_REVISION:-$REVISION}"
+move_to planning
+check "with the spec, specifying → planning goes through" \
+  "$(grep -q "moved $TASK_ID to planning" "$EVIDENCE_DIR/requires-move-planning.txt" && echo 0 || echo 1)" \
+  "revision=$REVISION"
+move_to building
+check "a person walks the card into building" "$([ "$REVISION" = "5" ] && echo 0 || echo 1)" "revision=$REVISION"
 
 # --- 0. building: no change, then no PR, then the PR (LOB-240) ---------------------------------------
 rc="$(cli requires-building-none.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION")"
-check "with no run, building → review is refused naming non_empty_diff" \
-  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move building → review needs "non_empty_diff" (a non-empty diff), which is not met: the card has no runs, so no branch carries its change' "$EVIDENCE_DIR/requires-building-none.txt" && echo 0 || echo 1)" \
+check "with no run, building → review is refused naming run_completed" \
+  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move building → review needs "run_completed" (a run that completed), which is not met: the card has no runs, so none completed a turn' "$EVIDENCE_DIR/requires-building-none.txt" && echo 0 || echo 1)" \
   "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-building-none.txt" | cut -c1-100)"
 
 rc="$(cli requires-start-build.txt board start --task "$TASK_ID" --prompt "build this card")"
@@ -338,8 +366,8 @@ rc="$(cli requires-move-review.txt board move --task "$TASK_ID" --to review --ex
 if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to review (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-move-review.txt"; then
   REVISION=$((REVISION + 1))
 fi
-check "with the card's change and its PR, the run's building → review goes through" \
-  "$([ "$REVISION" = "5" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
+check "with a completed run, the card's change and its PR, the run's building → review goes through" \
+  "$([ "$REVISION" = "6" ] && echo 0 || echo 1)" "exit=$rc revision=$REVISION"
 
 # --- 1. no evidence: refused, naming the requirement -------------------------------------------------
 rc="$(cli requires-refused-none.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"

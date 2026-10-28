@@ -26,6 +26,8 @@ import {
   CredentialProvider,
   rebuildIndexes,
   SessionServiceLive,
+  TaskService,
+  TaskServiceLive,
   TriggerService,
 } from "@repo/core";
 import { Unauthenticated } from "@repo/domain/Auth";
@@ -109,6 +111,32 @@ const scratch = ManagedRuntime.make(
 );
 const query = <A, E>(effect: Effect.Effect<A, E, SqlClient>) =>
   scratch.runPromise(Effect.orDie(effect));
+
+/**
+ * A specifying run's `spec` tool call on the card, in-process: no RPC posts a spec on a run's behalf,
+ * and `specifying`'s exit needs one (`spec_doc`, D9). Yields the revision the card is at after it.
+ */
+const declareSpec = (taskId: string, run: string) =>
+  Effect.gen(function* () {
+    const tasks = yield* TaskService;
+    const task = yield* tasks.declareSpec({
+      taskId,
+      actor: run,
+      goal: "walk the card on",
+      acceptance: ["it reaches planning"],
+      gaps: [],
+      openQuestions: [],
+    });
+    return task.revision;
+  }).pipe(
+    Effect.orDie,
+    Effect.provide(
+      TaskServiceLive.pipe(
+        Layer.provide(PostgresLive),
+        Layer.provide(ScratchConfig),
+      ),
+    ),
+  );
 
 /** Nothing here opens a PR. */
 const credentials = CredentialProvider.of({
@@ -667,15 +695,18 @@ describe("the actor every write records is the credential's, not the body's (LOB
           priority: "urgent",
           actor: MALLORY,
         });
-        const commented = yield* client.commentTask({
+        yield* client.commentTask({
           taskId: created.id,
           expectedRevision: updated.revision,
           body: "looks right",
           actor: MALLORY,
         });
+        // The run's own spec (its actor is the run, as the tool records it): the exit from
+        // specifying needs one.
+        const specRevision = yield* declareSpec(created.id, started.id);
         const planning = yield* client.moveTask({
           taskId: created.id,
-          expectedRevision: commented.revision,
+          expectedRevision: specRevision,
           to: "planning",
           actor: MALLORY,
         });
@@ -708,11 +739,16 @@ describe("the actor every write records is the credential's, not the body's (LOB
       "retitled",
       "priorityChanged",
       "commented",
+      "specified",
       "moved",
       "moved",
     ]);
-    expect(new Set(events.map((event) => event.actor))).toEqual(
-      new Set(["amy"]),
+    // Every write the credential made is amy's; the spec is the run's own, as its tool records it.
+    expect(
+      events.filter((event) => event.kind !== "specified").map((e) => e.actor),
+    ).toEqual(Array(events.length - 1).fill("amy"));
+    expect(events.find((event) => event.kind === "specified")?.actor).toBe(
+      outcome.started.id,
     );
     expect(outcome.thread.map((comment) => comment.actor)).toEqual(["amy"]);
     expect(await actorOf(outcome.started.id)).toBe("amy");

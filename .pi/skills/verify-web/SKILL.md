@@ -335,6 +335,20 @@ of the session recording it, `idle` once the run settles, no per-card read in th
 nine cards to cost no more calls per window than three (`features/card-face.md`). Evidence goes to
 `.verify/evidence/latest/card-face/`.
 
+### The exit checklist
+
+```sh
+EXIT_API_PORT=9561 EXIT_WEB_PORT=3561 ./exit-checklist.sh   # its own instance; leaves nothing running
+```
+
+The card pane lists what the column needs before the card leaves it (D9): "Leaves <column> when", each
+requirement `met`, `unmet` with the server's reason, or `not checked`, and a move the server would
+refuse says why before it is clicked. `exit-checklist.sh` starts its own API and dashboard;
+`exit-checklist.mjs` walks a card with `moveTask`, declares its spec in-process (`lib/seed-spec.ts`),
+and requires the pane's items to equal `getTaskExit`'s, the warning to name the key before the click,
+the refusal to carry the checklist's reason verbatim, and `spec_doc` to turn met within one poll
+interval (`features/exit-checklist.md`). Evidence goes to `.verify/evidence/latest/exit-checklist/`.
+
 ### The card pane's state controls
 
 ```sh

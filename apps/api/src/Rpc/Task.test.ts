@@ -27,6 +27,7 @@ import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug } from "@repo/domain/Session";
 import {
   BoardInstanceId,
+  TaskId,
   type ColumnConfig,
   DefinitionId,
 } from "@repo/domain/Task";
@@ -233,7 +234,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
         key: "spec_doc",
         description:
           "a spec doc, gaps declared (explicitly [] when there are none)",
-        checked: false,
+        checked: true,
       },
     ],
     exits: [{ to: "planning" }, { to: "canceled" }],
@@ -266,7 +267,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       {
         key: "run_completed",
         description: "a run that completed",
-        checked: false,
+        checked: true,
       },
       { key: "non_empty_diff", description: "a non-empty diff", checked: true },
       { key: "pr_link", description: "a PR link", checked: true },
@@ -521,6 +522,62 @@ describe("a board's configuration over RPC (LOB-270)", () => {
       boardId: missing,
     });
   });
+  /**
+   * D9 over the wire: `getTaskExit` is the checklist a move's refusal is made of. A card in
+   * `specifying` with no spec lists `spec_doc` unmet with the reason `moveTask`'s `RequirementUnmet`
+   * carries; an unknown card is `TaskNotFound`. Mutation: judge a requirement the move does not (the
+   * reasons part), or drop `reason` from the schema — the first expectation fails.
+   */
+  it("answers a card's exit checklist, the reason a refused move carries, and an unknown card as TaskNotFound", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`acme/rpc-task-exit-${run}`),
+          definitionId: DEFAULT,
+        });
+        const created = yield* client.createTask({
+          boardId: board.id,
+          title: "an exit",
+          actor: "person:rpc",
+        });
+        const specifying = yield* client.moveTask({
+          taskId: created.id,
+          expectedRevision: created.revision,
+          to: "specifying",
+          actor: "person:rpc",
+        });
+        const exit = yield* client.getTaskExit({ taskId: created.id });
+        const refused = yield* failureOf(
+          client.moveTask({
+            taskId: created.id,
+            expectedRevision: specifying.revision,
+            to: "planning",
+            actor: "person:rpc",
+          }),
+        );
+        return { exit, refused, specifying };
+      }),
+    );
+    expect(outcome.exit).toMatchObject({
+      column: "specifying",
+      revision: outcome.specifying.revision,
+      requirements: [{ key: "spec_doc", status: "unmet" }],
+    });
+    const reason = outcome.exit.requirements[0]?.reason ?? "";
+    expect(reason).toContain("the card has no spec");
+    expect(outcome.refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "spec_doc",
+    });
+    expect(outcome.refused.message).toContain(reason);
+
+    const missing = TaskId.make(`tsk_${"0".repeat(26)}`);
+    const unknown = await call((client) =>
+      failureOf(client.getTaskExit({ taskId: missing })),
+    );
+    expect(unknown).toMatchObject({ _tag: "TaskNotFound", taskId: missing });
+  });
+
   /**
    * LOB-263 over the wire: `createBoard` and `getBoard` answer the warning a repository with no local
    * checkout earns, the session's workspace says the same, and registering a path clears the board's.

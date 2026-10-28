@@ -175,7 +175,9 @@ try {
       "--task",
       amy.card.id,
       "--to",
-      "planning",
+      // `canceled`, not `planning`: leaving specifying for planning needs the card's spec (D9), which
+      // this drive is not about, and abandoning a card checks no requirement.
+      "canceled",
       "--expect-revision",
       String(amy.moved.revision),
       "--actor",
@@ -243,7 +245,7 @@ try {
     cli.status === 0 &&
       events.length === 3 &&
       events[2]?.kind === "moved" &&
-      events[2]?.to === "planning",
+      events[2]?.to === "canceled",
     `exit=${cli.status} events=${JSON.stringify(events)}`,
   );
   assert(

@@ -50,6 +50,9 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
 (120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
 
+`exit-checklist.sh` (a column's exit checklist in the card pane, D9) last passed **12/12** on 2026-10-28 from the
+`agent/D9` worktree, API `:9560` / web `:3560`; the pane re-reads on the 10 s `EXIT_POLL`.
+
 `card-edit.sh` (the card pane's block, unblock, urgent flag and title edit, C11) last passed **11/11** on
 2026-10-28 from the `agent/C11` worktree, API `:9582` / web `:3582`.
 
@@ -102,6 +105,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |
+| Exit checklist               | passing | [exit-checklist.md](exit-checklist.md) (`exit-checklist.sh`)                  |
 | Card pane state controls     | passing | [card-edit.md](card-edit.md) (`card-edit.sh`)                                 |
 | The dashboard's credential   | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
