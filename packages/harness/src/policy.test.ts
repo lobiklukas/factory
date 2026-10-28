@@ -396,7 +396,10 @@ describe("a session bound to a branch pushes that branch only (F15)", () => {
   /** Mutation: judge the push by the session id alone — the card's branch is refused. */
   it("allows the bound branch, by full ref or short name", () => {
     expect(
-      decideToolCall(bound, bash("git push origin HEAD:refs/heads/factory/ses_1")),
+      decideToolCall(
+        bound,
+        bash("git push origin HEAD:refs/heads/factory/ses_1"),
+      ),
     ).toEqual({ _tag: "allow" });
     expect(
       decideToolCall(bound, bash("git push origin factory/ses_1")),

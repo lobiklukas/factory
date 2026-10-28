@@ -671,7 +671,7 @@ describe("a card's runs share one branch and one PR (C19)", () => {
       SessionServiceLive({
         model: createFauxModelAccess({
           fauxCommand: [
-            'echo bound > bound-change.txt',
+            "echo bound > bound-change.txt",
             'git add -A && git -c user.email=f15@localhost -c user.name=f15 commit -qm "f15 bound change"',
             `git push -q ${forgeRepo} HEAD:refs/heads/${branch}`,
             "echo faux-ok",

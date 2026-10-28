@@ -5,11 +5,7 @@
  */
 import type { BoardColumn } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
-import {
-  type CardRun,
-  cardBranchOf,
-  changeColumnsOf,
-} from "./cardBranch";
+import { type CardRun, cardBranchOf, changeColumnsOf } from "./cardBranch";
 
 const REPO = "acme/widgets";
 
