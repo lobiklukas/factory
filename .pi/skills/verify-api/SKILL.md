@@ -272,9 +272,11 @@ just mints new ids.
   loud failure here rather than a 30-second `/readyz` loop in `up.sh`, and a compose that failed only
   because another agent's start won the port is not a refusal — the port decides. The regressions are
   covered by
-  `packages/storage-postgres/src/postgres-up.test.ts`, which drives every caller with a fake `docker`
-  and a real listener, and by a `PG_PORT` pointing at nothing, which reproduces the failure path
-  without touching 5442.
+  `packages/storage-postgres/src/postgres-up.test.ts`, which drives every verify-* script (its
+  `CALLERS` list) with a fake `docker` and a real listener, and by a `PG_PORT` pointing at nothing,
+  which reproduces the failure path without touching 5442. `.pi/ralph/loop.sh` also sources the helper
+  (its `ensure_db`) and is not guarded: its `docker_env` probes `docker info` directly, so it is out of
+  that test's scope.
 
 ## Feature map
 
