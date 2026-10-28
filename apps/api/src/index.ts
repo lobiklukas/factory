@@ -1,5 +1,6 @@
 import { BunHttpServer, BunRuntime, BunServices } from "@effect/platform-bun";
 import {
+  backfillSessionModels,
   CredentialConfig,
   CredentialProvider,
   CredentialProviderLive,
@@ -25,15 +26,28 @@ import {
   REVIEW_ROLES,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
-import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
+import {
+  Cause,
+  Config,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Redacted,
+  Schema,
+} from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
-import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
+import {
+  bootEnvFromProcess,
+  logTriggerBootFromProcess,
+} from "./Api/WebhookBoot";
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
+  linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
   ProposalTrackerLive,
@@ -44,6 +58,7 @@ import {
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import { ServerFacts, webhookRouteStates } from "./ServerInfo";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
   DEFAULT_SANDBOX_RUNTIME,
@@ -344,6 +359,23 @@ const applyMigrations = Effect.gen(function* () {
     );
     if (Exit.isSuccess(exit)) {
       yield* Effect.logInfo("migrations: applied");
+      // Rows older than migration 0027 name no model until something reads their logs (LOB-269):
+      // once, here, so the list names every session's model without waiting for each to reopen. A
+      // failure is a stale display column, never a reason to stop serving.
+      yield* backfillSessionModels.pipe(
+        Effect.flatMap((filled) =>
+          filled > 0
+            ? Effect.logInfo(
+                `session models: filled ${filled} index row(s) from their logs`,
+              )
+            : Effect.void,
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning(
+            `session models: the backfill stopped: ${error.message}`,
+          ),
+        ),
+      );
       return;
     }
     yield* Effect.logError(
@@ -567,8 +599,9 @@ const HttpLive = Effect.gen(function* () {
   // The reviewer's identity (LOB-36): its own token or App, never the worker's. One that *is* the
   // worker's fails the boot here; none at all boots, and each review's post says what is missing.
   const reviewerConfig = yield* ReviewerCredentialConfig;
+  const credentialConfig = yield* CredentialConfig;
   const reviewerCredentials = yield* selectReviewerCredentialProvider(
-    yield* CredentialConfig,
+    credentialConfig,
     reviewerConfig,
   ).pipe(Effect.provide(FetchHttpClient.layer));
   const reviewerAppId = Option.filter(reviewerConfig.appId, (id) => id !== "");
@@ -585,9 +618,33 @@ const HttpLive = Effect.gen(function* () {
         }
       : {}),
   }).pipe(Effect.provide(FetchHttpClient.layer));
+  const reviewerIdentity = Option.isSome(reviewerConfig.appId)
+    ? "github-app"
+    : Option.isSome(reviewerConfig.token)
+      ? "token"
+      : "none";
   yield* Effect.logInfo(
-    `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
+    `reviewer identity: ${reviewerIdentity === "github-app" ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : reviewerIdentity === "token" ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
   );
+
+  // What `getServerInfo` answers (LOB-269): the values resolved above, as they were resolved, so the
+  // RPC and the boot lines say the same thing. Names and modes only — no credential is in here.
+  const ServerFactsLive = Layer.succeed(ServerFacts, {
+    choice: backendChoice,
+    model: modelAccess,
+    roleModels,
+    approvalRequired: autonomy.approvalRequired,
+    defaultBudget,
+    // Resolved here to armed-or-not, so the secrets' values never enter the service.
+    webhooks: webhookRouteStates(bootEnvFromProcess()),
+    githubTokenSet: Option.exists(
+      credentialConfig.githubToken,
+      (token) => Redacted.value(token) !== "",
+    ),
+    linearStates: linearConfig?.states,
+    reviewer: reviewerIdentity,
+    sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
+  });
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
@@ -653,6 +710,7 @@ const HttpLive = Effect.gen(function* () {
     TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
+    ServerFactsLive,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance
     // (`./Api/LinearSync`): a layer first built inside `serve` would be the routes' private copy.

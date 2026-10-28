@@ -2,6 +2,7 @@ export * from "./Api";
 export * from "./Approval";
 export * from "./Page";
 export * from "./Rpc";
+export * from "./Server";
 export * from "./Session";
 export * from "./Task";
 export * from "./Trigger";
