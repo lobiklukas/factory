@@ -64,6 +64,11 @@ with LOB-7.
 
 ## Quickstart
 
+This is the short version. [`docs/getting-started.md`](docs/getting-started.md) is the whole journey, from
+this clone to a card in review with a pull request (register a repository, make a board, add a card,
+start runs, approve the plan, open the PR, merge), a table of what to set for each third party, and a
+runbook for a tunnel with a real Linear webhook.
+
 Requires Bun (`bun@1.4.2`, per `package.json`; Node `>=24`), Docker, and the repo checked out.
 
 ```sh
@@ -162,16 +167,17 @@ conventions around this.
 
 ## Where the truth lives
 
-| Document                                         | The question it answers                                                                                                                        |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`docs/design.md`](docs/design.md)               | What is the architecture, and which decisions (D1-D18) are settled, over which milestones (M0-M7) and risks (R1-R6)?                           |
-| [`docs/board.md`](docs/board.md)                 | How does work move? The settled board decisions (B1-B12), the default pipeline, the human gates, and the MVP/wave-2 cut.                       |
-| [`docs/roadmap.md`](docs/roadmap.md)             | In what order do we build, and what does "done" mean? Priority tiers and the Linear project that tracks them.                                  |
-| [`docs/features.md`](docs/features.md)           | What should we build next, and why? A ranked backlog from a code audit, the installed Pi Durable surface, and a survey of comparable products. |
-| [`docs/handoff.md`](docs/handoff.md)             | What is done, what is proven, what is not, and what is next? The state of the work.                                                            |
-| [`docs/next-agent.md`](docs/next-agent.md)       | Where does an agent start right now? A self-contained brief for one stretch of work; stale by design.                                          |
-| [`docs/parallel-work.md`](docs/parallel-work.md) | How do I run several streams of work at once without collisions? Subagents, worktrees, and where to hand off to the factory.                   |
-| [`docs/README.md`](docs/README.md)               | Which document answers which question? The index of the docs tree.                                                                             |
+| Document                                             | The question it answers                                                                                                                             |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`docs/design.md`](docs/design.md)                   | What is the architecture, and which decisions (D1-D18) are settled, over which milestones (M0-M7) and risks (R1-R6)?                                |
+| [`docs/getting-started.md`](docs/getting-started.md) | How do I go from a clone to a reviewed PR, and wire up real Linear and GitHub? One command per step, the configuration table, and a tunnel runbook. |
+| [`docs/board.md`](docs/board.md)                     | How does work move? The settled board decisions (B1-B12), the default pipeline, the human gates, and the MVP/wave-2 cut.                            |
+| [`docs/roadmap.md`](docs/roadmap.md)                 | In what order do we build, and what does "done" mean? Priority tiers and the Linear project that tracks them.                                       |
+| [`docs/features.md`](docs/features.md)               | What should we build next, and why? A ranked backlog from a code audit, the installed Pi Durable surface, and a survey of comparable products.      |
+| [`docs/handoff.md`](docs/handoff.md)                 | What is done, what is proven, what is not, and what is next? The state of the work.                                                                 |
+| [`docs/next-agent.md`](docs/next-agent.md)           | Where does an agent start right now? A self-contained brief for one stretch of work; stale by design.                                               |
+| [`docs/parallel-work.md`](docs/parallel-work.md)     | How do I run several streams of work at once without collisions? Subagents, worktrees, and where to hand off to the factory.                        |
+| [`docs/README.md`](docs/README.md)                   | Which document answers which question? The index of the docs tree.                                                                                  |
 
 ## Verification as a skill
 

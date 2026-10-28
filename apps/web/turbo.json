@@ -2,6 +2,11 @@
   "$schema": "https://turborepo.com/schema.json",
   "extends": ["//"],
   "tasks": {
+    "test": {
+      // guide-links.test.ts reads docs/getting-started.md from the repository root, so an edit to
+      // the guide alone must miss the cache (G1).
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/docs/getting-started.md"]
+    },
     "dev": {
       // What the dashboard's dev server reads: the port vite.config.ts binds, and the API and DevTools
       // URLs lib/rpc-client.ts and lib/devtools.ts read from import.meta.env (LOB-101). Declared rather
