@@ -56,6 +56,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | The review agent (LOB-36)               | `review.sh`: a signed `pull_request` starts a read-only reviewer at the head, on its own model; one `COMMENT` naming the bug, as its own token; a redelivery none; a push a second                                                                                                                                          | a PR is reviewed once per head, not as its author                                  |
 | A long session's history (LOB-243)      | `history.sh`: released, `getSession` carries the newest 200 entries and `earlier`; `readSessionHistory` pages back to the first entry, joined they are the transcript; `factory watch` says what it did not print; `factory history --all` prints it                                                                        | a historical read costs what it shows, and the rest is one call away               |
 | Proposed child issues (LOB-201)         | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, and no other row in the database moves                                                                                                                                                        | a spec becomes proposals, and nothing else is made                                 |
+| Approving proposals (LOB-202)           | `approve-proposals.sh`: `approveProposals` creates only the approved proposals in a loopback Linear, under the delegating issue and in its team, with the edges whose ends exist, and nothing twice                                                                                                                         | approved proposals become tracker issues, once                                     |
 | The model backend (LOB-258)             | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
 | Jira, Slack and GitHub issues (LOB-259) | `jira.sh`, `slack.sh`, `github-issues.sh`: signed deliveries at `/webhooks/jira`, `/webhooks/slack` and the issue events of `/webhooks/github` open one session and one comment; an unset secret answers 503                                                                                                                | three more sources arrive over HTTP, each armed by its own secret                  |
 |                                         |                                                                                                                                                                                                                                                                                                                             |                                                                                    |     |     |     | 579ff10 |
@@ -126,6 +127,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
+./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: the window it proves is a kill
@@ -217,6 +219,10 @@ order you want the evidence to end in.
 - `decompose.json`, `decompose-process.json`, `decompose-api.log` — from `./decompose.sh`: the spec,
   the proposals, every table's fingerprint (row count and content `md5`) before and after the call,
   the log's new commits, and the script's own checks
+- `approve-proposals.json`, `approve-proposals-process.json`, `approve-proposals-api.log`,
+  `approve-proposals-linear-ledger.json`, `approve-proposals-linear-fake.log` — from
+  `./approve-proposals.sh`: each approval's answer, the fake Linear's whole ledger (every request,
+  the issues made, the relations), and the script's own checks
 - `pr-evidence.json`, `pr-evidence-<scenario>.md`, `pr-evidence-ledger.json`, `pr-evidence.log` —
   from `./pr-evidence.sh`: each scenario's sent body, decoded records and committed evidence, the
   checks, and the fake's ledger
