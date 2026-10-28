@@ -1,6 +1,6 @@
 # Reviewer measurement: is the reviewer worth trusting on our own PRs
 
-**Status: the faux proof passes; the live measurement is the owner's to run.** An opt-in script
+**Status: the faux proof and the live boot check pass; the live measurement is the owner's to run and is not yet recorded.** An opt-in script
 (`bun run review-eval`, never part of the gate) runs the reviewer on twelve of the factory's own
 merged pull requests — six with a bug seeded on top, six as merged — and writes a table of what it
 found (LOB-242). LOB-36's acceptance ends with "measured on our own PRs before it is trusted"; the
@@ -11,12 +11,13 @@ finds a real bug and stays quiet on a clean change.
 
 - **The corpus** (`packages/harness/src/reviewEvalCorpus.ts`). Twelve squash commits on `main`, each
   one a PR (`commit^..commit`). Six are seeded: a `find`/`replace` against one file at that commit,
-  committed on top of the merge, so the diff is the real PR plus one bug — a dropped element
+  amended into the merge commit (which keeps the PR's own message), so the diff is the real PR plus one bug — a dropped element
   (`usageCostTotal` loses the tool buckets), a missing `await` (`yield*` becomes `void`), an off-by-one
   (`files === 0` becomes `=== 1`), two inverted conditions (the outcome tags swapped, a claim-age
   comparison reversed) and an unchecked input (the board-repo mismatch guard that can never fire).
   Six are clean, the PRs as merged. Each seed names the file a review has to name and the phrases a
-  review that understood the bug would use.
+  review that understood the bug would use; a phrase matches on whole words and must be specific to the
+  seeded change, not the PR's own topic or the code a reviewer would quote.
 - **The scoring** (`packages/harness/src/reviewEval.ts`, under test in the gate). It reads the comment
   the forge was handed back into findings (`parseReviewComment`) and scores each run: _reviewed_ (the
   `review` call was accepted), _posted_ (a review with no finding posts nothing), _detected_ (the posted
@@ -33,7 +34,9 @@ finds a real bug and stays quiet on a clean change.
   the gate worthless if it slips.
 - **The run** (`review-eval.sh`, `review-eval.ts`). It clones this repository, builds the corpus's heads
   in the clone (a seed whose `find` is not in the file exactly once, or a commit a shallow clone lacks,
-  stops it), boots the API and, for each PR, delivers a signed `pull_request` to `POST
+  stops it), scrubs the clone so the reviewer reads only the diff (one branch, no remote or reflog, a
+  neutral repo slug and no entry id or `seed` in the prompt or the history; the run checks the prompt
+  and `prepare` checks the message), boots the API and, for each PR, delivers a signed `pull_request` to `POST
 /webhooks/github` exactly as `review.sh` does. The reviewer runs on its `ROLE_MODELS` model and
   posts to a loopback `Bun.serve` forge: `GITHUB_API_URL` is the only GitHub the API is told about and
   both tokens are fixed fakes, so nothing is ever written to github.com, and every forge request's
@@ -43,6 +46,7 @@ finds a real bug and stays quiet on a clean change.
 
 ```
 REVIEW_EVAL=faux DATABASE_URL=… API_PORT=9570 ./review-eval.sh      # the proof
+REVIEW_EVAL=live-check DATABASE_URL=… API_PORT=9570 ./review-eval.sh # the live boot, dummy key, no model call
 REVIEW_EVAL=live DATABASE_URL=… API_PORT=9570 \
   ROLE_MODELS=reviewer=anthropic/<model> ./review-eval.sh            # the measurement
 bun run review-eval                                                   # the same, from the root
@@ -54,12 +58,16 @@ the wrong reason on one, a failing review of a different file on one, quiet on f
 nit on one and a false alarm on one. `live` forces `MODEL_BACKEND=anthropic` (a missing credential
 fails the boot, it does not fall back to the faux), boots once and runs the twelve in order; it needs
 the API's usual credential in its environment and spends money, a few dollars at most on a mid-size
-model. The script reads no credential and no `.env` file.
+model. `live-check` boots the API the way `live` does, with a dummy credential, and checks the log shows
+the anthropic backend and the reviewer's role row: `up.sh` adds its faux `replay-target` role only on
+the faux backend, because the anthropic catalog does not serve `faux/faux-2` and a role naming a
+model the process does not serve refuses the boot. The script reads no credential and no `.env` file.
 
 ## End state that proves it
 
-The faux proof's 40 checks (`review-eval.log`; the 16 of `report` are in `review-eval-proof.json`). Per run, two:
-every forge call carried the reviewer's own token and at most one review was posted. Then, over all twelve: each of the twelve table rows
+The faux proof's 52 checks (`review-eval.log`; the 16 of `report` are in `review-eval-proof.json`). Per run, three, and
+`run` exits non-zero (and `report` fails, in both modes) if any fails: every forge call carried the
+reviewer's own token, at most one review was posted, and the prompt names neither the entry nor a seed. Then, over all twelve: each of the twelve table rows
 equals what the faux reviewer's scripted answer scores, computed through the real rubric, comment
 rendering and reading; every run was reviewed on `faux/faux-review` with a cost; every forge call, of
 every run, carried the reviewer's own token; the table's totals are five detected, four named a file,

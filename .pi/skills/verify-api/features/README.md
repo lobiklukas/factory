@@ -129,7 +129,7 @@ because the GitHub route they drive now hands a `pull_request` to the review too
 
 The reviewer measurement (LOB-242) was run from the `agent/LOB-242` worktree on 2026-10-28 (API on
 `:9570`, forge on `:9571`, faux, the worktree's own database on 5442): `REVIEW_EVAL=faux
-./review-eval.sh` **40/40** (24 per-run forge checks, 12 row checks, 4 aggregate; the live run is not part of it), evidence `.verify/evidence/lob-242/`.
+./review-eval.sh` **52/52** (36 per-run checks, 12 row checks, 4 aggregate; the live run is not part of it), and `REVIEW_EVAL=live-check` (the live boot with a dummy key, no network) passing, evidence `.verify/evidence/lob-242/`.
 The live run, on a real model, is the owner's; see `review-eval.md`.
 
 The curation checks (LOB-206) were run from the `ralph/LOB-206` worktree on 2026-10-24 (API on

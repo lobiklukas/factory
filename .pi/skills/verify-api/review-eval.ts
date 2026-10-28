@@ -17,7 +17,7 @@
 // Env: API_URL, EVIDENCE_DIR, REVIEW_EVAL_DIR, REVIEW_EVAL_MODE (`faux` or `live`),
 // REVIEW_EVAL_REPO (the repo slug prefix), REVIEW_EVAL_TIMEOUT_MS, GITHUB_WEBHOOK_SECRET, FORGE_PORT,
 // DATABASE_URL (via DatabaseLive).
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -25,19 +25,21 @@ import { BunServices } from "@effect/platform-bun";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
+import { usageCostTotal } from "@repo/harness";
 import {
   fauxPostedComment,
   fauxReviewFor,
   renderReviewEvalTable,
-  REVIEW_EVAL_CORPUS,
   REVIEW_EVAL_FAUX_BEHAVIOR,
   scoreReviewEval,
   summarizeReviewEval,
-  usageCostTotal,
-  type ReviewEvalEntry,
   type ReviewEvalRecord,
   type ReviewEvalRow,
-} from "@repo/harness";
+} from "@repo/harness/reviewEval";
+import {
+  REVIEW_EVAL_CORPUS,
+  type ReviewEvalEntry,
+} from "@repo/harness/reviewEvalCorpus";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -94,16 +96,41 @@ const git = (cwd: string, ...args: string[]): string =>
   ).trim();
 
 /**
+ * What the reviewer could read in the checkout besides the diff: this repository's other branches (the
+ * one holding the corpus and its answers), later history, reflog lines naming a branch. Leaves one
+ * branch, `main`, at the oldest base, and no remote, tag or reflog; the entries' commits stay in the
+ * object store, which is all a worktree cut at a sha needs.
+ */
+const scrubCheckout = (planned: ReadonlyArray<{ readonly base: string }>) => {
+  const [first] = planned;
+  if (first === undefined) throw new Error("the corpus is empty");
+  git(CHECKOUT, "checkout", "--quiet", "--detach", first.base);
+  git(CHECKOUT, "remote", "remove", "origin");
+  for (const ref of git(CHECKOUT, "for-each-ref", "--format=%(refname)")
+    .split("\n")
+    .filter((line) => line !== ""))
+    git(CHECKOUT, "update-ref", "-d", ref);
+  git(CHECKOUT, "update-ref", "refs/heads/main", first.base);
+  git(CHECKOUT, "symbolic-ref", "HEAD", "refs/heads/main");
+  git(CHECKOUT, "reflog", "expire", "--expire=now", "--all");
+  const refs = git(CHECKOUT, "for-each-ref", "--format=%(refname)");
+  if (refs !== "refs/heads/main")
+    throw new Error(`the checkout still has refs: ${refs}`);
+};
+
+/**
  * A local clone of this repository, and for each corpus entry the base and head the reviewer is cut
- * at: `commit^` and the merge commit for a clean entry, `commit^` and a commit that applies the seed on
- * top of the merge for a seeded one. A seed whose `find` is not in the file exactly once, or a commit
+ * at: `commit^` and the merge commit for a clean entry, `commit^` and the merge commit with the seed
+ * amended in for a seeded one. A seed whose `find` is not in the file exactly once, or a commit
  * the clone lacks (a shallow history), stops here rather than measuring something else.
  */
 const prepare = async () => {
   await rm(RUN_DIR, { recursive: true, force: true });
   await mkdir(RUN_DIR, { recursive: true });
   git(ROOT, "rev-parse", "--git-dir");
-  git(RUN_DIR, "clone", "--quiet", ROOT, CHECKOUT);
+  git(RUN_DIR, "clone", "--quiet", "--no-tags", ROOT, CHECKOUT);
+  // Objects the scrub below leaves unreferenced have to stay: no automatic gc.
+  git(CHECKOUT, "config", "gc.auto", "0");
   const entries: Manifest["entries"] = {};
   for (const entry of REVIEW_EVAL_CORPUS) {
     try {
@@ -117,14 +144,7 @@ const prepare = async () => {
     let head = entry.commit;
     const { seed } = entry;
     if (seed !== undefined) {
-      git(
-        CHECKOUT,
-        "checkout",
-        "--quiet",
-        "-B",
-        `eval/${entry.id}`,
-        entry.commit,
-      );
+      git(CHECKOUT, "checkout", "--quiet", "--detach", entry.commit);
       const file = path.join(CHECKOUT, seed.file);
       const text = await readFile(file, "utf8");
       const found = text.split(seed.find).length - 1;
@@ -136,8 +156,16 @@ const prepare = async () => {
         file,
         text.replace(seed.find, () => seed.replace),
       );
-      git(CHECKOUT, "commit", "--quiet", "-am", `seed: ${seed.bug}`);
+      // Amended into the merged commit, which keeps its own message: a seeded head is one commit on
+      // `commit^` like a clean one, and nothing in `git log` says a bug was put there.
+      git(CHECKOUT, "commit", "--quiet", "--amend", "--no-edit", "-a");
       head = git(CHECKOUT, "rev-parse", "HEAD");
+      // Nothing the reviewer can read says a bug was put there: the head carries the merged message.
+      if (
+        git(CHECKOUT, "log", "-1", "--format=%B", head) !==
+        git(CHECKOUT, "log", "-1", "--format=%B", entry.commit)
+      )
+        throw new Error(`seed ${entry.id}: the head's message is not the PR's`);
       // The seed is the whole difference between the merged PR and what the reviewer is cut at.
       const seeded = git(CHECKOUT, "diff", "--name-only", entry.commit, head);
       if (seeded !== seed.file)
@@ -152,7 +180,7 @@ const prepare = async () => {
       throw new Error(`seed ${entry.id}: ${seed.file} is not in the diff`);
     entries[entry.id] = { base, head, changed };
   }
-  git(CHECKOUT, "checkout", "--quiet", "--detach", "HEAD");
+  scrubCheckout(Object.values(entries));
   await writeFile(
     MANIFEST,
     `${JSON.stringify({ checkout: CHECKOUT, entries } satisfies Manifest, null, 2)}\n`,
@@ -194,8 +222,10 @@ const run = async (id: string) => {
     process.env["REVIEW_EVAL_TIMEOUT_MS"] ??
       (MODE === "live" ? "900000" : "120000"),
   );
+  // A neutral slug: the reviewer's prompt and branch name carry it, and an entry's id says whether
+  // the PR is seeded and what the bug is. The id stays in the evidence files.
   const repo = RepoSlug.make(
-    `${process.env["REVIEW_EVAL_REPO"] ?? "acme/review-eval"}-${id}`,
+    `${process.env["REVIEW_EVAL_REPO"] ?? "acme/review-eval"}-${createHash("sha1").update(id).digest("hex").slice(0, 8)}`,
   );
   const page = `https://github.com/${repo}/pull/${entry.pr}`;
 
@@ -414,9 +444,25 @@ const run = async (id: string) => {
     posts.length <= 1,
     `posts=${posts.length}`,
   );
-  console.log(
-    `${id}: reviewed=${record.reviewed} posted=${record.comment !== null} cost=$${record.cost.toFixed(4)} ${record.note}`,
+  // What the run told the model, outside its own tool output: nothing names the entry or says seeded.
+  const told = transcript
+    .filter((item) => item.kind !== "assistant" && item.kind !== "toolResult")
+    .map((item) => item.text)
+    .join("\n");
+  check(
+    "the reviewer's prompt does not name the entry or say it is seeded",
+    transcript.some((item) => item.kind === "user") &&
+      !told.includes(id) &&
+      !/seed/i.test(told),
+    told.slice(0, 200),
   );
+  const failedChecks = Object.entries(observed.checks).filter(
+    ([, item]) => !item.passed,
+  );
+  console.log(
+    `${id}: reviewed=${record.reviewed} posted=${record.comment !== null} cost=$${record.cost.toFixed(4)} ${record.note}${failedChecks.length > 0 ? ` FAILED: ${failedChecks.map(([name]) => name).join("; ")}` : ""}`,
+  );
+  if (failedChecks.length > 0) process.exitCode = 1;
 
   await mkdir(path.join(EVIDENCE_DIR, "comments"), { recursive: true });
   await mkdir(RESULTS, { recursive: true });
@@ -434,6 +480,7 @@ const run = async (id: string) => {
 type StoredResult = {
   readonly record: ReviewEvalRecord;
   readonly requests: readonly ForgeRequest[];
+  readonly forgeChecks?: Record<string, { readonly passed: boolean | null }>;
 };
 
 const report = async () => {
@@ -476,9 +523,18 @@ const report = async () => {
   );
   console.log(`\n${table}`);
 
+  // The per-run checks `run` made, in both modes: a run that used another identity, posted twice or
+  // was told the answer is not a measurement of the reviewer.
+  const runFailures = [...stored.entries()].flatMap(([entryId, result]) =>
+    Object.entries(result.forgeChecks ?? {})
+      .filter(([, item]) => item.passed !== true)
+      .map(([name]) => `${entryId}: ${name}`),
+  );
+  if (runFailures.length > 0)
+    console.log(`\nper-run checks failed:\n  ${runFailures.join("\n  ")}`);
   if (MODE !== "faux") {
     console.log(`table: ${path.join(EVIDENCE_DIR, "review-eval.md")}`);
-    return 0;
+    return runFailures.length === 0 ? 0 : 1;
   }
 
   // The faux proof: the table has to say what the scripted reviewer did, entry by entry — which only
@@ -546,9 +602,9 @@ const report = async () => {
     path.join(EVIDENCE_DIR, "review-eval-proof.json"),
     `${JSON.stringify(observed.checks, null, 2)}\n`,
   );
-  const failed = Object.values(observed.checks).filter(
-    (item) => !item.passed,
-  ).length;
+  const failed =
+    Object.values(observed.checks).filter((item) => !item.passed).length +
+    runFailures.length;
   console.log(
     failed === 0
       ? "\nreview-eval (faux): all checks passed"

@@ -128,7 +128,24 @@ export type ReviewEvalRow = {
   readonly model: string | null;
 };
 
-const normalized = (text: string): string => text.toLowerCase();
+const escaped = (phrase: string): string =>
+  phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Whether `text` says one of `phrases`: case-insensitive, and a phrase has to stand on whole words, so
+ * `dead` is not found in `deadline` and `swap` is not found in `swapped` (a seed lists the forms it
+ * wants). A phrase that starts or ends with a symbol (`=== 1`) needs no boundary on that side.
+ */
+export const namesMechanism = (
+  text: string,
+  phrases: readonly string[],
+): boolean =>
+  phrases.some((phrase) =>
+    new RegExp(
+      `${/^\w/.test(phrase) ? "(?<![\\w])" : ""}${escaped(phrase)}${/\w$/.test(phrase) ? "(?![\\w])" : ""}`,
+      "i",
+    ).test(text),
+  );
 
 /** Score one run against its entry. */
 export const scoreReviewEval = (
@@ -167,11 +184,7 @@ export const scoreReviewEval = (
   const namedFile = failed && onFile.length > 0;
   const namedMechanism =
     namedFile &&
-    onFile.some((finding) =>
-      seed.mechanism.some((phrase) =>
-        normalized(finding.mechanism).includes(normalized(phrase)),
-      ),
-    );
+    onFile.some((finding) => namesMechanism(finding.mechanism, seed.mechanism));
   return {
     ...base,
     kind: "seeded",

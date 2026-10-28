@@ -9,7 +9,7 @@
  * The commits are immutable, so the corpus does not drift; the seeds are `find`/`replace` pairs
  * against the file *at that commit*, which `bun run review-eval`'s `prepare` step refuses to apply
  * unless `find` occurs exactly once. The unit suite pins the corpus's shape (six seeded, six clean,
- * four kinds of bug) but cannot check the commits: CI clones shallow.
+ * all five kinds of bug) but cannot check the commits: CI clones shallow.
  */
 
 export type ReviewEvalSeed = {
@@ -29,14 +29,15 @@ export type ReviewEvalSeed = {
   readonly bug: string;
   /**
    * Phrases a finding names the mechanism with, any one of which counts, matched case-insensitively
-   * against the finding's text. A heuristic by design: the raw comment is kept beside every row for a
+   * and on whole words (`namesMechanism`) against the finding's text. A phrase must be specific to the
+   * seeded change: not the PR's own topic, not the original code a reviewer would quote. A heuristic by design: the raw comment is kept beside every row for a
    * person to settle a disagreement, and a miss here is a row to read, not a verdict.
    */
   readonly mechanism: readonly string[];
 };
 
 export type ReviewEvalEntry = {
-  /** A slug, unique in the corpus: names the evidence files and the repo slug. */
+  /** A slug, unique in the corpus: names the evidence files only, never the reviewer-facing repo slug. */
   readonly id: string;
   readonly pr: number;
   /** The squash commit that merged the PR, in full. */
@@ -61,14 +62,15 @@ export const REVIEW_EVAL_CORPUS: readonly ReviewEvalEntry[] = [
       mechanism: [
         "usage.tools",
         "tool bucket",
+        "tool buckets",
         "tools bucket",
         "tool spend",
         "tool cost",
+        "tool costs",
         "drops the tool",
         "omits the tool",
         "excludes the tool",
         "without the tool",
-        "leaves out",
         "only the model",
         "model buckets only",
       ],
@@ -95,10 +97,10 @@ export const REVIEW_EVAL_CORPUS: readonly ReviewEvalEntry[] = [
         "is not sent",
         "not yielded",
         "no longer yield",
+        "no longer yielded",
         "not awaited",
         "never awaited",
-        "lazy",
-        "discard",
+        "lazy effect",
       ],
     },
   },
@@ -114,18 +116,7 @@ export const REVIEW_EVAL_CORPUS: readonly ReviewEvalEntry[] = [
       replace: "measured.value.files === 1",
       kind: "off-by-one",
       bug: "the empty-branch guard is off-by-one: it tests files === 1, so a one-file branch gets no PR while an empty one reaches GitHub",
-      mechanism: [
-        "=== 1",
-        "off-by-one",
-        "off by one",
-        "exactly one",
-        "one file",
-        "single file",
-        "single-file",
-        "files === 0",
-        "zero files",
-        "empty branch",
-      ],
+      mechanism: ["=== 1", "off-by-one", "off by one", "exactly one"],
     },
   },
   {
@@ -141,13 +132,16 @@ export const REVIEW_EVAL_CORPUS: readonly ReviewEvalEntry[] = [
       bug: "the outcome tags are swapped, so a first open is reported as already-open and a replay as opened",
       mechanism: [
         "swap",
-        "invert",
-        "revers",
+        "swaps",
+        "swapped",
+        "inverted",
+        "reversed",
         "backwards",
         "flipped",
-        "opposite",
         "wrong way",
         "mislabel",
+        "mislabels",
+        "mislabelled",
       ],
     },
   },
@@ -197,9 +191,11 @@ export const REVIEW_EVAL_CORPUS: readonly ReviewEvalEntry[] = [
         "never triggers",
         "can never",
         "always false",
-        "dead",
+        "dead code",
+        "dead branch",
         "unreachable",
         "bypass",
+        "bypassed",
         "unchecked",
         "not checked",
         "no longer refuses",

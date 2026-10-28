@@ -53,8 +53,12 @@ fi
 # `replay-target` is a role no session on this instance runs, so the row changes the catalog and
 # nothing else. `REPLAY_MODEL` is the same knob drive.ts reads, so an override reaches both, and the
 # row is appended to any `ROLE_MODELS` the caller set rather than replacing it.
+# Only on the faux backend: a real backend's catalog does not serve `faux/faux-2`, and a role naming a
+# model the process does not serve refuses the boot (LOB-242's live review-eval boots on anthropic).
 REPLAY_MODEL="${REPLAY_MODEL:-faux/faux-2}"
-ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
+if [ "${MODEL_BACKEND:-faux}" = "faux" ]; then
+  ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
+fi
 
 if [ "${API_VIA_TURBO:-}" = "1" ]; then
   # The turbo binary itself, not `bun run dev`, so `$!` is the process `down.sh` signals and turbo

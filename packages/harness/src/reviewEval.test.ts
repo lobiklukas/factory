@@ -9,6 +9,7 @@ import { renderReview } from "./review";
 import {
   fauxPostedComment,
   fauxReviewFor,
+  namesMechanism,
   parseReviewComment,
   renderReviewEvalTable,
   REVIEW_EVAL_FAUX_BEHAVIOR,
@@ -108,10 +109,7 @@ describe("the corpus", () => {
       expect(seed?.mechanism.length).toBeGreaterThan(0);
       // The faux reviewer that "finds" the bug says `bug`, so `bug` has to be in the corpus's words
       // or the faux proof could never score a mechanism.
-      const said = seed?.bug.toLowerCase() ?? "";
-      expect(
-        seed?.mechanism.some((phrase) => said.includes(phrase.toLowerCase())),
-      ).toBe(true);
+      expect(namesMechanism(seed?.bug ?? "", seed?.mechanism ?? [])).toBe(true);
     }
   });
 
@@ -139,11 +137,35 @@ describe("the corpus", () => {
         (wrong["dimensions"] as Record<string, unknown>)["correctness"],
       ).toLowerCase();
       for (const other of seeded) {
-        for (const phrase of other.seed?.mechanism ?? []) {
-          expect(text.includes(phrase.toLowerCase())).toBe(false);
-        }
+        expect(namesMechanism(text, other.seed?.mechanism ?? [])).toBe(false);
       }
     }
+  });
+
+  it("does not let a PR's own title, or a generic finding on its file, name its seed's mechanism", () => {
+    const generic = [
+      "the deadline is not enforced and a deadlock is possible on this path",
+      "the empty branch path no longer records its trace",
+      "this one file now does too many things and the empty branch case is untested",
+      "a lazy default here leaves out the docs",
+      "files === 0 was the guard before this change",
+      "an unrelated rename, reverse the order of the imports",
+    ];
+    for (const entry of seeded) {
+      const phrases = entry.seed?.mechanism ?? [];
+      expect(namesMechanism(entry.title, phrases)).toBe(false);
+      for (const text of generic) {
+        expect(namesMechanism(text, phrases)).toBe(false);
+      }
+    }
+  });
+
+  it("matches a phrase on whole words only", () => {
+    expect(namesMechanism("the tags are swapped", ["swap"])).toBe(false);
+    expect(namesMechanism("the tags swap places", ["swap"])).toBe(true);
+    expect(namesMechanism("it tests files === 1 now", ["=== 1"])).toBe(true);
+    expect(namesMechanism("DEAD code", ["dead code"])).toBe(true);
+    expect(namesMechanism("a deadline", ["dead code"])).toBe(false);
   });
 });
 
