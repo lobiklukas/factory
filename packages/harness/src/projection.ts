@@ -635,9 +635,10 @@ export const projectPrDoc = (value: JsonValue | undefined): PrDocView => {
 };
 
 /**
- * What `factory.merge` records (LOB-44): the PR that merged and when, and the revert that undid it.
- * An empty string is a field the document does not hold: `mergedAt` empty is "no merge recorded",
- * and `revertedAt` empty is "not reverted" — the seed is both.
+ * What `factory.merge` records (LOB-44): the PR that merged and when, the revert that undid it, and
+ * (F12) a close without a merge. An empty string is a field the document does not hold: `mergedAt`
+ * empty is "no merge recorded", `revertedAt` empty is "not reverted", and `closedAt` empty is "no
+ * unmerged close recorded" — the seed is all three.
  */
 export type MergeDocView = {
   readonly url: string;
@@ -648,6 +649,11 @@ export type MergeDocView = {
   /** The PR that reverted this one, by its page. */
   readonly revertedBy: string;
   readonly revertedAt: string;
+  /**
+   * When the PR was closed without merging (F12), empty while no close was recorded. A document
+   * written before the field existed has no such key, which reads as empty.
+   */
+  readonly closedAt: string;
 };
 
 export const projectMergeDoc = (
@@ -659,6 +665,7 @@ export const projectMergeDoc = (
   commit: stringAt(value, "commit") ?? "",
   revertedBy: stringAt(value, "revertedBy") ?? "",
   revertedAt: stringAt(value, "revertedAt") ?? "",
+  closedAt: stringAt(value, "closedAt") ?? "",
 });
 
 const ZERO_USAGE: ModelUsage = {

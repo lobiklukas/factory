@@ -34,7 +34,7 @@
  * caller-named branch (`factory.session`), the parent a fork was taken from (`factory.fork`), the
  * actor its spend is attributed to (`factory.actor`, LOB-162), the model the root conversation is
  * pinned to (`pi.agent`, LOB-269), the PR link (`factory.pr`), when it merged and was reverted
- * (`factory.merge`, LOB-44), the approvals a session asked for and the decisions that settled them
+ * (`factory.merge`, LOB-44; and, F12, when it was closed unmerged), the approvals a session asked for and the decisions that settled them
  * (`factory.approval.requested` / `.decided` / `.used` → `session_approvals`), spend (`pi.usage`),
  * created/last activity (`commits.committed_at`), and status — always `idle`, because a rebuild runs
  * in a process that owns nothing (D8).
@@ -105,6 +105,8 @@ type FoldedRow = {
   /** When that PR merged and when a revert undid it (LOB-44), from `factory.merge`. */
   readonly prMergedAt: string | null;
   readonly prRevertedAt: string | null;
+  /** When that PR was closed without merging (F12), from `factory.merge`. */
+  readonly prClosedAt: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
   readonly costTotal: number;
@@ -210,6 +212,7 @@ export const rebuildIndexes: Effect.Effect<
           ? null
           : sessionLog.merge.mergedAt,
       prRevertedAt: sessionLog.merge?.revert?.at ?? null,
+      prClosedAt: sessionLog.merge?.closedAt ?? null,
       createdAt: log.createdAt,
       lastActivityAt: log.lastActivityAt,
       costTotal,
@@ -273,7 +276,7 @@ export const rebuildIndexes: Effect.Effect<
   // values are *all* null (it has no element to infer a type from), and a batch of scratch sessions
   // is exactly that for `repo` and `base_ref` — and a batch of sessions that are not forks, or have
   // no PR, or no actor, is exactly that for `forked_from`, `pr_url` and `actor` (and a batch of logs
-  // with no root for `model`, and of unmerged PRs for `pr_merged_at` and `pr_reverted_at`, which
+  // with no root for `model`, and of unmerged PRs for `pr_merged_at`, `pr_reverted_at` and `pr_closed_at`, which
   // cross as text and are cast after the sentinel is gone). An empty string is never a legal slug, session id, URL, actor or
   // `provider/modelId`, so the sentinel cannot collide with a real value.
   //
@@ -286,7 +289,7 @@ export const rebuildIndexes: Effect.Effect<
     const batch = folded.slice(at, at + WRITE_BATCH_ROWS);
     const ids = batch.map((row) => row.id);
     yield* sql`
-      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, created_at)
+      INSERT INTO sessions (id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, pr_closed_at, created_at)
       SELECT
         id,
         title,
@@ -299,6 +302,7 @@ export const rebuildIndexes: Effect.Effect<
         NULLIF(pr_url, ''),
         NULLIF(pr_merged_at, '')::timestamptz,
         NULLIF(pr_reverted_at, '')::timestamptz,
+        NULLIF(pr_closed_at, '')::timestamptz,
         created_at
       FROM unnest(
         ${ids}::text[],
@@ -312,8 +316,9 @@ export const rebuildIndexes: Effect.Effect<
         ${batch.map((row) => row.prUrl ?? "")}::text[],
         ${batch.map((row) => row.prMergedAt ?? "")}::text[],
         ${batch.map((row) => row.prRevertedAt ?? "")}::text[],
+        ${batch.map((row) => row.prClosedAt ?? "")}::text[],
         ${batch.map((row) => row.createdAt)}::text[]::timestamptz[]
-      ) AS folded(id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, created_at)
+      ) AS folded(id, title, repo, base_ref, branch, forked_from, actor, model, pr_url, pr_merged_at, pr_reverted_at, pr_closed_at, created_at)
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         repo = EXCLUDED.repo,
@@ -325,6 +330,7 @@ export const rebuildIndexes: Effect.Effect<
         pr_url = EXCLUDED.pr_url,
         pr_merged_at = EXCLUDED.pr_merged_at,
         pr_reverted_at = EXCLUDED.pr_reverted_at,
+        pr_closed_at = EXCLUDED.pr_closed_at,
         created_at = EXCLUDED.created_at
     `;
     yield* sql`

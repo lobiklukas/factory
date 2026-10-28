@@ -32,7 +32,7 @@
  * - **A start while a run on the branch is still going is refused** (`busy`, naming that run): the
  *   hand-over would detach it mid-turn. A board pinned to a version with no caps (default versions
  *   1–4) can otherwise start a second run on a card whose first is busy. A run owned by another API
- *   process is not seen here; its card's `task` cap (B9) is what holds that case.
+ *   process is seen through its presence lease and the activity index that process writes (F13).
  * - **A message to a run whose worktree was handed over is refused** (`invalid_input`, naming the
  *   later run that took the branch): steering it would reopen a turn on the detached HEAD. The card's
  *   newest run is the one to send to, or a new run started on the card, which continues the branch.
@@ -114,17 +114,3 @@ export const cardBranchOf = (
       .map((run) => run.sessionId),
   };
 };
-
-/**
- * The session D11's push rule names for a session bound to `branch` (C19): a card's later run is
- * bound to its first change run's `factory/<session-id>`, and that is the branch its worktree has
- * and its agent may push — not `factory/<its own id>`, which does not exist there. Any other binding
- * (none, a reviewer's `factory/review-…`, a caller-named branch) leaves the session's own id.
- */
-export const branchOwnerOf = (
-  sessionId: string,
-  branch: string | undefined,
-): string =>
-  (branch === undefined
-    ? undefined
-    : /^factory\/(ses_[0-9a-z]+)$/.exec(branch)?.[1]) ?? sessionId;
