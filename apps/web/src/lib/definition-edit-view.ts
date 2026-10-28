@@ -122,6 +122,19 @@ export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
  * version carries but its version number (the server assigns one), with the draft's name, initial
  * column, columns and caps over them. No initial column is sent absent, so the server's refusal names it.
  */
+/**
+ * A column with its role trimmed, or with none when only whitespace is left: the harness looks a
+ * role's policy up by exact name, so a stray space typed into the open-role field (F4) would save a
+ * role that no policy names and silently drop the one the author meant.
+ */
+const trimmedRole = (column: BoardColumn): BoardColumn => {
+  if (column.role === undefined) return column;
+  const role = column.role.trim();
+  if (role === column.role) return column;
+  const { role: _role, ...rest } = column;
+  return role === "" ? rest : { ...rest, role };
+};
+
 export const defineInputOf = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
@@ -135,7 +148,7 @@ export const defineInputOf = (
   return {
     ...kept,
     name: draft.name,
-    columns: draft.columns.map((entry) => entry.column),
+    columns: draft.columns.map((entry) => trimmedRole(entry.column)),
     ...(draft.initialColumn === ""
       ? {}
       : { initialColumn: draft.initialColumn }),
@@ -333,8 +346,9 @@ export type CapKind = (typeof CAP_KINDS)[number];
 
 /**
  * A number field's text as a limit: empty is no limit (`undefined`), anything else the number it
- * reads as — whatever it is, so a `0`, a negative or a fraction reaches the server, which refuses it
- * beside the field rather than this page guessing what a limit may be. Text that is no number at all
+ * reads as — whatever it is, so a `0`, a negative or a fraction goes into the draft as typed and Save
+ * refuses it beside its field (`limitFaults`, with the `RunCap` schema the server decodes with)
+ * rather than this page guessing what a limit may be. Text that is no number at all
  * (a browser's number field answers `""` for one) is no limit.
  */
 export const parseLimit = (text: string): number | undefined => {
@@ -665,7 +679,7 @@ export const roleOptions = (
         : [...vocabulary.roles, column.role],
     ),
   ].toSorted(),
-  typed: vocabulary.rolesOpen,
+  typed: vocabulary.rolesOpen === true,
 });
 
 /** One line of the diff: added (`+`), removed (`-`) or changed (`~`), and what. */

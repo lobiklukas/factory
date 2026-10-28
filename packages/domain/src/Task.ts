@@ -857,9 +857,10 @@ export const DefinitionVocabulary = Schema.Struct({
    * Whether the deployment has no role table (`ROLE_MODELS` unset, B6): then `defineBoard` accepts
    * any role name — every role runs on the deployment's model — and the editor lets a person type
    * one the lists above do not hold. With a table, `roles` is closed: a role outside it is the typo
-   * the server refuses.
+   * the server refuses. Optional so a dashboard reading an older server still decodes its answer;
+   * an absent value reads as closed.
    */
-  rolesOpen: Schema.Boolean,
+  rolesOpen: Schema.optional(Schema.Boolean),
 });
 export type DefinitionVocabulary = typeof DefinitionVocabulary.Type;
 

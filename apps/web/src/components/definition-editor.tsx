@@ -148,8 +148,9 @@ const Section = ({
 );
 
 /**
- * A number field for a limit: empty is no limit. Whatever else is typed reaches the server as the
- * number it reads as, so `0` or `1.5` is refused there, next to the field, in the server's words.
+ * A number field for a limit: empty is no limit. Whatever else is typed goes into the draft as the
+ * number it reads as; Save refuses `0` or `1.5` next to the field, in the `RunCap` schema's words
+ * (the same schema the server decodes with), and sends nothing.
  */
 const LimitInput = ({
   id,

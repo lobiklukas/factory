@@ -108,6 +108,6 @@ except a settings disclosure's, and its write check still fails on any write the
 
 ## Last run
 
-2026-10-28 from `agent/F2-F3-F4-F9`, API `:9562` / web `:3562`: **32/32** passed (F9 added the re-pin
-checks). Before it: 2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
+2026-10-28 from `agent/F2-F3-F4-F9`, API `:9562` / web `:3562`: **33/33** passed (F9 added the re-pin
+checks and a console-error check after them). Before it: 2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
 five autonomy checks). Before it: 2026-10-28 from `agent/D3`, API `:9540` / web `:3540`, 23/23.

@@ -178,6 +178,22 @@ describe("draftOf and defineInputOf", () => {
     expect(definitionDiff(LEGACY, draft)).toEqual([]);
   });
 
+  /**
+   * F4. The harness finds a role's policy by exact name, so `planner ` would save a role no policy
+   * names. Mutation: send the typed text untrimmed, or keep a whitespace-only role.
+   */
+  it("sends a typed role trimmed, and none when only whitespace is left", () => {
+    const draft = draftOf(PINNED);
+    const key = keyOf(draft, "doing");
+    const sent = (role: string) =>
+      defineInputOf(PINNED, setRole(draft, key, role)).columns.find(
+        (column) => column.name === "doing",
+      );
+    expect(sent("  planner ")?.role).toBe("planner");
+    expect(sent("   ")).not.toHaveProperty("role");
+    expect(sent("planner")?.role).toBe("planner");
+  });
+
   /** Mutation: send `initialColumn: ""` — a schema-valid payload the server reads as a column name. */
   it("sends no initial column when the draft names none", () => {
     const input = defineInputOf(PINNED, setInitialColumn(draftOf(PINNED), ""));
@@ -465,6 +481,8 @@ describe("the pickers", () => {
     );
     expect(open.typed).toBe(true);
     expect(open.names).toEqual(["builder", "reviewer", "specifier"]);
+    // An older server sends no `rolesOpen`: the roles are a closed list.
+    expect(roleOptions({ roles: ["reviewer"] }, doing).typed).toBe(false);
     // A role typed into a column is that column's own, so the suggestions still list it.
     const typed = columnOf(setRole(draftOf(PINNED), "c1", "triager"), "doing");
     expect(

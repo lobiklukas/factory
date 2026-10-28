@@ -794,6 +794,7 @@ try {
   });
 
   // --- repin: a board's settings follow its pin without a reload (F9) ----------------------------
+  const errorsBeforeRepin = consoleErrors.length;
   const repinBoard = await rpc("createBoard", {
     repo: REPIN_REPO,
     definitionId: "default",
@@ -855,6 +856,13 @@ try {
     same(afterColumns, newestDefinition.columns.map(expectedColumn)) &&
       !same(afterColumns, beforeColumns),
     `${afterColumns.length} columns`,
+  );
+  assert(
+    "the re-pin, which writes and re-renders the page from an invalidated atom, logged no console error",
+    consoleErrors.length === errorsBeforeRepin,
+    JSON.stringify(
+      consoleErrors.slice(errorsBeforeRepin, errorsBeforeRepin + 5),
+    ),
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "board-settings-repinned.png"),

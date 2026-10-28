@@ -502,7 +502,7 @@ try {
       "caps.task: — → 1",
     ].every((line) => diff.some((entry) => entry.includes(line))) &&
       !diff.some(
-        (entry) => entry.startsWith('"todo"') && !entry.includes("move"),
+        (entry) => entry.includes('"todo"') && !entry.includes("move"),
       ),
     JSON.stringify(diff),
   );
