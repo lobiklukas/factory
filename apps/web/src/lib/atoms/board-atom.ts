@@ -310,18 +310,24 @@ export const decideApprovalAtom = runtime.fn(
   { reactivityKeys: [APPROVALS_KEY] },
 );
 
+/** The reactivity key a saved definition version invalidates (D6): the definition list re-reads. */
+export const DEFINITIONS_KEY = "definitions";
+
 /**
  * Which definitions exist and the versions each holds (LOB-270): what the "New board" form's
  * pickers offer, and how the settings page (LOB-245) knows a version newer than a board's pin exists.
- * Read once per opening of the form or the page — definitions are written by migrations, so a
- * poll would only re-ask a fixed answer.
+ * Read once per opening of the form or the page, and again when the editor saves a version here
+ * (`DEFINITIONS_KEY`, D6) — a version written elsewhere (`factory board define`) is rare enough that a
+ * poll would mostly re-ask a fixed answer.
  */
-export const definitionsAtom = runtime.atom(
-  Effect.gen(function* () {
-    const rpc = yield* RpcClient;
-    return yield* rpc.client.listDefinitions({});
-  }),
-);
+export const definitionsAtom = runtime
+  .atom(
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.listDefinitions({});
+    }),
+  )
+  .pipe(Atom.withReactivity([DEFINITIONS_KEY]));
 
 /**
  * A board's configuration (LOB-245): `getBoardConfig`, the instance with the definition version it pins

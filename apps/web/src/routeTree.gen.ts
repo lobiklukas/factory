@@ -21,6 +21,7 @@ import { Route as BoardsBoardIdRouteImport } from './routes/boards.$boardId'
 import { Route as SessionsIndexRouteImport } from './routes/sessions.index'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions.$sessionId'
 import { Route as BoardsBoardIdSettingsRouteImport } from './routes/boards.$boardId_.settings'
+import { Route as BoardsBoardIdSettingsEditRouteImport } from './routes/boards.$boardId_.settings_.edit'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -82,6 +83,12 @@ const BoardsBoardIdSettingsRoute = BoardsBoardIdSettingsRouteImport.update({
   path: '/boards/$boardId/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BoardsBoardIdSettingsEditRoute =
+  BoardsBoardIdSettingsEditRouteImport.update({
+    id: '/boards/$boardId_/settings_/edit',
+    path: '/boards/$boardId/settings/edit',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -96,6 +103,7 @@ export interface FileRoutesByFullPath {
   '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/boards/$boardId/settings': typeof BoardsBoardIdSettingsRoute
+  '/boards/$boardId/settings/edit': typeof BoardsBoardIdSettingsEditRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -109,6 +117,7 @@ export interface FileRoutesByTo {
   '/boards': typeof BoardsIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/boards/$boardId/settings': typeof BoardsBoardIdSettingsRoute
+  '/boards/$boardId/settings/edit': typeof BoardsBoardIdSettingsEditRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -124,6 +133,7 @@ export interface FileRoutesById {
   '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/boards/$boardId_/settings': typeof BoardsBoardIdSettingsRoute
+  '/boards/$boardId_/settings_/edit': typeof BoardsBoardIdSettingsEditRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -140,6 +150,7 @@ export interface FileRouteTypes {
     | '/boards/'
     | '/sessions/'
     | '/boards/$boardId/settings'
+    | '/boards/$boardId/settings/edit'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -153,6 +164,7 @@ export interface FileRouteTypes {
     | '/boards'
     | '/sessions'
     | '/boards/$boardId/settings'
+    | '/boards/$boardId/settings/edit'
   id:
     | '__root__'
     | '/'
@@ -167,6 +179,7 @@ export interface FileRouteTypes {
     | '/boards/'
     | '/sessions/'
     | '/boards/$boardId_/settings'
+    | '/boards/$boardId_/settings_/edit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -180,6 +193,7 @@ export interface RootRouteChildren {
   BoardsBoardIdRoute: typeof BoardsBoardIdRoute
   BoardsIndexRoute: typeof BoardsIndexRoute
   BoardsBoardIdSettingsRoute: typeof BoardsBoardIdSettingsRoute
+  BoardsBoardIdSettingsEditRoute: typeof BoardsBoardIdSettingsEditRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -268,6 +282,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BoardsBoardIdSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/boards/$boardId_/settings_/edit': {
+      id: '/boards/$boardId_/settings_/edit'
+      path: '/boards/$boardId/settings/edit'
+      fullPath: '/boards/$boardId/settings/edit'
+      preLoaderRoute: typeof BoardsBoardIdSettingsEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -296,6 +317,7 @@ const rootRouteChildren: RootRouteChildren = {
   BoardsBoardIdRoute: BoardsBoardIdRoute,
   BoardsIndexRoute: BoardsIndexRoute,
   BoardsBoardIdSettingsRoute: BoardsBoardIdSettingsRoute,
+  BoardsBoardIdSettingsEditRoute: BoardsBoardIdSettingsEditRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
