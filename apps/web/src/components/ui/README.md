@@ -11,13 +11,14 @@ a default: radius is 0 everywhere, and the accent is the amber `--ring`.
 | `alert`                       | the pane's read failure                              |
 | `badge`                       | the session status chip                              |
 | `bubble` `message`            | transcript rows and their alignment contract         |
-| `button` `textarea` `tooltip` | the composer, the rail, the header                   |
+| `button` `textarea` `tooltip` | the composer, the rail, the header, New card         |
 | `collapsible`                 | the tool-call disclosure                             |
+| `dialog` `input` `label`      | the board's New card form (LOB-275)                  |
 | `empty`                       | every empty state, including the named gaps          |
 | `kbd`                         | the composer's key contract                          |
 | `marker`                      | the `system` / `reset` / `compaction` divider        |
 | `message-scroller`            | the transcript viewport and its scroll-to-end button |
-| `skeleton` `spinner`          | attaching                                            |
+| `skeleton` `spinner`          | attaching, a New card in flight                      |
 | `sonner`                      | a refused create, and every future refusal           |
 
 ## Installed for the board, not wired yet
@@ -26,21 +27,20 @@ a default: radius is 0 everywhere, and the accent is the amber `--ring`.
 attention view. These are the kit for that surface, installed deliberately. If one is still unused
 when the board lands, delete it.
 
-| Component                            | The surface it is for                                                                                          |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `tabs`                               | card pane: Runs / Transcript / Evidence / Thread                                                               |
-| `command` + `dialog` + `input-group` | ⌘K: jump to a card or run, start a run, move a card                                                            |
-| `progress`                           | a column's WIP cap (B9) and a card's spend                                                                     |
-| `table`                              | the evidence a gate checks (B8)                                                                                |
-| `breadcrumb`                         | board → lane → card                                                                                            |
-| `item`                               | card rows in a lane                                                                                            |
-| `avatar`                             | the actor every move carries (B5). LOB-20 is what makes an actor real; until then a move's actor is a string   |
-| `field` + `label`                    | the card create form                                                                                           |
-| `combobox`                           | the repo picker, on the card create path                                                                       |
-| `resizable`                          | lane / card-pane / transcript split                                                                            |
-| `separator`                          | a transitive dependency of `field` and `item`                                                                  |
-| `input`                              | a transitive dependency of `input-group`                                                                       |
-| `attachment`                         | an evidence artifact: a screenshot, a diff, a log, with the idle / processing / error states it already models |
+| Component                 | The surface it is for                                                                                          |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `tabs`                    | card pane: Runs / Transcript / Evidence / Thread                                                               |
+| `command` + `input-group` | ⌘K: jump to a card or run, start a run, move a card (`dialog`, already wired, is its frame)                    |
+| `progress`                | a column's WIP cap (B9) and a card's spend                                                                     |
+| `table`                   | the evidence a gate checks (B8)                                                                                |
+| `breadcrumb`              | board → lane → card                                                                                            |
+| `item`                    | card rows in a lane                                                                                            |
+| `avatar`                  | the actor every move carries (B5). LOB-20 is what makes an actor real; until then a move's actor is a string   |
+| `field`                   | a form whose fields need more than a label and an input. New card did not: it is bare `label` + `input`        |
+| `combobox`                | the repo picker, on the card create path                                                                       |
+| `resizable`               | lane / card-pane / transcript split                                                                            |
+| `separator`               | a transitive dependency of `field` and `item`                                                                  |
+| `attachment`              | an evidence artifact: a screenshot, a diff, a log, with the idle / processing / error states it already models |
 
 ## Rules
 
