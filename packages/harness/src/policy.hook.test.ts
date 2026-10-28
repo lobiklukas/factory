@@ -90,7 +90,7 @@ const scripted = (
  */
 const DOCS_RUN: RunProfile = {
   column: "documenting",
-  skills: [{ name: "docs", body: "# Docs\n\nEdit documentation." }],
+  skills: [{ name: "docs", version: 1, body: "# Docs\n\nEdit documentation." }],
 };
 
 /**
@@ -99,7 +99,9 @@ const DOCS_RUN: RunProfile = {
  */
 const CODE_RUN: RunProfile = {
   column: "implementing",
-  skills: [{ name: "implement", body: "# Implement\n\nWrite code." }],
+  skills: [
+    { name: "implement", version: 1, body: "# Implement\n\nWrite code." },
+  ],
 };
 
 /** Run one session to idle and return its transcript. */
@@ -315,12 +317,16 @@ describe("a run in the specifying stage writes nothing", () => {
   const SPECIFYING_RUN: RunProfile = {
     column: "specifying",
     role: "specifier",
-    skills: [{ name: "specify", body: "# Specify\n\nWrite the spec." }],
+    skills: [
+      { name: "specify", version: 1, body: "# Specify\n\nWrite the spec." },
+    ],
   };
   const BUILDING_RUN: RunProfile = {
     column: "building",
     role: "builder",
-    skills: [{ name: "implement", body: "# Implement\n\nWrite code." }],
+    skills: [
+      { name: "implement", version: 1, body: "# Implement\n\nWrite code." },
+    ],
   };
 
   it("does not give specifying the write tool, and lets the same call write in building", async () => {
