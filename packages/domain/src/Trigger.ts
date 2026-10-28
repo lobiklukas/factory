@@ -467,3 +467,83 @@ export class TriggerRouteError extends Schema.TaggedError<TriggerRouteError>()(
     message: Schema.String,
   },
 ) {}
+
+/**
+ * Who sent a recorded delivery: a `TriggerSource`, or `plan-freshness`, the merge cadence that
+ * shares the delivery table's dedupe (LOB-45) and records its pass there under the spec session.
+ */
+export const DeliverySource = Schema.Literals([
+  ...TriggerSource.literals,
+  "plan-freshness",
+]);
+export type DeliverySource = typeof DeliverySource.Type;
+
+/**
+ * How a recorded delivery stands. `received` is a claim taken whose outcome is not written yet: in
+ * flight, or left by a process that died before it (the next delivery of that id reclaims it).
+ */
+export const DeliveryStatus = Schema.Literals([
+  "received",
+  "skipped",
+  "processed",
+]);
+export type DeliveryStatus = typeof DeliveryStatus.Type;
+
+/**
+ * One delivery the seam recorded (T4), as `listTriggerDeliveries` answers it: the answer to "did my
+ * labelled issue arrive, and what came of it".
+ *
+ * `reason` is the recorded outcome reason verbatim, whatever the outcome (`webhook_deliveries.
+ * skip_reason` holds a processed delivery's route too): why a skip started nothing, or which rule
+ * mapped a processed one. `sessionId` / `taskId` name what a processed delivery opened or found; both
+ * are absent for a skip, and for a delivery recorded before the columns existed. `source` is absent
+ * for such a row too.
+ *
+ * Only a delivery that reached the seam is here. A delivery refused before it — a missing or wrong
+ * signature (`401`), a body over the cap (`413`), a route with no secret (`503 not-configured`), a
+ * rate-limited one (`429`) — is logged and answered, never recorded: the table is the dedupe fact,
+ * and an unauthenticated request must not be able to write a row.
+ */
+export const DeliveryRecord = Schema.Struct({
+  /** The delivery's idempotency key: the source's own id for it. */
+  deliveryId: Schema.String,
+  source: Schema.optional(DeliverySource),
+  receivedAt: Timestamp,
+  status: DeliveryStatus,
+  reason: Schema.optional(Schema.String),
+  sessionId: Schema.optional(SessionId),
+  taskId: Schema.optional(TaskId),
+});
+export type DeliveryRecord = typeof DeliveryRecord.Type;
+
+/** What `listTriggerDeliveries` takes: both filters are exact, and a cursor continues a walk. */
+export const ListTriggerDeliveriesInput = Schema.Struct({
+  source: Schema.optional(DeliverySource),
+  status: Schema.optional(DeliveryStatus),
+  /** Page size. The server clamps it (default 50, at most 200). */
+  limit: Schema.optional(Schema.Int),
+  /** Opaque keyset cursor from a previous page's `nextCursor`. */
+  cursor: Schema.optional(Schema.String),
+});
+export type ListTriggerDeliveriesInput = typeof ListTriggerDeliveriesInput.Type;
+
+export const ListTriggerDeliveriesOutput = Schema.Struct({
+  /** Newest first. */
+  deliveries: Schema.Array(DeliveryRecord),
+  /** Present only when a row beyond this page exists. */
+  nextCursor: Schema.optional(Schema.String),
+});
+export type ListTriggerDeliveriesOutput =
+  typeof ListTriggerDeliveriesOutput.Type;
+
+/**
+ * `listTriggerDeliveries` could not answer: `invalid_input` is a cursor this server did not mint (the
+ * caller's to fix), `storage` is retryable.
+ */
+export class TriggerDeliveryError extends Schema.TaggedError<TriggerDeliveryError>()(
+  "TriggerDeliveryError",
+  {
+    code: Schema.Literals(["invalid_input", "storage"]),
+    message: Schema.String,
+  },
+) {}

@@ -27,6 +27,7 @@ import {
 import { spendCommand } from "./commands/spend";
 import { skillCommand } from "./commands/skill";
 import { statusCommand } from "./commands/status";
+import { triggersCommand } from "./commands/triggers";
 import { watchCommand } from "./commands/watch";
 import { withdrawCommand } from "./commands/withdraw";
 import { DevToolsLive } from "./observability/DevTools";
@@ -53,6 +54,7 @@ const root = Command.make("factory").pipe(
     boardCommand,
     repoCommand,
     skillCommand,
+    triggersCommand,
     replayCommand,
     costCommand,
     doctorCommand,

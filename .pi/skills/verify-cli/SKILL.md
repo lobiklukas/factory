@@ -42,6 +42,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `factory repo add --url`, `repo sync`, `doctor` (LOB-265) | `./clone.sh`: a URL-only repo cloned, a worktree of it, a typed failure             | a repo with no checkout on this machine still gets worktrees   |
 | `factory doctor` (E8)                                     | `./preflight.sh`: faux warns and exits 1, `--allow-faux` 0, Postgres down fails     | a first-run operator is told what is missing and how to fix it |
 | `factory run --model`, `DEFAULT_MODEL` (LOB-274)          | `./model.sh`: the `model` line, the requests' model, refusals, a refused boot       | an operator picks a model per task, a deployment its default   |
+| `factory triggers ls` (T4)                                | `./triggers.sh`: rows, reason verbatim, `--status`/`--source`, cursor               | an operator sees why a labelled issue started nothing          |
 | `factory history` (LOB-243)                               | not here: verify-api `./history.sh`, against a session grown past the window        | a terminal reads the whole of a long session, page by page     |
 | `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake            | the link is the forge's answer, never assumed                  |
 | `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                                  | the card and its runs are the server's, never a local guess    |
@@ -66,12 +67,17 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./skill.sh       # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it after repo.sh
 ./preflight.sh   # self-contained: `factory doctor` against its own APIs on :9480 (DOCTOR_PORT), :9481, :9482
 ./model.sh       # self-contained: its own API on :9370 (MODEL_PORT) and a refused boot on :9371
+./triggers.sh    # self-contained: its own API on :9395 (TRIGGERS_PORT) booted with a webhook secret and rules
 ./interrupt.sh   # self-contained: its own API on :9380 (INTERRUPT_PORT) with the sleeping faux script
 ```
 
 `preflight.sh` is separate because doctor's answers depend on the deployment: it boots a faux API on a
 scratch database, a second whose database is unreachable, and points the CLI at a port nothing
 listens on, under `.verify/run/cli-doctor/`. See `features/doctor.md`.
+
+`triggers.sh` is separate because the deliveries it reads need a signing secret and a label → repo rule, both
+deployment settings: it boots its own API under `.verify/run/cli-triggers/`, posts signed generic webhooks
+with `curl` (nothing leaves loopback) and reads them back with `factory triggers ls`. See `features/triggers.md`.
 
 `model.sh` is separate because the models a server serves are deployment settings: it boots its own
 API with `DEFAULT_MODEL=faux/faux-cheap` and `ROLE_MODELS=specifier=faux/faux-spec`, under

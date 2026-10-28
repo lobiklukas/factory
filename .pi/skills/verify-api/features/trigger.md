@@ -50,8 +50,19 @@ the way Linear signs a delivery:
 13. A `{action: "release", label: "release"}` is `400 lifecycle-action` too, with no row: the
     `release` rule's `startsWorkFor: ["release"]` is operator config of any string, and the
     adapter refuses every action a rule admits, not a fixed list (LOB-235 review).
-14. The same caller's `{action: "create", label: "docs"}` still starts a docs session, answered
-    `rule "docs" (env:TRIGGER_RULES[1]) mapped it to <repo>`, whose first message is the docs rule's template.
+
+**What is recorded, and where it is read (T4).** The seam records every delivery it receives in
+`webhook_deliveries`: its source, `received_at`, how it ended (`processed`, `skipped`, or `received`
+while in flight) and the outcome's reason verbatim, and for a processed delivery the session it
+opened (`session_id`) or the card it filed or found (`task_id`). `listTriggerDeliveries({source?,
+status?, limit?, cursor?})` reads them newest first (`factory triggers ls`, the dashboard's
+`/triggers`). A delivery **refused before the seam** — a wrong or missing signature (`401`), a body
+over `TRIGGER_MAX_BODY_BYTES` (`413`), a route with no secret (`503 not-configured`), a rate-limited
+one (`429`), a malformed or lifecycle-action one (`400`) — is logged and answered, never recorded:
+the table is the dedupe fact, and an unauthenticated request must not be able to write a row. The
+route tests (`Webhook.test.ts`) hold that the seam is handed nothing, and `linear.sh` checks that the
+forged delivery adds no row to the list. 14. The same caller's `{action: "create", label: "docs"}` still starts a docs session, answered
+`rule "docs" (env:TRIGGER_RULES[1]) mapped it to <repo>`, whose first message is the docs rule's template.
 
 Every check is required: `webhook.sh` exits non-zero when one fails.
 
