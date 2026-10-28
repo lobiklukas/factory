@@ -1230,15 +1230,6 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
-    /**
-     * A new version of a definition (D4). The rules come first and touch nothing (`./boardDefine`);
-     * then one transaction takes an advisory lock on the definition's id, reads its newest version and
-     * either answers it (the same content: `unchanged`), answers the version a write would take (a
-     * dry run: `validated`), or inserts newest + 1. The lock is what makes "newest + 1" safe: two
-     * concurrent defines of one id are serialised, so the second reads the first's version as the
-     * newest and takes the next one, rather than meeting the primary key. Nothing here updates a row
-     * — a board pinned to an older version keeps reading exactly what it pinned (B2).
-     */
     // A row whose `columns` is not an array (0007 leaves it unconstrained) contributes nothing
     // rather than failing the read.
     const declaredRoles: Effect.Effect<
@@ -1255,6 +1246,15 @@ export const TaskServiceLive = Layer.effect(
         `,
     ).pipe(Effect.map((rows) => new Set(rows.map((row) => row.role))));
 
+    /**
+     * A new version of a definition (D4). The rules come first and touch nothing (`./boardDefine`);
+     * then one transaction takes an advisory lock on the definition's id, reads its newest version and
+     * either answers it (the same content: `unchanged`), answers the version a write would take (a
+     * dry run: `validated`), or inserts newest + 1. The lock is what makes "newest + 1" safe: two
+     * concurrent defines of one id are serialised, so the second reads the first's version as the
+     * newest and takes the next one, rather than meeting the primary key. Nothing here updates a row
+     * — a board pinned to an older version keeps reading exactly what it pinned (B2).
+     */
     const defineBoard = (
       input: DefineBoardInput,
       library: DefinitionLibrary,
