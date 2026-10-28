@@ -2,7 +2,6 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { describe, expect, it } from "vitest";
 import {
   autoloadedEnvFiles,
-  describeFauxBackend,
   describeLoadedEnvFiles,
   explicitEnvFiles,
   loadedEnvFiles,
@@ -122,20 +121,6 @@ describe("loadedEnvFiles", () => {
         execArgv: ["--no-env-file", "--env-file=../../.env"],
       }),
     ).toEqual([]);
-  });
-});
-
-describe("describeFauxBackend", () => {
-  it("says faux was chosen, not that a key is missing, when MODEL_BACKEND set it", () => {
-    const line = describeFauxBackend(true);
-    expect(line).toContain("chosen by MODEL_BACKEND=faux");
-    expect(line).not.toContain("no ANTHROPIC_API_KEY");
-  });
-
-  it("points at the missing key when the backend was inferred", () => {
-    const line = describeFauxBackend(false);
-    expect(line).toContain("no ANTHROPIC_API_KEY");
-    expect(line).not.toContain("chosen by");
   });
 });
 

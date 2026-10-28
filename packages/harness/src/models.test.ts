@@ -11,9 +11,11 @@ import {
   type AssistantMessage,
   type Message,
 } from "@earendil-works/pi-ai";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Option } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  ANTHROPIC_AUTH_VARIABLES,
+  checkModelAuth,
   compactionPolicyFor,
   createModelAccess,
   fauxAnswer,
@@ -351,5 +353,69 @@ describe("parseFauxModelScripts", () => {
       expect(Exit.isFailure(parsed)).toBe(true);
       expect(JSON.stringify(parsed)).toContain("faux model scripts are not a");
     }
+  });
+});
+
+/**
+ * `checkModelAuth` is pi-ai's own resolution (LOB-258), driven through an injected context so no
+ * test touches the process environment. The values are dummies: nothing is sent anywhere.
+ */
+describe("checkModelAuth", () => {
+  const authWith = (env: Readonly<Record<string, string>>) =>
+    Effect.runPromise(
+      checkModelAuth(
+        createModelAccess("anthropic", {
+          authContext: {
+            env: async (name) => env[name],
+            fileExists: async () => false,
+          },
+        }),
+      ),
+    );
+
+  it("names each token variable as the source when it is the only one set", async () => {
+    for (const name of ANTHROPIC_AUTH_VARIABLES.tokens) {
+      expect(await authWith({ [name]: "dummy-credential" })).toEqual(
+        Option.some({ source: name, type: "api_key" }),
+      );
+    }
+  });
+
+  it("takes pi-ai's order: the bearer token before the OAuth token before the key", async () => {
+    expect(
+      await authWith({
+        ANTHROPIC_API_KEY: "dummy-key",
+        ANTHROPIC_OAUTH_TOKEN: "dummy-oauth",
+        ANTHROPIC_AUTH_TOKEN: "dummy-bearer",
+      }),
+    ).toEqual(Option.some({ source: "ANTHROPIC_AUTH_TOKEN", type: "api_key" }));
+    expect(
+      await authWith({
+        ANTHROPIC_API_KEY: "dummy-key",
+        ANTHROPIC_OAUTH_TOKEN: "dummy-oauth",
+      }),
+    ).toEqual(
+      Option.some({ source: "ANTHROPIC_OAUTH_TOKEN", type: "api_key" }),
+    );
+  });
+
+  it("authenticates by workload identity federation only with all three of its variables", async () => {
+    const federation = Object.fromEntries(
+      ANTHROPIC_AUTH_VARIABLES.federation.map((name) => [name, "dummy"]),
+    );
+    expect(await authWith(federation)).toEqual(
+      Option.some({ source: "workload identity federation", type: "api_key" }),
+    );
+    for (const missing of ANTHROPIC_AUTH_VARIABLES.federation) {
+      const { [missing]: _dropped, ...partial } = federation;
+      expect(await authWith(partial)).toEqual(Option.none());
+    }
+  });
+
+  it("finds nothing with no variable set, or only one pi-ai never reads", async () => {
+    expect(await authWith({})).toEqual(Option.none());
+    expect(
+      await authWith({ CLAUDE_CODE_OAUTH_TOKEN: "dummy-subscription" }),
+    ).toEqual(Option.none());
   });
 });

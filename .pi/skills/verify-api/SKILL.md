@@ -55,6 +55,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | The pages surface (LOB-220)        | `pages.sh`: `curateSession` writes one page, `listPages` reads it, a repeat writes none for exactly one call's price; deleted rows come back from the log                                                                                                                                                                   | a page is a log fact, and learning nothing is cheap                                |
 | The review agent (LOB-36)          | `review.sh`: a signed `pull_request` starts a read-only reviewer at the head, on its own model; one `COMMENT` naming the bug, as its own token; a redelivery none; a push a second                                                                                                                                          | a PR is reviewed once per head, not as its author                                  |
 | Proposed child issues (LOB-201)    | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, and no other row in the database moves                                                                                                                                                        | a spec becomes proposals, and nothing else is made                                 |
+| The model backend (LOB-258)        | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -107,6 +108,7 @@ running, and writes its own evidence:
 API_VIA_TURBO=1 ./webhook.sh  # the same drive with the API started the way `bun run dev` starts it (turbo, Strict Mode): TRIGGER_SECRET and the other webhook variables must be declared in apps/api/turbo.json or every route is 503 (LOB-257)
 ./jira.sh        # fake Jira on :9412 — the Jira adapter: one session, one comment, the retry
 ./github-issues.sh  # fake GitHub on :9413 — the GitHub issues adapter: one session, one comment
+DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted five times — the model backend from pi-ai's auth modes; a forced anthropic that cannot authenticate refused (features/model-backend.md)
 ./slack.sh       # fake Slack on :9414 — the Slack adapter: one session, one threaded reply
 ./linear.sh      # api on :9415 — Linear issue webhooks: one session per labeled issue, skips named
 ./sentry.sh      # api on :9423, booted twice — Sentry alerts: one session, 401s logged without the payload, 429 burst, dedupe across a restart (features/sentry.md)
