@@ -289,6 +289,21 @@ of the session recording it, `idle` once the run settles, no per-card read in th
 nine cards to cost no more calls per window than three (`features/card-face.md`). Evidence goes to
 `.verify/evidence/latest/card-face/`.
 
+### The card pane's state controls
+
+```sh
+CARD_EDIT_API_PORT=9583 CARD_EDIT_WEB_PORT=3583 ./card-edit.sh   # its own instance; leaves nothing running
+```
+
+An operator parks a card, flags it urgent and fixes its title from the card pane (C11). `card-edit.sh`
+starts its own API and dashboard; `card-edit.mjs` makes a board and two cards over the RPC and requires
+Block with reason `dependency` to show the blocked label on the lane and `factory board show` to print
+the block and its note, Unblock to clear both, the priority toggle to show the urgent marker and list
+the card first, a title edit to reach the lane, a write from a stale pane (the page's board reads held
+at the network while the oracle writes) to be refused with the server's own words and change nothing,
+and `factory board update` to show on the lane (`features/card-edit.md`). Evidence goes to
+`.verify/evidence/latest/card-edit/`.
+
 ### Open pull request
 
 ```sh

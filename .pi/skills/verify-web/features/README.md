@@ -50,6 +50,9 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
 (120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
 
+`card-edit.sh` (the card pane's block, unblock, urgent flag and title edit, C11) last passed **11/11** on
+2026-10-28 from the `agent/C11` worktree, API `:9582` / web `:3582`.
+
 `board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **28/28** on
 2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`, with each column's effective autonomy
 shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
@@ -89,6 +92,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |
+| Card pane state controls     | passing | [card-edit.md](card-edit.md) (`card-edit.sh`)                                 |
 | The dashboard's credential   | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
 ## Known gaps

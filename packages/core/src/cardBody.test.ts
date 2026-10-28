@@ -387,7 +387,7 @@ describe("projectTask (LOB-260)", () => {
     });
   });
 
-  /** Mutation: ignore `priorityChanged` — the fold keeps the create's priority. */
+  /** Mutation: ignore `priorityChanged` or `retitled` — the fold keeps the create's priority or title. */
   it("folds a priority change, and refuses a history that does not start with created", () => {
     expect(
       projectTask([
@@ -402,6 +402,19 @@ describe("projectTask (LOB-260)", () => {
         },
       ])?.priority,
     ).toBe("urgent");
+    expect(
+      projectTask([
+        created,
+        {
+          _tag: "retitled",
+          taskId: TASK,
+          from: "t",
+          to: "renamed",
+          actor: LUKAS,
+          revision: 1,
+        },
+      ]),
+    ).toMatchObject({ title: "renamed", revision: 2 });
     expect(projectTask([])).toBeUndefined();
     expect(
       projectTask([

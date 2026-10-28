@@ -92,7 +92,9 @@ precedent ("an index, not a projection").
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
 transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
-lane and there is no "return to where it was" ambiguity. `setup_failed` is written by a run, not a
+lane and there is no "return to where it was" ambiguity. A person parks and frees a card from the card pane or `factory board block` / `unblock`, and fixes its
+title or priority with `updateTask` (`factory board update`; C11), a revision-checked write that records
+a `retitled` / `priorityChanged` event per changed field. `setup_failed` is written by a run, not a
 person: its worktree's declared `install` or `build` failed before its first turn (S-env-setup), and
 the note names the step, its exit code and its output's last lines. There is **no `ready` column** in the MVP: nothing
 auto-starts, so `ready` only means something once a dispatcher exists (wave 2).
