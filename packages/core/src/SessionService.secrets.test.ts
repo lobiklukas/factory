@@ -514,6 +514,8 @@ describe("a repo's declared secrets in a session", CASE, () => {
   /**
    * Mutation: read the declaration at the base as it resolves on each open — the row is not
    * written, or is rewritten once the agent's shell moves `main`.
+   * Mutation: keep the row but read the grant at the re-resolved base — verify is given the key the
+   * agent's own commit granted, and its digest check passes.
    */
   it("pins the commit a session's grant is read at when it first opens, and keeps it when the base moves", async () => {
     const fixture = makeRepo("pinned", {
@@ -545,12 +547,28 @@ describe("a repo's declared secrets in a session", CASE, () => {
         git(worktree, "add", "-A");
         git(worktree, "commit", "-q", "-m", "grant myself the key");
         git(worktree, "update-ref", "refs/heads/main", "HEAD");
+        // The next run is a fresh owner, which reads the grant again: at the pinned commit.
+        yield* sessions.close;
         yield* sessions.send({ sessionId: session.id, content: "go" });
         yield* settledRun(session.id);
-        return { original, first, after: yield* pinned() };
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.reader(sql, session.id),
+        );
+        const records = yield* readVerifyRecords(storage).pipe(
+          Effect.ensuring(Effect.promise(() => storage.dispose())),
+        );
+        return { original, first, after: yield* pinned(), records };
       }),
     );
     expect(outcome.first).toEqual([outcome.original]);
     expect(outcome.after).toEqual([outcome.original]);
+    // The grant the agent committed is not the one read: verify ran without the key, and failed.
+    const [record] = outcome.records;
+    if (record?._tag !== "VerifyReport") throw new Error("no verify report");
+    const [result] = record.results;
+    if (result?._tag !== "VerifyRan") throw new Error("verify did not run");
+    expect(result.output).not.toContain("== secrets: TEST_API_KEY");
+    expect(result.output).not.toContain("[secret:TEST_API_KEY]");
+    expect(result.exitCode).not.toBe(0);
   });
 });

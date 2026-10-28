@@ -17,8 +17,9 @@
  * exactly what the store exists to prevent. A `pattern` finding is a line matching a credential's
  * well-known shape (`SECRET_PATTERNS`): a forge token, a cloud key, a private key's armour. A line can
  * opt out of the pattern check — a test fixture that has to spell one — by carrying
- * `SECRET_SCAN_ALLOW` on the same line; nothing opts a stored value out. The patterns apply to every
- * repo, with or without a store.
+ * `SECRET_SCAN_ALLOW` on the same line, in a file that already carries the marker at the base (so
+ * the operator, not the branch, chose to exempt it), and never in a commit's message or author;
+ * nothing opts a stored value out. The patterns apply to every repo, with or without a store.
  *
  * **Fails closed.** A scan git cannot answer is a `PrError`, never a pass: a push nobody scanned is
  * the push this exists to stop. The matched text is never in a finding (`@repo/domain/PullRequest`'s
@@ -240,10 +241,17 @@ const maskPath = (
   );
 };
 
-/** Every finding in `lines`: at most one per line, a stored value ahead of a pattern. */
+/**
+ * Every finding in `lines`: at most one per line, a stored value ahead of a pattern. The allow marker
+ * opts a line out of the pattern check only in a file of `allowAt` — the paths whose content at the
+ * base already carries it, so an operator put it there — and never in a commit's message, author or
+ * path list: a marker the branch itself writes is the agent's, and the agent is who this guards
+ * against.
+ */
 export const scanAddedLines = (
   lines: ReadonlyArray<AddedLine>,
   known: InjectedSecrets,
+  allowAt: ReadonlySet<string> = new Set(),
 ): ReadonlyArray<SecretFinding> => {
   const needles = needlesOf(known);
   return lines.flatMap((added): ReadonlyArray<SecretFinding> => {
@@ -256,7 +264,12 @@ export const scanAddedLines = (
     if (stored !== undefined) {
       return [{ ...where, kind: "stored" as const, name: stored.name }];
     }
-    if (added.text.includes(SECRET_SCAN_ALLOW)) return [];
+    if (
+      added.path !== COMMIT_METADATA_PATH &&
+      allowAt.has(added.path) &&
+      added.text.includes(SECRET_SCAN_ALLOW)
+    )
+      return [];
     const pattern = SECRET_PATTERNS.find((rule) =>
       rule.pattern.test(added.text),
     );
@@ -291,6 +304,13 @@ const SCAN_MAX_BUFFER = 64 * 1024 * 1024;
  * The settings every scan's git runs with, ahead of the subcommand: no hook, no fsmonitor, no quoted
  * paths, no global attributes file and no replacement objects (a `refs/replace` entry would show the
  * scan other bytes than the push sends).
+ *
+ * The checkout's `.git/config` is shared with the agent's shell, so every setting that changes what
+ * `git log` prints is pinned here, where it overrides the repo's: a root commit's patch is printed
+ * (`log.showRoot=false` would hide what an orphan commit merged into the branch adds), messages are
+ * not re-encoded (`i18n.logOutputEncoding` would turn a value in a message into other bytes; each
+ * log also passes `--encoding=none`, so a message is read as the bytes the push sends), no mailmap
+ * rewrites an author, and nothing is coloured.
  */
 const SCAN_GIT_CONFIG: ReadonlyArray<string> = [
   "--no-replace-objects",
@@ -304,12 +324,24 @@ const SCAN_GIT_CONFIG: ReadonlyArray<string> = [
   "core.attributesFile=/dev/null",
   "-c",
   "log.showSignature=false",
+  "-c",
+  "log.showRoot=true",
+  "-c",
+  "log.mailmap=false",
+  "-c",
+  "i18n.logOutputEncoding=UTF-8",
+  "-c",
+  "color.ui=never",
 ];
 
-/** Run one read-only git in `checkout`, answering its stdout or `undefined` when it failed. */
+/**
+ * Run one read-only git in `checkout`, answering its stdout or `undefined` when it failed. An exit
+ * status in `quiet` is an answer, not a failure (`git grep`'s 1 is "no match").
+ */
 const runScanGit = (
   checkout: string,
   args: ReadonlyArray<string>,
+  quiet: ReadonlyArray<number> = [],
 ): Effect.Effect<string | undefined> =>
   Effect.callback<string | undefined>((resume, signal) => {
     execFile(
@@ -323,7 +355,14 @@ const runScanGit = (
         maxBuffer: SCAN_MAX_BUFFER,
       },
       (error, stdout) =>
-        resume(Effect.succeed(error === null ? stdout : undefined)),
+        resume(
+          Effect.succeed(
+            error === null ||
+              (typeof error.code === "number" && quiet.includes(error.code))
+              ? stdout
+              : undefined,
+          ),
+        ),
     );
   });
 
@@ -355,7 +394,7 @@ export const scanBranchForSecrets = (input: {
     "--",
   ];
   return Effect.gen(function* () {
-    const [patches, metadata] = yield* Effect.all(
+    const [patches, metadata, marked] = yield* Effect.all(
       [
         runScanGit(input.checkout, [
           "log",
@@ -371,6 +410,7 @@ export const scanBranchForSecrets = (input: {
           "--no-relative",
           // A merge's own lines, not what it brings from its other parent (`diff --cc`).
           "--diff-merges=dense-combined",
+          "--encoding=none",
           ...range,
         ]),
         runScanGit(input.checkout, [
@@ -379,17 +419,46 @@ export const scanBranchForSecrets = (input: {
           "--name-only",
           "--no-renames",
           "--no-relative",
+          "--no-color",
           "--diff-merges=dense-combined",
+          "--encoding=none",
           ...range,
         ]),
+        // The files the base already marks: only there does the allow marker opt a line out.
+        runScanGit(
+          input.checkout,
+          [
+            "grep",
+            "-l",
+            "-z",
+            "-a",
+            "-F",
+            "--no-textconv",
+            "-e",
+            SECRET_SCAN_ALLOW,
+            "--end-of-options",
+            input.base,
+            "--",
+          ],
+          [1],
+        ),
       ],
-      { concurrency: 2 },
+      { concurrency: 3 },
     );
-    if (patches === undefined || metadata === undefined) return yield* refused;
+    if (patches === undefined || metadata === undefined || marked === undefined)
+      return yield* refused;
+    const prefix = `${input.base}:`;
+    const allowAt = new Set(
+      marked
+        .split("\u0000")
+        .filter((entry) => entry.startsWith(prefix))
+        .map((entry) => entry.slice(prefix.length)),
+    );
     return secretRefusal(
       scanAddedLines(
         [...parseAddedLines(patches), ...parseCommitMetadata(metadata)],
         input.known,
+        allowAt,
       ),
     );
   }).pipe(Effect.withSpan("secretScan.branch"));

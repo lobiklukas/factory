@@ -36,7 +36,10 @@ stored)`).
   ref — and at an adopted card PR's published commit. The patterns apply to every repo, with or
   without a store. A multi-line stored value is also recognized by each piece of it that looks like
   key material (20+ characters mixing cases and digits), never by its boilerplate lines (`SECRET_PATTERNS`; a fixture line may opt out of the patterns with
-  `factory-secret-scan:allow`, never out of a stored value). A finding answers `secret-found` — no
+  `factory-secret-scan:allow`, only in a file that already carries the marker at the base and never
+  in a commit's message or author, and never out of a stored value). The scan's git pins every
+  setting of the checkout's shared `.git/config` that changes what `git log` prints
+  (`log.showRoot`, `i18n.logOutputEncoding`, mailmap, colour, hooks, attributes). A finding answers `secret-found` — no
   push, no PR, no record — naming each finding's secret (or pattern), path, line and commit and never
   the text. A settled card run writes it as a `secret_found` note on the card; `factory pr` prints
   `error: secret_found: …`. A stored value this key cannot read refuses the step: a branch is never

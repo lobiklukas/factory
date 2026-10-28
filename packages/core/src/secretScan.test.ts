@@ -150,13 +150,31 @@ describe("scanAddedLines", () => {
     expect(scanAddedLines(at("const x = 'just a string'"), [])).toEqual([]);
   });
 
-  it("lets the allow marker opt a pattern out, never a stored value", () => {
+  it("lets the allow marker opt a pattern out in a file the base marks, never a stored value", () => {
+    const marked = new Set(["f"]);
     expect(
-      scanAddedLines(at(`${githubToken()} // ${SECRET_SCAN_ALLOW}`), []),
+      scanAddedLines(at(`${githubToken()} // ${SECRET_SCAN_ALLOW}`), [], marked),
     ).toEqual([]);
     expect(
-      scanAddedLines(at(`${FAKE} // ${SECRET_SCAN_ALLOW}`), KNOWN)[0]?.kind,
+      scanAddedLines(at(`${FAKE} // ${SECRET_SCAN_ALLOW}`), KNOWN, marked)[0]
+        ?.kind,
     ).toBe("stored");
+  });
+
+  /**
+   * Mutation: honour the marker on any line — an agent that found a forge token appends the marker
+   * to the line, or to its commit message, and the pattern check waves it through.
+   */
+  it("ignores the allow marker in a file the base does not mark, and in commit metadata", () => {
+    const line = `${githubToken()} // ${SECRET_SCAN_ALLOW}`;
+    expect(scanAddedLines(at(line), [])[0]?.name).toBe("github-token");
+    expect(
+      scanAddedLines(
+        [{ commit: "c", path: COMMIT_METADATA_PATH, line: 5, text: line }],
+        [],
+        new Set([COMMIT_METADATA_PATH]),
+      )[0]?.name,
+    ).toBe("github-token");
   });
 
   it("recognizes one line of a stored multi-line value", () => {
@@ -377,6 +395,67 @@ describe("scanBranchForSecrets", { timeout: 30_000 }, () => {
       }),
     );
     expect(Option.isNone(bounded)).toBe(true);
+  });
+
+  it("honours the allow marker only in a file that carries it at the base", async () => {
+    const root = repo({ "fixture.ts": `// ${SECRET_SCAN_ALLOW}\n` });
+    commit(root, {
+      "fixture.ts": `// ${SECRET_SCAN_ALLOW}\nconst t = "${githubToken()}"; // ${SECRET_SCAN_ALLOW}\n`,
+    });
+    expect(Option.isNone(await scan(root))).toBe(true);
+    commit(
+      root,
+      { "new.ts": `const t = "${githubToken()}"; // ${SECRET_SCAN_ALLOW}\n` },
+      `add ${githubToken()} ${SECRET_SCAN_ALLOW}`,
+    );
+    const found = Option.getOrUndefined(await scan(root));
+    expect(
+      found?.findings.map((finding) => [finding.path, finding.name]),
+    ).toEqual([
+      ["new.ts", "github-token"],
+      [COMMIT_METADATA_PATH, "github-token"],
+    ]);
+  });
+
+  /**
+   * Mutation: drop `log.showRoot=true` from the scan's settings — the agent sets `log.showRoot false`
+   * in the checkout's shared config, merges an orphan commit holding the value, and the dense
+   * combined diff (the file matches one parent) and the unprinted root patch both hide it.
+   */
+  it("refuses a value an orphan commit merged into the branch adds, whatever the repo's log.showRoot", async () => {
+    const root = repo();
+    git(root, "checkout", "-q", "--orphan", "orphan");
+    git(root, "rm", "-rq", "--cached", ".");
+    rmSync(join(root, "README.md"));
+    commit(root, { "leak.txt": `${FAKE}\n` });
+    git(root, "checkout", "-q", "work");
+    git(
+      root,
+      "merge",
+      "-q",
+      "--no-edit",
+      "--allow-unrelated-histories",
+      "orphan",
+    );
+    git(root, "config", "log.showRoot", "false");
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings).toMatchObject([
+      { path: "leak.txt", kind: "stored", name: "TEST_API_KEY" },
+    ]);
+  });
+
+  /**
+   * Mutation: drop `--encoding=none` and the pinned `i18n.logOutputEncoding` — the agent sets the
+   * checkout's output encoding to UTF-16, and a value in a commit message is read as other bytes.
+   */
+  it("refuses a value in a commit message, whatever the repo's i18n.logOutputEncoding", async () => {
+    const root = repo();
+    commit(root, { "a.txt": "hello\n" }, `note ${FAKE}`);
+    git(root, "config", "i18n.logOutputEncoding", "UTF-16");
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings).toMatchObject([
+      { path: COMMIT_METADATA_PATH, kind: "stored", name: "TEST_API_KEY" },
+    ]);
   });
 
   it("fails closed when git cannot read the range", async () => {

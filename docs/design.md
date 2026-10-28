@@ -348,9 +348,14 @@ The PR step scans every line the branch's commits add, and every commit's messag
 paths, for a stored value or a credential's shape before it pushes, and refuses `secret-found`. The
 scan stops at the base's tip as the control plane fetches it from the forge just before its push
 (and at an adopted card PR's published commit), never at a local ref; it reads every file as text
-whatever its attributes, and a merge as a dense combined diff. The credential patterns apply to
-every repo, with or without a store.
-_Limits:_ masking is literal, so a command that prints a value encoded leaks it; a repo the factory
+whatever its attributes, and a merge as a dense combined diff, with every `git log` setting the
+agent could write into the checkout's shared `.git/config` pinned on its command line. The
+credential patterns apply to every repo, with or without a store; a line opts out of them with
+`factory-secret-scan:allow` only in a file that carries the marker at that base, so a marker the
+branch writes, or one in a commit message, exempts nothing.
+_Limits:_ masking is literal, so a command that prints a value encoded leaks it, and the scan is
+literal too, so a value committed encoded passes it; a line added to a file the base already marks
+is exempt from the patterns (never from a stored value); a repo the factory
 does not push (no forge URL) is scanned from its local base, which a local agent can move; and a
 session's first open trusts the checkout's base as it then stands, which in a local checkout every
 other session's agent shares.
