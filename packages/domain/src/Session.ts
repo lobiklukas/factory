@@ -106,6 +106,13 @@ export const RepoSummary = Schema.Struct({
   localPathIsGit: Schema.Boolean,
   /** `localPath` holds a `.factory/config` declaring the repo's commands. */
   hasFactoryConfig: Schema.Boolean,
+  /**
+   * The root of the git work tree `localPath` is inside (`git rev-parse --show-toplevel`): the
+   * repository a session's worktree is cut from. The path itself for a checkout's root, an
+   * enclosing directory for one inside it (a monorepo package, or a plain directory under an
+   * unrelated repository). Present exactly when `localPathIsGit`.
+   */
+  workTree: Schema.optional(Schema.String),
 });
 export type RepoSummary = typeof RepoSummary.Type;
 

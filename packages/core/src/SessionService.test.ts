@@ -36,6 +36,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -1878,6 +1879,8 @@ describe("repo binding", () => {
       localPath: repoRoot,
       localPathIsGit: true,
       hasFactoryConfig: true,
+      // git names the root as the filesystem does: macOS's tmpdir is a symlink into /private.
+      workTree: realpathSync(repoRoot),
     });
     expect(result.registered.registeredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     // `get` answers the row `register` wrote, field for field.
@@ -1897,6 +1900,25 @@ describe("repo binding", () => {
     );
     const slugs = result.listed.repos.map((repo) => repo.repo);
     expect(slugs).toEqual([...slugs].sort());
+  });
+
+  it("accepts a path inside a checkout and names the work tree sessions are cut from (LOB-253)", async () => {
+    const slug = runSlug("registry-nested");
+    const nested = join(repoRoot, "packages", "nested");
+    mkdirSync(nested, { recursive: true });
+    const registered = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.registerRepo({ repo: slug, localPath: nested });
+      }),
+    );
+    // Not the path's own directory: the enclosing checkout, which is what `workspace.ts` cuts from.
+    expect(registered).toMatchObject({
+      localPath: nested,
+      localPathIsGit: true,
+      hasFactoryConfig: false,
+      workTree: realpathSync(repoRoot),
+    });
   });
 
   it("keeps the registered checkout when a second registration names only a new base ref (LOB-253)", async () => {
@@ -2056,6 +2078,7 @@ describe("repo binding", () => {
       localPathIsGit: false,
       hasFactoryConfig: false,
     });
+    expect(read.workTree).toBeUndefined();
   });
 });
 

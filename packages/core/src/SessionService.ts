@@ -207,7 +207,7 @@ import {
   SessionWriteBack,
 } from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
-import { inspectCheckout, isGitWorkTree } from "./repos";
+import { inspectCheckout, workTreeRoot } from "./repos";
 import { resolveWorkspace } from "./workspace";
 
 /** Longest title we derive from a first message, in characters. */
@@ -1171,7 +1171,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `repo ${repo}: local path ${localPath} is not an absolute path`,
             });
           }
-          if (!(yield* isGitWorkTree(localPath))) {
+          if ((yield* workTreeRoot(localPath)) === undefined) {
             return yield* new SessionErrorClass({
               code: "invalid_input",
               message: `repo ${repo}: local path ${localPath} is not a git work tree`,
@@ -1213,7 +1213,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const listRepos: Effect.Effect<ListReposOutput, SessionError> =
         Effect.gen(function* () {
           const rows = yield* paper("list repos", readRepos);
-          // One `git` per checkout, a few at a time: the registry is small, and the read is a picker's.
+          // One asynchronous `git` per checkout, four at a time: the registry is small, the read is a
+          // picker's, and a checkout on a slow mount holds one probe rather than the whole list.
           const repos = yield* Effect.forEach(rows, repoSummary, {
             concurrency: 4,
           });

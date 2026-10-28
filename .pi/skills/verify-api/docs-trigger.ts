@@ -53,8 +53,10 @@ import type { CheckRecord } from "./harness.ts";
 
 const SESSION_ROOT =
   process.env["SESSION_ROOT"] ?? ".verify/run/docs-trigger/sessions";
-const REPO_DIR =
-  process.env["DOCS_TRIGGER_REPO_DIR"] ?? ".verify/run/docs-trigger/repo";
+// Absolute, because `registerRepo` refuses a relative checkout (LOB-253).
+const REPO_DIR = path.resolve(
+  process.env["DOCS_TRIGGER_REPO_DIR"] ?? ".verify/run/docs-trigger/repo",
+);
 const REPO = RepoSlugSchema.make(
   process.env["DOCS_TRIGGER_REPO"] ?? "lobiklukas/factory",
 );

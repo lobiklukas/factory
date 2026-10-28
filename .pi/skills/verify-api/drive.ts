@@ -15,6 +15,7 @@
 // `RpcClient` a CLI or the dashboard uses, over the same NDJSON protocol, so a broken
 // schema, a mis-declared stream, or a lost typed error all fail here. See
 // features/session-stream.md.
+import { realpathSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
@@ -239,8 +240,11 @@ const program = Effect.gen(function* () {
     "registerRepo reads the checkout it was given",
     registered.localPath === fixture &&
       registered.localPathIsGit &&
-      registered.hasFactoryConfig,
-    `localPath=${registered.localPath} git=${registered.localPathIsGit} config=${registered.hasFactoryConfig}`,
+      registered.hasFactoryConfig &&
+      // The fixture is a directory inside this checkout: the work tree named is the enclosing one.
+      registered.workTree !== undefined &&
+      realpathSync(fixture).startsWith(`${registered.workTree}/`),
+    `localPath=${registered.localPath} git=${registered.localPathIsGit} config=${registered.hasFactoryConfig} workTree=${registered.workTree}`,
   );
   const repos = yield* client.listRepos({});
   const listedRepo = repos.repos.find((row) => row.repo === repoSlug);

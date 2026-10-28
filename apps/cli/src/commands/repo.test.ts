@@ -29,6 +29,7 @@ const summary = (
     registeredAt: "2026-10-28T10:00:00.000Z",
     localPathIsGit: true,
     hasFactoryConfig: true,
+    workTree: "/tmp/x",
     ...extra,
   });
 
@@ -43,7 +44,7 @@ const autoRegistered = (): RepoSummary =>
     hasFactoryConfig: false,
   });
 
-const fields = (row: string): readonly string[] => row.split(/\s+/);
+const fields = (row: string): readonly string[] => row.split("\t");
 const column = (row: string, name: string): string | undefined =>
   fields(row)[fields(REPO_LS_HEADER).indexOf(name)];
 
@@ -75,11 +76,20 @@ describe("repoLines", () => {
     const lines = repoLines(summary());
     expect(lines).toContain("repo        acme/x");
     expect(lines).toContain("path        /tmp/x");
+    expect(lines).toContain("work-tree   /tmp/x");
     expect(lines).toContain("base-ref    main");
     expect(lines).toContain("config      .factory/config found");
     expect(lines).toContain("state       ready");
     // A ready repo needs nothing: no remedy line.
     expect(lines.some((line) => line.startsWith("remedy"))).toBe(false);
+  });
+
+  it("names the enclosing work tree a path inside a checkout is cut from", () => {
+    const nested = summary({
+      localPath: "/tmp/x/packages/y",
+      workTree: "/tmp/x",
+    });
+    expect(repoLines(nested)).toContain("work-tree   /tmp/x");
   });
 
   it("says no .factory/config when the checkout declares none", () => {
@@ -91,6 +101,7 @@ describe("repoLines", () => {
   it("shows an auto-registered repo as no URL / no checkout, with the remedy", () => {
     const lines = repoLines(autoRegistered());
     expect(lines).toContain(`path        ${NONE}`);
+    expect(lines).toContain(`work-tree   ${NONE}`);
     expect(lines).toContain(`url         ${NONE}`);
     expect(lines).toContain("state       no clone URL / no local checkout");
     expect(lines).toContain(
@@ -108,7 +119,20 @@ describe("repoRow", () => {
     expect(column(row, "registered-at")).toBe("2026-10-28T10:00:00.000Z");
     expect(column(row, "config")).toBe("yes");
     expect(column(row, "url")).toBe("https://example.invalid/acme/x.git");
-    expect(row.endsWith("  ready")).toBe(true);
+    expect(column(row, "state")).toBe("ready");
+  });
+
+  it("keeps a path and a URL with spaces in one column each", () => {
+    const row = repoRow(
+      summary({
+        localPath: "/Users/me/My Repos/x",
+        url: "file:///Users/me/My Repos/x",
+      }),
+    );
+    expect(column(row, "path")).toBe("/Users/me/My Repos/x");
+    expect(column(row, "base-ref")).toBe("main");
+    expect(column(row, "url")).toBe("file:///Users/me/My Repos/x");
+    expect(fields(row)).toHaveLength(fields(REPO_LS_HEADER).length);
   });
 
   it("prints none, not an empty cell, for a repo with no path and no URL", () => {
@@ -116,13 +140,11 @@ describe("repoRow", () => {
     expect(column(row, "path")).toBe(NONE);
     expect(column(row, "url")).toBe(NONE);
     expect(column(row, "config")).toBe("no");
-    expect(row).not.toContain("    ");
-    // The state is last and carries the remedy, so the columns before it stay one token each.
-    expect(REPO_LS_HEADER.split("  ").at(-1)).toBe("state");
-    expect(
-      row.endsWith(
-        `  no clone URL / no local checkout (${repoRemedy("acme/auto")})`,
-      ),
-    ).toBe(true);
+    expect(fields(row).every((cell) => cell !== "")).toBe(true);
+    // The state carries the remedy in the last column.
+    expect(fields(REPO_LS_HEADER).at(-1)).toBe("state");
+    expect(column(row, "state")).toBe(
+      `no clone URL / no local checkout (${repoRemedy("acme/auto")})`,
+    );
   });
 });

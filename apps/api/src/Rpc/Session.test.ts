@@ -16,7 +16,13 @@
  * did.
  */
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -502,6 +508,8 @@ describe("the repo registry over RPC (LOB-253)", () => {
       defaultBaseRef: "main",
       localPathIsGit: true,
       hasFactoryConfig: true,
+      // The work tree sessions are cut from crosses the wire, as git names it.
+      workTree: realpathSync(checkout),
     });
     // The second registration named only the base ref: the checkout and URL are kept.
     expect(outcome.rebased).toMatchObject({

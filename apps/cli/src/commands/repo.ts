@@ -17,8 +17,9 @@ import { SessionClient } from "../rpc";
  * says so in words and prints the command that fixes it, so the operator does not have to know the
  * schema to read the registry.
  *
- * Every answer is the server's: the two checkout facts (`localPathIsGit`, `hasFactoryConfig`) are
- * read by the API from its own disk, which is the disk the worktree is cut on.
+ * Every answer is the server's: the checkout facts (`localPathIsGit`, `workTree`, `hasFactoryConfig`)
+ * are read by the API from its own disk, which is the disk the worktree is cut on. `work-tree` names
+ * the repository sessions are cut from, which for a path inside a checkout is the enclosing one.
  */
 
 /** What a cell says when the row has no value, matching `factory ls`'s rule of no empty cell. */
@@ -54,6 +55,8 @@ const configLine = (repo: RepoSummary): string =>
 export const repoLines = (repo: RepoSummary): readonly string[] => [
   `repo        ${repo.repo}`,
   `path        ${repo.localPath ?? NONE}`,
+  // The repository sessions are cut from: the path itself, or the work tree it sits inside.
+  `work-tree   ${repo.workTree ?? NONE}`,
   `base-ref    ${repo.defaultBaseRef}`,
   `url         ${repo.url === "" ? NONE : repo.url}`,
   `config      ${configLine(repo)}`,
@@ -62,14 +65,24 @@ export const repoLines = (repo: RepoSummary): readonly string[] => [
   ...(isReady(repo) ? [] : [`remedy      ${repoRemedy(repo.repo)}`]),
 ];
 
+/** What separates `factory repo ls`'s columns: a tab, so no path or URL with a space splits one. */
+export const REPO_LS_SEPARATOR = "\t";
+
 /** The header `factory repo ls` prints: one name per column, in row order. */
-export const REPO_LS_HEADER =
-  "repo  path  base-ref  registered-at  config  url  state";
+export const REPO_LS_HEADER = [
+  "repo",
+  "path",
+  "base-ref",
+  "registered-at",
+  "config",
+  "url",
+  "state",
+].join(REPO_LS_SEPARATOR);
 
 /**
- * One `factory repo ls` row. The state is last because it is the only field with spaces, so a script
- * can split the line on whitespace and read the path as the second field; a row that is not ready
- * carries its remedy after the state.
+ * One `factory repo ls` row, its columns tab-separated, so a script reads the path with `cut -f2`
+ * (or `awk -F'\t' '{ print $2 }'`) whatever the path contains. A row that is not ready carries its
+ * remedy after the state, in the last column.
  */
 export const repoRow = (repo: RepoSummary): string =>
   [
@@ -80,7 +93,7 @@ export const repoRow = (repo: RepoSummary): string =>
     repo.hasFactoryConfig ? "yes" : "no",
     repo.url === "" ? NONE : repo.url,
     isReady(repo) ? "ready" : `${repoState(repo)} (${repoRemedy(repo.repo)})`,
-  ].join("  ");
+  ].join(REPO_LS_SEPARATOR);
 
 /**
  * Decode the positional slug against the domain's own schema, so a malformed one is `invalid_input`

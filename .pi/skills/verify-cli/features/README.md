@@ -7,7 +7,9 @@ the skill drives it, and what observable end state proves it works.
 `./drive.sh` (API on `:9520`, approve on `:9522`, the seed's GitHub fake on `:9523`) **22/22**, one
 check being `./repo.sh` at **17/17**. A mutation run (every path read as a git work tree) failed 4 of
 the 17: the refusal, its path, the `repo_not_found` that proves nothing was written, and the refused
-slug's absence from `repo ls`.
+slug's absence from `repo ls`. After review, `./repo.sh` was re-run alone (API on `:9520`) at
+**20/20**: the added checks are the `work-tree` line, a path inside a checkout naming the enclosing
+work tree, and the tab-separated `repo ls` piped to a file.
 
 `factory approvals` / `approve` / `deny` were verified **2026-10-27** from the `agent/LOB-53`
 worktree: `./drive.sh` (API on `:9530`) **21/21**, its last check being `./approve.sh` (API on

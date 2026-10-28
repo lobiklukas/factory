@@ -24,6 +24,7 @@ RUN_ID="$(date +%s)-$$"
 SLUG="acme/verify-cli-repo-$RUN_ID"
 REFUSED="acme/verify-cli-refused-$RUN_ID"
 AUTO="acme/verify-cli-auto-$RUN_ID"
+NESTED_SLUG="acme/verify-cli-nested-$RUN_ID"
 UNKNOWN="acme/verify-cli-unknown-$RUN_ID"
 # A port nothing listens on: a command that sent a request there would fail as `error: error:`.
 DEAD_API="http://127.0.0.1:9"
@@ -75,6 +76,11 @@ if git -C "$PLAIN" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 git init -q -b main "$CHECKOUT"
 printf '{"test": "true"}\n' > "$CHECKOUT/.factory/config"
+# A plain directory inside the checkout: accepted, and the answer names the checkout it is inside.
+NESTED="$CHECKOUT/packages/nested"
+mkdir -p "$NESTED"
+# What `git rev-parse --show-toplevel` prints for it: the checkout, symlinks resolved.
+CHECKOUT_ROOT="$(cd "$CHECKOUT" && pwd -P)"
 
 t() { tmux -S "$SOCK" "$@"; }
 pane() { t capture-pane -p -J -t "$TERM_SESSION" -S -4000 | sed -e 's/[[:space:]]*$//'; }
@@ -127,6 +133,9 @@ check "repo add prints the repo, path and base ref" \
   "$(has repo-add.txt "repo        $SLUG" && has repo-add.txt "path        $CHECKOUT" &&
     has repo-add.txt "base-ref    main" && echo 0 || echo 1)" \
   "repo=$SLUG"
+check "repo add names the work tree sessions are cut from" \
+  "$(has repo-add.txt "work-tree   $CHECKOUT_ROOT" && echo 0 || echo 1)" \
+  "work-tree=$CHECKOUT_ROOT"
 check "repo add says .factory/config was found" \
   "$(has repo-add.txt "config      .factory/config found" && has repo-add.txt "state       ready" && echo 0 || echo 1)" \
   "config found, ready"
@@ -137,6 +146,14 @@ check "a second add with only --base-ref exits 0" "$([ "$(exit_code rebase)" = "
 check "the second add updates the base ref and keeps the path" \
   "$(has repo-add-rebase.txt "base-ref    trunk" && has repo-add-rebase.txt "path        $CHECKOUT" && echo 0 || echo 1)" \
   "base-ref=trunk path kept"
+
+# --- a path inside a checkout: accepted, and the enclosing work tree is named ----------------------
+drive nested repo-add-nested.txt "$FACTORY repo add $NESTED_SLUG --path $NESTED --api $API_URL"
+check "a path inside a checkout is ready and names the enclosing work tree" \
+  "$([ "$(exit_code nested)" = "0" ] && has repo-add-nested.txt "path        $NESTED" &&
+    has repo-add-nested.txt "work-tree   $CHECKOUT_ROOT" && has repo-add-nested.txt "state       ready" &&
+    echo 0 || echo 1)" \
+  "path=$NESTED work-tree=$CHECKOUT_ROOT"
 
 # --- refusals: a path that is not a work tree, and a slug that is not one -------------------------
 drive notgit repo-add-not-git.txt "$FACTORY repo add $REFUSED --path $PLAIN --api $API_URL"
@@ -176,9 +193,11 @@ check "and prints the remedy" \
 drive ls repo-ls.txt "$FACTORY repo ls --api $API_URL"
 REG_ROW="$(awk -v slug="$SLUG" '$1 == slug { print; exit }' "$EVIDENCE_DIR/repo-ls.txt")"
 AUTO_ROW="$(awk -v slug="$AUTO" '$1 == slug { print; exit }' "$EVIDENCE_DIR/repo-ls.txt")"
+# The terminal expands the tabs between columns, so the pane is read as whitespace-split fields.
 check "repo ls exits 0 with its header" \
   "$([ "$(exit_code ls)" = "0" ] &&
-    has repo-ls.txt "repo  path  base-ref  registered-at  config  url  state" && echo 0 || echo 1)" \
+    grep -qE '^repo[[:space:]]+path[[:space:]]+base-ref[[:space:]]+registered-at[[:space:]]+config[[:space:]]+url[[:space:]]+state$' \
+      "$EVIDENCE_DIR/repo-ls.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code ls)"
 check "repo ls lists the registered repo with its path, base ref and registered-at" \
   "$(echo "$REG_ROW" | awk -v p="$CHECKOUT" '$2 == p && $3 == "trunk" && $4 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/ && $5 == "yes" { ok = 1 } END { exit !ok }' && echo 0 || echo 1)" \
@@ -187,8 +206,16 @@ check "repo ls lists the auto-registered repo with none and the remedy" \
   "$(echo "$AUTO_ROW" | awk '$2 == "none" && $3 == "main" && $6 == "none" { ok = 1 } END { exit !ok }' &&
     echo "$AUTO_ROW" | grep -qF "no clone URL / no local checkout (factory repo add $AUTO --path <dir>)" && echo 0 || echo 1)" \
   "row=$(echo "$AUTO_ROW" | cut -c1-120)"
+# Piped rather than in the pane: what a script reads, where the separator is the tab itself.
+$FACTORY repo ls --api "$API_URL" > "$EVIDENCE_DIR/repo-ls-piped.txt" 2>&1
+PIPED_PATH="$(awk -F'\t' -v slug="$SLUG" '$1 == slug { print $2; exit }' "$EVIDENCE_DIR/repo-ls-piped.txt")"
+PIPED_HEADER="$(head -1 "$EVIDENCE_DIR/repo-ls-piped.txt")"
+check "piped, repo ls separates its columns with tabs" \
+  "$([ "$PIPED_HEADER" = "$(printf 'repo\tpath\tbase-ref\tregistered-at\tconfig\turl\tstate')" ] &&
+    [ "$PIPED_PATH" = "$CHECKOUT" ] && echo 0 || echo 1)" \
+  "path=$PIPED_PATH"
 check "repo ls does not list the refused registration" \
-  "$(grep -q "^$REFUSED " "$EVIDENCE_DIR/repo-ls.txt" && echo 1 || echo 0)" \
+  "$(grep -qE "^$REFUSED[[:space:]]" "$EVIDENCE_DIR/repo-ls.txt" && echo 1 || echo 0)" \
   "absent"
 
 # --- show: an unknown slug is a typed refusal -----------------------------------------------------
