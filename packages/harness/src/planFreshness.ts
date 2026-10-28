@@ -7,18 +7,30 @@
  * session, has no tools, and writes to no tracker: a proposal is not a change until a person approves
  * it (`approvePlanRevision` in `@repo/core`).
  *
- * **The call is bounded before it is made.** `planPassWorstCost` prices the request as the catalog
- * prices it — every byte of the prompt as an input token (a token is never shorter than a byte), and
- * the whole `PLAN_MAX_OUTPUT_TOKENS` the call is capped at as output, plus any flat per-call charge
- * (`ModelAccess.flatCost`) — so the caller can refuse a pass whose worst case is over its bound, and
- * a pass it lets through cannot spend more than that worst case.
+ * **The call is bounded before it is made.** `planPassWorstCost` prices the request at the dearest
+ * rate the catalog could bill it at — every byte of the prompt as an input token (a token is never
+ * shorter than a byte) at the highest of the input, cache-read and cache-write rates over the base
+ * price and every tier, and the whole `PLAN_MAX_OUTPUT_TOKENS` the call is capped at at the highest
+ * output rate, plus any flat per-call charge (`ModelAccess.flatCost`) — so the caller can refuse a
+ * pass whose worst case is over its bound, and a pass it lets through cannot spend more than that
+ * worst case. The call asks for no prompt cache (`cacheRetention: "none"`), so no 1h cache write,
+ * which pi-ai bills at twice the input rate, can be made.
+ *
+ * **A billed call is always charged.** `requestPlanFreshness` charges the call's spend the moment it
+ * settles, uninterruptibly; an interrupt while the call is in flight aborts it, awaits the answer the
+ * provider settles with (its partial usage), and charges that before the interrupt goes on.
  *
  * The answer passes through one validator, `validatePlanProposals` (`@repo/domain/PlanFreshness`),
  * against the issue set the prompt showed, on its way to the one writer, `writePlanRevision`. A refused
  * answer commits nothing.
  */
 import { createHash } from "node:crypto";
-import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Message,
+  ModelCostRates,
+  Usage,
+} from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
@@ -29,6 +41,7 @@ import {
   type PlanProposal,
   type PlanProposalsRefused,
   type PlanRevision,
+  type PlanTrigger,
   planProposalsRefused,
   projectPlanRevisions,
   validatePlanProposals,
@@ -87,7 +100,15 @@ export type PlanFreshnessOptions = {
   readonly spec: Spec;
   /** The tracker's issue set, as `ProposalTarget.issues` read it. */
   readonly issues: readonly PlanIssue[];
+  /**
+   * The merge the pass answers, shown to the model so it can tell work the merge delivered from work
+   * still missing. Absent: the prompt names no merge.
+   */
+  readonly trigger?: PlanTrigger | undefined;
 };
+
+/** The prompt's heading over the merge the pass answers. */
+export const PLAN_MERGE_HEADING = "## the merge";
 
 /**
  * The one request's user message. The marker opens it, so a scripted model answers a pass; the spec
@@ -95,11 +116,28 @@ export type PlanFreshnessOptions = {
  * own, so the derived faux answer reads back exactly what a real model was shown.
  */
 export const planFreshnessPrompt = (
-  options: Pick<PlanFreshnessOptions, "sessionId" | "spec" | "issues">,
+  options: Pick<
+    PlanFreshnessOptions,
+    "sessionId" | "spec" | "issues" | "trigger"
+  >,
 ): string =>
   [
     `${PLAN_PROMPT_PREFIX} session ${options.sessionId}`,
     "",
+    ...(options.trigger === undefined
+      ? []
+      : [
+          PLAN_MERGE_HEADING,
+          `- ${JSON.stringify({
+            pr: options.trigger.pr,
+            number: options.trigger.number,
+            ...(options.trigger.title === undefined
+              ? {}
+              : { title: oneLine(options.trigger.title) }),
+          })}`,
+          "This pull request just merged work against the spec below. What it delivered is done: do not propose adding it again.",
+          "",
+        ]),
     DECOMPOSITION_GOAL_HEADING,
     oneLine(options.spec.goal),
     "",
@@ -127,10 +165,13 @@ export const planFreshnessPrompt = (
   ].join("\n");
 
 /**
- * What the call can cost at most, in US dollars, before it is made: the catalog's input price on
- * every byte of the system prompt and the message (plus `PLAN_PROMPT_OVERHEAD_TOKENS`), its output
- * price on all of `PLAN_MAX_OUTPUT_TOKENS`, and the access's flat per-call charge. `undefined` when
- * the process serves no such model, which the call itself then refuses.
+ * What the call can cost at most, in US dollars, before it is made: every byte of the system prompt
+ * and the message (plus `PLAN_PROMPT_OVERHEAD_TOKENS`) at the dearest per-token input rate the
+ * catalog names — input, cache read or cache write, over the base price and every tier — all of
+ * `PLAN_MAX_OUTPUT_TOKENS` at the dearest output rate, and the access's flat per-call charge.
+ * pi-ai bills a request at one tier's rates (`calculateCost`), and the call asks for no prompt cache,
+ * so no billed split of the same tokens can cost more. `undefined` when the process serves no such
+ * model, which the call itself then refuses.
  */
 export const planPassWorstCost = (
   model: ModelAccess,
@@ -139,13 +180,21 @@ export const planPassWorstCost = (
 ): number | undefined => {
   const served = model.models.getModel(model.provider, model.modelId);
   if (served === undefined) return undefined;
+  const rates: readonly ModelCostRates[] = [
+    served.cost,
+    ...(served.cost.tiers ?? []),
+  ];
+  const inputRate = Math.max(
+    ...rates.map((one) => Math.max(one.input, one.cacheRead, one.cacheWrite)),
+  );
+  const outputRate = Math.max(...rates.map((one) => one.output));
   const inputTokens =
     Buffer.byteLength(instructions, "utf8") +
     Buffer.byteLength(prompt, "utf8") +
     PLAN_PROMPT_OVERHEAD_TOKENS;
   return (
-    (inputTokens * served.cost.input) / 1_000_000 +
-    (PLAN_MAX_OUTPUT_TOKENS * served.cost.output) / 1_000_000 +
+    (inputTokens * inputRate) / 1_000_000 +
+    (PLAN_MAX_OUTPUT_TOKENS * outputRate) / 1_000_000 +
     (model.flatCost ?? 0)
   );
 };
@@ -153,17 +202,41 @@ export const planPassWorstCost = (
 /** One call's answer, and what that call cost. */
 export type PlanFreshnessRequest = {
   readonly answer: AssistantMessage;
-  /** The call's spend. The caller charges it before it reads the answer: the call was made. */
+  /** The call's spend, already charged through the guard's `charge` by the time it is answered. */
   readonly usage: Usage;
 };
 
 /**
- * The one model call, capped at `PLAN_MAX_OUTPUT_TOKENS`. An error answer is not a failure here, as
- * in `requestDecomposition`: the call happened and was billed, and the caller charges it before
- * `planFreshnessProposals` refuses it.
+ * How a caller keeps a billed call from going uncharged. `charge` records one settled call's spend;
+ * `restore` is the caller's `Effect.uninterruptibleMask` restore, so only the wait on the provider is
+ * interruptible and everything after it — the charge, and whatever the caller does with the answer —
+ * runs in the caller's uninterruptible region, with no gap between the two for an interrupt to land in.
+ */
+export type PlanCallGuard = {
+  readonly charge: (usage: Usage) => Effect.Effect<void, SessionError>;
+  readonly restore: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>;
+};
+
+/**
+ * The one model call, capped at `PLAN_MAX_OUTPUT_TOKENS`, asking for no prompt cache. An error
+ * answer is not a failure here, as in `requestDecomposition`: the call happened and was billed, and
+ * it is charged before `planFreshnessProposals` refuses it.
+ *
+ * Called inside the caller's `Effect.uninterruptibleMask`, with its `restore` in `guard`: the wait on
+ * the provider is the only interruptible stretch. The spend is charged as soon as the call settles;
+ * an interrupt during the wait aborts the request (the signal is the provider's), waits for the answer
+ * it settles with, and charges that answer's usage before the interrupt proceeds — a call that was
+ * already billed is never dropped on the floor. Without a guard the call is charged nowhere and is
+ * interruptible throughout, which is what a test of the call alone wants.
  */
 export const requestPlanFreshness = (
   options: PlanFreshnessOptions,
+  guard: PlanCallGuard = {
+    charge: () => Effect.void,
+    restore: (effect) => effect,
+  },
 ): Effect.Effect<PlanFreshnessRequest, SessionError> =>
   Effect.gen(function* () {
     const request = options.model.models.getModel(
@@ -181,19 +254,48 @@ export const requestPlanFreshness = (
       content: planFreshnessPrompt(options),
       timestamp: yield* Clock.currentTimeMillis,
     };
-    const answer = yield* Effect.tryPromise({
-      try: () =>
-        options.model.models.completeSimple(
-          request,
-          { systemPrompt: options.instructions, messages: [message] },
-          { maxTokens: PLAN_MAX_OUTPUT_TOKENS },
-        ),
-      catch: (cause) =>
-        new SessionError({
-          code: "harness",
-          message: `the plan-freshness model call failed: ${String(cause)}`,
+    const failed = (cause: unknown) =>
+      new SessionError({
+        code: "harness",
+        message: `the plan-freshness model call failed: ${String(cause)}`,
+      });
+    // The call in flight, kept so an interrupt can wait for the answer it settles with: the
+    // `tryPromise` signal aborts the request on an interrupt, and does not wait for it.
+    const inFlight: { call?: Promise<AssistantMessage> } = {};
+    const answer = yield* guard
+      .restore(
+        Effect.tryPromise({
+          try: (signal) => {
+            const call = options.model.models.completeSimple(
+              request,
+              { systemPrompt: options.instructions, messages: [message] },
+              {
+                maxTokens: PLAN_MAX_OUTPUT_TOKENS,
+                cacheRetention: "none",
+                signal,
+              },
+            );
+            inFlight.call = call;
+            return call;
+          },
+          catch: failed,
         }),
-    });
+      )
+      .pipe(
+        Effect.onInterrupt(() => {
+          const call = inFlight.call;
+          if (call === undefined) return Effect.void;
+          return Effect.tryPromise({ try: () => call, catch: failed }).pipe(
+            Effect.flatMap((aborted) => guard.charge(aborted.usage)),
+            Effect.catch((error) =>
+              Effect.logError(
+                `plan freshness: an interrupted call's spend could not be charged: ${error.message}`,
+              ),
+            ),
+          );
+        }),
+      );
+    yield* guard.charge(answer.usage);
     return { answer, usage: answer.usage };
   });
 

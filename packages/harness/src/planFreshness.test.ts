@@ -18,7 +18,7 @@ import {
   type PlanRevision,
 } from "@repo/domain/PlanFreshness";
 import { SessionId } from "@repo/domain/Session";
-import { Effect, Exit, Option, Schema } from "effect";
+import { Effect, Exit, Fiber, Option, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { createFauxModelAccess, fauxAnswer, isFauxTurnStep } from "./models";
 import {
@@ -258,6 +258,174 @@ describe("one pass", () => {
         (PLAN_MAX_OUTPUT_TOKENS * 15) / 1_000_000,
       12,
     );
+  });
+});
+
+describe("the pass's bound and its call", () => {
+  /** The faux access, its catalog entry priced `cost` and its calls' options recorded. */
+  const priced = (cost: Record<string, unknown>) => {
+    const faux = createFauxModelAccess();
+    const served = faux.access.models.getModel("faux", faux.access.modelId);
+    if (served === undefined) throw new Error("the faux model is not served");
+    const calls: unknown[] = [];
+    const access = {
+      ...faux.access,
+      models: new Proxy(faux.access.models, {
+        get: (target, key) => {
+          if (key === "getModel") return () => ({ ...served, cost });
+          if (key === "completeSimple") {
+            return (
+              ...args: Parameters<typeof faux.access.models.completeSimple>
+            ) => {
+              calls.push(args[2]);
+              return target.completeSimple(...args);
+            };
+          }
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
+    return { access, calls };
+  };
+
+  it("prices input at the dearest of the input, cache and tier rates, and output at the dearest tier", () => {
+    const { access } = priced({
+      input: 3,
+      output: 15,
+      cacheRead: 0.3,
+      // A cache write dearer than input, and a tier above both.
+      cacheWrite: 3.75,
+      tiers: [
+        {
+          inputTokensAbove: 200_000,
+          input: 6,
+          output: 22.5,
+          cacheRead: 0.6,
+          cacheWrite: 7.5,
+        },
+      ],
+    });
+    const worst = planPassWorstCost(access, "ab", "cdé");
+    expect(worst).toBeCloseTo(
+      ((2 + 4 + 256) * 7.5) / 1_000_000 +
+        (PLAN_MAX_OUTPUT_TOKENS * 22.5) / 1_000_000,
+      12,
+    );
+  });
+
+  it("asks for no prompt cache, so no cache write can be billed", async () => {
+    const { access, calls } = priced({
+      input: 3,
+      output: 15,
+      cacheRead: 0,
+      cacheWrite: 3.75,
+    });
+    await Effect.runPromise(
+      requestPlanFreshness({
+        model: access,
+        instructions: "read the plan",
+        sessionId: SESSION,
+        spec: SPEC,
+        issues: ISSUES,
+      }),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      cacheRetention: "none",
+      maxTokens: PLAN_MAX_OUTPUT_TOKENS,
+    });
+  });
+
+  it("shows the model the merge it answers", () => {
+    const lines = planFreshnessPrompt({
+      sessionId: SESSION,
+      spec: SPEC,
+      issues: ISSUES,
+      trigger: {
+        pr: "https://github.com/acme/app/pull/7",
+        number: 7,
+        title: "Build\nthe schema",
+      },
+    }).split("\n");
+    expect(lines).toContain("## the merge");
+    expect(
+      lines.some(
+        (line) =>
+          line.startsWith("- {") &&
+          line.includes('"number":7') &&
+          line.includes('"title":"Build the schema"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("charges a call interrupted in flight with the answer it settles with", async () => {
+    const charged: number[] = [];
+    let release: () => void = () => {};
+    // oxlint-disable-next-line effecttsgo/new-promise -- a call the case lets answer by hand.
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let aborted = false;
+    const faux = createFauxModelAccess({ fauxCost: 0.05 });
+    const slow = {
+      ...faux.access,
+      models: new Proxy(faux.access.models, {
+        get: (target, key) => {
+          if (key === "completeSimple") {
+            return async (
+              ...args: Parameters<typeof faux.access.models.completeSimple>
+            ) => {
+              const [request, context, options] = args;
+              options?.signal?.addEventListener("abort", () => {
+                aborted = true;
+              });
+              await held;
+              // A provider that billed the call whatever the abort said.
+              return target.completeSimple(request, context, {
+                maxTokens: options?.maxTokens ?? 0,
+              });
+            };
+          }
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
+    const exit = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          Effect.uninterruptibleMask((restore) =>
+            requestPlanFreshness(
+              {
+                model: slow,
+                instructions: "read the plan",
+                sessionId: SESSION,
+                spec: SPEC,
+                issues: ISSUES,
+              },
+              {
+                restore,
+                charge: (usage) =>
+                  Effect.sync(() => {
+                    charged.push(usage.cost.total);
+                  }),
+              },
+            ),
+          ),
+        );
+        yield* Effect.sleep(20);
+        const interrupting = yield* Effect.forkChild(Fiber.interrupt(fiber));
+        yield* Effect.sleep(20);
+        release();
+        yield* Fiber.join(interrupting);
+        return yield* Fiber.await(fiber);
+      }),
+    );
+    expect(aborted).toBe(true);
+    expect(Exit.hasInterrupts(exit)).toBe(true);
+    expect(charged).toHaveLength(1);
+    expect(charged[0]).toBeCloseTo(0.05, 10);
   });
 });
 

@@ -216,7 +216,7 @@ evidence `.verify/evidence/lob-202/api/`. See [approve-proposals.md](approve-pro
 The plan-freshness checks (LOB-45) were run from the `agent/LOB-45` worktree on 2026-10-28
 (`DATABASE_URL` the worktree's own `factory_agent_lob_45` on 5442, a scratch database minted on it,
 faux with `FAUX_SPEC` and `FAUX_COST=0.01`, `PLAN_FRESHNESS=merged`, the API on `PLAN_PORT=9530` and
-the loopback Linear on `PLAN_LINEAR_PORT=9531`): `./plan-freshness.sh` **17/17** (14 driver checks,
+the loopback Linear on `PLAN_LINEAR_PORT=9531`): `./plan-freshness.sh` **18/18** (15 driver checks,
 3 shell checks), evidence `.verify/evidence/latest/api/plan-freshness*.json`. See
 [plan-freshness.md](plan-freshness.md).
 

@@ -8,9 +8,16 @@
  * `specified` event's session for a run on a card, or the PR's own session otherwise. The pass files
  * its proposals on that session and writes to no tracker; a person approves them.
  *
+ * **The pass is not the request's.** A pass makes a model call that can outlast the 10 s GitHub waits
+ * for an answer, and a closed connection interrupts the request. So the route hands each claimed pass
+ * to `PlanFreshnessPasses` — a fiber set the API process owns, whose scope closes at shutdown — and
+ * answers `accepted` once the claim is taken; the pass runs to its outcome whatever the connection
+ * does. Within the pass, only the wait on the provider is interruptible (`refreshPlan`): a billed
+ * call is charged, and a paid-for answer filed, even when a shutdown lands mid-pass.
+ *
  * **One merge, one revision.** The dedupe is the webhook seam's own row: each pass claims
- * `webhook_deliveries` for `plan-freshness:<spec session>:<pr url>` with the seam's single
- * `INSERT … ON CONFLICT … RETURNING` (`TriggerService`), so two deliveries of one merge — a
+ * `webhook_deliveries` for `plan-freshness:<spec session>:<pr url>` with the seam's claim
+ * (`claimDeliveryRow`, `TriggerService`), so two deliveries of one merge — a
  * redelivery from GitHub's log, or two at once — cannot both run a pass, across processes. The
  * claim is `processed` once a revision is filed, `skipped` with the reason when the pass was refused
  * (a refusal before the call costs nothing, and a refused answer was already paid for, so neither is
@@ -20,13 +27,27 @@
  * merge's key, and `refreshPlan` answers a held key without a call — a second guard should the
  * dedupe row ever be lost.
  */
-import { Duration, Effect, Exit, Schema } from "effect";
+import {
+  Context,
+  Duration,
+  Effect,
+  Exit,
+  FiberSet,
+  Layer,
+  Result,
+  Schema,
+} from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { planRevisionKey } from "@repo/domain/PlanFreshness";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import { githubPullRequestLifecycle, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
-import { TRIGGER_RECLAIM_AFTER } from "./TriggerService";
+import {
+  claimDeliveryRow,
+  releaseDeliveryClaim,
+  settleDeliveryClaim,
+  TRIGGER_RECLAIM_AFTER,
+} from "./TriggerService";
 
 /** When a pass runs: never (the default), or on every merged factory PR. */
 export const PLAN_FRESHNESS_CADENCES = ["off", "merged"] as const;
@@ -89,7 +110,9 @@ export type PlanFreshnessPass = {
     | "already-proposed"
     | "replayed"
     | "refused"
-    | "failed";
+    | "failed"
+    /** Claimed and handed to `PlanFreshnessPasses`: the pass runs past the answer. */
+    | "accepted";
   /** The revision's key, for `proposed` and `already-proposed`. */
   readonly key?: string;
   /** How many proposals the revision holds. */
@@ -106,6 +129,40 @@ export type PlanFreshnessOutcome =
       readonly status: "merged";
       readonly passes: readonly PlanFreshnessPass[];
     };
+
+/**
+ * Where a claimed pass runs when the caller will not wait for it: a fiber set the process owns, so a
+ * pass outlives the request that claimed it and is interrupted only when the process shuts down.
+ * `idle` waits until every pass handed to it has finished.
+ */
+export class PlanFreshnessPasses extends Context.Service<
+  PlanFreshnessPasses,
+  {
+    readonly run: (pass: Effect.Effect<void>) => Effect.Effect<void>;
+    readonly idle: Effect.Effect<void>;
+  }
+>()("@repo/core/PlanFreshnessPasses") {}
+
+/** The passes' fiber set, scoped to the layer: closing it interrupts (and awaits) every pass. */
+export const PlanFreshnessPassesLive = Layer.effect(
+  PlanFreshnessPasses,
+  Effect.gen(function* () {
+    const set = yield* FiberSet.make<void, never>();
+    return PlanFreshnessPasses.of({
+      run: (pass) => Effect.asVoid(FiberSet.run(set, pass)),
+      idle: FiberSet.awaitEmpty(set),
+    });
+  }),
+);
+
+/** The merged PR's title, when the payload carries one. */
+const titleOf = (payload: unknown): string | undefined => {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const pr: unknown = Reflect.get(payload, "pull_request");
+  if (typeof pr !== "object" || pr === null) return undefined;
+  const title: unknown = Reflect.get(pr, "title");
+  return typeof title === "string" && title.trim() !== "" ? title : undefined;
+};
 
 /** The dedupe id one pass claims: the spec it reads and the merge it answers. */
 export const planFreshnessDeliveryId = (
@@ -155,6 +212,10 @@ const specSessionsOf = (pr: string, apiUrl: string) =>
  * merge of a factory PR runs one pass per spec of record; anything else runs nothing. Never fails:
  * every outcome is an answer the route reports, and a storage failure is logged and reported as
  * `failed` with the claim given back.
+ *
+ * With `fork`, each claimed pass is handed to it and answered `accepted` — the route's way, so the
+ * answer does not wait on a model call (`PlanFreshnessPasses`). Without, each pass runs before the
+ * answer, which reports what it came to.
  */
 export const handlePlanFreshnessDelivery = (input: {
   readonly secret: string | undefined;
@@ -163,6 +224,8 @@ export const handlePlanFreshnessDelivery = (input: {
   readonly config: PlanFreshnessConfig;
   /** How long a `received` claim is held before a redelivery may take it; the seam's by default. */
   readonly reclaimAfter?: Duration.Input;
+  /** Runs a claimed pass past the answer; see above. */
+  readonly fork?: (pass: Effect.Effect<void>) => Effect.Effect<void>;
 }): Effect.Effect<PlanFreshnessOutcome, never, SessionService | SqlClient> =>
   Effect.gen(function* () {
     if (input.config.cadence === "off") return { status: "off" } as const;
@@ -192,102 +255,130 @@ export const handlePlanFreshnessDelivery = (input: {
         ),
       ),
     );
+    const title = titleOf(payload);
+    const trigger = {
+      pr,
+      number: lifecycle.pr.number,
+      ...(title === undefined ? {} : { title }),
+    };
+    /** The claimed pass on `sessionId`, run to its outcome, with the claim settled or given back. */
+    const runPass = (
+      sessionId: SessionIdSchema,
+      requestId: string,
+      claim: string,
+    ): Effect.Effect<PlanFreshnessPass> =>
+      Effect.gen(function* () {
+        const settle = (status: "processed" | "skipped", reason: string) =>
+          settleDeliveryClaim(sql, requestId, claim, status, reason).pipe(
+            Effect.ignore,
+          );
+        const release = releaseDeliveryClaim(sql, requestId, claim).pipe(
+          Effect.ignore,
+        );
+        const exit = yield* Effect.exit(
+          sessions
+            .refreshPlan({
+              sessionId,
+              key: planRevisionKey(pr),
+              trigger,
+              maxCost: input.config.maxCost,
+            })
+            // An interrupt is not an exit `Effect.exit` sees here: the claim goes back on it too.
+            .pipe(Effect.onInterrupt(() => release)),
+        );
+        if (Exit.isSuccess(exit)) {
+          const { revision, created } = exit.value;
+          yield* settle(
+            "processed",
+            `plan revision ${revision.key}: ${revision.proposals.length} proposal(s)`,
+          );
+          return {
+            sessionId,
+            outcome: created ? "proposed" : "already-proposed",
+            key: revision.key,
+            proposals: revision.proposals.length,
+          } as const;
+        }
+        const error = Exit.findErrorOption(exit);
+        if (
+          error._tag === "Some" &&
+          error.value._tag === "PlanFreshnessRefused"
+        ) {
+          // A busy spec session and a tracker that failed are passing states: the claim goes back,
+          // so a redelivery tries again. Every other refusal is the merge's answer and is recorded.
+          yield* TRANSIENT_REFUSALS.has(error.value.reason)
+            ? release
+            : settle(
+                "skipped",
+                `plan freshness refused: ${error.value.message}`,
+              );
+          return {
+            sessionId,
+            outcome: "refused",
+            reason: error.value.reason,
+          } as const;
+        }
+        if (
+          error._tag === "Some" &&
+          error.value._tag === "PlanProposalsRefused"
+        ) {
+          yield* settle("skipped", error.value.message);
+          yield* Effect.logWarning(
+            `plan freshness: session ${sessionId}'s pass answered proposals the rules refuse: ${error.value.message}`,
+          );
+          return {
+            sessionId,
+            outcome: "refused",
+            reason: "refused_answer",
+          } as const;
+        }
+        // A storage or model failure, a defect or an interrupt: the claim goes back, so a
+        // redelivery runs the pass that did not finish.
+        yield* release;
+        const message =
+          error._tag === "Some"
+            ? error.value.message
+            : "the pass did not finish";
+        yield* Effect.logError(
+          `plan freshness: session ${sessionId}'s pass for ${pr} failed: ${message}`,
+        );
+        return { sessionId, outcome: "failed", reason: message } as const;
+      });
+    /**
+     * Claim `sessionId`'s pass and run it, or hand it to `fork`. Uninterruptible when forking, so a
+     * request that goes away between the claim and the hand-off cannot strand a claim no pass holds.
+     */
+    const claimAndRun = (
+      sessionId: SessionIdSchema,
+    ): Effect.Effect<PlanFreshnessPass> =>
+      Effect.gen(function* () {
+        const requestId = planFreshnessDeliveryId(sessionId, pr);
+        const claimed = yield* Effect.result(
+          claimDeliveryRow(sql, requestId, reclaimSeconds),
+        );
+        if (Result.isFailure(claimed)) {
+          yield* Effect.logError(
+            `plan freshness: the pass of session ${sessionId} for ${pr} could not be claimed: ${claimed.failure.message}`,
+          );
+          return { sessionId, outcome: "failed", reason: "storage" } as const;
+        }
+        const claim = claimed.success;
+        if (claim === undefined) {
+          return { sessionId, outcome: "replayed" } as const;
+        }
+        if (input.fork === undefined) {
+          return yield* runPass(sessionId, requestId, claim);
+        }
+        yield* input.fork(Effect.asVoid(runPass(sessionId, requestId, claim)));
+        return { sessionId, outcome: "accepted" } as const;
+      });
     const passes: PlanFreshnessPass[] = [];
     for (const sessionId of specs) {
-      const requestId = planFreshnessDeliveryId(sessionId, pr);
-      const claimed = yield* sql<{ readonly claim: string }>`
-        INSERT INTO webhook_deliveries (request_id, status)
-        VALUES (${requestId}, 'received')
-        ON CONFLICT (request_id) DO UPDATE
-          SET claimed_at = now()
-          WHERE webhook_deliveries.status = 'received'
-            AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
-        RETURNING claimed_at::text AS claim
-      `.pipe(Effect.option);
-      if (claimed._tag === "None") {
-        passes.push({ sessionId, outcome: "failed", reason: "storage" });
-        continue;
-      }
-      const claim = claimed.value[0]?.claim;
-      if (claim === undefined) {
-        passes.push({ sessionId, outcome: "replayed" });
-        continue;
-      }
-      const settle = (status: "processed" | "skipped", reason: string) =>
-        sql`
-          UPDATE webhook_deliveries SET status = ${status}, skip_reason = ${reason}
-          WHERE request_id = ${requestId} AND claimed_at = ${claim}::timestamptz
-        `.pipe(Effect.ignore);
-      const release = sql`
-        DELETE FROM webhook_deliveries
-        WHERE request_id = ${requestId} AND claimed_at = ${claim}::timestamptz
-      `.pipe(Effect.ignore);
-      const exit = yield* Effect.exit(
-        sessions
-          .refreshPlan({
-            sessionId,
-            key: planRevisionKey(pr),
-            trigger: { pr, number: lifecycle.pr.number },
-            maxCost: input.config.maxCost,
-          })
-          // An interrupt is not an exit `Effect.exit` sees here: the claim goes back on it too.
-          .pipe(Effect.onInterrupt(() => release)),
+      passes.push(
+        yield* input.fork === undefined
+          ? claimAndRun(sessionId)
+          : Effect.uninterruptible(claimAndRun(sessionId)),
       );
-      if (Exit.isSuccess(exit)) {
-        const { revision, created } = exit.value;
-        yield* settle(
-          "processed",
-          `plan revision ${revision.key}: ${revision.proposals.length} proposal(s)`,
-        );
-        passes.push({
-          sessionId,
-          outcome: created ? "proposed" : "already-proposed",
-          key: revision.key,
-          proposals: revision.proposals.length,
-        });
-        continue;
-      }
-      const error = Exit.findErrorOption(exit);
-      if (
-        error._tag === "Some" &&
-        error.value._tag === "PlanFreshnessRefused"
-      ) {
-        // A busy spec session and a tracker that failed are passing states: the claim goes back, so
-        // a redelivery tries again. Every other refusal is the merge's answer and is recorded.
-        yield* TRANSIENT_REFUSALS.has(error.value.reason)
-          ? release
-          : settle("skipped", `plan freshness refused: ${error.value.message}`);
-        passes.push({
-          sessionId,
-          outcome: "refused",
-          reason: error.value.reason,
-        });
-        continue;
-      }
-      if (
-        error._tag === "Some" &&
-        error.value._tag === "PlanProposalsRefused"
-      ) {
-        yield* settle("skipped", error.value.message);
-        yield* Effect.logWarning(
-          `plan freshness: session ${sessionId}'s pass answered proposals the rules refuse: ${error.value.message}`,
-        );
-        passes.push({
-          sessionId,
-          outcome: "refused",
-          reason: "refused_answer",
-        });
-        continue;
-      }
-      // A storage or model failure, a defect or an interrupt: the claim goes back, so a redelivery
-      // runs the pass that did not finish.
-      yield* release;
-      const message =
-        error._tag === "Some" ? error.value.message : "the pass did not finish";
-      yield* Effect.logError(
-        `plan freshness: session ${sessionId}'s pass for ${pr} failed: ${message}`,
-      );
-      passes.push({ sessionId, outcome: "failed", reason: message });
     }
     return { status: "merged", passes } as const;
   });

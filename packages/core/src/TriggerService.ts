@@ -438,6 +438,60 @@ type ClaimRow = {
   readonly claim: string;
 };
 
+/**
+ * Claim `requestId` in `webhook_deliveries`: one `INSERT … ON CONFLICT … RETURNING`, so of any number
+ * of deliveries of one key, across processes, exactly one wins. The claim is won when the key is new,
+ * or when its row is still `received` with a claim older than `reclaimSeconds` (a process that died
+ * between its claim and its outcome). Answers the won claim's `claimed_at`, as Postgres text, or
+ * `undefined` when another delivery holds the key or recorded its outcome: the caller's replay.
+ * The seam's claim for a delivery not keyed by its work, and the plan-freshness cadence's (LOB-45).
+ */
+export const claimDeliveryRow = (
+  sql: SqlClient,
+  requestId: string,
+  reclaimSeconds: number,
+): Effect.Effect<string | undefined, SqlError> =>
+  Effect.map(
+    sql<ClaimRow>`
+      INSERT INTO webhook_deliveries (request_id, status)
+      VALUES (${requestId}, 'received')
+      ON CONFLICT (request_id) DO UPDATE
+        SET claimed_at = now()
+        WHERE webhook_deliveries.status = 'received'
+          AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
+      RETURNING request_id, claimed_at::text AS claim
+    `,
+    (rows) => rows[0]?.claim,
+  );
+
+/**
+ * Give back the claim `claim` on `requestId`, so a redelivery can take it. Scoped to that claim, so a
+ * process slow enough to have been reclaimed meanwhile does not delete the reclaimer's row.
+ */
+export const releaseDeliveryClaim = (
+  sql: SqlClient,
+  requestId: string,
+  claim: string,
+): Effect.Effect<void, SqlError> =>
+  Effect.asVoid(
+    sql`DELETE FROM webhook_deliveries
+        WHERE request_id = ${requestId}
+          AND claimed_at = ${claim}::timestamptz`,
+  );
+
+/** Record the outcome of the claim `claim` on `requestId`, scoped to that claim as the release is. */
+export const settleDeliveryClaim = (
+  sql: SqlClient,
+  requestId: string,
+  claim: string,
+  status: "processed" | "skipped",
+  reason: string,
+): Effect.Effect<void, SqlError> =>
+  Effect.asVoid(
+    sql`UPDATE webhook_deliveries SET status = ${status}, skip_reason = ${reason}
+        WHERE request_id = ${requestId} AND claimed_at = ${claim}::timestamptz`,
+  );
+
 /** One `webhook_deliveries` row as the replay read returns it. */
 type DeliveryRow = {
   readonly status: string;
@@ -819,33 +873,27 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // that never started (LOB-216). The reclaim is the same conditional `DO UPDATE`, and it
           // renews `claimed_at`, so of two retries that race for a stale row only the first wins —
           // the second re-reads a fresh claim and is the replay.
-          const claimed = yield* storage(
+          const claim = yield* storage(
             "claim delivery",
             delivery.keyedByWork === true
-              ? sql<ClaimRow>`
-                  INSERT INTO webhook_deliveries (request_id, status)
-                  VALUES (${requestId}, 'received')
-                  ON CONFLICT (request_id) DO UPDATE
-                    SET status = 'received', skip_reason = NULL, claimed_at = now()
-                    WHERE (webhook_deliveries.status = 'skipped'
-                        AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
-                          OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}
-                          OR webhook_deliveries.skip_reason LIKE ${PENDING_BINDING_PATTERN}))
-                      OR (webhook_deliveries.status = 'received'
-                        AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
-                  RETURNING request_id, claimed_at::text AS claim
-                `
-              : sql<ClaimRow>`
-                  INSERT INTO webhook_deliveries (request_id, status)
-                  VALUES (${requestId}, 'received')
-                  ON CONFLICT (request_id) DO UPDATE
-                    SET claimed_at = now()
-                    WHERE webhook_deliveries.status = 'received'
-                      AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
-                  RETURNING request_id, claimed_at::text AS claim
-                `,
+              ? Effect.map(
+                  sql<ClaimRow>`
+                    INSERT INTO webhook_deliveries (request_id, status)
+                    VALUES (${requestId}, 'received')
+                    ON CONFLICT (request_id) DO UPDATE
+                      SET status = 'received', skip_reason = NULL, claimed_at = now()
+                      WHERE (webhook_deliveries.status = 'skipped'
+                          AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
+                            OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}
+                            OR webhook_deliveries.skip_reason LIKE ${PENDING_BINDING_PATTERN}))
+                        OR (webhook_deliveries.status = 'received'
+                          AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
+                    RETURNING request_id, claimed_at::text AS claim
+                  `,
+                  (rows) => rows[0]?.claim,
+                )
+              : claimDeliveryRow(sql, requestId, reclaimSeconds),
           );
-          const claim = claimed[0]?.claim;
           if (claim === undefined) {
             return yield* replay(requestId);
           }
@@ -1005,9 +1053,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // and run `create` and `send` beside the reclaimer that is still working.
           const releaseClaim = storage(
             "release an unclaimed delivery",
-            sql`DELETE FROM webhook_deliveries
-                WHERE request_id = ${requestId}
-                  AND claimed_at = ${claim}::timestamptz`,
+            releaseDeliveryClaim(sql, requestId, claim),
           ).pipe(
             // A fingerprint this attempt claimed and opened no session under goes back too, so the
             // issue's next occurrence is not told a session is on its way that never will be. One

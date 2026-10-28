@@ -82,6 +82,10 @@ under Known gaps.
   renders a snapshot's `proposedIssues` yet (LOB-201); the surface is driven over RPC by verify-api's
   `./decompose.sh` ([decompose.md](../../verify-api/features/decompose.md)), and approving them by
   `./approve-proposals.sh` ([approve-proposals.md](../../verify-api/features/approve-proposals.md), LOB-202).
+- **Plan revisions have no pane.** Nothing in the dashboard renders a snapshot's `planRevisions` or
+  calls `approvePlanRevision` / `declinePlanRevision` yet (LOB-45); the surface is driven over RPC
+  and a signed merge by verify-api's `./plan-freshness.sh`
+  ([plan-freshness.md](../../verify-api/features/plan-freshness.md)).
 - `drive.mjs` has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
   in `up.sh` so the pane stays live; the one historical read the dashboard is driven through is a long
   session's earlier history, by `history.sh` on an instance of its own

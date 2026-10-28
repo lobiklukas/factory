@@ -236,6 +236,26 @@ const program = Effect.gen(function* () {
   );
   const first = yield* Effect.promise(() => deliverMerge(pr, 7));
   observed.deliveries["merge"] = first;
+  // The route answers once the pass is claimed (`accepted`); the pass runs on past the answer, on
+  // the process's own fiber set, and its claim is settled when the revision is filed.
+  assert(
+    "the merged delivery is answered once its pass is claimed, not after the model call",
+    first.status === 200 &&
+      JSON.stringify(first.body["planFreshness"]).includes('"accepted"'),
+    `status=${first.status} planFreshness=${JSON.stringify(first.body["planFreshness"])}`,
+  );
+  /** Wait for the pass `merged` claimed on the spec's session to settle its claim. */
+  const settled = (merged: string) =>
+    waitUntil(
+      Effect.map(
+        sql<{ status: string }>`
+          SELECT status FROM webhook_deliveries WHERE request_id = ${`plan-freshness:${specRun.id}:${merged}`}
+        `,
+        (rows) => (rows[0]?.status === "received" ? undefined : true),
+      ),
+      "the pass to settle its claim",
+    );
+  yield* settled(pr);
   const afterMerge = yield* client.getSession({ sessionId: specRun.id });
   const revisions = afterMerge.planRevisions ?? [];
   const [revision] = revisions;
@@ -244,8 +264,9 @@ const program = Effect.gen(function* () {
     revisions.length === 1 &&
       revision?.key === `merged:${pr}` &&
       revision.decision === "pending" &&
-      JSON.stringify(first.body["planFreshness"]).includes('"proposed"'),
-    `status=${first.status} planFreshness=${JSON.stringify(first.body["planFreshness"])} revisions=${revisions.length}`,
+      revision.trigger.pr === pr &&
+      revision.trigger.number === 7,
+    `revisions=${revisions.length} trigger=${JSON.stringify(revision?.trigger)}`,
   );
   assert(
     "the revision names the spec it was derived from, and the plan it was shown",
@@ -376,6 +397,7 @@ const program = Effect.gen(function* () {
   yield* sql`UPDATE sessions SET pr_url = ${pr2} WHERE id = ${buildRun.id}`;
   const second = yield* Effect.promise(() => deliverMerge(pr2, 70));
   observed.deliveries["second merge"] = second;
+  yield* settled(pr2);
   const approved = yield* client.approvePlanRevision({
     sessionId: specRun.id,
     key: `merged:${pr2}`,

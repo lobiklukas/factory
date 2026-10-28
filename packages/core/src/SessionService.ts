@@ -186,6 +186,7 @@ import {
   writeBudget,
   writeCurationUsage,
   PLAN_FRESHNESS_SKILL,
+  type PlanCallGuard,
   planFreshnessPrompt,
   planFreshnessProposals,
   planPassWorstCost,
@@ -4245,6 +4246,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               sessionId: input.sessionId,
               spec,
               issues,
+              trigger: input.trigger,
             };
             const worst = planPassWorstCost(
               options.model,
@@ -4257,32 +4259,50 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 `the pass could cost up to $${worst.toFixed(6)}, over the bound of $${input.maxCost}; no call was made`,
               );
             }
-            const request = yield* requestPlanFreshness(pass);
             // Charged before the answer is judged, as a decomposition is: a refused answer was still
-            // a billed call.
-            yield* writeCurationUsage(
-              owner.root,
-              modelKey(options.model),
-              request.usage,
+            // a billed call. The charge runs the moment the call settles, and on an interrupt during
+            // the call too (`requestPlanFreshness`), so a billed call is never left off the ledger.
+            const charge: PlanCallGuard["charge"] = (usage) =>
+              writeCurationUsage(
+                owner.root,
+                modelKey(options.model),
+                usage,
+              ).pipe(
+                Effect.andThen(readCurationUsage(owner.harness)),
+                Effect.flatMap((ledger) =>
+                  setActivityCost(input.sessionId, costOf(ledger)),
+                ),
+              );
+            // Only the wait on the provider is interruptible: from the answer through the charge to
+            // the revision's commit, an interrupt (a shutdown) waits, so a paid-for answer is filed
+            // rather than lost with its claim given back for a redelivery to pay for again.
+            return yield* Effect.uninterruptibleMask((restore) =>
+              Effect.gen(function* () {
+                const request = yield* requestPlanFreshness(pass, {
+                  charge,
+                  restore,
+                });
+                const proposals = yield* planFreshnessProposals(
+                  request,
+                  issues,
+                );
+                const committed = yield* writePlanRevision(owner.root, {
+                  key: input.key,
+                  at: DateTime.formatIso(yield* DateTime.now),
+                  trigger: input.trigger,
+                  spec: {
+                    sessionId: input.sessionId,
+                    goal: spec.goal,
+                    digest: specDigest(spec),
+                  },
+                  issues,
+                  proposals,
+                  decision: "pending",
+                });
+                yield* touchActivity(input.sessionId);
+                return committed;
+              }),
             );
-            const ledger = yield* readCurationUsage(owner.harness);
-            yield* setActivityCost(input.sessionId, costOf(ledger));
-            const proposals = yield* planFreshnessProposals(request, issues);
-            const committed = yield* writePlanRevision(owner.root, {
-              key: input.key,
-              at: DateTime.formatIso(yield* DateTime.now),
-              trigger: input.trigger,
-              spec: {
-                sessionId: input.sessionId,
-                goal: spec.goal,
-                digest: specDigest(spec),
-              },
-              issues,
-              proposals,
-              decision: "pending",
-            });
-            yield* touchActivity(input.sessionId);
-            return committed;
           }),
         );
 

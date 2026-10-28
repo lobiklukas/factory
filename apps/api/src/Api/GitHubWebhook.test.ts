@@ -33,6 +33,8 @@ import {
   CredentialProvider,
   LinearIssueSync,
   LinearSyncError,
+  PlanFreshnessPasses,
+  PlanFreshnessPassesLive,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
@@ -212,6 +214,8 @@ const failingSync = LinearIssueSync.of({
 
 const services = Layer.mergeAll(
   Layer.succeed(LinearIssueSync, failingSync),
+  // The process's plan-freshness passes (LOB-45): the route hands each claimed pass to it.
+  PlanFreshnessPassesLive,
   Layer.succeed(
     CredentialProvider,
     CredentialProvider.of({
@@ -233,7 +237,7 @@ const services = Layer.mergeAll(
 // `services` is built once, and the owner a case opens is the one the route's release closes.
 const runtime = ManagedRuntime.make(services);
 const context = await runtime.runPromise(
-  Effect.context<SessionService | SqlClient>(),
+  Effect.context<SessionService | SqlClient | PlanFreshnessPasses>(),
 );
 const { handler, dispose } = HttpRouter.toWebHandler(
   GitHubWebhookLive.pipe(Layer.provideMerge(services)),
@@ -267,7 +271,7 @@ afterEach(() => {
 });
 
 const inService = <A, E>(
-  effect: Effect.Effect<A, E, SessionService | SqlClient>,
+  effect: Effect.Effect<A, E, SessionService | SqlClient | PlanFreshnessPasses>,
 ) => Effect.runPromise(Effect.provideContext(effect, context));
 
 /**
@@ -393,16 +397,38 @@ describe("POST /webhooks/github reads the plan again after a merge (LOB-45)", ()
     }
   }, 120_000);
 
-  it("runs a pass per spec of record with PLAN_FRESHNESS=merged, and answers what it came to", async () => {
+  it("claims a pass per spec of record with PLAN_FRESHNESS=merged, answers before it runs, and the pass runs on", async () => {
     process.env["PLAN_FRESHNESS"] = "merged";
     const work = await mergedPrSessions(46);
     const response = await deliver(merge(46, work.url));
     const body = (await response.json()) as Record<string, unknown>;
-    // The opener holds no spec, so the pass is refused before any call — and says so.
+    // The answer does not wait on the pass: it was claimed and handed to the process's passes.
     expect(body["planFreshness"]).toMatchObject({
       status: "merged",
-      passes: [{ outcome: "refused", reason: "no_spec" }],
+      passes: [{ outcome: "accepted" }],
     });
+    // The pass runs to its outcome past the answer: the opener holds no spec, so it is refused
+    // before any call, and the refusal is the claim's recorded outcome.
+    const claims = await inService(
+      Effect.gen(function* () {
+        yield* (yield* PlanFreshnessPasses).idle;
+        const sql = yield* SqlClient;
+        return yield* sql<{
+          readonly status: string;
+          readonly skipReason: string | null;
+        }>`
+          SELECT status, skip_reason FROM webhook_deliveries
+          WHERE request_id LIKE ${`plan-freshness:%:${work.url}`}
+        `;
+      }),
+    );
+    expect(claims).toMatchObject([{ status: "skipped" }]);
+    expect(claims[0]?.skipReason).toContain("no spec");
+    // A redelivery of the merge claims nothing.
+    const again = await deliver(merge(46, work.url));
+    expect(
+      ((await again.json()) as Record<string, unknown>)["planFreshness"],
+    ).toMatchObject({ passes: [{ outcome: "replayed" }] });
   }, 120_000);
 });
 

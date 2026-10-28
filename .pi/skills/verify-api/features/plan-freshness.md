@@ -12,7 +12,15 @@ revision on the spec's session. Nothing reaches the tracker until a person appro
   call is made and no row is written. With `merged`, a merge of a PR the factory opened
   (`sessions.pr_url`) runs one pass per spec of record. The spec of record is the card's newest
   `specified` event's session, or the PR's own session when it runs on no card. An unmerged close or
-  an unsigned delivery runs nothing. The route's answer carries the outcome under `planFreshness`.
+  an unsigned delivery runs nothing. The route's answer carries each pass under `planFreshness`:
+  `accepted` once its claim is taken, or `replayed`.
+- **The pass is not the request's.** The route hands each claimed pass to `PlanFreshnessPasses`, a
+  fiber set the API process owns (built beside the docs schedule, on the session shutdown), and
+  answers without waiting for the model call. A connection GitHub drops after 10 s does not take the
+  pass with it. Within the pass only the wait on the provider is interruptible: the call is charged
+  as soon as it settles, and the answer is validated and filed before an interrupt is let through.
+  A shutdown that lands mid-call aborts the request, waits for the answer the provider settles with,
+  charges its usage, and gives the claim back, so a billed call is never left off the ledger.
 - **One merge, one revision.** Each pass claims `webhook_deliveries` for
   `plan-freshness:<spec session>:<pr url>`. This is the same claim the trigger seam takes, with the
   same reclaim window. A redelivery is `replayed` and makes no call. The claim is `processed` when a
@@ -24,11 +32,15 @@ revision on the spec's session. Nothing reaches the tracker until a person appro
   `plan-freshness` skill (`0033_seed_plan_freshness_skill.ts`). It reads the spec plus the delegating
   issue's children (title, state, and the checklist in the description), read through the tracker
   port (`ProposalTracker`'s `issues`). It opens no session, has no tools and writes no tracker. It is
-  capped at 4 096 output tokens. Before the call it refuses, at no cost (`PlanFreshnessRefused`): a
+  capped at 4 096 output tokens and asks for no prompt cache (`cacheRetention: "none"`). The prompt
+  names the merged PR (URL, number and title), so the model can tell what the merge delivered.
+  Before the call it refuses, at no cost (`PlanFreshnessRefused`): a
   busy session, no spec, a spec with gaps or too large, no tracker, no delegating issue, more than 100
   issues, and a **worst case over `PLAN_FRESHNESS_MAX_COST`** (US dollars, 0.25 by default). The worst
-  case prices every prompt byte as an input token, plus the whole output cap, plus any flat per-call
-  charge, so the call that follows cannot cost more than the bound. The spend is charged to the spec
+  case prices every prompt byte as an input token at the dearest of the input, cache-read and
+  cache-write rates over the base price and every tier, plus the whole output cap at the dearest
+  output rate, plus any flat per-call charge, so the call that follows cannot cost more than the
+  bound. The spend is charged to the spec
   session's ledger.
 - **The proposals** (`@repo/domain/PlanFreshness`). Each is `add` (title, goal, change, acceptance),
   `rescope` (an issue identifier plus a revised title, goal, change and acceptance) or `close` (an
@@ -67,7 +79,7 @@ database, minted and dropped. The API runs with a faux specifier, `FAUX_COST=0.0
 `PLAN_FRESHNESS=merged` and `PLAN_FRESHNESS_MAX_COST=0.05`. `plan-freshness.ts` signs merged
 deliveries as GitHub does and reads through `RpcApi`:
 
-1. One merged delivery files exactly one revision, on the spec's session and not the merged
+1. One merged delivery is answered `accepted`, and its pass files exactly one revision, on the spec's session and not the merged
    session's. It names the spec, shows the plan, and holds an `add` for the uncovered criterion and a
    `close` for the issue no criterion names. Exactly one call (0.01) lands in the spec session's
    ledger.
@@ -85,13 +97,16 @@ Below the wire:
 
 - `packages/domain/src/PlanFreshness.test.ts`: every rule, accepted and refused, and all faults at
   once.
-- `packages/harness/src/planFreshness.test.ts`: the prompt, one call, the worst case never below the
-  spend, and one revision per key in both snapshot paths.
+- `packages/harness/src/planFreshness.test.ts`: the prompt and the merge it names, one call with no
+  prompt cache, the worst case never below the spend (cache-write and tier rates included), a call
+  interrupted in flight still charged, and one revision per key in both snapshot paths.
 - `packages/core/src/PlanFreshness.test.ts`: a signed merged delivery end to end against Postgres
   and the in-process Linear fake. It covers cadence on and off, a redelivery, the bound, a refused
-  answer, decline, and approval, with the fake's write ledger empty until an approval.
+  answer, a forked pass answered before its slow call returns and still filed and charged, a pass
+  interrupted mid-call still charged with its claim given back, decline, and approval, with the fake's write ledger empty until an approval.
 - `packages/core/src/LinearSync.test.ts`: the plan read, the re-scope and the close, each once.
-- `apps/api/src/Api/GitHubWebhook.test.ts`: the route with the cadence unset, unreadable and on.
+- `apps/api/src/Api/GitHubWebhook.test.ts`: the route with the cadence unset, unreadable and on; on,
+  the answer is `accepted` and the pass settles its claim afterwards.
 - `apps/api/src/Rpc/Session.test.ts`: the errors across the wire.
 - `packages/storage-postgres/src/PostgresStorage.test.ts`: the seeded skill.
 
@@ -102,6 +117,6 @@ Below the wire:
   listed.
 - The fakes cannot prove that Linear answers `children { title state description }` as read here, or
   that it accepts `issueUpdate` with `title` and `description` (`docs/testing-third-parties.md`).
-- A webhook delivery waits for the pass. A model slower than GitHub's 10-second timeout leaves
-  GitHub reporting a timeout while the pass completes. If the connection's close interrupts it, the
-  claim is released and a redelivery runs it.
+- The answer does not say what the pass came to: read the spec session's `planRevisions`, or the
+  claim's `webhook_deliveries` row.
+- The plan is read as the delegating issue's children only, not a whole tracker project.

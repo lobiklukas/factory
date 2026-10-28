@@ -42,7 +42,8 @@
  *   `@repo/core`'s `handlePlanFreshnessDelivery`): one plan-freshness pass per spec of record, its
  *   proposals filed on the spec's session for a person to approve, its worst-case cost bounded by
  *   `PLAN_FRESHNESS_MAX_COST`. Off by default, when nothing reads the payload for it; a redelivery of
- *   the same merge runs no second pass. The answer carries it under `planFreshness`.
+ *   the same merge runs no second pass. Each claimed pass runs on `PlanFreshnessPasses`, past the
+ *   answer, which carries each pass as `accepted` (or `replayed`) under `planFreshness`.
  *
  * Any other event is answered `202` and ignored.
  */
@@ -58,6 +59,7 @@ import {
   handlePlanFreshnessDelivery,
   handlePullRequestReviewWebhook,
   PLAN_FRESHNESS_OFF,
+  PlanFreshnessPasses,
   planFreshnessConfigOf,
   releaseMergedDelivery,
   TriggerService,
@@ -215,11 +217,16 @@ const GitHubWebhookRoute = HttpRouter.add(
           `github: a merged pull request released ${released} session workspace(s)`,
         );
       }
+      // Each claimed pass runs on the process's own fiber set, not on this request: its model call
+      // can outlast the 10 s GitHub waits, and a closed connection interrupts the request. The
+      // answer says which passes were `accepted`; the revision lands on the spec's session.
+      const passes = yield* PlanFreshnessPasses;
       const plan = yield* handlePlanFreshnessDelivery({
         secret,
         raw,
         signature,
         config: yield* planFreshnessConfig,
+        fork: passes.run,
       });
       if (plan.status === "merged") planFreshness = plan;
     }

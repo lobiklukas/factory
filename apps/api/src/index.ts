@@ -7,6 +7,7 @@ import {
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
   gitRepoMirror,
+  PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
   runDocsSchedule,
@@ -772,16 +773,21 @@ const HttpLive = Effect.gen(function* () {
           "missions: resume at boot off (MISSION_RESUME=false); a mission or a run in flight waits for its next caller",
         ),
       );
-  const SessionDaemons = Option.match(docsSchedule.repo, {
-    onNone: () => MissionResume,
-    onSome: (repo) =>
-      docsEveryMs > 0
-        ? Layer.mergeAll(
-            MissionResume,
-            DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
-          )
-        : MissionResume,
-  }).pipe(Layer.provideMerge(SessionShutdown));
+  // The plan-freshness passes (LOB-45) sit there too: a pass a merged PR's delivery claimed runs on
+  // this fiber set, past the request, and shutdown interrupts it before the owners are released.
+  const SessionDaemons = Layer.mergeAll(
+    Option.match(docsSchedule.repo, {
+      onNone: () => MissionResume,
+      onSome: (repo) =>
+        docsEveryMs > 0
+          ? Layer.mergeAll(
+              MissionResume,
+              DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
+            )
+          : MissionResume,
+    }),
+    PlanFreshnessPassesLive,
+  ).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
   }

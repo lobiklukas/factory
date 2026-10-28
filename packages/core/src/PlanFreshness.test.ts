@@ -35,6 +35,7 @@ import type { SessionSnapshot } from "@repo/domain/Session";
 import {
   Effect,
   Exit,
+  Fiber,
   Layer,
   ManagedRuntime,
   Option,
@@ -53,6 +54,8 @@ import {
   handlePlanFreshnessDelivery,
   planFreshnessConfigOf,
   type PlanFreshnessConfig,
+  PlanFreshnessPasses,
+  PlanFreshnessPassesLive,
 } from "./PlanFreshness";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import { TaskService, TaskServiceLive } from "./TaskService";
@@ -90,7 +93,15 @@ afterAll(async () => {
  * a plan-freshness prompt — the faux's own count also counts a run's steps.
  */
 const world = (
-  options: { readonly fauxCost?: number; readonly linear?: FakeOptions } = {},
+  options: {
+    readonly fauxCost?: number;
+    readonly linear?: FakeOptions;
+    /**
+     * Hold every plan-freshness call until `gate.open()`, then answer it as a provider that billed
+     * the call whatever the abort said: the faux is called without the signal.
+     */
+    readonly slow?: boolean;
+  } = {},
 ) => {
   const key = `ENG-${randomBytes(3).toString("hex")}`;
   const fake = makeLinear({
@@ -104,6 +115,12 @@ const world = (
   });
   const answer: { body: string | undefined } = { body: undefined };
   let planCalls = 0;
+  let open: () => void = () => {};
+  // oxlint-disable-next-line effecttsgo/new-promise -- a gate the case opens by hand.
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const gate = { open: () => open() };
   const models = faux.access.models;
   const counted: typeof models.completeSimple = async (
     request,
@@ -117,6 +134,14 @@ const world = (
         message.content.startsWith(PLAN_PROMPT_PREFIX),
     );
     if (planning) planCalls += 1;
+    if (planning && options.slow === true) {
+      await opened;
+      const [callOptions] = rest;
+      if (callOptions !== undefined) {
+        const { signal: _ignored, ...unsignalled } = callOptions;
+        rest = [unsignalled];
+      }
+    }
     const message = await models.completeSimple(request, context, ...rest);
     return planning && answer.body !== undefined
       ? { ...message, content: [{ type: "text", text: answer.body }] }
@@ -152,7 +177,7 @@ const world = (
     ),
   );
   runtimes.push(runtime);
-  return { answer, fake, key, runtime, planCalls: () => planCalls };
+  return { answer, fake, gate, key, runtime, planCalls: () => planCalls };
 };
 
 const waitUntil = <E, R>(check: Effect.Effect<boolean, E, R>, label: string) =>
@@ -222,17 +247,31 @@ const merged = (key: string, pr: string) =>
 const prUrl = () =>
   `https://github.com/factory-test/plan-${randomBytes(4).toString("hex")}/pull/7`;
 
-/** A signed `pull_request` delivery GitHub would send for `pr`'s merge (or `merged: false`). */
-const delivery = (pr: string, config: PlanFreshnessConfig, merged = true) => {
+/**
+ * A signed `pull_request` delivery GitHub would send for `pr`'s merge (or `merged: false`), its
+ * passes run inline, or handed to `fork` as the route does.
+ */
+const delivery = (
+  pr: string,
+  config: PlanFreshnessConfig,
+  merged = true,
+  fork?: (pass: Effect.Effect<void>) => Effect.Effect<void>,
+) => {
   const raw = JSON.stringify({
     action: "closed",
-    pull_request: { html_url: pr, number: 7, merged },
+    pull_request: {
+      html_url: pr,
+      number: 7,
+      merged,
+      title: "Build the schema",
+    },
   });
   return handlePlanFreshnessDelivery({
     secret: SECRET,
     raw,
     signature: `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`,
     config,
+    ...(fork === undefined ? {} : { fork }),
   });
 };
 
@@ -309,7 +348,7 @@ describe("plan freshness after a merged PR (LOB-45)", () => {
     const [revision] = outcome.spec.planRevisions ?? [];
     expect(revision).toMatchObject({
       key: `merged:${pr}`,
-      trigger: { pr, number: 7 },
+      trigger: { pr, number: 7, title: "Build the schema" },
       decision: "pending",
       // The spec it was derived from.
       spec: { sessionId: outcome.runs.spec, goal: SPEC.goal },
@@ -453,6 +492,103 @@ describe("plan freshness after a merged PR (LOB-45)", () => {
     const spent = outcome.after - outcome.before;
     expect(spent).toBeCloseTo(0.05, 10);
     expect(spent).toBeLessThanOrEqual(0.1);
+  });
+
+  it("answers a forked delivery before a slow call returns, and the pass still files one revision and charges it", async () => {
+    const { gate, key, runtime, planCalls } = world({
+      fauxCost: 0.05,
+      slow: true,
+    });
+    const pr = prUrl();
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const passes = yield* PlanFreshnessPasses;
+        const runs = yield* merged(key, pr);
+        const before = spendOf(yield* sessions.get(runs.spec));
+        // The route's way: the pass is handed to the process's passes, and the answer is in while
+        // the call is still out — a request GitHub gave up on cannot take the pass with it.
+        const answered = yield* delivery(pr, ON, true, passes.run);
+        yield* waitUntil(
+          Effect.sync(() => planCalls() === 1),
+          "the pass's call",
+        );
+        const during = {
+          spec: yield* sessions.get(runs.spec),
+          claim: yield* claimOf(`plan-freshness:${runs.spec}:${pr}`),
+        };
+        gate.open();
+        yield* passes.idle;
+        return {
+          answered,
+          during,
+          before,
+          after: yield* sessions.get(runs.spec),
+          claim: yield* claimOf(`plan-freshness:${runs.spec}:${pr}`),
+        };
+      }).pipe(Effect.provide(PlanFreshnessPassesLive)),
+    );
+    expect(outcome.answered).toMatchObject({
+      status: "merged",
+      passes: [{ outcome: "accepted" }],
+    });
+    expect(outcome.during.spec.planRevisions).toBeUndefined();
+    expect(outcome.during.claim).toMatchObject([{ status: "received" }]);
+    expect(outcome.after.planRevisions).toHaveLength(1);
+    expect(spendOf(outcome.after) - outcome.before).toBeCloseTo(0.05, 10);
+    expect(outcome.claim).toMatchObject([{ status: "processed" }]);
+    expect(planCalls()).toBe(1);
+  });
+
+  it("charges a call the pass was interrupted in, gives the claim back, and a redelivery files the one revision", async () => {
+    const { gate, key, runtime, planCalls } = world({
+      fauxCost: 0.05,
+      slow: true,
+    });
+    const pr = prUrl();
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const runs = yield* merged(key, pr);
+        const before = spendOf(yield* sessions.get(runs.spec));
+        const pass = yield* Effect.forkChild(delivery(pr, ON));
+        yield* waitUntil(
+          Effect.sync(() => planCalls() === 1),
+          "the pass's call",
+        );
+        // A shutdown lands mid-call. The provider bills the call whatever the abort says; the
+        // interrupt waits for its answer and charges it before the claim goes back.
+        const interrupting = yield* Effect.forkChild(Fiber.interrupt(pass));
+        // Let the interrupt reach the pass while its call is still held, then let the call answer.
+        yield* Effect.sleep(100);
+        gate.open();
+        yield* Fiber.join(interrupting);
+        const interrupted = {
+          spec: yield* sessions.get(runs.spec),
+          claim: yield* claimOf(`plan-freshness:${runs.spec}:${pr}`),
+        };
+        const again = yield* delivery(pr, ON);
+        return {
+          before,
+          interrupted,
+          again,
+          after: yield* sessions.get(runs.spec),
+        };
+      }),
+    );
+    expect(spendOf(outcome.interrupted.spec) - outcome.before).toBeCloseTo(
+      0.05,
+      10,
+    );
+    expect(outcome.interrupted.spec.planRevisions).toBeUndefined();
+    expect(outcome.interrupted.claim).toEqual([]);
+    expect(outcome.again).toMatchObject({
+      passes: [{ outcome: "proposed" }],
+    });
+    expect(outcome.after.planRevisions).toHaveLength(1);
+    // Both calls were billed, and both are on the ledger.
+    expect(spendOf(outcome.after) - outcome.before).toBeCloseTo(0.1, 10);
+    expect(planCalls()).toBe(2);
   });
 
   it("gives the claim back when the plan could not be read, so a redelivery tries again", async () => {

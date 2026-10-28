@@ -115,10 +115,11 @@ export const PlanProposal = Schema.Union([
 ]);
 export type PlanProposal = typeof PlanProposal.Type;
 
-/** What produced a revision: the merged PR, by its page and number. */
+/** What produced a revision: the merged PR, by its page and number, and its title when known. */
 export const PlanTrigger = Schema.Struct({
   pr: Schema.String,
   number: Schema.Int,
+  title: Schema.optional(Schema.String),
 });
 export type PlanTrigger = typeof PlanTrigger.Type;
 
