@@ -1475,13 +1475,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 );
               }),
             (fence) =>
-              presence.release("card_pr", taskId, fence).pipe(
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `task ${taskId}: its PR lease was not released and lapses in ${presence.ttlMs}ms: ${String(error)}`,
+              presence
+                .release("card_pr", taskId, fence)
+                .pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `task ${taskId}: its PR lease was not released and lapses in ${presence.ttlMs}ms: ${String(error)}`,
+                    ),
                   ),
                 ),
-              ),
           ),
         );
       /**
@@ -1502,7 +1504,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             if (claim._tag === "Held") return claim.fence;
             yield* Effect.interruptible(
               Effect.sleep(
-                Math.min(CARD_PR_LEASE_POLL_MAX_MS, 50 * 2 ** Math.min(attempt, 5)),
+                Math.min(
+                  CARD_PR_LEASE_POLL_MAX_MS,
+                  50 * 2 ** Math.min(attempt, 5),
+                ),
               ),
             );
           }

@@ -37,9 +37,11 @@ import {
 import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
+  Clock,
   ConfigProvider,
   Context,
   Effect,
+  Fiber,
   Layer,
   ManagedRuntime,
   Option,
@@ -305,6 +307,54 @@ const cardInBuilding = (title: string, runtime: typeof first = first) =>
 const worktreeOf = (repo: string, sessionId: string, root = sessionRoot) =>
   join(root, ...repo.split("/"), sessionId);
 
+/**
+ * Start `SessionService.cardPrLease-fixture.ts` holding the card's PR lease, and answer once it
+ * holds it. A process that never gets there within the minute is killed, and the case fails with
+ * its output.
+ */
+const holdLease = (taskId: string, ttlMs: number) =>
+  Effect.callback<ChildProcess>((resume) => {
+    const child = spawn(
+      "bun",
+      [
+        fileURLToPath(
+          new URL("./SessionService.cardPrLease-fixture.ts", import.meta.url),
+        ),
+        taskId,
+        String(ttlMs),
+      ],
+      // oxlint-disable-next-line effecttsgo/process-env -- a test hands its child process an environment.
+      { env: process.env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let out = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      out += chunk.toString();
+      if (out.includes("READY ")) resume(Effect.succeed(child));
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.on("exit", (code) => {
+      resume(
+        Effect.die(new Error(`the lease holder exited (${code}): ${out}`)),
+      );
+    });
+    return Effect.sync(() => {
+      child.kill("SIGKILL");
+    });
+  }).pipe(Effect.timeout("60 seconds"));
+
+/** SIGKILL the process, if it still runs, and answer once it has exited. */
+const killed = (child: ChildProcess) =>
+  Effect.callback<void>((resume) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resume(Effect.void);
+      return;
+    }
+    child.on("exit", () => resume(Effect.void));
+    child.kill("SIGKILL");
+  });
+
 describe("a card's branch and PR across two API processes (F13)", () => {
   /**
    * Mutation this catches: see only the runs this process owns in `refuseBusyHolder` — the second
@@ -469,8 +519,7 @@ describe("a card's branch and PR across two API processes (F13)", () => {
         cardInBuilding(`pool card ${index}`, narrow),
       ),
     );
-    const runs: Array<{ readonly id: SessionId; readonly branch: string }> =
-      [];
+    const runs: Array<{ readonly id: SessionId; readonly branch: string }> = [];
     for (const card of cards) {
       const run = await narrow.runPromise(
         Effect.flatMap(SessionService, (service) =>
@@ -551,64 +600,31 @@ describe("a card's branch and PR across two API processes (F13)", () => {
     git(tree, "commit", "-q", "-m", "f13 held");
 
     const fixtureTtlMs = 1_500;
-    const holder = await new Promise<ChildProcess>((resolve, reject) => {
-      const child = spawn(
-        "bun",
-        [
-          fileURLToPath(
-            new URL("./SessionService.cardPrLease-fixture.ts", import.meta.url),
-          ),
-          taskId,
-          String(fixtureTtlMs),
-        ],
-        // oxlint-disable-next-line effecttsgo/process-env -- a test hands its child process an environment.
-        { env: process.env, stdio: ["ignore", "pipe", "pipe"] },
-      );
-      let out = "";
-      const giveUp = setTimeout(() => {
-        child.kill("SIGKILL");
-        reject(new Error(`the lease holder never held the lease: ${out}`));
-      }, 60_000);
-      child.stdout?.on("data", (chunk: Buffer) => {
-        out += chunk.toString();
-        if (!out.includes("READY ")) return;
-        clearTimeout(giveUp);
-        resolve(child);
-      });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        out += chunk.toString();
-      });
-      child.on("exit", (code) => {
-        clearTimeout(giveUp);
-        reject(new Error(`the lease holder exited (${code}): ${out}`));
-      });
-    });
-
     const before = posts.length;
-    let settled = false;
-    const stepping = first
-      .runPromise(
-        Effect.flatMap(SessionService, (service) =>
-          service
-            .openPullRequest({ sessionId: run.id, title: "held elsewhere" })
-            .pipe(Effect.provideContext(forgeContext)),
-        ),
-      )
-      .finally(() => {
-        settled = true;
-      });
-    // Twice the holder's TTL: only its renewals keep the claim, so a step through now was let past it.
-    await new Promise((resolve) => setTimeout(resolve, fixtureTtlMs * 2));
-    const askedWhileHeld = posts.length - before;
-    const settledWhileHeld = settled;
-
-    const killedAt = Date.now();
-    await new Promise<void>((resolve) => {
-      holder.on("exit", () => resolve());
-      holder.kill("SIGKILL");
-    });
-    const answer = await stepping;
-    const waitedAfterKill = Date.now() - killedAt;
+    const observed = await first.runPromise(
+      Effect.gen(function* () {
+        const holder = yield* Effect.acquireRelease(
+          holdLease(taskId, fixtureTtlMs),
+          killed,
+        );
+        const service = yield* SessionService;
+        const stepping = yield* service
+          .openPullRequest({ sessionId: run.id, title: "held elsewhere" })
+          .pipe(Effect.provideContext(forgeContext), Effect.forkChild);
+        // Four times the holder's TTL: only its renewals keep the claim, so a step through by now
+        // was let past a live holder — and long enough for a step no lease held up to reach GitHub.
+        yield* Effect.sleep(fixtureTtlMs * 4);
+        const askedWhileHeld = posts.length - before;
+        const settledWhileHeld = stepping.pollUnsafe() !== undefined;
+        const killedAt = yield* Clock.currentTimeMillis;
+        yield* killed(holder);
+        const answer = yield* Fiber.join(stepping);
+        const waitedAfterKill = (yield* Clock.currentTimeMillis) - killedAt;
+        return { askedWhileHeld, settledWhileHeld, answer, waitedAfterKill };
+      }).pipe(Effect.scoped),
+    );
+    const { askedWhileHeld, settledWhileHeld, answer, waitedAfterKill } =
+      observed;
 
     expect(askedWhileHeld).toBe(0);
     expect(settledWhileHeld).toBe(false);

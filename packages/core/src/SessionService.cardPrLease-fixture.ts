@@ -38,7 +38,5 @@ const program = Effect.gen(function* () {
 });
 
 BunRuntime.runMain(
-  program.pipe(
-    Effect.provide(Layer.mergeAll(DatabaseLive, BunServices.layer)),
-  ),
+  program.pipe(Effect.provide(Layer.mergeAll(DatabaseLive, BunServices.layer))),
 );
