@@ -36,7 +36,10 @@ finds a real bug and stays quiet on a clean change.
   in the clone (a seed whose `find` is not in the file exactly once, or a commit a shallow clone lacks,
   stops it), scrubs the clone so the reviewer reads only the diff (one branch, no remote or reflog, a
   neutral repo slug and no entry id or `seed` in the prompt or the history; the run checks the prompt
-  and `prepare` checks the message), boots the API and, for each PR, delivers a signed `pull_request` to `POST
+  and `prepare` checks the message). The clone and the API's session worktrees live in a `mktemp -d`
+  outside the repository (`VERIFY_RUN_DIR`, removed on exit), so no tool can read the corpus file from
+  a parent directory, and the run fails a PR whose tool results name `reviewEvalCorpus` or a seed's bug.
+  `live-check` keeps its own `live-check.log` and leaves a previous run's `comments/` and `results/` alone, boots the API and, for each PR, delivers a signed `pull_request` to `POST
 /webhooks/github` exactly as `review.sh` does. The reviewer runs on its `ROLE_MODELS` model and
   posts to a loopback `Bun.serve` forge: `GITHUB_API_URL` is the only GitHub the API is told about and
   both tokens are fixed fakes, so nothing is ever written to github.com, and every forge request's

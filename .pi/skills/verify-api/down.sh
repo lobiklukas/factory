@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-RUN_DIR="$ROOT/.verify/run"
+RUN_DIR="${VERIFY_RUN_DIR:-$ROOT/.verify/run}"
 
 pidfile="$RUN_DIR/api.pid"
 if [ -f "$pidfile" ]; then

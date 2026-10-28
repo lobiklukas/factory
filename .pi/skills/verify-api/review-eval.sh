@@ -29,6 +29,8 @@
 # dummy credential and no model call, and checks the process serves the reviewer's model (so a role
 # the anthropic catalog does not serve, which refuses the boot, cannot hide until the money is spent).
 #
+# The API's run directory is a fresh `mktemp -d` outside the repository, removed on exit (see below).
+#
 # Env: REVIEW_EVAL (`faux`, `live` or `live-check`; unset prints this and stops), API_PORT (9200 when unset),
 # FORGE_PORT (API_PORT + 1), EVIDENCE_DIR (.verify/evidence/lob-242), REVIEW_EVAL_TIMEOUT_MS (per PR),
 # DATABASE_URL (inherited by the API and the drive).
@@ -52,12 +54,26 @@ export REVIEW_EVAL_REPO="acme/eval-$RUN_STAMP"
 export API_URL="http://localhost:$API_PORT"
 export GITHUB_WEBHOOK_SECRET="$SECRET"
 
-cd "$ROOT/.pi/skills/verify-api" || exit 1
-trap './down.sh >/dev/null 2>&1 || true' EXIT
+# The run directory (the API's session worktrees, its log, the scrubbed checkout) lives outside the
+# repository: the reviewer's tools are real local processes, and this repository's working tree holds
+# the corpus with every seed's answer. `VERIFY_RUN_DIR` is the one lever up.sh and down.sh read.
+VERIFY_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/factory-review-eval.XXXXXX")"
+export VERIFY_RUN_DIR
+export REVIEW_EVAL_DIR="$VERIFY_RUN_DIR/review-eval"
 
-rm -rf "$EVIDENCE_DIR/results" "$EVIDENCE_DIR/comments"
+cd "$ROOT/.pi/skills/verify-api" || exit 1
+trap './down.sh >/dev/null 2>&1 || true; rm -rf "$VERIFY_RUN_DIR"' EXIT
+
 mkdir -p "$EVIDENCE_DIR"
-: >"$EVIDENCE_DIR/api.log"
+# live-check writes no per-PR evidence, so it must not delete what an earlier faux or live run left
+# (the posted comments are what a person settles the mechanism column with): it keeps its own log.
+if [ "$MODE" = "live-check" ]; then
+  API_LOG_KEPT="$EVIDENCE_DIR/live-check.log"
+else
+  API_LOG_KEPT="$EVIDENCE_DIR/api.log"
+  rm -rf "$EVIDENCE_DIR/results" "$EVIDENCE_DIR/comments"
+fi
+: >"$API_LOG_KEPT"
 
 # The environment every boot shares. The tokens are fakes and the forge is loopback in both modes.
 boot() {
@@ -70,11 +86,11 @@ boot() {
     GITHUB_REVIEWER_TOKEN="ghs-eval-reviewer" \
     ./up.sh >/dev/null; then
     echo "review-eval: the API did not boot" >&2
-    cat "$ROOT/.verify/run/api.log" >>"$EVIDENCE_DIR/api.log" 2>/dev/null || true
+    cat "$VERIFY_RUN_DIR/api.log" >>"$API_LOG_KEPT" 2>/dev/null || true
     return 1
   fi
 }
-keep_log() { cat "$ROOT/.verify/run/api.log" >>"$EVIDENCE_DIR/api.log" 2>/dev/null || true; }
+keep_log() { cat "$VERIFY_RUN_DIR/api.log" >>"$API_LOG_KEPT" 2>/dev/null || true; }
 
 if [ "$MODE" = "live-check" ]; then
   # The live boot, a dummy credential, no model call: the process must come up serving the reviewer's
@@ -83,7 +99,7 @@ if [ "$MODE" = "live-check" ]; then
   boot \
     -u FAUX_COMMAND -u FAUX_REVIEW -u FAUX_COST -u FAUX_MODEL_SCRIPTS -u FAUX_EVERY_TURN \
     MODEL_BACKEND=anthropic ANTHROPIC_API_KEY=dummy-key-live-check ROLE_MODELS="$REVIEWER_ROLE" || exit 1
-  LOG="$ROOT/.verify/run/api.log"
+  LOG="$VERIFY_RUN_DIR/api.log"
   keep_log
   if grep -q "model backend: anthropic" "$LOG" && grep -q "role models: reviewer" "$LOG" \
     && ! grep -q "dummy-key-live-check" "$LOG"; then

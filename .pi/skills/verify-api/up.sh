@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9200}"
-RUN_DIR="$ROOT/.verify/run"
+RUN_DIR="${VERIFY_RUN_DIR:-$ROOT/.verify/run}"
 
 mkdir -p "$RUN_DIR"
 
@@ -59,6 +59,7 @@ REPLAY_MODEL="${REPLAY_MODEL:-faux/faux-2}"
 if [ "${MODEL_BACKEND:-faux}" = "faux" ]; then
   ROLE_MODELS="${ROLE_MODELS:+$ROLE_MODELS,}replay-target=$REPLAY_MODEL"
 fi
+ROLE_MODELS="${ROLE_MODELS:-}"
 
 if [ "${API_VIA_TURBO:-}" = "1" ]; then
   # The turbo binary itself, not `bun run dev`, so `$!` is the process `down.sh` signals and turbo

@@ -20,6 +20,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { BunServices } from "@effect/platform-bun";
 import { RpcApi } from "@repo/domain/Rpc";
@@ -47,8 +48,11 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { makeChecker, protocolFor, type Observed } from "./harness.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "../../..");
+// Outside the repository on purpose: the reviewer's tools are real local processes, and this repository's
+// working tree holds `reviewEvalCorpus.ts`, the answer key. `review-eval.sh` always sets it.
 const RUN_DIR =
-  process.env["REVIEW_EVAL_DIR"] ?? path.join(ROOT, ".verify/run/review-eval");
+  process.env["REVIEW_EVAL_DIR"] ??
+  path.join(tmpdir(), "factory-review-eval", String(process.pid));
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? path.join(ROOT, ".verify/evidence/lob-242");
 const MODE = process.env["REVIEW_EVAL_MODE"] === "live" ? "live" : "faux";
@@ -455,6 +459,23 @@ const run = async (id: string) => {
       !told.includes(id) &&
       !/seed/i.test(told),
     told.slice(0, 200),
+  );
+  // What the reviewer's tools read: a result that names the corpus file or any seed's bug sentence means
+  // it found the answer key, and the row is not a measurement.
+  const read = transcript
+    .filter((item) => item.kind !== "assistant")
+    .map((item) => item.text)
+    .join("\n");
+  const leaked = [
+    "reviewEvalCorpus",
+    ...REVIEW_EVAL_CORPUS.flatMap((entry) =>
+      entry.seed === undefined ? [] : [entry.seed.bug],
+    ),
+  ].filter((needle) => read.includes(needle));
+  check(
+    "no tool result names the corpus file or a seed's bug",
+    leaked.length === 0,
+    leaked.join("; "),
   );
   const failedChecks = Object.entries(observed.checks).filter(
     ([, item]) => !item.passed,
